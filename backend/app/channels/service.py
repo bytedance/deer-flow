@@ -6,7 +6,7 @@ import asyncio
 import logging
 import math
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -14,7 +14,8 @@ from app.channels.base import Channel, ChannelStopTimeout
 from app.channels.manager import DEFAULT_CHANNEL_MAX_CONCURRENCY, DEFAULT_CHANNEL_SHUTDOWN_GRACE_PERIOD_SECONDS, DEFAULT_GATEWAY_URL, DEFAULT_LANGGRAPH_URL, ChannelManager
 from app.channels.message_bus import DEFAULT_INBOUND_QUEUE_MAXSIZE, MessageBus
 from app.channels.runtime_config_store import merge_runtime_channel_configs
-from app.channels.store import ChannelStore
+from app.channels.store import ChannelStore, SqlChannelStore, resolve_channel_store
+from deerflow.config.channel_leader_lease_config import CHANNEL_LEADER_LEASE_KEY, ChannelLeaderLeaseConfig, channel_leader_lease_config
 from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,35 @@ def _channel_has_credentials(name: str, channel_config: dict[str, Any]) -> bool:
     return any(not isinstance(channel_config.get(key), bool) and channel_config.get(key) is not None and str(channel_config[key]).strip() for key in cred_keys)
 
 
+def enabled_transport_providers(app_config: Any) -> list[str]:
+    """Return the providers whose platform connection this deployment may open.
+
+    These are the channels the leader lease arbitrates: every registered
+    provider that is ``enabled`` under ``channels.*`` in config.yaml, plus every
+    provider a user may connect from the web UI (``channel_connections.<p>.enabled``
+    with ``channel_connections.enabled``), whose credentials arrive at runtime
+    and start the transport without a restart. GitHub is excluded: it receives
+    webhooks pushed to whichever instance the load balancer picks and opens no
+    platform connection of its own. ``model_extra`` / ``channel_connections``
+    may be absent on config doubles; both then contribute nothing.
+    """
+    names: set[str] = set()
+    extra = getattr(app_config, "model_extra", None) or {}
+    channels = extra.get("channels") if isinstance(extra, Mapping) else None
+    if isinstance(channels, Mapping):
+        for name, block in channels.items():
+            if name in _CHANNEL_REGISTRY and isinstance(block, Mapping) and block.get("enabled", False):
+                names.add(name)
+    connections = getattr(app_config, "channel_connections", None)
+    if connections is not None and getattr(connections, "enabled", False):
+        for name in _CHANNEL_REGISTRY:
+            provider = getattr(connections, name, None)
+            if provider is not None and getattr(provider, "enabled", False):
+                names.add(name)
+    names.discard("github")
+    return sorted(names)
+
+
 def _resolve_service_url(config: dict[str, Any], config_key: str, env_key: str, default: str) -> str:
     value = config.pop(config_key, None)
     if isinstance(value, str) and value.strip():
@@ -95,7 +125,8 @@ def _merge_channel_connection_runtime_config(channels_config: dict[str, Any], ap
     merge_runtime_channel_configs(channels_config, connection_config)
 
 
-def _make_connection_repo(connection_config: ChannelConnectionsConfig | None):
+def _make_connection_repo(connection_config: ChannelConnectionsConfig | None, *, credentials_cipher: Any | None = None):
+    """Build the connection repository; ``credentials_cipher`` encrypts per-connection credentials."""
     if connection_config is None or not getattr(connection_config, "enabled", False):
         return None
 
@@ -110,7 +141,7 @@ def _make_connection_repo(connection_config: ChannelConnectionsConfig | None):
     if session_factory is None:
         logger.warning("Channel connections are enabled but database persistence is not available")
         return None
-    return ChannelConnectionRepository(session_factory)
+    return ChannelConnectionRepository(session_factory, cipher=credentials_cipher)
 
 
 class ChannelService:
@@ -128,13 +159,23 @@ class ChannelService:
         require_bound_identity: bool = False,
         app_config: AppConfig | None = None,
         get_stream_bridge: Callable[[], StreamBridge | None] | None = None,
+        store: ChannelStore | None = None,
     ) -> None:
         config = dict(channels_config or {})
+        # ``channels.leader_lease`` is a settings block, not a provider: take it
+        # out before the per-provider loops below and in ensure_ready_channels
+        # see it. The startup gate has already validated it; a direct caller
+        # (tests, embedded use) gets the same ValueError on a bad block.
+        self.leader_lease: ChannelLeaderLeaseConfig = channel_leader_lease_config({CHANNEL_LEADER_LEASE_KEY: config.pop(CHANNEL_LEADER_LEASE_KEY, None)})
         inbound_queue_maxsize = _resolve_positive_int(config, "inbound_queue_maxsize", DEFAULT_INBOUND_QUEUE_MAXSIZE)
         max_concurrency = _resolve_positive_int(config, "max_concurrency", DEFAULT_CHANNEL_MAX_CONCURRENCY)
         shutdown_grace_period_seconds = _resolve_non_negative_float(config, "shutdown_grace_period_seconds", DEFAULT_CHANNEL_SHUTDOWN_GRACE_PERIOD_SECONDS)
         self.bus = MessageBus(inbound_queue_maxsize=inbound_queue_maxsize)
-        self.store = ChannelStore()
+        # Chat-to-thread bindings: the shared ``channel_thread_bindings`` table
+        # for a sqlite/postgres database, the legacy JSON file otherwise. The
+        # JSON path resolves ``base_dir`` through realpath, so ``from_app_config``
+        # runs this constructor off the loop.
+        self.store: ChannelStore = store if store is not None else resolve_channel_store(app_config)
         self._connection_repo = connection_repo
         self._get_stream_bridge = get_stream_bridge
         langgraph_url = _resolve_service_url(config, "langgraph_url", _CHANNELS_LANGGRAPH_URL_ENV, DEFAULT_LANGGRAPH_URL)
@@ -160,6 +201,9 @@ class ChannelService:
         self._channels: dict[str, Any] = {}  # name -> Channel instance
         self._config = config
         self._running = False
+        self._stopping = False
+        self._shutdown_generation = 0
+        self._manager_start_lock = asyncio.Lock()
         self._readiness_locks: dict[str, asyncio.Lock] = {}
         self._config_epochs: dict[str, int] = {}
 
@@ -169,13 +213,16 @@ class ChannelService:
         app_config: AppConfig | None = None,
         *,
         get_stream_bridge: Callable[[], StreamBridge | None] | None = None,
+        credentials_cipher: Any | None = None,
     ) -> ChannelService:
         """Create a ChannelService from the application config.
 
         ``get_stream_bridge`` is threaded straight through to the
         ``ChannelManager`` (see its docstring); it is optional so direct
         callers (including most tests) that don't need follow-up-buffer
-        auto-draining can omit it.
+        auto-draining can omit it. ``credentials_cipher`` is the Gateway's
+        ``DEER_FLOW_CREDENTIALS_KEY`` cipher for per-connection credentials;
+        without it stored credentials stay unavailable.
         """
         if app_config is None:
             from deerflow.config.app_config import get_app_config
@@ -192,7 +239,7 @@ class ChannelService:
         require_bound_identity = bool(connections_enabled and getattr(connection_config, "require_bound_identity", True))
         return cls(
             channels_config=channels_config,
-            connection_repo=_make_connection_repo(connection_config),
+            connection_repo=_make_connection_repo(connection_config, credentials_cipher=credentials_cipher),
             require_bound_identity=require_bound_identity,
             app_config=app_config,
             get_stream_bridge=get_stream_bridge,
@@ -202,9 +249,31 @@ class ChannelService:
         """Start the manager and all enabled channels."""
         if self._running:
             return
+        if self._stopping:
+            raise RuntimeError("cannot start ChannelService while shutdown is incomplete")
 
-        await self.manager.start()
-        self._running = True
+        generation = self._shutdown_generation
+        async with self._manager_start_lock:
+            if generation != self._shutdown_generation or self._running:
+                return
+            if isinstance(self.store, SqlChannelStore):
+                # One-time move of a pre-database ``channels/store.json`` into the
+                # shared table (idempotent; a peer replica importing concurrently is
+                # tolerated). It runs under the start lock, after the generation
+                # check and before the manager starts, so the bindings are in the
+                # table before the first message is routed (a known chat would
+                # otherwise get a second thread), and a stop() that lands during
+                # the import bumps the generation and invalidates this start.
+                await self.store.import_legacy_json()
+                if generation != self._shutdown_generation:
+                    return
+            await self.manager.start()
+            if generation != self._shutdown_generation:
+                # Keep newer starts waiting until this late start is drained.
+                # stop() must remain free to invalidate an in-flight startup.
+                await self.manager.stop()
+                return
+            self._running = True
 
         ready_status = await self.ensure_ready_channels(attempts=2)
         ready_count = sum(1 for ready in ready_status.values() if ready)
@@ -215,6 +284,13 @@ class ChannelService:
         ready_status: dict[str, bool] = {}
         for name, channel_config in self._config.items():
             if not isinstance(channel_config, dict):
+                continue
+            if name not in _CHANNEL_REGISTRY:
+                # __init__ already popped the settings blocks (session, leader_lease),
+                # so an enabled dict here is almost certainly a misspelled provider
+                # key; say so instead of skipping it silently.
+                if name != CHANNEL_LEADER_LEASE_KEY and channel_config.get("enabled", False):
+                    logger.warning("Ignoring channels.%s: it is enabled but is not a registered provider (%s). Check the key spelling in config.yaml.", name, ", ".join(sorted(_CHANNEL_REGISTRY)))
                 continue
             if not channel_config.get("enabled", False):
                 if _channel_has_credentials(name, channel_config):
@@ -294,6 +370,8 @@ class ChannelService:
 
     async def stop(self) -> None:
         """Drain accepted messages while channels can still deliver replies."""
+        self._shutdown_generation += 1
+        self._stopping = True
         self._running = False
         # Reject new provider work first. Existing workers keep draining during
         # manager.stop(), and channel transports remain alive until that drain
@@ -323,6 +401,7 @@ class ChannelService:
         if stop_errors:
             raise ExceptionGroup("one or more channels failed to stop", stop_errors)
 
+        self._stopping = False
         logger.info("ChannelService stopped")
 
     def _load_channel_config(self, name: str) -> dict[str, Any] | None:
@@ -334,7 +413,8 @@ class ChannelService:
         The UI runtime-config overlay applied at startup is re-applied here
         so a file-driven reload neither drops credentials entered from the
         browser nor resurrects a channel disconnected from it.
-        Falls back to the cached ``self._config`` when config loading fails.
+        Returns a snapshot without mutating shared state, or ``None`` when
+        unavailable. The restart caller owns publication and cached fallback.
         """
         try:
             from deerflow.config.app_config import get_app_config
@@ -345,12 +425,10 @@ class ChannelService:
             _merge_channel_connection_runtime_config(channels_config, app_config)
             channel_config = channels_config.get(name)
             if isinstance(channel_config, dict):
-                # Update the cached config so get_status() stays consistent.
-                self._config[name] = channel_config
                 return channel_config
         except Exception:
-            logger.exception("Failed to reload config for channel %s, using cached version", name)
-        return self._config.get(name)
+            logger.exception("Failed to load config snapshot for channel %s", name)
+        return None
 
     def _channel_lock(self, name: str) -> asyncio.Lock:
         """Return the per-channel lifecycle lock ensuring serialized mutations."""
@@ -384,7 +462,11 @@ class ChannelService:
         if reload_config:
             # Reading config.yaml and the runtime store is disk IO; keep it
             # off the event loop.
-            config = await asyncio.to_thread(self._load_channel_config, name)
+            loaded_config = await asyncio.to_thread(self._load_channel_config, name)
+            # Publish under the lifecycle lock after await; abandoned workers stay read-only.
+            if loaded_config is not None:
+                self._config[name] = loaded_config
+            config = self._config.get(name)
             self._bump_config_epoch(name)
         else:
             config = self._config.get(name)
@@ -481,6 +563,10 @@ class ChannelService:
 
     async def _start_channel(self, name: str, config: dict[str, Any]) -> bool:
         """Instantiate and start a single channel."""
+        if self._stopping or not self._running:
+            logger.warning("Refusing to start %s while ChannelService is stopped or stopping", name)
+            return False
+
         import_path = _CHANNEL_REGISTRY.get(name)
         if not import_path:
             logger.warning("Unknown channel type")
@@ -525,9 +611,21 @@ class ChannelService:
                 config["seen_event_store_path"] = await asyncio.to_thread(_default_seen_store_path)
             if self._connection_repo is not None:
                 config["connection_repo"] = self._connection_repo
+            # A stop may have started while this coroutine was suspended in
+            # pre-start I/O above. Fence publication again immediately before
+            # the new instance becomes service-owned.
+            if self._stopping or not self._running:
+                logger.warning("Refusing to publish %s channel while ChannelService is stopped or stopping", name)
+                return False
             channel = channel_cls(bus=self.bus, config=config)
             self._channels[name] = channel
             await channel.start()
+            # A concurrent service stop may finish while channel.start() is
+            # suspended, removing this instance before it subscribes. Drain
+            # the late-started transport rather than leaving an orphan.
+            if self._stopping or not self._running:
+                await self._stop_and_discard_channel(name, channel)
+                return False
             if not channel.is_running:
                 logger.error("Channel did not enter a running state after start()")
                 await self._stop_and_discard_channel(name, channel)
@@ -611,6 +709,7 @@ async def start_channel_service(
     app_config: AppConfig | None = None,
     *,
     get_stream_bridge: Callable[[], StreamBridge | None] | None = None,
+    credentials_cipher: Any | None = None,
 ) -> ChannelService:
     """Create and start the global ChannelService from app config.
 
@@ -624,10 +723,10 @@ async def start_channel_service(
     global _channel_service
     if _channel_service is not None:
         return _channel_service
-    # from_app_config reads the JSON channel store and runtime config files;
-    # keep that disk IO off the event loop. asyncio.to_thread forwards both
-    # args and kwargs to the target callable.
-    service = await asyncio.to_thread(ChannelService.from_app_config, app_config, get_stream_bridge=get_stream_bridge)
+    # from_app_config resolves the channel store path (realpath) and reads the
+    # runtime config files; keep that disk IO off the event loop.
+    # asyncio.to_thread forwards both args and kwargs to the target callable.
+    service = await asyncio.to_thread(ChannelService.from_app_config, app_config, get_stream_bridge=get_stream_bridge, credentials_cipher=credentials_cipher)
     _channel_service = service
 
     async def rollback_failed_start() -> None:

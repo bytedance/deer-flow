@@ -142,6 +142,9 @@ export function SidecarPanel({ className }: { className?: string }) {
   const [queuedSubmit, setQueuedSubmit] = useState<{
     message: PromptInputMessage;
     references: SidecarReference[];
+    // Settles the composer's submit with the queued send's outcome.
+    resolve: () => void;
+    reject: (error: unknown) => void;
   } | null>(null);
   const { data: uploadLimits } = useUploadLimits(
     sidecar.sidecarThreadId ?? sidecar.parentThreadId,
@@ -408,17 +411,12 @@ export function SidecarPanel({ className }: { className?: string }) {
           sidecar.clearActiveReferences();
         }
       },
-    ).catch((error) => {
-      toast.error(
-        error instanceof Error ? error.message : t.sidecar.sendFailed,
-      );
-    });
+    ).then(nextSubmit.resolve, nextSubmit.reject);
   }, [
     queuedSubmit,
     sidecar,
     sidecar.sidecarThreadId,
     submitToSidecarThread,
-    t.sidecar.sendFailed,
     thread.isLoading,
   ]);
 
@@ -439,7 +437,16 @@ export function SidecarPanel({ className }: { className?: string }) {
       try {
         if (!sidecar.sidecarThreadId) {
           await ensureSidecarThread(pendingReferences);
-          setQueuedSubmit({ message, references: pendingReferences });
+          // The first send waits for the new thread to reach the stream hook.
+          // Settle with that send so the composer clears only once it is sent.
+          await new Promise<void>((resolve, reject) => {
+            setQueuedSubmit({
+              message,
+              references: pendingReferences,
+              resolve,
+              reject,
+            });
+          });
           return;
         }
 
@@ -457,6 +464,8 @@ export function SidecarPanel({ className }: { className?: string }) {
         toast.error(
           error instanceof Error ? error.message : t.sidecar.sendFailed,
         );
+        // Reject so PromptInput keeps the draft and attachments for a retry.
+        throw error;
       }
     },
     [

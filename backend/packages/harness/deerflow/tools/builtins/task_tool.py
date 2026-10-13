@@ -648,7 +648,7 @@ def _task_result_command(
                     content=content,
                     tool_call_id=tool_call_id,
                     name="task",
-                    artifact=cited_source_artifact(source_messages or [], content),
+                    artifact=cited_source_artifact(source_messages or [], content, include_omissions=True),
                     additional_kwargs=make_subagent_additional_kwargs(
                         status,
                         result=result,

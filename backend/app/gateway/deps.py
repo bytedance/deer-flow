@@ -22,13 +22,17 @@ import logging
 import os
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from fastapi import FastAPI, HTTPException, Request
 from langgraph.types import Checkpointer
 
+from app.gateway.auth.errors import AuthErrorCode
 from deerflow.community.browser_automation.session import browser_multi_worker_error
 from deerflow.config.app_config import AppConfig, get_app_config
+from deerflow.config.channel_leader_lease_config import CHANNEL_LEADER_LEASE_FIELD, ChannelLeaderLeaseConfig, ChannelLeaderLeaseConfigError, channel_leader_lease_from_app_config
+from deerflow.config.credentials_key import CREDENTIALS_KEY_ENV_VAR, CREDENTIALS_KEY_FILENAME, GENERATE_KEY_COMMAND, CredentialsKeyError, parse_credentials_keys
 from deerflow.config.deployment_config import multi_instance_declaration
 from deerflow.persistence.feedback import FeedbackRepository
 from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, STARTUP_ORPHAN_RECOVERY_ERROR, RunContext, RunManager, StreamBridge
@@ -157,6 +161,15 @@ def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
     7. ``sandbox.ownership.type`` must not be an explicit ``memory``: an
        in-process ownership store cannot see peers, so reconciliation would
        adopt and idle-destroy another instance's live containers (#4206).
+    8. ``channels.leader_lease.enabled`` must not be ``false`` while an IM
+       channel other than GitHub is enabled: every instance would open the
+       platform connection with the same bot credentials (Telegram rejects
+       the second poller with 409, Discord answers every message twice).
+       ``auto`` (the default) and ``true`` pass the clause, but they are reserved
+       configuration for the lease-backed transport ownership that ships
+       separately: in this version they do not stop the duplicate connections,
+       so the refusal offers only the single-instance and channel-disable
+       remedies.
 
     This gate runs once at startup before any persistence engine is
     initialised so the error message is clear and the process exits
@@ -176,6 +189,11 @@ def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
         raise SystemExit(f"scheduler.multi_instance=true requires run_events.backend='db'. run_events.backend is '{run_events_backend}'. Set scheduler.multi_instance=false or configure run_events.backend: db.")
     if multi_instance_requested and (run_ownership is None or not run_ownership.heartbeat_enabled):
         raise SystemExit("scheduler.multi_instance=true requires run_ownership.heartbeat_enabled=true so peer runs retain a valid lease. Set scheduler.multi_instance=false or enable run ownership heartbeats.")
+
+    # A malformed channels.leader_lease block is refused on every topology:
+    # ChannelService would otherwise raise the same error later in the
+    # lifespan, after the persistence engine is already up.
+    leader_lease = _channel_leader_lease(config)
 
     signal = _multi_process_signal(config)
     if signal is None:
@@ -225,6 +243,87 @@ def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
             "using (#4206). Set sandbox.ownership.type='redis', or omit the section so it is inferred from the redis stream bridge."
         )
 
+    if leader_lease.explicitly_disabled:
+        providers = _enabled_channel_transport_providers(config)
+        if providers:
+            raise SystemExit(
+                f"{reason} cannot run with {CHANNEL_LEADER_LEASE_FIELD}.enabled=false while IM channels {', '.join(providers)} are enabled: "
+                "every instance would open the platform connection with the same bot credentials (Telegram rejects the second poller "
+                "with 409 Conflict, Discord answers every message twice, and per-process channel state diverges). "
+                f"{rollback}, or disable those channels (channels.<provider>.enabled=false and channel_connections.<provider>.enabled=false). "
+                f"{CHANNEL_LEADER_LEASE_FIELD}.enabled=auto|true is reserved for the per-provider leader lease that ships separately and does not "
+                "yet stop these duplicate connections, so it is not a remedy here."
+            )
+
+
+def _channel_leader_lease(config: AppConfig) -> ChannelLeaderLeaseConfig:
+    """Parse ``channels.leader_lease``; a malformed block exits with the dotted path in the message."""
+    try:
+        return channel_leader_lease_from_app_config(config)
+    except ChannelLeaderLeaseConfigError as exc:
+        raise SystemExit(str(exc)) from None
+
+
+def _enabled_channel_transport_providers(config: AppConfig) -> list[str]:
+    """Non-GitHub IM providers whose platform connection this deployment may open.
+
+    Imported lazily: ``app.channels.service`` pulls in every channel module and
+    the gate runs before the lifespan has any reason to load them.
+    """
+    from app.channels.service import enabled_transport_providers
+
+    return enabled_transport_providers(config)
+
+
+def credentials_key_consumers(config: AppConfig) -> list[str]:
+    """Return the enabled features that store data under ``DEER_FLOW_CREDENTIALS_KEY``.
+
+    Each entry is the setting that enabled the feature, as refusal text spells
+    it. The Gateway loads the key only when this list is non-empty, and the
+    multi-instance gate below refuses a missing key only for these features, so
+    a deployment that stores no credentials keeps booting without one.
+    """
+    consumers: list[str] = []
+    connections = getattr(config, "channel_connections", None)
+    if connections is not None and getattr(connections, "enabled", False):
+        # ChannelConnectionRepository encrypts per-connection credentials.
+        consumers.append("channel_connections.enabled=true")
+    return consumers
+
+
+def _enforce_credentials_key(config: AppConfig) -> None:
+    """Refuse a malformed credentials key, or a missing one where instances cannot share the generated file.
+
+    A set ``DEER_FLOW_CREDENTIALS_KEY`` must parse (any topology): starting with
+    a key that cannot decrypt anything would silently hide stored credentials.
+    Without it each instance generates ``{base_dir}/.credentials_key``. Workers
+    of one process tree share that file and converge on one key through its
+    exclusive create, so only the explicit multi-instance declaration -- Pods or
+    hosts that need not share a runtime home -- requires the variable, and only
+    when a feature from :func:`credentials_key_consumers` is enabled.
+    """
+    raw = os.environ.get(CREDENTIALS_KEY_ENV_VAR, "")
+    if raw.strip():
+        try:
+            parse_credentials_keys(raw)
+        except CredentialsKeyError as exc:
+            raise SystemExit(str(exc)) from None
+        return
+    declaration = multi_instance_declaration(config)
+    if declaration is None:
+        return
+    consumers = credentials_key_consumers(config)
+    if not consumers:
+        return
+    enabled = ", ".join(consumers)
+    disabled = ", ".join(consumer.removesuffix("=true") + "=false" for consumer in consumers)
+    raise SystemExit(
+        f"{declaration.knob} with {enabled} requires {CREDENTIALS_KEY_ENV_VAR}: without it every instance generates its own "
+        f"{{base_dir}}/{CREDENTIALS_KEY_FILENAME}, and credentials one instance stores cannot be decrypted on its peers. "
+        f"Generate one key with {GENERATE_KEY_COMMAND} and set the same value on every instance (the Helm chart and "
+        f"scripts/deploy.sh generate and inject it automatically), {declaration.rollback}, or set {disabled}."
+    )
+
 
 def _validate_agent_storage(config: AppConfig) -> None:
     """Fail fast on an agent-storage backend the database cannot support.
@@ -256,6 +355,81 @@ def _validate_agent_storage(config: AppConfig) -> None:
             "across workers/nodes. Set agent_storage.backend='db' to share them.",
             signal[0],
         )
+
+
+def _validate_login_throttle_storage(config: AppConfig) -> None:
+    """Warn when a multi-process deployment counts login failures per process.
+
+    ``auth.local.throttle_storage`` resolves to the shared ``login_throttle``
+    table whenever an application database exists, so under the multi-process
+    gate (which already requires Postgres) only an explicit ``memory`` lands
+    here. That is not fatal — the throttle still works on every replica — but
+    with N replicas behind one load balancer an attacker gets N x
+    ``max_login_attempts`` guesses and a lockout on one replica is invisible
+    to the others, exactly the gap the shared table closes. Mirrors the
+    ``agent_storage.backend='file'`` divergence warning above.
+    """
+    signal = _multi_process_signal(config)
+    if signal is None:
+        return
+    local = getattr(getattr(config, "auth", None), "local", None)
+    if local is None:
+        return
+    from deerflow.config.auth_config import LocalAuthConfig, resolve_login_throttle_storage
+
+    selector = getattr(local, "throttle_storage", LocalAuthConfig.model_fields["throttle_storage"].default)
+    db_backend = getattr(getattr(config, "database", None), "backend", None)
+    if resolve_login_throttle_storage(selector, db_backend) == "memory":
+        logger.warning(
+            "%s with auth.local.throttle_storage=%s: failed-login counters and lockouts are kept per Gateway process, "
+            "so an attacker behind the load balancer gets N x max_login_attempts guesses and a lockout on one replica "
+            "is invisible to the others. Set auth.local.throttle_storage='auto' (or 'db') so the shared login_throttle "
+            "table in the application database enforces one limit per IP.",
+            signal[0],
+            str(getattr(selector, "value", selector)),
+        )
+
+
+def _validate_memory_retrieval_index(config: AppConfig) -> None:
+    """Warn when a declared multi-instance deployment keeps DeerMem's retrieval index on the shared memory volume.
+
+    DeerMem's derived FTS5 index is one SQLite database in WAL mode. When
+    ``storage_path`` sits on the home volume several Gateway instances share,
+    the default ``{storage_path}/.retrieval`` makes every instance open that
+    same file over a network filesystem (where SQLite documents WAL as
+    unsupported), empty and refill it under its peers at startup, and delete
+    it from under them on corruption recovery. The index is rebuildable, so
+    each instance should keep its own copy on local disk through
+    ``memory.backend_config.retrieval_index_path``. Only the explicit
+    declaration counts: uvicorn workers of one process tree share local disk,
+    where a shared WAL index is supported. Mirrors ``_validate_agent_storage``:
+    a warning, not a refusal, because memory still works, only slower.
+    """
+    declaration = multi_instance_declaration(config)
+    if declaration is None:
+        return
+    memory = getattr(config, "memory", None)
+    if memory is None or not getattr(memory, "enabled", False) or getattr(memory, "manager_class", "deermem") != "deermem":
+        return
+    backend_config = dict(getattr(memory, "backend_config", None) or {})
+    if backend_config.get("retrieval_adapter", "fts5") != "fts5":
+        return  # disabled, or a custom RetrievalPort factory that owns its own storage
+    from deerflow.agents.memory.backends.deermem.deermem.core.paths import retrieval_index_directory
+    from deerflow.agents.memory.manager import resolve_deermem_storage_path
+
+    storage_path = resolve_deermem_storage_path(backend_config)
+    index_dir = retrieval_index_directory(storage_path, backend_config.get("retrieval_index_path"))
+    if index_dir is None or not Path(index_dir).resolve().is_relative_to(Path(storage_path).resolve()):
+        return
+    logger.warning(
+        "%s but the DeerMem retrieval index at %s is inside memory storage_path %s: every Gateway instance opens the same "
+        "SQLite WAL index over the shared memory volume, rebuilds it under its peers at startup and deletes it from under them "
+        "on corruption recovery. Set memory.backend_config.retrieval_index_path to an instance-local directory (the Helm chart "
+        "mounts an emptyDir at /var/lib/deerflow/memory-index).",
+        declaration.knob,
+        index_dir,
+        storage_path,
+    )
 
 
 async def _drain_inflight_runs(run_manager: RunManager) -> None:
@@ -523,9 +697,21 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
     # SQLite write-locks cannot support concurrent multi-process access.
     # ------------------------------------------------------------------
     _enforce_postgres_for_multi_worker(startup_config)
+    # Reject a malformed DEER_FLOW_CREDENTIALS_KEY, or a missing one where
+    # declared instances store credentials but cannot share the generated file.
+    _enforce_credentials_key(startup_config)
     # Reject agent_storage.backend='db' on a non-durable database, and warn on
     # node-divergent file storage under multi-worker Postgres.
     _validate_agent_storage(startup_config)
+    # Warn when login lockouts stay per-process under several Gateway processes.
+    _validate_login_throttle_storage(startup_config)
+    # IM chat-to-thread bindings need no companion warning: ``resolve_channel_store``
+    # keeps them in the shared ``channel_thread_bindings`` table for every
+    # sqlite/postgres database, and the gate above already refuses a memory
+    # database -- the only JSON-file case -- under any multi-process signal.
+    # Warn when a declared multi-instance deployment shares DeerMem's SQLite
+    # retrieval index across instances through the memory volume.
+    _validate_memory_retrieval_index(startup_config)
 
     async with AsyncExitStack() as stack:
         # Lifecycle and system-model hooks can originate on isolated subagent
@@ -535,6 +721,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         # startup-failure and cancellation path below.
         try:
             from deerflow.extensions.notify import (
+                drain_extension_notify_dispatches,
                 reset_extension_notify_loop,
                 set_extension_notify_loop,
             )
@@ -544,16 +731,24 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             logger.exception("Failed to register the extension notify loop; sync observations will be dropped")
         else:
 
-            def reset_notify_loop_safely() -> None:
+            async def reset_notify_loop_safely() -> None:
                 try:
-                    reset_extension_notify_loop()
+                    await drain_extension_notify_dispatches()
                 except Exception:
                     logger.debug(
-                        "Failed to reset the extension notify loop (non-fatal)",
+                        "Failed to drain pending extension notifications (non-fatal)",
                         exc_info=True,
                     )
+                finally:
+                    try:
+                        reset_extension_notify_loop()
+                    except Exception:
+                        logger.debug(
+                            "Failed to reset the extension notify loop (non-fatal)",
+                            exc_info=True,
+                        )
 
-            stack.callback(reset_notify_loop_safely)
+            stack.push_async_callback(reset_notify_loop_safely)
 
         config = startup_config
         app.state.checkpoint_channel_mode = freeze_checkpoint_channel_mode(config.database.checkpoint_channel_mode)
@@ -571,17 +766,29 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         app.state.checkpointer = await stack.enter_async_context(make_checkpointer(config))
         app.state.store = await stack.enter_async_context(make_store(config))
 
-        # Record the checkpointer/Store backend selected from this startup
-        # snapshot so GET /health/ready probes what the running process
-        # actually uses. These singletons are restart-required by design and
-        # are never rebuilt on config.yaml hot reload, so the probe must not
-        # re-resolve process-wide configuration per request.
-        from app.gateway.health import READINESS_CHECKPOINTER_CONFIG_ATTR, resolve_checkpointer_config
+        # Record the checkpointer/Store backend and the provisioner endpoint
+        # selected from this startup snapshot so GET /health/ready probes what
+        # the running process actually uses. These singletons are
+        # restart-required by design and are never rebuilt on config.yaml hot
+        # reload, so the probe must not re-resolve process-wide configuration
+        # per request. The stream bridge needs no snapshot: the probe pings the
+        # singleton stored on app.state.stream_bridge above.
+        from app.gateway.health import READINESS_CHECKPOINTER_CONFIG_ATTR, READINESS_PROVISIONER_URL_ATTR, resolve_checkpointer_config, resolve_provisioner_url
 
         setattr(app.state, READINESS_CHECKPOINTER_CONFIG_ATTR, resolve_checkpointer_config(config))
+        setattr(app.state, READINESS_PROVISIONER_URL_ATTR, resolve_provisioner_url(config))
 
         # Initialize repositories — one get_session_factory() call for all.
         sf = get_session_factory()
+
+        # The login throttle store is resolved once per process from the startup
+        # snapshot and the engine above (auth.local.throttle_storage is
+        # startup-only); the router reads it through the same hook tests use.
+        from app.gateway.auth.login_throttle import install_login_throttle_store, reset_login_throttle_store, resolve_login_throttle_store
+
+        install_login_throttle_store(resolve_login_throttle_store(config, session_factory=sf))
+        stack.callback(reset_login_throttle_store)
+
         if sf is not None:
             from deerflow.persistence.feedback import FeedbackRepository
             from deerflow.persistence.personal_access_tokens import PersonalAccessTokenRepository
@@ -660,11 +867,13 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         if sf is not None:
             from deerflow.persistence.mcp_tasks import McpTaskRepository
             from deerflow.persistence.projects import ProjectDocumentRepository, ProjectRepository
+            from deerflow.persistence.scheduled_task_events import ScheduledTaskEventRepository
             from deerflow.persistence.scheduled_task_runs import (
                 ScheduledTaskRunRepository,
             )
             from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
             from deerflow.persistence.subagent_batches import SubagentBatchRepository
+            from deerflow.persistence.thread_reads import ThreadReadRepository
 
             app.state.project_repo = ProjectRepository(sf)
             app.state.project_document_repo = ProjectDocumentRepository(sf)
@@ -676,6 +885,9 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 sf,
                 run_repository=app.state.run_store,
             )
+            app.state.scheduled_task_event_repo = ScheduledTaskEventRepository(sf)
+            # Per-user unread state and the activity feed's read clock.
+            app.state.thread_read_repo = ThreadReadRepository(sf)
             app.state.mcp_task_repo = McpTaskRepository(sf)
             app.state.subagent_batch_repo = SubagentBatchRepository(sf)
         else:
@@ -685,6 +897,8 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             app.state.subagent_batch_repo = None
             app.state.scheduled_task_repo = None
             app.state.scheduled_task_run_repo = None
+            app.state.scheduled_task_event_repo = None
+            app.state.thread_read_repo = None
 
         # RunManager with store backing for persistence
         run_ownership_config = getattr(config, "run_ownership", None)
@@ -811,25 +1025,51 @@ def get_thread_store(request: Request) -> ThreadMetaStore:
     return val
 
 
+def _scheduler_unavailable(message: str) -> HTTPException:
+    """Coded 503 for the scheduled-task routes (contracts/scheduled_task_errors_contract.json)."""
+    from app.gateway.scheduled_task_errors import scheduler_error
+
+    return scheduler_error(503, "scheduler_unavailable", message)
+
+
 def get_scheduled_task_repo(request: Request):
     val = getattr(request.app.state, "scheduled_task_repo", None)
     if val is None:
-        raise HTTPException(status_code=503, detail="Scheduled task repo not available")
+        raise _scheduler_unavailable("Scheduled task repo not available")
     return val
 
 
 def get_scheduled_task_run_repo(request: Request):
     val = getattr(request.app.state, "scheduled_task_run_repo", None)
     if val is None:
-        raise HTTPException(status_code=503, detail="Scheduled task run repo not available")
+        raise _scheduler_unavailable("Scheduled task run repo not available")
+    return val
+
+
+def get_scheduled_task_event_repo(request: Request):
+    val = getattr(request.app.state, "scheduled_task_event_repo", None)
+    if val is None:
+        raise HTTPException(status_code=503, detail="Scheduled task event repo not available")
     return val
 
 
 def get_scheduled_task_service(request: Request):
     val = getattr(request.app.state, "scheduled_task_service", None)
     if val is None:
-        raise HTTPException(status_code=503, detail="Scheduled task service not available")
+        raise _scheduler_unavailable("Scheduled task service not available")
     return val
+
+
+def is_scheduler_running(request: Request) -> bool:
+    """Whether this Gateway process's scheduler poller is running.
+
+    False when the service is absent (no scheduler persistence) or was never
+    started (``scheduler.enabled: false``) or its poller stopped. Per process:
+    another worker may report differently.
+    """
+    state = getattr(getattr(request, "app", None), "state", None)
+    service = getattr(state, "scheduled_task_service", None)
+    return bool(getattr(service, "is_running", False))
 
 
 def get_mcp_task_repo(request: Request):
@@ -896,6 +1136,18 @@ def get_run_context(request: Request) -> RunContext:
 # Cached singletons to avoid repeated instantiation per request
 _cached_local_provider: LocalAuthProvider | None = None
 _cached_repo: SQLiteUserRepository | None = None
+
+
+def get_user_repository() -> SQLiteUserRepository:
+    """Return the cached user repository (created on first use).
+
+    Origin: admin user-management surface (RFC #4063 / #3462 gap 2). Shares
+    the ``get_local_provider`` cache so both surfaces see one store.
+    """
+
+    get_local_provider()
+    assert _cached_repo is not None
+    return _cached_repo
 
 
 def get_local_provider() -> LocalAuthProvider:
@@ -975,14 +1227,36 @@ async def get_current_user_from_request(request: Request):
             detail=AuthErrorResponse(code=AuthErrorCode.USER_NOT_FOUND, message="User not found").model_dump(),
         )
 
-    # Token version mismatch → password was changed, token is stale
-    if user.token_version != payload.ver:
+    # Operator-disabled account (#3462 gap 3) and stale token versions are
+    # both verdicts of the shared post-lookup validator: the password and
+    # PAT paths reject at their own surfaces; OAuth provisioning rejects at
+    # resolve time.
+    error = validate_resolved_session_user(user, payload)
+    if error is not None:
         raise HTTPException(
             status_code=401,
-            detail=AuthErrorResponse(code=AuthErrorCode.TOKEN_INVALID, message="Token revoked (password changed)").model_dump(),
+            detail=AuthErrorResponse(code=error, message="Account disabled" if error is AuthErrorCode.ACCOUNT_DISABLED else "Token revoked (password changed)").model_dump(),
         )
 
     return user
+
+
+def validate_resolved_session_user(user, payload) -> AuthErrorCode | None:
+    """Shared post-lookup session validation for EVERY JWT authenticator.
+
+    The Gateway's HTTP dependency, the WebSocket authenticator (browser
+    streaming bypasses AuthMiddleware), and the standalone LangGraph
+    ``authenticate`` callback all resolve cookie → JWT → user; this helper
+    is the one place the post-lookup verdicts live so a lifecycle change
+    (token_version bump, account suspension) lands everywhere at once.
+    Returns the failure code, or ``None`` when the session is valid —
+    callers map it to their own exception surface.
+    """
+    if user.token_version != payload.ver:
+        return AuthErrorCode.TOKEN_INVALID
+    if getattr(user, "disabled", False):
+        return AuthErrorCode.ACCOUNT_DISABLED
+    return None
 
 
 async def is_admin_user(request: Request) -> bool:

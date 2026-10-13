@@ -12,6 +12,7 @@ confidence-based behavior. Coverage:
 - the DynamicContextMiddleware -> ``_get_memory_context`` query wiring.
 """
 
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -71,6 +72,31 @@ class TestLexicalRelevance:
         monkeypatch.setattr(relevance, "jieba", SimpleNamespace(cut=cut), raising=False)
         assert len(tokenize("word" * 10000)) == 128
         assert seen == [4096]
+
+    @staticmethod
+    def _punctuation_emitting_segmenter(monkeypatch):
+        """Stub jieba the way it really segments: punctuation is its own token."""
+        from deerflow.agents.memory.backends.deermem.deermem.core import relevance
+
+        def cut(text):
+            yield from re.findall(r"\w+|[^\w\s]|\s", text)
+
+        monkeypatch.setattr(relevance, "_jieba_available", True)
+        monkeypatch.setattr(relevance, "jieba", SimpleNamespace(cut=cut), raising=False)
+
+    def test_segmenter_punctuation_is_not_a_token(self, monkeypatch):
+        self._punctuation_emitting_segmenter(monkeypatch)
+        assert tokenize("Python，数据库。SQL, rust!") == ["python", "数据库", "sql", "rust"]
+
+    def test_segmenter_punctuation_does_not_match_unrelated_facts(self, monkeypatch):
+        self._punctuation_emitting_segmenter(monkeypatch)
+        assert lexical_relevance("PostgreSQL，数据库", "周末喜欢爬山，偶尔骑车。") == 0.0
+
+    def test_segmenter_punctuation_does_not_consume_token_budget(self, monkeypatch):
+        self._punctuation_emitting_segmenter(monkeypatch)
+        query = ", ".join(f"term{i:02d}" for i in range(80))
+        assert tokenize(query) == [f"term{i:02d}" for i in range(80)]
+        assert lexical_relevance(query, "term75 is the read replica") > 0.0
 
     def test_mixed_cjk_without_jieba(self, monkeypatch):
         from deerflow.agents.memory.backends.deermem.deermem.core import relevance

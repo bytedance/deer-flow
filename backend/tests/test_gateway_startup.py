@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from support.compose import DOCKER, requires_docker_compose
 from support.shell import find_script_bash
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -117,6 +118,58 @@ def test_deploy_failure_prints_gateway_diagnostics_and_never_claims_success(tmp_
     assert "DeerFlow is running!" not in result.stdout
     assert "DeerFlow services failed to become ready" in result.stderr
     assert "supports `docker compose up --wait`" in result.stderr
+    assert "upgrade to Docker Compose 2.24+" in result.stderr
     calls = capture.read_text(encoding="utf-8")
     assert any(call.endswith(" ps") for call in calls.splitlines())
     assert " logs --no-color --tail 100 gateway" in calls
+
+
+# Hands only read-only calls to the real client: `up`, `down` and `logs` become
+# `config --quiet` on the same global flags, so Compose parses exactly the
+# project the entry point would act on without touching a running stack.
+# Anything else fails loudly instead of reaching the real daemon.
+_READ_ONLY_COMPOSE = """#!/usr/bin/env bash
+args=()
+for arg in "$@"; do
+  case "$arg" in
+    up|down|logs) exec "$REAL_DOCKER" "${args[@]}" config --quiet ;;
+    config|version) exec "$REAL_DOCKER" "$@" ;;
+  esac
+  args+=("$arg")
+done
+echo "unexpected docker call: $*" >&2
+exit 97
+"""
+
+
+@requires_script_bash
+@requires_docker_compose
+@pytest.mark.parametrize(
+    "command",
+    [("deploy.sh",), ("deploy.sh", "start"), ("deploy.sh", "down"), ("docker.sh", "logs", "--prod")],
+    ids=["make-up", "deploy-start", "make-down", "make-prod-logs"],
+)
+def test_production_entry_points_parse_the_compose_project_without_env_files(tmp_path: Path, command: tuple[str, ...]) -> None:
+    """A fresh clone has no .env or frontend/.env (both gitignored).
+
+    `make up`, `make down` and `make prod-logs` all load docker-compose.yaml,
+    so each must get past Compose's parse on such a checkout.
+    """
+    worktree, env = _deploy_fixture(tmp_path, docker_script=_READ_ONLY_COMPOSE)
+    env["REAL_DOCKER"] = DOCKER
+    env["DEER_FLOW_HOME"] = str(tmp_path / "deer-flow-home")
+    assert not (worktree / ".env").exists()
+    assert not (worktree / "frontend" / ".env").exists()
+
+    script, *args = command
+    result = subprocess.run(
+        [SCRIPT_BASH, str(worktree / "scripts" / script), *args],
+        cwd=worktree,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "env file" not in result.stderr

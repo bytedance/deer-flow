@@ -20,6 +20,7 @@ from langchain.agents.middleware.types import ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.agents.middlewares.skill_usage import SKILL_USAGE_KEY, SKILL_USAGES_KEY, build_skill_usage, record_skill_usage
+from deerflow.authz.activation_decisions import ActivationDecisions
 from deerflow.runtime.events.catalog import (
     MIDDLEWARE_SKILL_ACTIVATION_TAG,
     MIDDLEWARE_SKILL_SECRETS_TAG,
@@ -49,9 +50,9 @@ _SLASH_SKILL_ACTIVATION_TARGET_ID_KEY = "slash_skill_activation_target_id"
 
 # Async-prepass registry load already attempted and failed. Handed down so
 # the secret-binding resolution does not silently recover with a fresh load:
-# entry names resolved from a recovered registry would miss the (empty)
-# decision map and fall back to the synchronous provider API from the worker
-# thread — for a loop-affine provider a denial becomes a fail-open allow.
+# entry names resolved from a recovered registry would surface as batch
+# misses — resolved per the carried fail-closed/fail-open policy with a
+# WARNING, never a silent synchronous fallback.
 # Entries bind nothing for that call instead (fail closed by construction).
 # Same marker pattern as SkillToolPolicyMiddleware._REGISTRY_LOAD_FAILED.
 _REGISTRY_LOAD_FAILED = object()
@@ -64,13 +65,15 @@ _REGISTRY_LOAD_FAILED = object()
 # injection set is recomputed every model call, but a slash-activated skill must
 # stay bound for the rest of the run — the model's tool loop issues many model
 # calls after the single activation call (#3861 semantics).
-# _SLASH_SKILL_ACTIVATION_RUN_KEY: identity of the slash message already activated
-# in this run, so the reminder injection + skill disk read + "activate" audit event
-# fire once per user slash command instead of on every model call. The reminder is
-# added via request.override(messages=...) for a single model call and never
-# persisted to graph state, so the 2nd..Nth model call of a turn rebuilds
-# request.messages from state without it — the run context is the only signal that
-# survives the tool loop. All three live in secret_context so they are covered by
+# _SLASH_SKILL_ACTIVATION_RUN_KEY: the slash message already activated in this run
+# and the activation it produced (_RecordedActivation), so the skill disk read +
+# "activate" audit event + usage record fire once per user slash command instead of
+# on every model call. The reminder is added via request.override(messages=...) for
+# a single model call and never persisted to graph state, so the 2nd..Nth model call
+# of a turn rebuilds request.messages from state without it — the run context is
+# the only signal that survives the tool loop. A retry of the activation call
+# (nothing has answered the slash message yet) replays the recorded reminder rather
+# than dropping it. All three live in secret_context so they are covered by
 # REDACTED_CONTEXT_KEYS in one place.
 
 
@@ -91,6 +94,15 @@ class _Activation:
 class _ActivationResolution:
     activation: _Activation | None = None
     failure_message: str | None = None
+    # A retry of the call that already activated: re-inject the reminder, but the
+    # once-per-activation side effects (audit, usage record) already happened.
+    replayed: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _RecordedActivation:
+    run_key: str
+    activation: _Activation
 
 
 def is_slash_skill_activation_reminder(message: object) -> bool:
@@ -123,7 +135,7 @@ class SkillActivationMiddleware(AgentMiddleware):
         self._slash_source_owner_token = slash_source_owner_token
         self._skill_authorization = skill_authorization
 
-    def _activation_allowed(self, skill_name: str, *, activation_decisions: dict[str, bool] | None = None) -> bool:
+    def _activation_allowed(self, skill_name: str, *, activation_decisions: ActivationDecisions | None = None) -> bool:
         """Action-scoped ``skill:activate`` check for explicit slash activation.
 
         ``_available_skills`` is the Layer 1 *visibility* set (filter_resources,
@@ -135,20 +147,26 @@ class SkillActivationMiddleware(AgentMiddleware):
         Delegates to the shared ``skill_activation_allowed`` so the slash path,
         ``describe_skill``, and the skill-file-load path cannot drift.
 
-        *activation_decisions* carries decisions precomputed on the event loop
-        via ``aauthorize()`` by ``awrap_model_call``: the threaded handler then
-        consults them instead of calling the synchronous ``authorize()`` (wrong
-        API for loop-affine providers). Names absent from the map fall back to
-        the synchronous check, which is the correct API for the sync
-        ``wrap_model_call`` path.
+        *activation_decisions* carries the per-step
+        :class:`~deerflow.authz.activation_decisions.ActivationDecisions`
+        batch precomputed on the event loop via ``aauthorize()``: a covered
+        name returns the batched decision; a miss inside the batch resolves
+        per the carried provider-error policy with a loud WARNING and never
+        touches a provider (wrong API from a worker thread for loop-affine
+        providers). ``None`` (the sync ``wrap_model_call`` chain, or
+        authorization disabled) is the only case that takes the synchronous
+        check below — the correct API there.
         """
-        if activation_decisions is not None and skill_name in activation_decisions:
-            return activation_decisions[skill_name]
+        if activation_decisions is not None:
+            # Construction-enforced: a miss inside an async batch resolves per
+            # the provider-error policy with a loud log — it never falls back
+            # to the synchronous authorize() from a worker thread.
+            return activation_decisions.decision_for(skill_name)
         from deerflow.authz.skill_filter import skill_activation_allowed
 
         return skill_activation_allowed(self._skill_authorization, skill_name)
 
-    async def _collect_activation_decisions(self, names) -> dict[str, bool] | None:
+    async def _collect_activation_decisions(self, names) -> ActivationDecisions | None:
         """Precompute ``skill:activate`` decisions on the event loop.
 
         Async middleware paths offload the blocking handler (skill-tree reads)
@@ -162,13 +180,16 @@ class SkillActivationMiddleware(AgentMiddleware):
             return None
         candidates = {name for name in names if isinstance(name, str) and name}
         if not candidates:
-            return None
+            # An empty batch is still a batch: consumers that resolve a name
+            # despite no candidates (a divergence) must fail per policy, not
+            # silently take the sync path.
+            return ActivationDecisions({}, fail_closed=self._skill_authorization.fail_closed)
         from deerflow.authz.skill_filter import skill_activation_allowed_async
 
         decisions: dict[str, bool] = {}
         for name in sorted(candidates):
             decisions[name] = await skill_activation_allowed_async(self._skill_authorization, name)
-        return decisions
+        return ActivationDecisions(decisions, fail_closed=self._skill_authorization.fail_closed)
 
     def _candidate_activation_targets(self, request: ModelRequest) -> tuple[list[str], list[str]]:
         """Split the activation candidates into (names, entry_paths).
@@ -278,7 +299,7 @@ class SkillActivationMiddleware(AgentMiddleware):
             raise FileNotFoundError(resolved_file)
         return resolved_file.read_text(encoding="utf-8")
 
-    def _resolve_activation(self, text: str, *, activation_decisions: dict[str, bool] | None = None) -> _ActivationResolution | None:
+    def _resolve_activation(self, text: str, *, activation_decisions: ActivationDecisions | None = None) -> _ActivationResolution | None:
         reference = parse_slash_skill_reference(text)
         if reference is None:
             return None
@@ -392,8 +413,8 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         return context if isinstance(context, dict) else None
 
     @staticmethod
-    def _already_activated(run_context: dict | None, run_key: str) -> bool:
-        """Whether ``run_key`` was already recorded as activated earlier in this run.
+    def _recorded_activation(run_context: dict | None, run_key: str) -> _Activation | None:
+        """The activation ``run_key`` already produced earlier in this run, if any.
 
         Sibling to ``_has_existing_activation_for_target``: that helper catches an
         activation reminder still present in the scanned ``messages`` window; this
@@ -402,11 +423,26 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         ``_SLASH_SKILL_ACTIVATION_RUN_KEY``). ``run_key`` is computed once by the
         caller (``_find_activation_target``) and reused as-is at the write site in
         ``_prepare_model_request``, so the same key is always used to check and to
-        record — this helper only ever checks membership, never computes the key.
+        record — this helper only ever looks the key up, never computes it.
         """
-        return isinstance(run_context, dict) and run_context.get(_SLASH_SKILL_ACTIVATION_RUN_KEY) == run_key
+        recorded = run_context.get(_SLASH_SKILL_ACTIVATION_RUN_KEY) if isinstance(run_context, dict) else None
+        if isinstance(recorded, _RecordedActivation) and recorded.run_key == run_key:
+            return recorded.activation
+        return None
 
-    def _find_activation_target(self, messages: list, *, run_context: dict | None = None, activation_decisions: dict[str, bool] | None = None) -> tuple[int, HumanMessage, _ActivationResolution, str] | None:
+    @staticmethod
+    def _target_answered(messages: list, target_index: int) -> bool:
+        """Whether a model response to the target already reached graph state.
+
+        Tells the tool loop's follow-up calls apart from a retry of the activation
+        call. LLMErrorHandlingMiddleware sits outside this middleware and retries a
+        failed or empty call by running this wrap again on the same request, so the
+        retry sees no AI message after the target; a follow-up call sees the
+        response the activation call produced.
+        """
+        return any(isinstance(message, AIMessage) for message in messages[target_index + 1 :])
+
+    def _find_activation_target(self, messages: list, *, run_context: dict | None = None, activation_decisions: ActivationDecisions | None = None) -> tuple[int, HumanMessage, _ActivationResolution, str] | None:
         if not messages:
             return None
 
@@ -422,13 +458,19 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         # This exact slash message may have already activated earlier in the run.
         # The message scan above cannot catch it because the reminder lives only in
         # a per-call request override, never in state — the run context is the
-        # durable signal (see _already_activated / _SLASH_SKILL_ACTIVATION_RUN_KEY).
-        # Skipping here avoids the redundant skill disk read, reminder re-injection,
-        # and duplicate "activate" audit. run_key is computed once here and threaded
+        # durable signal (see _recorded_activation / _SLASH_SKILL_ACTIVATION_RUN_KEY).
+        # Once the activation call has been answered, skipping here avoids the
+        # redundant skill disk read, reminder re-injection, and duplicate "activate"
+        # audit. Before that, this call is a retry of the activation call and must
+        # carry the same reminder, replayed from the record rather than re-read so
+        # it matches what was audited. run_key is computed once here and threaded
         # through to the write site in _prepare_model_request.
         run_key = self._activation_run_key(target)
-        if self._already_activated(run_context, run_key):
-            return None
+        recorded = self._recorded_activation(run_context, run_key)
+        if recorded is not None:
+            if self._target_answered(messages, target_index):
+                return None
+            return target_index, target, _ActivationResolution(activation=recorded, replayed=True), run_key
 
         content = get_original_user_content_text(target.content, target.additional_kwargs)
         names = target.additional_kwargs.get("skill_references")
@@ -481,7 +523,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         except Exception:
             logger.warning("Failed to record slash skill activation audit event", exc_info=True)
 
-    def _prepare_model_request(self, request: ModelRequest, *, hook: str, activation_decisions: dict[str, bool] | None = None) -> tuple[ModelRequest | AIMessage | None, _Activation | None]:
+    def _prepare_model_request(self, request: ModelRequest, *, hook: str, activation_decisions: ActivationDecisions | None = None) -> tuple[ModelRequest | AIMessage | None, _Activation | None]:
         run_context = self._run_context(request)
         target_and_resolution = self._find_activation_target(list(request.messages), run_context=run_context, activation_decisions=activation_decisions)
         if target_and_resolution is None:
@@ -495,26 +537,28 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         if activation is None:
             return None, None
 
-        logger.info(
-            "SkillActivationMiddleware: activating slash skill %s category=%s path=%s hash=%s",
-            activation.skill_name,
-            activation.category,
-            activation.container_file_path,
-            activation.content_hash,
-        )
-        for item in (activation, *activation.additional_activations):
-            self._record_activation(request, item, hook=hook)
-        # Mark this slash message as activated for the run so the tool loop's later
-        # model calls skip the redundant re-activation (#3861: one activation call,
-        # many follow-up model calls). A new user slash message keys differently and
-        # still activates. Overwrite (`=`), not append/accumulate, is intentional:
-        # _find_activation_target only ever considers the latest real user message as
-        # an activation target, so there is nothing earlier in the run worth
-        # remembering once a new activation replaces it — do not "fix" this into a
-        # set. run_key is the same value already checked in _find_activation_target
-        # (computed once there, threaded through here) rather than recomputed.
-        if run_context is not None:
-            run_context[_SLASH_SKILL_ACTIVATION_RUN_KEY] = run_key
+        if not resolution.replayed:
+            logger.info(
+                "SkillActivationMiddleware: activating slash skill %s category=%s path=%s hash=%s",
+                activation.skill_name,
+                activation.category,
+                activation.container_file_path,
+                activation.content_hash,
+            )
+            for item in (activation, *activation.additional_activations):
+                self._record_activation(request, item, hook=hook)
+                record_skill_usage(getattr(request, "runtime", None), self._usage_snapshot(item))
+            # Mark this slash message as activated for the run so the tool loop's later
+            # model calls skip the redundant re-activation (#3861: one activation call,
+            # many follow-up model calls). A new user slash message keys differently and
+            # still activates. Overwrite (`=`), not append/accumulate, is intentional:
+            # _find_activation_target only ever considers the latest real user message as
+            # an activation target, so there is nothing earlier in the run worth
+            # remembering once a new activation replaces it — do not "fix" this into a
+            # set. run_key is the same value already checked in _find_activation_target
+            # (computed once there, threaded through here) rather than recomputed.
+            if run_context is not None:
+                run_context[_SLASH_SKILL_ACTIVATION_RUN_KEY] = _RecordedActivation(run_key=run_key, activation=activation)
         activation_msg = self._make_activation_message(target, "\n\n".join(self._build_activation_reminder(item, include_user_request=index == 0) for index, item in enumerate((activation, *activation.additional_activations))))
         messages = list(request.messages)
         messages.insert(target_index, activation_msg)
@@ -525,7 +569,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         request: ModelRequest,
         *,
         hook: str,
-        activation_decisions: dict[str, bool] | None = None,
+        activation_decisions: ActivationDecisions | None = None,
         entry_registry: dict[str, Skill] | object | None = None,
     ) -> tuple[ModelRequest | AIMessage, _Activation | None]:
         prepared, activation = self._prepare_model_request(request, hook=hook, activation_decisions=activation_decisions)
@@ -533,9 +577,6 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             return prepared, None
         effective = prepared if prepared is not None else request
         self._resolve_secret_bindings(effective, activation, hook=hook, activation_decisions=activation_decisions, entry_registry=entry_registry)
-        if activation is not None:
-            for item in (activation, *activation.additional_activations):
-                record_skill_usage(getattr(request, "runtime", None), self._usage_snapshot(item))
         return effective, activation
 
     @staticmethod
@@ -574,7 +615,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         activation: _Activation | None,
         *,
         hook: str,
-        activation_decisions: dict[str, bool] | None = None,
+        activation_decisions: ActivationDecisions | None = None,
         entry_registry: dict[str, Skill] | object | None = None,
     ) -> None:
         """Recompute the per-run secret injection set (binding point A+, #3861/#3914).
@@ -775,7 +816,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         request: ModelRequest,
         registry: dict[str, Skill],
         *,
-        activation_decisions: dict[str, bool] | None = None,
+        activation_decisions: ActivationDecisions | None = None,
         exclude_names: frozenset[str] = frozenset(),
         exclude_paths: frozenset[str] = frozenset(),
     ) -> list[tuple[str, tuple[SecretRequirement, ...]]]:
@@ -889,7 +930,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         request: ModelRequest,
         entry_paths: list[str],
         entry_registry: dict[str, Skill] | object | None,
-        activation_decisions: dict[str, bool] | None,
+        activation_decisions: ActivationDecisions | None,
     ) -> None:
         """Publish per-step ``skill:activate`` decisions keyed by entry path.
 
@@ -906,20 +947,24 @@ Follow this skill before choosing a general workflow. Load supporting resources 
 
         decisions: dict[str, bool] = {}
         registry = entry_registry if isinstance(entry_registry, dict) else {}
-        collected = activation_decisions or {}
+        collected = activation_decisions.get_or_none if activation_decisions is not None else (lambda _name: None)
         for path in entry_paths:
             normalized = posixpath.normpath(path)
             skill = registry.get(normalized)
-            decisions[normalized] = collected.get(skill.name, False) if skill is not None else False
+            decision = collected(skill.name) if skill is not None else None
+            decisions[normalized] = bool(decision) if decision is not None else False
         write_skill_entry_decisions(run_context, decisions, owner_token=self._slash_source_owner_token)
 
-    def _collect_sync_activation_decisions(self, names: list[str]) -> dict[str, bool] | None:
+    def _collect_sync_activation_decisions(self, names: list[str]) -> ActivationDecisions | None:
         """Synchronous authorize() decisions for *names* (sync chain only)."""
         if self._skill_authorization is None or not names:
             return None
         from deerflow.authz.skill_filter import skill_activation_allowed
 
-        return {name: skill_activation_allowed(self._skill_authorization, name) for name in names}
+        return ActivationDecisions(
+            {name: skill_activation_allowed(self._skill_authorization, name) for name in names},
+            fail_closed=self._skill_authorization.fail_closed,
+        )
 
     @override
     async def awrap_model_call(

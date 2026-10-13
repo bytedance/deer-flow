@@ -118,6 +118,8 @@ LLM-powered persistent context retention across conversations:
 | **MCP** | Any Model Context Protocol server (stdio, SSE, HTTP transports) |
 | **Skills** | Domain-specific workflows injected via system prompt |
 
+Jina AI web fetch follows HTTP redirects from its API endpoint, including 307/308 redirects, which retain the POST method and body.
+
 ### Run Event Storage
 
 For direct `RunEventStore.list_messages` callers, `after_seq` and `before_seq`
@@ -129,6 +131,10 @@ to the last returned sequence to page forward through a bounded history range.
 ### Gateway API
 
 FastAPI application providing REST endpoints for frontend integration:
+
+Integer metadata filters match exact JSON integers, including signed-64-bit
+boundaries. Stored integers outside that range are ignored rather than rounded
+to a boundary (SQLite) or causing the search to fail (PostgreSQL).
 
 | Route | Purpose |
 |-------|---------|

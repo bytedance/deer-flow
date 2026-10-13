@@ -12,6 +12,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
+from app.channels.capabilities import supports_proactive_notifications
 from app.channels.runtime_config_store import (
     ChannelRuntimeConfigStore,
     apply_runtime_connection_config,
@@ -53,6 +54,9 @@ class ChannelProviderResponse(BaseModel):
     connection_status: str
     credential_fields: list[ChannelCredentialFieldResponse] = Field(default_factory=list)
     credential_values: dict[str, str] = Field(default_factory=dict)
+    # Whether scheduled-task updates can be pushed to this app (the provider
+    # implements proactive push); Settings labels each provider card with it.
+    proactive_notifications: bool = False
 
 
 class ChannelProvidersResponse(BaseModel):
@@ -225,7 +229,8 @@ def _get_repository(request: Request, config: ChannelConnectionsConfig) -> Chann
     if sf is None:
         raise HTTPException(status_code=503, detail="Channel connection persistence is not available")
 
-    repo = ChannelConnectionRepository(sf)
+    # The lifespan loads the DEER_FLOW_CREDENTIALS_KEY cipher off the event loop.
+    repo = ChannelConnectionRepository(sf, cipher=getattr(request.app.state, "credentials_cipher", None))
     request.app.state.channel_connection_repo = repo
     return repo
 
@@ -477,6 +482,7 @@ def _provider_response(
         connection_status=connection_status,
         credential_fields=_credential_fields(provider),
         credential_values=credential_values,
+        proactive_notifications=supports_proactive_notifications(provider),
     )
 
 

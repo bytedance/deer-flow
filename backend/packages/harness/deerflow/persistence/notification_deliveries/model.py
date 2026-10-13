@@ -1,11 +1,12 @@
 """ORM model for the scheduled-task notification delivery outbox (issue #4254).
 
 A row records one pending IM notification for a scheduled-task outcome. The
-completion hook only enqueues; a separate delivery worker claims due rows and
-sends them. Execution status (``scheduled_task_runs``) and delivery status
-(this table) are deliberately independent: a failed delivery never changes the
-run outcome, and a re-fired completion hook cannot duplicate a notification
-because ``(task_run_id, event, provider, target)`` is unique.
+scheduler's finalization observer stages it in the transaction that records
+the outcome; a separate delivery worker claims due rows and sends them.
+Execution status (``scheduled_task_runs``) and delivery status (this table)
+are deliberately independent: a failed delivery never changes the run outcome,
+and a replayed finalization (recovery, a re-fired completion) cannot duplicate
+a notification because ``(task_run_id, event, provider, target)`` is unique.
 """
 
 from __future__ import annotations

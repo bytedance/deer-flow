@@ -6,6 +6,8 @@ import {
   deleteAgent,
   fetchAgentsApiEnabled,
   getAgent,
+  importAgentPackage,
+  listAgentToolGroups,
   listAgents,
   updateAgent,
 } from "./api";
@@ -63,6 +65,14 @@ export function useAgents() {
   return { agents: data ?? [], isLoading, error };
 }
 
+export function useAgentToolGroups() {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["agent-tool-groups"],
+    queryFn: () => listAgentToolGroups(),
+  });
+  return { toolGroups: data ?? [], isLoading, error };
+}
+
 export function useAgent(name: string | null | undefined) {
   const { data, isLoading, error } = useQuery({
     queryKey: ["agents", name],
@@ -76,6 +86,22 @@ export function useCreateAgent() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (request: CreateAgentRequest) => createAgent(request),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["agents"] });
+    },
+  });
+}
+
+export function useImportAgentPackage() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      agentPackage,
+      name,
+    }: {
+      agentPackage: unknown;
+      name?: string;
+    }) => importAgentPackage(agentPackage, name),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["agents"] });
     },

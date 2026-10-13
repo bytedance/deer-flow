@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import builtins
 import importlib.util
+import ipaddress
 import json
 import sys
 from pathlib import Path
@@ -28,6 +29,18 @@ def _load_script(path: Path, name: str):
     return module
 
 
+@pytest.mark.parametrize("host_encoding", ["ascii", "cp936"])
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_run_preserves_tool_diagnostics_with_invalid_utf8(monkeypatch, host_encoding, stream):
+    monkeypatch.setattr(doctor.subprocess, "_text_encoding", lambda: host_encoding)
+    output = "v22.0.0 ✓ 检查通过 ".encode() + b"\xff\n"
+    code = f"import sys; sys.{stream}.buffer.write({output!r})"
+
+    result = doctor._run([sys.executable, "-c", code])
+
+    assert result == "v22.0.0 ✓ 检查通过 \ufffd"
+
+
 # ---------------------------------------------------------------------------
 # check_python
 # ---------------------------------------------------------------------------
@@ -46,6 +59,30 @@ class TestCheckPython:
 
 
 class TestCheckPnpm:
+    @pytest.mark.parametrize("host_encoding", ["ascii", "cp936"])
+    @pytest.mark.parametrize("returncode", [0, 7])
+    def test_preserves_runner_diagnostics_with_invalid_utf8(self, tmp_path, monkeypatch, host_encoding, returncode):
+        monkeypatch.setattr(doctor.subprocess, "_text_encoding", lambda: host_encoding)
+        stdout = b"10.26.2\n" if returncode == 0 else "运行失败 ".encode() + b"\xff\n"
+        stderr = "诊断详情 ".encode() + b"\xff\n"
+        runner = tmp_path / "pnpm runner.py"
+        runner.write_text(
+            f"import os, sys\nassert os.getcwd() == {str(tmp_path)!r}\nassert sys.argv[1:] == ['-v']\nsys.stdout.buffer.write({stdout!r})\nsys.stderr.buffer.write({stderr!r})\nsys.exit({returncode})\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(doctor, "PNPM_SCRIPT_PATH", runner)
+        monkeypatch.setattr(doctor, "FRONTEND_DIR", tmp_path)
+
+        result = doctor.check_pnpm()
+
+        if returncode == 0:
+            assert result.status == "ok"
+            assert result.detail == "10.26.2"
+        else:
+            assert result.status == "fail"
+            assert result.detail == "诊断详情 \ufffd\n运行失败 \ufffd"
+            assert result.fix is not None
+
     def test_resolves_shared_runner_from_relative_script_path(self, monkeypatch):
         # Load the script as `scripts/doctor.py`, as a user would from the
         # repository root. The derived paths must not depend on that relative
@@ -767,16 +804,172 @@ class TestCheckWebFetch:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def delegated_backend_dns(monkeypatch):
+    """Keep backend screening real while replacing external DNS."""
+    from deerflow.community import url_safety
+
+    def resolve(host):
+        if host == "missing.invalid":
+            return []
+        if host == "mixed.invalid":
+            return [ipaddress.ip_address("93.184.216.34"), ipaddress.ip_address("10.0.0.5")]
+        return [ipaddress.ip_address("93.184.216.34")]
+
+    monkeypatch.setattr(url_safety, "resolve_host_addresses", resolve)
+
+
+@pytest.mark.usefixtures("delegated_backend_dns")
+class TestCheckDelegatedBackends:
+    @pytest.fixture(autouse=True)
+    def provider_keys(self, monkeypatch):
+        monkeypatch.setenv("FIRECRAWL_API_KEY", "test-key")
+        monkeypatch.setenv("CRW_API_KEY", "test-key")
+        monkeypatch.delenv("CRW_API_URL", raising=False)
+
+    def _config(self, tmp_path, provider, *, tool_name="web_fetch", **extra):
+        cfg = tmp_path / "config.yaml"
+        tool = {"name": tool_name, "use": f"deerflow.community.{provider}.tools:{tool_name}_tool", **extra}
+        cfg.write_text(json.dumps({"config_version": 5, "tools": [tool]}), encoding="utf-8")
+        return cfg
+
+    @pytest.mark.parametrize("provider", ["browserless", "crawl4ai", "firecrawl", "fastcrw"])
+    @pytest.mark.parametrize("base_url", ["http://10.0.0.5:3000", "http://missing.invalid:3000", "http://mixed.invalid:3000"])
+    def test_private_or_unverifiable_backend_warns(self, tmp_path, provider, base_url):
+        result = doctor.check_web_fetch(self._config(tmp_path, provider, base_url=base_url))
+
+        assert result.status == "warn"
+        assert "backend" in result.detail
+        assert "network_isolation_confirmed" in result.detail
+        assert "CONFIGURATION.md#delegated-fetch-backend-isolation" in result.fix
+
+    @pytest.mark.parametrize("provider", ["browserless", "crawl4ai"])
+    def test_localhost_default_warns(self, tmp_path, provider):
+        result = doctor.check_web_fetch(self._config(tmp_path, provider))
+
+        assert result.status == "warn"
+        assert "network_isolation_confirmed" in result.detail
+
+    @pytest.mark.parametrize("provider", ["browserless", "crawl4ai", "firecrawl", "fastcrw"])
+    def test_isolated_private_backend_ok(self, tmp_path, provider):
+        result = doctor.check_web_fetch(self._config(tmp_path, provider, base_url="http://10.0.0.5:3000", network_isolation_confirmed=True))
+
+        assert result.status == "ok"
+
+    @pytest.mark.parametrize("provider", ["browserless", "crawl4ai", "firecrawl", "fastcrw"])
+    def test_public_backend_needs_no_acknowledgement(self, tmp_path, provider):
+        result = doctor.check_web_fetch(self._config(tmp_path, provider, base_url="https://public.invalid"))
+
+        assert result.status == "ok"
+
+    @pytest.mark.parametrize("provider", ["browserless", "crawl4ai", "firecrawl", "fastcrw"])
+    def test_private_target_opt_in_does_not_authorize_backend(self, tmp_path, provider):
+        result = doctor.check_web_fetch(self._config(tmp_path, provider, base_url="http://10.0.0.5:3000", allow_private_addresses=True))
+
+        assert result.status == "warn"
+        assert "network_isolation_confirmed" in result.detail
+
+    @pytest.mark.parametrize("provider", ["browserless", "crawl4ai", "firecrawl", "fastcrw"])
+    def test_invalid_scheme_warns_even_when_isolation_confirmed(self, tmp_path, provider):
+        result = doctor.check_web_fetch(self._config(tmp_path, provider, base_url="ftp://public.invalid", network_isolation_confirmed=True))
+
+        assert result.status == "warn"
+        assert "Only http:// and https://" in result.detail
+
+    def test_fastcrw_env_backend_is_screened(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CRW_API_URL", "http://127.0.0.1:3000")
+
+        result = doctor.check_web_fetch(self._config(tmp_path, "fastcrw"))
+
+        assert result.status == "warn"
+        assert "network_isolation_confirmed" in result.detail
+
+    def test_fastcrw_config_endpoint_takes_precedence_over_env(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CRW_API_URL", "http://127.0.0.1:3000")
+
+        result = doctor.check_web_fetch(self._config(tmp_path, "fastcrw", base_url="https://public.invalid"))
+
+        assert result.status == "ok"
+
+    @pytest.mark.parametrize("provider", ["firecrawl", "fastcrw"])
+    def test_cloud_defaults_need_no_acknowledgement(self, tmp_path, provider):
+        result = doctor.check_web_fetch(self._config(tmp_path, provider))
+
+        assert result.status == "ok"
+
+    def test_env_endpoint_and_acknowledgement_are_resolved(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("FETCH_BACKEND", "http://10.0.0.5:3000")
+        monkeypatch.setenv("FETCH_ISOLATED", "false")
+        cfg = self._config(tmp_path, "crawl4ai", base_url="$FETCH_BACKEND", network_isolation_confirmed="$FETCH_ISOLATED")
+
+        assert doctor.check_web_fetch(cfg).status == "warn"
+        monkeypatch.setenv("FETCH_ISOLATED", "true")
+        assert doctor.check_web_fetch(cfg).status == "ok"
+
+    def test_dotenv_backend_is_screened(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("FETCH_BACKEND", "")  # Restore the environment after load_dotenv.
+        monkeypatch.delenv("FETCH_BACKEND")
+        (tmp_path / ".env").write_text("FETCH_BACKEND=http://10.0.0.5:3000\n", encoding="utf-8")
+
+        result = doctor.check_web_fetch(self._config(tmp_path, "crawl4ai", base_url="$FETCH_BACKEND"))
+
+        assert result.status == "warn"
+        assert "network_isolation_confirmed" in result.detail
+
+    def test_other_provider_does_not_mask_unsafe_backend(self, tmp_path):
+        cfg = self._config(tmp_path, "crawl4ai")
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+        data["tools"].insert(0, {"name": "web_fetch", "use": "deerflow.community.jina_ai.tools:web_fetch_tool"})
+        cfg.write_text(json.dumps(data), encoding="utf-8")
+
+        result = doctor.check_web_fetch(cfg)
+
+        assert result.status == "warn"
+        assert "network_isolation_confirmed" in result.detail
+
+    def test_search_policy_is_unchanged(self, tmp_path):
+        result = doctor.check_web_search(self._config(tmp_path, "fastcrw", tool_name="web_search", base_url="http://10.0.0.5:3000"))
+
+        assert result.status == "ok"
+
+
+@pytest.mark.usefixtures("delegated_backend_dns")
 class TestCheckWebCapture:
-    def test_browserless_self_host_without_token_ok(self, tmp_path, monkeypatch):
+    def test_browserless_self_host_without_confirmation_warns(self, tmp_path, monkeypatch):
         monkeypatch.delenv("BROWSERLESS_TOKEN", raising=False)
         cfg = tmp_path / "config.yaml"
         cfg.write_text("config_version: 5\ntools:\n  - name: web_capture\n    use: deerflow.community.browserless.tools:web_capture_tool\n    base_url: http://localhost:3032\n")
 
         result = doctor.check_web_capture(cfg)
 
+        assert result.status == "warn"
+        assert "network_isolation_confirmed" in result.detail
+        assert "CONFIGURATION.md#delegated-fetch-backend-isolation" in result.fix
+
+    def test_browserless_isolated_self_host_without_token_ok(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("BROWSERLESS_TOKEN", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "config_version: 5\ntools:\n  - name: web_capture\n    use: deerflow.community.browserless.tools:web_capture_tool\n    base_url: http://localhost:3032\n    network_isolation_confirmed: true\n",
+            encoding="utf-8",
+        )
+
+        result = doctor.check_web_capture(cfg)
+
         assert result.status == "ok"
         assert "self-hosted" in result.detail
+
+    def test_private_target_opt_in_does_not_authorize_capture_backend(self, tmp_path):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "config_version: 5\ntools:\n  - name: web_capture\n    use: deerflow.community.browserless.tools:web_capture_tool\n    allow_private_addresses: true\n",
+            encoding="utf-8",
+        )
+
+        result = doctor.check_web_capture(cfg)
+
+        assert result.status == "warn"
+        assert "network_isolation_confirmed" in result.detail
 
     def test_browserless_token_env_ref_ok(self, tmp_path, monkeypatch):
         monkeypatch.setenv("BROWSERLESS_TOKEN", "browserless-test")
@@ -1143,4 +1336,4 @@ class TestMainConfigResolution:
         else:
             assert exit_code == 1
             assert "✗ config.yaml found" in output
-            assert "~/cfg.yaml" in output
+            assert str(Path("~/cfg.yaml")) in output

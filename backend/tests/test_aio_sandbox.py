@@ -109,6 +109,27 @@ def sandbox():
         return sb
 
 
+def test_lark_cli_broker_defaults_to_unverified(sandbox):
+    """The constructor default must stay None (unverified).
+
+    False would mean "attested non-broker" and authorize the plaintext
+    credential-mount overlay, so a construction site that forgets to thread
+    the attested value must fail closed instead (#6436 review).
+    """
+    assert sandbox.lark_cli_broker is None
+
+
+def test_sandbox_info_from_dict_keeps_missing_broker_attestation_unverified():
+    """A legacy record without the field must rehydrate as unverified (None),
+    never as attested non-broker — otherwise a future persistence path would
+    silently undo the fail-closed contract (#6436 review)."""
+    from deerflow.community.aio_sandbox.sandbox_info import SandboxInfo
+
+    info = SandboxInfo.from_dict({"sandbox_id": "s", "sandbox_url": "http://x"})
+    assert info.lark_cli_broker is None
+    assert SandboxInfo.from_dict({"sandbox_id": "s", "sandbox_url": "http://x", "lark_cli_broker": False}).lark_cli_broker is False
+
+
 def test_exec_command_appends_exit_marker_when_failure_has_output(sandbox):
     """The legacy exec path must propagate the structured exit_code into the
     output text (LocalSandbox parity) instead of discarding it."""
@@ -948,18 +969,17 @@ class TestShellSessionCreationOwnership:
         self,
         sandbox,
     ):
-        sandbox._default_shell_corrupted = True
         create_session = MagicMock(side_effect=httpx.ConnectError("connection refused"))
         cleanup_session = MagicMock()
 
         sandbox._client.shell.create_session = create_session
         sandbox._client.shell.cleanup_session = cleanup_session
 
-        assert sandbox.execute_command("first").startswith("Error:")
+        assert sandbox.execute_command_in_scope("first", scope_id="create-failure").startswith("Error:")
         assert sandbox.requires_container_recycle is False
         cleanup_session.assert_not_called()
 
-        sandbox.execute_command("second")
+        sandbox.execute_command_in_scope("second", scope_id="create-failure")
         assert create_session.call_count == 2
 
     def test_shell_client_error_is_definite_and_does_not_quarantine(
@@ -968,7 +988,6 @@ class TestShellSessionCreationOwnership:
     ):
         from agent_sandbox.core.api_error import ApiError
 
-        sandbox._default_shell_corrupted = True
         sandbox._client.shell.create_session = MagicMock(
             side_effect=ApiError(
                 status_code=400,
@@ -977,7 +996,7 @@ class TestShellSessionCreationOwnership:
         )
         sandbox._client.shell.cleanup_session = MagicMock()
 
-        assert sandbox.execute_command("bad").startswith("Error:")
+        assert sandbox.execute_command_in_scope("bad", scope_id="create-failure").startswith("Error:")
         assert sandbox.requires_container_recycle is False
         sandbox._client.shell.cleanup_session.assert_not_called()
 
@@ -1095,6 +1114,40 @@ class TestShellSessionCreationOwnership:
         assert "earlier ambiguous create outcome" in blocked
         assert create_calls == before
 
+    def test_in_flight_shell_create_does_not_fence_the_container(self, sandbox):
+        """A pending create is transient, not an uncertain outcome.
+
+        While the create is in flight the container is healthy, so a
+        concurrent acquire must not read `requires_container_recycle` as a
+        recycle reason and destroy a live run's runtime (#6436 review P1).
+        Only the unresolved (ambiguous) outcome fences the container.
+        """
+        entered = threading.Event()
+        release = threading.Event()
+        results: list[str] = []
+
+        def stalled_create(id, **kwargs):
+            entered.set()
+            assert release.wait(timeout=2)
+            raise httpx.ReadTimeout("create stalled")
+
+        sandbox._client.shell.create_session = stalled_create
+        sandbox._client.shell.cleanup_session = MagicMock()
+
+        thread = threading.Thread(target=lambda: results.append(sandbox.execute_command_in_scope("first", scope_id="scope-a")))
+        thread.start()
+        try:
+            assert entered.wait(timeout=2)
+            assert sandbox.has_pending_session_creates is True
+            assert sandbox.requires_container_recycle is False
+        finally:
+            release.set()
+            thread.join(timeout=2)
+        assert not thread.is_alive()
+        assert "session creation outcome is unknown" in results[0]
+        assert sandbox.has_pending_session_creates is False
+        assert sandbox.requires_container_recycle is True
+
 
 class TestBashSessionCreationOwnership:
     """Bash env-session creation follows the same bounded ownership contract."""
@@ -1185,6 +1238,43 @@ class TestBashSessionCreationOwnership:
 
         assert "earlier ambiguous create outcome" in second
         create_session.assert_not_called()
+
+    def test_in_flight_bash_create_does_not_fence_the_container(self, sandbox):
+        """The bash plane follows the same transient-pending contract."""
+        entered = threading.Event()
+        release = threading.Event()
+        results: list[str] = []
+
+        def stalled_create(session_id, **kwargs):
+            entered.set()
+            assert release.wait(timeout=2)
+            raise httpx.ReadTimeout("create stalled")
+
+        sandbox._client.bash.create_session = stalled_create
+        sandbox._client.bash.close_session = MagicMock()
+        sandbox._client.bash.exec = MagicMock()
+
+        thread = threading.Thread(
+            target=lambda: results.append(
+                sandbox.execute_command(
+                    "echo $TOKEN",
+                    env={"TOKEN": "secret"},
+                )
+            )
+        )
+        thread.start()
+        try:
+            assert entered.wait(timeout=2)
+            assert sandbox.has_pending_session_creates is True
+            assert sandbox.requires_container_recycle is False
+            sandbox._client.bash.exec.assert_not_called()
+        finally:
+            release.set()
+            thread.join(timeout=2)
+        assert not thread.is_alive()
+        assert "session creation outcome is unknown" in results[0]
+        assert sandbox.has_pending_session_creates is False
+        assert sandbox.requires_container_recycle is True
 
     def test_shell_creation_quarantine_does_not_block_bash_plane(
         self,
@@ -2810,6 +2900,77 @@ class TestDownloadFile:
 
 class TestClose:
     """Verify AioSandbox.close() tears down the host-side HTTP client (#2872)."""
+
+    def test_close_waits_for_download_stream_cleanup(self, sandbox):
+        reading = threading.Event()
+        allow_read = threading.Event()
+        closing = threading.Event()
+        stream_closed = threading.Event()
+        close_observed_cleanup = []
+        outcomes = []
+
+        class ObservedLock:
+            def __init__(self):
+                self.lock = threading.Lock()
+                self.waited_for_reader = False
+
+            def __enter__(self):
+                if threading.current_thread().name == "download-close":
+                    if self.lock.acquire(blocking=False):
+                        closing.set()
+                        return
+                    self.waited_for_reader = True
+                    closing.set()
+                self.lock.acquire()
+
+            def __exit__(self, *args):
+                self.lock.release()
+
+        def stream():
+            try:
+                reading.set()
+                assert allow_read.wait(timeout=5)
+                yield b"data"
+            finally:
+                stream_closed.set()
+
+        def close_client():
+            close_observed_cleanup.append(stream_closed.is_set())
+
+        http_client = MagicMock(spec=["close"])
+        http_client.close.side_effect = close_client
+        sandbox._client._client_wrapper = SimpleNamespace(httpx_client=SimpleNamespace(httpx_client=http_client))
+        sandbox._client.file.download_file.return_value = stream()
+        sandbox._lock = ObservedLock()
+
+        def download():
+            try:
+                outcomes.append(sandbox.download_file("/mnt/user-data/outputs/image.png", max_bytes=4))
+            except BaseException as error:
+                outcomes.append(error)
+
+        reader = threading.Thread(target=download)
+        closer = threading.Thread(target=sandbox.close, name="download-close")
+        reader.start()
+        try:
+            assert reading.wait(timeout=5)
+            closer.start()
+            assert closing.wait(timeout=5)
+            assert sandbox._lock.waited_for_reader
+            http_client.close.assert_not_called()
+            assert not stream_closed.is_set()
+        finally:
+            allow_read.set()
+            reader.join(timeout=5)
+            if closer.ident is not None:
+                closer.join(timeout=5)
+        assert not reader.is_alive()
+        assert not closer.is_alive()
+        assert outcomes == [b"data"]
+        assert stream_closed.is_set()
+        assert close_observed_cleanup == [True]
+        http_client.close.assert_called_once_with()
+        assert sandbox._client is None
 
     def test_close_calls_real_nested_httpx_client(self, sandbox):
         """close() must close the real httpx.Client at the bottom of the chain.

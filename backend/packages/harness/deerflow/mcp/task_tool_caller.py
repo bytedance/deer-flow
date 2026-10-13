@@ -20,7 +20,14 @@ from deerflow.mcp.headers import apply_header_overrides
 from deerflow.mcp.interceptors import build_mcp_tool_interceptors
 from deerflow.mcp.oauth import OAuthTokenManager, build_oauth_tool_interceptor
 from deerflow.mcp.personal_access import require_personal_mcp_access
-from deerflow.mcp.session_pool import MCPSessionPool, call_pooled_session_tool, get_session_pool
+from deerflow.mcp.session_pool import (
+    MCPPoolDomain,
+    MCPSessionPool,
+    call_pooled_session_tool,
+    get_session_pool,
+    normalized_connection_fingerprint,
+)
+from deerflow.mcp.tasks.runtime import get_mcp_task_oauth_token_manager
 from deerflow.mcp.user_config import PersonalMcpConfigSnapshot, load_user_mcp_config_if_changed
 from deerflow.mcp_scope import mcp_session_scope_key
 from deerflow.runtime.user_context import reset_current_user, set_current_user
@@ -72,7 +79,7 @@ class McpTaskToolCaller:
         self._extensions_config = extensions_config
         self._personal_callers: OrderedDict[str, tuple[PersonalMcpConfigSnapshot, McpTaskToolCaller | None]] = OrderedDict()
         self._personal_callers_lock = threading.Lock()
-        self._oauth_token_manager = oauth_token_manager or OAuthTokenManager.from_extensions_config(extensions_config)
+        self._oauth_token_manager = oauth_token_manager or get_mcp_task_oauth_token_manager(extensions_config)
         context_headers_interceptor = build_context_headers_interceptor(extensions_config)
         # Built once so the two chains keep an identical interceptor order and a
         # custom ``mcpInterceptors`` builder is invoked exactly once.
@@ -129,6 +136,7 @@ class McpTaskToolCaller:
                 thread_id=thread_id,
                 thread_incarnation=thread_incarnation,
                 request_scoped_headers=request_scoped_headers,
+                connection_scope="personal",
             )
         if connection_scope != "deployment":
             raise ValueError("Invalid MCP task connection scope")
@@ -140,6 +148,7 @@ class McpTaskToolCaller:
             thread_id=thread_id,
             thread_incarnation=thread_incarnation,
             request_scoped_headers=request_scoped_headers,
+            connection_scope="deployment",
         )
 
     def _personal_caller_for(self, user_id: str, server_name: str) -> McpTaskToolCaller:
@@ -155,7 +164,9 @@ class McpTaskToolCaller:
             if server is None or not server.enabled:
                 raise LookupError("Personal MCP task connection is missing, disabled or changed")
             if caller is None:
-                caller = McpTaskToolCaller(snapshot.config)
+                # A personal name can equal a deployment name. Never consult
+                # the deployment OAuth state or startup snapshot for this path.
+                caller = McpTaskToolCaller(snapshot.config, oauth_token_manager=OAuthTokenManager.from_extensions_config(snapshot.config))
                 self._personal_callers[user_id] = (snapshot, caller)
             return caller
 
@@ -169,6 +180,7 @@ class McpTaskToolCaller:
         thread_id: str,
         thread_incarnation: str | None,
         request_scoped_headers: bool,
+        connection_scope: MCPPoolDomain,
     ) -> Any:
         is_background_call = not request_scoped_headers
         interceptors = self._interceptors if is_background_call else self._submit_interceptors
@@ -184,18 +196,40 @@ class McpTaskToolCaller:
         )
 
         if transport == "stdio":
+            pool = get_session_pool()
+            binding = None
+            if isinstance(pool, MCPSessionPool):
+                # Resolve the opaque binding from the base connection before
+                # per-call workspace cwd/TMP variables are added. Direct unit
+                # tests may inject a lightweight fake pool; the production
+                # singleton always takes the binding-aware path.
+                binding = pool.ensure_binding(
+                    server_name,
+                    normalized_connection_fingerprint(connection),
+                    domain=connection_scope,
+                )
             connection = await asyncio.to_thread(
                 _prepare_stdio_connection,
                 connection,
                 user_id=user_id,
                 thread_id=thread_id,
             )
-            pool = get_session_pool()
             session_init_timeout = server_config.session_init_timeout
+            if binding is not None:
+                session_request = pool.get_session(
+                    server_name,
+                    scope_key,
+                    connection,
+                    binding=binding,
+                )
+            elif connection_scope == "deployment":
+                session_request = pool.get_session(server_name, scope_key, connection)
+            else:
+                session_request = pool.get_session(server_name, scope_key, connection, domain=connection_scope)
             if session_init_timeout is not None:
                 try:
                     session = await asyncio.wait_for(
-                        pool.get_session(server_name, scope_key, connection),
+                        session_request,
                         timeout=session_init_timeout,
                     )
                 except TimeoutError:
@@ -206,7 +240,7 @@ class McpTaskToolCaller:
                     )
                     raise
             else:
-                session = await pool.get_session(server_name, scope_key, connection)
+                session = await session_request
             return await self._invoke(
                 session=session,
                 pool=pool,
@@ -220,6 +254,7 @@ class McpTaskToolCaller:
                 session_init_timeout_seconds=None,
                 persistent_session=True,
                 interceptors=interceptors,
+                connection_scope=connection_scope,
             )
 
         authorization = await self._oauth_token_manager.get_authorization_header(server_name)
@@ -244,6 +279,7 @@ class McpTaskToolCaller:
             session_init_timeout_seconds=server_config.session_init_timeout,
             persistent_session=False,
             interceptors=interceptors,
+            connection_scope=connection_scope,
         )
 
     async def _invoke(
@@ -261,6 +297,7 @@ class McpTaskToolCaller:
         session_init_timeout_seconds: float | None,
         persistent_session: bool,
         interceptors: list[Any],
+        connection_scope: MCPPoolDomain,
     ) -> Any:
         from langchain_mcp_adapters.interceptors import MCPToolCallRequest
         from langchain_mcp_adapters.sessions import create_session
@@ -280,6 +317,7 @@ class McpTaskToolCaller:
                             "Ignoring MCP interceptor headers with unsupported type: %s",
                             type(request.headers).__name__,
                         )
+                domain_kwargs = {"domain": connection_scope} if connection_scope != "deployment" else {}
                 return await call_pooled_session_tool(
                     session,
                     pool,
@@ -288,6 +326,7 @@ class McpTaskToolCaller:
                     tool_name=request.name,
                     arguments=request.args,
                     call_kwargs=call_kwargs,
+                    **domain_kwargs,
                 )
 
             effective_connection = dict(connection)

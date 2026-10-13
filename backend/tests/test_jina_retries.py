@@ -94,14 +94,28 @@ async def test_backoff_jitter_is_capped_by_remaining_budget(requests, monkeypatc
 
     assert requests.await_count == 2
     sleep.assert_awaited_once()
-    assert 0 < sleep.await_args.args[0] <= 0.05
+    # Tolerance, not an exact bound: deadline = now + budget rounds, so the
+    # remaining-budget cap can land above the exact 0.05 by ~ulp(loop.time())/4
+    # — the error scales with the host's uptime, not with 0.05. A relative
+    # tolerance covers any realistic uptime while a genuine regression
+    # overshoots the cap by >= 0.025.
+    assert 0 < sleep.await_args.args[0] <= 0.05 * (1 + 2**-24)
 
 
 @pytest.mark.parametrize("during_backoff", [False, True])
 async def test_shared_deadline(requests, monkeypatch, during_backoff):
     monkeypatch.setattr(random, "uniform", lambda low, high: 1.0)
+    loop = asyncio.get_running_loop()
+    real_time = loop.time
+    start = 0.0
+    # Freeze only mock-client setup. Once the request starts, the actual asyncio
+    # deadline runs for 50ms; host scheduling cannot consume it before this test
+    # reaches the request/backoff operation it intends to exercise.
+    monkeypatch.setattr(loop, "time", lambda: start)
 
     async def post(*args, **kwargs):
+        offset = real_time() - start
+        monkeypatch.setattr(loop, "time", lambda: real_time() - offset)
         assert 0 < kwargs["timeout"] <= 0.05
         if not during_backoff:
             await asyncio.Event().wait()

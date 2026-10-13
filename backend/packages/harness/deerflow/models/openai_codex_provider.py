@@ -95,7 +95,15 @@ class CodexChatModel(BaseChatModel):
 
     def model_post_init(self, __context: Any) -> None:
         """Auto-load Codex CLI credentials."""
+        from deerflow.models.request_admission import RequestAdmission
+
         self._validate_retry_config()
+        if isinstance(self.rate_limiter, RequestAdmission):
+            # Wrapper retries bypass BaseChatModel's admission hook. Leave
+            # paced retries to the LLM middleware.
+            if self.retry_max_attempts != 1:
+                logger.warning("Request admission enabled; ignoring configured retry_max_attempts=%d; provider retries are handled by middleware", self.retry_max_attempts)
+            self.retry_max_attempts = 1
 
         cred = self._load_codex_auth()
         if cred:
@@ -210,23 +218,20 @@ class CodexChatModel(BaseChatModel):
         for tool in tools:
             if tool.get("type") == "function" and "function" in tool:
                 fn = tool["function"]
-                responses_tools.append(
-                    {
-                        "type": "function",
-                        "name": fn["name"],
-                        "description": fn.get("description", ""),
-                        "parameters": fn.get("parameters", {}),
-                    }
-                )
             elif "name" in tool:
-                responses_tools.append(
-                    {
-                        "type": "function",
-                        "name": tool["name"],
-                        "description": tool.get("description", ""),
-                        "parameters": tool.get("parameters", {}),
-                    }
-                )
+                fn = tool
+            else:
+                continue
+            converted = {
+                "type": "function",
+                "name": fn["name"],
+                "description": fn.get("description", ""),
+                "parameters": fn.get("parameters", {}),
+            }
+            # Omitting strict is not equivalent to the caller's explicit False.
+            if fn.get("strict") is not None:
+                converted["strict"] = fn["strict"]
+            responses_tools.append(converted)
         return responses_tools
 
     def _call_codex_api(self, messages: list[BaseMessage], tools: list[dict] | None = None) -> dict:
@@ -421,7 +426,7 @@ class CodexChatModel(BaseChatModel):
                     }
                 )
 
-        usage = response.get("usage", {})
+        usage = response.get("usage") or {}
         usage_metadata = _build_usage_metadata(usage) if usage else None
         additional_kwargs = {}
         if reasoning_content:
@@ -474,14 +479,7 @@ class CodexChatModel(BaseChatModel):
             if isinstance(tool, BaseTool):
                 try:
                     fn = convert_to_openai_function(tool)
-                    formatted_tools.append(
-                        {
-                            "type": "function",
-                            "name": fn["name"],
-                            "description": fn.get("description", ""),
-                            "parameters": fn.get("parameters", {}),
-                        }
-                    )
+                    formatted_tools.extend(self._convert_tools([fn]))
                 except Exception:
                     formatted_tools.append(
                         {
@@ -493,15 +491,7 @@ class CodexChatModel(BaseChatModel):
                     )
             elif isinstance(tool, dict):
                 if "function" in tool:
-                    fn = tool["function"]
-                    formatted_tools.append(
-                        {
-                            "type": "function",
-                            "name": fn["name"],
-                            "description": fn.get("description", ""),
-                            "parameters": fn.get("parameters", {}),
-                        }
-                    )
+                    formatted_tools.extend(self._convert_tools([{"type": "function", "function": tool["function"]}]))
                 else:
                     formatted_tools.append(tool)
 

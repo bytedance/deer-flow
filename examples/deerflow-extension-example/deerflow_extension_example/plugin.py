@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Sequence
+from asyncio import CancelledError
+from collections.abc import Awaitable, Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from threading import Lock
+from time import monotonic_ns
 from typing import Any
 
 from deerflow_extension_api import (
@@ -31,6 +34,9 @@ class ExampleStats:
     """Small extension-owned value used in both app and task stores."""
 
     tool_calls: int = 0
+    tool_outcomes: dict[str, int] = field(default_factory=lambda: {"returned": 0, "raised": 0, "cancelled": 0})
+    tool_duration_samples: int = 0
+    tool_duration_total_ns: int = 0
     tasks: dict[str, int] = field(default_factory=dict)
     system_model_calls: dict[str, dict[str, int]] = field(default_factory=dict)
     _lock: Lock = field(default_factory=Lock, repr=False, compare=False)
@@ -39,13 +45,25 @@ class ExampleStats:
         with self._lock:
             self.tool_calls += 1
 
-    def task_tool_calls(self) -> int:
+    def note_tool_outcome(self, outcome: str, duration_ns: int) -> None:
         with self._lock:
-            return self.tool_calls
+            self.tool_outcomes[outcome] += 1
+            self.tool_duration_samples += 1
+            self.tool_duration_total_ns += duration_ns
 
-    def absorb_task(self, tool_calls: int, outcome: TaskOutcome) -> None:
+    def absorb_task(self, task_stats: ExampleStats, outcome: TaskOutcome) -> None:
+        # Copy the task under its lock, then merge under the app lock.
+        with task_stats._lock:
+            tool_calls = task_stats.tool_calls
+            outcomes = dict(task_stats.tool_outcomes)
+            samples = task_stats.tool_duration_samples
+            duration_ns = task_stats.tool_duration_total_ns
         with self._lock:
             self.tool_calls += tool_calls
+            for name, count in outcomes.items():
+                self.tool_outcomes[name] += count
+            self.tool_duration_samples += samples
+            self.tool_duration_total_ns += duration_ns
             key = outcome.value
             self.tasks[key] = self.tasks.get(key, 0) + 1
 
@@ -64,6 +82,9 @@ class ExampleStats:
             return {
                 "tasks": dict(self.tasks),
                 "tool_calls": self.tool_calls,
+                "tool_outcomes": dict(self.tool_outcomes),
+                "tool_duration_samples": self.tool_duration_samples,
+                "tool_duration_total_ms": self.tool_duration_total_ns / 1_000_000,
                 "system_model_calls": {kind: dict(counts) for kind, counts in self.system_model_calls.items()},
             }
 
@@ -73,16 +94,43 @@ def _stats(store: ExtensionData) -> ExampleStats:
 
 
 class ExampleMiddleware(AgentMiddleware):
+    @contextmanager
+    def _observe(self, request: ToolCallRequest) -> Iterator[None]:
+        task_store = task_store_from_runtime(getattr(request, "runtime", None))
+        task_stats = task_store.get(ExampleStats) if task_store is not None else None
+        if task_stats is None:
+            yield
+            return
+        task_stats.note_tool_call()
+        started = monotonic_ns()
+        outcome = "returned"
+        try:
+            yield
+        except CancelledError:
+            outcome = "cancelled"
+            raise
+        except BaseException:
+            # Includes graph interrupts; observation must not consume control flow.
+            outcome = "raised"
+            raise
+        finally:
+            task_stats.note_tool_outcome(outcome, monotonic_ns() - started)
+
+    def wrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], Any],
+    ) -> Any:
+        with self._observe(request):
+            return handler(request)
+
     async def awrap_tool_call(
         self,
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Awaitable[Any]],
     ) -> Any:
-        task_store = task_store_from_runtime(getattr(request, "runtime", None))
-        task_stats = task_store.get(ExampleStats) if task_store is not None else None
-        if task_stats is not None:
-            task_stats.note_tool_call()
-        return await handler(request)
+        with self._observe(request):
+            return await handler(request)
 
 
 class ExampleMiddlewareContributor:
@@ -117,10 +165,8 @@ class ExampleTaskLifecycle:
         outcome: TaskOutcome,
     ) -> None:
         task_stats = task_store.remove(ExampleStats)
-        _stats(app_store).absorb_task(
-            task_stats.task_tool_calls() if task_stats is not None else 0,
-            outcome,
-        )
+        if task_stats is not None:
+            _stats(app_store).absorb_task(task_stats, outcome)
 
 
 class ExampleSystemObserver:

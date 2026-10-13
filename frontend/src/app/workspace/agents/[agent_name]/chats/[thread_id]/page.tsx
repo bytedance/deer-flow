@@ -10,7 +10,11 @@ import { SidebarTrigger } from "@/components/ui/sidebar";
 import { AgentWelcome } from "@/components/workspace/agent-welcome";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
 import { BrowserTrigger } from "@/components/workspace/browser-view";
-import { ChatBox, useThreadChat } from "@/components/workspace/chats";
+import {
+  ChatBox,
+  useMarkOpenThreadRead,
+  useThreadChat,
+} from "@/components/workspace/chats";
 import { ContextUsageBadge } from "@/components/workspace/context-usage-badge";
 import { ExportTrigger } from "@/components/workspace/export-trigger";
 import { GoalStatus } from "@/components/workspace/goal-status";
@@ -60,6 +64,7 @@ import {
 import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
+import { useThreadScheduledTaskEvents } from "@/core/scheduled-tasks/events";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
 import { resolveThreadContext } from "@/core/settings/store";
 import {
@@ -106,6 +111,17 @@ export default function AgentChatPage() {
   const threadMetadata = useThreadMetadata(threadId, {
     enabled: !isNewThread && !isMock,
     isMock,
+  });
+  // A saved thread that exists on the server is being read while open:
+  // clears its unread dot (sidebar and chats list) on every device.
+  const markThreadRead = useMarkOpenThreadRead(threadId, {
+    enabled: !isNewThread && !isMock && threadMetadata.data != null,
+  });
+  // Lifecycle lines of schedules created in this chat ("Paused by agent",
+  // "Finished"); they stay after the task is deleted.
+  const scheduledTaskEvents = useThreadScheduledTaskEvents(threadId, {
+    isNewThread,
+    enabled: !isMock,
   });
   const backendTokenUsage = threadTokenUsageToTokenUsage(threadTokenUsage.data);
   const contextUsage = selectContextUsage(threadTokenUsage.data);
@@ -191,6 +207,9 @@ export default function AgentChatPage() {
       setIsNewThread(false);
     },
     onFinish: (state) => {
+      // A run in this thread ended (a send, or a joined scheduled run) while
+      // it is open: it has been read.
+      markThreadRead();
       if (document.hidden || !document.hasFocus()) {
         let body = "Conversation finished";
         const lastMessage = state.messages[state.messages.length - 1];
@@ -319,9 +338,11 @@ export default function AgentChatPage() {
     (agent.tool_groups == null || agent.tool_groups.includes("browser"));
   const browserEnabled =
     !isNewThread && !isMock && browserControlEnabled && agentBrowserEnabled;
-  const { activeGoal, hasGoal, setLocalGoal } = useActiveGoal(
+  const { activeGoal, hasGoal, goalOutcome, setLocalGoal } = useActiveGoal(
     threadId,
     thread.values.goal,
+    thread.values.goal_outcome,
+    thread.messages,
   );
   const hasOpenHumanInputCard = useMemo(
     () =>
@@ -331,6 +352,14 @@ export default function AgentChatPage() {
       ),
     [thread.messages],
   );
+  // A goal blocks edit-and-rerun server-side; show the pencil locked.
+  const editBase =
+    !isNewThread &&
+    !isMock &&
+    env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" &&
+    !isUploading &&
+    !thread.isLoading &&
+    !hasOpenHumanInputCard;
 
   return (
     <ThreadContext.Provider value={{ thread, isMock }}>
@@ -433,6 +462,7 @@ export default function AgentChatPage() {
                   testId="main-message-list"
                   threadId={threadId}
                   thread={thread}
+                  scheduledTaskEvents={scheduledTaskEvents.data}
                   enableConversationOutline
                   paddingBottom={MESSAGE_LIST_DEFAULT_PADDING_BOTTOM}
                   hasMoreHistory={hasMoreHistory}
@@ -447,15 +477,8 @@ export default function AgentChatPage() {
                     !thread.isLoading
                   }
                   onRegenerateMessage={handleRegenerate}
-                  canEdit={
-                    !isNewThread &&
-                    !isMock &&
-                    env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" &&
-                    !isUploading &&
-                    !thread.isLoading &&
-                    !hasGoal &&
-                    !hasOpenHumanInputCard
-                  }
+                  canEdit={editBase && !hasGoal}
+                  editLockedByGoal={editBase && hasGoal}
                   onEditAndRegenerateMessage={handleEditAndRegenerate}
                   onSubmitHumanInput={
                     isMock || env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"
@@ -481,7 +504,7 @@ export default function AgentChatPage() {
                       : "max-w-(--container-width-md)",
                   )}
                 >
-                  {(hasGoal || hasTodos) && (
+                  {(hasGoal || goalOutcome !== null || hasTodos) && (
                     <div
                       className={cn(
                         "right-0 left-0 z-0",
@@ -494,7 +517,12 @@ export default function AgentChatPage() {
                           isWelcomeMode ? "absolute" : "relative",
                         )}
                       >
-                        {activeGoal && <GoalStatus goal={activeGoal} />}
+                        <GoalStatus
+                          goal={activeGoal}
+                          outcome={goalOutcome}
+                          isRunning={thread.isLoading}
+                          hasOpenHumanInputCard={hasOpenHumanInputCard}
+                        />
                         {hasTodos && (
                           <TodoList
                             className="bg-background/5"

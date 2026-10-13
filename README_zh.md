@@ -71,6 +71,7 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
     - [Session Goals](#session-goals)
     - [手动上下文压缩](#手动上下文压缩)
     - [Sub-Agents](#sub-agents)
+    - [账号管理](#账号管理)
     - [Sandbox 与文件系统](#sandbox-与文件系统)
     - [Agentic Browser Control](#agentic-browser-control)
     - [Context Engineering](#context-engineering)
@@ -99,6 +100,25 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
 ```
 
 这条提示词是给 coding agent 用的。它会在需要时先 clone 仓库，优先选择 Docker，完成初始化，并在结束时告诉你下一条启动命令，以及还缺哪些配置需要你补充。
+
+### 通过 Web 注册共享模型
+
+管理员可在 **设置 → 模型 → 添加模型** 中选择厂商，仅填写 **API Key** 和
+**模型 ID**。后端预置 OpenAI、Anthropic、DeepSeek、百炼/通义千问、火山/豆包、
+Moonshot/Kimi、智谱/Z.AI 和 MiniMax 的端点、认证与适配器，地域和 Coding Plan
+使用明确区分的选项。模型 ID 不受内置枚举限制；内部名称自动生成且保持稳定。
+新模型默认启用，保存后自动刷新聊天及 Agent 的模型选择器，无需重启 Gateway。
+
+已有地址继续通过 **自定义 OpenAI-compatible** 查看、编辑和使用，也支持无认证
+接口。高级设置保留显示名称、上下文窗口、输出限制和视觉能力覆盖；未知模型不
+自动声明能力。编辑时 API Key 留空表示保留同一连接的密钥，切换厂商或地址须
+重新填写。清除预设模型密钥前应先停用模型。连接测试不保存草稿，并使用与聊天
+相同的协议及模型工厂；真实请求可能产生费用。
+
+YAML 同名模型优先，已有任务保留原配置快照。托管模型使用原有加密目录，必须
+备份整个 `$DEER_FLOW_HOME/managed-models/`，同时保存匹配的 `catalog.enc` 和
+`key`；丢失密钥应恢复备份，不要删除目录或重建密钥。
+详见[配置参考](backend/docs/CONFIGURATION.md#models-registered-through-the-web)。
 
 ## 快速开始
 
@@ -151,6 +171,13 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
        model: google/gemini-2.5-flash-preview
        api_key: $OPENROUTER_API_KEY
        base_url: https://openrouter.ai/api/v1
+
+     - name: opper-claude-sonnet-4-6
+       display_name: Claude Sonnet 4.6 (Opper)
+       use: langchain_openai:ChatOpenAI
+       model: claude-sonnet-4-6
+       api_key: $OPPER_API_KEY
+       base_url: https://api.opper.ai/v3/compat
 
      - name: gpt-5-responses
        display_name: GPT-5 (Responses API)
@@ -255,7 +282,7 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
 
 需要 Docker Desktop / Docker Engine，以及 **Docker Compose v2.24+**
 （`docker compose version`）。更旧的 Compose 客户端无法解析
-`docker/docker-compose-dev.yaml` 里的可选 `env_file` 语法。
+`docker/docker-compose.yaml` 与 `docker/docker-compose-dev.yaml` 里的可选 `env_file` 语法。
 
 **开发模式**（支持热更新，挂载源码）：
 
@@ -533,6 +560,7 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 2. 添加权限：`im:message`、`im:message.p2p_msg:readonly`、`im:resource`。
 3. 在 **事件订阅** 中订阅 `im.message.receive_v1`，连接方式选择 **长连接**。
 4. 复制 App ID 和 App Secret，在 `.env` 中设置 `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET`，并在 `config.yaml` 中启用该渠道。
+5. _（可选）_ 交互式澄清卡片：在 `channels.feishu` 下设置 `card_interaction_enabled: true`，让 agent 的选项式提问渲染为可点击的按钮卡片，并在问题前保留背景说明。随后在开发者后台打开 **回调配置**（与「事件订阅」是不同的标签页），订阅 `card.action.trigger` 并选择 **长连接**，最后发布新版本。点击按钮等同于输入该选项作答；只有触发该次提问的用户才能操作对应卡片。按钮答案会保存到对话历史中，后续澄清继续在同一会话内进行。
 
 **WeChat 配置**
 
@@ -566,10 +594,18 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 | `/new` | 开启新对话 |
 | `/status` | 查看当前 thread 信息 |
 | `/models` | 列出可用模型 |
+| `/model [name\|default]` | 查看或固定当前会话使用的模型 |
 | `/memory` | 查看 memory |
+| `/agent list` | 列出你的自定义智能体 |
+| `/agent use <name>` | 用自定义智能体开启一个新对话 |
 | `/help` | 查看帮助 |
 
 > 没有命令前缀的消息会被当作普通聊天处理。DeerFlow 会自动创建 thread，并以对话方式回复。
+
+智能体选择是会话级的：`/agent use <name>` 会开启一个新对话，并将该自定义智能体固定到 thread 元数据中。已有对话不会在中途切换智能体；该选择在 Gateway 重启后仍然有效，在 Web UI 中打开 IM 创建的 thread 时，也会继续使用同一个自定义智能体。
+使用 `/agent use lead_agent` 可在新对话中回到默认智能体。
+
+模型选择是会话级的：`/model <name>` 将模型固定到**当前**会话——会按调用方可见的模型列表校验，选择写入 thread 元数据（Gateway 重启后仍有效），从下一条消息开始生效，无需新开对话。`/model` 查看当前生效模型及其来源，`/model default` 清除固定，`/models` 会报告当前固定的模型。
 
 #### 请求链路关联
 
@@ -747,15 +783,22 @@ Web UI 输入框支持浏览器侧语音听写。浏览器提供 Web Speech API 
 /goal clear        # 清除它
 ```
 
-每次 Gateway 驱动的 run 结束后，DeerFlow 会用一个 non-thinking 的评估模型，把可见的对话内容（包括助手的工具调用和截短的工具结果）拿去和激活的 goal 比对。工具调用成功本身不代表 goal 已完成；如果助手不得不猜测缺失或含糊的信息，评估模型会报告 `needs_user_input`。评估模型必须返回一个带类型的 blocker（`missing_evidence`、`needs_user_input`、`run_failed`、`external_wait` 或 `goal_not_met_yet`），并附上可见证据。只有在最近一轮 assistant 回复已被持久化 checkpoint、blocker 是 `goal_not_met_yet`、评估期间 thread 没有变化、且无进展熔断器没有触发时，DeerFlow 才会注入一次 hidden continuation。安全上限默认是 8 次 hidden continuation；连续两次相同的无进展评估后就会停止。`/goal clear` 以及任何用户手动输入的新内容，优先级都高于排队中的 continuation。当 goal 被满足时，DeerFlow 会自动清除它，并发布更新后的 thread 状态。
+每次 Gateway 驱动的 run 结束后，DeerFlow 会用一个 non-thinking 的评估模型，把可见的对话内容（包括助手的工具调用和截短的工具结果）拿去和激活的 goal 比对。工具调用成功本身不代表 goal 已完成；如果助手不得不猜测缺失或含糊的信息，评估模型会报告 `needs_user_input`。评估模型必须返回一个带类型的 blocker（`missing_evidence`、`needs_user_input`、`run_failed`、`external_wait` 或 `goal_not_met_yet`），并附上可见证据。只有在最近一轮 assistant 回复已被持久化 checkpoint、blocker 是 `goal_not_met_yet`、评估期间 thread 没有变化、且无进展熔断器没有触发时，DeerFlow 才会注入一次 hidden continuation。安全上限默认是 8 次 hidden continuation；连续两次相同的无进展评估后就会停止。`/goal clear` 以及任何用户手动输入的新内容，优先级都高于排队中的 continuation。当 goal 被满足时，DeerFlow 会自动清除它，并发布更新后的 thread 状态。同一个 checkpoint 会把这次达成记为 `goal_outcome`，保留到下一次修改 goal。
 
-Web UI 会在输入框上方展示当前激活的 goal。同样的命令在 TUI 和受支持的 IM 渠道里也可用。在 Web UI 和受支持的 IM 渠道里，设置 `/goal <完成条件>` 还会以该条件作为任务启动一次 run；状态查询和清除命令则只管理 goal 状态本身。
+重新生成此前的回答时，会沿用当前对话的 goal 和已用续跑预算，不会恢复已清除或已达成的旧 goal。重放历史 checkpoint 时会移除旧回答的达成记录，避免把它当作新回答已经达成的证明。
+
+Web UI 会在输入框上方展示当前激活的 goal，说明自动续跑为什么停下，并在 goal 达成后显示「目标已达成」提示；设置了 goal 时不能编辑最后一条消息。同样的命令在 TUI 和受支持的 IM 渠道里也可用。在 Web UI 和受支持的 IM 渠道里，设置 `/goal <完成条件>` 还会以该条件作为任务启动一次 run；状态查询和清除命令则只管理 goal 状态本身。
 
 ### 手动上下文压缩
 
 启用 `task_continuity.enabled` 后，可用 `history_search` 检索当前任务的活跃消息和
 已压缩历史。可选参数 `role` 接受 `user`、`assistant`、`tool`，在最多八条结果的
-截断前过滤；省略或 `null` 保持原有全角色搜索。使用 `history_read` 核对来源原文，
+截断前过滤；省略或 `null` 保持原有全角色搜索。
+搜索摘录会围绕最早可完整放入摘录的匹配项返回最多 600 个字符，并提供 `excerpt_start` /
+`excerpt_end`，表示原文中从零开始、左闭右开的 Unicode 字符范围。过长的匹配项会被跳过，
+继续查找后续可完整放入摘录的匹配项；若没有这样的可定位匹配项，则返回原文开头并设置 `excerpt_match=false`。
+将 `excerpt_start` 作为 `history_read` 的 `offset` 即可从该位置继续读取。
+使用 `history_read` 核对来源原文，
 历史用户消息不代表当前授权。详见[任务连续性说明（英文）](docs/task-continuity.md)。
 
 在 Web UI 输入框中使用 `/compact`，可以把当前 thread 的早期上下文压缩成摘要。完整聊天记录仍会保留在界面上，但后续模型调用会基于压缩摘要和最近消息继续。当前历史不足时不会压缩；thread 正在运行任务时会阻止压缩。
@@ -769,6 +812,10 @@ lead agent 只会在委派具有明确净收益时动态拉起 sub-agents，例�
 管理员可以在**设置 → 子智能体**中添加、修改、停用和删除可复用的工作智能体；内置项和 `config.yaml` 项会在同一目录中以只读方式展示。默认 Lead Agent 可以使用全部已启用的运行时 sub-agents；页面创建的每个 Custom Agent 则可以选择允许全部、全部禁用或仅允许指定项。该范围同时约束模型可见目录和服务端 `task` 工具，不能通过直接填写名称绕过。当前版本的设置页管理定义是部署级全局数据，并跟随 `agent_storage.backend`：单机使用原子文件，多实例使用共享应用数据库。
 
 例如，彼此独立的只读研究可以在并行节省的时间明显高于重复检索和结果合并成本时并发执行；而会修改相同文件、依赖连续测试反馈的仓库重构则由 lead agent 直接完成。当 `max_concurrent_subagents` 为 `1` 时，提示词会关闭并行和多批次路由指导，仅在专业能力或上下文隔离具有明确收益时保留委派。
+
+### 账号管理
+
+管理员可以在**设置 → 用户**中停用和恢复账号（仅管理员可见该入口，普通用户不显示）。页面列出每个账号的邮箱、角色和状态，提供与 `PATCH /api/v1/admin/users/{id}` 相同的启用/停用操作；最后一个活跃管理员不允许被停用，网关返回的拒绝原因会原样展示。被停用的账号在所有认证入口都会被拒绝，其现有会话在下一次请求时终止，登录页会提示"账号已停用，请联系管理员"。持有密码者对停用账号发起密码登录时，仍会刻意返回"邮箱或密码错误"，避免向凭据持有者泄露账号状态。
 
 ### Sandbox 与文件系统
 
@@ -922,10 +969,11 @@ DeerFlow 现在在 workspace 里内置了一个一等的定时任务（scheduled
 - 支持 `once`、`cron` 和 `interval` 三种调度方式
 - 后台定时执行以非交互式 DeerFlow run 运行（那里不会暴露 `ask_clarification`）
 - 当所复用的 thread 或全局执行配额正忙时，到期执行会持久化为 `queued`，并在可用后启动；队列项在 Gateway 重启后保留，超过 `scheduler.queue_timeout_seconds` 后标记为失败
+- 执行位置在任务所有者之间公平分配：同一所有者同时启动或运行的定时运行最多 `scheduler.max_concurrent_runs_per_user` 个（默认 2，不超过 `max_concurrent_runs`；设为 `0` 即关闭这一按所有者的上限）。等待队列按所有者轮流取出，一个人积压的运行不会挡住别人的运行。等待超过 `scheduler.queue_timeout_seconds` 的运行会被跳过，运行记录显示“已跳过：等待空闲位置的时间过长”
 - 当某次执行处于 `queued`、`launching` 或 `running` 时冻结任务定义，避免持久化的执行意外换用新的 prompt、thread 或调度；将任务切换为暂停或删除任务会取消已在等待的执行，而 `launching`/`running` 执行结束后才能重试这些变更；显式手动触发在调度已暂停时仍可等待并执行，且不会自动恢复调度
 - 支持暂停、恢复、手动触发、查看历史和删除任务
 - 定时任务通过正常的 DeerFlow run 生命周期执行
-- 当 `channel_connections.enabled: true` 时，定时运行以成功或失败结束时，会把摘要推送到任务所有者已绑定的 IM 身份（outbox + 投递 worker）。带目标的任务在某次执行为 `unmet` 时改发“目标未达成”通知；连续三次未达成导致任务自动暂停时，再发一条自动暂停通知。手动「立即运行」和中断不推送；没有跑完一次运行就结束的执行记录（启动失败、排队超时、重启恢复）也不推送。渠道/传输宕机时会停车且不耗尽重试，最长约一天；平台拒绝大约重试 15 分钟后落为 `failed`。等待期间被你解绑的身份不会再收到推送：该条投递直接落为 `failed`。目前主动推送由企业微信实现；其它已绑定渠道会入队，但在实现 `send_notification` 前会失败。
+- 当 `channel_connections.enabled: true` 时，定时任务通知会发送到任务所有者已绑定、且支持主动推送的 IM 应用（outbox + 投递 worker），目前只有企业微信支持；设置页会在每个应用上标明是否发送，其它应用不会收到通知。每次执行最多发一条消息，内容可能是：一次运行完成、出错或未达成目标，连续 3 次未达成目标后自动暂停，由智能体暂停（停止条件已满足），或任务已结束（`max_runs` 次运行全部完成、已到 `end_at`）；同时发生多件事时，以暂停或结束为准，并在同一条消息里说明最后一次运行的结果。单次任务只发它那次运行的结果。消息与执行结果在同一个数据库事务中入队，因此崩溃或租约失效后恢复的执行也只通知一次。消息内容可以单独读懂，使用你在网页界面中选择的语言（未设置时用 `channel_connections.notification_locale`）：任务标题、发生了什么、智能体有回复时附一行结果，最后是“在 DeerFlow 的定时任务页查看详情。”，不含任何 ID 或链接。单纯的手动「立即运行」试跑和被中断的运行不通知；没有跑完一次运行就结束的执行记录（启动失败、排队超时、因重启而中断）也不通知。渠道/传输宕机时会停车且不耗尽重试，最长约一天；平台拒绝大约重试 15 分钟后落为 `failed`。等待期间被你解绑的身份不会再收到推送：该条投递直接落为 `failed`。
 - 按每页 50 条浏览执行历史；历史页暂停自动刷新，可随时返回最新记录。 仅在读取成功后显示条数，加载中或失败不会误显示为零条。
 
 **通过 API 筛选执行历史**
@@ -941,34 +989,70 @@ DeerFlow 现在在 workspace 里内置了一个一等的定时任务（scheduled
 
 通过 `config.yaml -> scheduler.enabled` 开启后台轮询。手动触发使用同样的 scheduled-task 资源和执行路径。
 
+### 生命周期、保险上限和停止条件
+
+- 任务页面和 REST API（`POST` / `PATCH /api/scheduled-tasks`）与对话一样，支持每次运行的目标（`goal_objective`）、保险上限（`max_runs`、`end_at`）和停止条件（`stop_condition`）。在 PATCH 中传 `null` 可以清除这四项中的任意一项；不带 UTC 偏移的 `end_at` 按任务所在时区的本地时间理解。
+- 停止条件是用户“满足某个条件就停”的规则，单独保存在自己的字段里（迁移 `0031`），不会写进任务指令。只有在运行启动时，DeerFlow 才把它附加到这次运行的消息中，要求运行在条件满足时调用 `stop_scheduled_task`。开启 `scheduler.tool_enabled` 时，无论任务是在对话中还是在任务页面创建的，每次定时运行都能暂停自己的定时任务；关闭时，运行只会说明条件已满足，不会被要求调用它没有的工具。
+- 在任务页面创建的带目标任务，现在也会像对话中创建的任务一样检查目标，其运行同样会收到已保存的备注和上一次运行的引用。
+- 恢复时从当前时间重新计算下次运行，长时间暂停后不会补跑。时间已过的单次任务返回 `422 once_time_passed`，需要设置新的时间。恢复一个已启用的任务不会有任何变化；暂停已结束的任务返回 `409 task_finished`。
+- `max_runs` 统计任务累计的自动运行次数，试运行不计入。重新启用保险上限已用完的任务（恢复，或通过 PATCH 修改已结束任务的运行时间使其重新启用）会返回 `409 limits_exhausted`，除非同一个请求放宽了已用完的那项上限：运行次数用完时，需要提高 `max_runs` 或传 `null` 取消；结束时间已过时，需要把 `end_at` 改晚或传 `null` 取消（只把 `end_at` 改晚，不能让次数已用完的任务恢复）。`POST /api/scheduled-tasks/{task_id}/resume` 为此接受可选的 `{"max_runs": …, "end_at": …}` 请求体（`null` 表示取消这项上限；在对话中创建、且比每小时更频繁的任务必须保留一项上限）。只修改已结束任务上限的 PATCH 会保存新上限，任务仍保持已结束。
+- 未能检查目标（评估器出错，或检查期间对话发生了变化）既不计入连续 3 次未达成目标的自动暂停，也不会让计数清零。修改目标、任务指令或停止条件，以及新增备注，都会重新计数；恢复不会清零。
+- 当前 Gateway 进程的调度器未运行时，新建任务（包括复制）会返回 `409 scheduler_not_running`，因为这样的任务不会按计划运行。`GET /api/features` 会返回 `scheduled_tasks.available`、`running`、`tool_enabled` 和 `min_interval_seconds`。
+- `/api/scheduled-tasks*` 的错误格式为 `{"detail": {"code", "message", "params"}}`，详见 [`backend/docs/API.md`](backend/docs/API.md#scheduled-tasks) 和 `contracts/scheduled_task_errors_contract.json`。
+
 ### 在对话中创建定时任务
 
 同时设置 `scheduler.enabled: true` 和 `scheduler.tool_enabled: true`，重启
-Gateway 后，具有权限的交互式对话可以通过 `schedule_task` 创建、列出、暂停或
-删除属于该会话的任务。例如：“未来四周，每周一北京时间上午九点准备会议报告。”
-工具回显实际保存的提示词、调度、可选目标和停止方法。周期性报告或文件任务可以
-提出手动试跑，只有用户提出试跑要求才执行，且不计入自动调度次数上限。
+Gateway 后，具有权限的交互式对话可以通过 `schedule_task` 创建、修改、列出、
+暂停、恢复或删除任务，发起试运行，或保存备注。例如：“每个工作日 9 点检查
+release-checklist.md，把没勾的项告诉我；全部勾完就停。”在 Web 应用中，结果会
+显示为一张实时更新的卡片，包含运行时间、停止条件和操作按钮，智能体只用一两句
+话回复；IM 等非 Web 对话则用文字说明运行时间、下次运行和停止条件。
+
+- **一个对话能管理哪些任务。** 在该对话中创建的任务；在某次运行的对话（定时
+  运行发出结果的那个对话）里，还能管理这次运行所属的任务，例如“暂停这个”
+  “改到 10 点”。这只适用于你发出的消息；定时运行本身只能用
+  `stop_scheduled_task` 暂停自己的定时任务。
+- **修改不会换任务。** 修改运行时间、任务指令、目标、停止条件或保险上限，都是
+  对同一个任务执行 `update`，任务 ID 和运行记录保持不变。`resume` 会恢复已暂停
+  或已结束的任务，不会补跑。保险上限已用完时，智能体会针对用完的那项上限问你
+  怎么处理（提高 `max_runs` 或取消；推迟 `end_at` 或取消），再随恢复一起提交。
+- **时区。** 你指定的时区优先。否则，新任务使用 Web 应用随每条消息发送的浏览器
+  时区（`context.client_timezone`，只用于这一点），结果中会说明用了哪个时区。
+  按间隔运行的任务和带 UTC 偏移的单次时间不需要时区；如果是 cron 或不带偏移的
+  单次本地时间，又不知道时区（例如来自 IM），智能体会先问你。修改任务时沿用
+  已保存的时区，浏览器时区不会改动已有任务。
+- **结果发在哪里。** 每次运行都会把结果发在一个新的对话里，标题为“任务名 · 本地
+  时间”；如果任务在来源对话中运行，就发在来源对话里。调度由智能体暂停、被自动
+  暂停或已结束时，来源对话会在当时对话所在的位置显示一行说明，并附上查看那次运行
+  或打开任务的链接；除此之外，不会再往来源对话发送任何内容。删除任务后，这行说明
+  仍会保留。运行对话会把任务指令收起为运行信息下方的一行“任务指令”，不再显示成
+  一长段用户消息。
+- **语言。** 智能体会用你的语言写标题、任务指令和停止条件；定时运行用任务指令
+  的语言回复。
 
 新任务默认每次创建独立会话。`goal_objective` 只验证当次执行，达成它不会结束
-周期性调度。运行中的 Agent 在用户的总体结束条件满足后，可以请求
+周期性调度。运行中的 Agent 在用户的停止条件满足后，可以请求
 `stop_scheduled_task` 停止自己的调度，请求在执行终结时生效。`max_runs` 只计算
 自动启动次数，`end_at` 指定结束时间；结束条件优先于暂停请求。工具创建的每小时
 多次调度必须带结束条件，每位用户最多保留 20 个活动工具任务，暂停任务也占名额。
 
 未达目标的执行记为 `unmet`，与执行故障区分。周期任务连续三次符合条件的自动
 执行未达目标后会暂停。成功会重置计数，包括依赖已声明假设的成功；手动试跑、
-中断、执行故障和等待外部条件不递增计数。恢复不重置计数，下一次符合条件的
-未达目标可能再次暂停。目标未达成及自动暂停通知复用现有绑定和持久化 outbox，
-手动试跑不通知。
+中断、执行故障、等待外部条件和未能检查目标都不递增计数。恢复不重置计数，下一次符合条件的
+未达目标可能再次暂停。支持主动推送的已绑定 IM 应用会通过同一个持久化 outbox，
+每次执行收到一条通知（未达成目标、自动暂停、由智能体暂停、已结束）；单纯的手动试跑不通知。
 
-用户可以在来源会话明确要求保存今后执行的备注，最多 10 条、每条 500 字符。
-新会话中的周期任务可以通过按需开启的 `read_conversation` 回查上一次已执行的
-会话，仍须满足属主和读取权限检查。这是来源引用，不会自动生成记忆，也不会把
-结果回写到来源会话。
+用户可以在能管理该任务的对话中明确要求保存今后执行的备注，最多 10 条、每条
+500 字符。新会话中的周期任务可以通过按需开启的 `read_conversation` 回查上一次
+已执行的会话，仍须满足属主和读取权限检查。这是来源引用，不会自动生成记忆，
+也不会把结果回写到来源会话。
 
-试跑时请直接说“先跑一次”或“Run this task now”。宿主只接受本轮用户消息中
-限定的中英文直接执行请求；单独提到任务、引用、条件句或仅回答“好”不会启动
-付费运行。需要时，Agent 会请用户给出直接请求。
+试运行时请直接提出，例如“先跑一次吧”“好的，先试一下”或“Run it now”；在 Web
+应用中，卡片上的“立即试运行”按钮效果相同。宿主只接受本轮用户消息中限定的中英文
+直接执行请求，前面可以带“好的，”“可以，”这类简短应答；单独回答“好”或“yes”、
+只提到任务、引用或条件句都不会启动付费运行。如果已有一次运行在排队等待开始，
+就不会再添加试运行，智能体会说明这一点。试运行不计入 `max_runs`。
 
 一次目标执行最多包含九轮智能体回合，每轮后可以有一次评估器请求。运行用量
 包含评估器请求及服务商返回的 token；缺少用量时，对应费用估算为未知。
@@ -1057,7 +1141,7 @@ PoC 不会自动清理。验证完成后，请用网页侧边栏的删除操作�
 
 ### 部署默认值
 
-Docker 部署栈默认只把入口端口发布在 `127.0.0.1` 上，与上文所述的本地可信环境模型一致。若需要从其他机器访问，请在 `.env` 中设置 `BIND_HOST`（例如 `BIND_HOST=0.0.0.0`），并且必须在落实下方的安全措施之后再这样做。
+Docker 部署栈默认只把入口端口发布在 `127.0.0.1` 上，本地 `make dev` / `make start` 也把 nginx、Gateway 和前端绑定在回环地址上，与上文所述的本地可信环境模型一致。若需要从其他机器访问，请在 `.env` 中设置 `BIND_HOST`（例如 `BIND_HOST=0.0.0.0`），并且必须在落实下方的安全措施之后再这样做。本地运行时 `BIND_HOST` 只作用于 `2026` 端口上的 nginx，Gateway 和前端始终留在其后的回环地址上。
 
 **请在主机变为可访问之前完成首次初始化设置。** 全新实例尚未创建任何账号，因此对于任何非仅回环访问的部署，请在启动后立即通过 `/setup` 创建管理员账号。
 

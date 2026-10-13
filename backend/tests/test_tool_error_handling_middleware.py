@@ -219,6 +219,8 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     # (all enabled by default).
     # + 1 ArtifactResolutionMiddleware + 1 ArtifactCaptureMiddleware
     # (tool_artifacts enabled by default, #4676).
+    # + 1 ModelContentCompatibilityMiddleware (unconditional read-time
+    # sanitizer between DurableContext and the date/coalescer tail).
     from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
     from deerflow.agents.middlewares.dynamic_context_middleware import SubagentDateContextMiddleware
     from deerflow.agents.middlewares.knowledge_scope_middleware import KnowledgeScopeMiddleware
@@ -230,7 +232,7 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
     from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
 
-    assert len(middlewares) == 22
+    assert len(middlewares) == 23
     assert isinstance(middlewares[0], FakeMiddleware)  # InputSanitizationMiddleware stub
     assert isinstance(middlewares[1], KnowledgeScopeMiddleware)
     assert isinstance(middlewares[2], ToolOutputBudgetMiddleware)

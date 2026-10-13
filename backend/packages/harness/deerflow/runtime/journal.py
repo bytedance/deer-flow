@@ -47,6 +47,7 @@ from deerflow.runtime.events.catalog import (
     RUN_ERROR_EVENT,
     RUN_START_EVENT,
 )
+from deerflow.utils.llm_text import strip_leading_think_blocks
 from deerflow.utils.messages import message_to_text, restore_original_human_message
 
 if TYPE_CHECKING:
@@ -411,7 +412,7 @@ class RunJournal(BaseCallbackHandler):
         is_ai_message = isinstance(message, AIMessage) or getattr(message, "type", None) == "ai"
         if not is_ai_message or (caller is not None and caller != "lead_agent"):
             return None
-        text = self._message_text(message).strip()
+        text = strip_leading_think_blocks(self._message_text(message))
         return text[:2000] if text else None
 
     def _record_message_summary(self, message: BaseMessage, *, caller: str | None = None) -> None:
@@ -1351,6 +1352,15 @@ class RunJournal(BaseCallbackHandler):
 
     async def flush(self) -> None:
         """Force flush remaining buffer. Called in worker's finally block."""
+        if self._closed:
+            return
+        # Events recorded from worker threads reach this loop through
+        # call_soon_threadsafe (see record_middleware). Since Python 3.13 an
+        # awaited run_in_executor()/to_thread() may complete without yielding
+        # to the loop when the worker finished before its future was chained,
+        # so such callbacks can still be queued when flush() starts. Yield once
+        # so they land in the buffer instead of being dropped after detach.
+        await asyncio.sleep(0)
         if self._closed:
             return
         self._explicit_flush_in_progress = True

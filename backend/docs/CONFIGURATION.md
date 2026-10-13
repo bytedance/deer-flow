@@ -83,8 +83,11 @@ disabling or regrouping active policies; conflicting settings fail model
 construction instead of resetting a live budget.
 
 When enabled, exposed SDK `max_retries` settings are set to zero: SDK retries
-would bypass the admission hook. Agent middleware retries still work and each
-new attempt is paced. Calls outside that middleware no longer get SDK retries.
+would bypass the admission hook. Claude and Codex also set their provider-internal
+`retry_max_attempts` to one, regardless of config or caller overrides, and log a
+warning when reducing a larger value. Agent middleware retries still work,
+including HTTP 529 overloads, and each new attempt is paced. Calls outside that
+middleware no longer get SDK or Claude/Codex wrapper retries.
 Custom providers that bypass BaseChatModel admission hooks or perform hidden
 retries need their own integration. A caller-supplied `rate_limiter` cannot be
 combined with `request_admission`.
@@ -121,6 +124,16 @@ from `config.yaml`. Use `mcpServers.<server>.routing` to add soft MCP tool
 preference hints for requests that should prefer a specific MCP server or tool.
 See [MCP Server Configuration](MCP_SERVER.md#routing-hints) for the schema,
 example, and soft-vs-hard routing boundary.
+
+Runtime edits to `extensions_config.json` (the MCP and skills APIs, the web UI,
+`DeerFlowClient`, or an editor) are picked up by every Gateway process that reads
+the same file: the process cache revalidates the file's path and content
+signature on each read, so uvicorn workers and multi-instance Pods sharing one
+volume converge without a restart or a per-Pod reload call. A change made through
+an API call on one instance is visible to the others on their next request. A
+missing, partially written or invalid file keeps the previously loaded configuration
+until a complete revision lands, including when it disappears during a reload;
+the Gateway logs one warning per such revision.
 
 ### Recursion Limits
 
@@ -268,6 +281,190 @@ models:
         thinking:
           type: enabled
 ```
+
+#### Models registered through the Web
+
+An administrator can open **Settings → Models → Add model**, select a provider,
+and enter its **API Key** and **model ID**. No endpoint, protocol, Python import
+path or thinking template is needed. The model ID is not an enum: any nonempty
+ID of up to 200 Unicode characters, without control characters, is accepted.
+The provider still decides whether that ID exists and is available to the key.
+No model discovery or external model directory is queried.
+
+New entries are enabled by default. The server generates an ASCII internal name
+(up to 100 characters) from a bounded slug and a random suffix, checking for
+collisions while holding the existing catalog lock. Slashes, spaces, Unicode,
+long IDs and identical model IDs do not collide or become filesystem paths.
+The default display name combines the provider and model ID. The internal name
+is immutable in the Web editor; changing a model ID keeps Agent/thread references
+stable. Display name, enabled state, context window, output token cap and vision
+support remain available under **Advanced settings**. Vision supports an explicit
+on/off override or the provider rule; unknown models default to no advertised
+vision/thinking/effort and no assumed context window. This conservative metadata
+is not a claim that an unknown model lacks those features. A verified `reasoning`
+contract can also be supplied by administrator API clients; it is validated by
+`ModelConfig` and interpreted by the existing model factory. Managed effort paths
+are restricted to request effort parameters (`reasoning_effort`,
+`extra_body.reasoning_effort`, `output_config.effort`, `effort`); they cannot address
+SDK credentials, endpoints or adapter fields. Operator YAML contracts are unchanged.
+
+Provider routing has one backend owner,
+`packages/harness/deerflow/config/managed_model_providers.py`. The admin-only
+`GET /api/managed-models/providers` returns IDs, labels and form requirements,
+without maintaining another endpoint map in the frontend. The initial presets
+are:
+
+| Provider ID | Service / credential scope | Endpoint | Protocol / authentication |
+| --- | --- | --- | --- |
+| `openai` | OpenAI API | `https://api.openai.com/v1` | Chat Completions / Bearer |
+| `anthropic` | Anthropic API | `https://api.anthropic.com` | Native Messages `/v1/messages` / `x-api-key` |
+| `deepseek` | DeepSeek API | `https://api.deepseek.com` | Chat Completions / Bearer |
+| `qwen-cn` | Alibaba Cloud Bailian / Qwen, China | `https://dashscope.aliyuncs.com/compatible-mode/v1` | Chat Completions / Bearer |
+| `doubao` | Volcengine Beijing, ordinary API | `https://ark.cn-beijing.volces.com/api/v3` | Chat Completions / Bearer |
+| `doubao-coding` | Volcengine Coding Plan, separate key/plan | `https://ark.cn-beijing.volces.com/api/coding/v3` | Chat Completions / Bearer |
+| `moonshot-cn` | Moonshot / Kimi, China API | `https://api.moonshot.cn/v1` | Chat Completions / Bearer |
+| `zhipu-cn` | Zhipu, China ordinary API | `https://open.bigmodel.cn/api/paas/v4` | Chat Completions / Bearer |
+| `zai` | Z.AI, international ordinary API | `https://api.z.ai/api/paas/v4` | Chat Completions / Bearer |
+| `minimax` | MiniMax, international API | `https://api.minimax.io/v1` | Chat Completions / Bearer |
+| `minimax-cn` | MiniMax, China API | `https://api.minimaxi.com/v1` | Chat Completions / Bearer |
+| `openai-compatible` | Custom OpenAI-compatible, including unauthenticated local endpoints | Administrator-supplied HTTP(S) base URL | Chat Completions / optional key |
+
+Keys for different regions and Coding Plans are not interchangeable. These
+presets do not route China keys to international endpoints or infer a Coding
+Plan from the model name. Plans/regions without a preset can use the custom
+OpenAI-compatible option if their documented protocol is compatible; native
+protocols need a verified backend preset or operator YAML configuration.
+
+Endpoint/auth sources used for these presets include the official
+[OpenAI SDK](https://github.com/openai/openai-python/blob/main/src/openai/_client.py),
+[Anthropic SDK](https://github.com/anthropics/anthropic-sdk-python/blob/main/src/anthropic/_client.py),
+[DeepSeek API docs](https://api-docs.deepseek.com/),
+[Alibaba Model Studio OpenAI compatibility docs](https://www.alibabacloud.com/help/en/model-studio/compatibility-of-openai-with-dashscope)
+and official [DashScope SDK](https://pypi.org/project/dashscope/),
+[Volcengine Ark SDK](https://github.com/volcengine/volcengine-python-sdk/tree/master/volcenginesdkarkruntime),
+[Moonshot API docs](https://platform.moonshot.cn/docs/guide/start-using-kimi-api),
+[Z.AI SDK](https://pypi.org/project/zai-sdk/) (`zai/_client.py` distinguishes the
+China and international endpoints), and
+[MiniMax OpenAI API docs](https://platform.minimax.io/docs/api-reference/text-openai-api)
+with the official [MiniMax MCP region settings](https://github.com/MiniMax-AI/MiniMax-MCP).
+The existing `config.example.yaml` documents Ark Coding Plan and the model-specific
+DeepSeek, Kimi, GLM, Anthropic, Doubao and MiniMax parameters. During implementation,
+restricted documentation hosts were not reachable; accessible official SDK
+source/package metadata and repository examples were checked instead. Vendor
+availability and live credentials must be verified separately.
+
+All selected adapters and SDK dependencies are already installed by the locked
+harness dependency set (`langchain-openai`, `langchain-anthropic`,
+`langchain-deepseek`). Anthropic uses its native SDK. The existing patched
+DeepSeek adapter is also used as a Chat Completions adapter where reasoning
+history and `max_tokens` must be preserved; this does not select a DeepSeek
+endpoint or infer DeepSeek capabilities for those vendors. MiniMax keeps its
+existing adapter for reasoning fields and user-message name normalization and
+uses its documented `max_tokens` wire parameter. MiniMax defaults to temperature
+1.0; Anthropic has a default output budget of 4096 because Messages requires an
+output cap. These request defaults are separate from model capability rules.
+
+To add a preset, append a stable ID and verified endpoint, adapter, protocol,
+authentication/SDK parameter mapping and required request defaults to `PROVIDERS`.
+Add model capability rules only for explicit verified IDs in `_capabilities`;
+never use a substring match or enable vision/thinking for an entire vendor.
+Keep unknown models conservative. Add an offline real-SDK transport regression
+for routing, authentication, streaming, tool choice and token limits, plus
+positive and negative capability-rule cases. The frontend discovers the new
+entry from `/providers`; it should not gain a routing map.
+
+`PUT /api/managed-models` and `POST /api/managed-models/test` keep their existing
+`{config, expected_revision}` envelope. A preset create needs only
+`config.provider`, `config.model` and `config.api_key`; omitted `name` and
+`display_name` are generated. User capability overrides are optional. Preset
+requests reject endpoint fields (even `base_url: null`), `use`, protocol and
+other routing overrides. Updates carry the unchanged internal name and current
+revision; stale updates return 409. Validation responses do not echo input
+objects, keys, headers or provider response bodies.
+
+An omitted API key on edit retains the existing key only for the same provider
+and custom endpoint. An empty string explicitly clears it; password masks are
+rejected. Preset models require a key to be enabled, so disable the model before
+clearing its key. A provider/custom endpoint switch clears the test result in the
+Web editor and requires a new key for authenticated presets. The server also
+refuses to inherit the old connection's credentials. Unauthenticated custom
+endpoints can continue to use no key. Do not send catalog responses back as PUT
+payloads: use the editable fields and `expected_revision`, omitting secret status,
+source metadata and preset endpoints.
+
+Old `provider: openai-compatible` records retain their names, revisions, encrypted
+keys and endpoint semantics. Official HTTPS DeepSeek endpoints (root or `/v1`,
+default port) continue to use the legacy DeepSeek adapter. A proxy with a
+DeepSeek-like model ID remains a generic custom OpenAI-compatible endpoint.
+Reads and startup do not rewrite or migrate the encrypted catalog.
+
+Managed entries are merged after YAML models. YAML names win and conflicts are
+shown by the management list; YAML and `$ENV_VAR` references are unchanged.
+Disabled entries are omitted from future model lists. Saving changes the catalog
+signature, so subsequent requests get a fresh `AppConfig` without a Gateway
+restart. Already-returned snapshots, active runs and explicitly injected configs
+remain authoritative. The Web editor invalidates both the management query and
+`MODELS_QUERY_KEY`, refreshing the existing chat and Agent pickers. Ordinary
+users retain the existing model-use authorization; only administrators can
+manage the shared catalog. Static/demo mode disables management.
+
+Testing never saves the draft. It constructs the same resolved `ModelConfig`
+through `create_chat_model` as chat, with tracing disabled, no SDK retries, a
+15-second SDK timeout and a 20-second overall deadline. Optional thinking is
+disabled for the short probe. Required-thinking models use automatic tool
+selection and a bounded 2048-token budget; ordinary probes use 32 output tokens.
+For an unknown third-party preset, automatic selection avoids assuming forced
+tool support. Responses are limited to 256 chunks and 16384 accumulated content
+and tool-argument characters. The result distinguishes missing keys,
+authentication failure, connection failure, absent tool calls and output limits.
+An edit can use its saved key only with the current revision and same connection.
+A passing probe establishes streaming/tool connectivity, not every agent or
+vision/reasoning workflow. Missing preset credentials stop before network access.
+
+Offline tests replace only HTTP transport, using actual LangChain/vendor SDK
+serialization. Live tests are opt-in, skipped without credentials and disabled
+in CI. To test a preset manually, securely export `MANAGED_MODEL_TEST_API_KEY`,
+`MANAGED_MODEL_TEST_PROVIDER` and `MANAGED_MODEL_TEST_MODEL`, then run in `backend/`:
+
+```bash
+DEER_FLOW_RUN_LIVE_TESTS=1 uv run --no-sync pytest tests/test_managed_presets_live.py -q
+```
+
+These requests may incur provider charges and do not save credentials. Keep the
+existing DeepSeek live suite for the legacy custom endpoint and tool-history path.
+
+**Backup and recovery:** keep the entire `$DEER_FLOW_HOME/managed-models/`
+directory on persistent storage, including the matched `catalog.enc` and `key`.
+Take a consistent backup while writes are paused (or through a filesystem
+snapshot); restore the pair together with restrictive filesystem permissions.
+Share the same directory across workers/replicas that need the same catalog.
+The existing thread/process locks, atomic writes and Fernet encryption remain;
+SQL does not replicate these files. Anyone able to read both files can decrypt
+the credentials. A missing/wrong key or corrupt catalog fails closed; restore a
+matched backup instead of generating a new key or deleting the encrypted file.
+
+#### MindIE XML tool arguments
+
+The MindIE adapter (`deerflow.models.mindie_provider:MindIEChatModel`) parses XML
+tool calls before decoding escaped newlines in the remaining reply text. JSON
+objects and arrays keep their original escapes during parsing, so `\n` inside a
+JSON string becomes a newline through JSON decoding and `\\n` retains a literal
+backslash. The existing Python-literal fallback also parses the original value.
+
+Non-JSON raw-string parameters retain the gateway's multiline compatibility:
+literal `\n` outside fenced code becomes a real newline, and surrounding
+whitespace is trimmed. Escapes inside fenced code remain unchanged. This keeps
+multi-line file content and commands working. Raw strings cannot distinguish an
+intended literal `\n` from a gateway-escaped newline; structured JSON parameters
+avoid that ambiguity. Numeric conversion failures and unsafe Python-literal
+containers retain the entire original argument rather than rewriting it.
+
+The same behavior applies to synchronous generation, asynchronous generation,
+and both synchronous and asynchronous streaming. Tool-enabled streams use
+non-streaming generation followed by simulated chunks, even with a
+`streaming: true` model default; native no-tool streams carry the fence state
+across chunks. Native tool-call arguments remain unchanged.
+No additional configuration is required.
 
 #### Gemini via Google's OpenAI-compatible endpoint
 
@@ -497,6 +694,7 @@ scheduler:
   poll_interval_seconds: 5
   lease_seconds: 120
   max_concurrent_runs: 3
+  max_concurrent_runs_per_user: 2
   queue_timeout_seconds: 3600
   min_once_delay_seconds: 60
   recursion_limit: 1000
@@ -505,16 +703,20 @@ scheduler:
 Notes:
 
 - `enabled: false` keeps background polling off by default.
-- `tool_enabled: false` keeps conversation schedule tools off. Set it together with `enabled: true` and restart Gateway to offer `schedule_task` in authorized interactive conversations and `stop_scheduled_task` in their scheduled runs (see "Create schedules in a conversation" in the README).
+- `tool_enabled: false` keeps conversation schedule tools off. Set it together with `enabled: true` and restart Gateway to offer `schedule_task` in authorized interactive conversations and `stop_scheduled_task` to every scheduled run of a task, whether a chat or the tasks page created it (see "Create schedules in a conversation" in the README). A run can stop only its own task's schedule. Managing tasks from chat (create, update, resume, pause, delete, trial, notes) is interactive-only: a conversation manages the tasks created in it and, when it is a task's run conversation, that task; scheduled runs get only their own stop. The tools are offered only while this Gateway process's scheduler is running. With `tool_enabled` off, a task's stop condition is still sent to its runs, phrased so the run reports a met rule instead of calling a tool it does not have. Each launch reads `tool_enabled` from the live config, the same value that decides whether the run gets the tool, so the phrasing always matches.
+- The tasks page and REST API have parity with conversations for the per-run goal (`goal_objective`), safety cap (`max_runs`, `end_at`) and stop condition (`stop_condition`, stored in its own column and appended to the run message only at launch). Resume computes the next run from now without a catch-up run and refuses a one-time task whose time passed; reactivating a task whose cap is used up returns `409 limits_exhausted` unless the same request (for example the optional Resume body `{"max_runs", "end_at"}`) renews or clears the cap. Goal-check failures neither count toward nor reset the three-miss automatic pause, and changing the goal, instructions or stop condition, or adding a note, starts a new count (Resume keeps it). Creating a task while this Gateway process's poller is not running returns `409 scheduler_not_running`; `/api/features` reports `scheduled_tasks.running`. See `backend/docs/API.md#scheduled-tasks`.
 - `multi_instance: true` opts into lease-aware scheduler recovery across Gateway instances. It requires Postgres, `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`; otherwise startup fails fast. Leave it false for the default single-instance scheduler.
 - `max_concurrent_runs` is a shared global execution cap in multi-instance mode. Waiting `queued` rows do not consume capacity; an atomic `queued` → `launching` claim counts `launching`/`running` rows under a Postgres advisory lock so concurrent Pods cannot exceed the cap.
-- `queue_timeout_seconds` limits how long a persisted occurrence may wait for capacity or a reused thread to become available. Expired occurrences are marked `failed`; queued rows otherwise survive Gateway restarts.
+- `max_concurrent_runs_per_user` (default `2`, `0` = off, at most 32) caps how many scheduled runs one task owner may have `launching`/`running` at a time, whatever started them (manual "run now" included). The effective cap is `min(max_concurrent_runs_per_user, max_concurrent_runs)`, so with the defaults one owner holds at most 2 of the 3 global slots and the third stays free for other owners. The check runs in the same atomic claim, under the same database-wide lock, as the global cap, so it holds across workers and Pods. A row rejected by either cap stays `queued`.
+- The waiting queue is drained fairly whatever the per-owner cap: eligible rows are ranked within their owner and the drain batch takes every owner's oldest row before any owner's second one, so one owner's backlog cannot push another owner's run out of the batch. Owners already at their cap drop out of the batch before its size limit applies. Same-thread FIFO and the order within one owner (fewest launch attempts, then oldest) are unchanged; with a single owner the order is the same as before.
+- `queue_timeout_seconds` limits how long a persisted occurrence may wait for capacity or a reused thread to become available. Expired occurrences are marked `failed`; queued rows otherwise survive Gateway restarts. With the per-owner cap on, an owner whose runs take longer than this can see its waiting runs expire: the run history then reads "Skipped: it waited too long for a free slot", and no chat event or IM notice is sent for it. Keep `queue_timeout_seconds` well above an owner's typical run length.
 - A task definition is immutable while an occurrence is `queued`, `launching`, or `running`. This prevents a durable occurrence from mixing its admitted thread with a later prompt or schedule edit. Transitioning a task to paused or deleting it cancels a waiting row; PATCH and resume return a conflict until the active occurrence finishes or is cancelled.
 - A manual trigger remains explicit even while the recurring schedule is paused: it may wait in the durable queue and run later, while the task itself stays paused. Transitioning an enabled task to paused still cancels its waiting occurrence atomically.
 - Queue admission, PATCH/resume, pause, and delete serialize on the parent task row. Per-thread FIFO spans all active states, so an older `launching` or `running` occurrence blocks a newer queued occurrence on the same reused thread as well as an older `queued` occurrence.
 - Multi-instance reconciliation uses the run ownership lease: a live peer run is preserved, an expired lease is atomically taken over before its scheduled row is interrupted, and a stale Pod cannot overwrite a newer Pod's parent-task bookkeeping.
 - `recursion_limit` is the LangGraph super-step cap for scheduler-launched runs (default 1000, matching the web UI's interactive budget). Values above `max_recursion_limit` (default 1000) are clamped. This field is read at dispatch, so a YAML edit applies to the next scheduled run without a Gateway restart.
-- Poller fields (`enabled`, `multi_instance`, `poll_interval_seconds`, `lease_seconds`, `max_concurrent_runs`, `queue_timeout_seconds`, `min_once_delay_seconds`) are restart-required; edits need a Gateway restart.
+- Poller fields (`enabled`, `multi_instance`, `poll_interval_seconds`, `lease_seconds`, `max_concurrent_runs`, `max_concurrent_runs_per_user`, `queue_timeout_seconds`, `min_once_delay_seconds`) are restart-required; edits need a Gateway restart.
+- **Upgrade note (behavior change):** one owner now runs at most 2 scheduled runs at a time by default (before, up to `max_concurrent_runs`). Set `scheduler.max_concurrent_runs_per_user: 0` to restore the old behavior; the drain stays fair to owners either way.
 - **Upgrade note:** before upgrading a deployment with `GATEWAY_WORKERS > 1` and `scheduler.enabled: true`, either run the scheduler on exactly one Gateway worker or enable `scheduler.multi_instance: true` with shared Postgres, `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`. The startup gate now rejects the unsafe combination instead of allowing it to start silently.
 - **Upgrade note:** in multi-instance mode, `max_concurrent_runs` is cluster-wide rather than per Pod and counts `launching`/`running` occurrences. Waiting `queued` rows remain outside the execution cap; capacity does not multiply with the replica count.
 - **Upgrade note:** `scheduler.multi_instance` and its related scheduler, ownership, and run-event settings are startup-only. Restart all Gateway Pods together after changing them; a ConfigMap update without a coordinated restart leaves the running service on its previous mode.
@@ -524,7 +726,15 @@ Notes:
 - Create/update accept `once`, `cron`, and `interval`. Interval uses `schedule_spec.every_seconds` (UTC `now + N`, no missed-beat catch-up). N is at least `min_once_delay_seconds` (default 60) and at most 30 days.
 - Manual trigger uses the same scheduled-task resource and run lifecycle.
 - Scheduled task definitions and task-run history are persisted in the application database.
-- With `channel_connections.enabled: true`, the scheduler enqueues IM outcome notifications for the task owner's connected identities. A delivery worker (same poll cadence as the scheduler) pushes them. Scheduled runs that finish as success or failed notify. For goal tasks, an `unmet` scheduled occurrence sends a goal-unmet notice instead, and an automatic pause after three unmet occurrences sends an auto-pause notice; a stop requested by the agent adds no separate notice. Manual triggers and interrupts stay silent, and so do occurrences that end without a finished run (launch error, queue timeout, restart recovery). Channel/transport outages park rows without consuming the retry budget, for up to about a day; platform rejections exhaust ~15 minutes of counted retries then settle `failed`. The worker re-checks the binding right before sending: a target the owner has disconnected since enqueue is dropped as `failed`, never pushed. Only WeCom currently implements proactive `send_notification`.
+- With `channel_connections.enabled: true`, the scheduler sends IM notices ("scheduled task updates") to the task owner's connected identities. A delivery worker (same poll cadence as the scheduler) pushes them.
+  - **Which apps:** only providers whose channel implements proactive push get notices; today those are WeCom and Feishu/Lark (`proactive_notifications` in `app/channels/capabilities.py`, also returned by `GET /api/channels/providers`, where Settings shows "sent here" or "not available for this app yet"). Other providers get no outbox rows at all, and rows queued for them before the upgrade end once as `failed` without retries.
+  - **Optional Feishu group:** each task may select one additional owner-bound group through the task form or `notification_group_connection_id` in REST. No group is selected automatically; personal delivery is retained. The app needs `im:chat:read` for names, and a private binding never becomes a group destination. [Group setup and delivery](IM_CHANNEL_CONNECTIONS.md#feishu-group-notifications).
+  - **Events:** `run_completed`, `run_failed`, `run_unmet` (goal missed), `task_paused` (automatic pause after three missed goals), `task_stopped` (paused by the agent because its stop condition was met) and `task_finished` (all `max_runs` done or `end_at` reached).
+  - **One message per occurrence:** when one occurrence produces several events, only the first of `task_stopped` > `task_paused` > `task_finished` > `run_failed` > `run_unmet` > `run_completed` is sent, and that message still says how the last run went ("The last run failed." / "didn't meet the goal"). A one-time task sends only its run's outcome, never a separate `task_finished`.
+  - **Transactional:** notices are queued by the finalization observer in the same database transaction that records the outcome and are deduplicated per occurrence (or per end time for a task that ends between runs), so an occurrence finalized by crash or lease recovery notifies exactly once. Plain manual "run now" trials and interrupted runs stay silent; a trial that pauses or finishes the task still sends that notice. Occurrences that end without a finished run (launch error, queue timeout, interrupted by a restart) stay silent.
+  - **Text:** the task title, what happened, a one-line result (the same run summary the tasks page shows, redacted, only when the agent replied) and "Open DeerFlow → Scheduled tasks for details." Notices carry no task, run or thread IDs, no timestamps and no links: most deployments run on localhost or a LAN, where a link would be dead on the phone that receives it.
+  - **Language:** the owner's web UI language (the `locale` user preference, which the web app keeps in sync), else `channel_connections.notification_locale` (`en-US` or `zh-CN`, default `en-US`; startup-scoped). Auth-disabled installs always use the config value.
+  - **Delivery:** channel/transport outages park rows without consuming the retry budget, for up to about a day; platform rejections exhaust ~15 minutes of counted retries then settle `failed`. The worker re-checks the binding right before sending: a target the owner has disconnected since enqueue is dropped as `failed`, never pushed.
 
 ### Deployment topology (multi-instance)
 
@@ -538,8 +748,87 @@ Notes:
 - `GATEWAY_WORKERS` / `WEB_CONCURRENCY` only count the uvicorn workers of one process tree. A Kubernetes Deployment with `replicas > 1` runs one worker per Pod, so every Pod reports a single worker and the multi-worker startup gate stays inert — while each Pod's startup orphan reconciliation still writes the other Pods' lease-less runs off as crashed on every rolling update.
 - Set `multi_instance: true` (or export `DEER_FLOW_MULTI_INSTANCE=1`, which lets deploy tooling such as a Helm chart set it from its replica count) on every instance that shares one database. Startup then enforces the same prerequisites as `GATEWAY_WORKERS > 1`: `database.backend: postgres`, `run_events.backend: db`, `run_ownership.heartbeat_enabled: true`, and a Redis stream bridge (`stream_bridge.type: redis` or `DEER_FLOW_STREAM_BRIDGE_REDIS_URL`). It refuses an explicit `sandbox.ownership.type: memory`, process-local browser tools, and `scheduler.enabled: true` without `scheduler.multi_instance: true`.
 - `DEER_FLOW_MULTI_INSTANCE` treats blank, `0`, `false`, `no` and `off` as "not declared"; any other value declares a multi-instance deployment, so a typo fails closed.
+- `GET /health/ready` pings the Redis stream bridge on every probe and answers 503 (`stream_bridge: unreachable`) while Redis is down, so the orchestrator drains that instance instead of routing it runs it cannot publish or stream; the memory bridge reports `not_configured`. When `sandbox.provisioner_url` is set, the body also carries the provisioner's `/health` verdict (`provisioner: ok|unreachable`), which never changes the status code because every instance shares one provisioner. That probe follows the sandbox clients' proxy policy: loopback, private, link-local and cluster-local provisioner addresses bypass `HTTP_PROXY`, external hosts keep the environment's proxy settings.
+- The declaration also drives the `agent_storage.backend: file` divergence warning, the inbound webhook dedupe warning, the `auth.local.throttle_storage: memory` warning, and the WeChat QR-login guard, which otherwise only look at the worker count.
+- Login lockouts are shared through the database: `auth.local.throttle_storage` (startup-only) defaults to `auto`, which keeps the per-IP failed-login counters for `POST /api/v1/auth/login/local` in the `login_throttle` table whenever `database.backend` is `sqlite` or `postgres`, so every instance enforces one `max_login_attempts` limit per client IP and a lockout on one instance holds on all of them. `memory` keeps the historical per-process counter (N instances give an attacker N × `max_login_attempts` guesses; a declared multi-instance deployment logs a warning), and `db` forces the table (it falls back to memory with a warning when the database backend is `memory`, and refuses to start when the configured database's engine is unavailable; `auto` falls back with a warning in that case). `max_login_attempts` and `lockout_seconds` stay live-read.
+- IM chat-to-thread bindings are shared through the database too: with `database.backend: sqlite` or `postgres` the `ChannelManager` keeps the `channel_name:chat_id[:topic_id]` → thread mapping of unbound IM conversations in the `channel_thread_bindings` table (migration `0038_channel_thread_bindings`), so a conversation created on one instance continues on the same thread when its next message lands on another. On the first start after upgrading, an existing `{base_dir}/channels/store.json` is imported once — only into an empty table, with `INSERT … ON CONFLICT DO NOTHING` so concurrently starting instances cannot duplicate a binding — and renamed `store.json.migrated`; a populated table leaves the file untouched. `memory` keeps the per-process JSON file.
 - The declaration also drives the `agent_storage.backend: file` divergence warning, the inbound webhook dedupe warning, and the WeChat QR-login guard, which otherwise only look at the worker count.
+- With the default DeerMem backend, the declaration also warns when the derived SQLite retrieval index sits inside the shared `storage_path` (the default `{storage_path}/.retrieval`). Set `memory.backend_config.retrieval_index_path` to an instance-local directory (relative values resolve against `storage_path`): SQLite WAL is unsupported on network filesystems, and the index is rebuilt from the Markdown facts at startup and re-synced per user scope after a peer writes.
+- A declared multi-instance deployment that enables a feature storing credentials (today `channel_connections.enabled: true`) also needs one shared `DEER_FLOW_CREDENTIALS_KEY`; see [Credentials encryption key](#credentials-encryption-key-deer_flow_credentials_key).
+- IM channels: the gate refuses `channels.leader_lease.enabled: false` while a provider other than GitHub is enabled (under `channels.*`, or connectable from the web UI through `channel_connections.<provider>.enabled`), because every instance would otherwise open the platform connection with the same bot credentials. `auto`/`true` pass the clause but are reserved for the lease-backed transport ownership that ships separately, so keep one instance while channels are enabled; see [IM channel leader lease](#im-channel-leader-lease-channelsleader_lease).
 - Restart-required: the gate runs once at startup. Restart all Gateway instances together after changing it.
+
+#### Local two-Gateway harness
+
+`scripts/dev_multi_instance.sh` (also `make dev-multi`, `make dev-multi-check`, `make dev-multi-down`) runs this topology on one machine, so cross-instance behavior can be checked without a cluster:
+
+- Throwaway `postgres:17-alpine` and `redis:7-alpine` containers (`deerflow-mi-postgres`, `deerflow-mi-redis`) on `127.0.0.1:55432` and `127.0.0.1:56379`, Gateway A on `127.0.0.1:8001` and Gateway B on `127.0.0.1:8011` (8002 stays free for the provisioner). When nginx is installed, `http://localhost:2027` round-robins `/api` over both Gateways, names the Gateway that answered in an `X-DeerFlow-Upstream` response header, and forwards `/` to a frontend on port 3000 if you start one. Ports, container names and images are overridable; see `--help`.
+- The generated `config.yaml` is your own `config.yaml` (otherwise `config.example.yaml`; `DEERFLOW_MI_BASE_CONFIG` picks another file) plus `deployment.multi_instance: true`, `database.backend: postgres`, `run_events.backend: db`, `run_ownership.heartbeat_enabled: true` and `stream_bridge.type: redis`. Settings the startup gate refuses are changed and reported: process-local browser tools are removed and an enabled scheduler gets `scheduler.multi_instance: true`. Enabled IM providers under both `channels.*` and the UI-connectable `channel_connections.*` are disabled because both Gateways would connect the same bot; `DEERFLOW_MI_KEEP_CHANNELS=1` keeps them. The `channels.leader_lease` block and connection metadata stay unchanged.
+- Everything the pair writes stays in the harness, never in your own deployment: any `checkpointer` section is removed (it would win over `database` for checkpoints and the Store), an explicit `sandbox.ownership` and a Redis `database.checkpoint_cache` point at the harness Redis (ownership timing settings are kept), a DeerMem `storage_path` (either spelling) and `blob_storage.backend_config.root` are dropped so their data lands in the harness home, and a local AIO sandbox gets a `container_prefix` derived from the state dir, so the harness never adopts or reaps sandbox containers it did not start. A non-DeerMem memory backend is used as configured, and the harness says so.
+- Both processes share one `DEER_FLOW_HOME`, one copy of `extensions_config.json` (MCP and skill edits never reach your own file), and generated `AUTH_JWT_SECRET`, `DEER_FLOW_INTERNAL_AUTH_TOKEN` and `DEER_FLOW_CREDENTIALS_KEY` values. Each process keeps its own DeerMem `retrieval_index_path`, which the shared config reads from `$DEERFLOW_MI_RETRIEVAL_INDEX_PATH`.
+- Gateway B starts only after A answers `/health`. Alembic migrations are serialized by an advisory lock, but the LangGraph checkpointer and store `setup()` that runs next is not, so two cold starts against an empty database could race.
+- State lives in `.deer-flow/multi-instance/` (gitignored). `down` stops the Gateways and nginx, removes the containers together with their anonymous data volumes and deletes everything there except `logs/`. Each container is labelled with the state dir that created it, and only that state dir removes it: a harness started from another checkout or `DEERFLOW_MI_STATE_DIR` refuses to start rather than remove them (give it its own `DEERFLOW_MI_*_CONTAINER` names and ports). If `up` fails partway, everything it already started is torn down. Do not run `make dev` or `make stop` alongside the harness: both reclaim port 8001 and this checkout's Gateway processes.
+
+```bash
+scripts/dev_multi_instance.sh up             # containers, config, Gateway A, then B, then nginx
+scripts/dev_multi_instance.sh check          # automated cross-instance checks (below)
+scripts/dev_multi_instance.sh stop b --kill  # SIGKILL B to simulate a crash; `start b` brings it back
+scripts/dev_multi_instance.sh logs a -f
+scripts/dev_multi_instance.sh down
+```
+
+`check` signs in as a throwaway account it creates on first use (on a fresh database it becomes the first admin, which the skill toggle needs; the credentials are in `.deer-flow/multi-instance/check-user.json`) and verifies that:
+
+- `GET /health/ready` reports `ready` and `stream_bridge: ok` on both Gateways;
+- B accepts a session issued by A, and both accept the shared internal token while refusing a wrong one;
+- a thread created on A is readable on B, and a file uploaded on A is listed on B, which serves identical bytes from `GET /api/threads/{id}/artifacts/{path}`;
+- a public skill toggled with `PUT /api/skills/{name}` on A shows the new state on B within 30 s (the toggle is reverted afterwards);
+- nginx reaches both Gateways;
+- a run created on A can be joined on B and resumed on A from a `Last-Event-ID`. With no model configured the run fails before any LLM call; when models are configured, or the model list could not be read, this check is skipped unless you pass `check --with-llm`. Each stream read has a time budget that heartbeats do not extend.
+
+These still need a manual pass:
+
+- stop B with `stop b --kill` while A has an active run: A's run must not turn `error`;
+- cancel a run on B from A: it takes effect within about one heartbeat (~10 s; a lower `run_ownership.lease_seconds` makes the boundary easier to observe);
+- change an MCP filesystem server's args on A: B's local-bash allowlist follows;
+- edit a skill on A: B's system-prompt skills section changes within 30 s;
+- the IM channel gates (one leader per platform, failover after killing the leader, runtime-config changes), once channel leader election lands; run them with `DEERFLOW_MI_KEEP_CHANNELS=1`.
+
+### IM channel leader lease (`channels.leader_lease`)
+
+```yaml
+channels:
+  leader_lease:
+    enabled: auto      # auto | true | false
+    lease_seconds: 30
+    grace_seconds: 10
+```
+
+Every IM channel except GitHub connects outbound to its platform (Telegram long polling, Discord / Slack / Feishu / DingTalk WebSockets). With more than one Gateway instance each one would open that connection with the same bot credentials: Telegram rejects the second poller with `409 Conflict`, Discord delivers every message to every session so the user is answered twice, and the per-process `ChannelManager` state (the `/model` cache, GitHub follow-up buffers) diverges. The leader lease will arbitrate this: one row per provider in the shared database, held by one instance and renewed on a heartbeat, so only the holder starts that provider's transport. GitHub is webhook-driven and needs no lease. **In this version the section only drives the startup gate**: the transport ownership ships separately, so `auto`/`true` are reserved settings, not an ownership guarantee, and a deployment with channels enabled must still run one instance.
+
+- `enabled: auto` (default) follows the multi-process signal: on with `GATEWAY_WORKERS` / `WEB_CONCURRENCY > 1`, `deployment.multi_instance: true` or `DEER_FLOW_MULTI_INSTANCE=1`, off on a single instance, which then never writes lease rows and behaves as before. `true` always turns it on; `false` never does, and the multi-process startup gate refuses `false` while an IM channel other than GitHub is enabled. The refusal names the providers and offers only the remedies that work today (a single instance, or disabling those channels); it does not recommend `auto`/`true`, which would merely bypass the clause until the lease ships.
+- `lease_seconds` (≥ 3, default 30) is how long a held lease stays valid without renewal; the holder renews every `lease_seconds // 3` seconds. `grace_seconds` (≥ 0, default 10) is the extra time after expiry before a peer may take the lease, absorbing a slow renewal. Worst-case failover after a crash is `lease_seconds + grace_seconds`; a cleanly stopped holder releases immediately, so a peer takes over within one heartbeat.
+- The block is validated on every topology: an unknown key, a non-mapping value, `enabled` outside `auto | true | false`, `lease_seconds < 3` or `grace_seconds < 0` stop startup with the dotted path in the message.
+- Restart-required (`channels.leader_lease` in the reload-boundary registry): the gate evaluates it once and `ChannelService` captures it at construction. Change it on every instance and restart them together.
+- The lease-backed transport ownership itself (the `channel_leases` table, the supervising loop and the leader reported by `GET /api/channels/providers`) ships separately; until it lands, `auto`/`true` do not stop every instance from connecting, so keep one instance while channels are enabled. This section fixes the configuration contract and the gate so that rollout needs no further config change.
+
+### Credentials encryption key (`DEER_FLOW_CREDENTIALS_KEY`)
+
+DeerFlow encrypts credentials it stores at rest (today: per-connection IM channel credentials in the `channel_credentials` table) with a deployment key read **only** from the environment — there is no `config.yaml` key, and it is never derived from `AUTH_JWT_SECRET`.
+
+```bash
+# Generate a key (urlsafe base64 of 32 random bytes, a Fernet key):
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+export DEER_FLOW_CREDENTIALS_KEY=<key>
+```
+
+- **Rotation:** the value may be a comma-separated list. The first key encrypts new values; every listed key decrypts. Prepend the new key (`new,old`), restart, and keep the old key listed until the values it encrypted have been rewritten. Stored values carry a `fernet:v2:` prefix; `fernet:v1:` values written by earlier builds stay readable under the same key.
+- **Single instance:** when the variable is unset or blank, the Gateway generates `{DEER_FLOW_HOME}/.credentials_key` (mode `0600`) on first use and reuses it. The file is created exclusively, so uvicorn workers sharing the runtime home converge on one key. It is only created when a feature that stores credentials is enabled.
+- **Multi-instance:** instances that do not share a runtime home would each generate their own file and could not decrypt what their peers stored. Startup therefore refuses a declared multi-instance deployment (`deployment.multi_instance: true` / `DEER_FLOW_MULTI_INSTANCE=1`) that enables `channel_connections` without the variable. Multiple workers of one process tree (`GATEWAY_WORKERS > 1` without the declaration) share the file and are not refused. Deployments that store no credentials keep booting without a key.
+- **Malformed keys** (wrong length, standard rather than urlsafe base64, any bad entry in the list) stop startup with an error that never repeats the key material.
+- **Backup:** losing the key makes every stored credential unreadable. Unreadable values are treated as missing (logged as a warning), never as a crash — Slack, for example, falls back to the deployment bot token.
+- **Deployment tooling:** the Helm chart generates the key into its app Secret and preserves it across upgrades; `make up` (`scripts/deploy.sh`) honors a shell or `.env` value and otherwise generates and persists `$DEER_FLOW_HOME/.credentials_key` — the same file the Gateway would generate, so whichever side created it first wins.
+- The persisted `.jwt_secret` (used when `AUTH_JWT_SECRET` is unset) is created the same exclusive way, so replicas cold-starting on a shared volume no longer keep different session-signing secrets.
 
 ### Agent Storage
 
@@ -559,12 +848,26 @@ agent_storage:
 
 Migrating an existing install from `file` to `db`:
 
+Run from the repository root using the backend's `uv` environment. The importer
+depends on the installed workspace packages; using a system `python` without
+an activated backend environment can fail with `ModuleNotFoundError: deerflow`.
+Complete the [backend installation](../../CONTRIBUTING.md#option-2-local-development)
+first, including the `postgres` extra when applicable. Use the same exported
+configuration and runtime selectors as the running Gateway, such as
+`DEER_FLOW_CONFIG_PATH` and `DEER_FLOW_HOME`. `--project backend` selects the
+environment without changing the working directory, so relative paths keep
+their meaning; `--no-sync` preserves installed extras.
+
 ```bash
-python backend/scripts/migrate_agents_to_db.py            # copy on-disk agents into the db
-python backend/scripts/migrate_agents_to_db.py --dry-run  # preview without writing
+uv run --no-sync --project backend python backend/scripts/migrate_agents_to_db.py --dry-run  # preview without writing
+uv run --no-sync --project backend python backend/scripts/migrate_agents_to_db.py            # copy on-disk agents into the db
 ```
 
 The importer is idempotent (already-present agents are skipped) and leaves the source files untouched, so reverting `agent_storage.backend` to `file` is a clean rollback. Agent *memory* (`memory.json`) is unaffected by this switch.
+
+With `backend: db`, retained legacy files do not block HTTP or `update_agent`
+updates to the imported SQL definitions. With `backend: file`, shared legacy
+agents still require the user-isolation migration before they can be updated.
 
 ### Tools
 
@@ -617,23 +920,195 @@ request timeout is capped by the remaining budget; the outer deadline also bound
 responses that keep delivering data. The existing `timeout` remains Jina's
 `X-Timeout` header and the per-request HTTP timeout limit.
 
-Only HTTP 502/503/504 and HTTPX connection-establishment errors (`ConnectError`,
-`ConnectTimeout`) are retried. Authentication/client errors, 429, other statuses,
-empty successful responses, read/write timeouts and arbitrary exceptions are not
-retried. `Retry-After` is not interpreted. Backoff ceilings start at 0.5 seconds,
-double to 1 and 2 seconds, then stay at 4 seconds. Each asynchronous wait caps its
-ceiling by the remaining budget and independently samples a uniform factor from
-0.5 to 1.0, reducing synchronized retries without increasing the wait cap.
+HTTP 502/503/504 and HTTPX connection-establishment errors (`ConnectError`,
+`ConnectTimeout`) are retryable. HTTP 429 is retried **only** with a valid
+`Retry-After` header; missing or malformed hints leave it terminal. HTTP 503
+uses the same hints, falling back to local backoff when they are absent or invalid.
+Authentication, payment/credit and other statuses remain terminal even with hints;
+error-body prose never enables retries. Empty successful responses, read/write
+timeouts and arbitrary exceptions are not retried.
+
+`Retry-After` accepts non-negative ASCII integer seconds or an HTTP-date
+(including obsolete HTTP date forms); past dates mean a zero server floor.
+Signed/fractional delays and non-HTTP dates are invalid. Local backoff ceilings
+start at 0.5 seconds, double to 1 and 2, then stay at 4. Each wait caps the local
+ceiling by the remaining budget and samples a uniform factor from 0.5 to 1.0.
+The actual wait is the greater of that local pacing and the server floor. A
+server floor is never reduced by jitter or the 4-second local ceiling. If the
+hinted wait equals or exceeds the remaining budget (including enormous valid
+integers), the last HTTP status error is returned without another request.
+Dates use wall time to compute a delay; requests and waits share one monotonic
+deadline. Each attempt uses only its own hint.
+
+Offline mocked regressions cover these policies; they do not establish that
+Jina's hosted service always supplies recovery hints. No paid-provider testing
+is required to enable this option.
 Cancellation propagates during requests and waits. This stops local work; it
 cannot cancel work already started by Jina. Enabling retries can send up to `1 + max_retries` upstream requests
 and incur additional cost. Successful content and final `Error:` results retain
 the existing contract.
+
+#### Jina request admission
+
+On the Jina `web_fetch` tool entry, `request_admission` is omitted/null by default
+(disabled). To enable it, supply all three fields as YAML numbers:
+
+```yaml
+request_admission:
+  max_concurrent_requests: 3
+  max_queue_size: 32
+  max_wait_seconds: 10
+```
+
+These are example values, not recommended or measured optimal limits. Concurrency
+must be a positive integer, queue capacity a nonnegative integer (zero rejects
+whenever all permits are held), and wait a finite positive number. Booleans,
+strings, missing/unknown fields and malformed values return `Error:` before client
+creation. The public tool arguments remain unchanged.
+
+Before the first enabled call, omitted/null settings bypass admission and do not
+initialize a policy. The first enabled call freezes one policy for the process.
+After that, identical and omitted/null settings reuse it, so a live config reload
+cannot silently bypass the active cap; conflicts return `restart required`.
+Restart to change or disable enabled settings. Lead/subagents, client instances,
+threads and event loops share the enabled budget. Each worker process or replica
+has its own budget; this is neither a distributed quota nor a per-user/account
+limit, and it does not control requests per minute.
+
+Each physical attempt holds a permit through response consumption and response
+stream close, including errors and cancellation. One HTTP client is reused across
+the logical crawl's retries; closing its idle connection pool happens after the
+final attempt and does not hold an attempt permit. Enabled admission streams even
+without a byte cap, preserving complete text and charset decoding. Response cleanup
+drains before release, so cancellation or a retry deadline may take longer to return
+if local close is slow; cancellation still wins if cleanup also fails. This cannot
+stop work already running remotely. Readability extraction and retry backoff hold no
+permit. Every retry joins admission again. Existing retry eligibility, Retry-After
+floors and decoded response byte caps apply.
+
+Waiting is bounded FIFO: full queues return terminal local
+`Error: Local Jina request admission rejected: queue full` without HTTP dispatch.
+Expired waits return `Error: Local Jina request admission rejected: wait expired`.
+Neither is described as a provider/network failure, fabricates a provider 429, or
+triggers a retry. Cancellation removes queued tickets. Waiting consumes the original
+retry budget when retries are enabled; the earlier of that deadline and
+`max_wait_seconds` applies and is checked again at dispatch. With retries disabled,
+only queue wait is bounded by admission, and the existing HTTP timeout semantics
+still apply.
+
+#### Jina response byte budget
+
+On the same Jina `web_fetch` tool entry, optionally set `max_response_bytes: 1048576`
+(for example, 1 MiB). This uses existing tool configuration extras; no model-facing
+argument is added. Omitted or `null` preserves the buffered default unless request
+admission is enabled. An enabled
+value must be a positive integer; booleans, strings, fractions, zero and negative
+values return `Error:` before HTTP client creation or network activity.
+
+Enabled fetches stream and count actual content-decoded bytes (after decompression,
+before text decoding), ignoring `Content-Length`. Exactly the limit is accepted.
+The first chunk exceeding it stops consumption and closes the response, returning
+an explicit size `Error:` without body content, partial success or readability
+extraction. This applies to all statuses, including 502/503/504, and oversize never
+retries. Each retry response has its own counter within the existing shared time
+budget. Streams close on success, errors, cancellation and read failures. Responses
+within the limit retain charset decoding and existing status/retry handling.
+
+This limits response retention/consumption, not wire-byte bandwidth or allocations
+inside HTTPX's decompressor; it is not a hard process-memory bound. The final
+Markdown truncation at 4096 characters is unchanged and independent of this option.
 
 Serper `web_search` also accepts the optional model argument
 `time_range: "day" | "week" | "month" | "year"`. For example,
 `{"query": "Python releases", "time_range": "week"}` sends `tbs: "qdr:w"`
 to Serper. Omitting `time_range` or passing `null` omits the recency constraint from the
 search request. This option does not change Serper `image_search`.
+
+#### Serper retries
+
+Both Serper `web_search` and `image_search` accept these operator-only settings
+in their respective `tools` entries (the model-facing arguments are unchanged):
+
+```yaml
+max_retries: 0             # Default off; integer 0–3 extra requests
+retry_budget_seconds: 30   # Default 30; finite number >0 and <=300
+```
+
+Set `max_retries: 1` to enable recovery. Booleans, strings, nulls, out-of-range
+values, and non-finite budgets return a structured configuration error before
+HTTP. The three-retry cap limits additional quota/cost; the 300-second budget
+cap limits scheduling waits. No billing or idempotency guarantee is claimed.
+
+Only connection establishment failures (`ConnectError`/`ConnectTimeout`) and
+HTTP 502/503/504 are retried. HTTP 429 requires a valid `Retry-After` hint.
+Authentication errors, other statuses, read/write timeouts, malformed successful
+JSON and tool/result-processing failures are never retried.
+
+Backoff uses equal jitter: 0.25–0.5, 0.5–1, then 1–2 seconds. Valid nonnegative
+integer seconds or HTTP-date `Retry-After` hints on 429/503 set a minimum wait
+(past dates mean zero). HTTP dates include asctime and RFC 850 forms; RFC 850
+two-digit years resolve to the most recent matching year no more than 50 years
+in the future. Invalid hints leave 503 on local backoff;
+429 stays terminal. A hint or backoff that reaches/exceeds the remaining budget
+returns the last error without another request or a shortened wait.
+Both budget checks log `Serper retry time budget exhausted` at warning level,
+distinguishing budget stops from exhausting all configured attempts without
+changing the returned error.
+
+One monotonic scheduling deadline starts before client creation, counting elapsed
+requests and waits; it is checked before waiting and again before a retry.
+It does **not** interrupt active synchronous HTTP requests, response streaming,
+or worker threads. HTTPX's unchanged 30-second timeout applies per network phase,
+so this is **not** a hard end-to-end wall-clock deadline. The initial request is
+always allowed. Payload, API key, domain restrictions and time range stay identical
+across attempts; errors still report the cleaned original query. No refill,
+cache, global limiter or model-level retry is added.
+
+#### Serper endpoints
+
+To use a Serper-compatible provider for web and image search, set
+`SERPER_BASE_URL` to its base URL without `/search` or `/images`, and set
+`SERPER_API_KEY` to that provider's key. The default base URL is
+`https://google.serper.dev`.
+
+Each Serper tool can override the environment independently in `config.yaml`:
+
+```yaml
+tools:
+  - name: web_search
+    group: web
+    use: deerflow.community.serper.tools:web_search_tool
+    base_url: https://proxy.example/api
+    api_key: $SEARCH_PROVIDER_API_KEY
+  - name: image_search
+    group: web
+    use: deerflow.community.serper.tools:image_search_tool
+    base_url: https://images.example/api
+    api_key: $IMAGE_PROVIDER_API_KEY
+```
+
+A non-empty string `base_url` in the requested tool's entry takes precedence
+over `SERPER_BASE_URL`. Missing, non-string or whitespace-only tool values fall
+back to the environment. An unset, empty or whitespace-only environment value
+keeps the default endpoint. Leading/trailing whitespace and trailing slashes
+are removed before appending `/search` or `/images`. A tool's `api_key` similarly
+overrides `SERPER_API_KEY`; neither tool inherits the other's endpoint or key.
+Both settings are read from the same captured tool configuration, so a hot
+reload cannot pair the old provider's endpoint with the new provider's key.
+
+Overrides must be absolute `http://` or `https://` URLs with a host and valid
+port. Query strings and fragments (including empty `?`/`#` markers) are rejected
+before HTTP. Invalid overrides return a configuration error naming
+`base_url`/`SERPER_BASE_URL` without exposing the configured value; they do not
+fall back to another host.
+
+These are operator-controlled settings, not model-supplied arguments. Choose a
+trusted provider: the key is sent to the configured host in the `X-API-KEY`
+header, never in a query parameter. Endpoint configuration does not change the
+existing validation of returned image URLs or web source filters. The endpoint
+is resolved once before transport so it can remain constant across retry attempts.
+Override debug diagnostics show the effective endpoint without URL credentials,
+query or fragment; result-URL guards do not restrict the operator's API host.
 
 #### Serper source filters
 
@@ -676,7 +1151,7 @@ including on provider errors.
 
 `time_range` still maps to `tbs`, and `max_results` caps the filtered results.
 `total_results` reports the actual remaining count (zero with `results: []`
-when none survive). One request is made: no refill or relaxed-filter retries.
+when none survive). No refill or relaxed-filter requests are made.
 These settings do not affect `image_search` or the model-facing tool schema.
 Source selection is neither a factuality guarantee nor a global URL-access
 policy for fetch tools, browsers, or redirects.
@@ -689,7 +1164,7 @@ offline mocked tests verify request composition and local filtering, not provide
 retrieval behavior. No paid API calls are needed for the regression suite.
 
 **Built-in Tools**:
-- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serper, Serply, Exa, InfoQuest, Tencent Cloud WSA, Firecrawl, fastCRW, GroundRoute, Sofya)
+- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serper, Serply, Exa, InfoQuest, Tencent Cloud WSA, Firecrawl, fastCRW, GroundRoute, Sofya, You.com)
 - `web_fetch` - Fetch web pages (Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless, Sofya, Unbrowse)
 - `web_capture` - Capture rendered webpage screenshots as artifacts (Browserless)
 - `image_search` - Search for reference images (DuckDuckGo, InfoQuest, Serper, Brave)
@@ -699,7 +1174,41 @@ retrieval behavior. No paid API calls are needed for the regression suite.
 - `str_replace` - String replacement in files
 - `bash` - Execute bash commands
 
-Browserless can be configured as an opt-in visual capture tool:
+#### Delegated Fetch Backend Isolation
+
+Browserless, Crawl4AI, Firecrawl, and fastCRW perform navigation, redirects,
+DNS resolution, and subresource loading in the backend's own network namespace.
+Checking the submitted URL in the Gateway cannot constrain these later requests.
+For `web_fetch`, and Browserless `web_capture`, DeerFlow therefore refuses to
+delegate to a private, loopback, or otherwise unverifiable backend by default.
+HTTP(S) backend endpoints resolving only to public addresses do not require an
+isolation acknowledgement.
+
+The backend endpoint is the tool's `base_url`. Browserless defaults to
+`http://localhost:3032`, Crawl4AI to `http://localhost:11235`, and Firecrawl to
+its SDK's public cloud endpoint when `base_url` is unset. fastCRW uses
+`base_url`, then `CRW_API_URL`, then `https://fastcrw.com/api`. The guard checks
+the effective endpoint, including environment references in the config.
+
+Before enabling a self-hosted backend, enforce an outbound policy on that
+service that blocks private, loopback, link-local, shared (`100.64.0.0/10`),
+other non-global, and cloud-metadata destinations, including redirects and
+subresources. Then set `network_isolation_confirmed: true` on each tool using
+that backend. Browserless fetch and capture are separate tool entries and each
+needs the setting. Run `make doctor` to check for configurations that would be
+refused. Existing localhost deployments need this migration before fetching or
+capturing pages after an upgrade.
+
+`network_isolation_confirmed` is an operator acknowledgement; it does not
+install or verify an egress policy. `allow_private_addresses: true` controls
+the submitted target URL only and never bypasses backend screening. Reserve it
+for intentional internal targets and explicitly account for those destinations
+in the backend's outbound policy. Neither setting relaxes the HTTP(S) requirement.
+Backend DNS screening happens at validation time and does not pin the subsequent
+client connection, so it cannot by itself close a DNS-rebinding window.
+
+Browserless can be configured as an opt-in visual capture tool after its egress
+policy is in place:
 
 ```yaml
 tools:
@@ -708,6 +1217,7 @@ tools:
     use: deerflow.community.browserless.tools:web_capture_tool
     base_url: http://localhost:3032
     # token: $BROWSERLESS_TOKEN
+    network_isolation_confirmed: true  # Only after isolating Browserless egress
     output_format: png
     full_page: true
     viewport_width: 1280
@@ -731,8 +1241,12 @@ Browserless instance. You can point `base_url` at [Browserless Cloud](https://ww
 # match the default base_url (http://localhost:3032). Recent Browserless
 # images always require a token — if you don't pass one, a random token is
 # generated and requests without it are rejected — so set it explicitly.
-docker run -d --name browserless -p 3032:3000 -e "TOKEN=local-dev-token" ghcr.io/browserless/chromium
+docker run -d --name browserless -p 127.0.0.1:3032:3000 -e "TOKEN=local-dev-token" ghcr.io/browserless/chromium
 ```
+
+Publishing a port does not isolate outbound traffic. Apply the egress policy
+appropriate to your container platform before setting
+`network_isolation_confirmed: true`; the command above only starts the service.
 
 Then set the same token so the tool sends it (uncomment `token: $BROWSERLESS_TOKEN`
 in the config above):
@@ -1316,18 +1830,22 @@ models:
 - `DEEPSEEK_API_KEY` - DeepSeek API key
 - `MIMO_API_KEY` - Xiaomi MiMo API key
 - `NOVITA_API_KEY` - Novita API key (OpenAI-compatible endpoint)
+- `OPPER_API_KEY` - Opper API key (OpenAI-compatible endpoint)
 - `TAVILY_API_KEY` - Tavily search API key
 - `BRAVE_SEARCH_API_KEY` - Brave Search API key for `web_search` and `image_search`
 - `SERPER_API_KEY` - Serper (Google Search/Images API) key for `web_search` and `image_search`
+- `SERPER_BASE_URL` - Optional operator-controlled Serper-compatible base URL for both tools; each tool's `base_url` takes precedence. The provider key is sent to the configured host in `X-API-KEY`, never a query parameter. See [Serper endpoints](#serper-endpoints).
 - `SERPLY_API_KEY` - [Serply](https://serply.io) key for `web_search` (Google Search, plus Google News and Google Scholar via `vertical`)
 - `GROUNDROUTE_API_KEY` - GroundRoute meta-search API key for `web_search` and `web_fetch` (routes across Serper, Brave, Exa, Tavily, Firecrawl, Perplexity with gain-share pricing)
 - `SOFYA_API_KEY` - [Sofya](https://sofya.co) key for `web_search` and `web_fetch`
 - `UNBROWSE_API_KEY` - [Unbrowse](https://unbrowse.ai) key for `web_fetch`
-- `BROWSERLESS_TOKEN` - Browserless Cloud token for `web_capture` (optional for self-hosted Browserless)
+- `YDC_API_KEY` - You.com Search API key for `web_search` (optional: without it the provider uses You.com's keyless free-tier endpoint)
+- `BROWSERLESS_TOKEN` - Browserless token for `web_fetch` (Browserless provider) and `web_capture`, sent as the `token` query parameter (required by Browserless Cloud and by a self-hosted instance started with `TOKEN`)
 - `DEER_FLOW_PROJECT_ROOT` - Project root for relative runtime paths
 - `DEER_FLOW_CONFIG_PATH` - Custom config file path
 - `DEER_FLOW_EXTENSIONS_CONFIG_PATH` - Custom extensions config file path
 - `DEER_FLOW_HOME` - Runtime state directory (defaults to `.deer-flow` under the project root)
+- `DEER_FLOW_CREDENTIALS_KEY` - At-rest encryption key(s) for stored credentials; comma-separate to rotate. See [Credentials encryption key](#credentials-encryption-key-deer_flow_credentials_key)
 - `DEER_FLOW_SKILLS_PATH` - Skills directory when `skills.path` is omitted
 - `GATEWAY_ENABLE_DOCS` - Set to `false` to disable Swagger UI (`/docs`), ReDoc (`/redoc`), and OpenAPI schema (`/openapi.json`) endpoints (default: `true`)
 

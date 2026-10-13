@@ -7,6 +7,7 @@ import os
 import shutil
 import stat
 import tempfile
+import threading
 import zipfile
 from enum import Enum
 from pathlib import Path
@@ -14,8 +15,10 @@ from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
 
 import pytest
+from _thread_checkpoint_helpers import INDEXED_SAVER_KINDS, SAVER_KINDS, make_saver, put_goal_write, put_thread
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage  # noqa: F401
 from langchain_core.tools import StructuredTool
+from test_mcp_cache_reconciliation import reconciler  # noqa: F401 - fixture re-export
 
 from app.gateway.routers.mcp import McpConfigResponse
 from app.gateway.routers.memory import MemoryConfigResponse, MemoryStatusResponse
@@ -2218,44 +2221,133 @@ class TestThreadQueries:
         snapshot.created_at = checkpoint_tuple.checkpoint["ts"]
         return snapshot
 
-    def test_list_threads_empty(self, client):
-        mock_checkpointer = MagicMock()
-        mock_checkpointer.list.return_value = []
-        client._checkpointer = mock_checkpointer
+    @pytest.fixture(params=SAVER_KINDS)
+    def saver(self, request):
+        with make_saver(request.param) as saver:
+            saver.kind = request.param
+            yield saver
 
-        result = client.list_threads()
-        assert result == {"thread_list": []}
-        mock_checkpointer.list.assert_called_once_with(config=None, limit=10)
+    def test_list_threads_empty(self, client, saver):
+        client._checkpointer = saver
 
-    def test_list_threads_basic(self, client):
-        mock_checkpointer = MagicMock()
-        client._checkpointer = mock_checkpointer
+        assert client.list_threads() == {"thread_list": []}
 
-        cp1 = self._make_mock_checkpoint_tuple("t1", "c1", "2023-01-01T10:00:00Z", title="Thread 1")
-        cp2 = self._make_mock_checkpoint_tuple("t1", "c2", "2023-01-01T10:05:00Z", title="Thread 1 Updated")
-        cp3 = self._make_mock_checkpoint_tuple("t2", "c3", "2023-01-02T10:00:00Z", title="Thread 2")
-        cp_empty = self._make_mock_checkpoint_tuple("", "c4", "2023-01-03T10:00:00Z", title="Thread Empty")
+    def test_list_threads_limit_counts_threads_not_checkpoints(self, client, saver):
+        client._checkpointer = saver
+        put_thread(saver, "t-old", ["2023-01-01T10:00:00Z", "2023-01-01T10:01:00Z"])
+        # A long conversation writes far more checkpoints than the limit.
+        put_thread(saver, "t-busy", [f"2023-01-02T10:{minute:02d}:00Z" for minute in range(30)])
 
-        # Mock list returns out of order to test the timestamp sorting/comparison
-        # Also includes a checkpoint with an empty thread_id which should be skipped
-        mock_checkpointer.list.return_value = [cp2, cp1, cp_empty, cp3]
+        threads = client.list_threads(limit=2)["thread_list"]
 
-        result = client.list_threads(limit=5)
-        mock_checkpointer.list.assert_called_once_with(config=None, limit=5)
+        assert [t["thread_id"] for t in threads] == ["t-busy", "t-old"]
 
-        threads = result["thread_list"]
-        assert len(threads) == 2
+    def test_list_threads_reports_first_and_latest_checkpoint(self, client, saver):
+        client._checkpointer = saver
+        checkpoint_ids = put_thread(saver, "t1", ["2023-01-01T10:00:00Z", "2023-01-01T10:05:00Z", "2023-01-01T10:09:00Z"], title="Thread 1")
 
-        # t2 should be first because its created_at (2023-01-02) is newer than t1 (2023-01-01)
-        assert threads[0]["thread_id"] == "t2"
-        assert threads[0]["created_at"] == "2023-01-02T10:00:00Z"
-        assert threads[0]["title"] == "Thread 2"
+        (thread,) = client.list_threads()["thread_list"]
 
-        assert threads[1]["thread_id"] == "t1"
-        assert threads[1]["created_at"] == "2023-01-01T10:00:00Z"
-        assert threads[1]["updated_at"] == "2023-01-01T10:05:00Z"
-        assert threads[1]["latest_checkpoint_id"] == "c2"
-        assert threads[1]["title"] == "Thread 1 Updated"
+        assert thread == {
+            "thread_id": "t1",
+            "created_at": "2023-01-01T10:00:00Z",
+            "updated_at": "2023-01-01T10:09:00Z",
+            "latest_checkpoint_id": checkpoint_ids[-1],
+            "title": "Thread 1 #2",
+        }
+
+    def test_list_threads_sorts_by_creation_then_slices(self, client, saver):
+        client._checkpointer = saver
+        put_thread(saver, "t-first", ["2023-01-01T10:00:00Z"])
+        put_thread(saver, "t-second", ["2023-01-02T10:00:00Z"])
+        put_thread(saver, "t-third", ["2023-01-03T10:00:00Z"])
+        put_thread(saver, "t-first", ["2023-01-05T10:00:00Z"])  # later activity does not change creation order
+
+        threads = client.list_threads(limit=2)["thread_list"]
+
+        assert [t["thread_id"] for t in threads] == ["t-third", "t-second"]
+
+    def test_list_threads_sort_by_updated_at_returns_most_recently_written(self, client, saver):
+        client._checkpointer = saver
+        put_thread(saver, "t-first", ["2023-01-01T10:00:00Z"])
+        put_thread(saver, "t-second", ["2023-01-02T10:00:00Z"])
+        put_thread(saver, "t-third", ["2023-01-03T10:00:00Z"])
+        put_thread(saver, "t-first", ["2023-01-05T10:00:00Z"])
+
+        threads = client.list_threads(limit=2, sort_by="updated_at")["thread_list"]
+
+        assert [t["thread_id"] for t in threads] == ["t-first", "t-third"]
+
+    def test_list_threads_includes_threads_seeded_without_an_input_checkpoint(self, client, saver):
+        client._checkpointer = saver
+        put_thread(saver, "t-run", ["2023-01-01T10:00:00Z", "2023-01-01T10:01:00Z"])
+        # The Gateway seeds a branch through update_state, so its first checkpoint is step 0.
+        put_thread(saver, "t-branch", ["2023-01-02T10:00:00Z", "2023-01-02T10:00:01Z"], title="My branch", first_step=0, first_source="branch")
+
+        threads = client.list_threads()["thread_list"]
+
+        assert [(t["thread_id"], t["created_at"]) for t in threads] == [("t-branch", "2023-01-02T10:00:00Z"), ("t-run", "2023-01-01T10:00:00Z")]
+
+    def test_list_threads_orders_goal_writes_by_checkpoint_not_ts(self, client, saver):
+        client._checkpointer = saver
+        put_thread(saver, "t-a", ["2023-01-01T10:00:00Z"])
+        put_thread(saver, "t-b", ["2023-01-02T10:00:00Z"])
+        # A goal write keeps the copied checkpoint's ts but is the newest write.
+        goal_checkpoint_id = put_goal_write(saver, "t-a")
+
+        (thread,) = client.list_threads(limit=1, sort_by="updated_at")["thread_list"]
+
+        assert thread["thread_id"] == "t-a"
+        assert thread["latest_checkpoint_id"] == goal_checkpoint_id
+        assert thread["updated_at"] == "2023-01-01T10:00:00Z"
+
+    def test_list_threads_ignores_subgraph_namespaces(self, client, saver):
+        client._checkpointer = saver
+        # Subgraph checkpoints are written both before and after the thread's own.
+        put_thread(saver, "t1", ["2023-01-01T09:00:00Z"], checkpoint_ns="subgraph-a")
+        checkpoint_ids = put_thread(saver, "t1", ["2023-01-01T10:00:00Z", "2023-01-01T10:05:00Z"])
+        put_thread(saver, "t1", ["2023-01-01T10:09:00Z"], checkpoint_ns="subgraph-b")
+
+        (thread,) = client.list_threads()["thread_list"]
+
+        assert thread["created_at"] == "2023-01-01T10:00:00Z"
+        assert thread["updated_at"] == "2023-01-01T10:05:00Z"
+        assert thread["latest_checkpoint_id"] == checkpoint_ids[-1]
+
+    def test_list_threads_reads_sql_savers_from_the_index(self, client, saver):
+        if saver.kind not in INDEXED_SAVER_KINDS:
+            pytest.skip("only SQL savers have a thread index")
+        client._checkpointer = saver
+        put_thread(saver, "t1", ["2023-01-01T10:00:00Z", "2023-01-01T10:01:00Z"])
+
+        with patch.object(type(saver), "list", side_effect=AssertionError("walked every checkpoint")):
+            threads = client.list_threads()["thread_list"]
+
+        assert [t["thread_id"] for t in threads] == ["t1"]
+
+    def test_list_threads_rejects_unknown_sort_key(self, client, saver):
+        client._checkpointer = saver
+
+        with pytest.raises(ValueError, match="sort_by"):
+            client.list_threads(sort_by="title")
+
+    def test_tui_session_resolves_past_a_busy_thread(self, client, saver):
+        from deerflow.tui.cli import LaunchPlan
+        from deerflow.tui.session import Session
+
+        client._checkpointer = saver
+        put_thread(saver, "t-old", ["2023-01-01T10:00:00Z"], title="Old chat")
+        put_thread(saver, "t-branch", ["2023-01-01T11:00:00Z"], title="My branch", first_step=0, first_source="branch")
+        put_thread(saver, "t-busy", [f"2023-01-02T10:{minute:02d}:00Z" for minute in range(120)], title="Busy chat")
+        put_goal_write(saver, "t-old")
+        session = Session(client=client)
+
+        # --resume <title> finds threads whose checkpoints fall outside the newest 100,
+        # including a branch that never had an input checkpoint.
+        assert session.resolve_ref("Old chat #0") == "t-old"
+        assert session.resolve_ref("My branch #0") == "t-branch"
+        # --continue resumes the thread written most recently, even by a goal write.
+        assert session.resolve_thread(LaunchPlan(mode="tui", continue_recent=True)) == "t-old"
 
     def test_list_threads_fallback_checkpointer(self, client):
         mock_checkpointer = MagicMock()
@@ -2386,15 +2478,17 @@ class TestThreadQueries:
 
 
 class TestGoalManagement:
-    def test_goal_round_trip_uses_checkpoint(self, client):
-        from langgraph.checkpoint.memory import InMemorySaver
+    # ``sqlite`` and ``cached-sqlite`` are the TUI/embedded defaults: sync-only
+    # savers whose async methods exist but raise NotImplementedError.
+    @pytest.mark.parametrize("saver_kind", SAVER_KINDS)
+    def test_goal_round_trip_uses_checkpoint(self, client, saver_kind):
+        with make_saver(saver_kind) as saver:
+            client._checkpointer = saver
 
-        client._checkpointer = InMemorySaver()
-
-        set_result = client.set_goal("goal-thread", "finish all tests", max_continuations=3)
-        get_result = client.get_goal("goal-thread")
-        clear_result = client.clear_goal("goal-thread")
-        after_clear = client.get_goal("goal-thread")
+            set_result = client.set_goal("goal-thread", "finish all tests", max_continuations=3)
+            get_result = client.get_goal("goal-thread")
+            clear_result = client.clear_goal("goal-thread")
+            after_clear = client.get_goal("goal-thread")
 
         assert set_result["goal"]["objective"] == "finish all tests"
         assert set_result["goal"]["max_continuations"] == 3
@@ -2406,6 +2500,73 @@ class TestGoalManagement:
 # ---------------------------------------------------------------------------
 # MCP config
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_update_mcp_config_installs_the_local_committed_fence(
+    client,
+    reconciler,  # noqa: F811 - fixture imported from the sibling suite
+    monkeypatch,
+    tmp_path,
+):
+    """A client write must retire the writer process's own binding, not just publish the token."""
+    import test_mcp_cache_reconciliation as harness
+
+    from deerflow.mcp import session_pool as session_pool_module
+    from deerflow.mcp.session_pool import MCPSessionPool
+
+    cfg = tmp_path / "extensions_config.json"
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    log = harness._session_log()
+    servers = {"A": harness._stdio("cmd-A")}
+    await harness._initialize(monkeypatch, cfg, servers, log)
+    binding_before = harness._binding(pool, "A")
+
+    # Delete A, then identically re-add it through the client writer. The
+    # committing process must install the new epochs under the same lock.
+    client.update_mcp_config({})
+    client.update_mcp_config({"A": {"enabled": True, "type": "stdio", "command": "cmd-A"}})
+
+    await harness._wait_until(lambda: log["exited"].get("cmd-A") == 1)
+    assert harness._binding(pool, "A") is not binding_before
+
+
+@pytest.mark.asyncio
+async def test_update_mcp_config_post_commit_failure_still_resets_agent(
+    client,
+    reconciler,  # noqa: F811 - fixture imported from the sibling suite
+    monkeypatch,
+    tmp_path,
+):
+    """A committed write whose local handoff fails must not keep the old cached agent."""
+    import test_mcp_cache_reconciliation as harness
+
+    from deerflow.mcp import session_pool as session_pool_module
+    from deerflow.mcp.session_pool import MCPSessionPool
+
+    cfg = tmp_path / "extensions_config.json"
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    log = harness._session_log()
+    await harness._initialize(monkeypatch, cfg, {"A": harness._stdio("cmd-A")}, log)
+
+    client._agent = "cached-agent"
+    client._agent_config_key = ("old",)
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("prepare failed")
+
+    monkeypatch.setattr("deerflow.mcp.cache.prepare_mcp_reconciliation", _boom)
+
+    with pytest.raises(RuntimeError, match="saved, but local cache reconciliation failed"):
+        client.update_mcp_config({"A": {"enabled": True, "type": "stdio", "command": "cmd-A2"}})
+
+    # The config was committed...
+    assert json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]["A"]["command"] == "cmd-A2"
+    # ...so the old agent must not be reusable, and the local pool is retired.
+    assert client._agent is None
+    assert session_pool_module.get_session_pool() is not pool
 
 
 class TestMcpConfig:
@@ -2454,7 +2615,7 @@ class TestMcpConfig:
         finally:
             tmp_path.unlink()
 
-    def test_update_mcp_config_preserves_raw_sibling_keys(self, client, tmp_path, monkeypatch):
+    def test_update_mcp_config_preserves_raw_sibling_keys(self, client, reconciler, tmp_path, monkeypatch):  # noqa: F811 - imported fixture
         """Only ``mcpServers`` is replaced; every other key keeps its on-disk ``$VAR`` form."""
         monkeypatch.setenv("DEERFLOW_TEST_GH_TOKEN", "ghp_live_secret_value")
         config_file = tmp_path / "extensions_config.json"
@@ -2475,13 +2636,37 @@ class TestMcpConfig:
         ):
             client.update_mcp_config({"new": {"type": "stdio", "command": "uvx", "env": {"TOKEN": "$DEERFLOW_TEST_GH_TOKEN"}}})
 
-        written_text = config_file.read_text(encoding="utf-8")
-        assert json.loads(written_text) == {
-            "mcpServers": {"new": {"type": "stdio", "command": "uvx", "env": {"TOKEN": "$DEERFLOW_TEST_GH_TOKEN"}}},
-            "mcpInterceptors": {"auth": "$DEERFLOW_TEST_GH_TOKEN"},
-            "skills": {"kept": {"enabled": False}},
-        }
-        assert "ghp_live_secret_value" not in written_text
+        written = json.loads(config_file.read_text(encoding="utf-8"))
+        assert written["mcpServers"] == {"new": {"type": "stdio", "command": "uvx", "env": {"TOKEN": "$DEERFLOW_TEST_GH_TOKEN"}}}
+        assert written["mcpInterceptors"] == {"auth": "$DEERFLOW_TEST_GH_TOKEN"}
+        assert written["skills"] == {"kept": {"enabled": False}}
+        # The controlled writer also commits the shared lifecycle ledger: "old"
+        # was removed (tombstone) and "new" was added, both with fresh tokens.
+        lifecycle = written["mcpLifecycle"]
+        assert lifecycle["version"] == 1
+        assert set(lifecycle["servers"]) == {"old", "new"}
+        assert all(len(token) == 32 and all(c in "0123456789abcdef" for c in token) for token in lifecycle["servers"].values())
+        # Raw $VAR placeholders are never expanded into the file.
+        assert "ghp_live_secret_value" not in config_file.read_text(encoding="utf-8")
+
+    def test_update_mcp_config_delete_then_identical_readd_advances_generation(self, client, reconciler, tmp_path, monkeypatch):  # noqa: F811 - imported fixture
+        """The client writer must not coalesce delete -> identical re-add."""
+        config_file = tmp_path / "extensions_config.json"
+        config_file.write_text(
+            json.dumps({"mcpServers": {"A": {"enabled": True, "type": "stdio", "command": "cmd-A"}}, "skills": {}}),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
+            patch("deerflow.client.reload_extensions_config", return_value=ExtensionsConfig()),
+        ):
+            client.update_mcp_config({})
+            after_delete = json.loads(config_file.read_text(encoding="utf-8"))["mcpLifecycle"]["servers"]["A"]
+            client.update_mcp_config({"A": {"enabled": True, "type": "stdio", "command": "cmd-A"}})
+            after_readd = json.loads(config_file.read_text(encoding="utf-8"))["mcpLifecycle"]["servers"]["A"]
+
+        assert after_readd != after_delete
 
     def test_update_mcp_config_rejects_invalid_candidate_without_writing(self, client, tmp_path):
         config_file = tmp_path / "extensions_config.json"
@@ -4948,6 +5133,184 @@ class TestUploadDuplicateFilenames:
     Now duplicates are renamed (data.txt → data_1.txt) and the response
     includes original_filename so the agent / caller can see what happened.
     """
+
+    @pytest.mark.parametrize("companion", [False, True])
+    def test_rejects_substituted_upload_copy(self, client, tmp_path, monkeypatch, companion):
+        from support.symlinks import symlink_or_skip
+
+        from deerflow.uploads import manager
+
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
+        source = tmp_path / ("notes.pdf" if companion else "notes.txt")
+        source.write_bytes(b"original upload")
+        outside = tmp_path / "outside.txt"
+        outside.write_bytes(b"private test fixture")
+        real_copy = manager.shutil.copyfileobj
+        copy_count = 0
+
+        def copy_and_swap(src, dst):
+            nonlocal copy_count
+            real_copy(src, dst)
+            staging = next(uploads.glob(".upload-*.part"), None)
+            if staging is None:
+                # Source capture happens outside uploads, before staging.
+                return
+            copy_count += 1
+            if copy_count == (2 if companion else 1):
+                try:
+                    staging.unlink()
+                except PermissionError:
+                    if os.name == "nt":
+                        pytest.skip("host prevents replacing an open staging file")
+                    raise
+                symlink_or_skip(staging, outside)
+
+        async def fake_convert(path, output_path=None):
+            output_path.write_bytes(b"converted content")
+            return output_path
+
+        monkeypatch.setattr(manager.shutil, "copyfileobj", copy_and_swap)
+        with (
+            patch("deerflow.client.ensure_uploads_dir", return_value=uploads),
+            patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
+            patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=fake_convert),
+        ):
+            result = client.upload_files("t-dup", [source])
+
+        assert outside.read_bytes() == b"private test fixture"
+        assert outside.stat().st_nlink == 1
+        assert not list(uploads.glob(".upload-*.part"))
+        if companion:
+            assert copy_count == 2
+            assert result["success"] is True
+            assert (uploads / "notes.pdf").read_bytes() == b"original upload"
+            assert "markdown_file" not in result["files"][0]
+            assert not os.path.lexists(uploads / "notes.md")
+        else:
+            assert copy_count == 1
+            assert result["success"] is False
+            assert result["files"] == []
+            assert result["skipped_files"] == ["notes.txt"]
+            assert not os.path.lexists(uploads / "notes.txt")
+
+    @pytest.mark.parametrize("count", [2, 3])
+    @pytest.mark.parametrize("suffix", [".txt", ".pdf"])
+    def test_concurrent_uploads_claim_distinct_names(self, client, tmp_path, count, suffix):
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        sources = []
+        for index in range(count):
+            directory = tmp_path / str(index)
+            directory.mkdir()
+            source = directory / f"data{suffix}"
+            source.write_bytes(f"payload-{index}".encode())
+            sources.append(source)
+
+        all_ready = threading.Barrier(count)
+        source_names = set(sources)
+        opened_sources = set()
+        opened_lock = threading.Lock()
+        real_open = open
+
+        def synchronized_open(file, mode="r", *args, **kwargs):
+            fh = real_open(file, mode, *args, **kwargs)
+            wait = False
+            if mode == "rb" and isinstance(file, (str, os.PathLike)) and Path(file) in source_names:
+                with opened_lock:
+                    if Path(file) not in opened_sources:
+                        opened_sources.add(Path(file))
+                        wait = True
+            if wait:
+                # All callers reach the real copy before any publishes its name.
+                try:
+                    all_ready.wait(timeout=15)
+                except BaseException:
+                    fh.close()
+                    raise
+            return fh
+
+        async def fake_convert(path: Path, output_path: Path | None = None) -> Path:
+            assert output_path is not None
+            output_path.write_bytes(path.read_bytes())
+            return output_path
+
+        with (
+            patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+            patch("builtins.open", side_effect=synchronized_open),
+            patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
+            patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=fake_convert),
+        ):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=count) as pool:
+                futures = [pool.submit(client.upload_files, "t-dup", [source]) for source in sources]
+                results = [future.result(timeout=30) for future in futures]
+
+        files = [result["files"][0] for result in results]
+        names = {file["filename"] for file in files}
+        assert names == {f"data{suffix}", *(f"data_{index}{suffix}" for index in range(1, count))}
+        for source, result, file in zip(sources, results, files, strict=True):
+            assert result["success"] is True
+            assert (uploads_dir / file["filename"]).read_bytes() == source.read_bytes()
+            if file["filename"] != source.name:
+                assert file["original_filename"] == source.name
+            if suffix == ".pdf":
+                from deerflow.uploads.companions import resolve_companion
+
+                assert (uploads_dir / file["markdown_file"]).read_bytes() == source.read_bytes()
+                assert resolve_companion(uploads_dir / file["filename"]) == uploads_dir / file["markdown_file"]
+        assert len(list(uploads_dir.iterdir())) == count * (2 if suffix == ".pdf" else 1)
+
+    def test_concurrent_same_stem_companions_remain_owned(self, client, tmp_path):
+        from deerflow.uploads.companions import resolve_companion
+
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        sources = [tmp_path / "report.pdf", tmp_path / "report.docx"]
+        for index, source in enumerate(sources):
+            source.write_bytes(f"document-{index}".encode())
+        both_converting = threading.Barrier(2)
+
+        async def fake_convert(path: Path, output_path: Path | None = None) -> Path:
+            assert output_path is not None
+            output_path.write_bytes(path.read_bytes())
+            both_converting.wait(timeout=15)
+            return output_path
+
+        with (
+            patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+            patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf", ".docx"}),
+            patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=fake_convert),
+        ):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [pool.submit(client.upload_files, "t-dup", [source]) for source in sources]
+                results = [future.result(timeout=30) for future in futures]
+
+        files = [result["files"][0] for result in results]
+        assert {file["markdown_file"] for file in files} == {"report.md", "report_1.md"}
+        for source, file in zip(sources, files, strict=True):
+            assert file["filename"] == source.name
+            companion = resolve_companion(uploads_dir / source.name)
+            assert companion == uploads_dir / file["markdown_file"]
+            assert companion.read_bytes() == source.read_bytes()
+        assert len(list(uploads_dir.iterdir())) == 4
+
+    def test_sequential_upload_keeps_replacement_behavior(self, client, tmp_path):
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        first = tmp_path / "first" / "data.txt"
+        second = tmp_path / "second" / "data.txt"
+        first.parent.mkdir()
+        second.parent.mkdir()
+        first.write_bytes(b"first")
+        second.write_bytes(b"second")
+
+        with patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir):
+            client.upload_files("t-dup", [first])
+            result = client.upload_files("t-dup", [second])
+
+        assert result["files"][0]["filename"] == "data.txt"
+        assert (uploads_dir / "data.txt").read_bytes() == b"second"
+        assert len(list(uploads_dir.iterdir())) == 1
 
     def test_duplicate_filenames_auto_renamed(self, client):
         """Two files with same basename → second gets _1 suffix."""

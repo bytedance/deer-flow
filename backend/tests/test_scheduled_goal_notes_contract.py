@@ -51,7 +51,64 @@ def test_literal_stand_down_reasons_and_no_verdict_are_in_contract():
 
 
 @pytest.mark.parametrize("code", sorted(_CODES))
-def test_im_notice_translates_every_contract_code(code):
-    text = render_notification_text({"event": "run_unmet", "task_id": "task-a", "payload": {"reason_code": code}})
-    assert "Reason: unknown." not in text
+@pytest.mark.parametrize(("locale", "unknown"), [("en-US", "no reason was recorded"), ("zh-CN", "没有记录原因")])
+def test_im_notice_translates_every_contract_code(code, locale, unknown):
+    text = render_notification_text({"event": "run_unmet", "task_id": "task-a", "payload": {"reason_code": code, "locale": locale}})
+    assert unknown not in text
     assert code not in text
+
+
+def test_contract_version_three_keeps_version_two_keys():
+    assert _CONTRACT["version"] == 3
+    assert _CONTRACT["scheduled_origin_key"] == "deerflow_scheduled_origin"
+    assert {"agent_stop_last_error_prefix", "auto_pause_last_error", "unmet_reason_codes", "check_failure_codes", "host_run_errors"} <= set(_CONTRACT)
+
+
+def test_lifecycle_vocabulary_matches_finalization_constants():
+    assert tuple(_CONTRACT["lifecycle_events"]) == finalization.LIFECYCLE_EVENTS
+    assert {event: tuple(reasons) for event, reasons in _CONTRACT["lifecycle_reasons"].items()} == finalization.LIFECYCLE_REASONS
+    assert set(_CONTRACT["lifecycle_reasons"]) == set(_CONTRACT["lifecycle_events"])
+    assert tuple(_CONTRACT["notification_events"]) == finalization.NOTIFICATION_EVENTS
+    # The existing outbox name of the automatic pause is kept, so queued rows stay valid.
+    assert "task_paused" in _CONTRACT["notification_events"]
+    assert set(finalization.RUN_EVENT_BY_STATUS.values()) <= set(_CONTRACT["notification_events"])
+
+
+def test_scheduled_origin_key_matches_the_gateway_constant():
+    from app.gateway.services import SCHEDULED_ORIGIN_KEY
+
+    assert _CONTRACT["scheduled_origin_key"] == SCHEDULED_ORIGIN_KEY
+
+
+def test_check_failure_codes_match_finalization_and_are_unmet_reasons():
+    assert tuple(_CONTRACT["check_failure_codes"]) == finalization.CHECK_FAILURE_CODES
+    assert set(_CONTRACT["check_failure_codes"]) <= _CODES
+
+
+def test_host_run_errors_match_the_host_note_constants():
+    from deerflow.scheduler import host_notes
+
+    assert _CONTRACT["host_run_errors"] == {
+        "restarted": host_notes.RUN_ERROR_RESTARTED,
+        "lease_lost": host_notes.RUN_ERROR_LEASE_LOST,
+        "queue_timeout": host_notes.RUN_ERROR_QUEUE_TIMEOUT,
+        "paused_while_queued": host_notes.RUN_ERROR_PAUSED_WHILE_QUEUED,
+        "deleted_while_queued": host_notes.RUN_ERROR_DELETED_WHILE_QUEUED,
+        "end_reached": host_notes.RUN_ERROR_END_REACHED,
+        "interrupted": host_notes.RUN_ERROR_INTERRUPTED,
+    }
+
+
+@pytest.mark.parametrize(
+    ("last_error", "expected"),
+    [
+        (f"{finalization.AGENT_STOP_LAST_ERROR_PREFIX}run-1", True),
+        (finalization.AUTO_PAUSE_LAST_ERROR, True),
+        (finalization.AGENT_STOP_LAST_ERROR_PREFIX, False),
+        (f"{finalization.AGENT_STOP_LAST_ERROR_PREFIX} run-1", False),
+        ("boom", False),
+        (None, False),
+    ],
+)
+def test_host_pause_marker_recognizes_only_host_pauses(last_error, expected):
+    assert finalization.is_host_pause_marker(last_error) is expected

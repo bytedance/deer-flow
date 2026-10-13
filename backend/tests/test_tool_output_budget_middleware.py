@@ -3,17 +3,22 @@
 Covers: pass-through, disk externalization, fallback truncation, UTF-8
 boundaries, Command results, model-request history patching, superseded
 write_file payload elision (issue #5328), config variations, exempt tools,
-per-tool overrides, edge cases, and both sync/async code paths.
+per-tool overrides, bash exit-marker preservation after budget rewrites,
+edge cases, and both sync/async code paths.
 """
 
 from __future__ import annotations
 
 import contextlib
+import csv
 import hashlib
+import importlib.util
+import io
 import json
 import os
 import pathlib
 import re
+import sys
 import tempfile
 from types import SimpleNamespace
 
@@ -23,12 +28,14 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.types import Command
 
 from deerflow.agents.middlewares.tool_output_budget_middleware import (
+    _BASH_EXIT_MARKER_TAIL_RE,
     TOOL_OUTPUT_BLOB_KEY,
     ToolOutputBudgetMiddleware,
     _build_fallback,
     _build_preview,
     _effective_trigger,
     _externalize,
+    _keep_exit_marker_last,
     _message_text,
     _needs_budget,
     _patch_model_messages,
@@ -97,6 +104,22 @@ def _tm(content: str = "ok", name: str = "tool", tool_call_id: str = "tc-1") -> 
     return ToolMessage(content=content, name=name, tool_call_id=tool_call_id)
 
 
+def _pytest_like_output(exit_line: str = "Exit Code: 1") -> str:
+    """Pytest-shaped bash output in the default 12k–20k budget window."""
+    return "============================= test session starts =============================\n" + ("collected 12 items\n" + "." * 12 + "\n") * 500 + f"12 passed in 1.23s\n{exit_line}"
+
+
+def _bash_tm(content: str, name: str = "bash") -> ToolMessage:
+    return ToolMessage(
+        content=content,
+        name=name,
+        tool_call_id="tc-1",
+        id="tool-msg-1",
+        artifact={"k": "v"},
+        additional_kwargs={"deerflow_tool_meta": {"status": "success", "source": "normalized"}},
+    )
+
+
 # ===========================================================================
 # Unit tests for helper functions
 # ===========================================================================
@@ -123,6 +146,104 @@ class TestMessageText:
 
     def test_non_string_non_list(self):
         assert _message_text(42) is None
+
+    def test_json_block_is_rendered(self):
+        assert _message_text([{"type": "json", "json": {"a": 1}}]) == '{"a": 1}'
+
+    def test_json_block_mixed_with_text(self):
+        assert _message_text([{"text": "rows:"}, {"type": "json", "json": [1, 2]}]) == "rows:\n[1, 2]"
+
+    def test_json_block_non_serializable_falls_back_to_str(self):
+        assert _message_text([{"type": "json", "json": {"bad": {1}}}]) == "{'bad': {1}}"
+
+    def test_json_block_circular_falls_back_to_str(self):
+        payload: dict = {}
+        payload["self"] = payload
+        result = _message_text([{"type": "json", "json": payload}])
+        # repr of a recursive dict differs across versions ("..." vs "{...}")
+        assert result is not None and result.startswith("{'self': ") and "..." in result
+
+    def test_json_block_without_json_key_returns_none(self):
+        assert _message_text([{"type": "json"}]) is None
+
+
+class TestStructuredJsonMindIEBudget:
+    def test_mixed_json_media_externalizes_without_losing_media(self, tmp_path):
+        from deerflow.models.mindie_provider import _fix_messages
+
+        payload = {"rows": ["x" * 10_000], "answer": "TAIL_SENTINEL"}
+        media = {"type": "image", "base64": "BINARY_SENTINEL", "mime_type": "image/png"}
+        message = ToolMessage(
+            content=[{"type": "json", "json": payload}, media, {"type": "json"}],
+            name="query_rows",
+            tool_call_id="call_rows",
+            artifact={"source": "rows"},
+        )
+        middleware = ToolOutputBudgetMiddleware(config=ToolOutputConfig(externalize_min_chars=100, preview_head_chars=20, preview_tail_chars=10))
+
+        result = middleware.wrap_tool_call(_make_request(tool_name="query_rows", outputs_path=str(tmp_path)), lambda _: message)
+
+        assert result is not message
+        assert isinstance(result.content, list)
+        assert media in result.content
+        assert result.artifact == message.artifact
+        files = list((tmp_path / ".tool-results").iterdir())
+        assert len(files) == 1
+        assert json.loads(files[0].read_text(encoding="utf-8")) == payload
+        visible = _fix_messages([result])[0].content
+        assert "Full query_rows output saved to" in visible
+        assert "BINARY_SENTINEL" not in visible
+        assert "x" * 10_000 not in visible
+        assert message.content[0]["json"] == payload
+
+    @pytest.mark.anyio
+    async def test_mixed_json_media_history_is_budgeted_before_mindie(self):
+        from deerflow.models.mindie_provider import _fix_messages
+
+        payload = {"rows": "x" * 2000, "answer": "TAIL_SENTINEL"}
+        media = {"type": "image", "base64": "BINARY_SENTINEL", "mime_type": "image/png"}
+        message = ToolMessage(content=[{"type": "json", "json": payload}, media], name="query_rows", tool_call_id="call_history")
+        request = ModelRequest(model=None, messages=[message], tools=[], state={})
+        middleware = ToolOutputBudgetMiddleware(config=ToolOutputConfig(externalize_min_chars=100, fallback_max_chars=300, fallback_head_chars=80, fallback_tail_chars=40))
+        captured = {}
+
+        async def handler(req):
+            captured["request"] = req
+            return []
+
+        await middleware.awrap_model_call(request, handler)
+
+        forwarded = captured["request"]
+        assert forwarded is not request
+        assert media in forwarded.messages[0].content
+        visible = _fix_messages(forwarded.messages)[0].content
+        assert len(visible) <= 333  # Configured text limit plus XML framing.
+        assert "TAIL_SENTINEL" in visible
+        assert "BINARY_SENTINEL" not in visible
+        assert message.content[0]["json"] == payload
+
+    @pytest.mark.parametrize("structured", [False, True], ids=["plain-text", "json"])
+    @pytest.mark.parametrize(
+        "config,tool_name",
+        [
+            (ToolOutputConfig(enabled=False), "query_rows"),
+            (ToolOutputConfig(externalize_min_chars=60_000, fallback_max_chars=60_000), "query_rows"),
+            (ToolOutputConfig(), "read_file"),
+        ],
+        ids=["disabled", "increased-limits", "exempt-read"],
+    )
+    def test_configured_passthrough_survives_provider_normalization(self, config, tool_name, structured):
+        from deerflow.models.mindie_provider import _fix_messages
+
+        payload = "x" * 35_000 + "TAIL_SENTINEL"
+        content = [{"type": "json", "json": {"rows": payload}}] if structured else payload
+        message = ToolMessage(content=content, name=tool_name, tool_call_id="call_passthrough")
+        middleware = ToolOutputBudgetMiddleware(config=config)
+
+        result = middleware.wrap_tool_call(_make_request(tool_name=tool_name), lambda _: message)
+
+        assert result is message
+        assert payload in _fix_messages([result])[0].content
 
 
 class TestSnapToLineBoundary:
@@ -324,6 +445,11 @@ class TestNeedsBudget:
         msg = ToolMessage(content=[{"type": "image", "data": "x" * 100}], name="tool", tool_call_id="tc-1")
         assert _needs_budget(msg, config) is False
 
+    def test_structured_json_output_needs_budget(self):
+        config = ToolOutputConfig(externalize_min_chars=50)
+        msg = ToolMessage(content=[{"type": "json", "json": {"rows": ["x" * 100]}}], name="query_rows", tool_call_id="tc-1")
+        assert _needs_budget(msg, config) is True
+
 
 class TestBuildPreview:
     def test_contains_typed_summary_and_reference(self):
@@ -524,6 +650,57 @@ class TestToolOutputSynopsis:
         # The re-joined comma-broken row is the failure mode we are guarding.
         assert "Ada,a fine, brilliant" not in first_row
 
+    @pytest.mark.parametrize("delimiter,kind", [(",", "csv"), ("\t", "tsv")])
+    @pytest.mark.parametrize("newline", ["\n", "\r\n"])
+    @pytest.mark.parametrize("count", [6, 60])
+    def test_table_synopsis_counts_logical_records(self, delimiter, kind, newline, count):
+        """Count logical records even beyond the physical-line recognition sample."""
+        buffer = io.StringIO(newline="")
+        writer = csv.writer(buffer, delimiter=delimiter, lineterminator=newline)
+        writer.writerow(["id", "description", "score"])
+        for index in range(count):
+            writer.writerow([index, f"first{delimiter}part{newline}second part", 90])
+        content = buffer.getvalue()
+        synopsis = build_tool_output_synopsis(content)
+        assert synopsis.kind == kind
+        assert synopsis.summary == [f"{kind.upper()} table with {count} data rows and 3 columns."]
+        preview = _build_preview(content, tool_name="bash", virtual_path="/mnt/test/table", head_chars=100, tail_chars=100)
+        assert synopsis.summary[0] in preview
+
+    @pytest.mark.parametrize("delimiter,kind", [(",", "csv"), ("\t", "tsv")])
+    def test_table_synopsis_ignores_blank_records(self, delimiter, kind):
+        """Ignore blank records while preserving blank lines inside quoted fields."""
+        buffer = io.StringIO(newline="")
+        writer = csv.writer(buffer, delimiter=delimiter)
+        writer.writerow(["id", "description"])
+        for index in range(6):
+            writer.writerow([index, "first\n\nlast"])
+            writer.writerow([])
+            writer.writerow([" ", ""])
+        synopsis = build_tool_output_synopsis(buffer.getvalue())
+        assert synopsis.kind == kind
+        assert synopsis.summary == [f"{kind.upper()} table with 6 data rows and 2 columns."]
+
+    @pytest.mark.parametrize("delimiter,kind", [(",", "csv"), ("\t", "tsv")])
+    @pytest.mark.parametrize("suffix", ['"unterminated', '"closed"invalid', "field_limit"])
+    def test_table_synopsis_does_not_invent_count_after_parse_failure(self, delimiter, kind, suffix):
+        """Do not report an exact total when parsing fails beyond the sample."""
+        content = f"id{delimiter}description\n" + "".join(f"{index}{delimiter}ok\n" for index in range(60))
+        original_limit = csv.field_size_limit()
+        if suffix == "field_limit":
+            suffix = "x" * (original_limit + 1)
+        synopsis = build_tool_output_synopsis(content + f"61{delimiter}{suffix}")
+        assert synopsis.kind == kind
+        assert synopsis.summary == [f"{kind.upper()} table with an undetermined number of data rows and 2 columns."]
+        assert csv.field_size_limit() == original_limit
+
+    def test_table_synopsis_preserves_oversized_input_guard(self):
+        """Skip structured parsing when the input exceeds the byte budget."""
+        content = "id,description\n" + "1,ok\n" * 6 + "x" * 5_000_000
+        synopsis = build_tool_output_synopsis(content)
+        assert synopsis.kind == "unknown"
+        assert "Parsing skipped due to size limit" in synopsis.summary[0]
+
     def test_review_9_tsv_detector_rejects_tab_indented_bash(self):
         # Tab-indented output (ls -l, tree, indented logs) used to be
         # accepted as TSV because _try_table only checked that the
@@ -642,6 +819,185 @@ class TestBuildFallback:
 
 
 # ===========================================================================
+# Bash exit-marker preservation (harvest reads Exit Code: N from the end)
+# ===========================================================================
+
+
+class TestBashExitMarkerPreservation:
+    """Budget rewrites must keep a trailing bash exit marker last.
+
+    The subagent executor harvests status with ``Exit Code: N\\s*$``. Preview
+    construction always ends with an Access footer, so without this the
+    marker is no longer last and a failed command is harvested as success.
+    """
+
+    def test_keep_exit_marker_last_appends_for_bash(self):
+        original = "out\nExit Code: 1"
+        rewritten = "preview\nAccess:\n- Use read_file"
+        assert _keep_exit_marker_last(original, rewritten, tool_name="bash") == "preview\nAccess:\n- Use read_file\nExit Code: 1"
+
+    def test_keep_exit_marker_last_is_noop_for_other_tools(self):
+        original = "out\nExit Code: 1"
+        rewritten = "preview\nAccess:\n- Use read_file"
+        assert _keep_exit_marker_last(original, rewritten, tool_name="web_fetch") == rewritten
+
+    def test_keep_exit_marker_last_is_noop_when_already_last(self):
+        original = "out\nExit Code: 0"
+        rewritten = "preview\nExit Code: 0"
+        assert _keep_exit_marker_last(original, rewritten, tool_name="bash") == rewritten
+
+    def test_wrap_tool_call_keeps_failed_exit_marker_last(self):
+        content = _pytest_like_output("Exit Code: 1")
+        assert 12_000 < len(content) <= 20_000
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mw = ToolOutputBudgetMiddleware(config=ToolOutputConfig())
+            msg = _bash_tm(content)
+            result = mw.wrap_tool_call(_make_request(tool_name="bash", outputs_path=tmpdir), lambda _: msg)
+
+        assert isinstance(result, ToolMessage)
+        assert result is not msg
+        assert str(result.content).rstrip().endswith("Exit Code: 1")
+        assert "Access:" in result.content
+        assert "read_file" in result.content
+        assert result.additional_kwargs["deerflow_tool_meta"] == {"status": "success", "source": "normalized"}
+        assert result.artifact == {"k": "v"}
+        assert result.id == "tool-msg-1"
+
+    @pytest.mark.anyio
+    async def test_awrap_tool_call_keeps_failed_exit_marker_last(self):
+        content = _pytest_like_output("Exit Code: 1")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mw = ToolOutputBudgetMiddleware(config=ToolOutputConfig())
+            msg = _bash_tm(content)
+
+            async def handler(_):
+                return msg
+
+            result = await mw.awrap_tool_call(_make_request(tool_name="bash", outputs_path=tmpdir), handler)
+
+        assert str(result.content).rstrip().endswith("Exit Code: 1")
+        assert "Access:" in result.content
+        assert result.artifact == {"k": "v"}
+        assert result.id == "tool-msg-1"
+
+    def test_wrap_tool_call_keeps_successful_exit_marker_last(self):
+        content = _pytest_like_output("Exit Code: 0")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mw = ToolOutputBudgetMiddleware(config=ToolOutputConfig())
+            result = mw.wrap_tool_call(_make_request(tool_name="bash", outputs_path=tmpdir), lambda _: _bash_tm(content))
+        assert str(result.content).rstrip().endswith("Exit Code: 0")
+        assert "Access:" in result.content
+
+    def test_wrap_tool_call_without_marker_ends_at_access_footer(self):
+        content = _pytest_like_output("12 failed in 1.23s")
+        assert not content.rstrip().endswith("Exit Code: 1")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mw = ToolOutputBudgetMiddleware(config=ToolOutputConfig())
+            result = mw.wrap_tool_call(_make_request(tool_name="bash", outputs_path=tmpdir), lambda _: _bash_tm(content))
+        assert "Access:" in result.content
+        assert "read_file" in result.content
+        assert not str(result.content).rstrip().endswith("Exit Code: 1")
+        assert "Exit Code:" not in str(result.content).rsplit("Access:", 1)[-1]
+
+    def test_non_bash_tool_does_not_promote_exit_marker(self):
+        content = _pytest_like_output("Exit Code: 1")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mw = ToolOutputBudgetMiddleware(config=ToolOutputConfig())
+            result = mw.wrap_tool_call(
+                _make_request(tool_name="web_fetch", outputs_path=tmpdir),
+                lambda _: _bash_tm(content, name="web_fetch"),
+            )
+        assert "Access:" in result.content
+        assert not str(result.content).rstrip().endswith("Exit Code: 1")
+
+    def test_bash_tool_alias_also_preserves_marker(self):
+        content = _pytest_like_output("Exit Code: 1")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mw = ToolOutputBudgetMiddleware(config=ToolOutputConfig())
+            result = mw.wrap_tool_call(
+                _make_request(tool_name="bash_tool", outputs_path=tmpdir),
+                lambda _: _bash_tm(content, name="bash_tool"),
+            )
+        assert str(result.content).rstrip().endswith("Exit Code: 1")
+
+    def test_fallback_tiny_budget_keeps_marker_and_stays_within_max_chars(self):
+        content = _pytest_like_output("Exit Code: 1")
+        result = _build_fallback(content, tool_name="bash", max_chars=80, head_chars=8000, tail_chars=3000)
+        assert len(result) <= 80
+        assert result.rstrip().endswith("Exit Code: 1")
+
+    def test_fallback_default_budget_leaves_payload_unchanged(self):
+        content = _pytest_like_output("Exit Code: 1")
+        result = _build_fallback(content, tool_name="bash", max_chars=30_000, head_chars=8000, tail_chars=3000)
+        assert result == content
+        assert result.rstrip().endswith("Exit Code: 1")
+
+    def test_fallback_never_exceeds_max_chars_with_exit_marker(self):
+        content = _pytest_like_output("Exit Code: 1")
+        marker_line = "\nExit Code: 1"
+        for max_chars in [10, len(marker_line) - 1, len(marker_line), 20, 80, 200, 500, 1000, 5000, 20000]:
+            result = _build_fallback(content, tool_name="bash", max_chars=max_chars, head_chars=max_chars // 2, tail_chars=max_chars // 4)
+            assert len(result) <= max_chars, f"max_chars={max_chars}: got {len(result)}"
+            if max_chars >= len(marker_line):
+                assert result.rstrip().endswith("Exit Code: 1"), f"max_chars={max_chars}"
+            else:
+                assert not result.rstrip().endswith("Exit Code: 1")
+
+    def test_exit_marker_regex_matches_sandbox_truncation_tail_shapes(self):
+        from deerflow.sandbox.tools import _BASH_EXIT_MARKER_TAIL_RE as sandbox_re
+
+        for content in ("out\nExit Code: 1", "out\nExit Code: -9 \n", "out\nCommand exited with code 3", "Command exited with code 3"):
+            ours = _BASH_EXIT_MARKER_TAIL_RE.search(content)
+            theirs = sandbox_re.search(content)
+            assert ours is not None and theirs is not None
+            assert ours.start() == theirs.start(), content
+
+    def test_budgeted_failed_pytest_is_harvested_as_error_not_pass(self):
+        """End-to-end: wrap_tool_call rewrite → harvest status=error → leaf holds=False.
+
+        ``tests/conftest.py`` mocks ``deerflow.subagents.executor``, so the
+        production harvest helpers are loaded under a unique module name.
+        """
+        path = pathlib.Path(__file__).parents[1] / "packages/harness/deerflow/subagents/executor.py"
+        spec = importlib.util.spec_from_file_location("_budget_exit_marker_executor", path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        try:
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+            from deerflow.subagents import acceptance_checks
+
+            content = _pytest_like_output("Exit Code: 1")
+            with tempfile.TemporaryDirectory() as tmpdir:
+                mw = ToolOutputBudgetMiddleware(config=ToolOutputConfig())
+                result = mw.wrap_tool_call(_make_request(tool_name="bash", outputs_path=tmpdir), lambda _: _bash_tm(content))
+
+            assert str(result.content).rstrip().endswith("Exit Code: 1")
+            cmd = "pytest -q"
+            ai = AIMessage(
+                content="",
+                tool_calls=[{"name": "bash", "args": {"command": cmd}, "id": "tc-1", "type": "tool_call"}],
+            )
+            state = {"messages": [HumanMessage(content="task"), ai, result]}
+            executions = module._harvest_bash_executions(state)
+            assert executions, "harvest returned no bash executions"
+            for entry in executions:
+                entry["shell_persistent"] = False
+            latest = executions[-1]
+            assert latest["status"] == "error"
+            assert latest["status_marker"] == "Exit Code: 1"
+            leaf = acceptance_checks._check_tests_passed_leaf(cmd, executions)
+            assert leaf["checked"] is True
+            assert leaf["holds"] is False
+        finally:
+            sys.modules.pop(spec.name, None)
+            # Absent when exec_module failed part-way; don't mask that error.
+            shutdown = getattr(module, "_shutdown_isolated_subagent_loop", None)
+            if shutdown is not None:
+                shutdown()
+
+
+# ===========================================================================
 # Middleware integration tests — wrap_tool_call
 # ===========================================================================
 
@@ -730,6 +1086,37 @@ class TestToolOutputBlobPersistence:
                 "thread_id": "thread-1",
             }
         ]
+
+    def test_host_externalized_file_keeps_its_blob_ref_bytes_under_windows_newlines(self, monkeypatch, tmp_path):
+        # Windows text mode wrote "\n" as "\r\n", so the file no longer matched
+        # the ref stamped from content.encode() and the next model call on this
+        # Gateway deleted it as a mismatch when no blob store was configured.
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        content = "first line\nsecond line\n" * 20
+        builtin_open = open
+
+        def windows_open(file, mode="r", *args, **kwargs):
+            if "b" not in mode and any(flag in mode for flag in "wax+"):
+                kwargs.setdefault("newline", "\r\n")
+            return builtin_open(file, mode, *args, **kwargs)
+
+        class RecordingStore:
+            def put_bytes(self, data: bytes, **kwargs) -> BlobRef:
+                return BlobRef(sha256=hashlib.sha256(data).hexdigest(), size=len(data), kind=kwargs["kind"], content_type=kwargs["content_type"])
+
+        monkeypatch.setattr(mod, "open", windows_open, raising=False)
+        monkeypatch.setattr(mod, "get_blob_store_if_enabled", lambda: RecordingStore())
+        mw = ToolOutputBudgetMiddleware(config=ToolOutputConfig(externalize_min_chars=50, preview_head_chars=20, preview_tail_chars=10))
+        result = mw.wrap_tool_call(_make_request(outputs_path=str(tmp_path)), lambda _: _tm(content, name="remote_executor"))
+        saved = tmp_path / ".tool-results" / os.path.basename(result.additional_kwargs[TOOL_OUTPUT_BLOB_KEY]["virtual_path"])
+        assert saved.read_bytes() == content.encode()
+
+        monkeypatch.setattr(mod, "get_blob_store_if_enabled", lambda: None)
+        request = ModelRequest(model=None, messages=[result], tools=[], state={"thread_data": {"outputs_path": str(tmp_path)}})
+        mw.wrap_model_call(request, lambda prepared: [])
+
+        assert saved.read_bytes() == content.encode()
 
     def test_configured_blob_write_failure_falls_back_inline(self, monkeypatch, tmp_path):
         from deerflow.agents.middlewares import tool_output_budget_middleware as mod
@@ -887,6 +1274,32 @@ class TestWrapToolCallFallback:
 
         assert isinstance(result, ToolMessage)
         assert "omitted from tool output" in result.content
+
+    def test_structured_json_output_budgeted_before_provider(self):
+        # Review feedback on #6208: the MindIE adapter serializes {"type": "json"}
+        # blocks to text, so a large structured result must hit the budget here,
+        # not sail through to provider normalization at full size.
+        config = ToolOutputConfig(
+            externalize_min_chars=50,
+            fallback_max_chars=200,
+            fallback_head_chars=80,
+            fallback_tail_chars=40,
+        )
+        mw = ToolOutputBudgetMiddleware(config=config)
+        msg = ToolMessage(
+            content=[{"type": "json", "json": {"rows": ["x" * 500]}}],
+            name="query_rows",
+            tool_call_id="tc-1",
+        )
+        req = _make_request(outputs_path=None)
+
+        result = mw.wrap_tool_call(req, lambda _: msg)
+
+        assert isinstance(result, ToolMessage)
+        assert result is not msg
+        assert isinstance(result.content, str)
+        assert "omitted from query_rows output" in result.content
+        assert len(result.content) <= 200
 
 
 class TestWrapToolCallExemption:
@@ -1458,6 +1871,14 @@ class TestPatchModelMessages:
         result = _patch_model_messages(messages, config)
         assert result is not None
         assert len(result) == 1
+        assert "omitted" in result[0].content
+
+    def test_patches_oversized_structured_json_history(self):
+        config = ToolOutputConfig(fallback_max_chars=500, fallback_head_chars=100, fallback_tail_chars=50)
+        messages = [ToolMessage(content=[{"type": "json", "json": {"rows": ["x" * 1000]}}], name="query_rows", tool_call_id="tc-1")]
+        result = _patch_model_messages(messages, config)
+        assert result is not None
+        assert isinstance(result[0].content, str)
         assert "omitted" in result[0].content
 
 

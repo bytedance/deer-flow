@@ -1150,6 +1150,28 @@ Phase 1 最低验证要求：
 - **复盘：** 本洞由"对刚写的修复立即执行新清单条目"抓出——第 41 条
   （重攻自身修复）的直接收益。
 
+### 2026-09-28 — 决策 map 构造性加固（#4541 review 线程预告的 follow-up）
+
+- **背景：** 四轮 review（R5–R9 前 #4541 合并前后）追踪到同一失败类的四个实例：
+  异步执行路径上决策 map 的 miss 静默回退 worker 线程里的同步 `authorize()`——
+  对 loop-affine provider 是错误 API，`fail_closed=false` 时拒绝翻成放行。根因是
+  载体契约（`dict | None`）由调用方自觉维持：`None` = 同步链，miss = 回退同步。
+- **决策（类型化载体）：** `deerflow/authz/activation_decisions.py` 的
+  `ActivationDecisions`：覆盖名返回批量决策；**miss 按配置的 provider-error 策略
+  解析（fail-closed 拒 / fail-open 放）并以 WARNING 响亮记日志，从不触达
+  provider**——miss 是构造 bug 不是策略问题。`None` 保留为同步链信号（同步
+  `authorize()` 在同步链是正确 API）。空候选集返回空批而非 `None`：即便无候选，
+  消费者的意外名字也必须按策略失败。`get_or_none` 供发布者区分"未覆盖"与 False。
+  `fail_closed` 随载体携带（取自 resolved 授权上下文）。
+- **证据：** `tests/test_activation_decisions.py` 5 个类型单测（覆盖返回/miss
+  双方向 + 响亮日志断言/get_or_none/容器协议）+ 中间件级 3 测试（miss 在
+  fail-open 允许且 `provider.sync_calls == []`、生产默认 fail-closed 拒绝、
+  `None` 同步链仍走同步 API）。突变 M18（恢复 miss 的同步回退）必红。
+  迁移后两中间件 + 既有套件 252 passed。
+- **兼容性：** 同步链（`None`）行为逐字不变；批量内覆盖名的语义不变；仅 miss
+  的处置从"静默同步回退"变为"按策略失败 + 响亮日志"——正是四轮 review 追逐
+  的行为面。
+
 ### 新记录模板
 
 ```markdown

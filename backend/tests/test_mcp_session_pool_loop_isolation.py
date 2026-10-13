@@ -92,7 +92,7 @@ def test_owner_completion_does_not_remove_a_replacement(loop_pool):
 
     async def replace():
         await pool.get_session("s", "u:t", {})
-        key = ("s", "u:t", asyncio.get_running_loop())
+        key = ("s", "u:t", asyncio.get_running_loop(), "deployment")
         old_owner = pool._entries[key][2]
         await pool.close_session("s", "u:t")
         replacement = await pool.get_session("s", "u:t", {})
@@ -114,7 +114,7 @@ def test_abandoned_closed_loop_entry_can_be_retired(loop_pool, retirement):
     closed_loop.close()
     owner = MagicMock(spec=asyncio.Task)
     owner.done.return_value = False
-    key = ("s", "u:t", closed_loop)
+    key = ("s", "u:t", closed_loop, "deployment")
     pool._entries[key] = (MagicMock(), closed_loop, owner, asyncio.Event())
     pool.MAX_SESSIONS = 1
     if retirement == "explicit":

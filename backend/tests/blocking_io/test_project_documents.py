@@ -32,7 +32,10 @@ from deerflow.projects.tools import _read_project_document_impl
 from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
 from deerflow.utils.file_io import run_file_io as _real_run_file_io
 
-pytestmark = [pytest.mark.asyncio, pytest.mark.allow_blocking_io]
+pytestmark = [
+    pytest.mark.asyncio,
+    pytest.mark.allow_blocking_io,
+]
 
 _USER = "u1"
 

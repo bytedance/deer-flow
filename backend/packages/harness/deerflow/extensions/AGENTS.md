@@ -43,6 +43,10 @@ case rather than reviving a record whose package declaration may already be gone
 cancellation skips the recovery sync entirely — the declarations are already restored and
 the next locked startup sync reconciles the environment, whereas blocking an interrupt on a
 full dependency resolve invites a second interrupt that escapes the handler mid-transaction.
+File snapshots capture the original permission bits alongside the bytes; rollback applies
+that mode to a temporary file before atomically replacing the destination, including when
+restoring `config.yaml` after a failed removal. A failed write, chmod, or replace leaves the
+current destination untouched and removes the temporary file.
 Package mutation is deferred from environment mutation: after `uv add/remove`
 updates the declaration and lock, one `uv sync --locked --all-packages` preserves the same
 config-/environment-detected optional extras as normal startup. All three uv calls pin the
@@ -432,3 +436,14 @@ and revoked before host shutdown; PAT/internal grants remain unsupported.
 Unstamped internal launches receive no handle and must still start normally.
 Action/tool dispatch scopes handles to each registered plugin namespace for
 idempotency isolation; request-resolved handles use `for_plugin` explicitly.
+
+**Recorded extension-first exception.** The project-shelf summary pipeline
+(`projects/summaries.py`) ships in core: its consumer-visible surface (the
+`project_documents.summary` column, the `<documents>` index rendering, and
+the shelf tool JSON) is core-owned, and the split design (host hook +
+extension-owned generation) was rejected — the write interface would have to
+enforce the sanitization and `updated_at`-preservation invariants across a
+plugin boundary, and the lifecycle hook would be a durable core contract with
+a single consumer. The generator sits behind the narrow `enqueue_summary`
+interface so a future document-lifecycle hook can lift generation into an
+extension without touching schema or rendering.

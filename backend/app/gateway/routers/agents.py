@@ -6,10 +6,11 @@ import re
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.gateway.authz import require_permission
+from app.gateway.deps import get_config
 from app.gateway.persistent_writes import run_drained_write
 from deerflow.agents.memory.manager import get_memory_manager
 from deerflow.config.agents_api_config import get_agents_api_config
@@ -22,10 +23,11 @@ from deerflow.config.agents_config import (
     load_agent_soul,
     preserve_non_managed_fields,
 )
-from deerflow.config.app_config import get_app_config
+from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.paths import get_paths
 from deerflow.knowledge_scope import KnowledgeScope, canonicalize_knowledge_scope
 from deerflow.persistence.agents import AgentDeleteOutcome, AgentExistsError, get_agent_store
+from deerflow.persistence.agents.file import FileAgentStore
 from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
@@ -66,6 +68,12 @@ class AgentsListResponse(BaseModel):
     agents: list[AgentResponse]
 
 
+class ToolGroupsResponse(BaseModel):
+    """Configured tool groups safe to present in Agent settings."""
+
+    tool_groups: list[str]
+
+
 class AgentCreateRequest(BaseModel):
     """Request body for creating a custom agent."""
 
@@ -99,6 +107,30 @@ class AgentUpdateRequest(BaseModel):
     thinking_enabled: bool | None = Field(default=None, description="Updated per-agent thinking-mode default")
     reasoning_effort: ReasoningEffort | None = Field(default=None, description="Updated per-agent reasoning-effort default")
     soul: str | None = Field(default=None, description="Updated SOUL.md content")
+
+
+class AgentPackageAgent(AgentCreateRequest):
+    """Portable, user-authored portion of a custom agent definition.
+
+    Deliberately excludes ``github`` because its installation binding belongs
+    to the target deployment. Runtime memory, conversations, credentials, and
+    other user state are not part of ``AgentConfig`` and are never read while
+    building this document.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    memory_enabled: bool = Field(default=True, description="Whether the imported agent may use memory")
+
+
+class AgentPackage(BaseModel):
+    """Versioned interchange document for one custom agent."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    format: Literal["deerflow.custom-agent"]
+    version: Literal[1]
+    agent: AgentPackageAgent
 
 
 def _validate_agent_name(name: str) -> None:
@@ -219,6 +251,48 @@ def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False
     )
 
 
+def _build_agent_config(body: AgentCreateRequest, normalized_name: str, *, memory_enabled: bool = True) -> dict:
+    """Build the persisted config shared by ordinary creation and import."""
+    config_data: dict = {"name": normalized_name}
+    if body.display_name:
+        config_data["display_name"] = body.display_name
+    if body.description:
+        config_data["description"] = body.description
+    if body.tool_groups is not None:
+        config_data["tool_groups"] = body.tool_groups
+    if body.knowledge_scope is not None:
+        config_data["knowledge_scope"] = canonicalize_knowledge_scope(body.knowledge_scope)
+    if body.mcp_plugins is not None:
+        config_data["mcp_plugins"] = body.mcp_plugins
+    if body.skills is not None:
+        config_data["skills"] = body.skills
+    if body.allowed_subagents is not None:
+        config_data["allowed_subagents"] = body.allowed_subagents
+    if not memory_enabled:
+        config_data["memory_enabled"] = False
+    _apply_model_behavior(config_data, body)
+    return config_data
+
+
+def _configured_tool_group_names(config: AppConfig) -> list[str]:
+    """Project configured group names without exposing tool definitions."""
+    return list(dict.fromkeys(group.name for group in config.tool_groups))
+
+
+async def _persist_new_agent(body: AgentCreateRequest, normalized_name: str, user_id: str, *, memory_enabled: bool = True) -> AgentResponse:
+    """Atomically create and reload one user-scoped agent."""
+    config_data = _build_agent_config(body, normalized_name, memory_enabled=memory_enabled)
+
+    def _create_agent() -> AgentResponse:
+        store = get_agent_store()
+        store.create(normalized_name, config_data, body.soul, user_id=user_id)
+        logger.info("Created agent '%s'", normalized_name)
+        agent_cfg = load_agent_config(normalized_name, user_id=user_id)
+        return _agent_config_to_response(agent_cfg, include_soul=True, user_id=user_id)
+
+    return await run_drained_write("Create agent", _create_agent, (AgentExistsError,))
+
+
 @router.get(
     "/agents",
     response_model=AgentsListResponse,
@@ -248,6 +322,22 @@ async def list_agents(request: Request) -> AgentsListResponse:
     except Exception as e:
         logger.error(f"Failed to list agents: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to list agents: {str(e)}")
+
+
+@router.get(
+    "/agent-tool-groups",
+    response_model=ToolGroupsResponse,
+    summary="List Agent Tool Groups",
+    description="List configured tool-group names available for custom-agent allowlists.",
+)
+@require_permission("agents", "read")
+async def list_agent_tool_groups(
+    request: Request,
+    config: AppConfig = Depends(get_config),
+) -> ToolGroupsResponse:
+    """Return names only; tool implementations and configuration stay private."""
+    _require_agents_api_enabled()
+    return ToolGroupsResponse(tool_groups=_configured_tool_group_names(config))
 
 
 @router.get(
@@ -281,6 +371,88 @@ async def check_agent_name(name: str, request: Request) -> dict:
 
     exists = await asyncio.to_thread(_exists)
     return {"available": not exists, "name": normalized}
+
+
+@router.post(
+    "/agents/import",
+    response_model=AgentResponse,
+    status_code=201,
+    summary="Import Custom Agent",
+    description="Create a user-scoped custom agent from a versioned DeerFlow agent package without importing runtime state.",
+)
+@require_permission("agents", "write")
+async def import_agent_package(body: AgentPackage, request: Request, name: str | None = None) -> AgentResponse:
+    """Import a portable definition, optionally under a different name."""
+    _require_agents_api_enabled()
+    target_name = name or body.agent.name
+    _validate_agent_name(target_name)
+    _validate_model_exists(body.agent.model)
+    normalized_name = _normalize_agent_name(target_name)
+    user_id = get_effective_user_id()
+
+    try:
+        return await _persist_new_agent(
+            body.agent,
+            normalized_name,
+            user_id,
+            memory_enabled=body.agent.memory_enabled,
+        )
+    except AgentExistsError:
+        raise HTTPException(status_code=409, detail=f"Agent '{normalized_name}' already exists")
+    except Exception as e:
+        logger.error("Failed to import agent '%s' (%s)", normalized_name, type(e).__name__, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to import agent")
+
+
+@router.get(
+    "/agents/{name}/export",
+    response_model=AgentPackage,
+    response_model_exclude_none=True,
+    summary="Export Custom Agent",
+    description="Export a versioned custom-agent definition and SOUL without memory, conversations, credentials, or deployment bindings.",
+)
+@require_permission("agents", "read")
+async def export_agent_package(name: str, request: Request, response: Response) -> AgentPackage:
+    """Export the portable portion of a caller-owned custom agent."""
+    _require_agents_api_enabled()
+    _validate_agent_name(name)
+    normalized_name = _normalize_agent_name(name)
+    user_id = get_effective_user_id()
+
+    def _export() -> AgentPackage:
+        agent_cfg = load_agent_config(normalized_name, user_id=user_id)
+        soul = load_agent_soul(normalized_name, user_id=user_id) or ""
+        return AgentPackage(
+            format="deerflow.custom-agent",
+            version=1,
+            agent=AgentPackageAgent(
+                name=agent_cfg.name,
+                display_name=agent_cfg.display_name,
+                description=agent_cfg.description,
+                model=agent_cfg.model,
+                tool_groups=agent_cfg.tool_groups,
+                mcp_plugins=agent_cfg.mcp_plugins,
+                knowledge_scope=agent_cfg.knowledge_scope,
+                skills=agent_cfg.skills,
+                allowed_subagents=agent_cfg.allowed_subagents,
+                model_settings=agent_cfg.model_settings,
+                thinking_enabled=agent_cfg.thinking_enabled,
+                reasoning_effort=agent_cfg.reasoning_effort,
+                memory_enabled=agent_cfg.memory_enabled,
+                soul=soul,
+            ),
+        )
+
+    try:
+        package = await asyncio.to_thread(_export)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Agent '{normalized_name}' not found")
+    except Exception as e:
+        logger.error("Failed to export agent '%s' (%s)", normalized_name, type(e).__name__, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to export agent")
+
+    response.headers["Content-Disposition"] = f'attachment; filename="{normalized_name}.deerflow-agent.json"'
+    return package
 
 
 @router.get(
@@ -348,37 +520,8 @@ async def create_agent_endpoint(body: AgentCreateRequest, request: Request) -> A
     normalized_name = _normalize_agent_name(body.name)
     user_id = get_effective_user_id()
 
-    # Config document — only the fields the caller set, matching the historical
-    # writer (an omitted field stays absent rather than being materialized).
-    config_data: dict = {"name": normalized_name}
-    if body.display_name:
-        config_data["display_name"] = body.display_name
-    if body.description:
-        config_data["description"] = body.description
-    if body.tool_groups is not None:
-        config_data["tool_groups"] = body.tool_groups
-    if body.knowledge_scope is not None:
-        config_data["knowledge_scope"] = canonicalize_knowledge_scope(body.knowledge_scope)
-    if body.mcp_plugins is not None:
-        config_data["mcp_plugins"] = body.mcp_plugins
-    if body.skills is not None:
-        config_data["skills"] = body.skills
-    if body.allowed_subagents is not None:
-        config_data["allowed_subagents"] = body.allowed_subagents
-    # model / model_settings / thinking_enabled / reasoning_effort (issue #4336).
-    _apply_model_behavior(config_data, body)
-
-    def _create_agent() -> AgentResponse:
-        # Worker thread: existence checks + persistence (file IO or a DB round
-        # trip) must stay off the event loop.
-        store = get_agent_store()
-        store.create(normalized_name, config_data, body.soul, user_id=user_id)
-        logger.info("Created agent '%s'", normalized_name)
-        agent_cfg = load_agent_config(normalized_name, user_id=user_id)
-        return _agent_config_to_response(agent_cfg, include_soul=True, user_id=user_id)
-
     try:
-        return await run_drained_write("Create agent", _create_agent, (AgentExistsError,))
+        return await _persist_new_agent(body, normalized_name, user_id)
     except AgentExistsError:
         raise HTTPException(status_code=409, detail=f"Agent '{normalized_name}' already exists")
     except Exception as e:
@@ -418,15 +561,18 @@ async def update_agent(name: str, body: AgentUpdateRequest, request: Request) ->
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
 
     def _is_legacy_only_layout() -> bool:
+        # The DB importer retains legacy source files for rollback. They say
+        # nothing about the ownership of the active SQL definition.
+        if not isinstance(get_agent_store(), FileAgentStore):
+            return False
         # Require config.yaml, not bare directory existence — a per-user agent
         # directory can exist containing only memory.json (written the first
         # time this user chats with a legacy shared agent, before this route
         # is ever called). Bare .exists() would miss that case and let this
         # fall through to a silent fork of a brand-new config.yaml/SOUL.md
         # into the memory-only directory instead of blocking (mirrors
-        # resolve_agent_dir's guard, see #3390). The db backend has no legacy
-        # shared layout, so this file-only guard is a no-op there. The .exists()
-        # probes are filesystem IO, so they run off the event loop.
+        # resolve_agent_dir's guard, see #3390). Store resolution and the
+        # filesystem probes both run off the event loop.
         paths = get_paths()
         agent_dir = paths.user_agent_dir(user_id, name)
         legacy_dir = paths.agent_dir(name)

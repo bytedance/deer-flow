@@ -408,7 +408,7 @@ class TestOnChatbotMessage:
     def test_p2p_message_without_sender_is_dropped(self, sender_staff_id):
         """A P2P chat_id *is* the sender, so an empty one keys every user to one thread.
 
-        ``ChannelStore._key`` builds ``f"{channel}:{chat_id}"`` for a topic-less conversation,
+        ``binding_key`` builds ``f"{channel}:{chat_id}"`` for a topic-less conversation,
         so publishing this would put every senderless P2P message under the literal
         ``"dingtalk:"`` — one shared thread, one shared history, across users.
         """
@@ -1196,6 +1196,26 @@ class TestAdaptMarkdownForDingtalk:
 
 
 class TestConvertMarkdownTable:
+    @pytest.mark.parametrize(
+        ("header", "row", "expected"),
+        [
+            ("| Rule | Meaning |", r"| foo\|bar | alternative |", "> **Rule**: foo\\|bar\n> **Meaning**: alternative\n"),
+            (r"| Rule\|Pattern | Meaning |", "| regex | alternative |", "> **Rule\\|Pattern**: regex\n> **Meaning**: alternative\n"),
+            ("| Rule | Meaning |", "|| alternative |", "> **Rule**: \n> **Meaning**: alternative\n"),
+            ("| Rule | Meaning |", "| regex ||", "> **Rule**: regex\n> **Meaning**: \n"),
+            ("| Rule | Meaning |", r"| regex | value\|", "> **Rule**: regex\n> **Meaning**: value\\|\n"),
+            ("| Rule | Meaning |", r"| foo\|bar\|baz | alternative |", "> **Rule**: foo\\|bar\\|baz\n> **Meaning**: alternative\n"),
+        ],
+        ids=["escaped-body-pipe", "escaped-header-pipe", "leading-empty-cell", "trailing-empty-cell", "escaped-final-pipe", "multiple-escaped-pipes"],
+    )
+    def test_cell_boundaries_preserved(self, header, row, expected):
+        text = f"{header}\n|---|---|\n{row}"
+        assert _convert_markdown_table(text) == expected
+
+    def test_fallback_adapter_preserves_table_values(self):
+        text = "| Rule | Meaning |\n|---|---|\n| `foo\\|bar` | alternative |"
+        assert _adapt_markdown_for_dingtalk(text) == "> **Rule**: **foo\\|bar**\n> **Meaning**: alternative\n"
+
     def test_simple_table(self):
         text = "| Name | Age |\n|------|-----|\n| Alice | 30 |\n| Bob | 25 |"
         result = _convert_markdown_table(text)
@@ -1851,10 +1871,13 @@ def _patch_uploads(monkeypatch, uploads_dir, *, sandbox_id="local", sandbox=None
     async def _acquire_async(thread_id, user_id=None):
         return sandbox_id
 
-    monkeypatch.setattr(
-        "app.channels.dingtalk.get_sandbox_provider",
-        lambda: SimpleNamespace(acquire_async=_acquire_async, get=lambda sid: sandbox),
+    provider = SimpleNamespace(
+        uses_thread_data_mounts=sandbox_id == "local" or sandbox_id.startswith("local:"),
+        acquire_async=_acquire_async,
+        get=lambda sid: sandbox,
+        release=lambda sid: None,
     )
+    monkeypatch.setattr("app.channels.dingtalk.get_sandbox_provider", lambda: provider)
 
 
 class TestExtractFiles:

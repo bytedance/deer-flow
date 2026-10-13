@@ -9,6 +9,7 @@ import {
   sortPinnedThreads,
   textOfMessage,
   THREAD_PINNED_METADATA_KEY,
+  titleOfThread,
 } from "@/core/threads/utils";
 
 function makeThread(
@@ -213,4 +214,18 @@ test("textOfMessage returns null when array content has no text", () => {
   } as unknown as Message;
 
   expect(textOfMessage(message)).toBeNull();
+});
+
+test("titleOfThread falls back to the given label for an untitled thread", () => {
+  const untitled = {
+    thread_id: "t",
+    metadata: {},
+    values: {},
+  } as unknown as AgentThread;
+  expect(titleOfThread(untitled, "未命名")).toBe("未命名");
+  // Export filenames keep the English default.
+  expect(titleOfThread(untitled)).toBe("Untitled");
+  expect(titleOfThread(makeThread("Weekly report"), "未命名")).toBe(
+    "Weekly report",
+  );
 });

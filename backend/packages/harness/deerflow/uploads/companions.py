@@ -87,7 +87,7 @@ def resolve_companion(original: Path) -> Path | None:
             return None
         data = json.loads(record.read_text(encoding="utf-8"))
         name = data["markdown"]
-        if data["original"] != original.name or not isinstance(name, str) or Path(name).name != name or not name.endswith(".md"):
+        if data["original"] != original.name or not isinstance(name, str) or Path(name).name != name or Path(name).suffix.lower() != ".md":
             return None
         source_stat = original.stat(follow_symlinks=False)
         # Legacy three-field records cannot establish whether an equal-size

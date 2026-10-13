@@ -145,6 +145,23 @@ export function clearComposerDraft(
   }
 }
 
+/**
+ * Clear a stored draft only while it still holds the text that was sent.
+ * A send can be dispatched after its composer is gone, by which time another
+ * composer may have saved a different draft under the same key.
+ */
+export function retireSentComposerDraft(
+  storage: ComposerDraftStorage | null | undefined,
+  key: string,
+  sentTexts: readonly string[],
+) {
+  const stored = readComposerDraft(storage, key);
+  if (stored && (stored.skillName || !sentTexts.includes(stored.text))) {
+    return;
+  }
+  clearComposerDraft(storage, key);
+}
+
 export function resolveComposerDraft(
   draft: ComposerDraft,
   enabledSkillNames: ReadonlySet<string>,
