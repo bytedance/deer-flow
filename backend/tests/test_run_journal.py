@@ -203,6 +203,37 @@ async def test_cross_thread_append_during_explicit_flush_is_not_flushed_concurre
 
 
 @pytest.mark.anyio
+async def test_flush_cancellation_keeps_started_batch_owned_until_store_write_finishes():
+    class BlockingStore(MemoryRunEventStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def put_batch(self, events):
+            self.started.set()
+            await self.release.wait()
+            return await super().put_batch(events)
+
+    store = BlockingStore()
+    journal = RunJournal("r-cancelled-flush", "t-cancelled-flush", store, flush_threshold=100)
+    journal.record_middleware("test", name="test", hook="after", action="record", changes={})
+
+    flush_task = asyncio.create_task(journal.flush())
+    await store.started.wait()
+    flush_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await flush_task
+
+    assert len(journal._pending_flush_tasks) == 1
+    store.release.set()
+    await journal.flush()
+
+    events = await store.list_events("t-cancelled-flush", "r-cancelled-flush")
+    assert [event["event_type"] for event in events] == ["middleware:test"]
+
+
+@pytest.mark.anyio
 async def test_close_flushes_and_detaches_runtime_dependencies():
     class ProgressReporter:
         async def __call__(self, snapshot):

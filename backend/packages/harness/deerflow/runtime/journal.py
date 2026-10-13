@@ -1065,15 +1065,13 @@ class RunJournal(BaseCallbackHandler):
         if self._pending_flush_tasks or self._explicit_flush_in_progress:
             return
         try:
-            loop = asyncio.get_running_loop()
+            asyncio.get_running_loop()
         except RuntimeError:
             # No event loop — keep events in buffer for later async flush.
             return
         batch = self._buffer.copy()
         self._buffer.clear()
-        task = loop.create_task(self._flush_async(batch))
-        self._pending_flush_tasks.add(task)
-        task.add_done_callback(self._on_flush_done)
+        self._start_flush_task(batch)
 
     async def _flush_async(self, batch: list[dict]) -> None:
         try:
@@ -1091,6 +1089,13 @@ class RunJournal(BaseCallbackHandler):
             )
             # Return failed events to buffer for retry on next flush
             self._buffer = batch + self._buffer
+
+    def _start_flush_task(self, batch: list[dict]) -> asyncio.Task[None]:
+        """Start and retain a batch write until its store operation settles."""
+        task = asyncio.create_task(self._flush_async(batch))
+        self._pending_flush_tasks.add(task)
+        task.add_done_callback(self._on_flush_done)
+        return task
 
     def _on_flush_done(self, task: asyncio.Task) -> None:
         self._pending_flush_tasks.discard(task)
@@ -1389,15 +1394,12 @@ class RunJournal(BaseCallbackHandler):
             while self._buffer:
                 batch = self._buffer[: self._flush_threshold]
                 del self._buffer[: self._flush_threshold]
-                try:
-                    store = self._store
-                    if store is None:
-                        return
-                    await store.put_batch(batch)
-                    self._feed_generation += 1
-                except Exception:
-                    self._buffer = batch + self._buffer
-                    raise
+                # Keep ownership of an already-started store write independent
+                # from the caller. Otherwise cancellation of flush() cancels
+                # put_batch() after the batch has left _buffer, losing events.
+                # The task remains in _pending_flush_tasks so a later flush or
+                # close can join it and observe its outcome.
+                await asyncio.shield(self._start_flush_task(batch))
         finally:
             self._explicit_flush_in_progress = False
 
