@@ -217,34 +217,58 @@ def _staging_entry_stat(entry: os.DirEntry[str]) -> os.stat_result:
     return os.lstat(entry.path)
 
 
-def _staging_name_shares_inode_with_sibling(uploads_dir: Path, entry: os.DirEntry[str], st: os.stat_result) -> bool:
-    """Whether another entry in *uploads_dir* names the same inode as *entry*.
+def _uploads_dir_entry_stats(uploads_dir: Path) -> dict[str, os.stat_result]:
+    """One ``lstat`` per entry, keyed by name.
+
+    Built once per *uploads_dir* so the stale-staging sweep stays linear in the
+    number of entries instead of rescanning the directory for every staging file.
+    Entries that cannot be stat'ed are omitted: a file that cannot be stat'ed is
+    kept, never removed on a guess.
+    """
+    try:
+        with os.scandir(uploads_dir) as entries:
+            stats: dict[str, os.stat_result] = {}
+            for entry in entries:
+                # ``_staging_entry_stat`` uses ``os.lstat`` rather than
+                # ``entry.stat``: on Windows a ``DirEntry`` stat reports zero
+                # for ``st_dev``/``st_ino`` and leaves ``st_nlink`` at zero
+                # (the same limitation the ``st_nlink`` note above records),
+                # so it can never match a real inode there.
+                try:
+                    stats[entry.name] = _staging_entry_stat(entry)
+                except FileNotFoundError:
+                    continue  # vanished mid-scan; nothing left to clean
+                except OSError:
+                    logger.warning("Could not stat upload staging file %s; keeping it", entry.path, exc_info=True)
+                    continue
+            return stats
+    except OSError:
+        return {}
+
+
+def _staging_name_shares_inode_with_sibling(sibling_stats: dict[str, os.stat_result], name: str, st: os.stat_result) -> bool:
+    """Whether another entry in the uploads dir names the same inode as *name*.
 
     A commit publishes a staged part with ``os.link``, so its bytes carry two names
     for an instant and the staged name is an alias once the final name exists. Any
-    sibling sharing ``(st_dev, st_ino)`` marks *entry* as such an alias. Inode
+    sibling sharing ``(st_dev, st_ino)`` marks it as such an alias. Inode
     identity is the portable signal: unlike ``st_nlink`` it stays meaningful on
     Windows, where the count is not decremented when a hard link is removed, so the
     sweep can still reclaim a published alias there instead of mistaking it for an
     in-flight upload and leaving the destination stuck behind the multi-link check.
+
+    A zero ``st_ino`` on either side never matches: on filesystems that cannot
+    answer inode identity (FAT/exFAT, some SMB/network shares) every name would
+    look like every other name's alias and the sweep would delete in-flight
+    uploads at any age. Such a volume falls back to the ``min_age`` guard only.
     """
-    try:
-        with os.scandir(uploads_dir) as siblings:
-            for sibling in siblings:
-                if sibling.name == entry.name:
-                    continue
-                try:
-                    # ``os.lstat`` rather than ``sibling.stat``: on Windows a
-                    # ``DirEntry`` stat reports zero for ``st_dev``/``st_ino``
-                    # (the same limitation the ``st_nlink`` note above records),
-                    # so it can never match a real inode there.
-                    sibling_st = os.lstat(sibling.path)
-                except OSError:
-                    continue
-                if sibling_st.st_dev == st.st_dev and sibling_st.st_ino == st.st_ino:
-                    return True
-    except OSError:
+    if st.st_ino == 0:
         return False
+    for sibling_name, sibling_st in sibling_stats.items():
+        if sibling_name == name or sibling_st.st_ino == 0:
+            continue
+        if sibling_st.st_dev == st.st_dev and sibling_st.st_ino == st.st_ino:
+            return True
     return False
 
 
@@ -276,31 +300,19 @@ def cleanup_stale_upload_staging_files(base_dir: Path | str | None = None, *, mi
     for uploads_dir in _iter_upload_dirs(root):
         if not uploads_dir.is_dir():
             continue
-        try:
-            with os.scandir(uploads_dir) as entries:
-                for entry in entries:
-                    if not is_upload_staging_file(entry.name) or not entry.is_file(follow_symlinks=False):
-                        continue
-                    try:
-                        st = _staging_entry_stat(entry)
-                    except FileNotFoundError:
-                        continue
-                    except OSError:
-                        logger.warning("Could not stat upload staging file %s; keeping it", entry.path, exc_info=True)
-                        continue
-                    if not _staging_name_shares_inode_with_sibling(uploads_dir, entry, st) and st.st_mtime >= cutoff:
-                        continue  # a lone, young part may still be in flight on another replica
-                    try:
-                        os.unlink(entry.path)
-                        removed += 1
-                    except FileNotFoundError:
-                        pass
-                    except OSError:
-                        logger.warning("Failed to remove stale upload staging file: %s", entry.path, exc_info=True)
-        except FileNotFoundError:
-            continue
-        except OSError:
-            logger.warning("Failed to scan uploads directory for stale staging files: %s", uploads_dir, exc_info=True)
+        entry_stats = _uploads_dir_entry_stats(uploads_dir)
+        for name, st in entry_stats.items():
+            if not is_upload_staging_file(name) or not stat.S_ISREG(st.st_mode):
+                continue
+            if not _staging_name_shares_inode_with_sibling(entry_stats, name, st) and st.st_mtime >= cutoff:
+                continue  # a lone, young part may still be in flight on another replica
+            try:
+                os.unlink(uploads_dir / name)
+                removed += 1
+            except FileNotFoundError:
+                pass
+            except OSError:
+                logger.warning("Failed to remove stale upload staging file: %s", uploads_dir / name, exc_info=True)
     return removed
 
 
@@ -389,8 +401,13 @@ def open_upload_file_no_symlink(base_dir: Path, filename: str, *, exclusive: boo
 
     try:
         opened_stat = os.fstat(fd)
-        if not stat.S_ISREG(opened_stat.st_mode) or (
-            not exclusive and _replacement_destination_is_hardlinked(opened_stat)
+        # The exclusive path keeps the strict post-open single-link check on every
+        # platform (a just-exclusively-created file must have exactly one link);
+        # only the non-exclusive replacement path defers to the Windows-aware guard.
+        if (
+            not stat.S_ISREG(opened_stat.st_mode)
+            or (exclusive and opened_stat.st_nlink != 1)
+            or (not exclusive and _replacement_destination_is_hardlinked(opened_stat))
         ):
             raise UnsafeUploadPathError(f"Upload destination is not an exclusive regular file: {safe_name}")
         os.ftruncate(fd, 0)

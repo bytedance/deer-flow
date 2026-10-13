@@ -14,6 +14,7 @@ import pytest
 from deerflow.uploads.manager import (
     PathTraversalError,
     UnsafeUploadPathError,
+    _staging_name_shares_inode_with_sibling,
     apply_upload_sandbox_permits,
     claim_unique_filename,
     cleanup_stale_upload_staging_files,
@@ -304,6 +305,25 @@ class TestWriteUploadFileNoSymlink:
         result = write_upload_file_no_symlink(tmp_path, "notes.txt", b"hello")
         assert result == tmp_path / "notes.txt"
         assert (tmp_path / "notes.txt").read_bytes() == b"hello"
+
+    def test_exclusive_write_keeps_post_open_link_guard_without_no_follow(self, tmp_path, monkeypatch):
+        """Without ``O_NOFOLLOW`` (the Windows fallback branch), the exclusive
+        path keeps its strict post-open single-link check: a file that opens
+        with more than one link is rejected on every platform. Only the
+        non-exclusive replacement path defers to the Windows-aware guard."""
+        monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+        real_fstat = os.fstat
+
+        def twin_linked_fstat(fd):
+            st = real_fstat(fd)
+            return os.stat_result(
+                (st.st_mode, st.st_ino, st.st_dev, 2, st.st_uid, st.st_gid, st.st_size, st.st_atime, st.st_mtime, st.st_ctime)
+            )
+
+        monkeypatch.setattr(os, "fstat", twin_linked_fstat)
+
+        with pytest.raises(UnsafeUploadPathError, match="not an exclusive regular file"):
+            write_upload_file_no_symlink(tmp_path, "notes.txt", b"new attachment", exclusive=True)
 
     def test_open_uses_nonblocking_flag_when_available(self, tmp_path):
         if not hasattr(os, "O_NONBLOCK"):
@@ -702,6 +722,55 @@ class TestCleanupStaleUploadStagingFiles:
         assert removed == 1
         assert young.exists()
         assert not old.exists()
+
+    def test_sibling_inode_match_ignores_degenerate_zero_inodes(self):
+        """On volumes that cannot answer inode identity (FAT/exFAT, some SMB
+        shares) ``st_ino`` reads as 0; a zero-inode sibling must never mark a
+        staging file as a published alias, or the sweep would delete in-flight
+        uploads at any age."""
+
+        def fake_stat(ino, dev=1):
+            return os.stat_result((stat.S_IFREG | 0o644, ino, dev, 1, 0, 0, 4, 0.0, 0.0, 0.0))
+
+        siblings = {
+            "published.txt": fake_stat(42),
+            ".upload-zero.part": fake_stat(0),
+        }
+
+        # A degenerate zero inode matches nothing, not even a sibling reporting
+        # the same degenerate zero.
+        assert not _staging_name_shares_inode_with_sibling(siblings, ".upload-zero.part", fake_stat(0))
+        assert not _staging_name_shares_inode_with_sibling(siblings, ".upload-new.part", fake_stat(0))
+        # A real shared-inode alias is still detected.
+        assert _staging_name_shares_inode_with_sibling(siblings, ".upload-alias.part", fake_stat(42))
+        # A different device never matches, even with the same inode number.
+        assert not _staging_name_shares_inode_with_sibling(siblings, ".upload-alias.part", fake_stat(42, dev=2))
+
+    def test_sweep_scans_each_uploads_dir_once(self, tmp_path, monkeypatch):
+        """The sweep builds its inode map once per uploads directory instead of
+        rescanning the directory for every staging file, so N orphan parts cost
+        one directory scan, not N."""
+        uploads_dir = tmp_path / "threads" / "thread-1" / "user-data" / "uploads"
+        uploads_dir.mkdir(parents=True)
+        for i in range(5):
+            part = uploads_dir / f".upload-{i}.part"
+            part.write_text("partial")
+            _set_age(part, timedelta(days=2))
+
+        real_scandir = os.scandir
+        sweep_scans: list[str] = []
+
+        def counting_scandir(path, /):
+            if os.path.abspath(os.fspath(path)) == os.path.abspath(os.fspath(uploads_dir)):
+                sweep_scans.append(os.fspath(path))
+            return real_scandir(path)
+
+        monkeypatch.setattr(os, "scandir", counting_scandir)
+
+        removed = cleanup_stale_upload_staging_files(tmp_path)
+
+        assert removed == 5
+        assert len(sweep_scans) == 1
 
     def test_keeps_staging_file_when_its_age_cannot_be_read(self, tmp_path, caplog):
         uploads_dir = tmp_path / "threads" / "thread-1" / "user-data" / "uploads"
