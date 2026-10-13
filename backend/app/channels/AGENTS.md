@@ -5,9 +5,9 @@ IM channels reach DeerFlow through `langgraph-sdk` HTTP; Gateway owns thread lif
 WeChat `_read_outbound_bytes` reads cap+1 off-loop; overflow returns `None` before encryption/upload; caps <=0 are unlimited.
 Cursor writes drain before cancellation; token expiry drains cursor/auth clearing under `_auth_lock`.
 
-Telegram stop retries share live cleanup. If its loop dies, warn once and
-drop only the matching future under `_shutdown_resources_lock`; client closure
-remains unconfirmed.
+Telegram stop retries share bootstrap/Bot cleanup. If the loop dies, warn once
+and drop only its matching future under `_shutdown_resources_lock`; client
+closure remains unconfirmed.
 
 **Auth**: SDK and raw-httpx `/goal` calls send process-local auth plus `_csrf_headers()`; internal auth requires CSRF.
 
