@@ -736,6 +736,17 @@ Notes:
   - **Language:** the owner's web UI language (the `locale` user preference, which the web app keeps in sync), else `channel_connections.notification_locale` (`en-US` or `zh-CN`, default `en-US`; startup-scoped). Auth-disabled installs always use the config value.
   - **Delivery:** channel/transport outages park rows without consuming the retry budget, for up to about a day; platform rejections exhaust ~15 minutes of counted retries then settle `failed`. The worker re-checks the binding right before sending: a target the owner has disconnected since enqueue is dropped as `failed`, never pushed.
 
+### Run event timestamps
+
+With `run_events.backend: db`, caller-supplied ISO 8601 event timestamps are
+normalized to UTC before storage, preserving their instant when SQLite drops
+timezone information. Timestamps without an offset are treated as UTC.
+
+**Upgrade note:** Previously stored timestamps are not rewritten. If callers
+supplied non-UTC offsets before this fix, existing SQLite `created_at` values
+may represent the wrong instant. Upgrading does not correct those values;
+the original offset cannot be recovered from the stored timestamp alone.
+
 ### Deployment topology (multi-instance)
 
 ```yaml
