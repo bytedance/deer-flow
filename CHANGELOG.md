@@ -1262,6 +1262,17 @@ This release closes that milestone with **621 merged pull requests**.
   (GitHub) are unchanged: `runs.create` returns as soon as the run is pending.
   ([#6876])
 
+- **deploy:** The Gateway container now shuts down gracefully. The production
+  compose `command`, both `CMD`s in `backend/Dockerfile` and the Helm chart
+  started it as `sh -c "cd backend && … uv run … uvicorn …"`, which leaves `sh`
+  as PID 1 with no SIGTERM handler, so the kernel dropped the stop signal:
+  uvicorn never shut down, the lifespan teardown (memory queue flush, run
+  drain, channel, scheduler and MCP shutdown) never ran, and every stop waited
+  out the grace period and ended in SIGKILL (exit 137). Every production launch
+  path now `exec`s the server, as `docker/dev-entrypoint.sh` already did, and
+  the compose gateway sets `init: true` so orphaned grandchildren are still
+  reaped. (issue #6835, [#6836])
+
 - **channels:** `FeishuChannel.stop()` and `DingTalkChannel.stop()` now end
   their SDK threads instead of timing out. Both SDKs run on a thread-private
   event loop that only returned on a fatal error, so every stop joined for
@@ -11701,6 +11712,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6781]: https://github.com/bytedance/deer-flow/pull/6781
 [#6785]: https://github.com/bytedance/deer-flow/pull/6785
 [#6798]: https://github.com/bytedance/deer-flow/pull/6798
+[#6836]: https://github.com/bytedance/deer-flow/pull/6836
 [#6843]: https://github.com/bytedance/deer-flow/pull/6843
 [#6844]: https://github.com/bytedance/deer-flow/pull/6844
 [#6852]: https://github.com/bytedance/deer-flow/pull/6852
