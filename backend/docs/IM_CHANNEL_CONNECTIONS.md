@@ -617,7 +617,11 @@ from the browser runtime setup flow, which persists them through
 `ChannelRuntimeConfigStore` so local/private deployments can configure bots
 without editing YAML. The runtime store is a local plaintext JSON fallback with
 owner-only file permissions (`0600`); use it only where the DeerFlow data
-directory is already trusted as secret storage. WeChat QR login auth state
+directory is already trusted as secret storage. Every Gateway worker keeps its own copy
+of the file; a save or disconnect rereads it under an advisory sidecar lock
+(`.runtime-config.json.lock`) and changes only that provider, so workers sharing
+`DEER_FLOW_HOME` do not overwrite each other's bots. Reads still serve the copy
+the worker last loaded or wrote. WeChat QR login auth state
 follows the same local-runtime model and may persist a QR-derived bot token in
 the channel state directory.
 
