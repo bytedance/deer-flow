@@ -3048,20 +3048,20 @@ run_ownership:
 #   #
 #   # Leader lease: with more than one Gateway instance, only one instance may
 #   # hold a provider's platform connection (Telegram rejects a second poller
-#   # with 409, Discord answers every message twice). The lease will be a row
-#   # per provider in the shared database, held by one instance and renewed on
-#   # a heartbeat; a crashed holder is replaced after lease_seconds +
-#   # grace_seconds, a cleanly stopped one within a heartbeat. The transport
-#   # ownership itself ships separately: in this version the section only drives
-#   # the startup gate, so keep ONE instance while channels are enabled.
-#   # Restart-required.
+#   # with 409, Discord answers every message twice). Each provider gets a row
+#   # in the shared channel_leases table, held by one instance and renewed on a
+#   # heartbeat; only the holder connects (GitHub webhooks stay on every
+#   # instance). A crashed holder is replaced within lease_seconds +
+#   # grace_seconds plus one renewal interval, a cleanly stopped one on the
+#   # next heartbeat. Runtime credential changes from the web UI reach the
+#   # holder only when it next starts the channel. Restart-required.
 #   leader_lease:
 #     # auto (default): on whenever the Gateway sees a multi-process signal
 #     # (GATEWAY_WORKERS / WEB_CONCURRENCY > 1, deployment.multi_instance: true
 #     # or DEER_FLOW_MULTI_INSTANCE=1), off on a single instance. true: always
-#     # on. false: never -- a multi-process deployment with an IM channel other
-#     # than GitHub enabled then refuses to start. auto/true are reserved until
-#     # the lease ships; they do not yet stop every instance from connecting.
+#     # on (needs database.backend sqlite or postgres). false: never -- a
+#     # multi-process deployment with an IM channel other than GitHub enabled
+#     # then refuses to start.
 #     enabled: auto
 #     lease_seconds: 30   # validity of a held lease; renewed every lease_seconds // 3
 #     grace_seconds: 10   # extra time before a peer may take an expired lease

@@ -21,6 +21,7 @@ from deerflow.persistence.channel_connections.model import (
     ChannelCredentialRow,
     ChannelOAuthStateRow,
 )
+from deerflow.persistence.channel_leases.model import ChannelLeaseRow
 from deerflow.persistence.channel_thread_bindings.model import ChannelThreadBindingRow
 from deerflow.persistence.feedback.model import FeedbackRow
 from deerflow.persistence.login_throttle.model import LoginThrottleRow
@@ -46,6 +47,7 @@ __all__ = [
     "ChannelConnectionRow",
     "ChannelConversationRow",
     "ChannelCredentialRow",
+    "ChannelLeaseRow",
     "ChannelOAuthStateRow",
     "ChannelThreadBindingRow",
     "FeedbackRow",
