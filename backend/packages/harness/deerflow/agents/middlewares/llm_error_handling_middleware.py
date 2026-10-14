@@ -1106,10 +1106,11 @@ def _extract_in_band_status(exc: BaseException) -> int | None:
     """Return the HTTP status that a status-less error carries in its contents.
 
     Three sources, in order; the first that yields a status decides:
-    a numeric ``code``/``status``/``status_code`` field (on the error, its body
-    or the body's ``error`` object), an explicit status in the message
-    (``_IN_BAND_STATUS_RE``, leftmost match in 400-599), and ``type ==
-    "server_error"``, which OpenAI-compatible APIs use for 5xx failures (500).
+    a numeric ``code`` on the error, or a numeric ``code``/``status``/
+    ``status_code`` in its body or the body's ``error`` object; an explicit
+    status in the message (``_IN_BAND_STATUS_RE``, leftmost match in 400-599);
+    and ``type == "server_error"``, which OpenAI-compatible APIs use for 5xx
+    failures (500).
     """
     body = getattr(exc, "body", None)
     body = body if isinstance(body, dict) else {}
