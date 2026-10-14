@@ -62,7 +62,7 @@ from deerflow_extension_api.placement import (
     MiddlewarePlacement,
     Placement,
 )
-from deerflow_extension_api.plugins import ActionContext, BackendAction, BrowserAssets, BrowserModule, ModelTool, PluginContribution, ToolContext
+from deerflow_extension_api.plugins import ActionContext, BackendAction, BrowserAssets, BrowserModule, ModelTool, PluginContribution, PluginToolResult, ToolContext
 from deerflow_extension_api.provenance import (
     MESSAGE_CONTENT_KIND_KEY,
     MESSAGE_PRODUCER_ENTITY_ID_KEY,
@@ -124,6 +124,7 @@ __all__ = [
     "BrowserAssets",
     "BrowserModule",
     "ModelTool",
+    "PluginToolResult",
     "PluginContribution",
     "ToolContext",
     "SettingsField",

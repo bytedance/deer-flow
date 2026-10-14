@@ -13,7 +13,7 @@ from types import MappingProxyType
 
 from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
 from deerflow_extension_api.auth import ExtensionPrincipal
-from deerflow_extension_api.plugins import ToolContext
+from deerflow_extension_api.plugins import PluginToolResult, ToolContext
 from jsonschema import Draft202012Validator
 from langchain.tools import ToolRuntime
 from langchain_core.tools import StructuredTool, ToolException
@@ -81,6 +81,15 @@ def _build_tool(source, plugin, declaration):
             )
             async with asyncio.timeout(30):
                 result = await declaration.handler(MappingProxyType(payload), tool_context)
+            if declaration.response_format == "content_and_artifact":
+                if not isinstance(result, PluginToolResult) or not isinstance(result.content, str) or (result.artifact is not None and not isinstance(result.artifact, Mapping)):
+                    raise TypeError("Expected PluginToolResult with text and a JSON object artifact")
+                envelope = {"content": result.content, "artifact": dict(result.artifact) if result.artifact is not None else None}
+                encoded = json.dumps(envelope, ensure_ascii=False, allow_nan=False)
+                if len(encoded.encode()) > 64 * 1024:
+                    raise ToolException("Plugin result exceeds 64 KiB.")
+                # A JSON roundtrip detaches nested values retained by the handler.
+                return result.content, json.loads(encoded)["artifact"]
             encoded = json.dumps(result, ensure_ascii=False, allow_nan=False)
             if len(encoded.encode()) > 64 * 1024:
                 raise ToolException("Plugin result exceeds 64 KiB.")
@@ -91,7 +100,8 @@ def _build_tool(source, plugin, declaration):
             logger.warning("Plugin tool failed: %s/%s (%s)", plugin.namespace, declaration.name, type(exc).__name__)
             raise ToolException("Plugin tool unavailable or input rejected.") from None
 
-    tool = StructuredTool(name=plugin_tool_name(plugin.namespace, declaration.name), description=declaration.description, args_schema=schema, coroutine=invoke, handle_tool_error=True)
+    options = {"response_format": "content_and_artifact"} if declaration.response_format == "content_and_artifact" else {}
+    tool = StructuredTool(name=plugin_tool_name(plugin.namespace, declaration.name), description=declaration.description, args_schema=schema, coroutine=invoke, handle_tool_error=True, **options)
     tag_plugin_tool(tool, namespace=plugin.namespace, declaration=declaration.name, installation=source)
     return tool
 
