@@ -827,11 +827,13 @@ class TestImageSearchTool:
                 "title": "Cat 1",
                 "imageUrl": "https://example.com/cat1.jpg",
                 "thumbnailUrl": "https://example.com/cat1_thumb.jpg",
+                "link": "https://example.com/cats/1",
             },
             {
                 "title": "Cat 2",
                 "imageUrl": "https://example.com/cat2.jpg",
                 "thumbnailUrl": "https://example.com/cat2_thumb.jpg",
+                "link": "https://example.com/cats/2",
             },
         ]
         mock_resp = _make_serper_images_response(images)
@@ -849,6 +851,7 @@ class TestImageSearchTool:
         assert parsed["results"][0]["title"] == "Cat 1"
         assert parsed["results"][0]["image_url"] == "https://example.com/cat1.jpg"
         assert parsed["results"][0]["thumbnail_url"] == "https://example.com/cat1_thumb.jpg"
+        assert parsed["results"][0]["source_url"] == "https://example.com/cats/1"
         assert parsed["usage_hint"] == "Use the 'image_url' values as reference images in image generation. Download them first if needed."
 
     def test_sends_correct_headers_and_payload_to_images_endpoint(self, mock_config_with_key):
@@ -1243,7 +1246,7 @@ class TestImageSearchTool:
         images = [
             {"title": "Local", "imageUrl": "file:///etc/passwd", "thumbnailUrl": "http://127.0.0.1/thumb.jpg"},
             {"title": "Data", "imageUrl": "data:image/png;base64,abc", "thumbnailUrl": "http://10.0.0.1/thumb.jpg"},
-            {"title": "Safe", "imageUrl": "https://example.com/i.jpg", "thumbnailUrl": "http://example.com/t.jpg"},
+            {"title": "Safe", "imageUrl": "https://example.com/i.jpg", "thumbnailUrl": "http://example.com/t.jpg", "link": "http://127.0.0.1/page"},
         ]
         mock_resp = _make_serper_images_response(images)
 
@@ -1259,6 +1262,7 @@ class TestImageSearchTool:
         assert parsed["results"][0]["title"] == "Safe"
         assert parsed["results"][0]["image_url"] == "https://example.com/i.jpg"
         assert parsed["results"][0]["thumbnail_url"] == "http://example.com/t.jpg"
+        assert parsed["results"][0]["source_url"] == ""
 
     def test_all_unsafe_image_urls_return_error(self, mock_config_with_key):
         images = [
