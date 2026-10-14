@@ -1550,11 +1550,13 @@
   "latest_checkpoint": {
     "work_package": "M3",
     "status": "partial",
-    "last_verified_job": "deerflow-tenant-m1-postgres",
-    "last_verified_build": 89,
-    "next": "frontend workspace selection/request/cache integration M3; scoped remote edit/physical fencing M4/M5 and full fault acceptance M11 remain mandatory under M0-M11",
+    "last_verified_job": "deerflow-tenant-frontend",
+    "last_verified_build": 6,
+    "next": "immutable tab-local request scope and SDK stream/recovery binding, per-space query/cache/provider switching and native UI selector; full M0-M11 remains required",
     "tenant_activation": "closed",
-    "deployment": "none"
+    "deployment": "none",
+    "previous_backend_job": "deerflow-tenant-m1-postgres",
+    "previous_backend_build": 89
   },
   "workspace_feedback": {
     "status": "partial_M3_verified_repository_and_HTTP_main",
@@ -1700,6 +1702,91 @@
       "real production sandbox/NAS isolation and filesystem capability acceptance M5/M11; LocalSandboxProvider tests are not OS isolation proof",
       "continuous credential/role/reset and multiprocess/fault/cancellation/crash/uncertain-NFS persistent reconciliation and admission fencing M6/M11",
       "frontend transport/cache switching and complete M0-M11 acceptance; activation closed"
+    ]
+  },
+  "workspace_frontend_request_foundation": {
+    "status": "partial_M3_verified_explicit_Request_preservation_only",
+    "job": "deerflow-tenant-frontend",
+    "base_commit": "ec530a70",
+    "environment": {
+      "image": "deerflow-native:final-ci-tools-52ce",
+      "image_id": "sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01",
+      "node": "22.23.3",
+      "pnpm": "10.26.2",
+      "rstest": "0.10.6",
+      "lock_sha256": "2c8528230db42751714e6378f711c63a4a05834bf11eebb81435d59410268f65",
+      "workspace": "/data/jenkins-agent/deerflow/tenant-frontend",
+      "constraints": "uid 999 gid 987, 1 CPU 2GiB no swap; install container alone uses registry network, test/check container network none; no production mounts/keys or local Docker/Node tests"
+    },
+    "setup_failure": {
+      "build": 1,
+      "result": "FAILURE",
+      "build_seconds": 3.064,
+      "archive_sha256": "4ddf86d2c20fcb42c77cddeca27f06a895d10a692900a3afbeafa575edfa84df",
+      "reason": "Docker created root-owned source parent for nested dependency bind; unprivileged tar could not extract. Not business RED. Cache mount moved outside extraction tree."
+    },
+    "red": {
+      "build": 2,
+      "result": "FAILURE",
+      "tests_failed": 2,
+      "test_seconds": 1.89,
+      "build_seconds": 127.682,
+      "archive_sha256": "4ddf86d2c20fcb42c77cddeca27f06a895d10a692900a3afbeafa575edfa84df",
+      "reason": "actual fetch boundary dropped Request workspace header and caller cancellation signal; initial frozen dependency install took 103.7s"
+    },
+    "intermediate": [
+      {
+        "build": 3,
+        "result": "FAILURE",
+        "tests_passed": 15,
+        "tests_failed": 1,
+        "test_seconds": 4.11,
+        "archive_sha256": "323d8ffae1128cbccabfa9e80e5c798349d14d034e21a45925659e2a05b40f14",
+        "reason": "happy-dom Request reconstruction lost worker Headers instance after the wrapper had preserved it; diagnostic build follows"
+      },
+      {
+        "build": 4,
+        "result": "FAILURE",
+        "tests_passed": 1,
+        "tests_failed": 1,
+        "test_seconds": 1.67,
+        "archive_sha256": "4126f878a4b5447403f55cb0bc0cd17983b535782c0cba727ba184629d83ced6",
+        "reason": "boundary probe confirmed correct POST/workspace/CSRF before native fetch double; only reconstructed Request lost Headers instance. Final fixture normalizes the standard Headers iterable without changing assertions; temporary diagnostics removed"
+      },
+      {
+        "build": 5,
+        "result": "FAILURE",
+        "tests_passed": 16,
+        "test_seconds": 3.83,
+        "archive_sha256": "c50325db9107187594a2c2c9f41d75811256edd4faa7354f9d9a409343d6ca6c",
+        "reason": "all behavior checks passed; Prettier rejected new test layout; final changes only format that test using locked cloud Prettier"
+      }
+    ],
+    "green": {
+      "build": 6,
+      "result": "SUCCESS",
+      "tests_passed": 16,
+      "tests_added": 2,
+      "test_seconds": 3.74,
+      "build_seconds": 338.094,
+      "archive_sha256": "0a7f301c13a1c5d95cd6a58f4dd5cfbd28ebe4364d6a571abd507a859c916872",
+      "commands": [
+        "python3 scripts/pnpm.py exec rstest run tests/unit/core/workspaces/request.dom.test.ts tests/unit/core/api/fetcher.dom.test.ts tests/unit/core/api/static-mode.test.ts",
+        "python3 scripts/pnpm.py exec prettier --check src/core/api/fetcher.ts tests/unit/core/workspaces/request.dom.test.ts",
+        "python3 scripts/pnpm.py check"
+      ],
+      "checks": "targeted tests, modified-file Prettier, full frontend ESLint and tsc passed; most elapsed build time is full static checking, not the 3.74s behavioral tests"
+    },
+    "source_sha256": {
+      "frontend/src/core/api/fetcher.ts": "6f63b61e412bc3a3b0da32fad6ede0620fffb6c2f3bd5a2f0493169676235cc3",
+      "frontend/tests/unit/core/workspaces/request.dom.test.ts": "8b20755f76d1473c17bc19da306e7be61b041961c75909a1c00a3ac4ec9be72c"
+    },
+    "cleanup": "frontend #1-#6 exact owned container/network inventories independently empty; runtime/formatter probes empty; private dependency cache intentionally retained",
+    "remaining": [
+      "automatic immutable actor/workspace request capture and stale response/stream cancellation",
+      "SDK clients/replay/reconnect binding, query/cache isolation and per-tab selection UI",
+      "real browser + actual authenticated backend two-tab acceptance M7/M11, not proved by happy-dom/HTTP doubles",
+      "M4-M11 and full tenant activation; goal remains active and incomplete"
     ]
   }
 }

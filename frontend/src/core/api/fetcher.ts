@@ -58,26 +58,32 @@ export function readCsrfCookie(): string | null {
  * present, so explicit overrides win.
  */
 export async function fetch(
-  input: RequestInfo | string,
+  input: RequestInfo | URL,
   init?: RequestInit,
 ): Promise<Response> {
-  const url = typeof input === "string" ? input : input.url;
+  const request = input instanceof Request ? input : undefined;
+  const url =
+    typeof input === "string"
+      ? input
+      : input instanceof URL
+        ? input.toString()
+        : input.url;
+  const method = init?.method ?? request?.method ?? "GET";
 
   // Static demos have no Gateway. Resolve REST calls before credentials,
   // CSRF, or redirects; demo assets and explicit mock routes still use HTTP.
   if (isStaticWebsiteOnly()) {
     const response = await staticApiResponse(url, {
       ...init,
-      method:
-        init?.method ?? (typeof input === "string" ? "GET" : input.method),
+      method,
     });
     if (response) return response;
   }
 
   // Inject CSRF for state-changing methods. GET/HEAD/OPTIONS/TRACE skip
   // it to mirror the gateway's ``should_check_csrf`` logic exactly.
-  let headers = init?.headers;
-  if (isStateChangingMethod(init?.method ?? "GET")) {
+  let headers = init?.headers ?? request?.headers;
+  if (isStateChangingMethod(method)) {
     const token = readCsrfCookie();
     if (token) {
       // Fresh Headers instance so we don't mutate caller-supplied objects.
@@ -89,7 +95,9 @@ export async function fetch(
     }
   }
 
-  const res = await globalThis.fetch(url, {
+  // Forward the original Request so its body, method and cancellation signal
+  // survive. Reducing it to a URL loses explicit workspace selectors as well.
+  const res = await globalThis.fetch(input, {
     ...init,
     headers,
     credentials: "include",

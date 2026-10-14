@@ -659,3 +659,11 @@ and non-mounted providers still need M4/M5 protocol (currently 503); unsupported
 platform and uncertain filesystem outcomes do not bypass gates. Physical/NAS/
 distributed fault/unknown-outcome reconciliation and client/M4-M11 remain required.
 Exact resources empty, sources match archive; M3 unchecked and activation closed.
+
+M3 frontend Request foundation: frontend #2 RED header/signal loss; #1 setup,
+#3/#4 DOM Headers-double diagnostic and #5 formatting history retained. #6 GREEN
+passes 16 checks (two new/fourteen native), Prettier and full pnpm check. Runtime/
+test bytes match archive, exact resources empty; existing Node22 CI image and
+frozen pnpm10 cache reused. This preserves explicit Request scope/method/body/
+signal only: automatic scope, SDK/reconnect, per-space cache/provider/UI and real
+two-tab backend acceptance remain mandatory. M3 unchecked, activation closed.

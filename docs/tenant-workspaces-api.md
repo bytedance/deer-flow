@@ -847,3 +847,29 @@ backend retry/rollback; durable unknown-outcome reconciliation/admission fencing
 still needs M11 proof. A revocation committed after an already authorized write is
 not retroactive rollback. Full credential/role checks, sandbox/NAS isolation,
 remote producers/factories, frontend and complete M0-M11 remain; activation closed.
+
+## Frontend Request preservation (partial M3)
+
+The public fetch wrapper now forwards the original Request (or URL input),
+keeps Request method/body/headers/AbortSignal and RequestInit override semantics,
+and derives CSRF from the actual request method. It never mutates caller headers.
+Reducing a Request to only its URL had silently removed an explicit workspace
+selector and prevented cancellation; preserving the object fixes that contract.
+
+Shanghai job deerflow-tenant-frontend #2 reproduced both failures. #1 was a
+non-root extraction setup failure, not business RED. #3/#4 traced a happy-dom
+Request reconstruction limitation: the wrapper's outgoing Headers already had
+the correct workspace and CSRF, but the test double discarded the worker Headers
+instance. The fixture now normalizes that standard iterable before reconstructing
+the outgoing Request, preserving all original header/body/signal assertions.
+#5 passed all sixteen checks but needed formatting; #6 SUCCESS passed the same
+16 (two new + fourteen native) in 3.74s, modified-file Prettier and full frontend
+pnpm check (ESLint + tsc). Full build time 338.094s mainly reflects static checking.
+The runtime/test bytes match its successful archive. #1-#6 and probes have empty
+owned inventories; a private frozen-lock dependency cache remains for reuse.
+
+This proves explicit Request forwarding and existing static/login compatibility,
+not automatic workspace selection or switch cancellation. Tab-local immutable
+scope, SDK stream/retry/reconnect binding, query/cache/provider reset, native UI
+selector and actual authenticated two-tab browser acceptance remain M3/M7/M11.
+No local frontend runtime/test or deployment ran; tenant activation stays closed.

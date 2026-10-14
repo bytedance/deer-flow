@@ -340,3 +340,41 @@ DeerFlow styling; actual real Agent HTTP launch remains M4 and browser onboardin
 M7/M11. Scoped remote artifact edits and production filesystem/unknown-outcome
 fencing remain mandatory M4/M5/M11; do not call full PUT or M3 acceptance done.
 Original M0-M11 goal stays active, no tenant push/deployment, activation closed.
+
+## Frontend Request preservation (partial M3)
+
+The public fetch wrapper now forwards the original Request (or URL input),
+keeps Request method/body/headers/AbortSignal and RequestInit override semantics,
+and derives CSRF from the actual request method. It never mutates caller headers.
+Reducing a Request to only its URL had silently removed an explicit workspace
+selector and prevented cancellation; preserving the object fixes that contract.
+
+Shanghai job deerflow-tenant-frontend #2 reproduced both failures. #1 was a
+non-root extraction setup failure, not business RED. #3/#4 traced a happy-dom
+Request reconstruction limitation: the wrapper's outgoing Headers already had
+the correct workspace and CSRF, but the test double discarded the worker Headers
+instance. The fixture now normalizes that standard iterable before reconstructing
+the outgoing Request, preserving all original header/body/signal assertions.
+#5 passed all sixteen checks but needed formatting; #6 SUCCESS passed the same
+16 (two new + fourteen native) in 3.74s, modified-file Prettier and full frontend
+pnpm check (ESLint + tsc). Full build time 338.094s mainly reflects static checking.
+The runtime/test bytes match its successful archive. #1-#6 and probes have empty
+owned inventories; a private frozen-lock dependency cache remains for reuse.
+
+This proves explicit Request forwarding and existing static/login compatibility,
+not automatic workspace selection or switch cancellation. Tab-local immutable
+scope, SDK stream/retry/reconnect binding, query/cache/provider reset, native UI
+selector and actual authenticated two-tab browser acceptance remain M3/M7/M11.
+No local frontend runtime/test or deployment ran; tenant activation stays closed.
+
+Latest continuation: frontend #6 SUCCESS terminal, full check clean and owned
+resources empty. Backend last #89 remains terminal/verified. No live test job.
+Next implement immutable tab-local actor/workspace request snapshots: old clients
+must abort/refuse, never read a newly selected mutable ID on retry. Apply to REST
+and every SDK client/recovery path; do not send selectors to untrusted origins.
+Then per-space QueryClient/cache and native-style selector/provider. Do not keep
+the current module-global QueryClient as shared viewer/workspace state or use a
+cross-tab last-workspace cookie/localStorage to retarget another tab. Switching
+must detach old observation without automatically cancelling its background Run;
+confirm native SDK/on_disconnect behavior during M4 integration. Preserve full
+M0-M11 scope and activation gates; no push/deployment.

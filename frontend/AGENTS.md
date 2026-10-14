@@ -352,3 +352,13 @@ locked during attachment. Deleting an object removes its context; undo restores
 references already attached to the draft. Labels grant no read authority. IME,
 caret, thread changes and attachment fences apply to editor and picker. The `@`
 and attachment buttons share the picker.
+
+The API fetch wrapper must forward native Request inputs intact, including body,
+method, explicit workspace header and AbortSignal. Derive CSRF from the effective
+RequestInit/Request method; caller RequestInit headers override inherited ones,
+and clone before adding CSRF. Never reduce a Request to just its URL. Workspace
+Request tests normalize Headers at the happy-dom fetch-double boundary because
+its Request constructor does not consume the worker Headers instance like native
+fetch; keep actual selector/body/signal assertions. Shanghai frontend #6 verifies
+this foundation and full check, not automatic workspace/client/cache switching.
+All frontend tests/typecheck here run in Shanghai, not local Docker/Node runtime.

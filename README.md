@@ -3004,3 +3004,9 @@ runtime integration remain pending before tenant activation.
 now checks private workspace and conversation identity at publication while
 preserving native digest checks. Scoped remote editing, frontend and production
 filesystem/fault acceptance remain unfinished gates before tenant activation.
+
+[Frontend Request preservation](docs/tenant-workspaces-api.md#frontend-request-preservation-partial-m3)
+now keeps explicit workspace selectors, request bodies and cancellation while
+retaining CSRF behavior. Automatic space selection, SDK streams, cache isolation
+and the native UI switcher remain pending. [Frontend CI notes](docs/tenant-workspaces-frontend-testing.md)
+record the isolated Shanghai validation setup and replay commands.
