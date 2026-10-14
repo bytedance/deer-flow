@@ -2948,3 +2948,8 @@ Workspace goal and state writes now preserve new-chat creation, native reservati
 Native conversation branches now preserve private workspace ownership, history and file copying. See [branch validation and remaining lifecycle work](docs/tenant-workspaces-api.md#private-native-branches-partial-m3); tenant activation remains blocked.
 
 Manual context compaction now rechecks private workspace access before summarizing and before checkpoint commit. See [compaction validation and remaining requirements](docs/tenant-workspaces-api.md#private-manual-compaction-partial-m3); full tenant activation remains blocked.
+
+Private conversation deletion and upload cleanup now preserve workspace and
+conversation-instance ownership in isolated local-sandbox acceptance. See
+[deletion limits and evidence](docs/tenant-workspaces-api.md#private-conversation-deletion-partial-m3).
+Remote lifecycle recovery, runtime/client isolation and tenant activation remain pending.

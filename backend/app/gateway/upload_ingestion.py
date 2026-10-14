@@ -146,6 +146,7 @@ class ThreadUploadIngestionService:
     def __init__(self, *, request: Request | None, thread_id: str, user_id: str, app_config: AppConfig, publication_check=None) -> None:
         self._publication_check = publication_check
         self._workspace_context = get_current_workspace()
+        self._thread_incarnation: str | None = None
         self._request = request
         self._thread_id = thread_id
         self._user_id = user_id
@@ -162,7 +163,7 @@ class ThreadUploadIngestionService:
         self._sync_targets: list[tuple[Path, str]] = []
         self._total_size = 0
 
-    async def _publish(self, operation):
+    async def _publish(self, operation, *, check_source=True):
         """Serialize short filesystem publication against native scope revocation."""
         if self._workspace_context is None:
             return await operation()
@@ -177,11 +178,11 @@ class ThreadUploadIngestionService:
             raise WorkspaceAccessDenied("workspace upload requires persistent thread scope")
 
         async def publish():
-            if self._publication_check is not None:
+            if check_source and self._publication_check is not None:
                 await self._publication_check()
             return await operation()
 
-        return await repo.publish_under_live_lock(self._thread_id, user_id=self._user_id, publish=publish)
+        return await repo.publish_under_live_lock(self._thread_id, user_id=self._user_id, incarnation=self._thread_incarnation, publish=publish)
 
     async def __aenter__(self) -> ThreadUploadIngestionService:
         await self.open()
@@ -211,7 +212,11 @@ class ThreadUploadIngestionService:
         """
         uploads = _uploads()
         self._limits = uploads._get_upload_limits(self._config)
-        self._uploads_dir = await run_file_io(uploads.ensure_uploads_dir, self._thread_id, user_id=self._user_id)
+        if self._workspace_context is not None:
+            from app.gateway.workspaces.checkpoints import capture_checkpoint_thread_identity
+
+            self._thread_incarnation = await capture_checkpoint_thread_identity(self._request, self._thread_id)
+        self._uploads_dir = await self._publish(lambda: run_file_io(uploads.ensure_uploads_dir, self._thread_id, user_id=self._user_id))
         listing = await run_file_io(uploads.list_files_in_dir, self._uploads_dir)
         self._seen_filenames.update(entry["filename"] for entry in listing["files"])
         sandbox_provider = uploads.get_sandbox_provider()
@@ -427,16 +432,28 @@ class ThreadUploadIngestionService:
         # Record the final inode/version only after sandbox-readable chmod and
         # any synchronization have completed; chmod changes st_ctime_ns.
         for original, markdown in self._companion_pairs:
-            await run_file_io(register_companion, original, markdown)
+            await self._publish(lambda: run_file_io(register_companion, original, markdown))
 
     async def cleanup_written(self) -> None:
         """Remove every file this session wrote (ordinary rejected-request cleanup)."""
         if not self._written_paths:
             return
         uploads = _uploads()
-        await run_file_io(uploads._cleanup_uploaded_paths, self._written_paths)
-        for original, _ in self._companion_pairs:
-            await run_file_io(unregister_companion, original)
+
+        async def cleanup():
+            await run_file_io(uploads._cleanup_uploaded_paths, self._written_paths)
+            for original, _ in self._companion_pairs:
+                await run_file_io(unregister_companion, original)
+
+        from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
+
+        try:
+            # A path is reusable after conversation deletion. Never use old
+            # request cleanup authority against a new incarnation. Withdrawal
+            # also defers cleanup; reconciliation must use captured provenance.
+            await self._publish(cleanup, check_source=False)
+        except WorkspaceAccessDenied:
+            logger.info("Upload cleanup deferred because its original thread scope is unavailable")
         self._companion_pairs = []
         self._written_paths = []
 

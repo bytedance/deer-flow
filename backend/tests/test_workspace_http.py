@@ -705,8 +705,8 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                     for table in (RunRow, RunEventRow, FeedbackRow, ThreadReadMarkerRow, ScheduledTaskEventRow):
                         assert await session.scalar(sa.select(sa.func.count()).select_from(table).where(table.thread_id == delete_id)) == 0
                         assert await session.scalar(sa.select(sa.func.count()).select_from(table).where(table.thread_id == delete_ids["personal"])) == 1
-                assert await app.state.run_event_store.list_events(delete_id, limit=100, user_id=identities["alice"]) == []
-                assert len(await app.state.run_event_store.list_events(delete_ids["personal"], limit=100, user_id=identities["alice"])) == 1
+                assert await app.state.run_event_store.list_events(delete_id, delete_id + "-run", limit=100, user_id=identities["alice"]) == []
+                assert len(await app.state.run_event_store.list_events(delete_ids["personal"], delete_ids["personal"] + "-run", limit=100, user_id=identities["alice"])) == 1
                 uncertain_id = str(uuid4())
                 assert (await client.post("/api/threads", headers=team_headers, json={"thread_id": uncertain_id})).status_code == 200
                 deletion_probe.update(thread_id=uncertain_id, fail=True)
@@ -718,6 +718,35 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                 assert (await client.post("/api/threads", headers=team_headers, json={"thread_id": uncertain_id})).status_code == 404
                 assert (await client.delete("/api/threads/" + uncertain_id, headers=team_headers)).status_code == 409
                 assert deletion_attempts[uncertain_id] == 1, "unknown physical cleanup was replayed"
+                # A real slow multipart request outlives delete + same-ID recreate.
+                # Its rejection/cleanup must preserve files in the new generation.
+                reused_id = str(uuid4())
+                assert (await client.post("/api/threads", headers=team_headers, json={"thread_id": reused_id})).status_code == 200
+                original_stream = uploads._stream_upload_file
+                replacement_during_stream = {"armed": True}
+
+                async def recreate_after_staging(file):
+                    async for chunk in original_stream(file):
+                        yield chunk
+                    if file.filename == "late.txt" and replacement_during_stream.pop("armed", False):
+                        removed = await client.delete("/api/threads/" + reused_id, headers=team_headers)
+                        assert removed.status_code == 200, removed.text
+                        recreated = await client.post("/api/threads", headers=team_headers, json={"thread_id": reused_id})
+                        assert recreated.status_code == 200, recreated.text
+                        fresh = await client.post("/api/threads/" + reused_id + "/uploads", headers=team_headers, files={"files": ("first.txt", b"new generation bytes", "text/plain")})
+                        assert fresh.status_code == 200, fresh.text
+
+                monkeypatch.setattr(uploads, "_stream_upload_file", recreate_after_staging)
+                stale_upload = await client.post("/api/threads/" + reused_id + "/uploads", headers=team_headers, files=[("files", ("first.txt", b"old first file", "text/plain")), ("files", ("late.txt", b"old delayed file", "text/plain"))])
+                monkeypatch.setattr(uploads, "_stream_upload_file", original_stream)
+                reused_root = tmp_path / "files" / "workspaces" / team / "users" / identities["alice"] / "threads" / reused_id / "user-data" / "uploads"
+                assert (reused_root / "first.txt").read_bytes() == b"new generation bytes", "old request cleanup deleted the recreated conversation's file"
+                assert stale_upload.status_code == 404, stale_upload.text
+                assert not (reused_root / "late.txt").exists(), "old request published into the recreated conversation"
+                owner_replacement["thread_id"] = reused_id
+                stale_unlink = await client.delete("/api/threads/" + reused_id + "/uploads/first.txt", headers=team_headers)
+                assert stale_unlink.status_code == 404, stale_unlink.text
+                assert (reused_root / "first.txt").read_bytes() == b"new generation bytes"
                 branch_source = str(uuid4())
                 created_source = await client.post("/api/threads", headers=team_headers, json={"thread_id": branch_source, "project_id": shared_project})
                 assert created_source.status_code == 200, created_source.text

@@ -542,3 +542,40 @@ legacy memory regression is not workspace memory authorization. Live DeepSeek,
 workspace credentials/memory/archive effects, PostgreSQL checkpointer, fault
 recovery and full UI/event-history acceptance remain M4/M5/M9/M11 requirements.
 Delete/feed/client and full M3 still gate tenant activation.
+
+## Private conversation deletion (partial M3)
+
+Scoped DELETE /threads/{id} keeps native permissions, goal locking and durable
+non-run admission. It captures the original private incarnation, verifies child
+attribution, and commits a metadata tombstone before physical cleanup. Ordinary
+scoped reads/publication refuse tombstones. Cleanup uses native browser/MCP
+session closure, checkpoint deletion, workspace thread paths and event cleanup.
+A captured internal receipt then authorizes exact workspace/owner SQL cleanup,
+including read markers, before removing metadata; the active delete reservation
+survives until native release. Live revocation blocks admission before effects.
+
+Only the local sandbox with compatible persistent stores is admitted by this
+partial implementation. A remote admission host, any retained MCP task, or active
+scheduled occurrence refuses cleanup. Unknown physical/checkpoint outcomes keep
+the tombstone and return 503; a repeat deletion returns 409 rather than replaying
+possibly destructive work. Verified STOP and recovery remain required future work.
+
+Uploads, shelf attachments and file unlink capture the private entry incarnation.
+Short file publication, chmod, companion registration and failure cleanup compare
+it under live SQL locks. Cleanup loses authority after deletion/recreation or
+revocation; it must defer instead of unlinking reusable paths. Deferred data needs
+captured-provenance reconciliation. Conversion and sandbox network work remain
+outside writer transactions; non-mounted sandbox effects still need M5 evidence.
+
+Jenkins #58 was the missing-scope RED. #59 caught a test event-query signature
+error. #60 reproduced an actual old multipart request deleting a new-generation
+file after HTTP delete/recreate. #61 passed both repaired HTTP mains; its native
+cancellation fixture still targeted the pre-refactor entry. #62 passed 10 checks
+in 39.38s: SQLite/PostgreSQL authenticated mains and eight affected native
+delete/upload regressions, including cancellation drain. The source archive and
+hashes are in tenant-workspaces-progress.json; all runtime/test bytes match.
+Each build's dedicated containers/networks were independently checked empty.
+
+This verifies local deletion and generation-safe file cleanup mains, not full
+M3 or runtime activation. Run cache/background history, remote STOP/recovery,
+PostgreSQL checkpoints, NAS, full client flows and M4–M11 remain required.

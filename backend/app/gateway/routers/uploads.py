@@ -390,7 +390,7 @@ def _auto_convert_documents_enabled(app_config: AppConfig) -> bool:
 
 
 @router.post("", response_model=UploadResponse)
-@workspace_resource_scope()
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("threads", "write", owner_check=True, require_existing=False)
 async def upload_files(
     thread_id: ThreadId,
@@ -504,7 +504,7 @@ async def list_uploaded_files(thread_id: ThreadId, request: Request) -> UploadLi
 
 
 @router.delete("/{filename}")
-@workspace_resource_scope()
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("threads", "delete", owner_check=True, require_existing=True)
 async def delete_uploaded_file(thread_id: ThreadId, filename: str, request: Request) -> dict:
     """Delete a file from a thread's uploads directory."""
@@ -521,7 +521,10 @@ async def delete_uploaded_file(thread_id: ThreadId, filename: str, request: Requ
             raise HTTPException(status_code=503, detail="Workspace deletion requires persistent thread scope")
         # Recheck live membership/private ownership while serializing with
         # revocation; drain the short unlink worker before releasing SQL locks.
-        return await repo.publish_under_live_lock(thread_id, user_id=owner, publish=delete)
+        from app.gateway.workspaces.checkpoints import capture_checkpoint_thread_identity
+
+        incarnation = await capture_checkpoint_thread_identity(request, thread_id)
+        return await repo.publish_under_live_lock(thread_id, user_id=owner, incarnation=incarnation, publish=delete)
     except (HTTPException, WorkspaceAccessDenied):
         raise
     except FileNotFoundError:

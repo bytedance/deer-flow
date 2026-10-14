@@ -423,3 +423,13 @@ a replaced snapshot before model invocation; the final commit adapter refuses
 revoked/replaced writes after generation. SQL writer locks never span model
 generation. Tenant memory/task archive effects and model credentials remain M5
 coverage; deterministic compaction acceptance alone cannot enable tenant mode.
+
+Scoped conversation deletion delegates to workspaces/deletion.py after native
+permission and workspace admission. Capture source incarnation before the native
+reservation; persist the tombstone before physical cleanup, retain it on unknown
+outcomes, and never auto-replay. Current acceptance is local-only with no retained
+MCP tasks/active scheduled occurrence. Upload/shelf-attach/file-unlink entry uses
+private_thread_read and passes the captured incarnation into the short file fence;
+failure cleanup must not unlink a recreated thread's reusable paths. Revoked
+cleanup defers for provenance-aware reconciliation. #62 verifies both metadata
+dialects and native cancellation drain; remote/background/client gates remain.

@@ -535,3 +535,11 @@ M3 checkpoint-only admission: #52 RED actual legacy checkpoint ID claimed by sco
 M3 native branches: #54 RED missing scope; #55 GREEN (8 passed, 35.34s). Actual SQLite/PostgreSQL metadata with native SQLite graph checkpoints proves private child/project ownership, exact source/child file bytes, own-only history, shared peer denial and source-incarnation replacement refusing new metadata. Six native full/delta/history/file/project regressions passed. Prepared checkpoints publish under source SQL fencing after file staging; cross-store faults and unpublished-stage reconciliation remain M4/M8/M10/M11 requirements. Delete/compact/feed/client and full M3 remain unchecked.
 
 M3 manual compaction: #56 RED missing scope; #57 GREEN (8 passed, 36.66s). Actual native middleware/graph/SQL with deterministic model output persists summary and latest-message retention, refuses generation-span policy/incarnation changes without checkpoint writes, and refuses snapshot replacement/foreign/peer access before model calls. Six native mutation/schema/noop/failure/binding/busy regressions passed. Scoped memory/archive disabled; live model/M5 effects, delete/feed/client, fault recovery and full M3 remain pending.
+
+M3 deletion checkpoint: #58 missing-scope RED; #59 fixture signature failure;
+#60 real delete/recreate stale multipart cleanup RED; #61 both HTTP mains pass
+with one stale cancellation unit entry; #62 GREEN (10 passed, 39.38s). Private
+tombstones/receipts fence local cleanup, child attribution and same-ID reuse;
+file publication/cleanup/unlink checks captured incarnation. Remote STOP,
+unknown cleanup recovery, Run cache/background feeds, client and all remaining
+M4–M11 evidence remain required. M3 stays unchecked and activation closed.

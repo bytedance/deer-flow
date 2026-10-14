@@ -206,3 +206,11 @@ Writable-directory cases remain portable.
 of an existing entry on failure. A cleanup failure must preserve the original
 publish exception, including interruption. Import the scanner during fixture
 setup, after the autouse fixtures initialize runtime, to avoid the package cycle.
+
+Workspace deletion coverage in test_workspace_http uses actual scoped SQL and
+authenticated multipart/delete/create calls: an old request must neither publish
+into nor clean files from a reused thread generation. Tombstone probes execute
+after real native checkpoint deletion, and uncertain cleanup checks no replay.
+The native cancellation unit targets _delete_thread_data_authorized.__wrapped__
+to retain its original authorization-bypassed lifecycle focus after the route
+adapter split; HTTP authorization remains exercised separately.

@@ -158,3 +158,15 @@ and file staging must occur before it, under durable source branch admission.
 Private files remain unpublished until metadata exists. It is not a cross-store
 atomic transaction; uncertain commits cannot authorize file cleanup. Orphan
 staging/retention and fault acceptance remain separate required work.
+
+ThreadDeletionRepository is a tenant-only lifecycle helper sharing ThreadMeta's
+session factory, not a new execution authority. Native delete reservations may
+see tombstones; other scoped reads/mutations may not. begin validates incarnation
+and child attribution before persisting deleting plus a private receipt token.
+finish locks workspace -> actor -> exact parent and verifies receipt before
+precise child/marker deletion; native reservation release remains independent.
+No unknown cleanup replay is authorized. publish_under_live_lock requires the
+captured incarnation whenever scope is bound, including rejected-upload cleanup.
+Do not silently look up and adopt a replacement incarnation. #62 proves the
+local HTTP mains; remote STOP, Run cache/background writers and crash recovery
+remain integration requirements, so compiled tenant activation stays closed.

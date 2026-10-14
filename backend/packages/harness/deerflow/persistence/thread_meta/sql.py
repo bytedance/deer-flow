@@ -83,13 +83,14 @@ class ThreadMetaRepository(ThreadMetaStore):
                 d[key] = coerce_iso(val)
         return d
 
-    async def publish_under_live_lock[T](self, thread_id: str, *, publish: Callable[[], Awaitable[T]], user_id: str | None | _AutoSentinel = AUTO) -> T:
+    async def publish_under_live_lock[T](self, thread_id: str, *, publish: Callable[[], Awaitable[T]], incarnation: str | None = None, user_id: str | None | _AutoSentinel = AUTO) -> T:
         """Fence a short file publication; never hold this over model/network work."""
         owner = resolve_user_id(user_id, method_name="ThreadMetaRepository.publish_under_live_lock")
         context = self._scope(owner)
         async with self._sf() as session:
-            if await self._locked_row(session, thread_id, owner, context) is None:
-                raise WorkspaceAccessDenied("thread publication is unavailable")
+            row = await self._locked_row(session, thread_id, owner, context)
+            if row is None or (context is not None and (not incarnation or row.incarnation != incarnation)):
+                raise WorkspaceAccessDenied("thread publication identity is unavailable")
             result = await await_drained(publish())
             await session.commit()
             return result

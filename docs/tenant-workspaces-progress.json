@@ -984,7 +984,7 @@
     }
   },
   "pause_checkpoint": {
-    "status": "paused_by_user",
+    "status": "resumed; deletion main verified, overall plan active",
     "reason": "保存当前进度，明天继续",
     "last_verified_commit": "b8dae318",
     "work_package": "M3 private thread deletion WIP",
@@ -996,7 +996,7 @@
       "archive_sha256": "9e352861b80bc6d7cb753b53894e4c2aa337b8dc34cba55f95cafc2e7f734159"
     },
     "green": "not_started",
-    "cleanup_58": "independent_check_pending",
+    "cleanup_58": "independently confirmed empty",
     "next": "Audit captured incarnation in upload/transfer publication before running deletion GREEN",
     "source_sha256": {
       "backend/app/gateway/routers/threads.py": "046dcdb9843daa5af9e0b6b23f8ac62fc46a2a291d7124311952a68f38f6207a",
@@ -1211,5 +1211,71 @@
       "networks": [],
       "verified": "Each build label inspected independently on Shanghai Jenkins"
     }
+  },
+  "private_thread_deletion": {
+    "status": "partial_M3_verified_main",
+    "red": {
+      "build": 58,
+      "tests_failed": 2,
+      "elapsed_seconds": 34.13,
+      "archive_sha256": "9e352861b80bc6d7cb753b53894e4c2aa337b8dc34cba55f95cafc2e7f734159",
+      "reason": "missing workspace binding before native DELETE owner admission"
+    },
+    "intermediate": [
+      {
+        "build": 59,
+        "result": "FAILURE",
+        "archive_sha256": "efc01e71044c0021eb7bbe24c0a999cf6600e1855bcd8093619252ea70deb2dc",
+        "reason": "test omitted required native event run_id; not a production GREEN",
+        "elapsed_seconds": 35.0
+      },
+      {
+        "build": 60,
+        "result": "FAILURE",
+        "archive_sha256": "4f59b3509bcedf576be9fc4e0f70c85575f142b4baebb0869fe4ba562c7f0ba3",
+        "reason": "actual old multipart cleanup deleted same-name new-generation file after HTTP delete/recreate",
+        "elapsed_seconds": 36.68
+      },
+      {
+        "build": 61,
+        "result": "FAILURE",
+        "archive_sha256": "10d5fa1601108935c642bd5f8b7b40584fe116fce3b2b8b73e9ef64c92e9a2d2",
+        "tests_passed": 9,
+        "tests_failed": 1,
+        "reason": "both HTTP mains passed; cancellation unit still unwrapped former route entry after refactor",
+        "elapsed_seconds": 44.71
+      }
+    ],
+    "green": {
+      "build": 62,
+      "result": "SUCCESS",
+      "tests_passed": 10,
+      "elapsed_seconds": 39.38,
+      "archive_sha256": "9a0299a1a6b68035d37a4665d11917b43d9f35070e4d7c465a98fc635aecc291",
+      "command": "python -m pytest tests/test_workspace_http.py tests/test_threads_router.py::test_delete_thread_route_cleans_thread_directory tests/test_threads_router.py::test_delete_thread_route_closes_mcp_sessions tests/test_threads_router.py::test_delete_thread_route_isolates_failing_mcp_cleanup tests/test_threads_router.py::test_delete_thread_route_cleans_persisted_records tests/test_threads_router.py::test_delete_thread_route_rejects_active_thread_operation_without_deleting_metadata tests/test_threads_router.py::test_delete_thread_route_holds_reservation_until_cancelled_removal_finishes tests/test_uploads_router.py::test_upload_files_writes_thread_storage_and_skips_local_sandbox_sync tests/test_uploads_router.py::test_upload_files_syncs_non_local_sandbox_and_marks_markdown_file -q --tb=short --no-showlocals"
+    },
+    "source_sha256": {
+      "backend/app/gateway/routers/threads.py": "046dcdb9843daa5af9e0b6b23f8ac62fc46a2a291d7124311952a68f38f6207a",
+      "backend/app/gateway/routers/uploads.py": "32d902ed8185cc83524f97a9f12e7e2f177429d603912691269a8fd40de1216e",
+      "backend/app/gateway/routers/project_documents.py": "bf72208889dc265c25821a2a80ab9d04b944baa6bae195e7a5837ca50ac2fcf0",
+      "backend/app/gateway/upload_ingestion.py": "a66e5f65d16323e1bf0f3540f9a1163f3eb2accb75a9f5a904de4db4a4fd57f5",
+      "backend/app/gateway/workspaces/deletion.py": "d708631da698f386306ac08c96d021ddee393c989e26454cc18256885e32fdcb",
+      "backend/packages/harness/deerflow/persistence/run/sql.py": "81fe8c42bcbde9f69f543743950a5434356725e255ac4e8cdb9491640443ba0a",
+      "backend/packages/harness/deerflow/persistence/thread_meta/base.py": "625608df78b1f625cd3a675803413768f07b537a8f1af1bc0eac3feb47371d5b",
+      "backend/packages/harness/deerflow/persistence/thread_meta/sql.py": "6fb9fcb8beb94116106b2599474ccec073e141cd16b8631b463cfc2f6412e528",
+      "backend/packages/harness/deerflow/persistence/thread_meta/deletion.py": "bc086cf082cb5e214ffc6b79218847705e7d8cf7e41fb0cb239c66359150c4ca",
+      "backend/tests/test_workspace_http.py": "7baf36f006827c559769c52e9c3036cf308f6e454cd53c5e7ddc801a250a6c44",
+      "backend/tests/test_threads_router.py": "40eb1e77c4c83989bb56dab1252bb4327b71b066e97eea6c6efdfcabe1dfc6ca"
+    },
+    "archive_source_comparison": "all changed runtime and test files byte-identical to #62",
+    "cleanup": "#58-#62 independently checked; each owned container/network list empty",
+    "warning": "existing Starlette TestClient/httpx deprecation warning",
+    "remaining": [
+      "remote execution and retained MCP verified STOP/disposition",
+      "crash/unknown cleanup receipt reconciliation; no automatic replay",
+      "scoped RunManager cache and history/background writer lifecycle",
+      "PostgreSQL checkpointer, NAS and physical cancellation/recovery",
+      "M3 activity/feed/client and remaining M4-M11; tenant activation remains closed"
+    ]
   }
 }
