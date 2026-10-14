@@ -2140,6 +2140,12 @@ Cancelled or timed-out background sub-agent executions retain provider-reported 
 
 For `tests_passed:go test ./...`, packages marked `[no test files]` or `[no tests to run]` do not veto a passing summary from another package. Runs with only zero-test package summaries remain `UNVERIFIED`; failures still take precedence. This checks recorded execution evidence, not claim correctness.
 
+For `tests_passed:cargo test`, a complete passing target summary can coexist with
+empty unit, integration or documentation targets. Complete zero-pass successful
+summaries do not veto that sibling evidence. All-empty or all-ignored runs and
+bare `test result: ok` banners remain `UNVERIFIED`; incomplete zero-test summaries
+are kept as vetoes, and failures still take precedence.
+
 For Maven and Gradle test acceptance, a `BUILD SUCCESS` / `BUILD SUCCESSFUL`
 banner alone remains `UNVERIFIED`: builds can succeed without running tests.
 Complete `Tests run: N, Failures: F, Errors: E, Skipped: S` or `N tests completed`
