@@ -47,6 +47,7 @@ from deerflow.community.search_max_results import coerce_max_results
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
+_FORMAT_ERROR = "You.com returned an unexpected response format"
 
 # Keyed Search API: full surface, higher limits, needs YDC_API_KEY.
 _YOUCOM_SEARCH_ENDPOINT = "https://api.you.com/v1/search"
@@ -193,7 +194,7 @@ def web_search_tool(query: str, max_results: int | None = None) -> str:
     if not isinstance(data, dict):
         logger.error("You.com returned an unexpected payload type: %s", type(data).__name__)
         return json.dumps(
-            {"error": "You.com returned an unexpected response format", "query": query},
+            {"error": _FORMAT_ERROR, "query": query},
             ensure_ascii=False,
         )
 
@@ -203,7 +204,7 @@ def web_search_tool(query: str, max_results: int | None = None) -> str:
     elif not isinstance(sections, dict):
         logger.error("You.com returned unexpected 'results' payload type: %s", type(sections).__name__)
         return json.dumps(
-            {"error": "You.com returned an unexpected response format", "query": query},
+            {"error": _FORMAT_ERROR, "query": query},
             ensure_ascii=False,
         )
 
@@ -211,7 +212,7 @@ def web_search_tool(query: str, max_results: int | None = None) -> str:
     news = _section_objects(sections, "news")
     if web is None or news is None:
         return json.dumps(
-            {"error": "You.com returned an unexpected response format", "query": query},
+            {"error": _FORMAT_ERROR, "query": query},
             ensure_ascii=False,
         )
 

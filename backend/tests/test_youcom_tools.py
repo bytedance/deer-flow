@@ -412,7 +412,7 @@ class TestMalformedResponseShapes:
         ],
         ids=["results-string", "results-list", "web-string", "news-dict", "web-no-objects", "both-no-objects"],
     )
-    def test_malformed_container_returns_format_error(self, mock_config_with_key, payload, leaked_value):
+    def test_malformed_container_returns_format_error(self, mock_config_with_key, payload, leaked_value, caplog):
         patcher, _ = _patch_get(_make_response(payload))
         try:
             from deerflow.community.youcom.tools import web_search_tool
@@ -423,7 +423,9 @@ class TestMalformedResponseShapes:
 
         assert parsed["error"] == "You.com returned an unexpected response format"
         assert parsed["query"] == "test"
-        assert "No results found" not in parsed["error"]
+        if leaked_value is not None:
+            assert leaked_value not in caplog.text
+            assert leaked_value not in json.dumps(parsed)
 
     def test_malformed_section_errors_even_when_other_section_has_hits(self, mock_config_with_key):
         """Strict like tavily: one malformed container fails the whole call."""
