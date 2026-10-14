@@ -631,7 +631,16 @@ platform connection to one instance: the holder of the provider's row in
 state, so the connect flow works on any instance; `GET /api/channels/` names
 each provider's `leader`. Runtime credentials saved on an instance that does
 not hold the provider apply on the holder only when it next starts the
-channel. See
+channel. Channel runs are created with `on_disconnect: continue`, so a run
+keeps executing when the request that created it dies with its instance (a
+leader hand-off, a rolling restart, a crash): its thread state is persisted
+and the answer stays readable in the web UI, while the IM reply itself is
+lost with the old holder's transport state. Because that run survives, the
+manager keeps the inbound dedupe key once a run request has left it (a
+cancelled worker, a read timeout, a dropped connection), so the provider's
+redelivery of the same message on the new holder is dropped instead of
+executing the turn twice; a request the Gateway rejected, or a failure before
+the request was sent, still releases the key for a retry. See
 [IM channel leader lease](CONFIGURATION.md#im-channel-leader-lease-channelsleader_lease).
 
 ## Security Notes
