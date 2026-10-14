@@ -4,8 +4,11 @@ Uses temp SQLite DB for ORM tests.
 """
 
 import pytest
+from _repository_race_helpers import miss_select_factory
+from sqlalchemy.exc import IntegrityError
 
 from deerflow.persistence.feedback import FeedbackRepository
+from deerflow.persistence.feedback.sql import _UPSERT_MAX_ATTEMPTS
 
 
 async def _make_feedback_repo(tmp_path):
@@ -20,37 +23,6 @@ async def _cleanup():
     from deerflow.persistence.engine import close_engine
 
     await close_engine()
-
-
-class _EmptyResult:
-    @staticmethod
-    def scalar_one_or_none():
-        return None
-
-
-class _MissFirstSelectSession:
-    """Make the first SELECT miss, as if a concurrent writer inserted right after it."""
-
-    def __init__(self, session):
-        self._session = session
-        self._missed = False
-
-    def __getattr__(self, name):
-        return getattr(self._session, name)
-
-    async def execute(self, *args, **kwargs):
-        result = await self._session.execute(*args, **kwargs)
-        if not self._missed:
-            self._missed = True
-            return _EmptyResult()
-        return result
-
-    async def __aenter__(self):
-        await self._session.__aenter__()
-        return self
-
-    async def __aexit__(self, *args):
-        return await self._session.__aexit__(*args)
 
 
 # -- FeedbackRepository --
@@ -211,7 +183,7 @@ class TestFeedbackRepository:
         try:
             first = await repo.upsert(run_id="r1", thread_id="t1", rating=1, user_id="u1")
             real_factory = repo._sf
-            repo._sf = lambda: _MissFirstSelectSession(real_factory())
+            repo._sf, _ = miss_select_factory(real_factory)
             try:
                 second = await repo.upsert(run_id="r1", thread_id="t1", rating=-1, user_id="u1", comment="second tab")
             finally:
@@ -222,6 +194,26 @@ class TestFeedbackRepository:
             assert second["comment"] == "second tab"
             rows = await repo.list_by_run("t1", "r1", user_id="u1")
             assert [row["feedback_id"] for row in rows] == [first["feedback_id"]]
+        finally:
+            await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_upsert_raises_the_integrity_error_once_retries_are_exhausted(self, tmp_path):
+        """If every attempt still collides, the original IntegrityError propagates instead of being swallowed."""
+        repo = await _make_feedback_repo(tmp_path)
+        try:
+            first = await repo.upsert(run_id="r1", thread_id="t1", rating=1, user_id="u1")
+            real_factory = repo._sf
+            repo._sf, sessions = miss_select_factory(real_factory, misses=None)
+            try:
+                with pytest.raises(IntegrityError, match="feedback.thread_id, feedback.run_id, feedback.user_id"):
+                    await repo.upsert(run_id="r1", thread_id="t1", rating=-1, user_id="u1")
+            finally:
+                repo._sf = real_factory
+
+            assert [session.missed for session in sessions] == [_UPSERT_MAX_ATTEMPTS]
+            rows = await repo.list_by_run("t1", "r1", user_id="u1")
+            assert [(row["feedback_id"], row["rating"]) for row in rows] == [(first["feedback_id"], 1)]
         finally:
             await _cleanup()
 
