@@ -1007,10 +1007,10 @@
   OpenAI 兼容网关，会把之后发生的 504 作为 SSE `error` 事件发出；openai SDK 将其抛出为
   不带状态码的 `APIError`，因此 `LLMErrorHandlingMiddleware` 此前把它归为普通错误，
   运行在第一次尝试后即失败。现在这类不带状态码的错误会依次从数字型 `code` 或 `status`
-  字段、消息中明确写出的 `[504]`、`HTTP 502` 或 `status 503`、以及
-  `type: server_error`（视为 500）中取得状态码，繁忙判断也会匹配 `rate-limit`、
-  `RATE_LIMIT_…` 等写法。重试预算、退避和熔断器按对应的 HTTP 错误处理；带状态码的错误
-  分类不变。
+  字段、消息中明确写出的 `[504]`、`HTTP 502` 或 `status 503`（`messages[502]` 这类
+  数组下标不算）、以及 `type: server_error`（视为 500）中取得 4xx 或 5xx 状态码；都
+  取不到时，繁忙判断才会额外匹配 `rate-limit`、`RATE_LIMIT_…` 等写法。重试预算、退避
+  和熔断器按对应的 HTTP 错误处理；带状态码的错误分类不变。
 
 - **前端：** 用户管理设置页不再在静态网站演示中发出注定失败的查询，非管理员的
   `?settings=users` 深链接也不再打开仅管理员可见的面板。该页面此前只以

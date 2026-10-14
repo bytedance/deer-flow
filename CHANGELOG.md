@@ -1253,12 +1253,13 @@ This release closes that milestone with **621 merged pull requests**.
   requests alive with SSE keepalives, reports a later 504 as an SSE `error`
   event; the openai SDK raises that as an `APIError` with no status, so
   `LLMErrorHandlingMiddleware` classified it as generic and the run failed on
-  the first attempt. Such a status-less error now takes its status from a
-  numeric `code` or `status` field, an explicit `[504]`, `HTTP 502` or
-  `status 503` in its message, or `type: server_error` (500), and its busy
-  check also matches spellings such as `rate-limit` and `RATE_LIMIT_…`. Retry
-  budget, backoff and circuit breaker treat it as the equivalent HTTP error;
-  errors that carry a status are classified as before.
+  the first attempt. Such a status-less error now takes a 4xx or 5xx status
+  from a numeric `code` or `status` field, an explicit `[504]`, `HTTP 502` or
+  `status 503` in its message (not an index such as `messages[502]`), or
+  `type: server_error` (500); only when none yields one does its busy check
+  also match spellings such as `rate-limit` and `RATE_LIMIT_…`. Retry budget,
+  backoff and circuit breaker treat it as the equivalent HTTP error; errors
+  that carry a status are classified as before.
 
 - **deploy:** The Gateway container now shuts down gracefully. The production
   compose `command`, both `CMD`s in `backend/Dockerfile` and the Helm chart
