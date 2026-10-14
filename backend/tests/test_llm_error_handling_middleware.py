@@ -3142,11 +3142,13 @@ def test_in_stream_error_takes_its_status_from_the_message(message: str) -> None
         pytest.param({"status_code": 502}, id="status_code"),
         pytest.param({"error": {"code": 503}}, id="nested-code"),
         pytest.param({"error": {"status": 502}}, id="nested-status"),
+        pytest.param({"error": {"status_code": 502}}, id="nested-status_code"),
         pytest.param({"type": "server_error"}, id="server-error-type"),
         pytest.param({"type": "SERVER_ERROR"}, id="server-error-type-upper-case"),
         pytest.param({"error": {"type": "server_error"}}, id="nested-server-error-type"),
         pytest.param({"code": 200, "type": "server_error"}, id="code-200-skipped-for-server-error-type"),
         pytest.param({"code": 200, "status": 503}, id="code-200-skipped-for-status"),
+        pytest.param({"code": 999, "status": 503}, id="code-999-skipped-for-status"),
     ],
 )
 def test_in_stream_error_takes_its_status_from_structured_fields(error_fields: dict[str, Any]) -> None:
@@ -3230,6 +3232,8 @@ def test_in_stream_error_without_a_retriable_signal_stays_generic(exc: openai.AP
         pytest.param(_in_stream_error("Upstream request failed.", error="upstream timeout"), id="string-error-field"),
         pytest.param(_in_stream_error("Upstream request failed.", code={"value": 503}), id="dict-code"),
         pytest.param(_in_stream_error("Upstream request failed.", status=["503"]), id="list-status"),
+        # Arabic-Indic digits for 503: int() accepts them, the status check must not.
+        pytest.param(_in_stream_error("Upstream request failed.", code="\u0665\u0660\u0663"), id="non-ascii-digit-code"),
     ],
 )
 def test_in_stream_error_with_a_malformed_body_stays_generic(exc: openai.APIError) -> None:
@@ -3259,6 +3263,17 @@ def test_in_stream_status_parsing_stays_fast_on_a_long_message() -> None:
 )
 def test_in_stream_quota_auth_and_burst_rate_keep_precedence(exc: openai.APIError, expected: tuple[bool, str]) -> None:
     assert _build_middleware()._classify_error(exc) == expected
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        pytest.param(_in_stream_error("rate limit exceeded", code=400), id="in-band-400"),
+        pytest.param(FakeError("rate limit exceeded", status_code=400), id="http-400"),
+    ],
+)
+def test_in_band_4xx_keeps_the_plain_busy_match(exc: Exception) -> None:
+    assert _build_middleware()._classify_error(exc) == (True, "busy")
 
 
 @pytest.mark.parametrize(
