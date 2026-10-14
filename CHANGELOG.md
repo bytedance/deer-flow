@@ -5878,6 +5878,14 @@ This release closes that milestone with **621 merged pull requests**.
   was dropped when a Slack bot was saved on the other, and a disconnected bot
   came back. Every save now rereads the file under a lock shared across
   processes and changes only its own provider. ([#6844])
+- **mcp:** Cancelling a background MCP task on SQLite now reaches the remote
+  server on the next poll cycle instead of up to `mcp_tasks.lease_seconds`
+  (120 s by default) later. A cancel that committed while the poller was
+  claiming the task had its cleared poll lease written back, because
+  `FOR UPDATE` is a no-op on SQLite. The cancellation worker then waited for
+  that lease to expire, and the task was polled once more for a result that
+  was thrown away. Each claim now re-checks that the task is still claimable
+  when it writes the lease. Postgres was not affected.
 
 ### Security
 
