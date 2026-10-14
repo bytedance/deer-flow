@@ -34,7 +34,7 @@ def _safe_literal(value: object) -> bool:
     if isinstance(value, (list, tuple, set)):
         return all(_safe_literal(item) for item in value)
     if isinstance(value, dict):
-        return all(_safe_literal(item) for item in value.values())
+        return all(_safe_literal(key) and _safe_literal(item) for key, item in value.items())
     return True
 
 

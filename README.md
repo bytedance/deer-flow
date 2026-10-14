@@ -2617,7 +2617,8 @@ numbers. If a number overflows, underflows to zero, or exceeds Python's integer
 digit limit, the complete argument stays a string, including nested JSON lists
 and objects, so parsing does not silently change its value. Python-literal sets
 and tuples containing non-finite floats also retain the complete argument as
-text, including when nested in other containers.
+text, including when nested in other containers. Dictionary keys and values
+are checked recursively as well.
 
 ## Embedded Python Client
 

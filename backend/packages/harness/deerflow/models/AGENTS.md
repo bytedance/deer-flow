@@ -6,7 +6,7 @@ from their original escapes. For non-JSON raw-string parameters, decode literal
 `\n` outside fenced code and trim surrounding whitespace, retaining the gateway's
 existing multiline-file/command behavior. Raw strings cannot distinguish intended
 literal escapes from over-escaped newlines. Numeric failures and non-finite floats
-in list/tuple/set/dict values preserve the entire argument. Keep the
+in list/tuple/set items or dict keys/values preserve the entire argument. Keep the
 existing content path when no tool calls can be parsed and preserve native tool
 calls. This contract is shared by sync/async generation and tool-enabled simulated
 streaming; no-tool native streaming has its own chunk handling. Coverage:
