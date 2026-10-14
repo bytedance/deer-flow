@@ -78,6 +78,7 @@ class Workflows:
         self.workers = {}
         self.processes = {}
         self.entries = {}
+        self.admissions = set()
         self.launch_lock = asyncio.Lock()
         self.write_lock = asyncio.Lock()
         self.global_slots = asyncio.Semaphore(config["global_concurrency"])
@@ -108,6 +109,10 @@ class Workflows:
             for entry in self.entries.values():
                 entry["cancel"].set()
             workers = list(self.workers.values())
+        # Admissions waiting for launch_lock see unavailable; committed admissions
+        # held the lock through worker publication and are included above.
+        if self.admissions:
+            await asyncio.gather(*list(self.admissions), return_exceptions=True)
         if workers:
             await asyncio.gather(*workers, return_exceptions=True)
         if self.lockfile:
@@ -165,26 +170,38 @@ class Workflows:
                 "agents": sorted(self.config["agents"]),
             }
         )
+        record = {
+            "id": uuid.uuid4().hex,
+            "request_id": request_id,
+            "fingerprint": fingerprint,
+            "script_hash": script_hash,
+            "args_hash": args_hash,
+            "script": script,
+            "args": args,
+            "limits": limits,
+            "created_at": time.time(),
+            "status": "queued",
+            "error": None,
+            "steps": [],
+            "logs": [],
+            "result": None,
+        }
+        # SQLite threads survive caller cancellation. Retain a service-owned task
+        # through commit AND supervisor publication, shielding only the caller's wait.
+        admission = asyncio.create_task(self.admit(owner, record, context))
+        self.admissions.add(admission)
+        admission.add_done_callback(self.admission_finished)
+        return await asyncio.shield(admission)
+
+    def admission_finished(self, task):
+        self.admissions.discard(task)
+        if not task.cancelled():
+            task.exception()  # Consume failures even when the launching caller left.
+
+    async def admit(self, owner, record, context):
         async with self.launch_lock:
             self.owner(context)
-            # Existing idempotent requests must remain readable even at capacity.
-            # create() is the authoritative unique-key lookup, including old records outside list.
-            record = {
-                "id": uuid.uuid4().hex,
-                "request_id": request_id,
-                "fingerprint": fingerprint,
-                "script_hash": script_hash,
-                "args_hash": args_hash,
-                "script": script,
-                "args": args,
-                "limits": limits,
-                "created_at": time.time(),
-                "status": "queued",
-                "error": None,
-                "steps": [],
-                "logs": [],
-                "result": None,
-            }
+            request_id, fingerprint = record["request_id"], record["fingerprint"]
             current = [e for e in self.entries.values() if e["owner"] == owner]
             # Capacity admission happens before persist, but matching retries bypass it.
             retry = await asyncio.to_thread(self.store.by_request, owner, request_id)
@@ -339,8 +356,17 @@ class Workflows:
                 if run.status != "success":
                     row["status"] = "failed"
                     raise ValueError("Agent run did not succeed")
+                # Dynamic context keeps X on a hidden system reminder and moves
+                # the visible human input to X__user. Never anchor on the reminder
+                # or hidden memory; genuinely later human messages still conflict.
                 marker = next(
-                    (i for i, m in enumerate(messages) if m.get("id") == message_id or (m.get("type", m.get("role")) in ("human", "user") and m.get("additional_kwargs", {}).get("run_id") == run.run_id)),
+                    (
+                        i
+                        for i, m in enumerate(messages)
+                        if m.get("type", m.get("role")) in ("human", "user")
+                        and not m.get("additional_kwargs", {}).get("hide_from_ui")
+                        and (m.get("id") in (message_id, f"{message_id}__user") or m.get("additional_kwargs", {}).get("run_id") == run.run_id)
+                    ),
                     None,
                 )
                 if marker is None or any(m.get("type", m.get("role")) in ("human", "user") for m in messages[marker + 1 :]):

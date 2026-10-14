@@ -3206,7 +3206,8 @@ bounded parallel execution, progress, retained results and cancellation. It is
 disabled by default and requires a POSIX Gateway and operator-authorized Agent
 references. Phase 1 does not support resume, human output approval, restart replay
 or a hard monetary budget. Workflow deadlines and child-observation timeouts are
-reported separately from uncertain admission. A runnable example, installation steps
+reported separately from uncertain admission. Accepted launches retain their request
+identity across inspection refresh failures, with a separate inspection retry action. A runnable example, installation steps
 and QuickJS source-build prerequisites for other Python/CPU combinations are included.
 
 ## License

@@ -17,9 +17,12 @@ observation timeout: interrupt/observe known runs and escalate only uncertain cl
 Keep the workflow deadline handler outside asyncio.timeout and test external cancellation
 separately. Hash the Agent allowlist in canonical sorted order. Owner scope applies
 to every public read and mutation.
+Own persistence through supervisor publication even if the launching caller cancels.
 Serialize launch admission and shutdown. Hold the process lock across service life;
 do not recover live records while another Gateway owns the file.
 
+Anchor results on the visible human input, including canonical __user rewrites;
+never use hidden system/memory IDs. Retain UI launch identity across refresh failures.
 Thread latest state is not immutable run output. Check message/run attribution,
 interrupts and pending human input before copying output. Agent success is never
 human approval. Phase 1 has no resume, artifact approval, effective-configuration

@@ -60,6 +60,15 @@ function mount(root, context) {
     }
   }
   let pendingRequest=null;
+  async function inspectAccepted(id) {
+    const version=generation;
+    notice.replaceChildren(node('span',t(`Workflow accepted: ${id}`,`工作流已接受：${id}`)));
+    try {await list();await show();}
+    catch(e) {
+      if(!alive(version)||selected!==id)return;
+      notice.append(node('span',` · ${e.message}`),button(t('Retry inspection','重试检查'),()=>inspectAccepted(id)));
+    }
+  }
   form.onsubmit=async event=>{
     event.preventDefault();submit.disabled=true;notice.textContent='';
     try{
@@ -68,7 +77,9 @@ function mount(root, context) {
       const content=JSON.stringify({script:script.value,args:value});
       if(pendingRequest?.content!==content)pendingRequest={content,id:Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,'0')).join('')};
       const result=await call('launch',{request_id:pendingRequest.id,script:script.value,args:value});
-      pendingRequest=null;selected=result.run_id;generation++;clearTimeout(timer);await list();await show();
+      // Keep the identity for unchanged input, including after accepted-launch
+      // refresh failures. Refresh retries must never submit another launch.
+      selected=result.run_id;generation++;clearTimeout(timer);await inspectAccepted(result.run_id);
     }catch(e){if(!disposed)notice.textContent=e.message;}finally{submit.disabled=false;}
   };
   list().catch(e=>{if(!disposed)notice.textContent=e.message;});

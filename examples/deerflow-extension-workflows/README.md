@@ -76,7 +76,11 @@ Open **Script workflows**, paste
 {"product":"Synthetic sample","formula":["ingredient A"],"claims":["sample claim"]}
 ```
 
-Click **Launch workflow**. The example sequences evidence collection, fans out two
+Click **Launch workflow**. An accepted launch shows its run ID immediately;
+if refreshing the list or details fails, use **Retry inspection**. Inspection retries
+do not launch another workflow. Resubmitting unchanged script/arguments retains the
+same request ID, including after a lost launch response; changing either creates a
+new launch identity. The example sequences evidence collection, fans out two
 checks, performs at most two review calls, and branches on a structured verdict.
 It returns findings for human review, never a product-pass or approval claim.
 This invokes your configured real Agents and can incur provider costs.
@@ -180,6 +184,14 @@ uncertain admission. Stable request IDs return an existing workflow record; they
 never resume it or reexecute completed work. Changed scripts/args/limits with the
 same request ID conflict. Phase 2 definition/config invalidation is not implemented.
 
+Caller cancellation during launch does not abandon a committed record: the service
+owns persistence through supervisor publication, including shutdown coordination.
+A matching retry returns that same supervised record rather than an unowned queued
+launch. This does not add execution replay or resume.
+
+Result collection anchors on the visible human input, including the host's canonical
+`__user` rewrite after dynamic context injection. Hidden system/memory reminders
+cannot become the anchor; genuinely later human input still conflicts.
 Result collection checks input message/run attribution and rejects an intervening
 human turn, because `get_state()` is the thread's latest state, not immutable run
 output. Results are copied before further script calls. Raw per-step input/results

@@ -553,3 +553,82 @@ async def test_idempotent_retry_survives_allowlist_reordering_and_restart(plugin
     service.config["agents"].append("new_agent")
     with pytest.raises(ValueError, match="request_id already used"):
         await launch(plugin, script)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("injection,later_turn", [(False, False), (True, False), (True, True)])
+async def test_result_anchor_uses_visible_input_after_real_context_rewrite(plugin, injection, later_turn):
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from app.gateway.services import normalize_input
+    from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
+    from deerflow.runtime.serialization import serialize_channel_values_for_api
+
+    original = plugin[3].get_state
+
+    async def injected(**kwargs):
+        state = await original(**kwargs)
+        raw = state["values"]["messages"][0]
+        user = normalize_input({"messages": [raw]})["messages"][0]
+        assert isinstance(user, HumanMessage)
+        messages = DynamicContextMiddleware._make_reminder_and_user_messages(user, "Synthetic context", "Synthetic memory") if injection else [user]
+        messages.append(AIMessage(content='{"answer":42}'))
+        if later_turn:
+            messages.extend([HumanMessage(content="Later user input"), AIMessage(content="Wrong answer")])
+        state["values"] = serialize_channel_values_for_api({"messages": messages})
+        return state
+
+    plugin[3].get_state = injected
+    result = await launch(plugin, "return await agent({stepId:'a',agentRef:'lead_agent',task:'first'});")
+    final = await done(plugin, result["run_id"])
+    if later_turn:
+        assert final["status"] == "failed" and final["steps"][0]["status"] == "result_conflict"
+    else:
+        assert final["status"] == "completed", final
+        assert final["result"]["output"] == {"answer": 42}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shutdown", [False, True])
+async def test_cancelled_launch_caller_keeps_committed_sqlite_launch_owned(plugin, monkeypatch, shutdown):
+    import threading
+
+    service, runs = plugin[2], plugin[3]
+    committed, release = threading.Event(), threading.Event()
+    original = service.store.create
+
+    def committed_before_response(owner, record):
+        result = original(owner, record)
+        committed.set()
+        assert release.wait(5)
+        return result
+
+    monkeypatch.setattr(service.store, "create", committed_before_response)
+    script = "return await agent({stepId:'a',agentRef:'lead_agent',task:'blocked'});"
+    caller = asyncio.create_task(launch(plugin, script))
+    stopping = None
+    try:
+        assert await asyncio.to_thread(committed.wait, 5)
+        caller.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+        if shutdown:
+            stopping = asyncio.create_task(service.stop())
+            await asyncio.sleep(0)
+        release.set()
+        if shutdown:
+            await asyncio.wait_for(stopping, 10)
+            await service.start(None)
+        retry = await launch(plugin, script)
+        if not shutdown:
+            await asyncio.wait_for(runs.entered.wait(), 5)
+            await plugin[1]["cancel"]({"run_id": retry["run_id"]}, context(runs))
+        final = await done(plugin, retry["run_id"])
+        assert final["status"] == "cancelled", final
+        assert len(runs.starts) <= 1
+        assert not service.entries and not service.workers and not service.processes
+        await plugin[1]["delete"]({"run_id": retry["run_id"]}, context(runs))
+    finally:
+        release.set()
+        if stopping:
+            await stopping
