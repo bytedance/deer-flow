@@ -100,6 +100,16 @@ STREAM_UPDATE_MIN_CHARS = 60  # flush immediately when this many chars accumulat
 STREAM_MODES = ["messages-tuple", "values"]
 MESSAGE_STREAM_EVENTS = ("messages-tuple", "messages")
 THREAD_BUSY_MESSAGE = "This conversation is already processing another request. Please wait for it to finish and try again."
+
+# IM runs must outlive the request that created them. The manager holds a
+# ``runs.wait`` / ``runs.stream`` request open for the whole run, and that
+# request dies with this Gateway instance: a leader hand-off, a rolling
+# restart, a crash. The Gateway's default ``on_disconnect="cancel"`` would then
+# cancel the run itself; ``continue`` lets it finish and persist its thread
+# state, so the user still finds the answer in the Web UI even though the IM
+# reply is lost with the transport. ``runs.create`` (fire-and-forget) needs no
+# such policy: its request returns as soon as the run is pending.
+CHANNEL_RUN_ON_DISCONNECT = "continue"
 # Recovery replies must say the turn was dropped: the run was rejected before
 # starting, so the triggering message never reached the agent.
 _STALE_PIN_RETRY_NOTE = "Your message was not processed — please send it again."
@@ -3033,6 +3043,8 @@ class ChannelManager:
                 self._maybe_spawn_followup_watcher(thread_id, result, msg)
             return
 
+        # Only now: ``runs.create`` above has no ``on_disconnect`` parameter.
+        run_kwargs["on_disconnect"] = CHANNEL_RUN_ON_DISCONNECT
         logger.info("[Manager] invoking runs.wait(thread_id=%s, text_len=%d)", thread_id, len(msg.text or ""))
         try:
             result = await client.runs.wait(
@@ -3121,6 +3133,7 @@ class ChannelManager:
             "context": run_context,
             "stream_mode": list(STREAM_MODES),
             "multitask_strategy": "reject",
+            "on_disconnect": CHANNEL_RUN_ON_DISCONNECT,
         }
         _apply_run_origin(stream_kwargs, msg)
         if owner_headers := _owner_headers(msg):

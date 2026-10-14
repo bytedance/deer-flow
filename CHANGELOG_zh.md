@@ -1002,6 +1002,15 @@
 
 ### 修复
 
+- **渠道：** 从 IM 渠道发起的运行不再随接收消息的 Gateway 实例一起消亡。manager 在整个
+  运行期间保持 `runs.wait` / `runs.stream` 请求打开，而 Gateway 会在创建请求断开时取消
+  运行，除非该请求声明了 `on_disconnect: continue`；因此 leader 切换、滚动重启或接收
+  实例崩溃都会取消所有进行中的 IM 运行。渠道运行现在声明 `continue`，运行会在执行它的
+  Gateway 上完成并持久化对话线程状态——即使 IM 回复随旧传输丢失，答案仍可在 Web UI
+  中查看。同一策略也覆盖 Slack/Discord `runs.wait` 遇到 SDK 300 秒读超时的情况：聊天里
+  仍会收到错误回复，但运行会在后台完成而不再被取消。即发即弃渠道（GitHub）不受影响：
+  `runs.create` 在运行进入 pending 后即返回。
+
 - **前端：** 用户管理设置页不再在静态网站演示中发出注定失败的查询，非管理员的
   `?settings=users` 深链接也不再打开仅管理员可见的面板。该页面此前只以
   `system_role === "admin"` 判断，而演示用户名义上是管理员，静态响应层又没有

@@ -1247,6 +1247,20 @@ This release closes that milestone with **621 merged pull requests**.
 
 ### Fixed
 
+- **channels:** Runs started from an IM channel no longer die with the Gateway
+  instance that received the message. The manager holds `runs.wait` /
+  `runs.stream` open for the whole run, and the Gateway cancels a run whose
+  creating request disconnects unless that request asked for
+  `on_disconnect: continue`; a leader hand-off, a rolling restart or a crash
+  of the receiving instance therefore cancelled every IM run in flight.
+  Channel runs now ask for `continue`, so the run finishes on the Gateway
+  executing it and its thread state is persisted — the answer stays readable
+  in the web UI even though the IM reply is lost with the old transport. The
+  same policy covers the SDK's 300s read timeout on a Slack/Discord
+  `runs.wait`: the chat still gets the error reply, but the run finishes in
+  the background instead of being cancelled. Fire-and-forget channels
+  (GitHub) are unchanged: `runs.create` returns as soon as the run is pending.
+
 - **channels:** `FeishuChannel.stop()` and `DingTalkChannel.stop()` now end
   their SDK threads instead of timing out. Both SDKs run on a thread-private
   event loop that only returned on a fatal error, so every stop joined for

@@ -1947,7 +1947,7 @@ class TestChannelManager:
 
             history_by_checkpoint: dict[tuple[str, str], list[str]] = {}
 
-            async def _runs_wait(thread_id, assistant_id, *, input, config, context, multitask_strategy=None, metadata=None):
+            async def _runs_wait(thread_id, assistant_id, *, input, config, context, multitask_strategy=None, metadata=None, on_disconnect=None):
                 del assistant_id, context  # unused in this test, kept for signature parity
 
                 checkpoint_ns = config.get("configurable", {}).get("checkpoint_ns")
@@ -5548,6 +5548,10 @@ class TestGithubFireAndForget:
             # multitask_strategy must still be ``reject`` — concurrent runs on
             # the same GitHub thread are surfaced via ConflictError below.
             assert create_args[1]["multitask_strategy"] == "reject"
+            # ``runs.create`` returns as soon as the run is pending, so there is
+            # no long-lived request whose disconnect could cancel the run — and
+            # the SDK's ``create`` has no ``on_disconnect`` parameter at all.
+            assert "on_disconnect" not in create_args[1]
 
         _run(go())
 
@@ -5727,6 +5731,74 @@ async def _stale_pin_drain_setup(thread_id, *, model, pin=None, session_model=No
     mock_client.runs.create = AsyncMock(side_effect=_make_allowlist_exc(model))
     manager._client = mock_client
     return manager, carrier_msg, mock_client, bus
+
+
+class TestChannelRunDisconnectPolicy:
+    """IM runs must outlive the HTTP request that created them.
+
+    The manager holds ``runs.wait`` / ``runs.stream`` open for the whole run,
+    and that request dies with the receiving Gateway instance: a leader
+    hand-off, a rolling restart, a crash. The Gateway's default
+    ``on_disconnect`` is ``cancel``, which would cancel the run itself, so
+    every long-lived channel request asks for ``continue``: the run finishes
+    and persists its thread state even though the IM reply is lost with the
+    transport.
+    """
+
+    def test_runs_wait_asks_gateway_to_continue_on_disconnect(self):
+        from app.channels.manager import CHANNEL_RUN_ON_DISCONNECT, ChannelManager
+
+        assert CHANNEL_RUN_ON_DISCONNECT == "continue"
+
+        async def go():
+            bus = MessageBus()
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            mock_client = _make_mock_langgraph_client(thread_id="slack-thread-1")
+            manager._client = mock_client
+
+            await manager._handle_chat(InboundMessage(channel_name="slack", chat_id="C123", user_id="U1", text="hi"))
+
+            mock_client.runs.wait.assert_called_once()
+            wait_kwargs = mock_client.runs.wait.call_args.kwargs
+            assert wait_kwargs["on_disconnect"] == "continue"
+            assert wait_kwargs["multitask_strategy"] == "reject"
+
+        _run(go())
+
+    def test_runs_stream_asks_gateway_to_continue_on_disconnect(self):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            captured: dict[str, object] = {}
+
+            async def _stream(thread_id, assistant_id, **kwargs):  # noqa: ARG001
+                captured.update(kwargs)
+                yield _make_stream_part(
+                    "values",
+                    {
+                        "messages": [
+                            {"type": "human", "content": "hi"},
+                            {"type": "ai", "content": "done"},
+                        ],
+                        "artifacts": [],
+                    },
+                )
+
+            mock_client = _make_mock_langgraph_client(thread_id="feishu-thread-1")
+            mock_client.runs.stream = MagicMock(side_effect=_stream)
+            manager._client = mock_client
+
+            await manager._handle_chat(InboundMessage(channel_name="feishu", chat_id="chat1", user_id="user1", text="hi"))
+
+            mock_client.runs.stream.assert_called_once()
+            assert captured["on_disconnect"] == "continue"
+            assert captured["multitask_strategy"] == "reject"
+
+        _run(go())
 
 
 class TestGithubFollowupBuffer:
