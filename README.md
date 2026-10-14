@@ -1826,6 +1826,14 @@ authenticated backend operations and model tools through the
 [plugin APIs](docs/full-stack-plugins.md). The independent
 [bookmarks example](examples/deerflow-extension-bookmarks/README.md) demonstrates
 one package with persistent user data, its own sidebar page and a read-only search tool.
+Model tools can opt into separate structured artifacts with
+`response_format="content_and_artifact"` and `PluginToolResult` (extension-api
+0.2.6). Artifact object keys must be strings at every depth. Existing tools keep
+their JSON text output. The
+[local retrieval example](examples/deerflow-extension-retrieval/README.md)
+demonstrates bounded, read-only results and checkpoint replay without an external
+knowledge service; artifacts do not automatically enable citations. It also appears
+in the extension catalog with localized installation-guide metadata.
 Reopening a bookmark resolves the conversation's current agent through the host, so
 custom-agent conversations retain their original chat entry point, including older bookmarks.
 The independent [Agent teams example](examples/deerflow-extension-agent-teams/README.md)
@@ -2131,6 +2139,13 @@ result text does not turn an unknown status into success or failure.
 Cancelled or timed-out background sub-agent executions retain provider-reported token usage from completed model calls, including responses received before their next progress update. Final usage delivery to the parent run does not count earlier progress snapshots twice.
 
 For `tests_passed:go test ./...`, packages marked `[no test files]` or `[no tests to run]` do not veto a passing summary from another package. Runs with only zero-test package summaries remain `UNVERIFIED`; failures still take precedence. This checks recorded execution evidence, not claim correctness.
+
+For Maven and Gradle test acceptance, a `BUILD SUCCESS` / `BUILD SUCCESSFUL`
+banner alone remains `UNVERIFIED`: builds can succeed without running tests.
+Complete `Tests run: N, Failures: F, Errors: E, Skipped: S` or `N tests completed`
+summaries establish a hold only when at least one test ran without a reported
+failure. Zero-test or all-skipped modules do not supply positive evidence;
+failures in any module take precedence over passing counts.
 
 For file acceptance criteria, an empty regular file in the shared workspace can satisfy `file:<path> exists` and `file_written:<path>`, including on remote sandboxes. It fails `file:<path> non-empty` with a deterministic empty-file result.
 

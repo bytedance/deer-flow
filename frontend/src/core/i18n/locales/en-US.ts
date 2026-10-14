@@ -70,6 +70,11 @@ export const enUS: Translations = {
         description:
           "Explore middleware, task lifecycle, model observers, services and HTTP route contributions.",
       },
+      retrieval: {
+        title: "Local retrieval example",
+        description:
+          "Demonstrate read-only retrieval and structured tool results using fixed sample documents, without an external knowledge service.",
+      },
     },
     pageUnavailable: "Extension page unavailable",
     pageUnavailableHint:

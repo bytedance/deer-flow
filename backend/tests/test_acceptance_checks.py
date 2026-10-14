@@ -2503,7 +2503,7 @@ class TestTestsPassedLeaf:
             ".....\nOK\n",
             "test result: ok. 5 passed; 0 failed",
             "ok  \tgithub.com/example/pkg\t0.5s",
-            "BUILD SUCCESSFUL",
+            "3 tests completed, 0 failed\nBUILD SUCCESSFUL",
             "All tests passed!",
         ],
     )
