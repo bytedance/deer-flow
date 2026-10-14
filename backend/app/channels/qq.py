@@ -23,6 +23,7 @@ from app.channels.base import Channel, ChannelUnavailable
 from app.channels.commands import extract_connect_code, is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage
+from app.channels.notification_groups import qq_notification_group_openid
 from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
@@ -451,7 +452,7 @@ class QQChannel(Channel):
                     provider="qq",
                     external_account_id=sender,
                     workspace_id=workspace,
-                    metadata={"chat_type": scope},
+                    metadata={"chat_type": "group", "group_openid": target} if group else {"chat_type": scope},
                     status="connected",
                 )
                 reply = "QQ connected to DeerFlow."
@@ -514,15 +515,40 @@ class QQChannel(Channel):
                 return
         raise QQAPIError("QQ private notification identity is no longer connected")
 
-    async def send_notification(self, *, target: str, text_markdown: str) -> None:
-        """Send one proactive C2C message; the outbox owns retries and delivery state."""
+    async def send_group_notification_for_owner(self, *, owner_user_id: str | None, target: str, text_markdown: str) -> None:
+        """Deliver to an explicit QQ group connection owned by ``owner_user_id``."""
+        if not owner_user_id or self._connection_repo is None:
+            raise ChannelUnavailable("QQ notification binding lookup is unavailable")
+        target_id = _parse_open_id(target)
+        if not target_id:
+            raise QQAPIError("QQ group notification target is empty")
+        try:
+            connections = await self._connection_repo.list_connections(owner_user_id)
+        except Exception:
+            raise ChannelUnavailable("QQ notification binding lookup is unavailable") from None
+        if not isinstance(connections, (list, tuple)):
+            raise ChannelUnavailable("QQ notification binding lookup is unavailable")
+        for connection in connections:
+            if connection.get("id") != target_id or connection.get("owner_user_id") != owner_user_id:
+                continue
+            group_openid = qq_notification_group_openid(
+                provider=connection.get("provider"),
+                status=connection.get("status"),
+                workspace_id=connection.get("workspace_id"),
+                metadata=connection.get("metadata"),
+                app_id=self._app_id,
+            )
+            if group_openid is not None:
+                await self._send_proactive_message(f"/v2/groups/{quote(group_openid, safe='')}/messages", text_markdown=text_markdown)
+                return
+        raise QQAPIError("QQ group notification destination is no longer connected")
+
+    async def _send_proactive_message(self, path: str, *, text_markdown: str) -> None:
         if not self.is_running or self._http is None or self._http.is_closed:
             raise ChannelUnavailable("QQ notification transport is unavailable")
-        if not _parse_open_id(target):
-            raise QQAPIError("QQ notification target is empty")
         try:
             # No source ID or reply sequence: passive reply quotas are separate.
-            payload = await self._api_request("POST", f"/v2/users/{quote(target, safe='')}/messages", json={"msg_type": 0, "content": text_markdown})
+            payload = await self._api_request("POST", path, json={"msg_type": 0, "content": text_markdown})
         except QQTransportError:
             raise ChannelUnavailable("QQ notification transport is unavailable") from None
         except QQAPIError:
@@ -533,6 +559,15 @@ class QQChannel(Channel):
             raise QQAPIError("QQ notification was rejected")
         if not isinstance(payload.get("id"), str) or not payload["id"].strip():
             raise QQAPIError("QQ notification response has no message acknowledgement")
+
+    async def send_notification(self, *, target: str, text_markdown: str) -> None:
+        """Send one proactive C2C message; the outbox owns retries and delivery state."""
+        if not self.is_running or self._http is None or self._http.is_closed:
+            raise ChannelUnavailable("QQ notification transport is unavailable")
+        target_id = _parse_open_id(target)
+        if not target_id:
+            raise QQAPIError("QQ notification target is empty")
+        await self._send_proactive_message(f"/v2/users/{quote(target_id, safe='')}/messages", text_markdown=text_markdown)
 
     async def send(self, msg: OutboundMessage) -> None:
         if not msg.is_final or not msg.text:

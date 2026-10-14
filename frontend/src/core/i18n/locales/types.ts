@@ -1944,6 +1944,14 @@ export interface Translations {
           qq: string;
         };
         toggleLabel: (provider: string) => string;
+        eventsTitle: string;
+        eventsDescription: string;
+        events: {
+          run_completed: string;
+          run_failed: string;
+          human_input_requested: string;
+        };
+        eventToggleLabel: (event: string) => string;
         loading: string;
         saving: string;
         loadFailed: string;

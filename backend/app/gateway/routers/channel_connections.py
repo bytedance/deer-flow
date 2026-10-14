@@ -12,7 +12,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-from app.channels.capabilities import supports_proactive_notifications
+from app.channels.capabilities import supports_proactive_group_notifications, supports_proactive_notifications
 from app.channels.runtime_config_store import (
     ChannelRuntimeConfigStore,
     apply_runtime_connection_config,
@@ -57,6 +57,7 @@ class ChannelProviderResponse(BaseModel):
     # Whether scheduled-task updates can be pushed to this app (the provider
     # implements proactive push); Settings labels each provider card with it.
     proactive_notifications: bool = False
+    proactive_group_notifications: bool = False
 
 
 class ChannelProvidersResponse(BaseModel):
@@ -483,6 +484,7 @@ def _provider_response(
         credential_fields=_credential_fields(provider),
         credential_values=credential_values,
         proactive_notifications=supports_proactive_notifications(provider),
+        proactive_group_notifications=supports_proactive_group_notifications(provider),
     )
 
 

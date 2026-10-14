@@ -2258,6 +2258,15 @@ export const zhCN: Translations = {
           qq: "QQ",
         },
         toggleLabel: (provider: string) => `${provider}定时任务通知`,
+        eventsTitle: "普通任务与目标提醒",
+        eventsDescription:
+          "可选：通过上方已开启的应用接收普通网页或后台任务、目标的运行提醒（默认关闭）。",
+        events: {
+          run_completed: "任务或目标已完成",
+          run_failed: "任务或目标运行失败",
+          human_input_requested: "需要你参与确认",
+        },
+        eventToggleLabel: (event: string) => `${event}通知`,
         loading: "正在加载通知偏好…",
         saving: "正在保存…",
         loadFailed: "无法加载通知偏好，请重试。",

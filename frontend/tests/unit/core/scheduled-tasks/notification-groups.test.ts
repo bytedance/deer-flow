@@ -44,4 +44,45 @@ describe("additional Feishu notification groups", () => {
       notificationGroupName({ ...group, workspace_name: "  项目会议  " }),
     ).toBe("项目会议");
   });
+
+  test("includes connected QQ and WeCom group bindings while excluding private or unsupported bindings", () => {
+    const qqGroup: ChannelConnection = {
+      id: "qq-group",
+      provider: "qq",
+      status: "connected",
+      workspace_id: "app1:group:group-openid",
+      scopes: [],
+      metadata: { chat_type: "group", group_openid: "group-openid" },
+    };
+    const wecomGroup: ChannelConnection = {
+      id: "wecom-group",
+      provider: "wecom",
+      status: "connected",
+      workspace_id: "bot1:group:wr_chat_1",
+      scopes: [],
+      metadata: { aibotid: "bot1", chattype: "group", chatid: "wr_chat_1" },
+    };
+    const qqPrivate: ChannelConnection = {
+      id: "qq-private",
+      provider: "qq",
+      status: "connected",
+      workspace_id: "app1:c2c",
+      scopes: [],
+      metadata: { chat_type: "c2c" },
+    };
+    const wechatGroup: ChannelConnection = {
+      id: "wechat-group",
+      provider: "wechat",
+      status: "connected",
+      workspace_id: "group:wx_1",
+      scopes: [],
+      metadata: { chat_type: "group", chat_id: "group:wx_1" },
+    };
+    expect(
+      feishuNotificationGroups([qqGroup, wecomGroup, qqPrivate, wechatGroup]),
+    ).toEqual([qqGroup, wecomGroup]);
+    expect(notificationGroupName(qqGroup)).toBe("QQ group");
+    expect(notificationGroupName(wecomGroup)).toBe("WeCom group");
+  });
 });
+

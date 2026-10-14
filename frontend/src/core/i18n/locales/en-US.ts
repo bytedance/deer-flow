@@ -2406,6 +2406,15 @@ export const enUS: Translations = {
         },
         toggleLabel: (provider: string) =>
           `${provider} scheduled task notifications`,
+        eventsTitle: "Task & goal run notifications",
+        eventsDescription:
+          "Optional IM reminders for ordinary web or background task runs and goals on your enabled apps above (off by default).",
+        events: {
+          run_completed: "Task or goal completed",
+          run_failed: "Task or goal failed",
+          human_input_requested: "Needs your input",
+        },
+        eventToggleLabel: (event: string) => `${event} notifications`,
         loading: "Loading notification preferences…",
         saving: "Saving…",
         loadFailed:

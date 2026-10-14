@@ -254,6 +254,7 @@ class RunRecord:
     ownership_lost: bool = False
     stop_reason: str | None = None
     goal_verdict: dict[str, Any] | None = None
+    human_input_request: dict[str, Any] | None = None
     # Process-local finalization barrier for a worker-installed scheduled goal.
     scheduled_goal_cleanup_pending: bool = False
     # Process-local renewal barrier: the worker stages its terminal status in

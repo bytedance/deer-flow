@@ -1872,6 +1872,14 @@ async def run_agent(
                 except Exception:
                     logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
 
+            if started and not record.ownership_lost and accessor is not None and record.status == RunStatus.success and not record.abort_event.is_set() and record.human_input_request is None:
+                try:
+                    from deerflow.agents.human_input import extract_unanswered_human_input_request
+
+                    record.human_input_request = extract_unanswered_human_input_request(await _materialized_checkpoint_messages(accessor, thread_id))
+                except Exception:
+                    logger.debug("Failed to inspect trailing human_input_request for run %s (non-fatal)", run_id, exc_info=True)
+
             if not record.ownership_lost and ctx.on_run_completed is not None:
                 try:
                     await ctx.on_run_completed(record)

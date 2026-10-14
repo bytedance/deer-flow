@@ -233,10 +233,54 @@ async def test_auth_refresh_keeps_proactive_payload_and_no_passive_budget():
         assert not channel._replies
 
 
-async def test_group_notification_remains_unsupported():
-    async with connected() as (channel, requests):
-        with pytest.raises(NotImplementedError):
-            await channel.send_group_notification_for_owner(owner_user_id="owner", target="group-binding", text_markdown="Done")
+def group_binding(**overrides):
+    return {
+        "id": "group-binding",
+        "owner_user_id": "owner",
+        "provider": "qq",
+        "status": "connected",
+        "external_account_id": "member-openid",
+        "workspace_id": "app1:group:group-openid",
+        "metadata": {"chat_type": "group", "group_openid": "group-openid"},
+        **overrides,
+    }
+
+
+async def test_group_notification_serializes_to_group_endpoint_without_passive_context():
+    async with connected(bindings=[group_binding()]) as (channel, requests):
+        await channel.send_group_notification_for_owner(
+            owner_user_id="owner",
+            target="group-binding",
+            text_markdown="任务已完成。\nOpen DeerFlow for details.",
+        )
+        channel._connection_repo.list_connections.assert_awaited_once_with("owner")
+        assert len(requests) == 2
+        _token, message = requests
+        assert str(message.url) == "https://api.sgroup.qq.com/v2/groups/group-openid/messages"
+        assert json.loads(message.content) == {"msg_type": 0, "content": "任务已完成。\nOpen DeerFlow for details."}
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"id": "other-binding"},
+        {"owner_user_id": "other-owner"},
+        {"provider": "feishu"},
+        {"status": "revoked"},
+        {"workspace_id": "another-app:group:group-openid"},
+        {"workspace_id": "app1:c2c", "metadata": {"chat_type": "c2c"}},
+        {"metadata": {"chat_type": "c2c"}},
+        {"metadata": {"chat_type": "group", "group_openid": "other-group"}},
+    ],
+)
+async def test_group_notification_refuses_invalid_or_unowned_binding_without_private_fallback(override):
+    async with connected(bindings=[binding(), group_binding(**override)]) as (channel, requests):
+        with pytest.raises(QQAPIError, match="group.*connected"):
+            await channel.send_group_notification_for_owner(
+                owner_user_id="owner",
+                target="group-binding",
+                text_markdown="Done",
+            )
         assert requests == []
 
 
