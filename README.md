@@ -1352,6 +1352,27 @@ establish that a package is valid or readable. The scope note remains visible
 even when there are no YAML warnings; check Gateway logs for other load failures.
 Parsing remains strict and invalid skills stay unavailable to agents.
 
+#### Read-only knowledge sources
+
+Configure `knowledge_search` with either
+`deerflow.community.ragflow.tools:knowledge_search_tool` or
+`deerflow.community.lightrag.tools:knowledge_search_tool` in `config.yaml`.
+Both support attributable retrieval evidence. LightRAG and RAGFlow responses
+without complete provider locators use the shared DeerFlow source contract;
+complete RAGFlow responses retain their existing citation snapshots and scope
+controls. Knowledge citations show the
+provider, document title, and retrieved excerpt in chat, including after reload
+and when a subagent performed the retrieval. Missing page numbers and public
+URLs remain absent; sources without a URL are readable as local evidence.
+Inline citations remain readable after Markdown sanitization, and supplied page
+numbers use the selected interface language. New providers use the shared
+envelope; existing RAGFlow citation histories remain supported.
+Expand a completed subtask card to inspect its report's forwarded knowledge
+sources, including when reopening a saved conversation.
+Existing web citations and the text-only Python `knowledge_search(query)` APIs
+remain supported. No knowledge management service or page is required.
+See [the knowledge contract guide](backend/docs/KNOWLEDGE.md).
+
 Skills are what make DeerFlow do *almost anything*.
 
 A standard Agent Skill is a structured capability module — a Markdown file that defines a workflow, best practices, and references to supporting resources. DeerFlow ships with built-in skills for research, report generation, slide creation, web pages, image and video generation, and more. But the real power is extensibility: add your own skills, replace the built-in ones, or combine them into compound workflows.
