@@ -40,6 +40,11 @@ export const zhCN: Translations = {
       "此条目来自仓库扩展目录；实际安装和启用状态请由部署管理员确认。",
     installationGuide: "查看安装说明",
     catalog: {
+      workflows: {
+        title: "脚本工作流",
+        description:
+          "通过可检查的脚本编排 Agent，支持受限并发、进度与取消。第一阶段不支持恢复、人工审批或硬金额预算。",
+      },
       agentTeams: {
         title: "Agent 团队",
         description: "让完整 Custom Agent 通过 @成员、共享记录与任务交接协作。",
