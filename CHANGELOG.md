@@ -1258,7 +1258,12 @@ This release closes that milestone with **621 merged pull requests**.
   in the web UI even though the IM reply is lost with the old transport. The
   same policy covers the SDK's 300s read timeout on a Slack/Discord
   `runs.wait`: the chat still gets the error reply, but the run finishes in
-  the background instead of being cancelled. Fire-and-forget channels
+  the background instead of being cancelled. Because the run survives, the
+  manager now keeps the inbound dedupe key once the run request has left it
+  (a cancelled worker, a read timeout, a dropped connection): the provider's
+  redelivery on the new holder is dropped instead of executing the turn a
+  second time, while a request the Gateway rejected or a failure before
+  sending still releases the key for a retry. Fire-and-forget channels
   (GitHub) are unchanged: `runs.create` returns as soon as the run is pending.
   ([#6876])
 
