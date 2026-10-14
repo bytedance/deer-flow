@@ -135,7 +135,7 @@ they resolve from the `secrets` map):
 
 ```yaml
 config: |
-  config_version: 59
+  config_version: 60
   models:
     - name: gpt-4
       use: langchain_openai:ChatOpenAI
@@ -300,11 +300,18 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   PodDisruptionBudget (`minAvailable: 1`) is rendered immediately and blocks
   every voluntary eviction and node drain while only one Pod exists, so set
   `gateway.podDisruptionBudget.enabled: false` for that interim if you need
-  to drain nodes first. `gateway.replicas: 1` stays the
-  default because the following are still single-instance: **IM channels**
-  (every Pod would connect to every platform — Telegram polling conflicts and
-  Discord double-processes; keep 1 replica while channels are enabled), the
-  WeChat QR login, and browser tools. Before raising replicas, also set
+  to drain nodes first. **IM channels** run on several replicas through
+  `channels.leader_lease` in `config` (default `auto`, which turns on with the
+  multi-instance declaration): each platform connection is held by the one Pod
+  owning that provider's row in the `channel_leases` table, a crashed holder is
+  replaced within `lease_seconds + grace_seconds` plus one renewal interval
+  (50 s by default) and a Pod stopped cleanly hands its providers over on the
+  next heartbeat. The startup gate refuses `enabled: false` while channels are
+  enabled. Credentials saved from the web UI reach the holding Pod only when it
+  next starts the channel, so restart it after changing them, and a failover
+  cancels the IM replies in flight on the old holder. `gateway.replicas: 1`
+  stays the default because the WeChat QR login and browser tools are still
+  single-instance. Before raising replicas, also set
   `persistence.home.accessMode: ReadWriteMany` on multi-node clusters (thread
   uploads, outputs, memory and `extensions_config.json` live on that volume)
   and `agent_storage.backend: db` so custom agents are visible on every Pod.

@@ -2,7 +2,8 @@
 
 import { DownloadIcon } from "lucide-react";
 import dynamic from "next/dynamic";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { defaultUrlTransform, type UrlTransform } from "streamdown";
 
 import { Button } from "@/components/ui/button";
 import { prepareHtmlPreview } from "@/core/artifacts/html-assets";
@@ -12,7 +13,11 @@ import {
   createHtmlPreviewScrollKey,
   HTML_PREVIEW_SCROLL_MESSAGE_SOURCE,
 } from "@/core/artifacts/preview";
-import { urlOfArtifact } from "@/core/artifacts/utils";
+import {
+  type ArtifactImageContext,
+  resolveArtifactImageURL,
+  urlOfArtifact,
+} from "@/core/artifacts/utils";
 import { extractCitationSources } from "@/core/citations/sources";
 import { useI18n } from "@/core/i18n/hooks";
 import {
@@ -130,6 +135,7 @@ export function ArtifactFilePreview({
   language,
   scrollKey,
   url,
+  artifact,
   truncated = false,
   active = true,
 }: {
@@ -137,10 +143,23 @@ export function ArtifactFilePreview({
   language: string;
   scrollKey: string;
   url?: string;
+  artifact?: ArtifactImageContext;
   truncated?: boolean;
   active?: boolean;
 }) {
   const { t } = useI18n();
+  const { filepath, threadId, isMock } = artifact ?? {};
+  const transformUrl = useCallback<UrlTransform>(
+    (src, key, node) =>
+      defaultUrlTransform(
+        node.tagName === "img" && key === "src" && filepath && threadId
+          ? resolveArtifactImageURL(src, { filepath, threadId, isMock })
+          : src,
+        key,
+        node,
+      ),
+    [filepath, threadId, isMock],
+  );
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const scrollPositionRef = useRef({ x: 0, y: 0 });
   const scrollMessageKey = useMemo(
@@ -260,8 +279,11 @@ export function ArtifactFilePreview({
     return (
       <div className="size-full overflow-auto px-4 py-3">
         <SafeStreamdown
+          // Streamdown memoizes blocks by content, not the image URL resolver.
+          key={JSON.stringify([scrollKey, filepath, threadId, Boolean(isMock)])}
           className="min-w-0"
           {...artifactMarkdownPlugins}
+          urlTransform={transformUrl}
           components={toStreamdownComponents({ a: ArtifactLink })}
         >
           {content ?? ""}

@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 import { mockLangGraphAPI } from "./utils/mock-api";
 
@@ -26,6 +26,39 @@ const THREADS = Array.from({ length: TOTAL_THREADS }, (_, i) => {
 
 const FIRST_PAGE_LAST = `Conversation ${String(PAGE_SIZE).padStart(3, "0")}`;
 const SECOND_PAGE_FIRST = `Conversation ${String(PAGE_SIZE + 1).padStart(3, "0")}`;
+
+// Side chats are hidden from the primary lists, so a page of 50 visible
+// chats spans more server rows. Three side chats in the first 50 rows push
+// the second page to server offset 53.
+const SIDECAR_INDEXES = new Set([4, 21, 38]);
+const THREADS_WITH_SIDE_CHATS = THREADS.map((thread, i) =>
+  SIDECAR_INDEXES.has(i)
+    ? {
+        ...thread,
+        metadata: {
+          deerflow_sidecar: true,
+          parent_thread_id: THREADS[0]!.thread_id,
+        },
+      }
+    : thread,
+);
+const SECOND_PAGE_OFFSET = PAGE_SIZE + SIDECAR_INDEXES.size;
+
+function observeSearchOffsets(page: Page) {
+  const offsets: number[] = [];
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      /^\/api\/(?:langgraph\/)?threads\/search$/.test(
+        new URL(request.url()).pathname,
+      )
+    ) {
+      const body = request.postDataJSON() as { offset?: number } | null;
+      offsets.push(body?.offset ?? 0);
+    }
+  });
+  return offsets;
+}
 
 test.describe("Thread list infinite scroll (issue #3482)", () => {
   test("chats list page loads more threads when scrolling to the bottom", async ({
@@ -129,5 +162,48 @@ test.describe("Thread list infinite scroll (issue #3482)", () => {
     await expect
       .poll(() => searchRequestCount, { timeout: 10_000 })
       .toBeGreaterThan(baselineRequests);
+  });
+  test("sidebar loads the next page past hidden side chats after a rename", async ({
+    page,
+  }) => {
+    const offsets = observeSearchOffsets(page);
+    mockLangGraphAPI(page, { threads: THREADS_WITH_SIDE_CHATS });
+
+    await page.goto("/workspace/chats/new");
+
+    const lastVisibleOnFirstPage = `Conversation ${String(
+      SECOND_PAGE_OFFSET,
+    ).padStart(3, "0")}`;
+    await expect(page.getByText(lastVisibleOnFirstPage).first()).toBeVisible({
+      timeout: 15_000,
+    });
+
+    // Renaming rewrites the cached pages; the next page must still start
+    // after the side chats the first page skipped.
+    const firstItem = page
+      .locator(
+        `a[data-sidebar="menu-button"][href="/workspace/chats/${THREADS[0]!.thread_id}"]`,
+      )
+      .locator("xpath=..");
+    await firstItem.hover();
+    await firstItem.getByRole("button", { name: "More" }).click();
+    await page.getByRole("menuitem", { name: "Rename" }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByRole("textbox").fill("Renamed conversation");
+    await dialog.getByRole("button", { name: "Save" }).click();
+    await expect(dialog).toBeHidden();
+    await expect(firstItem).toContainText("Renamed conversation");
+
+    offsets.length = 0;
+    await page
+      .getByTestId("recent-chat-list-sentinel")
+      .scrollIntoViewIfNeeded();
+
+    const nextFirst = `Conversation ${String(SECOND_PAGE_OFFSET + 1).padStart(3, "0")}`;
+    await expect(page.getByText(nextFirst).first()).toBeVisible({
+      timeout: 15_000,
+    });
+    expect(offsets).toContain(SECOND_PAGE_OFFSET);
+    expect(offsets).not.toContain(PAGE_SIZE);
   });
 });

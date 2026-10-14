@@ -26,7 +26,7 @@ _CHANNEL_SDK_MODULES = ("lark_oapi", "slack_sdk", "telegram", "discord", "dingta
 def test_capabilities_cover_channel_registry():
     # A provider registered without a capability entry (as qq once was) fails here.
     assert set(CHANNEL_CAPABILITIES) == set(_CHANNEL_REGISTRY)
-    assert CHANNEL_CAPABILITIES["qq"]["proactive_notifications"] is False
+    assert CHANNEL_CAPABILITIES["qq"]["proactive_notifications"] is True
 
 
 def test_every_entry_declares_both_flags_as_bools():
@@ -35,10 +35,10 @@ def test_every_entry_declares_both_flags_as_bools():
         assert all(isinstance(value, bool) for value in entry.values()), provider
 
 
-def test_only_wecom_pushes_proactively_today():
-    assert {provider for provider, entry in CHANNEL_CAPABILITIES.items() if entry["proactive_notifications"]} == {"wecom"}
-    assert supports_proactive_notifications("wecom") is True
-    assert supports_proactive_notifications("feishu") is False
+def test_supported_notification_channels_push_proactively():
+    assert {provider for provider, entry in CHANNEL_CAPABILITIES.items() if entry["proactive_notifications"]} == {"wecom", "feishu", "wechat", "qq"}
+    for provider in ("wecom", "feishu", "wechat", "qq"):
+        assert supports_proactive_notifications(provider) is True
 
 
 @pytest.mark.parametrize("provider", ["", "unknown", "WeCom", None, 1])

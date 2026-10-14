@@ -97,11 +97,13 @@ export type ScheduledTaskPayload = {
   max_runs?: number | null;
   end_at?: string | null;
   stop_condition?: string | null;
+  notification_group_connection_id?: string | null;
 };
 
 /**
  * PATCH body: send only changed fields. `null` clears `goal_objective`,
- * `max_runs`, `end_at` and `stop_condition`; other fields ignore `null`.
+ * `max_runs`, `end_at`, `stop_condition` and `notification_group_connection_id`;
+ * other fields ignore `null`.
  * `schedule_type` is accepted (with `schedule_spec`), though the page keeps it
  * locked when editing.
  */

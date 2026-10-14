@@ -6513,7 +6513,7 @@ class TestGithubFollowupBuffer:
             def get_status(self):
                 return {}
 
-        def fake_from_app_config(app_config=None, *, get_stream_bridge=None, credentials_cipher=None):
+        def fake_from_app_config(app_config=None, *, get_stream_bridge=None, credentials_cipher=None, **_lease):
             captured["get_stream_bridge"] = get_stream_bridge
             return _FakeService()
 
@@ -10670,7 +10670,7 @@ class TestSlackAllowedUsers:
         assert inbound.text == "/help"
         assert inbound.msg_type == InboundMessageType.COMMAND
 
-    def test_scalar_allowed_users_warns_and_matches_stringified_event_user_id(self, caplog):
+    def test_numeric_scalar_allowed_users_matches_stringified_event_user_id(self, caplog):
         from app.channels.slack import SlackChannel
 
         bus = MessageBus()
@@ -10697,10 +10697,72 @@ class TestSlackAllowedUsers:
         ):
             channel._handle_message_event(event)
 
-        assert "Slack allowed_users should be a list" in caplog.text
+        # A scalar is one entry under the shared allowlist contract, not a misconfiguration.
+        assert caplog.records == []
         channel._loop.call_soon_threadsafe.assert_called_once()
         inbound = bus.get_inbound_nowait()
         assert inbound.user_id == "123456"
+
+    @pytest.mark.parametrize(
+        ("allowed_users", "admitted"),
+        [([""], False), ({"U123456": True}, False), ([" U123456 "], True), (frozenset({"U123456"}), True)],
+        ids=["blank-entry", "mapping", "padded-entry", "frozenset"],
+    )
+    def test_allowlist_gate_uses_parsed_user_ids(self, allowed_users, admitted):
+        from app.channels.slack import SlackChannel
+
+        bus = MessageBus()
+        channel = SlackChannel(bus=bus, config={"allowed_users": allowed_users})
+        channel._loop = self._immediate_loop()
+        channel._add_reaction = MagicMock()
+        channel._send_running_reply = MagicMock()
+
+        event = {"user": "U123456", "text": "hello from slack", "channel": "C123", "ts": "1710000000.000100"}
+        with patch("app.channels.slack.asyncio.run_coroutine_threadsafe", side_effect=self._submit_coro):
+            channel._handle_message_event(event)
+
+        assert (not bus.inbound_queue.empty()) is admitted
+        assert channel._add_reaction.called is admitted
+
+    @pytest.mark.parametrize("allowed_users", [None, [], (), set(), frozenset(), "", " "])
+    def test_unset_or_empty_allowlist_allows_everyone_quietly(self, allowed_users, caplog):
+        from app.channels.slack import _parse_allowed_users
+
+        with caplog.at_level(logging.WARNING, logger="app.channels.slack"):
+            assert _parse_allowed_users(allowed_users) is None
+        assert caplog.records == []
+
+    @pytest.mark.parametrize("allowed_users", ["U123456,U654321", ","])
+    def test_scalar_with_separators_stays_one_literal_id_and_warns(self, allowed_users, caplog):
+        from app.channels.slack import _parse_allowed_users
+
+        with caplog.at_level(logging.WARNING, logger="app.channels.slack"):
+            assert _parse_allowed_users(allowed_users) == {allowed_users}
+        assert "YAML list" in caplog.text
+
+    def test_invalid_entries_are_dropped_with_a_warning(self, caplog):
+        from app.channels.slack import _parse_allowed_users
+
+        with caplog.at_level(logging.WARNING, logger="app.channels.slack"):
+            assert _parse_allowed_users(["U123456", True, 4.2, None, "  "]) == {"U123456"}
+        assert "True" in caplog.text
+        assert "4.2" in caplog.text
+        assert not any(record.levelno == logging.ERROR for record in caplog.records)
+
+    @pytest.mark.parametrize(
+        "allowed_users",
+        [[""], ["", "  "], [None], [True], {"U123456": True}, {}, True, 4.2],
+        ids=["blank-entry", "blank-entries", "null-entry", "bool-entry", "mapping", "empty-mapping", "bool-scalar", "float-scalar"],
+    )
+    def test_allowlist_without_a_valid_user_id_denies_everyone(self, allowed_users, caplog):
+        # A mapping must not authorize its keys, and a list whose entries are
+        # all blank (e.g. ``[$SLACK_USER_ID]`` with the variable set to an
+        # empty string) must not turn into "allow all".
+        from app.channels.slack import _parse_allowed_users
+
+        with caplog.at_level(logging.ERROR, logger="app.channels.slack"):
+            assert _parse_allowed_users(allowed_users) == frozenset()
+        assert any(record.levelno == logging.ERROR for record in caplog.records)
 
     def test_raises_after_all_retries_exhausted(self):
         from app.channels.slack import SlackChannel
@@ -11354,7 +11416,60 @@ class TestTelegramInboundMessages:
 
         _run(go())
 
-    def test_cancelled_stop_still_stops_thread_and_clears_state(self):
+    @pytest.mark.parametrize("owner_loop", ["missing", "stopped", "closed"])
+    def test_stop_releases_abandoned_cleanup_generation(self, caplog, owner_loop):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            ch = TelegramChannel(bus=MessageBus(), config={"bot_token": "test-token"})
+            telegram_loop = asyncio.new_event_loop() if owner_loop != "missing" else None
+            if owner_loop == "closed":
+                telegram_loop.close()
+            cleanup_future: Future[None] = Future()
+            ch._tg_loop = telegram_loop
+            ch._shutdown_resources_future = cleanup_future
+            ch._download_bot = SimpleNamespace(shutdown=AsyncMock())
+            try:
+                with caplog.at_level(logging.WARNING, logger="app.channels.telegram"):
+                    await ch.stop()
+                    await ch.stop()
+
+                assert ch._shutdown_resources_future is None
+                assert caplog.text.count("Telegram loop stopped before its resource cleanup finished") == 1
+                # Dropping an abandoned generation is not evidence that its
+                # loop-owned clients were closed, nor a reason to cancel it.
+                ch._download_bot.shutdown.assert_not_awaited()
+                assert not cleanup_future.done()
+            finally:
+                if telegram_loop is not None and not telegram_loop.is_closed():
+                    telegram_loop.close()
+
+        _run(go())
+
+    def test_stop_abandons_only_the_matching_cleanup_generation(self, monkeypatch):
+        from app.channels import telegram as telegram_module
+
+        async def go():
+            ch = telegram_module.TelegramChannel(bus=MessageBus(), config={"bot_token": "test-token"})
+            abandoned: Future[None] = Future()
+            replacement: Future[None] = Future()
+            ch._shutdown_resources_future = abandoned
+
+            def replace_generation_before_release(*args, **kwargs):
+                with ch._shutdown_resources_lock:
+                    ch._shutdown_resources_future = replacement
+
+            monkeypatch.setattr(telegram_module.logger, "warning", replace_generation_before_release)
+            await ch.stop()
+
+            assert ch._shutdown_resources_future is replacement
+            assert not abandoned.done()
+            assert not replacement.done()
+
+        _run(go())
+
+    def test_cancelled_stop_keeps_owned_cleanup_and_retry_converges(self):
+        """A cancelled stop must not cancel the cleanup the Telegram loop owns."""
         from app.channels.telegram import TelegramChannel
 
         async def go():
@@ -11362,16 +11477,23 @@ class TestTelegramInboundMessages:
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
             telegram_loop = asyncio.new_event_loop()
             loop_started: Future[None] = Future()
-            drain_started = threading.Event()
+            cleanup_started = threading.Event()
+            cleanup_finished = threading.Event()
+            release_cleanup = threading.Event()
+            shutdown_calls = 0
 
             def run_telegram_loop():
                 asyncio.set_event_loop(telegram_loop)
                 telegram_loop.call_soon(loop_started.set_result, None)
                 telegram_loop.run_forever()
 
-            async def slow_drain():
-                drain_started.set()
-                await asyncio.Event().wait()
+            class DownloadBot:
+                async def shutdown(self):
+                    nonlocal shutdown_calls
+                    shutdown_calls += 1
+                    cleanup_started.set()
+                    await asyncio.to_thread(release_cleanup.wait)
+                    cleanup_finished.set()
 
             loop_thread = threading.Thread(target=run_telegram_loop, daemon=True)
             loop_thread.start()
@@ -11380,19 +11502,174 @@ class TestTelegramInboundMessages:
                 ch._tg_loop = telegram_loop
                 ch._thread = loop_thread
                 ch._running = True
-                ch._application = SimpleNamespace(bot=SimpleNamespace())
-                ch._cancel_telegram_bridge_tasks = slow_drain
+                ch._application = SimpleNamespace(bot=SimpleNamespace(shutdown=AsyncMock()), updater=SimpleNamespace(running=False), running=False, shutdown=AsyncMock())
+                ch._download_bot = DownloadBot()
 
                 stop_task = asyncio.create_task(ch.stop())
-                assert await asyncio.to_thread(drain_started.wait, 2)
+                assert await asyncio.to_thread(cleanup_started.wait, 2)
                 stop_task.cancel()
 
                 with pytest.raises(asyncio.CancelledError):
                     await stop_task
 
-                assert not loop_thread.is_alive()
+                # Cancellation reached the caller only: the loop and the cleanup
+                # it owns stay with the channel so a retry can finish them.
+                assert not cleanup_finished.is_set()
+                assert telegram_loop.is_running()
+                assert loop_thread.is_alive()
+                assert ch._thread is loop_thread
+                assert ch._application is not None
+                assert ch._download_bot is not None
+
+                release_cleanup.set()
+                assert await asyncio.to_thread(cleanup_finished.wait, 2)
+                await ch.stop()
+
+                assert shutdown_calls == 1
+                assert ch._download_bot is None
                 assert ch._thread is None
                 assert ch._application is None
+                assert not loop_thread.is_alive()
+            finally:
+                if telegram_loop.is_running():
+                    telegram_loop.call_soon_threadsafe(telegram_loop.stop)
+                await asyncio.to_thread(loop_thread.join, 2)
+                if loop_thread.is_alive():
+                    pytest.fail("Telegram test event loop did not stop")
+                telegram_loop.close()
+
+        _run(go())
+
+    def test_concurrent_stops_share_one_telegram_cleanup_generation(self):
+        """Concurrent stops must not schedule a second Telegram-loop cleanup."""
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            telegram_loop = asyncio.new_event_loop()
+            loop_started: Future[None] = Future()
+            cleanup_started = threading.Event()
+            cleanup_finished = threading.Event()
+            release_cleanup = threading.Event()
+            shutdown_calls = 0
+
+            def run_telegram_loop():
+                asyncio.set_event_loop(telegram_loop)
+                telegram_loop.call_soon(loop_started.set_result, None)
+                telegram_loop.run_forever()
+
+            class DownloadBot:
+                async def shutdown(self):
+                    nonlocal shutdown_calls
+                    shutdown_calls += 1
+                    cleanup_started.set()
+                    await asyncio.to_thread(release_cleanup.wait)
+                    cleanup_finished.set()
+
+            loop_thread = threading.Thread(target=run_telegram_loop, daemon=True)
+            loop_thread.start()
+            try:
+                loop_started.result(timeout=2)
+                ch._tg_loop = telegram_loop
+                ch._thread = loop_thread
+                ch._running = True
+                ch._application = SimpleNamespace(bot=SimpleNamespace(shutdown=AsyncMock()), updater=SimpleNamespace(running=False), running=False, shutdown=AsyncMock())
+                ch._download_bot = DownloadBot()
+
+                first = asyncio.create_task(ch.stop())
+                assert await asyncio.to_thread(cleanup_started.wait, 2)
+                second = asyncio.create_task(ch.stop())
+                await asyncio.sleep(0.05)
+
+                assert not first.done()
+                assert not second.done()
+
+                release_cleanup.set()
+                await asyncio.gather(first, second)
+
+                assert shutdown_calls == 1
+                assert await asyncio.to_thread(cleanup_finished.wait, 2)
+                assert ch._download_bot is None
+                assert ch._thread is None
+                assert ch._application is None
+                assert not loop_thread.is_alive()
+            finally:
+                if telegram_loop.is_running():
+                    telegram_loop.call_soon_threadsafe(telegram_loop.stop)
+                await asyncio.to_thread(loop_thread.join, 2)
+                if loop_thread.is_alive():
+                    pytest.fail("Telegram test event loop did not stop")
+                telegram_loop.close()
+
+        _run(go())
+
+    def test_shutdown_timeout_keeps_download_bot_cleanup_running(self, monkeypatch):
+        """The Gateway deadline must not cancel Telegram-loop-owned Bot cleanup."""
+        from app.channels import telegram as telegram_module
+        from app.channels.base import ChannelStopTimeout
+
+        async def go():
+            bus = MessageBus()
+            ch = telegram_module.TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            telegram_loop = asyncio.new_event_loop()
+            loop_started: Future[None] = Future()
+            cleanup_started = threading.Event()
+            cleanup_finished = threading.Event()
+            release_cleanup = threading.Event()
+            shutdown_calls = 0
+
+            def run_telegram_loop():
+                asyncio.set_event_loop(telegram_loop)
+                telegram_loop.call_soon(loop_started.set_result, None)
+                telegram_loop.run_forever()
+
+            class DownloadBot:
+                async def shutdown(self):
+                    nonlocal shutdown_calls
+                    shutdown_calls += 1
+                    cleanup_started.set()
+                    await asyncio.to_thread(release_cleanup.wait)
+                    cleanup_finished.set()
+
+            loop_thread = threading.Thread(target=run_telegram_loop, daemon=True)
+            loop_thread.start()
+            try:
+                loop_started.result(timeout=2)
+                ch._tg_loop = telegram_loop
+                ch._thread = loop_thread
+                ch._running = True
+                ch._application = SimpleNamespace(bot=SimpleNamespace(shutdown=AsyncMock()), updater=SimpleNamespace(running=False), running=False, shutdown=AsyncMock())
+                ch._download_bot = DownloadBot()
+                monkeypatch.setattr(telegram_module, "TELEGRAM_SHUTDOWN_TIMEOUT_SECONDS", 0.01)
+
+                with pytest.raises(ChannelStopTimeout, match="Telegram loop cleanup is still running"):
+                    await ch.stop()
+
+                # The deadline interrupted the wait, not the cleanup: the loop
+                # still owns the unfinished download Bot shutdown.
+                assert await asyncio.to_thread(cleanup_started.wait, 2)
+                assert not cleanup_finished.is_set()
+                assert telegram_loop.is_running()
+                assert loop_thread.is_alive()
+                assert ch._thread is loop_thread
+                assert ch._application is not None
+                assert ch._download_bot is not None
+
+                release_cleanup.set()
+                assert await asyncio.to_thread(cleanup_finished.wait, 2)
+
+                # A retried stop joins that same cleanup and only then tears the
+                # channel down.
+                monkeypatch.setattr(telegram_module, "TELEGRAM_SHUTDOWN_TIMEOUT_SECONDS", 5.0)
+                await ch.stop()
+
+                assert shutdown_calls == 1
+                assert ch._download_bot is None
+                assert ch._thread is None
+                assert ch._application is None
+                assert not telegram_loop.is_running()
+                assert not loop_thread.is_alive()
             finally:
                 if telegram_loop.is_running():
                     telegram_loop.call_soon_threadsafe(telegram_loop.stop)
@@ -12486,6 +12763,7 @@ class TestTelegramStreaming:
                 chat_id=12345,
                 text="Working on it...",
                 reply_to_message_id=42,
+                allow_sending_without_reply=True,
             )
 
         _run(go())
@@ -13410,3 +13688,114 @@ def test_streaming_chat_never_publishes_hidden_memory_context(monkeypatch):
         assert [m.text for m in outbound_received] == ["All green. ▉", "All green."]
 
     _run(go())
+
+
+# _extract_human_input_payload / clarification metadata passthrough tests
+
+
+class TestExtractHumanInputPayload:
+    def test_returns_payload_from_ask_clarification_artifact(self):
+        from app.channels.manager import _extract_human_input_payload
+
+        payload = {
+            "version": 1,
+            "kind": "human_input_request",
+            "source": "ask_clarification",
+            "request_id": "clarification:call_1",
+            "question": "Pick one",
+            "input_mode": "choice_with_other",
+            "options": [{"id": "option-1", "label": "Alpha", "value": "Alpha"}],
+        }
+        result = {
+            "messages": [
+                {"type": "human", "content": "hi"},
+                {
+                    "type": "tool",
+                    "name": "ask_clarification",
+                    "content": "Pick one",
+                    "artifact": {"human_input": payload},
+                },
+            ]
+        }
+        assert _extract_human_input_payload(result) == payload
+
+    def test_returns_none_without_artifact(self):
+        from app.channels.manager import _extract_human_input_payload
+
+        result = {"messages": [{"type": "tool", "name": "ask_clarification", "content": "q"}]}
+        assert _extract_human_input_payload(result) is None
+
+    def test_returns_none_for_non_clarification(self):
+        from app.channels.manager import _extract_human_input_payload
+
+        result = {"messages": [{"type": "ai", "content": "done"}]}
+        assert _extract_human_input_payload(result) is None
+
+    def test_ignores_previous_turn_clarification(self):
+        from app.channels.manager import _extract_human_input_payload
+
+        payload = {"kind": "human_input_request", "request_id": "clarification:old"}
+        result = {
+            "messages": [
+                {"type": "tool", "name": "ask_clarification", "content": "old", "artifact": {"human_input": payload}},
+                {"type": "human", "content": "answer"},
+                {"type": "ai", "content": "next"},
+            ]
+        }
+        assert _extract_human_input_payload(result) is None
+
+
+class TestResponseMetadataClarificationPassthrough:
+    def test_pending_clarification_carries_human_input_payload(self):
+        from app.channels.manager import _response_metadata_with_clarification
+        from app.channels.message_bus import HUMAN_INPUT_REQUEST_METADATA_KEY, PENDING_CLARIFICATION_METADATA_KEY
+
+        payload = {"kind": "human_input_request", "request_id": "clarification:call_1", "input_mode": "choice_with_other"}
+        result = {
+            "messages": [
+                {"type": "human", "content": "hi"},
+                {"type": "tool", "name": "ask_clarification", "content": "q", "artifact": {"human_input": payload}},
+            ]
+        }
+        metadata = _response_metadata_with_clarification(result, {"user_id": "ou_1"}, pending_clarification=True)
+        assert metadata[PENDING_CLARIFICATION_METADATA_KEY] is True
+        assert metadata[HUMAN_INPUT_REQUEST_METADATA_KEY] == payload
+        assert metadata["user_id"] == "ou_1"
+
+    def test_non_clarification_outbound_never_carries_payload(self):
+        from app.channels.manager import _response_metadata_with_clarification
+        from app.channels.message_bus import HUMAN_INPUT_REQUEST_METADATA_KEY
+
+        result = {"messages": [{"type": "ai", "content": "done"}]}
+        metadata = _response_metadata_with_clarification(result, {}, pending_clarification=False)
+        assert HUMAN_INPUT_REQUEST_METADATA_KEY not in metadata
+
+
+class TestHumanInputResponseTranslation:
+    """A channel-synthesized human-input answer must land on the run's human
+    message as additional_kwargs, hidden from transcripts (Web card parity)."""
+
+    def test_response_metadata_key_is_translated_to_additional_kwargs(self):
+        from app.channels.manager import _human_input_message_with_channel_response
+        from app.channels.message_bus import HUMAN_INPUT_RESPONSE_METADATA_KEY
+
+        response = {
+            "version": 1,
+            "kind": "human_input_response",
+            "source": "feishu_card",
+            "request_id": "clarification:call_1",
+            "response_kind": "option",
+            "option_id": "option-1",
+            "value": "Alpha",
+        }
+        message = _human_input_message_with_channel_response("Alpha", metadata={HUMAN_INPUT_RESPONSE_METADATA_KEY: response})
+        assert message["content"] == "Alpha"
+        assert message["additional_kwargs"][HUMAN_INPUT_RESPONSE_METADATA_KEY] == response
+        assert message["additional_kwargs"]["hide_from_ui"] is True
+
+    def test_plain_message_unchanged(self):
+        from app.channels.manager import _human_input_message_with_channel_response
+
+        message = _human_input_message_with_channel_response("hello", metadata={})
+        assert message["content"] == "hello"
+        assert "additional_kwargs" not in message
