@@ -567,8 +567,8 @@ OpenID denies every sender and logs an error.
 
 The MVP supports text-only `C2C_MESSAGE_CREATE` and `GROUP_AT_MESSAGE_CREATE`
 events and final text replies. It does not download/upload attachments, stream
-partial answers, handle guild/channel messages, or proactively push scheduled
-results. Replies require the original message ID: C2C replies have a 60-minute
+partial answers or handle guild/channel messages. Scheduled private results
+use the separate proactive notification path described below. Replies require the original message ID: C2C replies have a 60-minute
 window with at most four replies per source message; group replies have a
 5-minute window with at most five replies. Long answers are split at UTF-8 character boundaries with a
 conservative 4,000-byte adapter budget per message; overflow is marked as
@@ -617,7 +617,11 @@ from the browser runtime setup flow, which persists them through
 `ChannelRuntimeConfigStore` so local/private deployments can configure bots
 without editing YAML. The runtime store is a local plaintext JSON fallback with
 owner-only file permissions (`0600`); use it only where the DeerFlow data
-directory is already trusted as secret storage. WeChat QR login auth state
+directory is already trusted as secret storage. Every Gateway worker keeps its own copy
+of the file; a save or disconnect rereads it under an advisory sidecar lock
+(`.runtime-config.json.lock`) and changes only that provider, so workers sharing
+`DEER_FLOW_HOME` do not overwrite each other's bots. Reads still serve the copy
+the worker last loaded or wrote. WeChat QR login auth state
 follows the same local-runtime model and may persist a QR-derived bot token in
 the channel state directory.
 
@@ -642,3 +646,52 @@ the channel state directory.
 - Provider bot tokens remain in `channels.*` and are never returned to the browser.
 - Stored per-connection credentials are encrypted. If stored credential material cannot be decrypted, DeerFlow treats it as unavailable instead of using corrupt secrets.
 - This implementation does not add public provider callback or webhook routes.
+
+## Proactive notification settings
+
+The shared scheduler outbox sends result/lifecycle notices to bound private
+identities on WeCom, Feishu/Lark, WeChat and QQ. **Settings → Notifications → IM
+notifications** lists connected, push-capable apps with the same per-provider
+control. The setting is durable and owner-scoped, and also works in local
+`DEER_FLOW_AUTH_DISABLED=1` mode. It does not disable chatting, disconnect an
+account or stop a scheduled task. Browser notifications have a separate switch.
+
+Opting out stops new enqueueing and permanently closes pending/retrying notices
+for that owner/provider, including any selected Feishu group. Re-enabling does
+not replay these notices. A platform send already in progress may still arrive.
+Preference lookup failures park instead of sending; ordinary binding revocation,
+localized summaries, redaction, deduplication and retry budgets remain shared.
+Upgrade every Gateway worker before relying on an opt-out during a rolling
+upgrade. Downgrading below `0041_im_notice_preferences` removes the choices.
+
+### WeChat private notifications
+
+Use the existing iLink QR/bot setup and bind in a private chat. Send one private
+message so the worker can securely save the current conversation context. New
+contexts live in encrypted connection credentials and survive restart; private
+context tokens are not exposed by the browser connection API. Old bindings do
+not automatically trust a token previously stored in public metadata, and a
+changed bot token needs a fresh private message. Missing context or a platform
+rejection fails visibly rather than being recorded as sent. A server-expired
+context may need another private message. Notifications use the existing
+`sendmessage` HTTP path and require its success ACK, without a provider-local
+retry loop. WeChat group notification targets are not part of this version.
+
+Official protocol: [Tencent/openclaw-weixin](https://github.com/Tencent/openclaw-weixin/blob/main/docs/protocol.md).
+The client-side protocol does not guarantee that the server accepts missing or
+arbitrarily old conversation contexts; real account acceptance is still required.
+
+### QQ private notifications
+
+Configure the existing QQ WebSocket bot and `/connect` in **private/C2C chat**.
+Group member OpenIDs are a different recipient namespace; a group-only binding
+is not used as a private notification destination. A proactive notice uses
+`POST /v2/users/{user_openid}/messages`, without `msg_id`, `event_id`, passive reply
+sequence/quota or `is_wakeup`. The recipient must permit proactive messages and
+the bot must have platform access. Success requires a nonempty message ID ACK.
+Transport failures park; platform rejections use the shared retry budget.
+
+Current official rules are in the [QQ message overview](https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/overview.html).
+Older GitHub bot-docs snapshots say proactive sending was discontinued; use the
+current live documentation and verify the actual bot account. QQ group
+notification destinations remain separate from the existing group chat replies.

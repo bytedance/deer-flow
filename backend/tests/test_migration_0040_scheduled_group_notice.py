@@ -21,7 +21,8 @@ COLUMN = "notification_group_connection_id"
 
 def test_group_notification_revision_has_one_head_after_0039():
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
-    assert script.get_heads() == [REVISION]
+    assert script.get_heads() == ["0041_im_notice_preferences"]
+    assert script.get_revision("0041_im_notice_preferences").down_revision == REVISION
     assert script.get_revision(REVISION).down_revision == PREVIOUS
     assert len(REVISION) <= 32
 

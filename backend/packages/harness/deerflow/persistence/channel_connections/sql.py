@@ -235,6 +235,49 @@ class ChannelConnectionRepository:
             await session.commit()
             return len(connection_ids)
 
+    async def store_connection_context(
+        self,
+        connection_id: str,
+        *,
+        owner_user_id: str,
+        provider: str,
+        external_account_id: str,
+        workspace_id: str | None,
+        extra: dict[str, Any],
+    ) -> bool:
+        """Merge private context only while the captured binding is still connected."""
+        if self._cipher is None:
+            raise RuntimeError("channel connection encryption key is required")
+        async with self.session_factory() as session:
+            # The guarded write locks the parent on both SQLite and PostgreSQL.
+            # Transfer/disconnect must finish before this check or wait until
+            # our credential write commits, then revoke and delete it normally.
+            result = await session.execute(
+                update(ChannelConnectionRow)
+                .where(
+                    ChannelConnectionRow.id == connection_id,
+                    ChannelConnectionRow.owner_user_id == owner_user_id,
+                    ChannelConnectionRow.provider == provider,
+                    ChannelConnectionRow.external_account_id == self._normalize_optional_identity(external_account_id),
+                    ChannelConnectionRow.workspace_id == self._normalize_optional_identity(workspace_id),
+                    ChannelConnectionRow.status == "connected",
+                )
+                .values(updated_at=ChannelConnectionRow.updated_at)
+            )
+            if result.rowcount != 1:
+                return False
+            row = await session.get(ChannelCredentialRow, connection_id)
+            if row is None:
+                row = ChannelCredentialRow(connection_id=connection_id)
+                session.add(row)
+            previous = self._decrypt_optional_secret(row.encrypted_extra_json)
+            merged = json.loads(previous) if previous else {}
+            merged.update(extra)
+            row.encrypted_extra_json = self._encrypt_optional_secret(json.dumps(merged, ensure_ascii=False))
+            row.version = (row.version or 0) + 1
+            await session.commit()
+            return True
+
     async def store_credentials(
         self,
         connection_id: str,
