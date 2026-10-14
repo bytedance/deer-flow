@@ -4,6 +4,7 @@ Uses MemoryRunEventStore as the backend for direct event inspection.
 """
 
 import asyncio
+import logging
 import threading
 import weakref
 from concurrent.futures import ThreadPoolExecutor
@@ -228,7 +229,6 @@ async def test_close_flushes_and_detaches_runtime_dependencies():
     assert journal._store is None
     assert journal._progress_reporter is None
     assert journal._buffer == []
-    assert journal._pending_flush_tasks == set()
     del store, reporter
     await asyncio.sleep(0)
     assert store_ref() is None
@@ -391,7 +391,7 @@ async def test_close_without_flush_detaches_when_cancellation_interrupts_pending
             await asyncio.Event().wait()
 
     pending_flush = asyncio.create_task(stubborn_pending_flush())
-    journal._pending_flush_tasks.add(pending_flush)
+    journal._owned_writes[pending_flush] = [{"event_type": "test", "category": "trace", "content": ""}]
     close_task = asyncio.create_task(journal.close(flush=False))
     await asyncio.wait_for(first_cancellation_seen.wait(), timeout=1)
 
@@ -403,7 +403,7 @@ async def test_close_without_flush_detaches_when_cancellation_interrupts_pending
     assert journal._closed is True
     assert journal._store is None
     assert journal._buffer == []
-    assert journal._pending_flush_tasks == set()
+    assert journal._owned_writes == {}
 
 
 class TestWriteOwnership:
@@ -428,7 +428,6 @@ class TestWriteOwnership:
         await journal.close(flush=False)
 
         assert journal._owned_writes == {}
-        assert journal._pending_flush_tasks == set()
         assert store_task_ref and store_task_ref[0].cancelled(), "inner store task was orphaned"
 
     @pytest.mark.anyio
@@ -493,7 +492,7 @@ class TestWriteOwnership:
         assert [event["event_type"] for event in events] == ["A"]
 
     @pytest.mark.anyio
-    async def test_background_completion_after_caller_cancel_is_reaped(self):
+    async def test_background_completion_after_caller_cancel_is_reaped(self, caplog):
         class FailingStore(MemoryRunEventStore):
             def __init__(self) -> None:
                 super().__init__()
@@ -515,13 +514,15 @@ class TestWriteOwnership:
         with pytest.raises(asyncio.CancelledError):
             await flush_task
 
-        store.finish.set()
-        for _ in range(5):
-            await asyncio.sleep(0)
+        with caplog.at_level(logging.WARNING, logger="deerflow.runtime.journal"):
+            store.finish.set()
+            for _ in range(5):
+                await asyncio.sleep(0)
 
         assert journal._owned_writes == {}, "background write was not reaped"
         assert len(journal._quarantined_batches) == 1, "background failure was lost"
-        assert journal._pending_flush_tasks == set()
+        assert "has an unknown outcome" in caplog.text
+        assert "store failed after caller detached" in caplog.text
 
     @pytest.mark.anyio
     async def test_caller_cancellation_does_not_cancel_owned_write(self):
@@ -620,6 +621,152 @@ class TestWriteOwnership:
         with pytest.raises(RunEventStoreNotCommittedError):
             await journal.flush()
         assert store.calls == 2
+
+    @pytest.mark.anyio
+    async def test_background_not_committed_write_is_logged(self, caplog):
+        class DetachedNotCommittedStore(MemoryRunEventStore):
+            def __init__(self) -> None:
+                super().__init__()
+                self.started = asyncio.Event()
+                self.finish = asyncio.Event()
+
+            async def put_batch(self, events):
+                self.started.set()
+                await self.finish.wait()
+                raise RunEventStoreNotCommittedError("rejected before storage")
+
+        store = DetachedNotCommittedStore()
+        journal = RunJournal("r-bg-nc", "t-bg-nc", store, flush_threshold=100)
+        journal._put(event_type="A", category="trace", content="one")
+
+        flush_task = asyncio.create_task(journal.flush())
+        await store.started.wait()
+        flush_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await flush_task
+
+        with caplog.at_level(logging.WARNING, logger="deerflow.runtime.journal"):
+            store.finish.set()
+            for _ in range(5):
+                await asyncio.sleep(0)
+
+        assert journal._owned_writes == {}
+        assert [event["event_type"] for event in journal._buffer] == ["A"]
+        assert "came back not-committed" in caplog.text
+
+    @pytest.mark.anyio
+    async def test_sync_write_failure_is_not_double_logged_by_reaper(self, caplog):
+        class FailingStore(MemoryRunEventStore):
+            async def put_batch(self, events):
+                raise RuntimeError("store unavailable")
+
+        journal = RunJournal("r-sync-log", "t-sync-log", FailingStore(), flush_threshold=100)
+        journal._put(event_type="A", category="trace", content="one")
+
+        with caplog.at_level(logging.WARNING, logger="deerflow.runtime.journal"):
+            with pytest.raises(RuntimeError, match="store unavailable"):
+                await journal.flush()
+
+        # The drain surfaces the failure to the caller; the reaper must stay quiet
+        # so the same failure is not logged twice.
+        assert "has an unknown outcome" not in caplog.text
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("cancel_times", [1, 2])
+    async def test_flush_cancellation_preserves_task_cancel_count(self, cancel_times):
+        """Cancelling an explicit flush must not mutate the caller's cancel count.
+
+        The write is started by a threshold flush first, so the explicit flush
+        enters its already-in-flight drain (the branch that used to call
+        ``uncancel()``).
+        """
+
+        class HangingStore(MemoryRunEventStore):
+            def __init__(self) -> None:
+                super().__init__()
+                self.started = asyncio.Event()
+                self.finish = asyncio.Event()
+
+            async def put_batch(self, events):
+                self.started.set()
+                await self.finish.wait()
+                return await super().put_batch(events)
+
+        store = HangingStore()
+        journal = RunJournal("r-cancel-count", "t-cancel-count", store, flush_threshold=100)
+        journal._put(event_type="A", category="trace", content="one")
+        journal._flush_sync()  # start the owned write before the explicit flush
+        await store.started.wait()
+
+        flush_task = asyncio.create_task(journal.flush())
+        # flush() yields once before touching the buffer; pump until it is parked
+        # on the already-in-flight write so the cancel lands in the settle branch.
+        for _ in range(20):
+            await asyncio.sleep(0)
+            if journal._draining_tasks:
+                break
+        assert journal._draining_tasks, "flush did not enter its in-flight drain"
+
+        for _ in range(cancel_times):
+            flush_task.cancel()
+        await asyncio.sleep(0)
+        store.finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await flush_task
+
+        assert flush_task.cancelling() == cancel_times, "journal must not mutate the caller's cancel count"
+        for _ in range(20):
+            await asyncio.sleep(0)
+        types = [event["event_type"] for event in await store.list_events("t-cancel-count", "r-cancel-count")]
+        assert types.count("A") == 1
+
+    @pytest.mark.anyio
+    async def test_close_without_flush_supervises_abandoned_store_task(self, monkeypatch, caplog):
+        """A store that outlives bounded teardown must still have its result observed."""
+        import gc
+
+        import deerflow.runtime.journal as journal_module
+
+        monkeypatch.setattr(journal_module, "_WRITE_SETTLE_TIMEOUT_SECONDS", 0.02, raising=False)
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        class UncooperativeStore(MemoryRunEventStore):
+            async def put_batch(self, events):
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    # Swallow the teardown cancel and keep the "I/O" running.
+                    await release.wait()
+                raise RuntimeError("late failure after the writer was abandoned")
+
+        journal = RunJournal("r-abandoned", "t-abandoned", UncooperativeStore(), flush_threshold=100)
+        journal._put(event_type="A", category="trace", content="one")
+        journal._flush_sync()
+        await started.wait()
+
+        unretrieved: list[BaseException] = []
+        loop = asyncio.get_running_loop()
+        previous = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, ctx: unretrieved.append(ctx.get("exception")))
+        try:
+            with caplog.at_level(logging.WARNING, logger="deerflow.runtime.journal"):
+                await journal.close(flush=False)
+                assert journal._closed is True
+                assert len(journal._abandoned_store_tasks) == 1, "inner store task was not supervised"
+
+                release.set()
+                for _ in range(10):
+                    await asyncio.sleep(0)
+            assert journal._abandoned_store_tasks == {}
+            gc.collect()
+            await asyncio.sleep(0)
+        finally:
+            loop.set_exception_handler(previous)
+
+        assert unretrieved == [], f"abandoned store task exception was never retrieved: {unretrieved}"
+        assert "after the writer was abandoned" in caplog.text
 
     @pytest.mark.anyio
     async def test_store_self_cancellation_is_quarantined_not_replayed(self):
