@@ -311,7 +311,6 @@ class TestSlackReceiveFile:
         assert result.files == []
         assert "bot token missing" in result.text
 
-
     def test_rejects_non_slack_host_without_fetching(self):
         from app.channels.slack import SlackChannel
 
@@ -461,22 +460,12 @@ class TestSlackPrivateFileUrlAllowlist:
     def test_allows_files_slack_com_https(self):
         from app.channels.slack import SlackChannel
 
-        assert SlackChannel._is_allowed_private_file_url(
-            "https://files.slack.com/files-pri/T-F/download/x"
-        )
-        assert SlackChannel._is_allowed_private_file_url(
-            "https://cdn.files.slack.com/files-pri/T-F/download/x"
-        )
+        assert SlackChannel._is_allowed_private_file_url("https://files.slack.com/files-pri/T-F/download/x")
+        assert SlackChannel._is_allowed_private_file_url("https://cdn.files.slack.com/files-pri/T-F/download/x")
 
     def test_rejects_http_and_foreign_hosts(self):
         from app.channels.slack import SlackChannel
 
-        assert not SlackChannel._is_allowed_private_file_url(
-            "http://files.slack.com/files-pri/T-F/download/x"
-        )
-        assert not SlackChannel._is_allowed_private_file_url(
-            "https://evil.example/x"
-        )
-        assert not SlackChannel._is_allowed_private_file_url(
-            "https://notfiles.slack.com.evil.io/x"
-        )
+        assert not SlackChannel._is_allowed_private_file_url("http://files.slack.com/files-pri/T-F/download/x")
+        assert not SlackChannel._is_allowed_private_file_url("https://evil.example/x")
+        assert not SlackChannel._is_allowed_private_file_url("https://notfiles.slack.com.evil.io/x")
