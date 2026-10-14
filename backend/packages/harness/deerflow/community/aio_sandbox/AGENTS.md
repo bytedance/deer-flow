@@ -102,4 +102,4 @@ SDK cannot parse into ``FileReadResult``; the resulting ``ValidationError``
 becomes ``Error: file not found or unreadable: <path>`` logged at debug
 (missing files are expected on ReadBeforeWrite probes of new files), never the
 raw pydantic text. Other exceptions keep the error log.
-Regressions: `tests/test_aio_sandbox.py`.
+Regressions: `test_aio_sandbox.py`.
