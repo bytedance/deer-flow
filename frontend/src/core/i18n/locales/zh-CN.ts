@@ -1542,8 +1542,8 @@ export const zhCN: Translations = {
     },
     connectedAs: (name: string) => `已连接为 ${name}。`,
     scheduledUpdates: {
-      supported: "定时任务通知：会发送到这里",
-      supportedAfterConnect: "定时任务通知：连接后可发送到这里",
+      supported: "定时任务通知：已支持，可在通知设置中管理",
+      supportedAfterConnect: "定时任务通知：已支持，连接后可管理通知",
       unsupported: "定时任务通知：此应用暂不支持",
     },
   },
@@ -2242,6 +2242,25 @@ export const zhCN: Translations = {
       testBody: "这是一条测试通知。",
       notSupported: "当前浏览器不支持通知功能。",
       disableNotification: "关闭通知",
+      channels: {
+        title: "定时任务通知",
+        description:
+          "选择哪些已连接的应用接收定时任务更新。关闭通知不影响聊天。待发和重试中的通知会取消，重新开启不会补发旧通知。已经开始投递的通知仍可能送达。",
+        providers: {
+          feishu: "飞书 / Lark",
+          wecom: "企业微信",
+          wechat: "微信",
+          qq: "QQ",
+        },
+        toggleLabel: (provider: string) => `${provider}定时任务通知`,
+        loading: "正在加载通知偏好…",
+        saving: "正在保存…",
+        loadFailed: "无法加载通知偏好，请重试。",
+        saveFailed: "未能保存此更改，当前仍显示之前的设置，请重试。",
+        unavailable: "当前服务尚不支持通知偏好设置。",
+        empty: "请在设置 → 频道中连接支持定时任务通知的应用。",
+        retry: "重试",
+      },
     },
     account: {
       profileTitle: "个人信息",

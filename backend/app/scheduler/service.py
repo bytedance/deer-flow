@@ -22,6 +22,7 @@ from deerflow.persistence.scheduled_task_runs.finalization import LIFECYCLE_EVEN
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_task_runs.sql import run_number_expression
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.persistence.user.im_notifications import ImNotificationPreferencesRepository
 from deerflow.persistence.user.model import UserPreferenceRow
 from deerflow.runtime import ConflictError, RunRecord
 from deerflow.scheduler.host_notes import RUN_ERROR_DELETED_WHILE_QUEUED, RUN_ERROR_INTERRUPTED, RUN_ERROR_LEASE_LOST, RUN_ERROR_PAUSED_WHILE_QUEUED, RUN_ERROR_QUEUE_TIMEOUT, RUN_ERROR_RESTARTED
@@ -352,10 +353,16 @@ class ScheduledTaskService:
         if selected is None:
             return
         event, reason = selected
+        preferences = await ImNotificationPreferencesRepository.get_in_session(session, task.user_id, lock_owner=True)
         bindings = [
             binding
             for binding in await session.scalars(select(ChannelConnectionRow).where(ChannelConnectionRow.owner_user_id == task.user_id, ChannelConnectionRow.status == "connected"))
-            if binding.provider and binding.external_account_id and supports_proactive_notifications(binding.provider)
+            if binding.provider
+            and binding.external_account_id
+            and supports_proactive_notifications(binding.provider)
+            and preferences.get(binding.provider, False)
+            # QQ group member OpenIDs are not the C2C recipient namespace.
+            and (binding.provider != "qq" or ((binding.metadata_json or {}).get("chat_type") == "c2c" and (binding.workspace_id or "").endswith(":c2c")))
         ]
         group_connection_id = getattr(task, "notification_group_connection_id", None)
         if not bindings and not group_connection_id:
@@ -363,7 +370,7 @@ class ScheduledTaskService:
         payload = _notice_payload(task, occurrence, event, reason, locale=await self._owner_locale(session, task.user_id))
         task_run_id = occurrence.id if occurrence is not None else _idle_notice_key(task.id, lifecycle_anchor(task, occurrence, now=now))
         recipients = [(binding.provider, binding.external_account_id, payload) for binding in bindings]
-        if group_connection_id:
+        if group_connection_id and preferences.get("feishu", False):
             # Keep the selected binding identity even if it was removed: the
             # worker records an explicit failed delivery after its owner check.
             recipients.append(("feishu", group_connection_id, {**payload, "target_type": "group"}))
