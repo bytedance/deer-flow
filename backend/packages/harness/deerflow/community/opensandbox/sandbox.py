@@ -81,16 +81,55 @@ def execution_stdout(execution: Any) -> str:
 
 def format_execution(execution: Any) -> str:
     """Combine stdout, result text, and stderr using DeerFlow's string contract."""
-    output = execution_stdout(execution)
-    result = _join_event_text(item.text for item in getattr(execution, "result", []) if getattr(item, "text", None) is not None)
-    output = _append_output(output, result)
-    stderr = _join_event_text(message.text for message in getattr(getattr(execution, "logs", None), "stderr", []))
-    output = _append_output(output, stderr)
+    output = execution_body(execution)
     error = getattr(execution, "error", None)
     if error is not None:
         detail = f"{getattr(error, 'name', type(error).__name__)}: {getattr(error, 'value', error)}"
         output = _append_output(output, detail)
     return output
+
+
+def execution_body(execution: Any) -> str:
+    """Combine the command's own stdout, result text and stderr.
+
+    Excludes the error detail so a caller that reports the failure itself (the
+    timeout branch) can present the partial output without a second, rawer copy
+    of the same failure underneath it.
+    """
+    output = execution_stdout(execution)
+    result = _join_event_text(item.text for item in getattr(execution, "result", []) if getattr(item, "text", None) is not None)
+    output = _append_output(output, result)
+    stderr = _join_event_text(message.text for message in getattr(getattr(execution, "logs", None), "stderr", []))
+    return _append_output(output, stderr)
+
+
+#: execd's deadline kill reaps the process group with SIGKILL. os/exec and the
+#: init-mode supervisor both report the signal death as -1, which is not an
+#: exit status any shell produces, so it only reaches here for a killed command.
+_SIGNAL_KILLED_EXIT_CODE = -1
+
+
+def _is_timeout_execution(execution: Any, exit_code: int | None) -> bool:
+    """Return whether a finished execution is execd's command deadline.
+
+    Only a ``CommandExecError`` whose exit code is the signal-death ``-1``
+    counts. That pairing is what the deadline produces: execd receives the
+    timeout, SIGKILLs the process group, and reports the reaped status.
+
+    Two lookalikes are deliberately excluded, because execd reports them
+    through the same ``CommandExecError`` event with no distinguishing field:
+
+    - a command that exits non-zero on its own arrives as an ordinary result
+      (``complete`` set, no error event), so it never matches here;
+    - a command that failed to *start* (bad credential, bad cwd) also carries a
+      free-text detail and no usable code. It is not a deadline, so the
+      missing-code shape is left to the existing "completed without an exit
+      code" reporting rather than being relabelled a timeout.
+    """
+    error = getattr(execution, "error", None)
+    if error is None or getattr(error, "name", None) != "CommandExecError":
+        return False
+    return exit_code == _SIGNAL_KILLED_EXIT_CODE
 
 
 class OpenSandboxSandbox(Sandbox):
@@ -251,11 +290,25 @@ class OpenSandboxSandbox(Sandbox):
         merged_env = {**self._default_env, **(env or {})} or None
         try:
             execution = self._run(command, env=merged_env, timeout=timeout)
+        except TimeoutError:
+            # A command deadline is a shell outcome, not a provider hiccup: end
+            # with the same Exit Code: 124 marker Local/AIO/Tenki/E2B/BoxLite
+            # emit on timeout so evidence consumers recover the real status.
+            return "Error: command timed out\nExit Code: 124"
         except Exception as exc:
             logger.error("Failed to execute command in OpenSandbox %s: %s", self.id, exc)
             return f"Error: {exc}"
-        output = format_execution(execution)
         exit_code = getattr(execution, "exit_code", None)
+        # The deadline is enforced by execd, so a timed-out command does not
+        # raise here: it ends as a CommandExecError whose process group was
+        # SIGKILLed, reported as the signal-death exit code -1. Normalize that
+        # to the 124 marker the other providers emit, rather than handing the
+        # model a bare "-1" that no shell produces.
+        if _is_timeout_execution(execution, exit_code):
+            body = execution_body(execution)
+            message = "Error: command timed out\nExit Code: 124"
+            return f"{body}\n{message}" if body else message
+        output = format_execution(execution)
         if exit_code is None:
             detail = output or "no completion or error event"
             return f"Error: OpenSandbox command completed without an exit code: {detail}"

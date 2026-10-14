@@ -1095,6 +1095,91 @@ def test_execute_forwards_env_timeout_and_combines_streams() -> None:
     assert box.execute_command("missing-complete") == "Error: OpenSandbox command completed without an exit code: stream ended"
 
 
+def _timeout_execution(*, stdout: tuple[str, ...] = (), error_value: str = "signal: killed", exit_code: int | None = -1) -> Any:
+    """An execd deadline kill as it reaches the adapter.
+
+    execd enforces the deadline server-side and reaps the process group with
+    SIGKILL, so a timed-out command arrives as a ``CommandExecError`` result
+    rather than an exception: init mode reports the signal death as ``-1``, and
+    when no code is recoverable the detail is free text.
+    """
+    return types.SimpleNamespace(
+        exit_code=exit_code,
+        logs=_Logs(stdout=[_Message(text) for text in stdout], stderr=[]),
+        result=[],
+        complete=None,
+        error=types.SimpleNamespace(name="CommandExecError", value=error_value),
+    )
+
+
+def test_execute_command_timeout_appends_exit_marker() -> None:
+    """A command deadline is a shell outcome, not a provider hiccup: the result
+    must end with the same ``Exit Code: 124`` marker Local/AIO/Tenki/E2B/BoxLite
+    emit on timeout (#6847 family)."""
+    remote = _FakeRemote("remote")
+
+    def timed_out_run(command: str, *, opts: _FakeRunCommandOpts | None = None) -> _Execution:
+        raise TimeoutError
+
+    remote.commands.run = timed_out_run  # type: ignore[method-assign]
+    box = _box(remote, sandbox_timeout=timedelta(seconds=60), default_command_timeout=120)
+
+    assert box.execute_command("sleep 9999", timeout=5) == "Error: command timed out\nExit Code: 124"
+
+
+def test_execute_command_server_side_deadline_appends_exit_marker() -> None:
+    """execd enforces the deadline, so the timeout does not raise.
+
+    The SDK reports the SIGKILLed process group as exit code ``-1``; the adapter
+    must normalize that to the 124 marker instead of handing the model a bare
+    ``Exit Code: -1`` that no shell produces.
+    """
+    remote = _FakeRemote("remote")
+    remote.commands.run = lambda command, opts=None: _timeout_execution(stdout=("partial output",))  # type: ignore[method-assign]
+    box = _box(remote, sandbox_timeout=timedelta(seconds=60), default_command_timeout=120)
+
+    result = box.execute_command("sleep 9999", timeout=5)
+    assert result == "partial output\nError: command timed out\nExit Code: 124"
+
+
+def test_execute_command_start_failure_is_not_reported_as_a_timeout() -> None:
+    """A start failure shares the CommandExecError shape but is not a deadline.
+
+    execd reports a failed launch (bad credential, bad cwd) through the same
+    error event with free text and no usable code, so the adapter cannot tell
+    the two apart from that shape alone. It must keep the existing
+    missing-exit-code reporting instead of claiming a timeout that never
+    happened.
+    """
+    remote = _FakeRemote("remote")
+    remote.commands.run = lambda command, opts=None: _timeout_execution(error_value="credential lookup failed", exit_code=None)  # type: ignore[method-assign]
+    box = _box(remote, sandbox_timeout=timedelta(seconds=60), default_command_timeout=120)
+
+    result = box.execute_command("true", timeout=5)
+    assert result.startswith("Error: OpenSandbox command completed without an exit code:")
+    assert not result.endswith("Exit Code: 124")
+
+
+def test_execute_command_ordinary_failures_keep_their_own_exit_code() -> None:
+    """Only a CommandExecError is a deadline outcome.
+
+    A script that exits nonzero on its own, and a result with no error event at
+    all, must keep their existing reporting: rewriting either to 124 would hide
+    a real failure behind a timeout marker.
+    """
+    remote = _FakeRemote("remote")
+    box = _box(remote, sandbox_timeout=timedelta(seconds=60), default_command_timeout=120)
+
+    assert box.execute_command("mixed-output", timeout=5).endswith("Exit Code: 7")
+    assert box.execute_command("missing-complete") == "Error: OpenSandbox command completed without an exit code: stream ended"
+
+    def negative_exit(command: str, *, opts: _FakeRunCommandOpts | None = None) -> _Execution:
+        return _execution(stdout=("script output",), exit_code=-1)
+
+    remote.commands.run = negative_exit  # type: ignore[method-assign]
+    assert box.execute_command("negative", timeout=5) == "script output\nExit Code: -1"
+
+
 def test_operations_renew_remote_lifetime_and_bound_default_commands() -> None:
     remote = _FakeRemote("remote")
     remote.file_data["/mnt/user-data/workspace/note.txt"] = b"note"
