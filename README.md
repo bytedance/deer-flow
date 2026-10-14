@@ -343,6 +343,8 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
 
    To route OpenAI models through `/v1/responses`, keep using `langchain_openai:ChatOpenAI` and set `use_responses_api: true` with `output_version: responses/v1`.
 
+   When thinking is disabled on a legacy profile, blank `extra_body`, `thinking`, and nested `extra_body.thinking` keys in a `when_thinking_enabled` template are treated as absent during dialect inference. When thinking is enabled, template values are forwarded as configured.
+
    Models whose provider contract differs from DeerFlow's generic thinking/effort assumptions can declare a per-model mapping-valued `reasoning:` block (thinking `unsupported`/`optional`/`required`, the accepted effort values with aliases and a default, the payload dialect, and the reasoning-history requirement). The setup wizard's Z.AI GLM-5.3-Flash profile uses it: thinking stays on for every foreground and background call, and the effort selector offers the model's own `low`/`high`/`max` levels. Ollama's existing boolean `reasoning: true` remains a native provider setting and is forwarded to ChatOllama. When migrating a profile to a custom effort `path`, remove any old `reasoning_effort` setting from the profile and thinking templates; configuration validation rejects the leftover key. The chat UI drops a remembered provider-specific effort when switching to a legacy model that does not advertise it. Profiles without the block keep their existing provider behavior. See `config.example.yaml` for the shape and the equivalent manual configuration.
 
    For vLLM 0.19.0, use `deerflow.models.vllm_provider:VllmChatModel`. For Qwen-style reasoning models, DeerFlow toggles reasoning with `extra_body.chat_template_kwargs.enable_thinking` and preserves vLLM's non-standard `reasoning` field across multi-turn tool-call conversations. Legacy `thinking` configs are normalized automatically for backward compatibility, without modifying model defaults or caller-owned `extra_body` dictionaries; a reused dictionary can change the legacy switch between requests. If the endpoint reports a cumulative usage snapshot on every streaming chunk, set `cumulative_stream_usage: true` so DeerFlow converts those snapshots into per-chunk deltas; the option is disabled by default and leaves usage unchanged when a stable completion id is unavailable. Reasoning models may also require the server to be started with `--reasoning-parser ...`. If your local vLLM deployment accepts any non-empty API key, you can still set `VLLM_API_KEY` to a placeholder value.
@@ -542,6 +544,8 @@ The unified nginx endpoint is same-origin by default and does not emit browser C
 When fine-grained authorization is enabled, Live Browser connections require `threads:write` as well as ownership of the thread, even when only viewing frames: the same connection can control the browser. Permission checks run when connecting. Restart Gateway after upgrading to disconnect sessions admitted by older code.
 
 Browser login uses `HttpOnly` session cookies. The login page offers a "keep me signed in" option that extends the browser session when the request is HTTPS (including trusted `X-Forwarded-Proto: https`) or localhost HTTP. The localhost exception uses the direct request `Host` and ignores forwarded host headers. Public HTTP deployments, including many temporary sandbox URLs, fall back to session cookies by default. DeerFlow never stores the password in browser storage; the UI may remember only the email address.
+
+OIDC/SSO authorization endpoints may include provider query parameters such as `?prompt=login`. DeerFlow preserves those parameters when adding the login request, including for configured `authorization_endpoint` overrides.
 
 Administrators can suspend and restore accounts from **Settings → Users** (admin-only; the section is hidden for ordinary users). The page lists each account's email, role, and status and exposes the same enable/disable operation as `PATCH /api/v1/admin/users/{id}`; the last remaining active admin cannot be disabled, and the Gateway's rejection detail is shown verbatim. A disabled account is rejected by every authentication surface, and its live sessions end on the next request with a login page that states the account has been disabled. Password login for a disabled account deliberately still answers "incorrect email or password" so the state is not disclosed to whoever holds the credentials.
 
@@ -873,6 +877,8 @@ Targeted updates accept both DeerFlow's `type` field and the MCP-spec `transport
 Runtime MCP and skill updates replace `extensions_config.json` atomically, so an interrupted write cannot leave the shared configuration truncated or partially written. Every Gateway worker or instance that reads the same file picks up a new revision on its next read (the cache checks the file's content signature), so MCP and skill changes made through one replica apply to the others without a restart; a missing, truncated, or invalid revision keeps the previous configuration until a complete one lands, including when the file disappears during a reload.
 The admin MCP cache reset advances a durable generation marker in the writable config directory. Every Gateway worker mounting that same directory retires its own cached tools and pooled sessions before the next lookup; replicas with independent filesystems are not implicitly covered. If no config path is available, the API reports a process-local reset instead.
 The parsed extensions configuration and its recorded content digest come from the same read, so a racing edit followed by a timestamp-preserving backup restore cannot leave a different revision cached indefinitely.
+Changes to the global `mcpInterceptors` chain rebuild every server's tool wrappers,
+including when a server configuration is edited at the same time.
 
 `extensions_config.json` accepts UTF-8 with or without a leading byte-order mark (BOM), including files saved as UTF-8 with BOM by an editor.
 
@@ -1357,6 +1363,8 @@ Discovery follows operator-managed directory symlinks, but skips links back to a
 
 Skill Markdown and bundled text resources use UTF-8. Skill-creator CLI and review utilities read and write text explicitly as UTF-8 so localized skills behave consistently across operating systems.
 
+`SKILL.md` YAML frontmatter must open and close with `---` on its own line (trailing spaces or tabs are allowed). A line such as `---suffix` is not a closing delimiter.
+
 Custom skill history preserves Unicode line separators inside saved content and metadata, keeping those revisions readable for history inspection and rollback. Malformed JSON history records are still rejected.
 
 The bundled `github-deep-research` API client also works without `requests`, using
@@ -1528,6 +1536,10 @@ Public-skill CI waivers are exact, expiring exceptions in `.github/skill-review-
 Tools follow the same philosophy. DeerFlow comes with a core toolset — web search, web fetch, rendered web capture, file operations, bash execution — and supports custom tools via MCP servers and Python functions. The bundled DDG, Brave, Tavily, SearXNG, and Serper search providers accept an optional `time_range` of `day`, `week`, `month`, or `year`; omitting it preserves existing search behavior. For DDG recency searches, DeerFlow excludes DDGS backends that ignore time limits. Swap anything. Add anything.
 
 For DDG web search and DDG image search, `max_results` in `config.yaml` can be a positive integer or an environment-variable reference such as `max_results: $DDG_MAX_RESULTS` with `DDG_MAX_RESULTS=5`. The configured value takes precedence over the tool call's `max_results` argument. Invalid values (for example, `abc`, an empty string, or `3.5`), zero, and negative counts produce a warning and fall back to the default of 5 results. DDG, Brave, and Serper image search share one result-URL screen that omits non-HTTP(S), localhost, cloud-metadata hostnames, and non-public address literals, including multicast and IPv6 spellings embedding private IPv4 addresses. The screen does not resolve DNS; downloaders must validate the resolved address when connecting. A result with neither a safe full image URL nor a safe thumbnail is omitted.
+
+Image result screening also recognizes Unicode hostname separators (`。`, `．`,
+`｡`) as dots, matching IDNA client normalization before classifying local/private
+hosts. Accepted result URLs retain their original spelling.
 
 Stdio MCP servers can set `cwd` in `extensions_config.json` when their entrypoint
 or data files depend on a specific working directory. The setting applies to
@@ -2427,6 +2439,9 @@ Failed upload commits report the original error even if temporary-file cleanup
 also fails, for example because of a Windows sharing violation.
 Once the file is published, a temporary-file cleanup failure is logged without
 failing the upload; hidden staging files are left for the startup sweep.
+If that sweep cannot scan an uploads directory, it logs a warning and preserves
+its files while continuing cleanup elsewhere. A directory that disappears
+during cleanup is skipped quietly.
 
 Uploads, new skill support files, and new local sandbox paths reject Windows
 reserved device names on every platform, including `COM¹`, `LPT²`, the console

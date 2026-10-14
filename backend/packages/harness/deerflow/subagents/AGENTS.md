@@ -16,7 +16,7 @@ Durable batch specs store overlays as JSON and restore them before execution.
 
 Batch evidence uses nullable `result_artifact` (migration 0033), persisted with
 successful results under the same lease fence. Only full-result exports expose
-bounded, cited RAG snapshots; compact item projections omit them. Cancelled,
+bounded, cited RAG snapshots; compact `list_items` defers them. Cancelled,
 failed and stale attempts cannot publish evidence; retry clears it. Cover the
 formatter/step capture -> worker -> reopened SQLite -> authorized export chain
 in `tests/test_batch_rag_evidence.py`; no provider fetch or preview UI is added.

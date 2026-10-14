@@ -8,6 +8,7 @@ from collections.abc import Callable
 from urllib.parse import urlparse
 
 _BLOCKED_HOSTNAMES = {"localhost", "metadata.google.internal"}
+_IDNA_DOT_TRANSLATION = str.maketrans("\u3002\uff0e\uff61", "...")
 
 
 def safe_public_result_url(value: object) -> str:
@@ -26,7 +27,9 @@ def safe_public_result_url(value: object) -> str:
         return ""
     if parsed.scheme not in {"http", "https"} or not parsed.netloc or not host:
         return ""
-    host = host.lower().rstrip(".")
+    # IDNA clients treat these Unicode label separators as ASCII dots. Screen
+    # the normalized host so an IP literal cannot masquerade as a DNS name.
+    host = host.translate(_IDNA_DOT_TRANSLATION).lower().rstrip(".")
     if not host or host in _BLOCKED_HOSTNAMES or host.endswith(".localhost"):
         return ""
 
