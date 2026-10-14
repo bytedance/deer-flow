@@ -11,6 +11,11 @@ Reject symlinked resource roots/ancestors; skip nested symlinks, special files,
 upload staging files and output-sync temporary files. Directory scan failures
 must propagate rather than masquerading as empty directories. Release sync is
 still copy-only; deletion reconciliation is a separate contract.
+Capacity breaches raise `_ThreadResourceRestoreLimitError` with the logical tree,
+cap and operator remediation; deadlines remain ordinary restore errors. Do not
+silently truncate required resources or imply unchanged over-limit data can succeed
+on retry. Log restore failures with owner/thread context and the exception chain;
+caller-facing errors identify the logical tree without exposing host paths.
 Regressions: `tests/test_e2b_sandbox_provider.py` exercises release, expiry and
 recreation using saved bytes, plus isolation, reuse and failed restoration.
 

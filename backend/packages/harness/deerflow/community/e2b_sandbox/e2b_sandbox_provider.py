@@ -129,6 +129,14 @@ class _ThreadResourceRestoreError(RuntimeError):
     """A fresh VM cannot be used until persisted thread files are restored."""
 
 
+class _ThreadResourceRestoreLimitError(_ThreadResourceRestoreError):
+    """Persisted data exceeds a capacity cap; unchanged retries cannot succeed."""
+
+
+class _MountTreeLimitExceeded(ValueError):
+    """A source tree exceeds a per-file or per-tree capacity cap."""
+
+
 # Recursive skill projection replacement must never target an operating-system
 # tree. The configured E2B home is handled separately: an isolated descendant
 # such as /home/user/skills is supported, while the home directory itself and
@@ -201,6 +209,10 @@ def _validate_skills_reset_root(container_path: str, *, home_dir: str) -> str:
 
 class _MountPassLimitExceeded(Exception):
     """Stop the current mount upload pass at its aggregate resource limit."""
+
+
+class _MountPassCapacityExceeded(_MountPassLimitExceeded):
+    """A creation pass exceeds its file or byte cap, rather than its deadline."""
 
 
 @dataclass(frozen=True)
@@ -2170,21 +2182,33 @@ class E2BSandboxProvider(SandboxProvider):
             (paths.acp_workspace_dir(thread_id, user_id=user_id), "acp-workspace", True),
         ]
         for source, subdir, read_only in sources:
-            budget.check_deadline()
-            # Reject linked roots/ancestors: a thread resource must never read
-            # another owner's directory or arbitrary Gateway files.
-            for part in (source, *source.parents):
-                if part == paths.base_dir:
-                    break
-                if part.is_symlink():
-                    raise ValueError("Thread resource directory must not be a symlink")
             try:
-                mode = source.stat().st_mode
-            except FileNotFoundError:
-                continue
-            if not stat.S_ISDIR(mode):
-                raise ValueError("Thread resource path must be a directory")
-            self._upload_tree(client, source, f"{home_dir}/{subdir}", read_only, budget=budget, thread_resource=True)
+                budget.check_deadline()
+                # Reject linked roots/ancestors: a thread resource must never read
+                # another owner's directory or arbitrary Gateway files.
+                for part in (source, *source.parents):
+                    if part == paths.base_dir:
+                        break
+                    if part.is_symlink():
+                        raise ValueError("Thread resource directory must not be a symlink")
+                try:
+                    mode = source.stat().st_mode
+                except FileNotFoundError:
+                    continue
+                if not stat.S_ISDIR(mode):
+                    raise ValueError("Thread resource path must be a directory")
+                self._upload_tree(client, source, f"{home_dir}/{subdir}", read_only, budget=budget, thread_resource=True)
+            except (_MountTreeLimitExceeded, _MountPassCapacityExceeded) as exc:
+                raise _ThreadResourceRestoreLimitError(
+                    f"Failed to restore persisted thread resources: tree={subdir}; {exc}. "
+                    "Operator action required: archive or remove unneeded files from the persisted thread directories "
+                    "to fit the stated limit before retrying. Retrying unchanged data will fail again."
+                ) from exc
+            except Exception as exc:
+                # Exception text can contain host paths or SDK details. Keep those
+                # in the operator log, while exposing the tree and cause category.
+                reason = str(exc) if isinstance(exc, _MountPassLimitExceeded) else type(exc).__name__
+                raise _ThreadResourceRestoreError(f"Failed to restore persisted thread resources: tree={subdir}; {reason}. See Gateway logs for the underlying cause.") from exc
 
     def _apply_mounts(
         self,
@@ -2220,7 +2244,16 @@ class E2BSandboxProvider(SandboxProvider):
             try:
                 self._restore_thread_resources(client, thread_id=thread_id, user_id=effective_user_id, budget=budget)
             except Exception as exc:
-                raise _ThreadResourceRestoreError("Failed to restore persisted thread resources to e2b sandbox") from exc
+                logger.warning(
+                    "Failed to restore persisted thread resources for user=%s thread=%s: %s",
+                    effective_user_id,
+                    thread_id,
+                    exc,
+                    exc_info=True,
+                )
+                if isinstance(exc, _ThreadResourceRestoreError):
+                    raise
+                raise _ThreadResourceRestoreError(f"Failed to restore persisted thread resources to e2b sandbox: {type(exc).__name__}. See Gateway logs for the underlying cause.") from exc
         projection_mounts = self._skill_projection_mounts(effective_user_id, thread_id) if thread_id is not None else self._skill_projection_mounts(effective_user_id)
         configured_mounts = self._config.get("mounts") or []
         skills_root = self._config["skills_container_path"]
@@ -2686,13 +2719,15 @@ class E2BSandboxProvider(SandboxProvider):
             if budget is not None:
                 budget.check_deadline()
             file_size = path.stat().st_size
+            display_path = path.relative_to(src) if thread_resource else path
+            display_source = "thread resource tree" if thread_resource else str(src)
             if file_size > _MAX_MOUNT_FILE_SIZE:
-                raise ValueError(f"Mount file {path} is {file_size} bytes and exceeds the {_MAX_MOUNT_FILE_SIZE}-byte file limit")
+                raise _MountTreeLimitExceeded(f"Mount file {display_path} is {file_size} bytes and exceeds the {_MAX_MOUNT_FILE_SIZE}-byte file limit")
             if len(files) >= _MAX_MOUNT_FILES:
-                raise ValueError(f"Mount {src} contains more than {_MAX_MOUNT_FILES} files and exceeds the {_MAX_MOUNT_FILES}-file limit")
+                raise _MountTreeLimitExceeded(f"Mount {display_source} contains more than {_MAX_MOUNT_FILES} files and exceeds the {_MAX_MOUNT_FILES}-file limit")
             total_size += file_size
             if total_size > _MAX_MOUNT_TOTAL_SIZE:
-                raise ValueError(f"Mount {src} is at least {total_size} bytes and exceeds the {_MAX_MOUNT_TOTAL_SIZE}-byte total limit")
+                raise _MountTreeLimitExceeded(f"Mount {display_source} is at least {total_size} bytes and exceeds the {_MAX_MOUNT_TOTAL_SIZE}-byte total limit")
             files.append((path, target, file_size))
 
         if source_is_file:
@@ -2729,9 +2764,9 @@ class E2BSandboxProvider(SandboxProvider):
                 if budget is not None:
                     budget.check_deadline()
                 if budget is not None and budget.attempted_files >= _MAX_MOUNT_PASS_FILES:
-                    raise _MountPassLimitExceeded(f"file count cap {_MAX_MOUNT_PASS_FILES}")
+                    raise _MountPassCapacityExceeded(f"shared creation file count cap {_MAX_MOUNT_PASS_FILES}")
                 if budget is not None and budget.attempted_bytes + expected_size > _MAX_MOUNT_PASS_TOTAL_BYTES:
-                    raise _MountPassLimitExceeded(f"total byte budget {_MAX_MOUNT_PASS_TOTAL_BYTES}")
+                    raise _MountPassCapacityExceeded(f"shared creation total byte budget {_MAX_MOUNT_PASS_TOTAL_BYTES}")
                 try:
                     make_dir = getattr(client.files, "make_dir", None)
                     if callable(make_dir):

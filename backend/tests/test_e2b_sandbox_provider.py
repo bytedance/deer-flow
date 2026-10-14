@@ -3476,8 +3476,8 @@ def test_thread_restore_does_not_overwrite_live_sandbox(monkeypatch, tmp_path, r
     provider.shutdown()
 
 
-@pytest.mark.parametrize("failure", ["write", "file_limit", "byte_limit", "deadline"])
-def test_thread_restore_failure_discards_unusable_sandbox(monkeypatch, tmp_path, failure):
+@pytest.mark.parametrize("failure", ["write", "file_limit", "byte_limit", "single_file_limit", "tree_file_limit", "tree_byte_limit", "deadline"])
+def test_thread_restore_failure_discards_unusable_sandbox(monkeypatch, tmp_path, caplog, failure):
     _setup_paths(monkeypatch, tmp_path)
     mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
     provider = _make_provider()
@@ -3495,10 +3495,42 @@ def test_thread_restore_failure_discards_unusable_sandbox(monkeypatch, tmp_path,
         monkeypatch.setattr(mod, "_MAX_MOUNT_PASS_FILES", 0)
     elif failure == "byte_limit":
         monkeypatch.setattr(mod, "_MAX_MOUNT_PASS_TOTAL_BYTES", 1)
+    elif failure == "single_file_limit":
+        monkeypatch.setattr(mod, "_MAX_MOUNT_FILE_SIZE", 1)
+    elif failure == "tree_file_limit":
+        monkeypatch.setattr(mod, "_MAX_MOUNT_FILES", 0)
+    elif failure == "tree_byte_limit":
+        monkeypatch.setattr(mod, "_MAX_MOUNT_TOTAL_SIZE", 1)
     else:
         provider._config["mount_upload_deadline_seconds"] = 0
-    with pytest.raises(RuntimeError, match="restore.*thread"):
+    with pytest.raises(RuntimeError, match="restore.*thread") as error:
         provider.acquire("t1", user_id="u1")
+    message = str(error.value)
+    assert str(tmp_path) not in message
+    assert "tree=" in message
+    if failure.endswith("limit"):
+        assert isinstance(error.value, mod._ThreadResourceRestoreLimitError)
+        assert "tree=outputs" in message
+        assert "Operator action required" in message
+        assert "Retrying unchanged data" in message
+        expected_limit = {
+            "file_limit": "file count cap 0",
+            "byte_limit": "total byte budget 1",
+            "single_file_limit": "1-byte file limit",
+            "tree_file_limit": "0-file limit",
+            "tree_byte_limit": "1-byte total limit",
+        }[failure]
+        assert expected_limit in message
+    else:
+        assert not isinstance(error.value, mod._ThreadResourceRestoreLimitError)
+        assert "Operator action required" not in message
+        assert ("OSError" if failure == "write" else "time budget 0s") in message
+    records = [r for r in caplog.records if "Failed to restore" in r.message]
+    assert len(records) == 1
+    assert records[0].exc_info is not None
+    assert "u1" in records[0].message and "t1" in records[0].message
+    if failure == "write":
+        assert "upload failed" in caplog.text
     assert client.killed and client.closed
     assert not provider._sandboxes
     assert not provider._thread_sandboxes
@@ -3506,6 +3538,43 @@ def test_thread_restore_failure_discards_unusable_sandbox(monkeypatch, tmp_path,
     assert provider._reserved_slots == 0
     assert saved.read_bytes() == b"saved"
     provider.shutdown()
+
+
+@pytest.mark.parametrize("cap", ["_MAX_MOUNT_PASS_FILES", "_MAX_MOUNT_PASS_TOTAL_BYTES"])
+def test_thread_restore_shared_limit_requires_saved_data_remediation(monkeypatch, tmp_path, cap):
+    _setup_paths(monkeypatch, tmp_path)
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, cap, 1)
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda *args: [])
+    sdk = _install_fake_sdk(monkeypatch, provider)
+    clients = []
+
+    def create(**kwargs):
+        client = FakeClient(sandbox_id=f"restore-{len(clients)}")
+        clients.append(client)
+        return client
+
+    sdk.create_factory = create
+    paths = Paths(base_dir=tmp_path)
+    paths.ensure_thread_dirs("t1", user_id="u1")
+    first = paths.sandbox_work_dir("t1", user_id="u1") / "first.txt"
+    first.write_bytes(b"1")
+    (paths.sandbox_outputs_dir("t1", user_id="u1") / "second.txt").write_bytes(b"2")
+    try:
+        for _ in range(2):
+            with pytest.raises(mod._ThreadResourceRestoreLimitError, match="tree=outputs"):
+                provider.acquire("t1", user_id="u1")
+            assert clients[-1].killed and clients[-1].closed
+            assert not provider._sandboxes
+            assert provider._reserved_slots == 0
+        # Only changing the persisted data resolves a deterministic budget breach.
+        first.unlink()
+        sandbox_id = provider.acquire("t1", user_id="u1")
+        assert provider.get(sandbox_id) is not None
+        assert clients[-1].files.write_calls == [("/home/user/outputs/second.txt", b"2")]
+    finally:
+        provider.shutdown()
 
 
 def test_thread_restore_skips_links_and_unpublished_files(monkeypatch, tmp_path):
@@ -3582,19 +3651,36 @@ def test_thread_restore_shares_budget_with_optional_mounts(monkeypatch, tmp_path
     assert result.completed_files == 1
 
 
-def test_thread_restore_scan_error_is_not_an_empty_directory(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "tree,path_method",
+    [
+        ("workspace", "sandbox_work_dir"),
+        ("uploads", "sandbox_uploads_dir"),
+        ("outputs", "sandbox_outputs_dir"),
+        ("acp-workspace", "acp_workspace_dir"),
+    ],
+)
+def test_thread_restore_scan_error_is_not_an_empty_directory(monkeypatch, tmp_path, caplog, tree, path_method):
     _setup_paths(monkeypatch, tmp_path)
     provider = _make_provider()
     paths = Paths(base_dir=tmp_path)
     paths.ensure_thread_dirs("t1", user_id="u1")
 
+    unreadable_root = getattr(paths, path_method)("t1", user_id="u1")
+    unreadable_root.mkdir(parents=True, exist_ok=True)
+    original_walk = os.walk
+
     def unreadable(source, *, followlinks, onerror):
-        onerror(PermissionError("unreadable directory"))
-        return iter(())
+        if source == unreadable_root:
+            onerror(PermissionError(13, "unreadable directory", str(source)))
+        return original_walk(source, followlinks=followlinks, onerror=onerror)
 
     monkeypatch.setattr(os, "walk", unreadable)
-    with pytest.raises(RuntimeError, match="restore.*thread"):
+    with pytest.raises(RuntimeError, match=f"tree={tree}.*PermissionError") as error:
         provider._apply_mounts(FakeClient(), user_id="u1", thread_id="t1")
+    assert isinstance(error.value.__cause__, PermissionError)
+    assert str(tmp_path) not in str(error.value)
+    assert "unreadable directory" in caplog.text
 
 
 def test_sync_outputs_to_host_writes_new_files(monkeypatch, tmp_path):
