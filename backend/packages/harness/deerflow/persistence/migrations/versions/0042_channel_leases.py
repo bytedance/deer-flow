@@ -1,7 +1,7 @@
 """Per-provider IM transport leader lease.
 
-Revision ID: 0041_channel_leases
-Revises: 0040_scheduled_group_notice
+Revision ID: 0042_channel_leases
+Revises: 0041_im_notice_preferences
 
 Creates ``channel_leases``: one row per IM provider naming the Gateway
 instance that holds its platform connection (``owner_id``), a fencing
@@ -24,8 +24,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0041_channel_leases"
-down_revision: str | Sequence[str] | None = "0040_scheduled_group_notice"
+revision: str = "0042_channel_leases"
+down_revision: str | Sequence[str] | None = "0041_im_notice_preferences"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

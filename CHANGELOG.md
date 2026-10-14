@@ -950,7 +950,7 @@ This release closes that milestone with **621 merged pull requests**.
   `channels.leader_lease` active (`auto`, the default, follows the
   multi-process signal), each provider's platform connection belongs to the
   one instance holding its row in the new `channel_leases` table (migration
-  `0041_channel_leases`): a single upsert decides ownership against the
+  `0042_channel_leases`): a single upsert decides ownership against the
   database clock, renewals carry a fencing epoch, and the holder stops its
   transport on its own monotonic deadline before a peer may connect, so a
   stalled database cannot leave two Telegram pollers or two Discord sessions

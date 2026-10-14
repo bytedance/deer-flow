@@ -1,4 +1,4 @@
-"""Migration 0041: the shared ``channel_leases`` table (per-provider IM transport leader lease)."""
+"""Migration 0042: the shared ``channel_leases`` table (per-provider IM transport leader lease)."""
 
 from __future__ import annotations
 
@@ -20,15 +20,15 @@ from deerflow.persistence.base import Base
 from deerflow.persistence.channel_leases import ChannelLeaseRow
 from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 
-REVISION = "0041_channel_leases"
-PREVIOUS = "0040_scheduled_group_notice"
-CURRENT_HEAD = "0041_channel_leases"
+REVISION = "0042_channel_leases"
+PREVIOUS = "0041_im_notice_preferences"
+CURRENT_HEAD = "0042_channel_leases"
 TABLE = "channel_leases"
 COLUMNS = {"provider", "owner_id", "epoch", "lease_expires_at", "transport_running", "updated_at"}
 pytestmark = pytest.mark.asyncio
 
 
-async def test_0041_remains_in_the_single_migration_chain():
+async def test_0042_remains_in_the_single_migration_chain():
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
     assert script.get_heads() == [CURRENT_HEAD]
     assert script.get_revision(REVISION).down_revision == PREVIOUS
@@ -41,7 +41,7 @@ def _engine(tmp_path, backend):
         return create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'migration.db'}"), None
     uri = os.environ.get("TEST_POSTGRES_URI")
     if not uri:
-        pytest.skip("requires TEST_POSTGRES_URI (real Postgres migration 0041)")
+        pytest.skip("requires TEST_POSTGRES_URI (real Postgres migration 0042)")
     schema = f"channel_leases_{uuid.uuid4().hex}"
     return create_async_engine(asyncpg_test_url(uri), connect_args=build_asyncpg_connect_args(schema)), schema
 
@@ -87,7 +87,7 @@ async def _drop_schema(engine, schema):
 
 
 @pytest.mark.parametrize("backend", ["sqlite", "postgres"])
-async def test_0041_creates_the_table_matching_the_orm_and_downgrades_cleanly(tmp_path, backend):
+async def test_0042_creates_the_table_matching_the_orm_and_downgrades_cleanly(tmp_path, backend):
     engine, schema = _engine(tmp_path, backend)
     cfg = bootstrap._get_alembic_config(engine, postgres_schema=schema or "")
     try:
@@ -122,7 +122,7 @@ async def test_0041_creates_the_table_matching_the_orm_and_downgrades_cleanly(tm
 
 
 @pytest.mark.parametrize("backend", ["sqlite", "postgres"])
-async def test_0041_completes_after_create_all_and_downgrades_after_a_manual_drop(tmp_path, backend):
+async def test_0042_completes_after_create_all_and_downgrades_after_a_manual_drop(tmp_path, backend):
     """The table already exists (an interrupted earlier attempt): upgrade still lands, and vice versa."""
     engine, schema = _engine(tmp_path, backend)
     cfg = bootstrap._get_alembic_config(engine, postgres_schema=schema or "")

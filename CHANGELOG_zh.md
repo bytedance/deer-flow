@@ -731,7 +731,7 @@
 
 - **channels:** IM 通道可以在多个 Gateway 实例上运行。`channels.leader_lease`
   生效时（默认 `auto` 跟随多进程信号），每个 provider 的平台连接只属于在新表
-  `channel_leases`（迁移 `0041_channel_leases`）中持有该行的那个实例：归属由一条
+  `channel_leases`（迁移 `0042_channel_leases`）中持有该行的那个实例：归属由一条
   upsert 依据数据库时钟判定，续约携带防护 epoch，持有者按自己的单调时钟在对端
   可以连接之前先停传输，因此数据库卡住也不会出现两个 Telegram 轮询者或两个
   Discord 会话。持有者崩溃后，对端在 `lease_seconds + grace_seconds` 再加一个续约

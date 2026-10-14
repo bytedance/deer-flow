@@ -17,8 +17,13 @@ function channelsUrl(path: string): string {
   return `${getBackendBaseURL()}/api/channels${path}`;
 }
 
-export async function listChannelProviders(): Promise<ChannelProvidersResponse> {
-  const response = await fetch(channelsUrl("/providers"));
+export async function listChannelProviders(options?: {
+  signal?: AbortSignal;
+}): Promise<ChannelProvidersResponse> {
+  const signal = options?.signal;
+  const response = signal
+    ? await fetch(channelsUrl("/providers"), { signal })
+    : await fetch(channelsUrl("/providers"));
   if (!response.ok) {
     await throwGatewayApiError(
       response,
