@@ -60,6 +60,17 @@ def plugin_tool_name(namespace, name):
     return f"ext_{re.sub('[^a-z0-9_]', '_', namespace)[:20]}_{name[:25]}_{digest}"
 
 
+def _validate_artifact_keys(value):
+    if isinstance(value, Mapping):
+        if any(not isinstance(key, str) for key in value):
+            raise TypeError("Artifact object keys must be strings")
+        for child in value.values():
+            _validate_artifact_keys(child)
+    elif isinstance(value, (list, tuple)):
+        for child in value:
+            _validate_artifact_keys(child)
+
+
 def _build_tool(source, plugin, declaration):
     schema = deepcopy(dict(declaration.input_schema))
     validator = Draft202012Validator(schema)
@@ -84,7 +95,11 @@ def _build_tool(source, plugin, declaration):
             if declaration.response_format == "content_and_artifact":
                 if not isinstance(result, PluginToolResult) or not isinstance(result.content, str) or (result.artifact is not None and not isinstance(result.artifact, Mapping)):
                     raise TypeError("Expected PluginToolResult with text and a JSON object artifact")
-                envelope = {"content": result.content, "artifact": dict(result.artifact) if result.artifact is not None else None}
+                _validate_artifact_keys(result.artifact)
+                artifact = result.artifact
+                if artifact is not None and not isinstance(artifact, dict):
+                    artifact = dict(artifact)
+                envelope = {"content": result.content, "artifact": artifact}
                 encoded = json.dumps(envelope, ensure_ascii=False, allow_nan=False)
                 if len(encoded.encode()) > 64 * 1024:
                     raise ToolException("Plugin result exceeds 64 KiB.")

@@ -75,8 +75,9 @@ tool = ModelTool(
 )
 ```
 
-Content must be a string and artifact must be a JSON object or `None`. Both share
-the 64 KiB UTF-8 JSON output cap. The host validates and snapshots the artifact
+Content must be a string and artifact must be a JSON object or `None`, with string
+keys in every nested object. Non-string keys are rejected rather than coerced.
+Content and artifact share the 64 KiB UTF-8 JSON output cap. The host validates and snapshots the artifact
 before attaching it to `ToolMessage.artifact`; it does not append it to ordinary
 tool content or let it replace the tool name or call ID. Invalid result shapes,
 non-JSON values and oversize output use the normal sanitized tool-error path.

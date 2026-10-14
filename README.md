@@ -1805,7 +1805,8 @@ authenticated backend operations and model tools through the
 one package with persistent user data, its own sidebar page and a read-only search tool.
 Model tools can opt into separate structured artifacts with
 `response_format="content_and_artifact"` and `PluginToolResult` (extension-api
-0.2.6). Existing tools keep their JSON text output. The
+0.2.6). Artifact object keys must be strings at every depth. Existing tools keep
+their JSON text output. The
 [local retrieval example](examples/deerflow-extension-retrieval/README.md)
 demonstrates bounded, read-only results and checkpoint replay without an external
 knowledge service; artifacts do not automatically enable citations.

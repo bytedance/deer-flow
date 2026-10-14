@@ -425,9 +425,9 @@ settings write API. `plugin_tools.py` uses the run snapshot, passed explicitly
 to delegation. Browser fields are allowlisted. Code is trusted, not sandboxed.
 
 `ModelTool` defaults to JSON content. Opt-in `content_and_artifact` requires
-`PluginToolResult`. Validate content/artifact JSON jointly within 64 KiB; snapshot
-artifacts. Keep identity, policy/deadline and citation gates. Test ToolNode and
-checkpoint replay. See `docs/full-stack-plugins.md`.
+`PluginToolResult`. Require string artifact keys throughout; validate JSON jointly
+within 64 KiB and snapshot artifacts. Keep identity, policy/deadline and citation
+gates. Test ToolNode and checkpoint replay. See `docs/full-stack-plugins.md`.
 
 Full Agent run control is an optional `deerflow_extension_api.AgentRuns` handle
 on action/tool contexts and the request resolver. Gateway owns principal binding,
