@@ -242,7 +242,10 @@ def _uploads_dir_entry_stats(uploads_dir: Path) -> dict[str, os.stat_result]:
                     logger.warning("Could not stat upload staging file %s; keeping it", entry.path, exc_info=True)
                     continue
             return stats
+    except FileNotFoundError:
+        return {}  # directory vanished during cleanup
     except OSError:
+        logger.warning("Could not scan uploads directory for stale staging files: %s", uploads_dir, exc_info=True)
         return {}
 
 

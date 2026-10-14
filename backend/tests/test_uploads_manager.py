@@ -770,6 +770,39 @@ class TestCleanupStaleUploadStagingFiles:
         assert removed == 5
         assert len(sweep_scans) == 1
 
+    @pytest.mark.parametrize("error_code", [errno.EACCES, errno.EIO, errno.ENOENT])
+    def test_failed_directory_scan_preserves_files_and_continues_cleanup(self, tmp_path, monkeypatch, caplog, error_code):
+        failed_dir = tmp_path / "threads" / "failed" / "user-data" / "uploads"
+        healthy_dir = tmp_path / "threads" / "healthy" / "user-data" / "uploads"
+        for directory in (failed_dir, healthy_dir):
+            directory.mkdir(parents=True)
+            part = directory / ".upload-old.part"
+            part.write_text("partial", encoding="utf-8")
+            _set_age(part, timedelta(days=2))
+
+        real_scandir = os.scandir
+
+        def fail_one_scan(path):
+            if os.path.abspath(os.fspath(path)) == os.path.abspath(os.fspath(failed_dir)):
+                raise OSError(error_code, "scan failed")
+            return real_scandir(path)
+
+        monkeypatch.setattr(os, "scandir", fail_one_scan)
+        with caplog.at_level(logging.WARNING, logger="deerflow.uploads.manager"):
+            removed = cleanup_stale_upload_staging_files(tmp_path)
+
+        assert removed == 1
+        assert (failed_dir / ".upload-old.part").exists()
+        assert not (healthy_dir / ".upload-old.part").exists()
+        warnings = [record for record in caplog.records if record.name == "deerflow.uploads.manager" and record.levelno >= logging.WARNING]
+        if error_code == errno.ENOENT:
+            assert warnings == []
+        else:
+            assert len(warnings) == 1
+            assert "scan uploads directory for stale staging files" in warnings[0].getMessage()
+            assert str(failed_dir) in warnings[0].getMessage()
+            assert warnings[0].exc_info[1].errno == error_code
+
     def test_keeps_staging_file_when_its_age_cannot_be_read(self, tmp_path, caplog):
         uploads_dir = tmp_path / "threads" / "thread-1" / "user-data" / "uploads"
         uploads_dir.mkdir(parents=True)
