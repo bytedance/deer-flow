@@ -308,6 +308,7 @@ async def test_uncertain_admission_is_retained_without_automatic_retry(plugin):
     assert final["status"] == "needs_reconciliation"
     assert final["steps"][0]["thread_id"] and final["steps"][0]["run_id"] is None
     assert len(plugin[3].starts) == 1
+    assert final["steps"][0]["error"] == "Admission timed out; inspect the stable child thread, do not replay"
     retry = await launch(plugin, script)
     assert retry["run_id"] == result["run_id"] and len(plugin[3].starts) == 1
 
@@ -475,3 +476,80 @@ async def test_model_tool_dispatch_uses_stamped_principal_and_handle(plugin):
         assert final["result"] == 7
     finally:
         await runs.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_child", [False, True])
+async def test_workflow_deadline_is_failed_and_cleans_up(plugin, with_child):
+    service, runs = plugin[2], plugin[3]
+    service.config["timeout_seconds"] = 1
+    script = "return await agent({stepId:'a',agentRef:'lead_agent',task:'blocked'});" if with_child else "return await new Promise(()=>{});"
+    result = await launch(plugin, script)
+    final = await done(plugin, result["run_id"])
+    assert final["status"] == "failed", final
+    assert final["error"] == "Execution deadline exceeded"
+    assert not service.processes
+    if with_child:
+        assert len(runs.starts) == 1
+        assert final["steps"][0]["child_status"] == "interrupted"
+        assert all(run.status == "interrupted" for run in runs.runs.values())
+
+
+@pytest.mark.asyncio
+async def test_external_supervisor_cancellation_is_interrupted(plugin):
+    service, runs = plugin[2], plugin[3]
+    result = await launch(plugin, "return await agent({stepId:'a',agentRef:'lead_agent',task:'blocked'});")
+    await asyncio.wait_for(runs.entered.wait(), 5)
+    service.workers[result["run_id"]].cancel()
+    final = await done(plugin, result["run_id"])
+    assert final["status"] == "interrupted", final
+    assert final["error"] == "Host interrupted; child cleanup required"
+    assert final["steps"][0]["child_status"] == "interrupted"
+    assert not service.processes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["get", "get_state"])
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_post_admission_timeout_reports_observation_and_cleans_up(plugin, operation, cleanup_fails):
+    service, runs = plugin[2], plugin[3]
+
+    async def timeout_once(**kwargs):
+        setattr(runs, operation, original)
+        if cleanup_fails:
+            runs.denied = True
+        raise TimeoutError("Slow child observation")
+
+    original = getattr(runs, operation)
+    setattr(runs, operation, timeout_once)
+    result = await launch(plugin, "return await agent({stepId:'a',agentRef:'lead_agent',task:args.task});", args={"task": "blocked" if operation == "get" else 1})
+    final = await done(plugin, result["run_id"])
+    step = final["steps"][0]
+    assert step["run_id"]
+    assert step["error"] == "Child observation timed out; interrupting tracked run"
+    assert not service.processes
+    if cleanup_fails:
+        assert final["status"] == step["status"] == "needs_reconciliation"
+    else:
+        assert final["status"] == step["status"] == "failed"
+        assert final["error"] == step["error"]
+        assert step["child_status"] in ("success", "interrupted")
+        assert all(run.status != "running" for run in runs.runs.values())
+
+
+@pytest.mark.asyncio
+async def test_idempotent_retry_survives_allowlist_reordering_and_restart(plugin):
+    service, runs = plugin[2], plugin[3]
+    script = "return 42;"
+    first = await launch(plugin, script)
+    await done(plugin, first["run_id"])
+    await service.stop()
+    service.config["agents"] = list(reversed(service.config["agents"]))
+    await service.start(None)
+    retry = await launch(plugin, script)
+    assert retry["run_id"] == first["run_id"]
+    assert retry["status"] == "completed"
+    assert not runs.starts
+    service.config["agents"].append("new_agent")
+    with pytest.raises(ValueError, match="request_id already used"):
+        await launch(plugin, script)

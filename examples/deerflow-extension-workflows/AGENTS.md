@@ -12,7 +12,11 @@ kill and reap the worker and explicitly observe child cancellation.
 Persist stable child thread, input message, attempt and idempotency identity before
 admission. Workflow cancel is a supervisor signal; do not cancel an admission task
 and lose an already-created child. Timeout/unknown outcomes require reconciliation,
-never automatic retries. Owner scope applies to every public read and mutation.
+never automatic retries. Distinguish admission uncertainty from post-admission
+observation timeout: interrupt/observe known runs and escalate only uncertain cleanup.
+Keep the workflow deadline handler outside asyncio.timeout and test external cancellation
+separately. Hash the Agent allowlist in canonical sorted order. Owner scope applies
+to every public read and mutation.
 Serialize launch admission and shutdown. Hold the process lock across service life;
 do not recover live records while another Gateway owns the file.
 

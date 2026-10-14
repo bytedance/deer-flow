@@ -20,6 +20,14 @@ The package holds an exclusive process lock; another process using that same fil
 fails service startup rather than recovering another worker's live workflows.
 Use only a trusted operator-installed package.
 
+Pinned QuickJS 1.19.4 provides CPython 3.12 wheels for macOS universal2 and Linux
+x86_64. Python 3.13/3.14 and Linux arm64 installations build its source distribution:
+install a C compiler and matching Python development headers first (for example,
+Xcode Command Line Tools on macOS, or `build-essential` plus the matching
+`python3-dev` package on Debian/Ubuntu). Source-build compatibility depends on your
+Python/toolchain; use CPython 3.12 on a wheel-supported platform if the build fails.
+This also applies to backend development dependency installation and arm64 containers.
+
 From the repository root:
 
 ```sh
@@ -144,11 +152,20 @@ reservation/enforcement contract before advertising that guarantee.
 | --- | --- |
 | queued / running | Supervised execution in this Gateway process |
 | completed | Script and awaited child calls returned; output is unapproved task data |
-| failed | Script, resource limit, attribution or child execution failed |
+| failed | Script, resource limit (including wall deadline), attribution, child execution or observation failed |
 | cancelled | Stop requested and known active children interrupted or already terminal |
 | waiting_input | Child has a graph interrupt or human-input artifact; downstream stopped |
 | needs_reconciliation | Admission/cancellation outcome uncertain; inspect child identities before new work |
-| interrupted | Unfinished record recovered after Gateway restart; no execution replay |
+| interrupted | Supervisor externally cancelled, or unfinished record recovered after Gateway restart; no execution replay |
+
+Wall-clock expiry reports `failed` with `Execution deadline exceeded` and cleans
+up tracked children and the worker. A timeout after child admission reports child
+observation failure and interrupts/observes the known run; only uncertain cleanup
+escalates it to `needs_reconciliation`. Admission timeouts without a known run ID
+retain the stable child thread identity for reconciliation.
+
+Allowlist order does not change request identity; adding or removing allowed Agent
+references does. Matching retries still return the retained record after restart.
 
 Cancel is asynchronous and never rolls back side effects. The service retains
 in-flight admission until its bounded response returns, records the actual child

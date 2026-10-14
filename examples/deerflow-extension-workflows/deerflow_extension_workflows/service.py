@@ -162,7 +162,7 @@ class Workflows:
                 "script_hash": script_hash,
                 "args_hash": args_hash,
                 "limits": limits,
-                "agents": self.config["agents"],
+                "agents": sorted(self.config["agents"]),
             }
         )
         async with self.launch_lock:
@@ -367,9 +367,15 @@ class Workflows:
                     "status": "success",
                 }
         except TimeoutError:
-            if row:
-                row["status"] = "needs_reconciliation"
-            entry["fault"] = "Admission timed out; inspect the stable child thread, do not replay"
+            if row and row["run_id"] is not None:
+                # Admission is known. Final cleanup interrupts/observes the tracked
+                # run and escalates to reconciliation only if that cleanup fails.
+                row["status"] = "failed"
+                entry["fault"] = "Child observation timed out; interrupting tracked run"
+            else:
+                if row:
+                    row["status"] = "needs_reconciliation"
+                entry["fault"] = "Admission timed out; inspect the stable child thread, do not replay"
             response["error"] = entry["fault"]
         except AgentRunError as exc:
             if row:
@@ -488,13 +494,17 @@ class Workflows:
                     responses = [t.result() for t in finished]
                     entry["tasks"].difference_update(finished)
                     await self.send(process, {"responses": responses})
+        except TimeoutError:
+            # Keep this outside asyncio.timeout: its own cancellation must first
+            # leave the context manager so it can be translated to TimeoutError.
+            record.update(status="failed", error="Execution deadline exceeded")
         except asyncio.CancelledError:
             entry["cancel"].set()
             record.update(status="interrupted", error="Host interrupted; child cleanup required")
         except Exception as exc:
             record.update(
                 status="cancelled" if entry["cancel"].is_set() else "waiting_input" if entry["fault"] == "waiting_input" else "failed",
-                error="Execution deadline exceeded" if isinstance(exc, TimeoutError) else str(exc)[:240],
+                error=str(exc)[:240],
             )
         finally:
             entry["cancel"].set()
