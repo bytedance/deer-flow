@@ -207,7 +207,7 @@ def test_get_providers_uses_existing_channels_config(tmp_path):
         "discord": False,
         "feishu": True,
         "dingtalk": False,
-        "wechat": False,
+        "wechat": True,
         "wecom": True,
     }
 
@@ -1594,7 +1594,7 @@ def test_qq_provider_exposes_binding_flow_and_masks_secret(tmp_path):
             assert provider["auth_mode"] == "binding_code"
             assert provider["configured"] is True
             assert provider["connectable"] is True
-            assert provider["proactive_notifications"] is False
+            assert provider["proactive_notifications"] is True
             assert "fixture-private-secret" not in response.text
             fields = {field["name"]: field for field in provider["credential_fields"]}
             assert fields["app_id"]["type"] == "text"
