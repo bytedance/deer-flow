@@ -615,3 +615,22 @@ archive, and #65–#67 dedicated resources were independently checked empty.
 This does not establish native normal-run admission, worker lease/generation
 identity, event/SSE delivery or frontend cache isolation. Those remain required
 M3/M4–M11 work; no tenant runtime is activated.
+
+## Event SQL reads (partial M3)
+
+DbRunEventStore reads now combine event owner/workspace with the live private
+ThreadMeta parent before limits, paging, identity matching and aggregation.
+This covers thread/Run messages, events, counts, last AI positions and message
+positions; the inherited AI-to-Run lookup uses the same filtered pages.
+Branch history may carry inherited/synthetic Run IDs, so it is authorized by
+the event and private parent without requiring an invented execution record.
+The optional workspace_required constructor flag guards reads, including empty
+position queries. Writes and factory/background wiring are not yet integrated.
+
+#68 RED disclosed another space on both databases; #69 passed 9 checks in
+44.47s: two SQL event mains, two existing HTTP mains and five native event
+read regressions. Actual SQL withdrawal hides rows/counts/positions, foreign
+and NULL stamps are excluded before paging, and branch-style history remains.
+Source bytes match its archive; dedicated #68/#69 resources are empty.
+HTTP Run/message/event admission, writer scope, SSE, physical recovery and full
+client flows still gate M3/M4–M11 and tenant activation.

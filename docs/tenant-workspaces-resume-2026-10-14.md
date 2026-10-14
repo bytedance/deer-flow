@@ -98,3 +98,11 @@ SQL删除或存储故障不再回退内存，匹配的实时对象与最新状�
 下一项接通 Run/message/event HTTP 与 SSE（尤其事件 SQL 分页前空间过滤、
 分支历史保留及后台回填），随后前端空间切换。正常 Run 准入和后台
 代际/租约/发布仍是 M4，不可把缓存读修复当成执行隔离完成。目标 active。
+
+最新接续：事件 SQL 读取 #68 RED/#69 GREEN（9 passed, 44.47s），
+#68/#69 专属资源已查空，源码与归档一致。DbRunEventStore 六类读取在
+分页/聚合前过滤事件空间、原用户及 live 私有父会话，保留分支种子历史。
+workspace_required 目前只覆盖读取；写入归属/工厂/后台 journal 仍须 M4。
+下一项从 HTTP thread_runs 的 Run列表/详情、消息分页、事件入口开始，
+保留实时 Run 控制对象，并给 list_run_messages 的 get 传显式用户；
+随后 SSE/客户端切换。全局 runs 路由、反馈和后台回填不能遗漏。目标 active。

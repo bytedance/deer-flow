@@ -18,6 +18,9 @@ from sqlalchemy import delete, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.models.run_event import RunEventRow, RunEventThreadSeqRow
+from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
+from deerflow.persistence.workspaces.scope import resolve_resource_scope
 from deerflow.runtime.events.message_identity import message_identity
 from deerflow.runtime.events.store.base import RunEventStore
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user, resolve_user_id
@@ -27,9 +30,10 @@ logger = logging.getLogger(__name__)
 
 
 class DbRunEventStore(RunEventStore):
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession], *, max_trace_content: int = 10240):
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession], *, max_trace_content: int = 10240, workspace_required: bool = False):
         self._sf = session_factory
         self._max_trace_content = max_trace_content
+        self._workspace_required = workspace_required
         # Per-thread asyncio locks serialize seq assignment for concurrent
         # in-process writers on the same thread. The DB-level FOR UPDATE /
         # advisory lock guards cross-process races; this guards the common
@@ -325,6 +329,20 @@ class DbRunEventStore(RunEventStore):
                     await self._raise_seq_watermark(session, thread_id, row.seq)
                 return self._row_to_dict(row), True
 
+    def _read_context(self, user_id):
+        return resolve_resource_scope(None, user_id, required=self._workspace_required)
+
+    def _read_scope(self, stmt, user_id):
+        context = self._read_context(user_id)
+        if user_id is not None:
+            stmt = stmt.where(RunEventRow.user_id == user_id)
+        if context is not None:
+            # Branch history may use synthetic seed Run IDs. Its authority is
+            # the event's own scope and private thread, not a copied Run row.
+            parent = ThreadMetaRepository._owned_scope(select(ThreadMetaRow.thread_id).where(ThreadMetaRow.thread_id == RunEventRow.thread_id), user_id, context).correlate(RunEventRow).exists()
+            stmt = stmt.where(RunEventRow.workspace_id == context.workspace_id, parent)
+        return stmt
+
     async def list_messages(
         self,
         thread_id,
@@ -336,8 +354,7 @@ class DbRunEventStore(RunEventStore):
     ):
         resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.list_messages")
         stmt = select(RunEventRow).where(RunEventRow.thread_id == thread_id, RunEventRow.category == "message")
-        if resolved_user_id is not None:
-            stmt = stmt.where(RunEventRow.user_id == resolved_user_id)
+        stmt = self._read_scope(stmt, resolved_user_id)
         if before_seq is not None:
             stmt = stmt.where(RunEventRow.seq < before_seq)
         if after_seq is not None:
@@ -370,8 +387,7 @@ class DbRunEventStore(RunEventStore):
     ):
         resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.list_events")
         stmt = select(RunEventRow).where(RunEventRow.thread_id == thread_id, RunEventRow.run_id == run_id)
-        if resolved_user_id is not None:
-            stmt = stmt.where(RunEventRow.user_id == resolved_user_id)
+        stmt = self._read_scope(stmt, resolved_user_id)
         if event_types:
             stmt = stmt.where(RunEventRow.event_type.in_(event_types))
         if task_id is not None:
@@ -404,8 +420,7 @@ class DbRunEventStore(RunEventStore):
             RunEventRow.run_id == run_id,
             RunEventRow.category == "message",
         )
-        if resolved_user_id is not None:
-            stmt = stmt.where(RunEventRow.user_id == resolved_user_id)
+        stmt = self._read_scope(stmt, resolved_user_id)
         if before_seq is not None:
             stmt = stmt.where(RunEventRow.seq < before_seq)
         if after_seq is not None:
@@ -430,9 +445,10 @@ class DbRunEventStore(RunEventStore):
         *,
         user_id: str | None | _AutoSentinel = AUTO,
     ):
+        resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.get_last_visible_ai_seq_by_run")
+        self._read_context(resolved_user_id)
         if not run_ids:
             return {}
-        resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.get_last_visible_ai_seq_by_run")
         caller = RunEventRow.event_metadata["caller"].as_string()
         # RunJournal canonically persists AI message rows as
         # ``llm.ai.response``; ``ai_message`` remains for legacy compatibility.
@@ -447,8 +463,7 @@ class DbRunEventStore(RunEventStore):
             )
             .group_by(RunEventRow.run_id)
         )
-        if resolved_user_id is not None:
-            stmt = stmt.where(RunEventRow.user_id == resolved_user_id)
+        stmt = self._read_scope(stmt, resolved_user_id)
         async with self._sf() as session:
             result = await session.execute(stmt)
             return {run_id: seq for run_id, seq in result if isinstance(seq, int)}
@@ -461,8 +476,7 @@ class DbRunEventStore(RunEventStore):
     ):
         resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.count_messages")
         stmt = select(func.count()).select_from(RunEventRow).where(RunEventRow.thread_id == thread_id, RunEventRow.category == "message")
-        if resolved_user_id is not None:
-            stmt = stmt.where(RunEventRow.user_id == resolved_user_id)
+        stmt = self._read_scope(stmt, resolved_user_id)
         async with self._sf() as session:
             return await session.scalar(stmt) or 0
 
@@ -473,10 +487,11 @@ class DbRunEventStore(RunEventStore):
         *,
         user_id: str | None | _AutoSentinel = AUTO,
     ):
+        resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.get_message_seqs")
+        self._read_context(resolved_user_id)
         wanted = set(identities)
         if not wanted:
             return {}
-        resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.get_message_seqs")
         # ``content`` is a TEXT column holding a JSON *string* (see
         # ``_content_to_db``), not a JSON column, so the identity fields cannot
         # be projected in SQL — matching rows are decoded here instead. The
@@ -489,8 +504,7 @@ class DbRunEventStore(RunEventStore):
         # ``message_identity``; ids the prefilter cannot express fall back to
         # the full scan).
         stmt = select(RunEventRow.seq, RunEventRow.content).where(RunEventRow.thread_id == thread_id, RunEventRow.category == "message").order_by(RunEventRow.seq)
-        if resolved_user_id is not None:
-            stmt = stmt.where(RunEventRow.user_id == resolved_user_id)
+        stmt = self._read_scope(stmt, resolved_user_id)
         prefilter_ids = self._prefilter_substrings(wanted)
         if prefilter_ids is not None:
             stmt = stmt.where(or_(*[RunEventRow.content.like(f"%{i.replace('%', '\\%').replace('_', '\\_')}%", escape="\\") for i in prefilter_ids]))

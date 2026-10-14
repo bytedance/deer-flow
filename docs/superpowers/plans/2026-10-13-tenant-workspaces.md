@@ -558,3 +558,10 @@ cache/list/batch/replay reads refuse foreign/revoked/deleted rows and durable
 read faults. Required empty batches reject missing scope. Native hydration and
 pagination remain verified. Next integrate Run/message/event HTTP and SSE, then
 client switching; normal admission/worker generation/lease remains M4.
+
+M3 event SQL checkpoint: #68 RED same-owner foreign-space disclosure; #69
+GREEN (9 passed, 44.47s). Event/page/count/identity predicates validate event
+space plus private live parent before reductions, preserving branch seeds
+without inventing Run rows. The constructor flag currently gates reads only.
+Next: HTTP Run/messages/events and SSE; writes, factories, background journal
+identity and physical recovery remain required M4/M10/M11 work.

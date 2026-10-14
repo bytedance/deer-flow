@@ -1349,5 +1349,37 @@
       "frontend scope selection/cursor/cache lifecycle",
       "M5-M11 and complete tenant activation acceptance"
     ]
+  },
+  "workspace_event_sql_reads": {
+    "status": "partial_M3_verified_read_main",
+    "red": {
+      "build": 68,
+      "result": "FAILURE",
+      "tests_failed": 2,
+      "elapsed_seconds": 16.8,
+      "archive_sha256": "0248bd0b05587374fe4eba79cb75afc250193d53e76ed5030a2d36c7f02ac3c3",
+      "reason": "same-owner event SQL disclosed another workspace"
+    },
+    "green": {
+      "build": 69,
+      "result": "SUCCESS",
+      "tests_passed": 9,
+      "elapsed_seconds": 44.47,
+      "archive_sha256": "4f883e2f9fb4901b366be42457ad2f3d0f0736da8dfca85bb5a190552c8f8884",
+      "command": "python -m pytest tests/test_workspace_event_reads.py tests/test_workspace_http.py tests/test_run_event_store.py::TestDbRunEventStore::test_basic_crud tests/test_run_event_store.py::TestDbRunEventStore::test_pagination tests/test_run_event_store.py::TestDbRunEventStore::test_find_latest_ai_message_run_ids_contract_and_owner_filter tests/test_run_event_store.py::TestDbRunEventStore::test_find_latest_ai_message_run_ids_pages_db_with_owner_scoped_high_watermark tests/test_run_event_store.py::TestGetMessageSeqs::test_db_store_resolves_identities -q --tb=short --no-showlocals"
+    },
+    "source_sha256": {
+      "backend/packages/harness/deerflow/runtime/events/store/db.py": "9384715cd67b32571b866542fea322a9414778cc71a413c9ea184b01a6dbe039",
+      "backend/tests/test_workspace_event_reads.py": "308412d35a481777ab675d7bb01367cbd4e798fbe9621365dbec8dabcedc6774",
+      "backend/tests/test_workspace_http.py": "22eb3c703a533acadfeeadba561d3cb2894a1e32503deb6c563daaa3af5f7577"
+    },
+    "cleanup": "#68/#69 ownership-labelled container/network inventories independently empty",
+    "remaining": [
+      "HTTP Run/message/event binding and SSE delivery",
+      "Db event write attribution/revocation/cancellation; constructor flag currently guards reads only",
+      "full runtime factory/startup integration and alternative event storage refusal",
+      "background Run/branch seed/journal/recovery publication M4",
+      "frontend and remaining M4-M11; activation closed"
+    ]
   }
 }

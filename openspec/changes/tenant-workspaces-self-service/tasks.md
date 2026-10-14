@@ -63,3 +63,9 @@ native collection exposed eager path/authz cycle; #67 GREEN (9 passed, 43.47s).
 Both SQL/cache mains, both HTTP mains and five native cache/pagination cases
 pass. Durable read faults cannot fall back to cache. Run HTTP/event/SSE/client
 and M4 worker identity remain incomplete, so M3 stays unchecked.
+
+M3 event SQL reads: #68 RED foreign-space disclosure; #69 GREEN (9 passed,
+44.47s), both metadata dialects plus existing HTTP/native read regressions.
+Filter event and private parent before limits/reductions, preserve synthetic
+branch IDs, and reject required unbound position queries. HTTP/SSE, event
+writes/factory/background integration and client acceptance remain unchecked.

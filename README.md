@@ -2961,3 +2961,7 @@ Run/SSE and frontend workspace integration remain pending.
 [Scoped resident Run reads](docs/tenant-workspaces-api.md#resident-run-authorization-partial-m3)
 now validate durable ownership before serving cached data. Full Run/event/SSE,
 worker and frontend integration remain pending; tenant activation stays closed.
+
+[Event SQL read isolation](docs/tenant-workspaces-api.md#event-sql-reads-partial-m3)
+preserves private workspace paging and branch history in isolated acceptance;
+HTTP/SSE, event writers and full tenant rollout remain pending.

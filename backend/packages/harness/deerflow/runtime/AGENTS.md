@@ -308,3 +308,10 @@ Scope/store errors cannot use legacy memory fallback; empty batches still check
 required scope. Unbound legacy behavior is unchanged. #67 verifies both dialects
 and native live-object/status precedence. Worker/admission/lease/result scope
 remains M4 work, not implied by these read checks.
+
+DbRunEventStore read predicates combine event workspace/owner with the live
+private ThreadMeta parent before pagination, reduction or message identity
+matching. Synthetic/inherited branch seed Run IDs remain readable without a
+new execution record. workspace_required currently gates reads only; journal
+write attribution and runtime factory/alternative-backend policy remain M4
+integration work. #69 verifies both dialects, withdrawal and native read parity.
