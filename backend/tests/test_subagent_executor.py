@@ -6284,7 +6284,11 @@ class TestBashExecutionHarvest:
 
         executions = executor_module._harvest_bash_executions(state)
         assert executions[0]["shell_persistent"] is False
-        verdict = check_acceptance_criteria(["tests_passed:mvn test"], bash_executions=executions)
+        verdict = check_acceptance_criteria(
+            ["tests_passed:mvn test"],
+            bash_executions=executions,
+            content_reader=lambda *_args: pytest.fail("test-summary acceptance must not read files"),
+        )
         leaf = verdict["leaves"][0]
         assert (leaf["checked"], leaf["holds"]) == (checked, holds)
         assert verdict["all_hold"] is holds
