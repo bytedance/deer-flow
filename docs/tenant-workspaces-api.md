@@ -790,3 +790,21 @@ workspace change, delivery. Other personal child tables remain exactly one.
 Single-artifact entry identity/PUT, frontend, normal producers/factories and
 M4-M11 remain pending. This before-header proof is not continuous credential/
 role/physical transport or cross-process/crash/load acceptance. No activation.
+
+## Single-artifact entry identity (partial M3)
+
+GET artifact now captures the private entry incarnation before native owner
+admission while retaining query workspace locators. The existing identity helper
+rechecks that same nonce before any file-response preparation, and the wrapper
+still checks before ASGI headers. It cannot adopt a conversation replaced during
+owner admission. Native preview, download, Range and ETag logic is unchanged.
+
+#85 RED reproduced a real SQL nonce change in native owner admission returning
+200 file bytes in both metadata dialects. #86 passed six checks in 47.62s: both
+JWT/SQL HTTP mains plus four native text/Range/ETag regressions. The interrupted
+old request returns 404 and the next fresh request still reads the correct
+bytes. Archive/source bytes match, and #85/#86 exact resources are empty.
+
+PUT host/remote publication and filesystem races, frontend switching, normal
+producers/factories and M4-M11 remain. This entry identity fix is not continuous
+credential/role/physical-transport revocation; tenant activation stays closed.

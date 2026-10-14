@@ -2994,3 +2994,8 @@ frontend and runtime integration still gate full tenant activation.
 now preserve selected private-space delivery and close temporary archives when
 publication is refused or cancelled. Remaining file editing, frontend and full
 runtime integration still gate tenant activation.
+
+[Single-artifact download identity](docs/tenant-workspaces-api.md#single-artifact-entry-identity-partial-m3)
+now refuses requests whose conversation is replaced during owner admission,
+while preserving native Range and ETag behavior. File editing, frontend and full
+runtime integration remain pending before tenant activation.

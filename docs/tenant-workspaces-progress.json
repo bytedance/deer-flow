@@ -1551,8 +1551,8 @@
     "work_package": "M3",
     "status": "partial",
     "last_verified_job": "deerflow-tenant-m1-postgres",
-    "last_verified_build": 84,
-    "next": "single-artifact entry identity then scoped PUT publication; frontend switching/caches and full M0-M11 remain required",
+    "last_verified_build": 86,
+    "next": "scoped PUT artifact final publication (mounted host + remote provider protocol), then frontend workspace selection/caches; full M0-M11 remains required",
     "tenant_activation": "closed",
     "deployment": "none"
   },
@@ -1624,6 +1624,38 @@
       "frontend workspace switching and M4 normal Run/event producer factories",
       "continuous credential/role/transport and distributed/crash/load evidence M6/M11",
       "full M0-M11 and tenant activation remain incomplete"
+    ]
+  },
+  "workspace_artifact_entry_identity": {
+    "status": "partial_M3_verified_download_entry_main",
+    "job": "deerflow-tenant-m1-postgres",
+    "red": {
+      "build": 85,
+      "result": "FAILURE",
+      "tests_failed": 2,
+      "elapsed_seconds": 35.56,
+      "archive_sha256": "b3916f026e062a5457cb32b948bdbd4c4623294d2e60bde3883247c8a5b1bbed",
+      "reason": "actual owner-admission incarnation rotation still returned 200 file content in both metadata dialects"
+    },
+    "green": {
+      "build": 86,
+      "result": "SUCCESS",
+      "tests_passed": 6,
+      "elapsed_seconds": 47.62,
+      "archive_sha256": "0e2825d3eae799591f230e708cb447117025f09ff7c0c54abb2b5fd7d4d62980",
+      "command": "python -m pytest tests/test_workspace_http.py tests/test_artifacts_router.py::test_get_artifact_reads_utf8_text_file_on_windows_locale tests/test_artifacts_router.py::test_get_artifact_text_preview_supports_bounded_range_requests tests/test_artifacts_router.py::test_get_artifact_inline_text_returns_sha256_etag tests/test_artifacts_router.py::test_replaced_artifact_rejects_previous_if_range_validator -q --tb=short --no-showlocals"
+    },
+    "source_sha256": {
+      "backend/app/gateway/routers/artifacts.py": "59efcd7dd44eb0c472050fe6c79c7917560b165f6a4537991cbae8cb4e626e9a",
+      "backend/tests/test_workspace_http.py": "6220eaaaa7dcb9debdacd4b901947338d7b84726a7c4066cd620b147587941d6"
+    },
+    "cleanup": "#85/#86 exact ownership-labelled container/network inventories independently empty",
+    "warning": "existing Starlette TestClient/httpx deprecation warning",
+    "remaining": [
+      "PUT artifact final host/remote publication and filesystem race boundaries",
+      "frontend switching/caches, normal Run/event producers/factories M4",
+      "continuous credential/role/physical transport and full fault evidence M6/M11",
+      "M0-M11 acceptance and activation remain incomplete"
     ]
   }
 }

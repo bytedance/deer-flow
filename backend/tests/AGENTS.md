@@ -255,3 +255,9 @@ policy refusal, and delayed ASGI refusal. Cancellation test separately checks
 owned close/context restore. Personal SQL retention now has three events
 (message/change/delivery), exactly one in other seeded child tables, zero for
 the deleted space. Never relax this to an arbitrary positive count.
+
+Artifact entry replacement in the workspace HTTP main commits an actual new
+nonce inside native check_access. The old request must return 404, then a new
+request must still read correct bytes. #85 failed with 200; #86 passes. This is
+separate from existing prepared-response policy withdrawal and archive close
+checks; do not replace it with a pre-denied canned owner response.

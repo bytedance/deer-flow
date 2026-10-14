@@ -112,3 +112,10 @@ manifest/busy/wrong-thread/cancellation checks. Prepared archive closes on
 post-materialization or pre-header refusal and cancellation. Source bytes match,
 exact resources empty. Artifact GET entry identity/PUT/client and M4-M11 remain;
 M3 unchecked and activation closed.
+
+M3 artifact GET entry identity: #85 RED real owner-admission replacement returned
+200; #86 GREEN (6 passed, 47.62s) on both SQL/JWT HTTP mains and four native
+text/Range/ETag regressions. Capture before owner check, recheck before file
+preparation; old request 404 and fresh request valid. Exact resources empty,
+source/archive bytes match. PUT/remote/filesystem/client and M4-M11 still required;
+M3 remains unchecked, activation closed.

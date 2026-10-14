@@ -768,6 +768,15 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                 personal_run = delete_ids["personal"] + "-run"
                 team_run_base = "/api/threads/" + delete_ids["team"]
                 personal_run_base = "/api/threads/" + delete_ids["personal"]
+                # A file request cannot adopt a replacement parent during native owner admission.
+                private_artifact = team_run_base + "/artifacts/mnt/user-data/uploads/delete.txt?workspace_id=" + team
+                live_file = await client.get(private_artifact)
+                assert live_file.status_code == 200 and live_file.content == b"team private bytes", live_file.text
+                owner_replacement["thread_id"] = delete_ids["team"]
+                replaced_file = await client.get(private_artifact)
+                assert replaced_file.status_code == 404, "artifact request adopted a replacement conversation during owner admission"
+                fresh_file = await client.get(private_artifact)
+                assert fresh_file.status_code == 200 and fresh_file.content == b"team private bytes", fresh_file.text
                 run_list = await client.get(team_run_base + "/runs", headers=team_headers)
                 assert run_list.status_code == 200, run_list.text
                 assert [row["run_id"] for row in run_list.json()] == [team_run]

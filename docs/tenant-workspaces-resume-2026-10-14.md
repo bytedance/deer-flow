@@ -266,3 +266,30 @@ workspace change, delivery. Other personal child tables remain exactly one.
 Single-artifact entry identity/PUT, frontend, normal producers/factories and
 M4-M11 remain pending. This before-header proof is not continuous credential/
 role/physical transport or cross-process/crash/load acceptance. No activation.
+
+## Single-artifact entry identity (partial M3)
+
+GET artifact now captures the private entry incarnation before native owner
+admission while retaining query workspace locators. The existing identity helper
+rechecks that same nonce before any file-response preparation, and the wrapper
+still checks before ASGI headers. It cannot adopt a conversation replaced during
+owner admission. Native preview, download, Range and ETag logic is unchanged.
+
+#85 RED reproduced a real SQL nonce change in native owner admission returning
+200 file bytes in both metadata dialects. #86 passed six checks in 47.62s: both
+JWT/SQL HTTP mains plus four native text/Range/ETag regressions. The interrupted
+old request returns 404 and the next fresh request still reads the correct
+bytes. Archive/source bytes match, and #85/#86 exact resources are empty.
+
+PUT host/remote publication and filesystem races, frontend switching, normal
+producers/factories and M4-M11 remain. This entry identity fix is not continuous
+credential/role/physical-transport revocation; tenant activation stays closed.
+
+Latest verified checkpoint: #83/#84 archives and #85/#86 artifact entry identity,
+all terminal, exact resources empty and successful archive/source bytes matched.
+No active test job remains. Next M3: PUT artifact scope/entry identity, final
+mounted-file publication under live SQL fence, CAS/path races and explicit remote
+provider protocol (no SQL locks over network, no silent host-only fallback).
+Then finish client selection/cache isolation and continue M4-M11. Existing history
+read is already bound; deferred producers remain M4. Tenant activation closed;
+no tenant push/deployment. Native UI styling remains the approved direction.

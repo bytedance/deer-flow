@@ -489,3 +489,10 @@ Do not run arbitrary response background tasks on denial. Archive construction
 retains ownership through reservation release and response construction; native
 builder/reservation semantics stay intact. #84 covers SQL/JWT/ZIP and resource
 close edges; continuous credential/transport acceptance remains M6/M11.
+
+Single artifact GET binds private_thread_read with query locators before native
+owner admission. capture_checkpoint_thread_identity checks the original request
+nonce again before file preparation; do not reacquire a fresh nonce after owner
+checks and treat it as original authority. #86 proves old-admission replacement
+refusal and fresh valid download while native Range/ETag remains passing. PUT
+and continuous credential/transport gates remain separate unfinished work.
