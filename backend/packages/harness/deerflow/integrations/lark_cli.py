@@ -74,6 +74,8 @@ from typing import Any
 from uuid import uuid4
 from weakref import WeakValueDictionary
 
+from deerflow.utils.file_lock import retry_until_locked
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows fallback
@@ -182,8 +184,8 @@ LARK_SKILL_NAMES: tuple[str, ...] = (
     "lark-workflow-standup-report",
 )
 LARK_SKILL_NAME_SET = frozenset(LARK_SKILL_NAMES)
-# Matches the extensions manager's retry cadence for the same Windows limitation.
-_LOCK_RETRY_INTERVAL_SECONDS = 0.2
+# Allow long installs to finish without waiting indefinitely on a stuck holder.
+_INSTALL_LOCK_TIMEOUT_SECONDS = 15 * 60
 _LARK_INSTALL_THREAD_LOCK = threading.Lock()
 _LARK_RUNTIME_INSTALL_THREAD_LOCK = threading.Lock()
 _LARK_CREDENTIAL_LOCKS_GUARD = threading.Lock()
@@ -1337,18 +1339,18 @@ def _exclusive_install_lock(lock_path: Path, thread_lock):
         if fcntl is not None:
             fcntl.flock(lock_file, fcntl.LOCK_EX)
         else:  # pragma: no cover - Windows fallback
-            # Windows' blocking mode (msvcrt.LK_LOCK) gives up after roughly ten
-            # seconds and surfaces contention as Permission denied, while a real
-            # install (download + setup of the lark/sandbox CLI) can hold this
-            # lock far longer. Retry the non-blocking acquisition so concurrent
-            # Gateway workers serialize instead of failing, mirroring the
-            # extensions manager's lock.
-            while True:
-                try:
-                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
-                    break
-                except OSError:
-                    time.sleep(_LOCK_RETRY_INTERVAL_SECONDS)
+
+            def acquire_region() -> None:
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+
+            retry_until_locked(
+                acquire_region,
+                deadline=time.monotonic() + _INSTALL_LOCK_TIMEOUT_SECONDS,
+                sleep=time.sleep,
+                monotonic=time.monotonic,
+                timeout_message="Lark install lock timed out",
+            )
         try:
             yield
         finally:

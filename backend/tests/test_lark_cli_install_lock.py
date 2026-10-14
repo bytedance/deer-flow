@@ -9,8 +9,10 @@ frees, mirroring the extensions manager's lock.
 
 from __future__ import annotations
 
+import errno
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -28,8 +30,9 @@ class _ContendedFakeMsvcrt:
     LK_LOCK = 1
     LK_NBLCK = 2
 
-    def __init__(self, fail_times: int) -> None:
+    def __init__(self, fail_times: int, *, error_number: int = errno.EDEADLK) -> None:
         self.fail_times = fail_times
+        self.error_number = error_number
         self.attempts: list[int] = []
         self.unlocked = 0
 
@@ -40,7 +43,7 @@ class _ContendedFakeMsvcrt:
             return None
         blocking_attempts = len(self.attempts) - self.unlocked
         if blocking_attempts <= self.fail_times:
-            raise OSError(36, "Resource deadlock avoided")
+            raise OSError(self.error_number, "Lock unavailable")
         return None
 
 
@@ -50,7 +53,7 @@ def test_install_lock_retries_until_contention_clears(tmp_path, monkeypatch) -> 
     monkeypatch.setattr(lark_cli, "fcntl", None)
     monkeypatch.setattr(lark_cli, "msvcrt", fake, raising=False)
     sleeps: list[float] = []
-    monkeypatch.setattr(lark_cli.time, "sleep", sleeps.append)
+    monkeypatch.setattr(lark_cli, "time", SimpleNamespace(sleep=sleeps.append, monotonic=time.monotonic))
 
     lock_path = tmp_path / ".lark-cli.install.lock"
     entered = False
@@ -60,7 +63,7 @@ def test_install_lock_retries_until_contention_clears(tmp_path, monkeypatch) -> 
     assert entered
     assert fake.attempts == [fake.LK_NBLCK] * 4 + [fake.LK_UNLCK]
     assert fake.unlocked == 1
-    assert sleeps == [lark_cli._LOCK_RETRY_INTERVAL_SECONDS] * 3
+    assert sleeps == [0.2] * 3
 
 
 def test_install_lock_posix_branch_still_flocks(tmp_path, monkeypatch) -> None:
@@ -133,3 +136,50 @@ def test_install_lock_waits_for_real_windows_contention(tmp_path) -> None:
         thread.join(timeout=10)
 
     assert not errors
+
+
+@pytest.mark.parametrize("error_number", [errno.EBADF, errno.EINVAL, errno.EIO, errno.EPERM])
+def test_install_lock_propagates_non_contention_errors(tmp_path, monkeypatch, error_number):
+    fake = _ContendedFakeMsvcrt(fail_times=1, error_number=error_number)
+    monkeypatch.setattr(lark_cli, "fcntl", None)
+    monkeypatch.setattr(lark_cli, "msvcrt", fake, raising=False)
+
+    def unexpected_sleep(_delay):
+        raise AssertionError("Permanent lock errors must not be retried")
+
+    monkeypatch.setattr(lark_cli, "time", SimpleNamespace(sleep=unexpected_sleep, monotonic=lambda: 0.0))
+    thread_lock = threading.Lock()
+    with pytest.raises(OSError) as caught:
+        with lark_cli._exclusive_install_lock(tmp_path / ".lock", thread_lock):
+            pytest.fail("Must not enter after a failed acquisition")
+
+    assert caught.value.errno == error_number
+    assert fake.attempts == [fake.LK_NBLCK]
+    assert fake.unlocked == 0
+    assert not thread_lock.locked()
+
+
+def test_install_lock_contention_has_a_deadline(tmp_path, monkeypatch):
+    fake = _ContendedFakeMsvcrt(fail_times=100)
+    monkeypatch.setattr(lark_cli, "fcntl", None)
+    monkeypatch.setattr(lark_cli, "msvcrt", fake, raising=False)
+    monkeypatch.setattr(lark_cli, "_INSTALL_LOCK_TIMEOUT_SECONDS", 0.5, raising=False)
+    now = 0.0
+    sleeps = []
+
+    def sleep(delay):
+        nonlocal now
+        sleeps.append(delay)
+        now += delay
+        assert now <= 1, "Lock acquisition must not retry forever"
+
+    monkeypatch.setattr(lark_cli, "time", SimpleNamespace(sleep=sleep, monotonic=lambda: now))
+    thread_lock = threading.Lock()
+    with pytest.raises(TimeoutError, match="Lark install lock timed out"):
+        with lark_cli._exclusive_install_lock(tmp_path / ".lock", thread_lock):
+            pytest.fail("Must not enter while the lock is held")
+
+    assert sleeps == pytest.approx([0.2, 0.2, 0.1])
+    assert fake.attempts == [fake.LK_NBLCK] * 4
+    assert fake.unlocked == 0
+    assert not thread_lock.locked()

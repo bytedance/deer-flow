@@ -1451,6 +1451,8 @@ OAuth data remain isolated under
 `{DEER_FLOW_HOME}/users/{user_id}/integrations/lark-cli/{config,data}`. These
 secret directories are restricted to `0700`, regular credential files to
 `0600`, and symlinks are rejected.
+On Windows, waiting for another process's integration file lock retries for up
+to 15 minutes; other file-lock errors are reported immediately.
 
 After installation, users can click **Connect Lark** to open a browser
 authorization link; no terminal authorization is required. The same UI can
