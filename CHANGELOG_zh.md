@@ -4469,6 +4469,11 @@
   每 2 秒轮询一次）不再为了只返回预览而载入每个条目的完整报告、证据 JSON 和提示词。
   默认 `max_result_chars` 下，一页 100 个条目约占用 34 MB，并阻塞事件循环约 70 ms
   （`limit=500` 时为 170 MB 和 300 ms）；现在不到 1 MB。响应内容不变。([#6781])
+- **渠道：** 在渠道设置页保存或断开机器人时，不再覆盖经由其他 Gateway worker
+  保存的机器人。每个 worker 都保留启动时读入的 `runtime-config.json` 内容，并用这份
+  副本重写整个文件，因此在两个 worker 下，一个 worker 上保存的 Telegram 机器人会在
+  另一个 worker 保存 Slack 机器人时丢失，已断开的机器人也会重新出现。现在每次保存
+  都会在跨进程共享的锁下重新读取文件，只修改自己的 provider。([#6844])
 
 ### 安全
 
@@ -9309,3 +9314,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6746]: https://github.com/bytedance/deer-flow/pull/6746
 [#6781]: https://github.com/bytedance/deer-flow/pull/6781
 [#6785]: https://github.com/bytedance/deer-flow/pull/6785
+[#6844]: https://github.com/bytedance/deer-flow/pull/6844
