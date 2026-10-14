@@ -374,6 +374,9 @@ a model switch without changing the backend's direct legacy-request behavior.
 
 ## Full-stack plugin UI
 
+Bundled extensions need localized catalog entries and declared namespaces; listing
+never enables plugins. Tests: `tests/unit/core/extensions/catalog.test.ts`.
+
 Before changing plugin loaders, pages or conversation actions, read the mandatory
 [Frontend implementation invariants](../docs/full-stack-plugins.md#frontend-implementation-invariants).
 Preserve authenticated, viewer-bound loading, native actions, localization and

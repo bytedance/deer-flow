@@ -211,3 +211,8 @@ def test_repository_exposes_one_local_and_one_ci_entrypoint() -> None:
     assert "fetch-depth: 0" in workflow
     assert "--base-ref" in workflow
     assert "--before" in workflow
+
+
+def test_repository_guidance_chains_fit_hard_budget() -> None:
+    files = {PurePosixPath(relative): (REPO_ROOT / relative).read_text(encoding="utf-8") for relative in EXPECTED_GUIDANCE_PATHS}
+    assert not [finding for finding in checker.analyze(REPO_ROOT, files) if finding.severity == "error"]

@@ -56,6 +56,10 @@ plugins:
       memory_bytes: 16777216
 ```
 
+Find **Script workflows** in the workspace extension directory for the installation
+guide. Its catalog listing does not indicate installation or activation; the operator
+configuration above and Gateway runtime registration determine availability.
+
 Restart Gateway. The namespace is `community.workflows`; the page is
 `/workspace/extensions/community.workflows/runs`. The UI and tools are disabled by
 default. `agents` restricts target selection in addition to normal host permissions;
