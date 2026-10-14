@@ -40,6 +40,11 @@ export const zhCN: Translations = {
       "此条目来自仓库扩展目录；实际安装和启用状态请由部署管理员确认。",
     installationGuide: "查看安装说明",
     catalog: {
+      workflows: {
+        title: "脚本工作流",
+        description:
+          "通过可检查的脚本编排 Agent，支持受限并发、进度与取消。第一阶段不支持恢复、人工审批或硬金额预算。",
+      },
       agentTeams: {
         title: "Agent 团队",
         description: "让完整 Custom Agent 通过 @成员、共享记录与任务交接协作。",
@@ -65,6 +70,11 @@ export const zhCN: Translations = {
         title: "扩展开发示例",
         description:
           "演示中间件、任务生命周期、模型观察器、服务和 HTTP 路由的扩展方式。",
+      },
+      retrieval: {
+        title: "本地检索示例",
+        description:
+          "使用固定示例文档演示只读检索与结构化工具结果，不连接外部知识库。",
       },
     },
     pageUnavailable: "扩展页面不可用",

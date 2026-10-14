@@ -207,6 +207,11 @@ UI validation separate from the API payload. Preserve the original instant when
 wall time and timezone match the mounted snapshot; validate changed inputs, and
 restore the exact original timestamp when those edits are reverted.
 
+Wall-time conversion matches the scheduler's `ZoneInfo(fold=0)` policy: choose
+the first occurrence of a repeated time and the pre-transition offset for a
+skipped time. Stored one-time schedules use that instant for display; the form's
+round-trip validation must still reject newly entered skipped times.
+
 ## Resources
 
 - [LangGraph Documentation](https://langchain-ai.github.io/langgraph/)
@@ -386,10 +391,11 @@ a model switch without changing the backend's direct legacy-request behavior.
 
 ## Full-stack plugin UI
 
-Before changing plugin loaders, pages or conversation actions, read the mandatory
-[Frontend implementation invariants](../docs/full-stack-plugins.md#frontend-implementation-invariants).
-Preserve authenticated, viewer-bound loading, native actions, localization and
-mount/dispose plus abort fencing; Shadow DOM is not a security sandbox.
+Follow [invariants](../docs/full-stack-plugins.md#frontend-implementation-invariants) for
+plugin loaders/pages/actions: viewer-bound auth, native actions, i18n and
+mount/dispose/abort fencing. Shadow DOM is not a sandbox. Bundled extensions need
+typed en/zh `core/extensions/catalog.ts` entries with their namespace.
+Catalog entries are not proof of installation or activation.
 
 ### Composer references
 

@@ -204,7 +204,7 @@ async def test_task_without_applicable_user_auth_preserves_interceptor_context(t
 
     caller._interceptors.append(inspect_context)
     session = SimpleNamespace(initialize=AsyncMock(), call_tool=AsyncMock(return_value="result"))
-    pool = SimpleNamespace(get_session=AsyncMock(return_value=session))
+    pool = MCPSessionPool()
     user_token = set_current_user(ambient_user) if ambient_user is not None else None
     try:
         with (
@@ -223,6 +223,7 @@ async def test_task_without_applicable_user_auth_preserves_interceptor_context(t
         assert observed_users == [ambient_user]
         assert get_current_user() is ambient_user
     finally:
+        await pool.close_all()
         if user_token is not None:
             reset_current_user(user_token)
 
