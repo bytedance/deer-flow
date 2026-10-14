@@ -12701,6 +12701,7 @@ class TestTelegramStreaming:
                 chat_id=12345,
                 text="Working on it...",
                 reply_to_message_id=42,
+                allow_sending_without_reply=True,
             )
 
         _run(go())
