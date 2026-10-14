@@ -221,13 +221,9 @@ round-trip validation must still reject newly entered skipped times.
 
 ## Contributing
 
-When adding features:
-
-1. Follow the established `src/` structure
-2. Add TypeScript types and proper error handling
-3. Write unit tests under `tests/unit/` (`pnpm test`) and E2E tests under `tests/e2e/` (`pnpm test:e2e`)
-4. Run `pnpm check` before committing
-5. Update this `AGENTS.md` when architecture, commands, or conventions change
+Follow `src/` layout, TypeScript types and error handling. Add unit/E2E tests
+in `tests/unit/` and `tests/e2e/`; run `pnpm test`, `pnpm test:e2e` and `pnpm check`
+before committing. Update this guide when architecture/commands/conventions change.
 
 Route asset budgets are enforced with `pnpm perf:check`. The command measures
 `/login` from a normal production build, then builds in static-demo mode for the
@@ -389,11 +385,8 @@ components directly. On a legacy model, `resolveReasoningEffort` keeps only its
 advertised generic values; this drops a remembered provider-specific token after
 a model switch without changing the backend's direct legacy-request behavior.
 
-`AgentSettingsDialog` compares model/thinking/effort drafts to its opening
-snapshot and omits untouched fields from updates. Normalize reasoning only for
-an intentional switch to a resolved model; an absent effective model (pending,
-failed, empty or missing catalog entry) is unknown capability, never proof of
-unsupported reasoning. Explicit `null` clears a setting; omission preserves it.
+Agent settings omit model/thinking/effort unchanged from the opening state;
+normalize only on a resolved model switch. Missing models never imply a clear.
 
 ## Full-stack plugin UI
 
