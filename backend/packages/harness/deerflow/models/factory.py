@@ -1,5 +1,6 @@
 import copy
 import logging
+import os
 
 from langchain.chat_models import BaseChatModel
 from langchain_openai.chat_models.base import BaseChatOpenAI
@@ -452,7 +453,13 @@ def _apply_stream_chunk_timeout_default(model_class: type, model_settings_from_c
 #   those deployments (LiteLLM, vLLM, one-api, …) often lack ``/responses`` and
 #   must not be silently re-pointed. ``AzureChatOpenAI`` is skipped too: it
 #   subclasses ``BaseChatOpenAI``, and Azure's Responses API additionally
-#   requires ``api-version >= 2025-04-01-preview``.
+#   requires ``api-version >= 2025-04-01-preview``. A gateway wired purely via
+#   the ``OPENAI_BASE_URL``/``OPENAI_API_BASE`` environment variables (the openai
+#   SDK's fallback when no ``base_url`` is passed) is also treated as a custom
+#   endpoint. Known blind spot: a ``BaseChatOpenAI`` subclass that declares its
+#   own ``api_base`` field (ChatDeepSeek-style) skips
+#   ``_normalize_openai_base_url``, so its ``api_base`` never becomes ``base_url``
+#   and is invisible to this gate.
 # * **The injection is logged**, so an operator can trace why their model began
 #   calling ``/responses`` even before they diagnose a failure.
 #
@@ -462,8 +469,9 @@ def _apply_stream_chunk_timeout_default(model_class: type, model_settings_from_c
 #   operator's routing decision, even on a custom endpoint or Azure.
 # * Otherwise a ``BaseChatOpenAI`` subclass whose ``model`` starts with ``gpt-6``
 #   gets ``use_responses_api: true`` + ``output_version: responses/v1`` injected,
-#   unless the model targets a custom endpoint (``base_url``/``openai_api_base``)
-#   or is an ``AzureChatOpenAI``.
+#   unless the model targets a custom endpoint (``base_url``/``openai_api_base``,
+#   or a set ``OPENAI_BASE_URL``/``OPENAI_API_BASE`` env var) or is an
+#   ``AzureChatOpenAI``.
 # * An explicit ``output_version`` alone (without ``use_responses_api``) implies
 #   the operator expects Responses formatting: their value is preserved and
 #   ``use_responses_api: true`` is still injected, so the issue #6841 400s do not
@@ -488,6 +496,13 @@ def _apply_openai_responses_api_default(model_class: type, model_settings_from_c
     if any(getattr(base, "__name__", "") == "AzureChatOpenAI" for base in model_class.__mro__):
         return
     if any(key in model_settings_from_config for key in ("base_url", "openai_api_base", "azure_endpoint")):
+        return
+    # A gateway can also be wired purely through the environment: the openai SDK
+    # falls back to OPENAI_BASE_URL/OPENAI_API_BASE when no base_url is passed,
+    # so a gpt-6 model behind an env-var-wired gateway would otherwise be
+    # re-pointed at <gateway>/responses — the exact regression the endpoint gate
+    # exists to avoid. Treat a set env var like an explicit endpoint.
+    if os.getenv("OPENAI_BASE_URL") or os.getenv("OPENAI_API_BASE"):
         return
     if "output_version" in model_settings_from_config:
         # Operator pinned an output version — implying Responses formatting —

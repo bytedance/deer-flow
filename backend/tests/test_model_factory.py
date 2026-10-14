@@ -2721,3 +2721,51 @@ def test_gpt6_output_version_only_still_routes(monkeypatch):
 
     assert captured.get("use_responses_api") is True
     assert captured.get("output_version") == "responses/v1"
+
+
+def test_gpt6_env_var_base_url_not_rerouted(monkeypatch):
+    """A gpt-6 model with no ``base_url`` in settings but a gateway wired purely
+    via the ``OPENAI_BASE_URL`` env var must not be re-pointed at ``/responses``:
+    the openai SDK falls back to that env var when no ``base_url`` is passed.
+    """
+    from langchain_openai import ChatOpenAI
+
+    model = _make_model("gpt-6.1-sol", use="langchain_openai:ChatOpenAI")
+    cfg = _make_app_config([model])
+
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://env-gateway.example.com/v1")
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
+    factory_module.create_chat_model(name="gpt-6.1-sol")
+
+    assert captured.get("use_responses_api") is None
+    assert captured.get("output_version") is None
+
+
+def test_gpt6_explicit_responses_config_wins_on_custom_endpoint(monkeypatch):
+    """An explicit ``use_responses_api`` is the operator's routing decision and
+    must win even on a custom endpoint: the explicit-key check precedes the
+    endpoint gate, so a ``base_url``-configured gpt-6 model keeps its explicit
+    value instead of being silently left on default chat-completions routing.
+    """
+    from langchain_openai import ChatOpenAI
+
+    model = ModelConfig(
+        name="gpt-6-gateway-explicit",
+        display_name="GPT-6 gateway with explicit routing",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="gpt-6.1-sol",
+        base_url="https://my-gateway.example.com/v1",
+        use_responses_api=True,
+        output_version="responses/v1",
+    )
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
+    factory_module.create_chat_model(name="gpt-6-gateway-explicit")
+
+    assert captured.get("use_responses_api") is True
+    assert captured.get("output_version") == "responses/v1"
