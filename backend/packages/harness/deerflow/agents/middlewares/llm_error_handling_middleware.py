@@ -81,7 +81,7 @@ def _consume_empty_response_retry(request: ModelRequest) -> bool:
     return True
 
 
-_RETRIABLE_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
+_RETRIABLE_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504, 529}
 _BUSY_PATTERNS = (
     "server busy",
     "temporarily unavailable",

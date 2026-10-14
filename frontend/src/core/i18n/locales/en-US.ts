@@ -494,6 +494,53 @@ export const enUS: Translations = {
     goalFailed: "Goal command failed.",
     goalTooLong: "Goal is too long. Keep it under {max} characters.",
     goalLengthCounter: "Goal length: {length}/{max} characters",
+    goalBar: {
+      regionLabel: "Goal status",
+      inProgress: "In progress",
+      stopped: "Stopped",
+      waitingForYou: "Waiting for you",
+      waiting: "Waiting",
+      paused: "Paused",
+      autoContinuedOnce: "Auto-continued once",
+      autoContinuedMany: "Auto-continued {count} times",
+      details: "Details",
+      hideDetails: "Hide details",
+      noteLabel: "Goal check note (from the checker)",
+      codeLabel: "Stop code",
+      assumptionTooltip:
+        "The agent filled in something the goal didn't specify and said so in its reply. Check the reply above.",
+      announce: "{status}: {detail}",
+      editLocked:
+        "Editing is off while a goal is set. Run /goal clear to edit.",
+      busy: "A run is still going in this chat. Try again when it finishes.",
+      next: {
+        limit:
+          "Continuation limit reached · {count}/{max}. It won't auto-continue again. Reply to keep going, or set the goal again with /goal <condition> to start a fresh count (this also starts a new run).",
+        autoOff:
+          "Goal check: not met yet. Auto-continue is off for this goal. Reply to keep going.",
+        noProgress:
+          "No progress between turns. Reply with what's missing, or rephrase the goal with /goal.",
+        tokenCapped:
+          "Token budget reached. Send a message to continue; a new run starts with a fresh budget.",
+        missingEvidence:
+          "Goal check: evidence missing. Ask it to show the result or explain what's missing; if the goal no longer applies, run /goal clear.",
+        runFailed:
+          "Goal check: the run did not finish the work. Check the reply for errors, then send a message to retry.",
+        needsInputCard: "Answer the question above to continue.",
+        needsInputReply: "Reply with the missing details to continue.",
+        external:
+          "Goal check: waiting on something external. Send a message when it's ready.",
+        unchecked: "{reason}. It's checked again after your next message.",
+        unknown: "Send a message to keep going.",
+        paused:
+          "Auto-continued {count}/{max}. The run ended before the goal was confirmed. Send a message to check again.",
+      },
+      uncheckedReasons: {
+        evaluatorFailed: "The run itself may be fine",
+        noDurableEndOfTurn: "No final reply was saved",
+        threadChanged: "The chat changed during the check",
+      },
+    },
     compactSuccess:
       "Earlier context compacted. The full chat remains visible; future model calls will use the summary and recent messages.",
     compactSkipped: "The current context does not need compaction yet.",
@@ -972,6 +1019,39 @@ export const enUS: Translations = {
         "Tasks created in chat that run more often than hourly need a safety cap.",
       submit: "Resume",
     },
+    notificationGroup: {
+      savedUnavailable:
+        "This task has a saved group destination, but group notifications are unavailable on this server.",
+      clearSaved: "Clear group notification",
+      bind: "Bind a Feishu group",
+      refresh: "Refresh group list",
+      bindInstructions:
+        "Add the bot to the group, then mention the bot and send this command in that group. Refresh the group list after binding.",
+      generating: "Generating a binding code…",
+      bindFailed: "Could not create a binding code. Try again.",
+      command: "Group binding command",
+      expiresAt: "Expires at {time}.",
+      copy: "Copy command",
+      copied: "Copied",
+      copyFailed: "Could not copy. Select and copy the command above.",
+      newCode: "Generate a new code",
+      close: "Close binding instructions",
+      label: "Also notify a Feishu group (optional)",
+      detailLabel: "Additional Feishu group",
+      none: "No additional group",
+      personalHint:
+        "Your personal notifications stay unchanged. The selected group also receives task updates.",
+      emptyHint: "Bind a Feishu group below, then refresh the list.",
+      loading: "Loading groups…",
+      unavailable: "Selected group unavailable",
+      unavailableHint:
+        "The selected group is no longer available. Keep it, remove it, or choose another group.",
+      unnamed: "Group name unavailable",
+      unnamedHint:
+        "Check the app's group-information permission, then bind the group again to load its name.",
+      loadFailed:
+        "Could not load groups. Your selection is kept; you can save other changes or remove it.",
+    },
     form: {
       createTitle: "New scheduled task",
       editTitle: "Edit task",
@@ -1143,6 +1223,8 @@ export const enUS: Translations = {
       goalRequiresFreshThread: "A goal needs each run to start a new chat.",
       invalidStopCondition:
         "The stop condition must be at most {max_chars} characters.",
+      invalidNotificationGroup:
+        "This Feishu group is no longer available. Select another group or remove the additional notification.",
       invalidMaxRuns: "The run limit must be a whole number of at least 1.",
       endAtInPast: "Pick an end time in the future.",
       endAtBeforeFirstRun: "The end time must leave room for at least one run.",
@@ -1313,12 +1395,20 @@ export const enUS: Translations = {
       "Display name must be at most 100 Unicode code points.",
     settingsDisplayNameHint:
       "Supports Unicode. Leave blank to use the agent identifier",
+    settingsToolGroups: "Tool access",
+    settingsToolGroupsHint:
+      "Restrict which configured tool groups this agent and its delegated tasks may use.",
+    settingsToolGroupsAll: "Use every configured tool group",
+    settingsToolGroupsLoadFailed: "Tool groups could not be loaded.",
+    settingsToolGroupUnavailable: "unavailable",
     settingsDescription:
       "Choose a display name and model defaults for this agent. Model changes take effect on the next message.",
     settingsKnowledge: "Default knowledge",
     settingsKnowledgeHint:
       "New conversations use this knowledge scope. Individual messages can override it. Selecting all knowledge bases removes the binding.",
     settingsKnowledgeReset: "Use all knowledge bases",
+    settingsKnowledgeSaveToolAccess:
+      "Save tool access before choosing default knowledge bases.",
     settingsModel: "Default model",
     settingsModelDefault: "Use global default",
     settingsTemperature: "Temperature",
@@ -1738,7 +1828,7 @@ export const enUS: Translations = {
       enable: "Enable",
       disable: "Disable",
       formDescription:
-        "Connect an OpenAI-compatible endpoint. Testing sends a short streaming tool-call request and may incur provider charges.",
+        "Choose a provider and enter its API key and model ID. Testing sends a short streaming tool-call request and may incur provider charges.",
       provider: "Provider",
       name: "Unique name",
       displayName: "Display name",
@@ -1760,9 +1850,47 @@ export const enUS: Translations = {
         "The endpoint responded, but did not return a tool call. Check the model’s tool support.",
       connection_failed:
         "Connection test failed. Check the endpoint, credentials, model ID and streaming/tool support.",
+      customProvider: "Custom OpenAI-compatible",
+      apiKey: "API Key",
+      advanced: "Advanced settings",
+      providerDefault: "Provider default",
+      requiredKey: "Enter the provider API key",
+      providerChanged:
+        "Connection changed. Enter a new API key; the saved key will not be reused.",
+      missing_api_key:
+        "This provider requires an API key. Enter a key, or disable the model before clearing its key.",
+      authentication_failed:
+        "Authentication failed. Check the API key and the provider region or plan.",
+      response_limit: "The test response exceeded its safe output limit.",
+      revisionConflict:
+        "The model changed or its name is reserved. Reload the list and reopen the editor. Your draft has been kept.",
+      keyOrCapabilities:
+        "Check the API key and capability overrides. Preset models must be disabled before removing their key.",
+      invalidModel:
+        "Invalid model configuration. Check the provider, model ID and advanced settings.",
+    },
+    users: {
+      title: "User management",
+      description:
+        "Suspend or restore sign-in for accounts on this deployment. A disabled account is rejected by every authentication surface; its active sessions end immediately.",
+      adminOnly:
+        "Only administrators can manage users. This feature is unavailable in demos.",
+      loading: "Loading users…",
+      failed: "Failed to load users.",
+      reload: "Reload",
+      empty: "No users yet.",
+      email: "Email",
+      role: "Role",
+      status: "Status",
+      active: "Active",
+      disabled: "Disabled",
+      disable: "Disable",
+      enable: "Enable",
+      updateFailed: "Failed to update the account.",
     },
     sections: {
       models: "Models",
+      users: "Users",
       account: "Account",
       appearance: "Appearance",
       channels: "Channels",
@@ -2165,6 +2293,16 @@ export const enUS: Translations = {
       },
     },
     skills: {
+      diagnosticsTitle: "Could not load",
+      diagnosticsScope:
+        "Only YAML syntax errors in your own custom skills are shown. After correcting a SKILL.md file, reload skills. Missing frontmatter, metadata validation errors, and unreadable or non-UTF-8 files are not reported. Shared and externally linked packages are excluded.",
+      diagnosticsInvalid: "Invalid YAML frontmatter.",
+      diagnosticsQuote: "Quote values containing a colon followed by a space.",
+      diagnosticsRefresh: "Reload skills",
+      diagnosticsRefreshing: "Reloading skills…",
+      diagnosticsFailed:
+        "Could not check custom skills for YAML errors. Reload to try again.",
+      diagnosticsReloadFailed: "Could not reload skills. Try again.",
       exportPrevious: "Previous 50 files",
       exportNotices: {
         skill_export_yaml_alias:
@@ -2314,6 +2452,8 @@ export const enUS: Translations = {
         "An account with this email already exists. Please sign in with your password or contact your administrator.",
       sso_not_allowed:
         "SSO login is not allowed for your account. Contact your administrator.",
+      account_disabled:
+        "This account has been disabled. Contact your administrator.",
     },
   },
 };

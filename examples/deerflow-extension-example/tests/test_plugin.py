@@ -70,7 +70,7 @@ class FakeToolRequest:
     runtime: FakeRuntime
 
 
-def test_install_registers_all_five_contribution_kinds() -> None:
+def test_install_registers_the_five_demonstrated_contribution_kinds() -> None:
     registry = FakeRegistry()
 
     install(registry, {})
@@ -81,6 +81,9 @@ def test_install_registers_all_five_contribution_kinds() -> None:
     assert len(registry.system_model_observers) == 1
     assert len(registry.services) == 1
     assert len(registry.contributed_routers) == 1
+    # The README names these as not demonstrated here.
+    assert registry.agent_assembly_observers == []
+    assert registry.context_compaction_observers == []
     assert [route.path for route in registry.contributed_routers[0].routes] == ["/api/extension-example/stats"]
     assert install.__deerflow_api__ == "0.2.0"
     assert install.__deerflow_name__ == "example"

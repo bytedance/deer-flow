@@ -1,8 +1,11 @@
 """Memory update queue with debounce mechanism.
 
 The queue collects conversation contexts and processes them after a
-configurable debounce period; multiple contexts for the same
-``(thread_id, user_id, agent_name)`` key are coalesced into one update.
+per-key debounce period; multiple contexts for the same
+``(thread_id, user_id, agent_name)`` key are coalesced into one update. A
+monotonic deadline caps debounce deferral at ``max_wait_seconds`` from the
+first pending arrival. One timer wakes for the earliest deadline; the single
+consumer processes only eligible items unless explicitly flushed.
 
 The queue is a process-local in-memory list plus a debounce
 :class:`~threading.Timer`. Items still pending at process exit are lost
@@ -123,14 +126,19 @@ class ConversationContext:
     # waiting to peek. The call must not enqueue those pre-clear messages
     # under the new generation.
     consumed_by_clear: bool = False
+    # Monotonic scheduling times; timestamp remains wall-clock metadata.
+    # Same-generation merges keep ``first_at``. A newer clear starts a fresh
+    # window, and a refused older enqueue leaves the queued deadline unchanged.
+    first_at: float = field(default_factory=time.monotonic)
+    due_at: float = 0.0
 
 
 class MemoryUpdateQueue:
     """Queue for memory updates with debounce mechanism.
 
     This queue collects conversation contexts and processes them after
-    a configurable debounce period. Multiple conversations received within
-    the debounce window are batched together.
+    a per-conversation debounce period. Conversations whose deadlines have
+    elapsed are batched together; unrelated arrivals cannot postpone them.
     """
 
     def __init__(self, config: DeerMemConfig, updater: MemoryUpdater):
@@ -140,6 +148,7 @@ class MemoryUpdateQueue:
         self._items: list[ConversationContext] = []
         self._lock = threading.Lock()
         self._timer: threading.Timer | None = None
+        self._timer_due_at: float | None = None
         self._processing = False
         # Thread currently running ``_process_queue`` (None when idle). ``flush_sync``
         # joins an in-flight worker instead of reporting a false-positive "completed"
@@ -268,7 +277,7 @@ class MemoryUpdateQueue:
                 if start_immediately:
                     self._schedule_timer(0)
                 else:
-                    self._reset_timer()
+                    self._rearm_timer_locked()
         finally:
             self._end_inflight(inflight)
 
@@ -438,6 +447,22 @@ class MemoryUpdateQueue:
             excluded_message_ids |= {message_id for message in existing.messages if (message_id := _message_id(message)) is not None}
         if excluded_message_ids:
             messages = [message for message in messages if _message_id(message) not in excluded_message_ids]
+        now = time.monotonic()
+        # Keep the first arrival only while this is still the same pending
+        # batch. A newer clear replaces that batch, so the post-clear messages
+        # start their own window instead of inheriting a deadline that may
+        # already be due. A detached stale snapshot keeps the deadline it
+        # already has; the new item does not copy it. Refused older enqueues
+        # return above and leave the queued deadline unchanged.
+        if existing is not None and not detach_from_stale and existing.clear_generation == enqueued_clear_generation:
+            first_at = existing.first_at
+            due_at = now if bypass_watermark else min(now + self._config.debounce_seconds, first_at + self._config.max_wait_seconds)
+            # A forced flush's deadline must survive same-key coalescing.
+            if existing.due_at <= now:
+                due_at = existing.due_at
+        else:
+            first_at = now
+            due_at = now if bypass_watermark else min(now + self._config.debounce_seconds, first_at + self._config.max_wait_seconds)
         context = ConversationContext(
             thread_id=thread_id,
             messages=messages,
@@ -449,6 +474,8 @@ class MemoryUpdateQueue:
             clear_generation=enqueued_clear_generation,
             excluded_message_ids=excluded_message_ids,
             sequence=call_sequence,
+            first_at=first_at,
+            due_at=due_at,
         )
         if detach_from_stale:
             logger.info(
@@ -535,12 +562,20 @@ class MemoryUpdateQueue:
             return False
         return True
 
-    def _reset_timer(self) -> None:
-        """Reset the debounce timer."""
-        config = self._config
-        self._schedule_timer(config.debounce_seconds)
-
-        logger.debug("Memory update timer set for %ss", config.debounce_seconds)
+    def _rearm_timer_locked(self) -> None:
+        """Wake for the earliest deadline. Caller must hold ``_lock``."""
+        if not self._items:
+            return
+        if self._processing:
+            self._reprocess_pending = True
+            return
+        now = time.monotonic()
+        due_at = min(c.due_at for c in self._items)
+        # Keep an already-armed earlier wakeup. Recreating it on every arrival
+        # can itself starve a due item under sufficiently frequent traffic.
+        if self._timer is not None and self._timer_due_at is not None and self._timer_due_at <= due_at:
+            return
+        self._schedule_timer(max(0.05, due_at - now))
 
     def _schedule_timer(self, delay_seconds: float) -> None:
         """Schedule queue processing after the provided delay."""
@@ -552,19 +587,30 @@ class MemoryUpdateQueue:
             delay_seconds,
             self._process_queue,
         )
+        # Track the logical deadline, not the rounded wakeup time. Otherwise
+        # arrivals during the 50 ms rearm floor could keep restarting it.
+        self._timer_due_at = min((c.due_at for c in self._items), default=time.monotonic() + delay_seconds)
         self._timer.daemon = True
         self._timer.start()
 
-    def _process_queue(self, *, skip_inter_item_delay: bool = False) -> None:
-        """Process all queued conversation contexts.
+    def _process_queue(self, *, skip_inter_item_delay: bool = False, due_only: bool = True) -> None:
+        """Process due contexts, or all pending contexts for an explicit flush.
 
         Args:
+            due_only: Select only eligible contexts. Explicit flushes set
+                this to False to drain even contexts still debouncing.
             skip_inter_item_delay: When set, skip the inter-item rate-limit
                 ``time.sleep``. Intended for the shutdown-drain path
                 (:meth:`flush_sync`), which races a bounded timeout and should
                 not waste budget sleeping between items.
         """
         with self._lock:
+            # A canceled callback may already be waiting for the lock. Cancel
+            # the currently armed wakeup before selecting/rearming deadlines.
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+                self._timer_due_at = None
             if self._processing:
                 # Another worker is already draining the queue. Instead of
                 # spawning a tight timer spin (repeatedly re-scheduling a
@@ -577,11 +623,14 @@ class MemoryUpdateQueue:
             if not self._items:
                 return
 
+            now = time.monotonic()
+            contexts_to_process = [c for c in self._items if not due_only or c.due_at <= now]
+            if not contexts_to_process:
+                self._rearm_timer_locked()
+                return
             self._processing = True
             self._processing_thread = threading.current_thread()
-            contexts_to_process = self._items
-            self._items = []
-            self._timer = None
+            self._items = [c for c in self._items if due_only and c.due_at > now]
 
         logger.info("Processing %d queued memory updates", len(contexts_to_process))
 
@@ -635,15 +684,12 @@ class MemoryUpdateQueue:
                 self._processing_thread = None
                 # Reschedule inside the lock: ``_schedule_timer`` read-cancels-
                 # reassigns ``self._timer`` non-atomically, and a concurrent
-                # ``add``'s ``_reset_timer`` (also under the lock) touches the
+                # ``add``'s ``_rearm_timer_locked`` (also under the lock) touches the
                 # same field. Holding the lock makes the reschedule atomic w.r.t.
                 # ``add``. ``_schedule_timer`` only calls ``Timer.start()`` (no
                 # synchronous lock acquisition), so this cannot deadlock.
-                if self._reprocess_pending:
-                    self._reprocess_pending = False
-                    if self._items:
-                        # New work arrived mid-processing: re-run immediately.
-                        self._schedule_timer(0)
+                self._reprocess_pending = False
+                self._rearm_timer_locked()
 
     def flush(self, *, skip_inter_item_delay: bool = False) -> None:
         """Force immediate processing of the queue.
@@ -659,8 +705,14 @@ class MemoryUpdateQueue:
             if self._timer is not None:
                 self._timer.cancel()
                 self._timer = None
+                self._timer_due_at = None
+            # If another worker is busy, its follow-up must still honor this
+            # explicit drain even though ordinary deadlines are in the future.
+            now = time.monotonic()
+            for context in self._items:
+                context.due_at = min(context.due_at, now)
 
-        self._process_queue(skip_inter_item_delay=skip_inter_item_delay)
+        self._process_queue(skip_inter_item_delay=skip_inter_item_delay, due_only=False)
 
     def flush_sync(self, timeout: float) -> bool:
         """Best-effort synchronous flush bounded by ``timeout`` seconds.
@@ -730,11 +782,14 @@ class MemoryUpdateQueue:
         if not finished:
             return False
         # flush() returned; only report success if no worker raced back in.
-        return bool(success) and not self.is_processing
+        return bool(success) and not self.is_processing and self.pending_count == 0
 
     def flush_nowait(self) -> None:
         """Start queue processing immediately in a background thread."""
         with self._lock:
+            now = time.monotonic()
+            for context in self._items:
+                context.due_at = min(context.due_at, now)
             # Daemon thread: queued messages may be lost if the process exits
             # before _process_queue completes. Acceptable for best-effort memory updates.
             self._schedule_timer(0)
@@ -834,6 +889,7 @@ class MemoryUpdateQueue:
             if removed and not self._items and self._timer is not None:
                 self._timer.cancel()
                 self._timer = None
+                self._timer_due_at = None
             # Consume under the lock so a concurrent add cannot re-feed the
             # dropped snapshot before the watermark advances.
             for context in dropped:
@@ -849,6 +905,7 @@ class MemoryUpdateQueue:
             if self._timer is not None:
                 self._timer.cancel()
                 self._timer = None
+                self._timer_due_at = None
             self._items = []
             self._processing = False
             self._processing_thread = None

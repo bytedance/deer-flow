@@ -1,3 +1,12 @@
+### Atomic Byte Publication
+
+`atomic_write.publish_bytes_atomically` owns browser screenshot and Browserless
+capture/fetch publication. It writes and fsyncs a hidden exclusive sibling before
+`os.replace`, cleaning it on failure. New files use `0666` filtered by the host
+umask; replacements preserve existing permission bits before publication. Never
+read the process umask by changing it in this threaded runtime. Behavioral tests
+for both tool imports live in `tests/test_browser_outputs_atomic.py`.
+
 ### Model Retry Hints
 
 `retry_after.py::bounded_retry_after_ms` shares the 24-hour provider-hint ceiling
@@ -30,6 +39,12 @@ which takes a whole message and uses different list/mapping semantics.
 Regression coverage lives in `tests/test_utils_messages.py`,
 `tests/test_subagent_executor.py`, and `tests/test_task_continuity.py`.
 
+`llm_text.py::extract_response_text` ignores content blocks with non-string
+`type` values, including lists and mappings, while retaining adjacent text and
+output-text blocks. Tests cover extraction and the one-shot input-polish path
+with real LangChain messages in `tests/test_utils_llm_text.py` and
+`tests/test_input_polish_router.py`.
+
 `llm_text.py::strip_think_blocks` scans opening and closing tags forward so
 repeated unclosed `<think>` prefixes in model output do not rescan the same
 suffix. Keep its case-insensitive tag handling, optional whitespace before
@@ -41,6 +56,8 @@ name; punctuated names such as `<think-tank>`, `<think:note>`, and `<think/other
 are ordinary content. The shared prefix regex owns this boundary rule; do not
 duplicate it in a manual re-check. Self-closing `<think/>` and `<think />` tags
 are empty reasoning blocks: remove the tag without consuming subsequent text.
+Both cleanup functions find opening delimiters outside quoted attributes; a
+quoted `>` cannot terminate the tag or hide an answer after a self-closing tag.
 Keep exact unfinished `<think` prefixes hidden in leading summaries. Coverage:
 `tests/test_think_tag_boundaries.py`.
 

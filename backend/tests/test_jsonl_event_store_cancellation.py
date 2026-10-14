@@ -42,6 +42,36 @@ async def _checkpoint():
 
 
 @pytest.mark.anyio
+async def test_cancelled_watermark_publication_drains_before_thread_delete(tmp_path, monkeypatch):
+    store = JsonlRunEventStore(tmp_path)
+    await store.put(**_event(content="baseline"))
+    paused = _PausedIO(store._save_seq_watermark)
+    monkeypatch.setattr(store, "_save_seq_watermark", paused)
+    pending = asyncio.create_task(store.delete_by_run("t1", "r1"))
+    deletion = None
+    try:
+        await asyncio.wait_for(paused.entered.wait(), 5)
+        pending.cancel()
+        await _checkpoint()
+        pending.cancel()
+        deletion = asyncio.create_task(store.delete_by_thread("t1"))
+        await _checkpoint()
+        assert not pending.done()
+        assert not deletion.done()
+        paused.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        assert await deletion == 0
+        assert not (tmp_path / "threads" / "t1" / "runs" / ".seq-watermark").exists()
+        new = await JsonlRunEventStore(tmp_path).put(**_event("r2"))
+        assert new["seq"] == 1
+    finally:
+        paused.release.set()
+        await asyncio.gather(pending, *([deletion] if deletion is not None else []), return_exceptions=True)
+        await asyncio.wait_for(paused.finished.wait(), 5)
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("method", ["put", "put_if_absent", "put_batch"])
 @pytest.mark.parametrize("cancellations", [1, 3])
 async def test_cancelled_write_cannot_recreate_deleted_records(tmp_path, monkeypatch, method, cancellations):

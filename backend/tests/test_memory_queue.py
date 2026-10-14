@@ -152,7 +152,7 @@ def test_finishing_worker_reschedules_once_when_reprocess_pending() -> None:
     with patch("deerflow.agents.memory.backends.deermem.deermem.core.queue.threading.Timer", return_value=created_timer) as timer_cls:
         queue._process_queue()
 
-    timer_cls.assert_called_once_with(0, queue._process_queue)
+    timer_cls.assert_called_once_with(0.05, queue._process_queue)
     assert created_timer.daemon is True
     created_timer.start.assert_called_once_with()
     assert queue._reprocess_pending is False
@@ -198,7 +198,7 @@ def test_flush_nowait_is_non_blocking() -> None:
 
 def test_queue_keeps_updates_for_different_agents_in_same_thread() -> None:
     queue = _queue()
-    with patch.object(queue, "_reset_timer"):
+    with patch.object(queue, "_rearm_timer_locked"):
         queue.add(thread_id="thread-1", messages=["agent-a"], agent_name="agent-a")
         queue.add(thread_id="thread-1", messages=["agent-b"], agent_name="agent-b")
 
@@ -220,7 +220,7 @@ def test_queue_still_coalesces_updates_for_same_agent_in_same_thread() -> None:
 
 def test_process_queue_updates_different_agents_in_same_thread_separately() -> None:
     queue = _queue()
-    with patch.object(queue, "_reset_timer"):
+    with patch.object(queue, "_rearm_timer_locked"):
         queue.add(thread_id="thread-1", messages=["agent-a"], agent_name="agent-a")
         queue.add(thread_id="thread-1", messages=["agent-b"], agent_name="agent-b")
 
@@ -514,7 +514,7 @@ def test_queue_coalesce_keeps_stale_fence_when_pre_clear_consume_fails() -> None
         sequence=1,
     )
 
-    queue._process_queue()
+    queue._process_queue(due_only=False)
     assert mock_updater.update_memory.call_count == 2
     first_call, second_call = mock_updater.update_memory.call_args_list
     assert first_call.kwargs["messages"] == ["first"]
@@ -670,7 +670,7 @@ def test_queue_failed_refresh_strips_pre_clear_ids_from_fresh_snapshot() -> None
     assert [message.id for message in queue._items[1].messages] == ["m3", "m4", "m5"]
     assert queue._items[1].excluded_message_ids == frozenset({"m1", "m2"})
 
-    queue._process_queue()
+    queue._process_queue(due_only=False)
     assert mock_updater.update_memory.call_count == 2
     stale_call, fresh_call = mock_updater.update_memory.call_args_list
     assert stale_call.kwargs["messages"] == pre_clear
@@ -691,6 +691,49 @@ def test_queue_failed_refresh_keeps_id_less_messages() -> None:
     assert queue.pending_count == 2
     assert queue._items[1].excluded_message_ids == frozenset()
     assert [message.content for message in queue._items[1].messages] == ["I like Python"]
+
+
+def test_successful_clear_refresh_starts_a_new_deadline_window() -> None:
+    """Post-clear messages must not inherit a pre-clear deadline that is already due."""
+    mock_updater = MagicMock()
+    mock_updater.peek_clear_generation.side_effect = [(0, 0), (1, 0)]
+    queue = MemoryUpdateQueue(DeerMemConfig(debounce_seconds=30, max_wait_seconds=300), mock_updater)
+    module = "deerflow.agents.memory.backends.deermem.deermem.core.queue"
+    with patch(f"{module}.time.monotonic") as clock, patch(f"{module}.threading.Timer"):
+        clock.return_value = 100
+        queue.add(thread_id="thread-1", messages=["before"], agent_name="researcher", user_id="alice")
+        clock.return_value = 130
+        queue.add(thread_id="thread-1", messages=["after"], agent_name="researcher", user_id="alice")
+
+    assert queue.pending_count == 1
+    assert queue._items[0].messages == ["after"]
+    assert queue._items[0].clear_generation == (1, 0)
+    assert queue._items[0].first_at == 130
+    assert queue._items[0].due_at == 160
+    mock_updater.mark_feed_consumed.assert_called_once()
+
+
+def test_failed_clear_refresh_keeps_the_stale_deadline() -> None:
+    """The pre-clear snapshot keeps its deadline; the new messages start their own."""
+    mock_updater = MagicMock()
+    mock_updater.peek_clear_generation.side_effect = [(0, 0), (1, 0)]
+    mock_updater.mark_feed_consumed.side_effect = RuntimeError("watermark unavailable")
+    queue = MemoryUpdateQueue(DeerMemConfig(debounce_seconds=30, max_wait_seconds=300), mock_updater)
+    module = "deerflow.agents.memory.backends.deermem.deermem.core.queue"
+    with patch(f"{module}.time.monotonic") as clock, patch(f"{module}.threading.Timer"):
+        clock.return_value = 100
+        queue.add(thread_id="thread-1", messages=["before"], agent_name="researcher", user_id="alice")
+        clock.return_value = 120
+        queue.add(thread_id="thread-1", messages=["after"], agent_name="researcher", user_id="alice")
+
+    assert queue.pending_count == 2
+    assert queue._items[0].messages == ["before"]
+    assert queue._items[0].first_at == 100
+    assert queue._items[0].due_at == 130
+    assert queue._items[1].messages == ["after"]
+    assert queue._items[1].clear_generation == (1, 0)
+    assert queue._items[1].first_at == 120
+    assert queue._items[1].due_at == 150
 
 
 def test_queue_coalesce_does_not_refresh_missing_generation_from_storage() -> None:

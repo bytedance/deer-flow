@@ -34,15 +34,13 @@ Nginx is the single public entry: it proxies `/api/*` to the Gateway, rewriting
 HTML and configured textual assets, deliberately leaving SSE, fonts, images, audio, and
 video uncompressed at the proxy layer.
 
-Both compose files publish that entry as `"${BIND_HOST:-127.0.0.1}:${PORT:-2026}:2026"`
-— **loopback by default**, matching the README's documented deployment model; a bare
-`"${PORT}:2026"` binds `0.0.0.0`, which does not. The root `PORT` value is Docker ingress
-configuration only; local orchestration pins Next.js to `3000` so loading `.env` cannot
-make `make dev` wait on the wrong port. Nginx listening `default_server` on IPv4+IPv6 and
-the Gateway binding `0.0.0.0:8001` are container-internal on purpose: the published nginx
-port is the entire external surface. Any new published port needs an explicit bind
-address; `backend/tests/test_compose_default_bind_host.py` pins this for every service in
-both compose files.
+Both Compose files publish nginx at `"${BIND_HOST:-127.0.0.1}:${PORT:-2026}:2026"`
+(README's **loopback default**); bare `"${PORT}:2026"` binds `0.0.0.0`. Root `PORT`
+controls Docker ingress only; local Next.js stays on `3000` so `.env` cannot
+redirect `make dev`'s port wait. Nginx's IPv4+IPv6 `default_server` and Gateway's
+`0.0.0.0:8001` bind are container-internal; only published nginx is external.
+Require explicit bind addresses for new published ports;
+`backend/tests/test_compose_default_bind_host.py` pins every service in both files.
 
 ## Repository Map
 
@@ -227,6 +225,8 @@ These apply repo-wide; module guides own the module-specific detail.
 - **Test-driven development** — features and bug fixes ship with tests. Backend tests live
   in `backend/tests/` (TDD is mandatory there; see [backend/AGENTS.md](backend/AGENTS.md));
   frontend tests live in `frontend/tests/`.
+  Public skill script regressions live in `tests/skills/`; exercise dependency fallbacks
+  with the optional import unavailable and mock HTTP transport to keep tests offline.
 - **Format before pushing** — run `make format` (backend) / `pnpm check` (frontend). Backend
   CI enforces `ruff format --check`, so formatting must be clean before a push.
 - **Skill text encoding** — treat `SKILL.md` and other textual skill resources as UTF-8;

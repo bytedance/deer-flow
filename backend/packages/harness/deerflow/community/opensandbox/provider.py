@@ -3,26 +3,32 @@
 from __future__ import annotations
 
 import atexit
+import base64
 import ipaddress
 import logging
 import math
 import os
+import shlex
+import stat
+import tempfile
 import threading
 import time
+import unicodedata
 import uuid
 from datetime import timedelta
 from functools import partial
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from deerflow.config import get_app_config
-from deerflow.sandbox.acquire_serialization import AcquireSerializer
+from deerflow.sandbox.acquire_serialization import AcquireSerializer, AcquireSerializerClosed
 from deerflow.sandbox.identity import derive_sandbox_scope_token
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.sandbox_provider import SandboxProvider
 
 from ..warm_pool_lifecycle import WarmPoolLifecycleMixin
-from .sandbox import OpenSandboxSandbox, format_execution
+from .sandbox import _MAX_DOWNLOAD_SIZE, OpenSandboxSandbox, execution_stdout, format_execution
 
 if TYPE_CHECKING:
     from opensandbox.config.connection_sync import ConnectionConfigSync
@@ -38,6 +44,7 @@ DEFAULT_SANDBOX_TIMEOUT = 4 * 60 * 60
 DEFAULT_COMMAND_TIMEOUT = 10 * 60
 _BOOTSTRAP_TIMEOUT = 30.0
 _BOOTSTRAP_COMMAND = "mkdir -p /mnt/user-data/workspace /mnt/user-data/uploads /mnt/user-data/outputs"
+_WINDOWS_RESERVED_NAMES = frozenset({"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"} | {f"{prefix}{digit}" for prefix in ("COM", "LPT") for digit in "123456789¹²³"})
 
 
 def _uses_insecure_remote_http(domain: Any, protocol: str) -> bool:
@@ -75,6 +82,10 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
     uses_thread_data_mounts = False
     needs_upload_permission_adjustment = True
     _idle_checker_thread_name = "opensandbox-idle-reaper"
+    _MAX_SYNC_FILES = 2000
+    _MAX_SYNC_TOTAL_BYTES = 512 * 1024 * 1024
+    _MAX_SYNC_LISTING_BYTES = 512 * 1024
+    _SYNC_DEADLINE_SECONDS = 120.0
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -114,6 +125,8 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             logger.warning("OpenSandboxProvider: no api_key or domain configured (set sandbox.api_key/sandbox.domain in config.yaml or OPEN_SANDBOX_API_KEY/OPEN_SANDBOX_DOMAIN). The SDK will default to unauthenticated localhost:8080.")
         if _uses_insecure_remote_http(effective_domain, protocol):
             logger.warning("OpenSandboxProvider: remote OpenSandbox domain uses HTTP; use HTTPS to protect credentials and sandbox traffic.")
+        # $VARS in config.yaml are already resolved by AppConfig.resolve_env_variables;
+        # resolving again would rewrite a secret that itself starts with $.
         environment = dict(option("environment") or {})
         _validate_extra_env(environment)
         replicas = option("replicas")
@@ -135,20 +148,10 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             "ready_timeout": self._positive_float("ready_timeout", option("ready_timeout"), DEFAULT_READY_TIMEOUT),
             "sandbox_timeout": None if sandbox_timeout == 0 else sandbox_timeout,
             "command_timeout": self._positive_float("bash_command_timeout", option("bash_command_timeout"), DEFAULT_COMMAND_TIMEOUT),
-            "environment": self._resolve_env_vars(environment),
+            "environment": environment,
             "replicas": replicas if replicas is not None else self.DEFAULT_REPLICAS,
             "idle_timeout": idle_timeout if idle_timeout is not None else self.DEFAULT_IDLE_TIMEOUT,
         }
-
-    @staticmethod
-    def _resolve_env_vars(env_config: dict[str, str]) -> dict[str, str]:
-        resolved: dict[str, str] = {}
-        for key, value in env_config.items():
-            if isinstance(value, str) and value.startswith("$"):
-                resolved[key] = os.environ.get(value[1:], "")
-            else:
-                resolved[key] = "" if value is None else str(value)
-        return resolved
 
     def _get_sdk(self) -> tuple[type[SandboxSync], type[ConnectionConfigSync], type[RunCommandOpts]]:
         with self._lock:
@@ -362,19 +365,189 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             return self._sandboxes.get(sandbox_id)
 
     def release(self, sandbox_id: str) -> None:
+        # Same scope lock as acquire: no next turn may reuse a client while its
+        # previous outputs are still being mirrored. Keep it active until sync
+        # finishes so the warm-pool reaper cannot destroy it during transfer.
         with self._lock:
-            sandbox = self._sandboxes.pop(sandbox_id, None)
+            if sandbox_id not in self._sandboxes:
+                return
+        try:
+            with self._acquire_serializer.hold(sandbox_id):
+                self._release_scope_locked(sandbox_id)
+        except AcquireSerializerClosed:
+            # reset/shutdown can close the serializer between the existence
+            # check and checkout. Preserve release's no-op after termination.
+            with self._lock:
+                untracked = sandbox_id not in self._sandboxes
+            if not untracked:
+                raise
+
+    def _release_scope_locked(self, sandbox_id: str) -> None:
+        with self._lock:
+            sandbox = self._sandboxes.get(sandbox_id)
+            scope = next((key for key, value in self._thread_sandboxes.items() if value == sandbox_id), None)
+        if sandbox is None:
+            return
+        if scope is not None and scope[0]:
+            try:
+                self._sync_outputs_to_host(sandbox, user_id=scope[0], thread_id=scope[1])
+            except Exception:
+                logger.warning("Failed to synchronize OpenSandbox outputs for %s", sandbox_id, exc_info=True)
+        with self._lock:
+            # Terminal transfer failures or shutdown may already untrack
+            # this client. Never resurrect it in the warm pool.
+            if self._sandboxes.get(sandbox_id) is not sandbox:
+                return
+            self._sandboxes.pop(sandbox_id)
             for key in [key for key, value in self._thread_sandboxes.items() if value == sandbox_id]:
                 self._thread_sandboxes.pop(key, None)
-            if sandbox is None:
-                return
-            if self._shutdown_called:
-                destroy_after_unlock = True
-            else:
+            destroy_after_unlock = self._shutdown_called
+            if not destroy_after_unlock:
                 self._warm_pool[sandbox_id] = (sandbox, time.time())
-                destroy_after_unlock = False
         if destroy_after_unlock:
             self._destroy_quietly(sandbox, context="released during shutdown")
+
+    @staticmethod
+    def _output_parts(remote_path: str) -> tuple[str, ...]:
+        prefix = "/mnt/user-data/outputs/"
+        if not remote_path.startswith(prefix) or "\\" in remote_path:
+            raise ValueError("Output path is outside the outputs directory")
+        parts = remote_path[len(prefix) :].split("/")
+        if any(part in {"", ".", ".."} or ":" in part or part.partition(".")[0].rstrip(" ").upper() in _WINDOWS_RESERVED_NAMES or part.endswith((" ", ".")) for part in parts):
+            raise ValueError("Unsafe output path")
+        return tuple(parts)
+
+    @staticmethod
+    def _output_name_key(name: str) -> str:
+        return unicodedata.normalize("NFC", name.casefold())
+
+    @classmethod
+    def _ambiguous_output_paths(cls, remote_paths: list[str | None]) -> set[str]:
+        # Component IDs keep this preflight linear in the bounded listing size,
+        # even for deeply nested names. A directory alias rejects all children.
+        components: dict[tuple[int, str], tuple[str, int]] = {}
+        ambiguous: set[int] = set()
+        path_nodes: dict[str, list[int]] = {}
+        for remote_path in remote_paths:
+            if remote_path is None:
+                continue
+            try:
+                parts = cls._output_parts(remote_path)
+            except ValueError:
+                continue
+            parent = 0
+            nodes = path_nodes.setdefault(remote_path, [])
+            for part in parts:
+                key = (parent, cls._output_name_key(part))
+                spelling, node = components.setdefault(key, (part, len(components) + 1))
+                if spelling != part:
+                    ambiguous.add(node)
+                nodes.append(node)
+                parent = node
+        return {path for path, nodes in path_nodes.items() if ambiguous.intersection(nodes)}
+
+    @classmethod
+    def _output_destination(cls, root: Path, remote_path: str) -> Path:
+        parts = cls._output_parts(remote_path)
+        target = root.joinpath(*PurePosixPath(*parts).parts)
+        # Reject links/junctions in existing parents, including the owner/thread
+        # bucket. Resolving the root first would trust an escaped linked root.
+        for component in reversed((target, *target.parents)):
+            if component.is_symlink() or component.is_junction():
+                raise ValueError("Symlinked output destination")
+        parent = root
+        for part in parts:
+            if parent.is_dir():
+                key = cls._output_name_key(part)
+                with os.scandir(parent) as entries:
+                    if any(entry.name != part and cls._output_name_key(entry.name) == key for entry in entries):
+                        raise ValueError("Output destination aliases an existing path")
+            parent = parent / part
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists() and not stat.S_ISREG(target.stat().st_mode):
+            raise ValueError("Output destination is not a regular file")
+        return target
+
+    def _sync_outputs_to_host(self, sandbox: OpenSandboxSandbox, *, thread_id: str, user_id: str) -> None:
+        """Best-effort bounded mirror before parking a remote sandbox."""
+        from deerflow.config.paths import get_paths
+
+        root = get_paths().sandbox_outputs_dir(thread_id, user_id=user_id)
+        deadline = time.monotonic() + self._SYNC_DEADLINE_SECONDS
+        remote_root = shlex.quote("/mnt/user-data/outputs")
+        command = (
+            # POSIX sh lacks pipefail: preserve each stage's own exit status.
+            'set +e; ( for _tool in find head base64 mktemp; do command -v "$_tool" >/dev/null || exit 127; done; '
+            f"[ -d {remote_root} ] && [ ! -L {remote_root} ] || exit 1; "
+            "_st=$(mktemp -d) || exit 1; "
+            f'{{ find {remote_root} -type f -print0; echo $? > "$_st/find"; }} | '
+            f'{{ head -c {self._MAX_SYNC_LISTING_BYTES + 1}; echo $? > "$_st/head"; }} | base64; _enc=$?; '
+            '_find=$(cat "$_st/find" 2>/dev/null); _head=$(cat "$_st/head" 2>/dev/null); '
+            'rm -f "$_st/find" "$_st/head"; rmdir "$_st"; '
+            'printf "\\n__DF_OUTPUT_SYNC__:%s:%s:%s\\n" "$_find" "$_head" "$_enc"; exit 0 )'
+        )
+        execution = sandbox._run(command, timeout=self._SYNC_DEADLINE_SECONDS)
+        if getattr(execution, "exit_code", None) != 0 or getattr(execution, "error", None) is not None:
+            raise OSError("OpenSandbox output listing failed")
+        # SSE stdout is line-oriented. Base64 keeps event boundaries from
+        # inserting newlines into filenames (NUL frames alone cannot do that).
+        payload, marker = execution_stdout(execution).rsplit("\n", 1)
+        if marker not in {"__DF_OUTPUT_SYNC__:0:0:0", "__DF_OUTPUT_SYNC__:1:0:0", "__DF_OUTPUT_SYNC__:141:0:0"}:
+            raise OSError(f"OpenSandbox output listing failed: {marker}")
+        raw_listing = base64.b64decode("".join(payload.split()), validate=True)
+        if marker == "__DF_OUTPUT_SYNC__:141:0:0" and len(raw_listing) <= self._MAX_SYNC_LISTING_BYTES:
+            raise OSError("OpenSandbox output listing failed: unexpected SIGPIPE")
+        if len(raw_listing) > self._MAX_SYNC_LISTING_BYTES:
+            logger.warning("OpenSandbox output listing exceeded %d bytes; skipping synchronization", self._MAX_SYNC_LISTING_BYTES)
+            return
+        if raw_listing and not raw_listing.endswith(b"\0"):
+            raise OSError("OpenSandbox output listing was incomplete")
+        if marker == "__DF_OUTPUT_SYNC__:1:0:0":
+            logger.warning("OpenSandbox output listing had traversal errors; synchronizing complete records")
+        remote_paths: list[str | None] = []
+        for remote_record in filter(None, raw_listing.split(b"\0")):
+            try:
+                remote_paths.append(remote_record.decode("utf-8"))
+            except UnicodeDecodeError:
+                logger.warning("Skipping non-UTF-8 OpenSandbox output %r", remote_record)
+                remote_paths.append(None)
+        # Include records beyond the transfer cap: publishing the first of two
+        # aliases would otherwise expose its bytes through both artifact URLs.
+        ambiguous_paths = self._ambiguous_output_paths(remote_paths)
+        total = 0
+        for index, remote_path in enumerate(remote_paths):
+            if index >= self._MAX_SYNC_FILES or total >= self._MAX_SYNC_TOTAL_BYTES or time.monotonic() >= deadline:
+                logger.warning("OpenSandbox output synchronization stopped at its file, byte or time limit")
+                break
+            if remote_path is None:
+                continue
+            if remote_path in ambiguous_paths:
+                logger.warning("Skipping ambiguous OpenSandbox output %r", remote_path)
+                continue
+            staged: Path | None = None
+            transferring = False
+            try:
+                target = self._output_destination(root, remote_path)
+                transferring = True
+                data = sandbox._download_file_bounded(remote_path, max_bytes=min(_MAX_DOWNLOAD_SIZE, self._MAX_SYNC_TOTAL_BYTES - total), deadline=deadline)
+                transferring = False
+                total += len(data)
+                with tempfile.NamedTemporaryFile(prefix=".opensandbox-sync-", dir=target.parent, delete=False) as output:
+                    staged = Path(output.name)
+                    output.write(data)
+                # Recheck confinement after the network operation before
+                # publishing, preserving any previous complete version on error.
+                self._output_destination(root, remote_path)
+                staged.replace(target)
+            except (OSError, ValueError):
+                logger.warning("Could not synchronize OpenSandbox output %r", remote_path, exc_info=True)
+                # A failed stream may already have consumed bytes that the
+                # caller cannot account for. Stop rather than reset its budget.
+                if transferring:
+                    break
+            finally:
+                if staged is not None:
+                    staged.unlink(missing_ok=True)
 
     def reset(self) -> None:
         """Park active clients so the detached provider still owns their cleanup."""

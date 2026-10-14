@@ -11,7 +11,7 @@ from langgraph_sdk.client import LangGraphClient
 
 from app.channels.manager import ChannelManager
 from app.channels.message_bus import InboundMessage, MessageBus
-from app.channels.store import ChannelStore
+from app.channels.store import JsonChannelStore
 from app.gateway.routers import thread_runs
 from deerflow.runtime import DisconnectMode, RunRecord, RunStatus
 from deerflow.runtime.stream_bridge.memory import MemoryStreamBridge
@@ -58,7 +58,7 @@ async def test_channel_consumes_error_sse_and_releases_dedupe_after_final_publis
     app.state.stream_bridge = bridge
     app.state.run_manager = SimpleNamespace(get=AsyncMock(return_value=record))
     bus = MessageBus()
-    manager = ChannelManager(bus=bus, store=ChannelStore(path=tmp_path / "channels.json"))
+    manager = ChannelManager(bus=bus, store=JsonChannelStore(path=tmp_path / "channels.json"))
     inbound = InboundMessage(channel_name="feishu", chat_id="chat-1", user_id="user-1", text="Hello", metadata={"message_id": "message-1"})
     assert await manager._is_duplicate_inbound(inbound) is False
     outbound = []

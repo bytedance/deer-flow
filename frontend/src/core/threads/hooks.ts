@@ -628,6 +628,7 @@ export function buildThreadMessagesPageUrl(
   baseUrl: string,
   threadId: string,
   beforeSeq?: number,
+  limit?: number,
 ) {
   const normalizedBaseUrl = baseUrl.replace(/\/$/, "");
   const path = `/api/threads/${encodeURIComponent(threadId)}/messages/page`;
@@ -638,6 +639,7 @@ export function buildThreadMessagesPageUrl(
   if (beforeSeq !== undefined) {
     url.searchParams.set("before_seq", String(beforeSeq));
   }
+  if (limit !== undefined) url.searchParams.set("limit", String(limit));
   return normalizedBaseUrl ? url.toString() : `${url.pathname}${url.search}`;
 }
 
@@ -649,6 +651,40 @@ export function flattenThreadHistoryPages(
       .slice()
       .reverse()
       .flatMap((page) => page.data),
+  );
+}
+
+/** Read persisted history independently of the loaded UI and compacted state. */
+export async function fetchThreadExportMessages(threadId: string) {
+  const pages: ThreadMessagesPageResponse[] = [];
+  let beforeSeq: number | undefined;
+  do {
+    const response = await fetch(
+      buildThreadMessagesPageUrl(getBackendBaseURL(), threadId, beforeSeq, 200),
+    );
+    if (!response.ok) {
+      throw new Error("Failed to load conversation for export.");
+    }
+    const page = parseThreadMessagesPageResponse(await response.json());
+    const next = getThreadHistoryNextPageParam(page);
+    if (
+      next !== undefined &&
+      (page.data.length === 0 ||
+        next !== page.data[0]?.seq ||
+        (beforeSeq !== undefined && next >= beforeSeq))
+    ) {
+      throw new Error("Thread export history cursor did not advance.");
+    }
+    pages.push(page);
+    beforeSeq = next;
+  } while (beforeSeq !== undefined);
+  return mergeMessages(
+    buildVisibleHistoryMessages(
+      flattenThreadHistoryPages(pages),
+      new Set<string>(),
+    ),
+    [],
+    [],
   );
 }
 
@@ -1714,13 +1750,14 @@ export function upsertThreadInInfiniteCache(
       exact: false,
       predicate: (query) => !hasArchiveFilter(query),
     },
-    (oldData: InfiniteData<AgentThread[]> | undefined) => {
+    (oldData: InfiniteThreadsData | undefined) => {
       if (!oldData) {
         return oldData;
       }
 
-      const merged = oldData.pages.map((page) =>
-        page.map((t) =>
+      const merged = oldData.pages.map((page) => ({
+        ...page,
+        threads: page.threads.map((t) =>
           t.thread_id === thread.thread_id
             ? {
                 ...thread,
@@ -1736,20 +1773,27 @@ export function upsertThreadInInfiniteCache(
               }
             : t,
         ),
-      );
+      }));
 
       const exists = merged.some((page) =>
-        page.some((t) => t.thread_id === thread.thread_id),
+        page.threads.some((t) => t.thread_id === thread.thread_id),
       );
       if (exists) {
         return { ...oldData, pages: merged };
       }
 
-      const firstPage = merged[0] ?? [];
+      const firstPage = merged[0] ?? {
+        threads: [],
+        hiddenCount: 0,
+        hasMore: false,
+      };
       const restPages = merged.slice(1);
       return {
         ...oldData,
-        pages: [[thread, ...firstPage], ...restPages],
+        pages: [
+          { ...firstPage, threads: [thread, ...firstPage.threads] },
+          ...restPages,
+        ],
       };
     },
   );
@@ -3334,10 +3378,6 @@ export const INFINITE_THREADS_QUERY_KEY_PREFIX = [
   "searchInfinite",
 ] as const;
 
-const INFINITE_THREADS_NEXT_PAGE_PARAM = Symbol(
-  "deerflow.infiniteThreads.nextPageParam",
-);
-
 type InfiniteThreadsParams = Omit<
   NonNullable<Parameters<ThreadsClient["search"]>[0]>,
   "limit" | "offset"
@@ -3349,29 +3389,30 @@ type InfiniteThreadsSearchClient = {
   };
 };
 
-type InfiniteThreadsPageWithNextParam = AgentThread[] & {
-  [INFINITE_THREADS_NEXT_PAGE_PARAM]?: number;
+/**
+ * One loaded page of an infinite thread list. `threads` holds the rows the
+ * list shows; `hiddenCount` counts the server rows the page consumed but the
+ * client filtered out (sidecar threads). Both live in the page data itself so
+ * cache writes and structural sharing, which rebuild pages, keep them.
+ */
+export type InfiniteThreadsPage = {
+  threads: AgentThread[];
+  hiddenCount: number;
+  /** False once the server returned fewer rows than requested. */
+  hasMore: boolean;
 };
 
-function annotateInfiniteThreadsPage(
-  page: AgentThread[],
-  nextPageParam: number | undefined,
-): AgentThread[] {
-  if (nextPageParam !== undefined) {
-    Reflect.set(page, INFINITE_THREADS_NEXT_PAGE_PARAM, nextPageParam);
-  }
-  return page;
-}
+export type InfiniteThreadsData = InfiniteData<InfiniteThreadsPage, number>;
 
 export async function fetchInfiniteThreadsPage(
   apiClient: InfiniteThreadsSearchClient,
   params: InfiniteThreadsParams,
   pageParam: number,
   pageSize: number = INFINITE_THREADS_PAGE_SIZE,
-): Promise<AgentThread[]> {
+): Promise<InfiniteThreadsPage> {
   const threads: AgentThread[] = [];
   let offset = pageParam;
-  let nextPageParam: number | undefined;
+  let hasMore = true;
 
   while (threads.length < pageSize) {
     const currentLimit = pageSize - threads.length;
@@ -3394,59 +3435,73 @@ export async function fetchInfiniteThreadsPage(
     offset += response.length;
 
     if (response.length < currentLimit) {
-      nextPageParam = undefined;
+      hasMore = false;
       break;
     }
-
-    nextPageParam = offset;
   }
 
-  return annotateInfiniteThreadsPage(threads, nextPageParam);
+  return {
+    threads,
+    hiddenCount: offset - pageParam - threads.length,
+    hasMore,
+  };
 }
 
 export function getInfiniteThreadsNextPageParam(
-  lastPage: AgentThread[],
-  allPages: AgentThread[][],
-  pageSize: number = INFINITE_THREADS_PAGE_SIZE,
+  lastPage: InfiniteThreadsPage,
+  allPages: InfiniteThreadsPage[],
 ): number | undefined {
-  const annotatedNextPageParam = Reflect.get(
-    lastPage as InfiniteThreadsPageWithNextParam,
-    INFINITE_THREADS_NEXT_PAGE_PARAM,
-  );
-  if (typeof annotatedNextPageParam === "number") {
-    return annotatedNextPageParam;
-  }
-
-  if (lastPage.length < pageSize) {
+  if (!lastPage.hasMore) {
     return undefined;
   }
-  return allPages.reduce((sum, page) => sum + page.length, 0);
+  // Count visible rows from the cache instead of freezing the fetch-time
+  // offset: a local delete or insert changes the server list the same way.
+  return allPages.reduce(
+    (offset, page) => offset + page.threads.length + page.hiddenCount,
+    0,
+  );
+}
+
+/** List components read plain thread pages; pagination state stays cached. */
+function selectInfiniteThreads(
+  data: InfiniteThreadsData,
+): InfiniteData<AgentThread[], number> {
+  return {
+    pages: data.pages.map((page) => page.threads),
+    pageParams: data.pageParams,
+  };
+}
+
+function updateInfiniteThreadsPages(
+  oldData: InfiniteThreadsData | undefined,
+  update: (threads: AgentThread[]) => AgentThread[],
+): InfiniteThreadsData | undefined {
+  if (!oldData) {
+    return oldData;
+  }
+  return {
+    ...oldData,
+    pages: oldData.pages.map((page) => ({
+      ...page,
+      threads: update(page.threads),
+    })),
+  };
 }
 
 export function mapInfiniteThreadsCache(
-  oldData: InfiniteData<AgentThread[]> | undefined,
+  oldData: InfiniteThreadsData | undefined,
   mapper: (thread: AgentThread) => AgentThread,
-): InfiniteData<AgentThread[]> | undefined {
-  if (!oldData) {
-    return oldData;
-  }
-  return {
-    ...oldData,
-    pages: oldData.pages.map((page) => page.map(mapper)),
-  };
+): InfiniteThreadsData | undefined {
+  return updateInfiniteThreadsPages(oldData, (threads) => threads.map(mapper));
 }
 
 export function filterInfiniteThreadsCache(
-  oldData: InfiniteData<AgentThread[]> | undefined,
+  oldData: InfiniteThreadsData | undefined,
   predicate: (thread: AgentThread) => boolean,
-): InfiniteData<AgentThread[]> | undefined {
-  if (!oldData) {
-    return oldData;
-  }
-  return {
-    ...oldData,
-    pages: oldData.pages.map((page) => page.filter(predicate)),
-  };
+): InfiniteThreadsData | undefined {
+  return updateInfiniteThreadsPages(oldData, (threads) =>
+    threads.filter(predicate),
+  );
 }
 
 function mergeThreadMetadata(
@@ -3509,7 +3564,7 @@ function setThreadInCaches(
   );
   queryClient.setQueriesData(
     filters.infiniteSearch,
-    (oldData: InfiniteData<AgentThread[]> | undefined) =>
+    (oldData: InfiniteThreadsData | undefined) =>
       mapInfiniteThreadsCache(oldData, (thread) =>
         thread.thread_id === threadId ? mapper(thread) : thread,
       ),
@@ -3551,9 +3606,9 @@ export function useInfiniteThreads(
 ) {
   const apiClient = getAPIClient();
   return useInfiniteQuery<
-    AgentThread[],
+    InfiniteThreadsPage,
     Error,
-    InfiniteData<AgentThread[]>,
+    InfiniteData<AgentThread[], number>,
     readonly unknown[],
     number
   >({
@@ -3568,6 +3623,7 @@ export function useInfiniteThreads(
       ),
     getNextPageParam: (lastPage, allPages) =>
       getInfiniteThreadsNextPageParam(lastPage, allPages),
+    select: selectInfiniteThreads,
     refetchOnWindowFocus: false,
     enabled,
   });
@@ -3923,7 +3979,7 @@ export function useDeleteThread() {
           queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
           exact: false,
         },
-        (oldData: InfiniteData<AgentThread[]> | undefined) =>
+        (oldData: InfiniteThreadsData | undefined) =>
           filterInfiniteThreadsCache(
             oldData,
             (t) => !deletedThreadIds.has(t.thread_id),

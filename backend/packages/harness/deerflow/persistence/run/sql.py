@@ -107,6 +107,7 @@ class RunRepository(RunStore):
         # Remap JSON columns to match RunStore interface
         d["metadata"] = d.pop("metadata_json", {})
         d["kwargs"] = d.pop("kwargs_json", {})
+        d["idempotency_request"] = d.pop("idempotency_request_json", None)
         # Convert datetime to ISO string for consistency with MemoryRunStore.
         # SQLite drops tzinfo on read despite ``DateTime(timezone=True)`` —
         # ``coerce_iso`` normalizes naive datetimes as UTC.
@@ -137,6 +138,7 @@ class RunRepository(RunStore):
         owner_worker_id: str | None = None,
         lease_expires_at: str | None = None,
         idempotency_key: str | None = None,
+        idempotency_request: dict[str, Any] | None = None,
     ):
         """Insert or update a run row.
 
@@ -165,6 +167,7 @@ class RunRepository(RunStore):
             "owner_worker_id": owner_worker_id,
             "lease_expires_at": lease_dt,
             "idempotency_key": idempotency_key,
+            "idempotency_request_json": self._safe_json(idempotency_request),
             "origin_kind": _origin_kind(operation_kind, metadata),
             "updated_at": now,
         }
@@ -851,6 +854,7 @@ class RunRepository(RunStore):
         created_at: str | None = None,
         grace_seconds: int = 10,
         idempotency_key: str | None = None,
+        idempotency_request: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Atomically create a run with cross-process thread-uniqueness.
 
@@ -886,6 +890,7 @@ class RunRepository(RunStore):
             "owner_worker_id": owner_worker_id,
             "lease_expires_at": lease_dt,
             "idempotency_key": idempotency_key,
+            "idempotency_request_json": self._safe_json(idempotency_request),
             "origin_kind": _origin_kind(operation_kind, metadata),
             "created_at": created,
             "updated_at": now,
@@ -897,6 +902,11 @@ class RunRepository(RunStore):
             # provides deterministic ordering within the position.
             change_seq = await self._next_change_seq(session)
             claimed: list[dict[str, Any]] = []
+
+            if idempotency_key is not None:
+                existing = (await session.execute(select(RunRow).where(RunRow.idempotency_key == idempotency_key).with_for_update())).scalar_one_or_none()
+                if existing is not None:
+                    raise RunIdempotencyConflict(self._row_to_dict(existing))
 
             if multitask_strategy in ("interrupt", "rollback"):
                 stmt = (

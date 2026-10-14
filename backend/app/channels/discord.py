@@ -11,6 +11,7 @@ from concurrent.futures import Future
 from pathlib import Path
 from typing import Any
 
+from app.channels.allowed_users import parse_channel_ids
 from app.channels.base import Channel
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
@@ -81,10 +82,7 @@ def _parse_allowed_channels(allowed_channels: Any) -> frozenset[str]:
     the entries are kept verbatim rather than validated — an unreadable ID just
     never matches, which leaves ``mention_only`` in force (fail-closed).
     """
-    if allowed_channels is None or (isinstance(allowed_channels, str) and not allowed_channels.strip()):
-        return frozenset()
-    entries = list(allowed_channels) if isinstance(allowed_channels, list | tuple | set) else [allowed_channels]
-    return frozenset(text for text in (str(entry).strip() for entry in entries) if text)
+    return parse_channel_ids(allowed_channels, logger=logger, channel_name="Discord", key_name="allowed_channels")
 
 
 class DiscordChannel(Channel):
@@ -113,8 +111,8 @@ class DiscordChannel(Channel):
         self._allowed_channels: frozenset[str] = _parse_allowed_channels(config.get("allowed_channels"))
 
         # Session tracking: channel_id -> Discord thread_id (in-memory, persisted to JSON).
-        # Uses a dedicated JSON file separate from ChannelStore, which maps IM
-        # conversations to DeerFlow thread IDs — a different concern.
+        # Uses a dedicated JSON file next to the channel store's state, separate from
+        # the ChannelStore itself, which maps IM conversations to DeerFlow thread IDs.
         self._active_threads: dict[str, str] = {}
         # Reverse-lookup set for O(1) thread ID checks (avoids O(n) scan of _active_threads.values()).
         self._active_thread_ids: set[str] = set()
@@ -127,9 +125,9 @@ class DiscordChannel(Channel):
         # error) — ChannelService then stops the instance, and an ungated flush
         # would overwrite the persisted mappings with an empty snapshot (#2897).
         self._thread_store_loaded = False
-        store = config.get("channel_store")
-        if store is not None:
-            self._thread_store_path = store._path.parent / "discord_threads.json"
+        channels_dir = getattr(config.get("channel_store"), "channels_dir", None)
+        if channels_dir is not None:
+            self._thread_store_path = Path(channels_dir) / "discord_threads.json"
         else:
             self._thread_store_path = Path.home() / ".deer-flow" / "channels" / "discord_threads.json"
 

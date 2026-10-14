@@ -12,6 +12,7 @@ import subprocess
 import sys
 import zipfile
 from datetime import UTC, datetime
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
@@ -283,14 +284,16 @@ def _thread_data_roots(project_root: Path) -> list[tuple[Path, str]]:
     if env_file.is_file():
         try:
             from dotenv.parser import parse_stream
-        except ImportError:
-            # Diagnostics must still work in an incomplete backend environment.
+
+            contents = env_file.read_text(encoding="utf-8-sig")
+        except (ImportError, OSError, UnicodeError):
+            # Diagnostics must still work with a broken environment or unreadable .env.
             pass
         else:
             # serve.sh changes to the checkout before sourcing .env. Keep its
             # assignment order in a private mapping; never export parsed secrets.
             environment = {**os.environ, "PWD": str(project_root.resolve())}
-            with env_file.open(encoding="utf-8-sig") as stream:
+            with StringIO(contents) as stream:
                 for binding in parse_stream(stream):
                     if not binding.key or binding.value is None or binding.error:
                         continue

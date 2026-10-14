@@ -16,7 +16,9 @@ from scripts.benchmark.scheduled_tasks.protocol import goal_history_evidence
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["full", "delta"])
-async def test_public_history_projection_omits_goal_but_native_accessor_reads_real_counters(tmp_path, monkeypatch, mode):
+async def test_public_history_projection_omits_older_goals_but_native_accessor_reads_real_counters(tmp_path, monkeypatch, mode):
+    """Only the history head carries the goal, and only while it is active; the
+    benchmark therefore reads earlier counters through the native accessor."""
     from scripts.benchmark.scheduled_tasks.budget_evidence import read_native_goal_evidence
 
     objective = "Observe a synthetic budget stop"
@@ -29,13 +31,20 @@ async def test_public_history_projection_omits_goal_but_native_accessor_reads_re
         goal = build_goal_state(objective)
         goal["continuation_count"] = 2
         await accessor.aupdate(config, {"goal": goal}, as_node="evidence")
+        monkeypatch.setattr(threads, "get_checkpointer", lambda _request: saver)
+        monkeypatch.setattr(threads, "build_thread_checkpoint_state_accessor", AsyncMock(return_value=(accessor, config)))
+
+        async def public_history():
+            projected = await call_unwrapped(threads.get_thread_history, thread_id="budget-thread", body=threads.ThreadHistoryRequest(limit=100), request=SimpleNamespace(), background_tasks=BackgroundTasks())
+            return [entry.model_dump(mode="json") for entry in projected]
+
+        active_shape = await public_history()
+        assert active_shape[0]["values"]["goal"]["continuation_count"] == 2
+        assert all("goal" not in entry["values"] for entry in active_shape[1:])
         # The production control writer removes the channel; the reducer's
         # ordinary None update deliberately preserves an active goal.
         await write_thread_goal(saver, "budget-thread", None)
-        monkeypatch.setattr(threads, "get_checkpointer", lambda _request: saver)
-        monkeypatch.setattr(threads, "build_thread_checkpoint_state_accessor", AsyncMock(return_value=(accessor, config)))
-        projected = await call_unwrapped(threads.get_thread_history, thread_id="budget-thread", body=threads.ThreadHistoryRequest(limit=100), request=SimpleNamespace(), background_tasks=BackgroundTasks())
-        api_shape = [entry.model_dump(mode="json") for entry in projected]
+        api_shape = await public_history()
         assert all("goal" not in entry["values"] for entry in api_shape)
         assert goal_history_evidence(api_shape, objective)["goal_snapshots_observed"] == 0
 

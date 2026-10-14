@@ -63,7 +63,7 @@ YAML loading and both middleware tool-call paths in `test_tool_output_config_lim
 
 **Config Hot-Reload Boundary**: Gateway dependencies route through `get_app_config()` on every request, so per-run fields like `models[*].max_tokens`, `summarization.*`, `title.*`, `memory.*`, `subagents.*`, `verification.*`, `tools[*]`, and the agent system prompt pick up `config.yaml` edits on the next message. `AppConfig` is intentionally **not** cached on `app.state` — `lifespan()` keeps a local `startup_config` variable for one-shot bootstrap work and passes it to `langgraph_runtime(app, startup_config)`.
 
-Infrastructure fields are **restart-required**. The authoritative list lives in `packages/harness/deerflow/config/reload_boundary.py::STARTUP_ONLY_FIELDS` and is mirrored by the standardised `"startup-only:"` prefix on the corresponding `Field(description=...)` in `AppConfig` or an explicitly registered nested config model, so IDE hover on those fields surfaces the reason inline (no need to context-switch into this table). Currently registered: `plugins`, `database`, `checkpointer`, `run_events`, `agent_storage`, `stream_bridge`, `sandbox`, `skills.container_path`, `log_level`, `logging`, `channels`, `channel_connections`, `scheduler`, `mcp_tasks`, `subagent_runtime`, `subagent_batches`, `run_ownership`, `dedupe_storage`, `auth.local.throttle_storage` (the login throttle store is installed once by `langgraph_runtime`; `max_login_attempts` / `lockout_seconds` stay live-read). Adding a new restart-required field requires updating the registry; drift is pinned by `tests/test_reload_boundary.py`. `scheduler.recursion_limit` is the exception inside that section: it is read from `get_app_config()` at each scheduled dispatch, so a YAML edit applies to the next run without restarting the poller.
+Infrastructure fields are **restart-required**. The authoritative list lives in `packages/harness/deerflow/config/reload_boundary.py::STARTUP_ONLY_FIELDS` and is mirrored by the standardised `"startup-only:"` prefix on the corresponding `Field(description=...)` in `AppConfig` or an explicitly registered nested config model, so IDE hover on those fields surfaces the reason inline (no need to context-switch into this table). Currently registered: `plugins`, `database`, `checkpointer`, `run_events`, `agent_storage`, `stream_bridge`, `sandbox`, `skills.container_path`, `log_level`, `logging`, `channels`, `channels.leader_lease` (validated by `channel_leader_lease_config.py` from the non-schema `channels` mapping; the multi-process gate refuses `enabled: false` while a non-GitHub channel is enabled), `channel_connections`, `scheduler`, `mcp_tasks`, `subagent_runtime`, `subagent_batches`, `run_ownership`, `dedupe_storage`, `auth.local.throttle_storage` (the login throttle store is installed once by `langgraph_runtime`; `max_login_attempts` / `lockout_seconds` stay live-read). Adding a new restart-required field requires updating the registry; drift is pinned by `tests/test_reload_boundary.py`. `scheduler.recursion_limit` is the exception inside that section: it is read from `get_app_config()` at each scheduled dispatch, so a YAML edit applies to the next run without restarting the poller.
 
 **Persistence backend resolution**: the unified `database` section selects the
 Gateway's LangGraph checkpointer, LangGraph Store, and DeerFlow SQL repositories.
@@ -82,6 +82,8 @@ The legacy locations are anchored to the installed harness source, not to the ca
 `scripts/doctor.py` calls `AppConfig.resolve_config_path` rather than copying this order.
 
 Config values starting with `$` are resolved as environment variables (e.g., `$OPENAI_API_KEY`).
+This happens once, at load: consumers such as sandbox providers and ACP `env` use the values verbatim,
+because a resolved secret may itself start with `$` (`tests/test_sandbox_environment_passthrough.py`).
 `ModelConfig` also declares `use_responses_api` and `output_version` so OpenAI `/v1/responses` can be enabled explicitly while still using `langchain_openai:ChatOpenAI`.
 
 `ModelConfig.request_admission` is optional and is not a provider parameter.
@@ -123,6 +125,26 @@ probed path explicitly; a missing or invalid revision keeps the last-known-good
 cache, including AppConfig's middleware snapshot, until a readable revision returns.
 
 **Shared Reset Markers** (`shared_reset_marker.py`): caches derived from the extensions config can go stale without a byte of it changing (a remote MCP server's `tools/list`, a skill installed or edited on the shared volume by another process). `SharedResetMarker(suffix)` owns one hidden JSON file beside the resolved config, `.<config name>.<suffix>.json`; `publish()` replaces it atomically with a random generation under `extensions_config_write_lock` + `extensions_config_file_lock` (`publish_locked()` when the caller already holds both), chaining `previous_generation` and an optional `user_id`. `SharedResetMarkerTracker.poll()` re-reads the marker at most once per second (monotonic clock, never blocking behind a concurrent poller), adopts the current state silently on its first poll, and reports a `SharedResetChange`: `user_ids={user}` only when exactly one publication carrying that user happened since the last poll, otherwise `None` (retire everything), including deleted/unreadable markers and config-path switches. `note_own_publication()` lets the writer skip the redundant self-invalidation. `resolve_shared_config_path()` maps a missing explicit path to `None` (no shared directory: callers answer `scope=process`). Consumers: `mcp/cache.py` (`mcp-cache-reset`) and `agents/lead_agent/prompt.py` (`skills-cache-reset`). Tests: `tests/test_shared_reset_marker.py`.
+
+**Credentials key** (`credentials_key.py`): `DEER_FLOW_CREDENTIALS_KEY` is env-only
+(no `config.yaml` key, never derived from `AUTH_JWT_SECRET`): comma-separated
+Fernet keys, first encrypts, all decrypt (`MultiFernet`). `get_credentials_cipher()`
+is the process-wide entry point for consumers that store secrets at rest; it
+returns a `CredentialsCipher` (`encrypt_text`/`decrypt_text`/`rotate_text`,
+`fernet:v2:` prefix, legacy `fernet:v1:` readable). `decrypt_text` raises
+`CredentialsDecryptError` (an `InvalidToken`); callers treat that as missing data
+and never crash. Unset, it generates `{base_dir}/.credentials_key` -- file I/O,
+so async callers use `asyncio.to_thread`. Error text never carries key material.
+A new consumer must also join `app.gateway.deps.credentials_key_consumers`, which
+drives both Gateway loading and the multi-instance refusal.
+
+**Secret files** (`secret_file.py`): `read_or_create_secret_file` is the one way
+to create a shared secret file (`.credentials_key`, `.jwt_secret`, the managed
+model key): write a `0600` temp file, then hard-link it exclusively and read
+back, so the name is never empty or partial and concurrent creators converge.
+No hard links (SMB) or an abandoned empty file (older releases): single-winner
+`<name>.replacing` claim plus rename. Never overwrites a non-empty invalid file.
+Tests: `tests/test_secret_file.py`, `tests/test_credentials_key.py`.
 
 ### Config Schema
 
@@ -184,3 +206,7 @@ or an explicitly injected AppConfig. See `../models/AGENTS.md` for storage and r
 boundaries. `managed_model_providers.py` derives provider defaults from validated
 endpoints; `ManagedModel.runtime_config()` combines them with profile fields.
 `AppConfig.from_file()` remains YAML-only.
+
+### Web model provider presets
+
+Managed model provider presets live only in `managed_model_providers.py`. `managed_models.py` reads legacy custom encrypted records compatibly and converts presets into ModelConfig without changing YAML, previous snapshots or injected configurations. See the managed-model section in `../models/AGENTS.md` and the Web registration section of `backend/docs/CONFIGURATION.md`.

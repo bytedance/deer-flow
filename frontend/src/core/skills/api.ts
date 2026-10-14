@@ -1,7 +1,7 @@
 import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
-import type { Skill } from "./type";
+import type { Skill, SkillLoadDiagnostic } from "./type";
 
 // Keep this in lockstep with `_MAX_SKILL_ARCHIVE_UPLOAD_BYTES` in
 // `backend/app/gateway/routers/skills.py`; nginx and Ingress allow 101 MiB so
@@ -119,6 +119,33 @@ async function readErrorDetail(response: Response): Promise<SkillErrorDetail> {
     message: `HTTP ${response.status}${response.statusText ? `: ${response.statusText}` : ""}`,
     findings: [],
   };
+}
+
+export async function loadSkillDiagnostics(
+  signal?: AbortSignal,
+): Promise<SkillLoadDiagnostic[]> {
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/skills/diagnostics/custom`,
+    { signal, cache: "no-store" },
+  );
+  if (!response.ok) {
+    const detail = await readErrorDetail(response);
+    throw new SkillRequestError(response.status, detail.message, detail);
+  }
+  const data = (await response.json()) as {
+    diagnostics: SkillLoadDiagnostic[];
+  };
+  return data.diagnostics;
+}
+
+export async function reloadSkills(): Promise<void> {
+  const response = await fetch(`${getBackendBaseURL()}/api/skills/reload`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    const detail = await readErrorDetail(response);
+    throw new SkillRequestError(response.status, detail.message, detail);
+  }
 }
 
 export async function loadSkills() {

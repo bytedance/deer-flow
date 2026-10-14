@@ -150,3 +150,31 @@ async def test_store_reset_and_probe_do_not_block_loop(store) -> None:
 
     assert await store.get(_CLIENT_IP) is None
     await store.reset(_CLIENT_IP)  # idempotent on a clean IP
+
+
+async def test_trusted_proxy_hostname_resolution_does_not_block_loop(store, monkeypatch) -> None:
+    """A hostname in AUTH_TRUSTED_PROXIES (the compose default ``nginx``) is
+    resolved on the login path; ``getaddrinfo`` must run off the event loop."""
+    monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "localhost")
+    auth_router._trusted_proxy_host_cache.clear()
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/v1/auth/login/local",
+            "headers": [(b"x-real-ip", _CLIENT_IP.encode())],
+            "query_string": b"",
+            "client": ("127.0.0.1", 44000),
+            "server": ("testserver", 80),
+        }
+    )
+    for _ in range(_POLICY["max_attempts"]):
+        await store.record_failure(_CLIENT_IP, **_POLICY)  # the forwarded client is locked
+    try:
+        with pytest.raises(HTTPException) as exc_info:
+            await auth_router.login_local(request, Response(), _form(), remember_me=True)
+    finally:
+        auth_router._trusted_proxy_host_cache.clear()
+
+    # 429 proves the lockout was looked up under X-Real-IP, i.e. "localhost" resolved.
+    assert exc_info.value.status_code == 429

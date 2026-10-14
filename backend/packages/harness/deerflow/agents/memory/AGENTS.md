@@ -201,6 +201,23 @@ Same-generation merges also keep the already-queued snapshot when the incoming
 call-arrival sequence is older; they union signals and do not consume the
 incoming feed as a clear.
 
+DeerMem debounces each `(thread_id, user_id, agent_name)` independently using
+monotonic deadlines. Same-key coalescing preserves the first pending arrival
+only while the clear generation is unchanged.
+`backend_config.max_wait_seconds` (default 300) caps debounce deferral even
+under continuous updates. A newer clear starts a fresh window for the
+post-clear messages, whether the pre-clear snapshot was consumed or left
+queued beside them. A refused older enqueue leaves the queued deadline
+unchanged. One timer wakes for the earliest deadline and one consumer
+processes eligible items serially. Other conversations cannot reset that
+deadline. Consumer backlog and LLM latency can still delay completion.
+Early wakeups rearm with a 50 ms minimum; arrivals during extraction wait for
+the finishing worker to rearm. Emergency snapshots are immediately eligible;
+`flush`, `flush_nowait`, and `flush_sync` make all pending items eligible.
+Becoming eligible does not skip the generation captured at enqueue.
+Tests in `tests/test_memory_queue_deadlines.py` use a fake monotonic clock and
+timer to exercise scheduling without timing-sensitive sleeps.
+
 DeerMem and mem0 exclude assistant tool-call intent in every representation:
 `tool_calls`, `invalid_tool_calls`, and provider-raw `tool_calls`/`function_call`.
 An empty parsed call list does not make an attempted call a final response.

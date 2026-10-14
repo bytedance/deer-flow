@@ -8,6 +8,7 @@ import re
 import threading
 import time
 from collections.abc import Coroutine
+from concurrent.futures import Future
 from typing import Any
 
 from app.channels.allowed_users import parse_allowed_users
@@ -149,6 +150,10 @@ class TelegramChannel(Channel):
         # its pool on the loop that performs the download.
         self._download_bot: Any = None
         self._download_bot_lock = asyncio.Lock()
+        # The first stop() owns this Telegram-loop cleanup. A bounded or
+        # cancelled caller leaves it running so a retry can join the same work.
+        self._shutdown_resources_future: Future[None] | None = None
+        self._shutdown_resources_lock = threading.Lock()
         # Tasks submitted from the main dispatcher loop back to PTB's loop.
         # Only the Telegram loop mutates this set.
         self._tg_bridge_tasks: set[asyncio.Task[Any]] = set()
@@ -192,6 +197,7 @@ class TelegramChannel(Channel):
         app.add_handler(CommandHandler("new", self._cmd_generic))
         app.add_handler(CommandHandler("status", self._cmd_generic))
         app.add_handler(CommandHandler("models", self._cmd_generic))
+        app.add_handler(CommandHandler("model", self._cmd_generic))
         app.add_handler(CommandHandler("memory", self._cmd_generic))
         app.add_handler(CommandHandler("agent", self._cmd_generic))
         app.add_handler(CommandHandler("goal", self._cmd_generic))
@@ -223,44 +229,66 @@ class TelegramChannel(Channel):
         deadline = shutdown_loop.time() + TELEGRAM_SHUTDOWN_TIMEOUT_SECONDS
         telegram_loop = self._tg_loop
         worker_thread = self._thread
+        telegram_loop_running = telegram_loop is not None and telegram_loop.is_running()
 
-        try:
-            if telegram_loop and telegram_loop.is_running():
-                drain_future = asyncio.run_coroutine_threadsafe(self._shutdown_telegram_resources(), telegram_loop)
-                try:
-                    remaining = max(0.0, deadline - shutdown_loop.time())
-                    await asyncio.wait_for(asyncio.wrap_future(drain_future), timeout=remaining)
-                except asyncio.CancelledError:
-                    drain_future.cancel()
-                    raise
-                except TimeoutError:
-                    drain_future.cancel()
-                    logger.warning("[Telegram] timed out shutting down Telegram loop resources during shutdown")
-                except Exception as exc:
-                    logger.warning("[Telegram] failed to shut down Telegram loop resources during shutdown: %s", type(exc).__name__)
-        finally:
-            if telegram_loop and telegram_loop.is_running():
-                try:
-                    telegram_loop.call_soon_threadsafe(telegram_loop.stop)
-                except RuntimeError:
-                    pass
+        # Bridge tasks and the download Bot's HTTPX clients may only be released
+        # on the Telegram loop, so that loop has to outlive the cleanup. Exactly
+        # one cleanup generation is scheduled per channel: a bounded or
+        # cancelled caller leaves it running, and a retried stop() joins the
+        # same work instead of scheduling a second shutdown next to it.
+        cleanup_future = self._shutdown_resources_future
+        if cleanup_future is None and telegram_loop_running:
+            with self._shutdown_resources_lock:
+                cleanup_future = self._shutdown_resources_future
+                if cleanup_future is None:
+                    cleanup_future = asyncio.run_coroutine_threadsafe(self._shutdown_telegram_resources(), telegram_loop)
+                    self._shutdown_resources_future = cleanup_future
+        if cleanup_future is not None and not telegram_loop_running:
+            # Its owner loop is gone, so nothing can finish this cleanup.
+            logger.warning("[Telegram] Telegram loop stopped before its resource cleanup finished; the download bot's HTTPX clients may not have been closed")
+            with self._shutdown_resources_lock:
+                if self._shutdown_resources_future is cleanup_future:
+                    self._shutdown_resources_future = None
+            cleanup_future = None
+        if cleanup_future is not None:
             try:
-                if worker_thread is not None and worker_thread.is_alive():
-                    remaining = max(0.0, deadline - shutdown_loop.time())
-                    if remaining:
-                        try:
-                            await asyncio.wait_for(
-                                asyncio.to_thread(worker_thread.join, remaining),
-                                timeout=remaining,
-                            )
-                        except TimeoutError:
-                            logger.warning("[Telegram] polling thread did not stop within the shutdown budget")
-            finally:
-                if worker_thread is not None and worker_thread.is_alive():
-                    raise ChannelStopTimeout("Telegram polling thread is still running after stop timeout")
-                if self._thread is worker_thread:
-                    self._thread = None
-                self._application = None
+                remaining = max(0.0, deadline - shutdown_loop.time())
+                # shield(): the deadline and caller cancellation must interrupt
+                # only this wait, never the cleanup the Telegram loop owns.
+                await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(cleanup_future)), timeout=remaining)
+            except asyncio.CancelledError:
+                # Retain the loop and its cleanup: ChannelService keeps this
+                # instance, and its next stop() converges on the same generation.
+                raise
+            except TimeoutError:
+                logger.warning("[Telegram] timed out shutting down Telegram loop resources during shutdown")
+                raise ChannelStopTimeout("Telegram loop cleanup is still running after stop timeout") from None
+            except Exception as exc:
+                logger.warning("[Telegram] failed to shut down Telegram loop resources during shutdown: %s", type(exc).__name__)
+
+        if telegram_loop_running:
+            try:
+                telegram_loop.call_soon_threadsafe(telegram_loop.stop)
+            except RuntimeError:
+                pass
+        if worker_thread is not None and worker_thread.is_alive():
+            remaining = max(0.0, deadline - shutdown_loop.time())
+            if remaining:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.to_thread(worker_thread.join, remaining),
+                        timeout=remaining,
+                    )
+                except TimeoutError:
+                    logger.warning("[Telegram] polling thread did not stop within the shutdown budget")
+        if worker_thread is not None and worker_thread.is_alive():
+            raise ChannelStopTimeout("Telegram polling thread is still running after stop timeout")
+        if self._thread is worker_thread:
+            self._thread = None
+        self._application = None
+        with self._shutdown_resources_lock:
+            if self._shutdown_resources_future is cleanup_future:
+                self._shutdown_resources_future = None
         logger.info("Telegram channel stopped")
 
     async def send(self, msg: OutboundMessage, *, _max_retries: int = 3) -> None:

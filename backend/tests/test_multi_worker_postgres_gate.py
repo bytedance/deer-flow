@@ -18,8 +18,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import FastAPI
 
-from app.gateway.deps import _enforce_postgres_for_multi_worker, _validate_agent_storage, _validate_login_throttle_storage, _validate_memory_retrieval_index, langgraph_runtime
+from app.gateway.deps import (
+    _enforce_credentials_key,
+    _enforce_postgres_for_multi_worker,
+    _validate_agent_storage,
+    _validate_login_throttle_storage,
+    _validate_memory_retrieval_index,
+    credentials_key_consumers,
+    langgraph_runtime,
+)
 from app.gateway.routers.browser import _browser_tools_enabled
+from deerflow.config.credentials_key import CREDENTIALS_KEY_ENV_VAR, GENERATE_KEY_COMMAND
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.deployment_config import MULTI_INSTANCE_ENV_VAR, DeploymentConfig, multi_instance_declaration
 from deerflow.config.run_ownership_config import RunOwnershipConfig
@@ -75,6 +84,7 @@ def isolated_worker_env(monkeypatch):
     monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
     monkeypatch.delenv(MULTI_INSTANCE_ENV_VAR, raising=False)
     monkeypatch.delenv("DEER_FLOW_STREAM_BRIDGE_REDIS_URL", raising=False)
+    monkeypatch.delenv(CREDENTIALS_KEY_ENV_VAR, raising=False)
 
 
 # ---------------------------------------------------------------------------
@@ -846,3 +856,221 @@ def test_retrieval_index_warning_only_covers_the_bundled_fts5_index(caplog, memo
     with caplog.at_level("WARNING"):
         _validate_memory_retrieval_index(config)
     assert _retrieval_index_warnings(caplog) == []
+
+
+# ---------------------------------------------------------------------------
+# At-rest credentials key (DEER_FLOW_CREDENTIALS_KEY)
+# ---------------------------------------------------------------------------
+
+_VALID_KEY = "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE="
+
+
+def _with_channel_connections(config, *, enabled: bool = True):
+    config.channel_connections = SimpleNamespace(enabled=enabled)
+    return config
+
+
+def test_credentials_key_consumers_name_the_enabled_features():
+    assert credentials_key_consumers(_cluster_ready()) == [], "a config without the section uses no key"
+    assert credentials_key_consumers(_with_channel_connections(_cluster_ready(), enabled=False)) == []
+    assert credentials_key_consumers(_with_channel_connections(_cluster_ready())) == ["channel_connections.enabled=true"]
+
+
+def test_declared_multi_instance_with_channel_connections_requires_the_credentials_key():
+    """Each instance would otherwise generate its own key file and could not read its peers' credentials."""
+    with pytest.raises(SystemExit) as exc_info:
+        _enforce_credentials_key(_with_channel_connections(_cluster_ready(deployment_multi_instance=True)))
+    msg = str(exc_info.value)
+    assert CREDENTIALS_KEY_ENV_VAR in msg
+    assert "deployment.multi_instance=true" in msg
+    assert "channel_connections.enabled=true" in msg
+    assert GENERATE_KEY_COMMAND in msg, "the refusal must say how to generate a key"
+    assert "Helm" in msg
+    assert "deployment.multi_instance=false" in msg, "must name the rollback knob"
+    assert "or set channel_connections.enabled=false" in msg, "must name the setting that turns the consumer off"
+
+
+def test_env_declared_multi_instance_names_the_env_knob(monkeypatch):
+    monkeypatch.setenv(MULTI_INSTANCE_ENV_VAR, "1")
+    with pytest.raises(SystemExit) as exc_info:
+        _enforce_credentials_key(_with_channel_connections(_cluster_ready()))
+    msg = str(exc_info.value)
+    assert f"{MULTI_INSTANCE_ENV_VAR}=1" in msg
+    assert f"unset {MULTI_INSTANCE_ENV_VAR}" in msg
+
+
+def test_declared_multi_instance_accepts_a_shared_credentials_key(monkeypatch):
+    monkeypatch.setenv(CREDENTIALS_KEY_ENV_VAR, _VALID_KEY)
+    _enforce_credentials_key(_with_channel_connections(_cluster_ready(deployment_multi_instance=True)))
+
+
+@pytest.mark.parametrize("channel_connections", [None, False], ids=["section-absent", "disabled"])
+def test_declared_multi_instance_without_key_consumers_keeps_booting(channel_connections):
+    """Existing multi-instance deployments that store no credentials must not need the key."""
+    config = _cluster_ready(deployment_multi_instance=True)
+    if channel_connections is not None:
+        _with_channel_connections(config, enabled=channel_connections)
+    _enforce_credentials_key(config)
+
+
+def test_multi_worker_without_a_declaration_shares_the_generated_key_file(monkeypatch):
+    """Workers of one process tree share base_dir, where the exclusive-create key file converges."""
+    monkeypatch.setenv("GATEWAY_WORKERS", "4")
+    _enforce_credentials_key(_with_channel_connections(_cluster_ready()))
+
+
+def test_single_instance_without_a_credentials_key_keeps_booting():
+    _enforce_credentials_key(_with_channel_connections(_config_with_backend("sqlite")))
+
+
+@pytest.mark.parametrize("declared", [False, True], ids=["single-instance", "multi-instance"])
+@pytest.mark.parametrize("value", ["not-a-fernet-key", f"{_VALID_KEY},second-entry-is-garbage"], ids=["garbage", "bad-rotation-entry"])
+def test_a_malformed_credentials_key_is_refused_without_echoing_it(monkeypatch, declared, value):
+    monkeypatch.setenv(CREDENTIALS_KEY_ENV_VAR, value)
+    with pytest.raises(SystemExit) as exc_info:
+        _enforce_credentials_key(_with_channel_connections(_cluster_ready(deployment_multi_instance=declared)))
+    msg = str(exc_info.value)
+    assert CREDENTIALS_KEY_ENV_VAR in msg
+    assert "not-a-fernet-key" not in msg and "second-entry-is-garbage" not in msg and _VALID_KEY not in msg
+
+
+@pytest.mark.asyncio
+async def test_langgraph_runtime_enforces_the_credentials_key_before_persistence_setup():
+    init_engine_from_config = AsyncMock(name="init_engine_from_config")
+
+    @asynccontextmanager
+    async def _noop_stream_bridge(_config):
+        yield MagicMock()
+
+    with (
+        patch("deerflow.persistence.engine.init_engine_from_config", init_engine_from_config),
+        patch("deerflow.runtime.make_stream_bridge", side_effect=_noop_stream_bridge) as make_stream_bridge,
+    ):
+        startup_config = _with_channel_connections(_cluster_ready(deployment_multi_instance=True))
+        with pytest.raises(SystemExit, match=CREDENTIALS_KEY_ENV_VAR):
+            async with langgraph_runtime(FastAPI(), startup_config):
+                pass
+
+    init_engine_from_config.assert_not_called()
+    make_stream_bridge.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# IM channel leader lease clause (channels.leader_lease)
+# ---------------------------------------------------------------------------
+
+
+def _channels_cluster(*, leader_lease=None, channels=None, connections=None, **overrides):
+    """A fully shared Postgres deployment plus the channel-facing config a gate double needs.
+
+    ``channels`` is the raw ``channels`` mapping that lives in ``AppConfig.model_extra``;
+    ``connections`` is the ``channel_connections`` section.
+    """
+    from deerflow.config.channel_connections_config import ChannelConnectionsConfig
+
+    config = _cluster_ready(**overrides)
+    section = dict(channels or {})
+    if leader_lease is not None:
+        section["leader_lease"] = leader_lease
+    config.model_extra = {"channels": section} if section else {}
+    config.channel_connections = ChannelConnectionsConfig.model_validate(connections) if connections is not None else ChannelConnectionsConfig()
+    return config
+
+
+def test_multi_worker_rejects_disabled_leader_lease_with_an_enabled_channel(monkeypatch):
+    monkeypatch.setenv("GATEWAY_WORKERS", "2")
+    config = _channels_cluster(leader_lease={"enabled": False}, channels={"telegram": {"enabled": True, "bot_token": "x"}, "discord": {"enabled": True}, "slack": {"enabled": False}})
+    with pytest.raises(SystemExit) as exc_info:
+        _enforce_postgres_for_multi_worker(config)
+    msg = str(exc_info.value)
+    assert "GATEWAY_WORKERS=2" in msg
+    assert "channels.leader_lease.enabled=false" in msg
+    assert "discord, telegram" in msg  # sorted, only the enabled ones
+    assert "slack" not in msg
+    assert "409" in msg
+    assert "Set GATEWAY_WORKERS=1" in msg
+    _assert_lease_is_not_offered_as_a_remedy(msg)
+
+
+@pytest.mark.parametrize("leader_lease", [None, {}, {"enabled": "auto"}, {"enabled": True}, {"enabled": True, "lease_seconds": 15, "grace_seconds": 5}])
+def test_multi_worker_accepts_auto_or_enabled_leader_lease_with_channels(monkeypatch, leader_lease):
+    monkeypatch.setenv("GATEWAY_WORKERS", "2")
+    _enforce_postgres_for_multi_worker(_channels_cluster(leader_lease=leader_lease, channels={"telegram": {"enabled": True}}))
+
+
+def test_multi_worker_accepts_disabled_leader_lease_without_enabled_channels(monkeypatch):
+    monkeypatch.setenv("GATEWAY_WORKERS", "2")
+    _enforce_postgres_for_multi_worker(_channels_cluster(leader_lease={"enabled": False}))
+    _enforce_postgres_for_multi_worker(_channels_cluster(leader_lease={"enabled": False}, channels={"telegram": {"enabled": False, "bot_token": "x"}, "langgraph_url": "http://gw:8001/api", "session": {"assistant_id": "lead_agent"}}))
+
+
+def test_github_is_webhook_driven_and_needs_no_leader_lease(monkeypatch):
+    monkeypatch.setenv("GATEWAY_WORKERS", "2")
+    _enforce_postgres_for_multi_worker(_channels_cluster(leader_lease={"enabled": False}, channels={"github": {"enabled": True}}))
+
+
+def test_declared_multi_instance_rejects_disabled_leader_lease_for_ui_connectable_providers():
+    """channel_connections providers get credentials at runtime, so they count even without a channels block."""
+    config = _channels_cluster(
+        deployment_multi_instance=True,
+        leader_lease={"enabled": False},
+        connections={"enabled": True, "telegram": {"enabled": True, "bot_username": "bot"}, "slack": {"enabled": False}},
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        _enforce_postgres_for_multi_worker(config)
+    msg = str(exc_info.value)
+    assert "deployment.multi_instance=true" in msg
+    assert "IM channels telegram are enabled" in msg
+    assert "deployment.multi_instance=false and run a single Gateway instance" in msg
+    assert "channel_connections.<provider>.enabled=false" in msg
+    _assert_lease_is_not_offered_as_a_remedy(msg)
+
+
+def _assert_lease_is_not_offered_as_a_remedy(msg: str) -> None:
+    """Transport arbitration ships separately: until then auto/true only bypass the refusal.
+
+    The remedies the refusal may offer are the ones that work today -- a single
+    instance or disabled channels. Recommending ``auto``/``true`` would send an
+    operator straight back into the duplicate connections the clause exists to
+    prevent (review on #6746).
+    """
+    assert "Set channels.leader_lease.enabled to auto" not in msg
+    assert "so one instance owns" not in msg
+    assert "reserved" in msg and "not a remedy" in msg
+    remedies = msg.split("diverges). ", 1)[1]
+    assert remedies.startswith(("Set GATEWAY_WORKERS=1", "Set deployment.multi_instance=false", "Unset DEER_FLOW_MULTI_INSTANCE")), remedies
+
+
+def test_disabled_channel_connections_master_switch_does_not_count_providers():
+    config = _channels_cluster(deployment_multi_instance=True, leader_lease={"enabled": False}, connections={"enabled": False, "telegram": {"enabled": True}})
+    _enforce_postgres_for_multi_worker(config)
+
+
+def test_single_instance_ignores_a_disabled_leader_lease():
+    """Without a multi-process signal the clause is inert, like every other clause of the gate."""
+    _enforce_postgres_for_multi_worker(_channels_cluster(leader_lease={"enabled": False}, channels={"telegram": {"enabled": True}}))
+
+
+@pytest.mark.parametrize("block", [{"enabled": "maybe"}, {"lease_seconds": 0}, {"grace_seconds": -1}, {"enable": False}, "auto"])
+def test_malformed_leader_lease_is_refused_on_every_topology(block):
+    with pytest.raises(SystemExit) as exc_info:
+        _enforce_postgres_for_multi_worker(_channels_cluster(leader_lease=block))
+    assert "channels.leader_lease" in str(exc_info.value)
+
+
+def test_leader_lease_clause_runs_after_the_postgres_clause(monkeypatch):
+    """The lease needs the shared database; a SQLite deployment is told about Postgres first."""
+    monkeypatch.setenv("GATEWAY_WORKERS", "2")
+    config = _channels_cluster(leader_lease={"enabled": False}, channels={"telegram": {"enabled": True}})
+    config.database = DatabaseConfig(backend="sqlite")
+    with pytest.raises(SystemExit) as exc_info:
+        _enforce_postgres_for_multi_worker(config)
+    msg = str(exc_info.value)
+    assert "postgres" in msg.lower()
+    assert "leader_lease" not in msg
+
+
+def test_gate_doubles_without_channel_attributes_still_pass(monkeypatch):
+    """The existing SimpleNamespace doubles carry neither model_extra nor channel_connections."""
+    monkeypatch.setenv("GATEWAY_WORKERS", "2")
+    _enforce_postgres_for_multi_worker(_cluster_ready())
