@@ -5878,6 +5878,13 @@ This release closes that milestone with **621 merged pull requests**.
   was dropped when a Slack bot was saved on the other, and a disconnected bot
   came back. Every save now rereads the file under a lock shared across
   processes and changes only its own provider. ([#6844])
+- **persistence:** Two first ratings of one run by the same user at the same
+  moment (two tabs, two devices, a client retry) no longer fail one of them
+  with a 500. Both used to miss the existing-row lookup and insert, and the
+  second insert hit the `(thread, run, user)` unique key. On Postgres, 26 of
+  80 such requests failed. The same race in IM conversation binding, such as
+  a first message arriving together with `/new`, no longer fails the message.
+  The losing write now updates the row the other one created. ([#6852])
 - **mcp:** Cancelling a background MCP task on SQLite now reaches the remote
   server on the next poll cycle instead of up to `mcp_tasks.lease_seconds`
   (120 s by default) later. A cancel that committed while the poller was
@@ -11667,4 +11674,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6785]: https://github.com/bytedance/deer-flow/pull/6785
 [#6798]: https://github.com/bytedance/deer-flow/pull/6798
 [#6844]: https://github.com/bytedance/deer-flow/pull/6844
+[#6852]: https://github.com/bytedance/deer-flow/pull/6852
 [#6859]: https://github.com/bytedance/deer-flow/pull/6859
