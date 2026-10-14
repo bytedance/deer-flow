@@ -38,7 +38,13 @@ Checkpointer storage runs in one of two channel modes, selected by `checkpoint_c
 **Journal capture**: Image-only input stops batch scans and later human-event
 capture despite an empty summary. AI summaries strip leading think sections
 before the 2000-character cap, preserving events, literal answer tags, and
-prior useful summaries. Tests: `test_run_journal*.py` (callbacks, full/delta).
+prior useful summaries. When an admitted run is interrupted after root assistant
+text was published but before `on_llm_end`, the worker records the accumulated
+visible text as an interrupted partial `llm.ai.response` feed event after the
+agent stream closes. Completed responses win cancellation races by message ID;
+hidden, subgraph, unpublished, and ID-less chunks are not recovered. Partial
+events never enter authoritative checkpoint state. Tests: `test_run_journal*.py`
+(callbacks, full/delta) and `test_run_worker_rollback.py` (interruption recovery).
 
 **Per-call LLM telemetry** (`runtime/journal.py`): `RunJournal` adds observation-only keys
 to `llm.ai.response` metadata and to `llm.error` metadata (previously empty): `langchain_run_id`,

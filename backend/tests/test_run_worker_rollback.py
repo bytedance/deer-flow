@@ -1146,6 +1146,97 @@ async def test_run_agent_closes_stream_when_abort_breaks_iteration():
     assert record.status == RunStatus.interrupted
 
 
+@pytest.mark.anyio
+async def test_run_agent_persists_visible_partial_response_when_interrupted():
+    run_manager = RunManager()
+    record = await run_manager.create("thread-partial-response")
+    event_store = MemoryRunEventStore()
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class PartialResponseAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            del graph_input, config, stream_mode, subgraphs
+            metadata = {"langgraph_node": "agent"}
+            yield ("messages", (AIMessageChunk(content="A useful ", id="partial-ai"), metadata))
+            yield ("messages", (AIMessageChunk(content="partial answer", id="partial-ai"), metadata))
+            record.abort_event.set()
+            # The worker observes the abort before publishing or capturing this
+            # frame, so only text the client actually saw may be recovered.
+            yield ("messages", (AIMessageChunk(content=" unseen", id="partial-ai"), metadata))
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=event_store),
+        agent_factory=lambda **_kwargs: PartialResponseAgent(),
+        graph_input={},
+        config={},
+        stream_modes=["messages-tuple", "values"],
+    )
+
+    messages = await event_store.list_messages(record.thread_id)
+    assert record.status == RunStatus.interrupted
+    assert len(messages) == 1
+    assert messages[0]["run_id"] == record.run_id
+    assert messages[0]["content"]["id"] == "partial-ai"
+    assert messages[0]["content"]["content"] == "A useful partial answer"
+    assert messages[0]["metadata"] == {
+        "caller": "lead_agent",
+        "interrupted": True,
+        "latency_ms": None,
+        "llm_call_index": 1,
+        "partial": True,
+        "usage": {},
+    }
+
+
+@pytest.mark.anyio
+async def test_run_agent_does_not_persist_hidden_partial_response():
+    run_manager = RunManager()
+    record = await run_manager.create("thread-hidden-partial-response")
+    event_store = MemoryRunEventStore()
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class HiddenPartialResponseAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            del graph_input, config, stream_mode, subgraphs
+            yield (
+                "messages",
+                (
+                    AIMessageChunk(
+                        content="internal context",
+                        id="hidden-ai",
+                        additional_kwargs={"hide_from_ui": True},
+                    ),
+                    {"langgraph_node": "agent"},
+                ),
+            )
+            record.abort_event.set()
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=event_store),
+        agent_factory=lambda **_kwargs: HiddenPartialResponseAgent(),
+        graph_input={},
+        config={},
+        stream_modes=["messages-tuple", "values"],
+    )
+
+    assert record.status == RunStatus.interrupted
+    assert await event_store.list_messages(record.thread_id) == []
+
+
 @pytest.mark.parametrize("stream_modes", [["values"], ["messages-tuple", "values"]])
 @pytest.mark.parametrize("close_fails", [False, True], ids=["close-succeeds", "close-fails"])
 @pytest.mark.anyio

@@ -409,6 +409,7 @@ class RunJournal(BaseCallbackHandler):
         self._seen_llm_starts: set[str] = set()  # langchain run_ids that fired on_chat_model_start
         self._current_run_tool_call_names: dict[str, str] = {}
         self._active_tool_names: dict[str, str] = {}
+        self._persisted_ai_message_identities: set[str] = set()
         self._persisted_tool_message_identities: set[str] = set()
 
         # Bumped once per successful event-store write. A reader that cached a
@@ -680,6 +681,8 @@ class RunJournal(BaseCallbackHandler):
                 messages,
                 caller=caller,
             )
+            if is_canonical_callback:
+                self._persisted_ai_message_identities.update(identity for message in messages if self._is_ai_message(message) and (identity := self._message_identity(message)) is not None)
 
         if should_schedule_progress:
             self._schedule_progress_flush()
@@ -879,6 +882,41 @@ class RunJournal(BaseCallbackHandler):
         if identity:
             self._persisted_tool_message_identities.add(identity)
         self._record_message_summary(message)
+
+    def record_interrupted_ai_responses(self, messages: Iterable[AIMessage]) -> int:
+        """Persist visible streamed text that never reached ``on_llm_end``.
+
+        The worker calls this only after its agent stream has closed and the run
+        has resolved to ``interrupted``. Completed callback responses win the
+        cancellation race by message identity, and repeated finalization is a
+        no-op. These feed events intentionally do not enter checkpoint state.
+        """
+        recorded = 0
+        for message in messages:
+            if self._closed or message.additional_kwargs.get("hide_from_ui") is True:
+                continue
+            identity = self._message_identity(message)
+            if identity is None or identity in self._persisted_ai_message_identities:
+                continue
+            if not self._message_text(message).strip():
+                continue
+            self._put(
+                event_type=LLM_AI_RESPONSE_EVENT.event_type,
+                category=LLM_AI_RESPONSE_EVENT.category,
+                content=message.model_dump(),
+                metadata={
+                    "caller": "lead_agent",
+                    "interrupted": True,
+                    "latency_ms": None,
+                    "llm_call_index": max(1, self._llm_call_index),
+                    "partial": True,
+                    "usage": {},
+                },
+            )
+            self._persisted_ai_message_identities.add(identity)
+            self._record_message_summary(message, caller="lead_agent")
+            recorded += 1
+        return recorded
 
     def _final_output_messages(self, outputs: Any) -> list[Any]:
         if isinstance(outputs, Mapping):
@@ -1666,6 +1704,7 @@ class RunJournal(BaseCallbackHandler):
         self._llm_start_times.clear()
         self._seen_llm_starts.clear()
         self._current_run_tool_call_names.clear()
+        self._persisted_ai_message_identities.clear()
         self._persisted_tool_message_identities.clear()
         self._produced_artifacts.clear()
         self._produced_artifact_keys.clear()
