@@ -14,6 +14,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
+import { useWorkspaceLifetime } from "@/core/workspaces/context";
+import {
+  createWorkspaceRunStorage,
+  type WorkspaceRunStorage,
+} from "@/core/workspaces/run-storage";
 
 import { getAPIClient } from "../api";
 import { fetch } from "../api/fetcher";
@@ -333,28 +338,40 @@ function createActiveRunRejoinState(
   };
 }
 
-function readReconnectRun(threadId: string): string | null {
+function readReconnectRun(
+  threadId: string,
+  storage?: WorkspaceRunStorage,
+): string | null {
   try {
-    return window.sessionStorage.getItem(`lg:stream:${threadId}`);
+    return (storage ?? window.sessionStorage).getItem(`lg:stream:${threadId}`);
   } catch {
     return null;
   }
 }
 
-function rememberReconnectRun(threadId: string, runId: string): void {
+function rememberReconnectRun(
+  threadId: string,
+  runId: string,
+  storage?: WorkspaceRunStorage,
+): void {
   try {
-    window.sessionStorage.setItem(`lg:stream:${threadId}`, runId);
+    (storage ?? window.sessionStorage).setItem(`lg:stream:${threadId}`, runId);
   } catch {
     // The stream can still be joined, but SDK stop cannot cancel it without
     // the tab-local run pointer.
   }
 }
 
-function clearReconnectRun(threadId: string, runId: string): void {
+function clearReconnectRun(
+  threadId: string,
+  runId: string,
+  storage?: WorkspaceRunStorage,
+): void {
   try {
-    const key = `lg:stream:${threadId}`;
-    if (window.sessionStorage.getItem(key) === runId) {
-      window.sessionStorage.removeItem(key);
+    const key = `lg:stream:${threadId}` as const;
+    const target = storage ?? window.sessionStorage;
+    if (target.getItem(key) === runId) {
+      target.removeItem(key);
     }
   } catch {
     // Storage access is best-effort and must never block stream cleanup.
@@ -1892,6 +1909,15 @@ export function useThreadStream({
   onFinish,
 }: ThreadStreamOptions) {
   const { t } = useI18n();
+  const lifetime = useWorkspaceLifetime();
+  const apiClient = lifetime && !isMock ? lifetime.sdk : getAPIClient(isMock);
+  const runStorage = useMemo(
+    () =>
+      lifetime && !isMock
+        ? createWorkspaceRunStorage(lifetime.scope)
+        : undefined,
+    [lifetime, isMock],
+  );
   const currentViewThreadId = displayThreadId ?? threadId ?? null;
   const currentViewThreadIdRef = useRef(currentViewThreadId);
   currentViewThreadIdRef.current = currentViewThreadId;
@@ -2009,6 +2035,7 @@ export function useThreadStream({
 
   const scheduleActiveRunRejoinRetry = useCallback(
     (run: Pick<Run, "thread_id" | "run_id"> | undefined) => {
+      if (lifetime?.scope.signal.aborted) return;
       const rejoin = activeRunRejoinRef.current;
       // SDK 1.6.0 LGP joinStream errors include { thread_id, run_id }; history
       // errors omit it. Re-verify this callback contract when upgrading the SDK.
@@ -2016,12 +2043,12 @@ export function useThreadStream({
         run &&
         !rejoin.inFlight &&
         run.run_id !== submittedRunIdRef.current &&
-        readReconnectRun(run.thread_id) === run.run_id
+        readReconnectRun(run.thread_id, runStorage) === run.run_id
       ) {
         // The SDK's same-tab reconnect tries once and keeps its pointer on
         // error, so the recovery effect would keep deferring to a stream that
         // no longer exists. Release the pointer and let recovery take over.
-        clearReconnectRun(run.thread_id, run.run_id);
+        clearReconnectRun(run.thread_id, run.run_id, runStorage);
         setActiveRunRejoinRetry((current) => current + 1);
         return;
       }
@@ -2036,18 +2063,19 @@ export function useThreadStream({
       }
 
       rejoin.inFlight = false;
-      clearReconnectRun(rejoin.threadId, rejoin.runId);
+      clearReconnectRun(rejoin.threadId, rejoin.runId, runStorage);
       const retryDelay = ACTIVE_RUN_REJOIN_RETRY_DELAYS_MS[rejoin.attempts - 1];
       if (retryDelay === undefined) {
         return;
       }
 
       rejoin.retryTimer = setTimeout(() => {
+        if (lifetime?.scope.signal.aborted) return;
         rejoin.retryTimer = null;
         setActiveRunRejoinRetry((current) => current + 1);
       }, retryDelay);
     },
-    [],
+    [lifetime, runStorage],
   );
 
   const settleActiveRunRejoin = useCallback(() => {
@@ -2082,10 +2110,10 @@ export function useThreadStream({
   );
 
   const thread = useStream<AgentThreadState>({
-    client: getAPIClient(isMock),
+    client: apiClient,
     assistantId,
     threadId: onStreamThreadId,
-    reconnectOnMount: true,
+    reconnectOnMount: runStorage ? () => runStorage : true,
     fetchStateHistory: { limit: 1 },
     // Batch stream updates received in the same macrotask without adding a
     // fixed debounce interval that could delay a continuously active stream.
@@ -2095,6 +2123,7 @@ export function useThreadStream({
     // Keep explicit: SDK types claim @default true, but runtime uses throttle ?? false.
     throttle: true,
     onCreated(meta) {
+      if (lifetime?.scope.signal.aborted) return;
       submittedRunIdRef.current = meta.run_id;
       handleStreamStart(meta.thread_id, meta.run_id);
       const now = new Date().toISOString();
@@ -2125,14 +2154,15 @@ export function useThreadStream({
         interrupts: {},
       });
       if (context.agent_name && !isMock) {
-        void getAPIClient()
-          .threads.update(meta.thread_id, {
+        void apiClient.threads
+          .update(meta.thread_id, {
             metadata: { agent_name: context.agent_name },
           })
           .catch(() => ({}));
       }
     },
     onUpdateEvent(data, { mutate }) {
+      if (lifetime?.scope.signal.aborted) return;
       if (hasRenderedThreadStateUpdate(data)) {
         mutate((previous) => reduceThreadStateUpdates(previous, data) ?? {});
       }
@@ -2180,6 +2210,7 @@ export function useThreadStream({
       }
     },
     onCustomEvent(event: unknown) {
+      if (lifetime?.scope.signal.aborted) return;
       // Narrow `event.type` once; taskEventToSubtaskUpdate already validated the
       // task_* events, so the per-branch re-narrowing below reads this single
       // source of truth instead of re-checking the object shape each time.
@@ -2239,6 +2270,7 @@ export function useThreadStream({
       }
     },
     onError(error, run) {
+      if (lifetime?.scope.signal.aborted) return;
       scheduleActiveRunRejoinRetry(run);
       setOptimisticMessages([]);
       setOptimisticThreadId(null);
@@ -2262,6 +2294,7 @@ export function useThreadStream({
       }
     },
     onFinish(state, run) {
+      if (lifetime?.scope.signal.aborted) return;
       if (run) {
         completedRunIdsRef.current.add(run.run_id);
       }
@@ -2282,6 +2315,7 @@ export function useThreadStream({
   // sessionStorage. A reopened browser or a new tab has no pointer, so recover
   // the newest active run from the server and join its resumable SSE stream.
   useEffect(() => {
+    if (lifetime?.scope.signal.aborted) return;
     const resolvedThreadId = onStreamThreadId ?? null;
     const resolvedRunId = activeRunId ?? null;
     let rejoin = activeRunRejoinRef.current;
@@ -2294,7 +2328,7 @@ export function useThreadStream({
         clearTimeout(rejoin.retryTimer);
       }
       if (rejoin.attempts > 0 && rejoin.threadId && rejoin.runId) {
-        clearReconnectRun(rejoin.threadId, rejoin.runId);
+        clearReconnectRun(rejoin.threadId, rejoin.runId, runStorage);
       }
       rejoin = createActiveRunRejoinState(resolvedThreadId, resolvedRunId);
       activeRunRejoinRef.current = rejoin;
@@ -2316,13 +2350,13 @@ export function useThreadStream({
     // A matching pointer means the SDK's native same-tab reconnect owns this
     // run. Do not create a second SSE consumer; if that reconnect fails,
     // scheduleActiveRunRejoinRetry releases the pointer.
-    if (readReconnectRun(resolvedThreadId) === resolvedRunId) {
+    if (readReconnectRun(resolvedThreadId, runStorage) === resolvedRunId) {
       return;
     }
 
     rejoin.attempts += 1;
     rejoin.inFlight = true;
-    rememberReconnectRun(resolvedThreadId, resolvedRunId);
+    rememberReconnectRun(resolvedThreadId, resolvedRunId, runStorage);
     void joinStream(resolvedRunId);
   }, [
     activeRunId,
@@ -2330,6 +2364,8 @@ export function useThreadStream({
     isThreadLoading,
     joinStream,
     onStreamThreadId,
+    lifetime,
+    runStorage,
   ]);
 
   useEffect(
@@ -2342,11 +2378,11 @@ export function useThreadStream({
         clearTimeout(rejoin.retryTimer);
       }
       if (rejoin.attempts > 0 && rejoin.threadId && rejoin.runId) {
-        clearReconnectRun(rejoin.threadId, rejoin.runId);
+        clearReconnectRun(rejoin.threadId, rejoin.runId, runStorage);
       }
       activeRunRejoinRef.current = createActiveRunRejoinState();
     },
-    [onStreamThreadId],
+    [onStreamThreadId, runStorage],
   );
 
   const stopThread = useCallback(async () => {
@@ -2551,6 +2587,7 @@ export function useThreadStream({
       extraContext?: Record<string, unknown>,
       options?: SendMessageOptions,
     ) => {
+      lifetime?.scope.signal.throwIfAborted();
       if (sendInFlightRef.current) {
         return;
       }
@@ -2636,6 +2673,7 @@ export function useThreadStream({
       let uploadedFiles: FileInMessage[] = [];
 
       try {
+        lifetime?.scope.signal.throwIfAborted();
         // Upload files first if any
         if (message.files && message.files.length > 0) {
           setIsUploading(true);
@@ -2645,6 +2683,7 @@ export function useThreadStream({
             );
 
             const conversionResults = await Promise.all(filePromises);
+            lifetime?.scope.signal.throwIfAborted();
             const files = conversionResults.filter(
               (file): file is File => file !== null,
             );
@@ -2661,7 +2700,10 @@ export function useThreadStream({
             }
 
             if (files.length > 0) {
-              const uploadResponse = await uploadFiles(threadId, files);
+              const uploadResponse = lifetime
+                ? await uploadFiles(threadId, files, { rest: lifetime.rest })
+                : await uploadFiles(threadId, files);
+              lifetime?.scope.signal.throwIfAborted();
               uploadedFiles = uploadResponse.files.map((info) => ({
                 filename: info.filename,
                 size: info.size,
@@ -2692,7 +2734,7 @@ export function useThreadStream({
               error instanceof Error
                 ? error.message
                 : "Failed to upload files.";
-            toast.error(errorMessage);
+            if (!lifetime?.scope.signal.aborted) toast.error(errorMessage);
             setOptimisticMessages([]);
             setOptimisticThreadId(null);
             setLiveMessagesThreadId(null);
@@ -2705,7 +2747,9 @@ export function useThreadStream({
         // Attachments are uploaded, so the send is genuinely dispatched and
         // callers can drop one-time state. A failed upload rejected above
         // without reaching here, leaving that state for a retry.
+        lifetime?.scope.signal.throwIfAborted();
         options?.onSent?.();
+        lifetime?.scope.signal.throwIfAborted();
         await thread.submit(
           {
             messages: buildThreadSubmitMessages({
@@ -2733,6 +2777,7 @@ export function useThreadStream({
             }),
           },
         );
+        lifetime?.scope.signal.throwIfAborted();
         void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
         void queryClient.invalidateQueries({
           queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
@@ -2750,6 +2795,7 @@ export function useThreadStream({
     },
     [
       thread,
+      lifetime,
       t.uploads.uploadingFiles,
       context,
       queryClient,
@@ -3221,6 +3267,7 @@ export function useThreadHistory(
   threadId: string,
   { enabled = true, pendingSupersededRunIds }: ThreadHistoryOptions = {},
 ) {
+  const lifetime = useWorkspaceLifetime();
   const historyQuery = useInfiniteQuery<
     ThreadMessagesPageResponse,
     Error,
@@ -3238,7 +3285,7 @@ export function useThreadHistory(
         threadId,
         pageParam ?? undefined,
       );
-      const response = await fetch(url, {
+      const response = await (lifetime?.rest.fetch ?? fetch)(url, {
         method: "GET",
         headers: {
           "Content-Type": "application/json",
@@ -3246,15 +3293,19 @@ export function useThreadHistory(
         credentials: "include",
         signal,
       });
-      if (!response.ok) {
-        throw new Error(
-          await readResponseErrorMessage(
-            response,
-            "Failed to load thread history.",
-          ),
-        );
-      }
-      return parseThreadMessagesPageResponse(await response.json());
+      const decode = async (response: Response) => {
+        if (!response.ok)
+          throw new Error(
+            await readResponseErrorMessage(
+              response,
+              "Failed to load thread history.",
+            ),
+          );
+        return parseThreadMessagesPageResponse(await response.json());
+      };
+      return lifetime
+        ? lifetime.rest.consume(response, decode)
+        : decode(response);
     },
     getNextPageParam: getThreadHistoryNextPageParam,
   });
@@ -3304,11 +3355,11 @@ export function useThreadHistory(
   }, [messageRows, pendingSupersededRunIds]);
 
   useEffect(() => {
-    if (historyQuery.error) {
+    if (historyQuery.error && !lifetime?.scope.signal.aborted) {
       console.error(historyQuery.error);
       toast.error("Failed to load thread history.");
     }
-  }, [historyQuery.error]);
+  }, [historyQuery.error, lifetime]);
 
   return {
     messages,
@@ -3577,7 +3628,8 @@ export function useThreadRuns(
   threadId?: string,
   { enabled = true }: { enabled?: boolean } = {},
 ) {
-  const apiClient = getAPIClient();
+  const lifetime = useWorkspaceLifetime();
+  const apiClient = lifetime?.sdk ?? getAPIClient();
   return useQuery<Run[]>({
     queryKey: ["thread", threadId],
     queryFn: async () => {
@@ -3585,6 +3637,7 @@ export function useThreadRuns(
         return [];
       }
       const response = await apiClient.runs.list(threadId);
+      lifetime?.scope.signal.throwIfAborted();
       return response;
     },
     enabled: enabled && Boolean(threadId),
@@ -3600,7 +3653,8 @@ export function useThreadMetadata(
     isMock = false,
   }: { enabled?: boolean; isMock?: boolean } = {},
 ) {
-  const apiClient = getAPIClient(isMock);
+  const lifetime = useWorkspaceLifetime();
+  const apiClient = lifetime && !isMock ? lifetime.sdk : getAPIClient(isMock);
   return useQuery<AgentThread | null>({
     queryKey: ["thread", "metadata", threadId, isMock],
     queryFn: async () => {
@@ -3609,8 +3663,10 @@ export function useThreadMetadata(
       }
       try {
         const response = await apiClient.threads.get(threadId);
+        lifetime?.scope.signal.throwIfAborted();
         return response as AgentThread;
       } catch (error) {
+        lifetime?.scope.signal.throwIfAborted();
         if (isThreadMissingError(error)) {
           return null;
         }
@@ -3627,13 +3683,16 @@ export function useThreadTokenUsage(
   threadId?: string | null,
   { enabled = true }: { enabled?: boolean } = {},
 ) {
+  const lifetime = useWorkspaceLifetime();
   return useQuery<ThreadTokenUsageResponse | null>({
     queryKey: threadTokenUsageQueryKey(threadId),
     queryFn: async () => {
       if (!threadId) {
         return null;
       }
-      return fetchThreadTokenUsage(threadId);
+      return lifetime
+        ? fetchThreadTokenUsage(threadId, { rest: lifetime.rest })
+        : fetchThreadTokenUsage(threadId);
     },
     enabled: enabled && Boolean(threadId),
     retry: false,

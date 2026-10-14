@@ -507,3 +507,37 @@ separate direct uploadFiles path and actual SDK/thread reads/submission are next
 app-shell bootstrap/selector, storage/reconnect reset and actual browser/backend
 acceptance remain. No real business upload is claimed from this test. M3 and
 M4-M11 remain open, activation closed, no deployment/push/local runtime/model.
+
+
+M3 native chat consumer checkpoint: frontend #28 RED reproduced actual missing
+thread selectors, stale decoded upload continuing to submit, and shared SDK
+reconnect storage. #29 passed two mains but exposed a test-only return-shape
+mistake (chat.thread.messages); #30 passed all three mains and 35 regressions,
+then exposed two existing isolated options tests' incomplete React substitute.
+Their explicit native/no-workspace fixture now supplies null; no production
+workaround. #31 passed all 40 tests but target lint refused two test fixture String()
+conversions; explicit type narrowing fixed those. #32 SUCCESS passes three mains plus all 37 native/SDK regressions,
+five-file formatting, zero-warning target lint and full pnpm check. Runtime/test
+bytes match the archive; exact #28-#32 and formatter/SDK-probe resources empty.
+
+Ordinary useThreadStream now captures the confirmed SDK for streaming and agent
+metadata. Native per-thread history, metadata, Runs and token-usage reads bind
+the matching client; materialized responses are fenced after decode. File
+conversion and direct chat upload are checked before/after await, at onSent and
+before submit/cache effects. Old stream callbacks cannot notify/update new
+content. The native SDK's documented reconnectOnMount storage factory is used
+instead of modifying global storage or replacing its runtime. The adapter maps
+SDK keys to the existing actor/workspace/thread namespace, refuses stale
+lifetime reads/writes/removal and preserves native unscoped markers. Explicit
+server admission must still verify current resource/Run identity; markers grant
+no authority. Ordinary selection never requests Run cancellation.
+
+New mains use real React/StrictMode, Context, native domain hooks, REST/SDK
+clients and the SDK stream parser with network doubles. The external React SDK
+useStream adapter is doubled, so actual automatic rejoin/stop/render lifecycle
+and browser/backend authorization are not proven. Search/archive/branch/move/
+delete/rename and replay/compact still need client/publication binding, along
+with project-thread creation, artifacts, remaining resources and storage.
+App-shell/bootstrap/native selector and real two-tab acceptance remain next.
+M3 and M4-M11 stay open; tenant activation closed, no deployment/push/local
+application runtime/model calls. Continue reusing native DeerFlow styling.

@@ -443,6 +443,20 @@ Native upload hooks capture useWorkspaceLifetime and pass its REST client into
 upload/list/limits/delete APIs. Scoped list/limits queries consume their query
 AbortSignal; mutation cache effects skip expired lifetimes. The on-submit helper
 checks again after awaiting upload. Optional request options preserve native
-unscoped callers. useThreadStream's separate direct uploadFiles path is not yet
-bound by these hooks; it needs the same captured lifetime before chat activation.
-Do not infer complete chat isolation from the upload-hook checks.
+unscoped callers. Ordinary chat's separate direct uploadFiles path also captures
+the confirmed REST client. Replay and other resource actions still need integration;
+upload-hook checks alone do not prove complete chat isolation.
+
+
+Native ordinary chat consumers now capture useWorkspaceLifetime: useThreadStream
+uses its SDK for streaming/agent metadata and its REST client for direct upload;
+per-thread history, metadata, Runs and token-usage reads use the same lifetime.
+Check again after conversion/upload/submit awaits before publication. Expired
+stream callbacks must not send UI notifications or update task/cache state.
+The SDK-supported reconnectOnMount storage factory uses core/workspaces/run-storage:
+map only lg:stream keys to actor/workspace/thread keys, refuse operations after
+scope abort, and leave native unscoped keys untouched. Recovery helpers use this
+same adapter. A stored marker is only a hint; server-side Run/resource ownership
+must be revalidated. Switching workspace must not cancel background Runs.
+Search/CRUD/replay/compact and actual shell activation remain unintegrated; do
+not infer complete client isolation from ordinary-chat network-double tests.

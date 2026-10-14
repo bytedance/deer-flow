@@ -1,4 +1,7 @@
-import { fetch as fetchWithAuth } from "@/core/api/fetcher";
+import {
+  fetch as fetchWithAuth,
+  type WorkspaceRESTClient,
+} from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
 import type { AgentThread, ThreadTokenUsageResponse } from "./types";
@@ -64,22 +67,26 @@ async function readThreadAPIError(
 
 export async function fetchThreadTokenUsage(
   threadId: string,
+  options?: { rest: WorkspaceRESTClient; signal?: AbortSignal },
 ): Promise<ThreadTokenUsageResponse | null> {
-  const response = await fetchWithAuth(
+  const response = await (options?.rest.fetch ?? fetchWithAuth)(
     `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/token-usage`,
     {
       method: "GET",
+      ...(options?.signal ? { signal: options.signal } : {}),
     },
   );
 
-  if (!response.ok) {
-    if (response.status === 403 || response.status === 404) {
-      return null;
+  const decode = async (
+    response: Response,
+  ): Promise<ThreadTokenUsageResponse | null> => {
+    if (!response.ok) {
+      if (response.status === 403 || response.status === 404) return null;
+      throw new Error("Failed to load thread token usage.");
     }
-    throw new Error("Failed to load thread token usage.");
-  }
-
-  return (await response.json()) as ThreadTokenUsageResponse;
+    return (await response.json()) as ThreadTokenUsageResponse;
+  };
+  return options ? options.rest.consume(response, decode) : decode(response);
 }
 
 export async function branchThreadFromTurn(

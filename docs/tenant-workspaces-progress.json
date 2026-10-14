@@ -1981,7 +1981,7 @@
   },
   "frontend_confirmed_context": {
     "job": "deerflow-tenant-frontend",
-    "status": "opt-in Context/metadata/session foundation verified; app shell and real consumers not mounted",
+    "status": "opt-in confirmed Context verified; first native upload/chat consumers integrated, app-shell activation remains pending",
     "red": {
       "build": 24,
       "result": "FAILURE",
@@ -2050,9 +2050,75 @@
     "scope": "Upload hooks capture confirmed immutable REST clients; query cancellation consumed; native multipart and error formatting retained; old decoded upload and retained callback refused; old mutation cannot invalidate the new cache. REST consume keeps native Response and fences native domain decoder success/error with captured combined signal.",
     "cleanup": "#26-#27 terminal; exact owned container/network and upload-format probe inventories independently empty; dependency cache retained",
     "remaining": [
-      "useThreadStream still calls direct uploadFiles and must bind upload+SDK+publication before real chat acceptance",
+      "Ordinary useThreadStream upload is now covered by frontend_chat_consumers; replay and remaining thread actions still require integration",
       "thread/resource hooks, app capability bootstrap, selector and UI/storage/reconnect integration",
       "real server/browser two-tab authorization; M4-M11 and full tenant activation remain open"
+    ]
+  },
+  "frontend_chat_consumers": {
+    "job": "deerflow-tenant-frontend",
+    "status": "native per-thread reads and ordinary send/upload consumer integration verified under opt-in Context; full M3 remains incomplete",
+    "red": {
+      "build": 28,
+      "result": "FAILURE",
+      "tests_failed": 3,
+      "test_seconds": 7.82,
+      "build_seconds": 23.316,
+      "archive_sha256": "bc68bca890ee71f2e56d7e6c9f8664928ceda2910201c11bac5a596792b3d4c9",
+      "reason": "Actual metadata has no selector; delayed upload continues into submit after selection; SDK reconnect option still uses shared native storage."
+    },
+    "intermediate": [
+      {
+        "build": 29,
+        "result": "FAILURE",
+        "tests_passed": 2,
+        "tests_failed": 1,
+        "archive_sha256": "39212d4a9be4ed21c3fa23e52fc78d59c57a648323169dc54692956c0a225e7b",
+        "reason": "New test accessed chat.messages rather than the actual hook contract chat.thread.messages. Test fixture corrected; no production workaround."
+      },
+      {
+        "build": 30,
+        "result": "FAILURE",
+        "main_tests_passed": 3,
+        "related_tests_passed": 35,
+        "related_tests_failed": 2,
+        "archive_sha256": "42dfa46ff609198a8de120115d1ec2ac3a2676388c12066c915b4a137d81d1ad",
+        "reason": "Existing isolated stream-options unit replaces React without createContext. Its explicit no-workspace boundary fixture now returns null; actual new React/Context mains remain real."
+      },
+      {
+        "build": 31,
+        "result": "FAILURE",
+        "tests_passed": 40,
+        "archive_sha256": "c77b9f64b007e785340e25c1eb01522b216059527837e32b6ae3ae47c6469a4b",
+        "reason": "Targeted lint rejected two broad String(RequestInfo/BodyInit) conversions in the new test fixture; narrowed to real strings without weakening assertions. Full pnpm check was not reached."
+      }
+    ],
+    "green": {
+      "build": 32,
+      "result": "SUCCESS",
+      "tests_passed": 40,
+      "tests_added": 3,
+      "main_test_seconds": 5.75,
+      "regression_test_seconds": 18.0,
+      "build_seconds": 428.119,
+      "archive_sha256": "491077d3d42e24d250c4f8e9073784915f69a20224d8144b5cc82f1fc51dc653",
+      "checks": "three actual React/StrictMode chat mains; 37 native sending/rejoin/usage/history/options/throttle/scoped-SDK regressions; five-file Prettier; targeted ESLint max-warnings 0; full frontend pnpm check"
+    },
+    "source_sha256": {
+      "frontend/src/core/workspaces/run-storage.ts": "07d43134ba0451ba79cb0361e9e1d85daefcad10a6efc2022ead7a7c85ea1eb7",
+      "frontend/src/core/threads/api.ts": "9804164f2fce716cff18929768097db187f2b7e457e9ec44a16c2aed956b2ac8",
+      "frontend/src/core/threads/hooks.ts": "f743f3d353b3f511667b9c14b4c521ed44e7f2e127cdac07605b19263c60480d",
+      "frontend/tests/unit/core/threads/workspace-chat.dom.test.tsx": "c87f64cc82ec29b1e08296d1676972fe983bb0a3f11c0c87248532ad74ef88d7",
+      "frontend/tests/unit/core/threads/stream-options.test.ts": "aa0ba635c4e51502241f470eabeee9647b2b85a6e507cf1ba9ab3e00c7aeb7f4"
+    },
+    "scope": "useThreadStream captures fixed SDK for normal streaming and agent metadata; scoped native history/metadata/runs/token usage, direct attachment upload and conversion/send publication fences; stale stream callbacks and retry side effects ignored; SDK-supported custom run metadata storage uses actor/workspace/thread namespace and rejects stale lifetime reads/writes/removal. Switching detaches and does not cancel server Runs.",
+    "evidence_limits": "Only the external React SDK useStream adapter is doubled in new tests; real source hooks, Context, native REST/SDK clients and stream parser run with network doubles. Does not prove actual browser/SDK automatic reconnect or backend authorization.",
+    "cleanup": "#28-#32 terminal; exact owned container/network, chat-format and SDK source probe inventories independently empty; private dependency cache retained",
+    "remaining": [
+      "thread search/archive/branch/move/delete/rename, replay prepare and compact REST/domain consumers",
+      "project-thread creation and remaining project/artifact/resource clients and storage namespaces",
+      "actual app capability bootstrap, native selector and browser/backend two-tab acceptance",
+      "credential/principal consistency, active revocation, physical runtime and all M4-M11 gates; no tenant activation"
     ]
   }
 }

@@ -91,3 +91,13 @@ thread UI stores and React SDK reconnect markers. Each needs actor/workspace/
 incarnation-safe namespacing or reset; query cache remount is not proof for
 those stores. Native session/principal changes after promotion still require
 M6/M11 proof, including same-workspace actors. No activation gate is removed.
+
+
+Frontend ordinary-chat checkpoint (frontend #32): native per-thread history,
+metadata, Runs/token usage and ordinary send/direct-upload use captured clients.
+Conversion/upload/send and stream-callback publication are lifetime-fenced.
+React SDK reconnect and durable-list recovery use the same actor/workspace/thread
+storage adapter; stale lifetime operations are inert. This tests actual source
+hooks with a doubled external React SDK adapter, not real browser reconnect.
+Thread search/CRUD/replay/compact, remaining resources/stores and shell activation
+are still open entries. Scoped markers never replace server ownership checks.
