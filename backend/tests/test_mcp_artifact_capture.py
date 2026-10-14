@@ -13,6 +13,7 @@ from deerflow.agents.middlewares.artifact_capture_middleware import ArtifactCapt
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.paths import Paths
+from deerflow.mcp.session_pool import MCPSessionPool
 from deerflow.mcp.tools import _RawServerDiscovery, _wrap_discovered_server_tools
 
 
@@ -61,13 +62,12 @@ async def test_resource_link_captured_by_agent_graph(transport, mime, suffix, mo
     async def fake_session(*args, **kwargs):
         yield Session()
 
-    class Pool:
-        async def get_session(self, *args, **kwargs):
-            return Session()
+    pool = MCPSessionPool()
 
     # Replace only the external MCP session and the filesystem base directory.
     # Discovery conversion, transport dispatch, tool execution, and capture are real.
     monkeypatch.setattr("langchain_mcp_adapters.tools.create_session", fake_session)
+    monkeypatch.setattr("langchain_mcp_adapters.sessions.create_session", fake_session)
     monkeypatch.setattr("deerflow.mcp.tools.get_paths", lambda: Paths(tmp_path))
     connection = {"transport": "stdio", "command": "offline-mcp-fixture"} if transport == "stdio" else {"transport": "streamable_http", "url": "https://example.com/mcp"}
     discovered = await load_mcp_tools(
@@ -83,7 +83,7 @@ async def test_resource_link_captured_by_agent_graph(transport, mime, suffix, mo
         _RawServerDiscovery(discovered, []),
         tool_name_prefix=True,
         session_init_timeout=None,
-        pool=Pool(),
+        pool=pool,
         binding=None,
         ownership_domain="deployment",
         connection_scope="deployment",
@@ -96,10 +96,13 @@ async def test_resource_link_captured_by_agent_graph(transport, mime, suffix, mo
         state_schema=ThreadState,
         context_schema=dict,
     )
-    state = await graph.ainvoke(
-        {"messages": [("user", "Export a report")]},
-        context={"thread_id": "report-thread", "thread_incarnation": "fixture-incarnation"},
-    )
+    try:
+        state = await graph.ainvoke(
+            {"messages": [("user", "Export a report")]},
+            context={"thread_id": "report-thread", "thread_incarnation": "fixture-incarnation"},
+        )
+    finally:
+        await pool.close_all()
     (message,) = [m for m in state["messages"] if isinstance(m, ToolMessage)]
     assert calls == [("export", {})]
     assert message.status == "success"
