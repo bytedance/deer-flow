@@ -174,11 +174,13 @@ _EMPTY_STREAM_MARKER = "no generations found in stream"
 # ``[504]`` - but not an index such as ``messages[502]``, which the bracketed
 # form's lookbehind rejects; ``HTTP 502``, ``(HTTP 502)``, ``HTTP/1.1 502``;
 # ``status 503``, ``status: 503``, ``status_code=503``, ``"status": 503``. The
-# keyword is required and only spaces or tabs may separate it from the number,
-# so a bare number (``130504 tokens``) or one on the next line never counts.
-# The spaces before and after ``:``/``=`` are separate runs, which keeps
-# matching linear in the length of the message.
-_IN_BAND_STATUS_RE = re.compile(r"(?<![\w\]])\[(\d{3})\]|\bhttp(?:/\d(?:\.\d)?)?[ \t]+(\d{3})\b|\bstatus(?:[ _]?code)?[\"']?[ \t]*(?:[:=][ \t]*)?(\d{3})\b")
+# keyword is required and must be separated from the number - by spaces or tabs
+# after ``HTTP``, and also by ``:`` or ``=`` after ``status`` - so a bare number
+# (``130504 tokens``), one on the next line or one run into the keyword
+# (``status503``) never counts. Digits are ASCII only: ``\d`` and ``int()``
+# also accept other scripts' digits. The spaces before and after ``:``/``=``
+# are separate runs, which keeps matching linear in the length of the message.
+_IN_BAND_STATUS_RE = re.compile(r"(?<![\w\]])\[([0-9]{3})\]|\bhttp(?:/[0-9](?:\.[0-9])?)?[ \t]+([0-9]{3})\b|\bstatus(?:[ _]?code)?(?:[\"']?[ \t]*[:=][ \t]*|[\"']?[ \t]+)([0-9]{3})\b")
 
 # Runs of ``_``, ``-`` and whitespace. A status-less error's busy check reads each
 # run as one space, so ``rate-limit`` and ``RATE_LIMIT_...`` match ``rate limit``.
