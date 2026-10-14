@@ -96,3 +96,12 @@ native regressions. Distinct usage/diffs and native options, foreign/peer denial
 and changed entry/materialization nonce refusal verified. Exact child retention
 checks preserved after new event fixture. Feedback/files/client and M4-M11
 remain pending; M3 unchecked and activation closed.
+
+M3 feedback checkpoint: #81 RED real cross-space disclosure/missing HTTP scope;
+#82 GREEN (38 passed, 57.61s), four SQLite/PostgreSQL SQL/JWT mains plus native
+feedback compatibility. Scoped reads filter parent/Run/live versions before
+pagination/reduction; writes require original incarnation and parent-first SQL
+locks. Actual withdrawal/replacement preserves data. Generic scoped bulk cleanup
+refuses bypass of canonical deletion receipt. Exact resources empty, archive
+bytes match. Files/client, full factories/producers and M4–M11 remain pending;
+M3 stays unchecked and activation closed.

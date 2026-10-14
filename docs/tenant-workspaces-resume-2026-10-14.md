@@ -180,3 +180,35 @@ frontend flows, event writers/producers/factories and M4-M11 are still required.
 This does not enable tenant mode or prove full usage accounting/quota admission.
 
 Latest continuation: #76/#77 global Run reads and #78/#79/#80 usage/file-change reads are recorded; all five builds terminal and exact owned inventories empty. No live validation job remains. User confirmed native UI style. Next: FeedbackRepository scope/read/write transaction guards plus feedback routes, then remaining file/artifact/PUT/history entries and frontend space selection/caches. M0-M11 remains active and incomplete; no tenant push/deployment, compiled activation closed.
+
+## Feedback SQL and HTTP (partial M3)
+
+FeedbackRepository derives private scope from its original actor/thread/Run
+relations; no second feedback identity or tenant ownership backfill is guessed.
+Reads apply compatible native Run, private parent and live space in SQL before
+limit, count or grouping. NULL/unattributed, mismatched-parent and peer rows are
+not claimed. Required instances check shape/actor even for empty run-ID batches.
+Legacy all-owner aggregate defaults and unbound method signatures are retained.
+
+Scoped create/upsert/delete/delete_by_run require the captured entry incarnation
+and lock workspace → actor → thread → Run → feedback in their short transaction.
+ID-only delete discovers a read-only locator in a separate session, then rechecks
+the exact relation after locking. Generic scoped bulk deletion is refused;
+canonical thread deletion uses its existing captured SQL receipt. All six native
+feedback routes bind scope before owner admission; scoped reads pass the actor
+and matching Run, writes pass the original admission nonce into the repository.
+
+#81 RED reproduced cross-space disclosure and missing HTTP binding on both
+metadata dialects. #82 passed 38 checks in 57.61s: real SQLite/PostgreSQL SQL and
+JWT/HTTP mains, native feedback and global-feedback compatibility. Actual policy
+withdrawal before update/delete preserves the row, and parent replacement before
+create leaves zero new rows; owner-admission replacement also refuses writes.
+Paging excludes invalid rows before limit; stats/grouping omit peers and invalid
+Run parents. Archive/source bytes match; #81/#82 exact resources are empty.
+The existing TestClient/httpx warning is unchanged.
+
+These results do not prove all multiprocess/crash/cancellation or credential-reset
+and role/OAuth boundaries. Remaining files/artifact/PUT/history, frontend, producer
+and scope-required factory integration and M4–M11 still gate tenant activation.
+
+Latest: #81 FAILURE/#82 SUCCESS both terminal, resources empty, four runtime/test files matched #82 archive. Feedback SQL/HTTP main verified, not full M3. Next inspect remaining artifact/archive/PUT/history paths before frontend. Original M0–M11 active, no tenant push/deployment, activation closed.

@@ -33,7 +33,7 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
     from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
     from app.gateway.auth_middleware import AuthMiddleware
     from app.gateway.csrf_middleware import CSRFMiddleware
-    from app.gateway.routers import artifacts, project_documents, projects, runs, thread_activity, thread_runs, threads, uploads
+    from app.gateway.routers import artifacts, feedback, project_documents, projects, runs, thread_activity, thread_runs, threads, uploads
     from deerflow.agents.middlewares import summarization_middleware as summary_module
     from deerflow.config import app_config
     from deerflow.config import paths as paths_module
@@ -204,6 +204,7 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
             app.include_router(threads.router)
             app.include_router(thread_activity.router)
             app.include_router(runs.router)
+            app.include_router(feedback.router)
             app.include_router(thread_runs.router)
             app.include_router(projects.router)
             app.include_router(project_documents.router)
@@ -869,6 +870,59 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                     with monkeypatch.context() as patch:
                         patch.setattr(repository, method, supplementary_read_then_replace)
                         assert (await client.get(team_run_base + suffix, headers=team_headers)).status_code == 404
+
+                # Feedback writes use the entry nonce inside their SQL transaction.
+                feedback_url = team_run_base + "/runs/" + team_run + "/feedback"
+                listed_feedback = await client.get(feedback_url, headers=team_headers)
+                assert listed_feedback.status_code == 200 and len(listed_feedback.json()) == 1, listed_feedback.text
+                feedback_id = listed_feedback.json()[0]["feedback_id"]
+                stats = await client.get(feedback_url + "/stats", headers=team_headers)
+                assert stats.status_code == 200 and stats.json()["total"] == 1, stats.text
+                for url in (feedback_url, feedback_url + "/stats"):
+                    assert (await client.get(url)).status_code == 404
+                    as_user("bob")
+                    assert (await client.get(url, headers=team_headers)).status_code == 404
+                    as_user("alice")
+                assert (await client.get(team_run_base + "/runs/" + personal_run + "/feedback", headers=team_headers)).status_code == 404
+                rated = await client.put(feedback_url, headers=team_headers, json={"rating": -1, "comment": "needs sources"})
+                assert rated.status_code == 200 and rated.json()["feedback_id"] == feedback_id and rated.json()["rating"] == -1, rated.text
+                for method, url, payload in (("put", feedback_url, {"rating": 1}), ("delete", feedback_url, None), ("delete", feedback_url + "/" + feedback_id, None)):
+                    owner_replacement["thread_id"] = delete_ids["team"]
+                    replaced = await client.request(method, url, headers=team_headers, **({"json": payload} if payload is not None else {}))
+                    assert replaced.status_code == 404, replaced.text
+                    async with sf() as session:
+                        assert (await session.get(FeedbackRow, feedback_id)).rating == -1, "refused owner-admission write changed feedback"
+                for method, operation, url in (("put", "upsert", feedback_url), ("delete", "delete_by_run", feedback_url), ("delete", "delete", feedback_url + "/" + feedback_id)):
+                    original_write = getattr(app.state.feedback_repo, operation)
+
+                    async def revoke_then_write(*args, _write=original_write, **kwargs):
+                        async with sf() as session:
+                            await session.execute(sa.text("UPDATE workspaces SET policy_version=policy_version+1 WHERE id=:id"), {"id": team})
+                            await session.commit()
+                        return await _write(*args, **kwargs)
+
+                    with monkeypatch.context() as patch:
+                        patch.setattr(app.state.feedback_repo, operation, revoke_then_write)
+                        refused = await client.request(method, url, headers=team_headers, **({"json": {"rating": 1}} if method == "put" else {}))
+                        assert refused.status_code == 404, refused.text
+                    async with sf() as session:
+                        assert (await session.get(FeedbackRow, feedback_id)).rating == -1, "response denial happened after unauthorized SQL mutation"
+                deleted_feedback = await client.delete(feedback_url, headers=team_headers)
+                assert deleted_feedback.status_code == 200, deleted_feedback.text
+                original_create = app.state.feedback_repo.create
+
+                async def replace_then_create(*args, **kwargs):
+                    await rotate_private_parent()
+                    return await original_create(*args, **kwargs)
+
+                with monkeypatch.context() as patch:
+                    patch.setattr(app.state.feedback_repo, "create", replace_then_create)
+                    denied_create = await client.post(feedback_url, headers=team_headers, json={"rating": 1})
+                    assert denied_create.status_code == 404, denied_create.text
+                async with sf() as session:
+                    assert await session.scalar(sa.select(sa.func.count()).select_from(FeedbackRow).where(FeedbackRow.run_id == team_run)) == 0, "replaced generation received new feedback"
+                created_feedback = await client.post(feedback_url, headers=team_headers, json={"rating": 1, "message_id": delete_ids["team"] + "-message"})
+                assert created_feedback.status_code == 200 and created_feedback.json()["rating"] == 1, created_feedback.text
 
                 class ScopeChangingBridge(MemoryStreamBridge):
                     def __init__(self, mode):

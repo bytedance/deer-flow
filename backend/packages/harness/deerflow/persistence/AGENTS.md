@@ -185,3 +185,13 @@ setup/role/OAuth principal attributes in one statement. _read_scope keeps its
 legacy default and accepts optional thread_incarnation for this check.
 The Gateway owns JWT expiry and native route permission evaluation; no SQL
 writer lock spans delivery. Producer lease/generation scope remains M4.
+
+FeedbackRepository scopes reads using original actor/thread/Run relations;
+compatible workspace, private parent and live versions precede limit/count/
+grouping. Scoped user writes require captured entry incarnation and the standard
+workspace -> actor -> thread -> Run -> feedback lock order. ID deletion discovers
+only a locator in a separate read session and rechecks after locking. Bulk
+workspace cleanup must use the canonical ThreadDeletion receipt, not generic
+feedback.delete_by_thread. Unbound stats defaults remain all-owner; scoped
+callers pass the explicit actor. Constructor workspace_required is not yet full
+runtime-factory activation. #82 evidence/limits live in workspace progress JSON.

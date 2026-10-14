@@ -240,3 +240,10 @@ one workspace_changes event per space, tests native include flags and SQL nonce
 replacement after reads. Later deletion must retain exactly two personal SQL
 events (message plus file change), one row in each other seeded child table, and
 zero rows for the deleted space. Do not loosen retention to a nonzero count.
+
+Workspace feedback tests use both actual metadata dialects. Invalid-parent and
+peer rows precede valid feedback so a limit-one read proves SQL filtering.
+HTTP tests commit policy/nonce changes immediately before the actual repository
+method and inspect persisted rating/row count after refusal; do not mock a
+successful mutation or test only the 404 status. Native feedback tests retain
+unbound owner/statistics/deletion compatibility. Full fault matrices remain M11.

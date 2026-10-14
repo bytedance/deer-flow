@@ -474,3 +474,10 @@ The wrapper fences the materialized result against the entry incarnation and
 live versions. #80 verifies actual two-dialect payloads/options and eleven native
 regressions. Usage quota admission, event production and remaining feedback/
 file/client paths are not implied by these read checks.
+
+All six feedback routes bind private workspace scope before native owner checks.
+Scoped lists/stats require matching durable Run and explicit actor. Mutations
+pass the original HTTP entry nonce into FeedbackRepository; response revalidation
+alone cannot authorize a write that already committed. Legacy calls omit new
+keywords. #82 verifies policy/nonce changes before real SQL writes preserve data;
+full credential and distributed lifecycle gates remain M6/M11.

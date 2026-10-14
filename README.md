@@ -2984,3 +2984,8 @@ DeerFlow styling, as confirmed for the tenant UI plan.
 now apply selected private-workspace authorization while retaining native
 statistics and diff options. Feedback operations, frontend and full tenant
 activation remain pending.
+
+[Feedback space isolation](docs/tenant-workspaces-api.md#feedback-sql-and-http-partial-m3)
+now covers native SQL reads and HTTP feedback mutations, including withdrawn
+space permissions and replaced conversations before commit. Remaining file,
+frontend and runtime integration still gate full tenant activation.

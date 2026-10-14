@@ -1546,5 +1546,49 @@
       "normal Run producers/event writers/runtime factories M4",
       "M4-M11 and full activation remain incomplete"
     ]
+  },
+  "latest_checkpoint": {
+    "work_package": "M3",
+    "status": "partial",
+    "last_verified_job": "deerflow-tenant-m1-postgres",
+    "last_verified_build": 82,
+    "next": "remaining artifact/PUT/history file paths, then frontend workspace selection/caches; full M0-M11 remains required",
+    "tenant_activation": "closed",
+    "deployment": "none"
+  },
+  "workspace_feedback": {
+    "status": "partial_M3_verified_repository_and_HTTP_main",
+    "job": "deerflow-tenant-m1-postgres",
+    "red": {
+      "build": 81,
+      "result": "FAILURE",
+      "tests_failed": 4,
+      "elapsed_seconds": 43.77,
+      "archive_sha256": "803a56d69002fe2b8d8924d3d385e891df34120310639e63f53ead932bea4de5",
+      "reason": "actual same-user personal feedback disclosed under team scope in both dialects; native feedback HTTP lacked scope"
+    },
+    "green": {
+      "build": 82,
+      "result": "SUCCESS",
+      "tests_passed": 38,
+      "elapsed_seconds": 57.61,
+      "archive_sha256": "2d2d830ba893f8cb896d2fbb13ad887b06e985bbf6b948c7574cd8145f66b305",
+      "command": "python -m pytest tests/test_workspace_feedback.py tests/test_workspace_http.py tests/test_feedback.py tests/test_runs_api_endpoints.py::TestRunFeedback -q --tb=short --no-showlocals"
+    },
+    "source_sha256": {
+      "backend/packages/harness/deerflow/persistence/feedback/sql.py": "e1ce6a04349854d67f95272c4f401f59ed587d7d4fd9ed42addf3014fff7235d",
+      "backend/app/gateway/routers/feedback.py": "bb57404639c79cfc34179b9b45ef51cc52218ca7f482efea6e3e18beb0a77712",
+      "backend/tests/test_workspace_feedback.py": "2427bd77fd78355b4eeccf6f7147f5eb6ee6bbab96942fb6542365f8d3e44f45",
+      "backend/tests/test_workspace_http.py": "dc0dcb391d60948edef351a2380c8d72386d1d3585588523a42ec292206d59da"
+    },
+    "cleanup": "#81/#82 ownership-labelled container/network inventories independently empty",
+    "warning": "existing Starlette TestClient/httpx deprecation warning",
+    "implementation": "Feedback reads filter private parent, live workspace and compatible native Run before paging/count/grouping; scoped writes lock workspace->actor->thread->Run->feedback and require original HTTP-admitted incarnation. Bulk maintenance under workspace scope is refused; canonical receipt deletion remains authoritative.",
+    "remaining": [
+      "remaining artifact/PUT/history and frontend workspace switching",
+      "full factory/startup scope-required wiring and M4 producers",
+      "physical races/crash/cancellation, complete credential-reset/role/OAuth workflows M6/M11",
+      "M4-M11 and full activation remain incomplete"
+    ]
   }
 }
