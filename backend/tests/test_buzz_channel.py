@@ -2279,7 +2279,8 @@ def test_no_floor_first_connect_never_walks_the_backlog(monkeypatch):
     assert [m.metadata["event_id"] for m in captured] == [only["id"]]
 
 
-def test_a_closed_backlog_page_only_drops_the_walk_and_never_touches_the_live_subscription(monkeypatch):
+@pytest.mark.parametrize("reason", ["error: gone", "auth-required: authenticate first"])
+def test_a_closed_backlog_page_only_drops_the_walk_and_never_touches_the_live_subscription(monkeypatch, reason):
     """A relay CLOSED for a backlog page is best effort: the live subscription survives."""
     monkeypatch.setattr("app.channels.buzz.RELAY_HISTORY_LIMIT", 1, raising=False)
     ch, _ = _started()
@@ -2294,11 +2295,12 @@ def test_a_closed_backlog_page_only_drops_the_walk_and_never_touches_the_live_su
     backlog_sub = f"buzz-backlog-{CHANNEL}"
     assert len(_reqs_for(transport, backlog_sub)) == 1
 
-    asyncio.run(ch.handle_relay_frame(json.dumps(["CLOSED", backlog_sub, "error: gone"])))
+    asyncio.run(ch.handle_relay_frame(json.dumps(["CLOSED", backlog_sub, reason])))
 
     # The walk state is dropped, but the channel stays subscribed and is NOT
     # re-subscribed (a backlog close is not a chat-subscription outage).
     assert CHANNEL not in ch._backlog_pages and CHANNEL not in ch._backlog_floor
+    assert CHANNEL not in ch._backlog_until
     assert CHANNEL in ch._chat_subscriptions
     assert len(_reqs_by_sub(transport)[live_sub]) == 1
 
@@ -2333,3 +2335,73 @@ def test_reopening_the_live_subscription_closes_an_in_flight_backlog_page(monkey
     assert CHANNEL not in ch._backlog_pages
     # ... and the new live REQ starts a fresh window, keyed to the current cursor.
     assert ch._backlog_floor[CHANNEL] == 1700000500
+
+
+async def _open_backlog_walk(monkeypatch):
+    monkeypatch.setattr("app.channels.buzz.RELAY_HISTORY_LIMIT", 2)
+    ch, captured = _started()
+    transport = FakeTransport()
+    ch._transport = transport
+    ch._seen_created_at[CHANNEL] = 1700000000
+    await ch._ensure_chat_subscription(CHANNEL)
+    live_sub = ch._chat_sub_id(CHANNEL)
+    for created_at in (1700000500, 1700000400):
+        await ch.handle_relay_frame(json.dumps(["EVENT", live_sub, _event(created_at=created_at)]))
+    await ch.handle_relay_frame(json.dumps(["EOSE", live_sub]))
+    return ch, transport, captured
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["membership", "restricted", "pre-auth"])
+async def test_channel_access_ending_closes_backlog_and_ignores_stale_frames(monkeypatch, ending):
+    ch, transport, captured = await _open_backlog_walk(monkeypatch)
+    await ch._ensure_chat_subscription(CHANNEL_B)
+    other_live_sub = ch._chat_sub_id(CHANNEL_B)
+    backlog_sub = ch._backlog_sub_id(CHANNEL)
+    live_sub = ch._chat_sub_id(CHANNEL)
+    if ending == "membership":
+        await ch.handle_relay_frame(json.dumps(["EVENT", "buzz-membership", _membership_event(buzz_nostr.KIND_MEMBER_REMOVED)]))
+        assert live_sub in _closed_subs(transport)
+    else:
+        reason = "restricted: not a member" if ending == "restricted" else "auth-required: authenticate first"
+        await ch.handle_relay_frame(json.dumps(["CLOSED", live_sub, reason]))
+    assert backlog_sub in _closed_subs(transport)
+    assert CHANNEL not in ch._chat_subscriptions
+    assert CHANNEL_B in ch._chat_subscriptions
+    assert other_live_sub not in _closed_subs(transport)
+    assert other_live_sub in ch._page_seen
+    assert CHANNEL not in ch._backlog_pages and CHANNEL not in ch._backlog_floor
+    assert live_sub not in ch._page_seen and backlog_sub not in ch._page_seen
+    assert live_sub not in ch._page_oldest and backlog_sub not in ch._page_oldest
+    assert CHANNEL not in ch._backlog_until
+    before = len(captured)
+    for created_at in (1700000300, 1700000200):
+        await ch.handle_relay_frame(json.dumps(["EVENT", backlog_sub, _event(created_at=created_at)]))
+    for sub_id in (backlog_sub, live_sub):
+        await ch.handle_relay_frame(json.dumps(["EOSE", sub_id]))
+    assert len(captured) == before
+    assert len(_reqs_for(transport, backlog_sub)) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("created_at", [1700000400, 1700000450])
+async def test_backlog_without_timestamp_progress_stops_and_warns(monkeypatch, caplog, created_at):
+    ch, transport, _ = await _open_backlog_walk(monkeypatch)
+    backlog_sub = ch._backlog_sub_id(CHANNEL)
+    caplog.set_level(logging.WARNING, logger="app.channels.buzz")
+    # Equal timestamps saturate the inclusive boundary; newer timestamps violate
+    # the requested window. Neither response can advance a descending walk.
+    for i in range(2):
+        event = _event(created_at=created_at, content=f"@DeerFlow tied {i}")
+        await ch.handle_relay_frame(json.dumps(["EVENT", backlog_sub, event]))
+    await ch.handle_relay_frame(json.dumps(["EOSE", backlog_sub]))
+    assert len(_reqs_for(transport, backlog_sub)) == 1
+    assert backlog_sub in _closed_subs(transport)
+    assert CHANNEL in ch._chat_subscriptions
+    assert CHANNEL not in ch._backlog_pages and CHANNEL not in ch._backlog_until
+    assert "no timestamp progress" in caplog.text
+    assert "1700000400" in caplog.text
+    # Late EOSE/events must not restart a finished walk.
+    await ch.handle_relay_frame(json.dumps(["EVENT", backlog_sub, _event(created_at=1700000300)]))
+    await ch.handle_relay_frame(json.dumps(["EOSE", backlog_sub]))
+    assert len(_reqs_for(transport, backlog_sub)) == 1

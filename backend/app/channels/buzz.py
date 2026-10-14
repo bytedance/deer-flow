@@ -313,6 +313,7 @@ class BuzzChannel(Channel):
         self._page_oldest: dict[str, int] = {}  # sub id -> oldest created_at among them
         self._backlog_floor: dict[str, int | None] = {}  # channel id -> the `since` its live REQ was sent with
         self._backlog_pages: dict[str, int] = {}  # channel id -> descending pages issued this connection
+        self._backlog_until: dict[str, int] = {}  # channel id -> boundary requested by the current backlog page
         self._auth_completed = False  # has THIS socket's NIP-42 handshake been ACKNOWLEDGED by the relay? (see _handle_auth_ok, _AUTH_REQUIRED_CLOSE_PREFIX)
         self._pending_auth_event_id: str | None = None  # id of the AUTH event most recently sent, awaiting a matching OK (see _handle_auth_ok / _confirm_auth_if_pending)
         self._session_started_at: int | None = None  # wall clock at which the CURRENT socket opened; anchors the live membership filter
@@ -457,6 +458,7 @@ class BuzzChannel(Channel):
         self._page_oldest.clear()
         self._backlog_floor.clear()
         self._backlog_pages.clear()
+        self._backlog_until.clear()
 
     def _record_page_delivery(self, sub_id: str, ev: dict) -> None:
         """Count one stored event against the subscription that delivered it.
@@ -632,9 +634,11 @@ class BuzzChannel(Channel):
 
     async def _close_chat_subscription(self, channel_id: str) -> None:
         """Stop listening to one channel, leaving every other subscription on this socket alone."""
-        if channel_id not in self._chat_subscriptions:
-            return
+        subscribed = channel_id in self._chat_subscriptions
         self._chat_subscriptions.discard(channel_id)
+        await self._finish_backlog_walk(channel_id, self._chat_sub_id(channel_id))
+        if not subscribed:
+            return
         transport = self._transport
         if transport is None:
             return
@@ -693,9 +697,11 @@ class BuzzChannel(Channel):
         from the live set, because it genuinely is not subscribed from this moment
         and the auth branch/discovery sweep is what re-opens it.
         """
-        if _is_auth_required_close(reason) and not self._auth_completed:
+        if _is_auth_required_close(reason) and not self._auth_completed and not sub_id.startswith(BACKLOG_SUB_PREFIX):
             if sub_id.startswith(CHAT_SUB_PREFIX):
-                self._chat_subscriptions.discard(sub_id[len(CHAT_SUB_PREFIX) :])
+                channel_id = sub_id[len(CHAT_SUB_PREFIX) :]
+                self._chat_subscriptions.discard(channel_id)
+                await self._finish_backlog_walk(channel_id, sub_id)
             logger.debug("[buzz] relay closed %s pending NIP-42 auth (%s); the auth handshake re-opens it", sub_id, reason or "<no reason>")
             return
         if sub_id == DISCOVERY_SUB_ID or sub_id == MEMBERSHIP_SUB_ID:
@@ -709,6 +715,7 @@ class BuzzChannel(Channel):
             channel_id = sub_id[len(BACKLOG_SUB_PREFIX) :]
             self._backlog_pages.pop(channel_id, None)
             self._backlog_floor.pop(channel_id, None)
+            self._backlog_until.pop(channel_id, None)
             self._page_seen.pop(sub_id, None)
             self._page_oldest.pop(sub_id, None)
             logger.debug("[buzz] relay closed backlog page %s: %s; the live subscription is unaffected", sub_id, reason or "<no reason>")
@@ -777,6 +784,7 @@ class BuzzChannel(Channel):
             logger.info("[buzz] relay closed chat subscription for channel %s, which we were not subscribed to: %s", channel_id, reason or "<no reason>")
             return
         self._chat_subscriptions.discard(channel_id)
+        await self._finish_backlog_walk(channel_id, self._chat_sub_id(channel_id))
         name = self._channel_meta.get(channel_id, {}).get("name") or "<unnamed>"
         logger.warning("[buzz] relay closed the chat subscription for channel %s (%s), so it is now UNLISTENED: %s", name, channel_id, reason or "<no reason>")
         if not _is_transient_close(reason):
@@ -875,6 +883,12 @@ class BuzzChannel(Channel):
         comes back under the cap (the history is exhausted) or reaches the ``since`` the
         walk started from (everything at or before that is already processed).
 
+        If a saturated backlog page does not descend past its requested ``until``,
+        stop and warn instead of repeating the same inclusive timestamp bucket.
+        Moving ``until`` back a second could skip unread events in that bucket.
+        A channel removal or live-subscription close also ends the walk; queued
+        backlog events and EOSEs cannot continue it after cleanup.
+
         A floor (the live REQ's ``since``, frozen in ``_backlog_floor``) is REQUIRED:
         without one the walk has no semantic stop short of ``MAX_BACKLOG_PAGES``, which
         is the case on a channel's first connect (no stored watermark) and again after a
@@ -892,7 +906,7 @@ class BuzzChannel(Channel):
         failure can never make delivery worse than it already was.
         """
         channel_id = self._page_channel(sub_id)
-        if channel_id is None:
+        if channel_id is None or channel_id not in self._chat_subscriptions or sub_id not in self._page_seen:
             return
         oldest = self._page_oldest.get(sub_id)
         saturated = oldest is not None and self._page_seen.get(sub_id, 0) >= RELAY_HISTORY_LIMIT
@@ -900,6 +914,13 @@ class BuzzChannel(Channel):
         # No floor means no walk -- see the docstring: first connect and an evicted
         # cursor have nothing to stop at, so they keep the newest-2000 behaviour.
         if not saturated or floor is None or oldest <= floor:
+            await self._finish_backlog_walk(channel_id, sub_id)
+            return
+        previous_until = self._backlog_until.get(channel_id)
+        if sub_id == self._backlog_sub_id(channel_id) and previous_until is not None and oldest >= previous_until:
+            # NIP-01's inclusive `until` can return the same full timestamp bucket.
+            # Subtracting a second would skip unread events in that bucket.
+            logger.warning("[buzz] stopped paging channel %s backlog: no timestamp progress below created_at=%d; remaining history was not fetched on this connection", channel_id, previous_until)
             await self._finish_backlog_walk(channel_id, sub_id)
             return
         pages = self._backlog_pages.get(channel_id, 0)
@@ -912,6 +933,7 @@ class BuzzChannel(Channel):
             return  # no socket: the next connection re-walks this from the live page's EOSE
         backlog_sub_id = self._backlog_sub_id(channel_id)
         self._backlog_pages[channel_id] = pages + 1
+        self._backlog_until[channel_id] = oldest
         self._page_seen[backlog_sub_id] = 0
         self._page_oldest.pop(backlog_sub_id, None)
         try:
@@ -929,18 +951,20 @@ class BuzzChannel(Channel):
         a bounded, non-live subscription alive on the relay for the rest of the socket's
         life for no benefit.
         """
-        self._backlog_pages.pop(channel_id, None)
+        backlog_sub_id = self._backlog_sub_id(channel_id)
+        backlog_open = self._backlog_pages.pop(channel_id, None) is not None
         self._backlog_floor.pop(channel_id, None)
-        for tracked in {sub_id, self._backlog_sub_id(channel_id)}:
+        self._backlog_until.pop(channel_id, None)
+        for tracked in {sub_id, self._chat_sub_id(channel_id), backlog_sub_id}:
             self._page_seen.pop(tracked, None)
             self._page_oldest.pop(tracked, None)
-        if sub_id == self._backlog_sub_id(channel_id):
+        if backlog_open:
             transport = self._transport
             if transport is not None:
                 try:
-                    await transport.send(buzz_nostr.close_frame(sub_id))
+                    await transport.send(buzz_nostr.close_frame(backlog_sub_id))
                 except Exception:
-                    logger.debug("[buzz] failed to close backlog page %s", sub_id, exc_info=True)
+                    logger.debug("[buzz] failed to close backlog page %s", backlog_sub_id, exc_info=True)
 
     def _handle_auth_ok(self, event_id: str, accepted: bool, message: str) -> None:
         """React to a relay ``OK`` acknowledgment, specifically for our outstanding NIP-42 AUTH event.
@@ -1169,10 +1193,15 @@ class BuzzChannel(Channel):
             await self._handle_closed(str(frame[1]), str(frame[2]) if len(frame) >= 3 else "")
         elif kind == "EVENT" and len(frame) >= 3 and isinstance(frame[2], dict):
             ev = frame[2]
+            sub_id = str(frame[1])
+            if sub_id.startswith(BACKLOG_SUB_PREFIX):
+                channel_id = self._page_channel(sub_id)
+                if channel_id not in self._chat_subscriptions or sub_id not in self._page_seen:
+                    return  # queued frames from a closed or superseded backlog page
             # Charge the delivery to the subscription that carried it BEFORE any gate
             # (see `_record_page_delivery`), so a saturated page is recognised however
             # many of its events the gates drop.
-            self._record_page_delivery(str(frame[1]), ev)
+            self._record_page_delivery(sub_id, ev)
             if not buzz_nostr.verify_event(ev):
                 logger.warning("[buzz] dropped relay event with an invalid id/signature (claimed pubkey=%s kind=%s)", ev.get("pubkey"), ev.get("kind"))
                 return
