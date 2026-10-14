@@ -32,13 +32,12 @@ gateway:
   # Redis stream bridge (sandbox ownership leases are inferred from it). The
   # chart also exports DEER_FLOW_MULTI_INSTANCE=true when replicas > 1 so the
   # Gateway's startup gate enforces those prerequisites instead of staying
-  # inert (its worker count only sees one Pod). Still single-instance: IM
-  # channels (every Pod connects to every platform -- keep replicas at 1
-  # while channels are enabled), the WeChat QR login, and browser tools.
-  # `channels.leader_lease` in `config` (default `auto`) is reserved for the
-  # per-provider leader lease that will give one Pod each platform connection;
-  # until it ships the setting only drives the startup gate, which refuses
-  # `enabled: false` while channels are enabled (see the chart README).
+  # inert (its worker count only sees one Pod). IM channels follow
+  # `channels.leader_lease` in `config` (default `auto`, on with replicas > 1):
+  # one Pod holds each platform connection and another takes over when it
+  # dies; the startup gate refuses `enabled: false` while channels are enabled
+  # (see the chart README). Still single-instance: the WeChat QR login and
+  # browser tools.
   # Multi-node clusters also need `persistence.home.accessMode: ReadWriteMany`,
   # and `agent_storage.backend: db` keeps custom agents visible on every Pod.
   # Memory stays on that shared volume, but DeerMem's SQLite retrieval index is

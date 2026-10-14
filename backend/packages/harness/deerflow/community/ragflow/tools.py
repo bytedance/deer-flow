@@ -14,6 +14,8 @@ from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr, Valida
 
 from deerflow.community.provider_credentials import redact_secret, reject_url_userinfo, resolve_api_key
 from deerflow.config import get_app_config
+from deerflow.knowledge import format_result
+from deerflow.knowledge.sources import redact_strings
 from deerflow.knowledge_scope import (
     KNOWLEDGE_SCOPE_RUNTIME_KEY,
     canonicalize_knowledge_scope,
@@ -22,7 +24,7 @@ from deerflow.knowledge_scope import (
 from deerflow.tools.types import Runtime
 
 from .client import RAGFlowAPIError, RAGFlowClient, RAGFlowConnectionError, RAGFlowProtocolError
-from .formatting import format_retrieval_result, format_retrieval_sources
+from .formatting import CAPABILITIES, format_retrieval_result, format_retrieval_sources, normalize_retrieval_result
 
 logger = logging.getLogger(__name__)
 
@@ -565,6 +567,9 @@ async def knowledge_search(
                 max_total_chars=settings.max_total_chars,
                 redact=lambda value: redact_secret(value, _api_key(settings)),
             )
+            if artifact is None:
+                normalized = normalize_retrieval_result(redact_strings(result, _api_key(settings)), dataset_names_by_id=redact_strings(names_by_id, _api_key(settings)))
+                content, artifact = format_result(normalized, max_chars_per_chunk=settings.max_chars_per_chunk, max_total_chars=settings.max_total_chars)
             if artifact is not None:
                 _source_artifact.update(artifact)
             return content
@@ -628,6 +633,7 @@ knowledge_search_tool = StructuredTool.from_function(
     response_format="content_and_artifact",
     description=_tool_description(),
     parse_docstring=True,
+    metadata={"knowledge_capabilities": CAPABILITIES.model_dump(mode="json")},
 )
 
 
