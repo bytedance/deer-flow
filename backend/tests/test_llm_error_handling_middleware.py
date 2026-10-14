@@ -3121,6 +3121,8 @@ def test_omniroute_in_stream_504_is_transient(exc: openai.APIError) -> None:
         pytest.param("upstream status_code=503", id="status_code"),
         pytest.param('upstream replied {"status": 503}', id="json-status"),
         pytest.param("gateway [999] relayed HTTP 503", id="out-of-range-match-skipped"),
+        pytest.param("error: [503] overloaded", id="bracketed-in-running-text"),
+        pytest.param("openai-compatible-chat-conn:7b9b6797/glm-5.3: provider — [504]: upstream timed out (HTTP 504)", id="omniroute-combo-text"),
     ],
 )
 def test_in_stream_error_takes_its_status_from_the_message(message: str) -> None:
@@ -3187,6 +3189,8 @@ def test_status_less_error_matches_busy_patterns_across_separators(exc: Exceptio
         pytest.param(_in_stream_error("upstream failed: error 504"), id="number-without-keyword"),
         pytest.param(_in_stream_error("upstream said [503]", code=400), id="code-400-beats-message-503"),
         pytest.param(_in_stream_error("upstream returned HTTP 400 after [503]"), id="leftmost-message-status-decides"),
+        pytest.param(_in_stream_error("invalid value at messages[502].content"), id="message-index"),
+        pytest.param(_in_stream_error("invalid tool call at tools[0][503].function"), id="nested-index"),
     ],
 )
 def test_in_stream_error_without_a_retriable_signal_stays_generic(exc: openai.APIError) -> None:
