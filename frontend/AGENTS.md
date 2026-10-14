@@ -386,10 +386,11 @@ a model switch without changing the backend's direct legacy-request behavior.
 
 ## Full-stack plugin UI
 
-Before changing plugin loaders, pages or conversation actions, read the mandatory
-[Frontend implementation invariants](../docs/full-stack-plugins.md#frontend-implementation-invariants).
-Preserve authenticated, viewer-bound loading, native actions, localization and
-mount/dispose plus abort fencing; Shadow DOM is not a security sandbox.
+Follow [invariants](../docs/full-stack-plugins.md#frontend-implementation-invariants) for
+plugin loaders/pages/actions: viewer-bound auth, native actions, i18n and
+mount/dispose/abort fencing. Shadow DOM is not a sandbox. Bundled extensions need
+typed en/zh `core/extensions/catalog.ts` entries with their namespace.
+Catalog entries are not proof of installation or activation.
 
 ### Composer references
 

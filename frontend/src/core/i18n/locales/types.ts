@@ -32,6 +32,7 @@ export interface Translations {
       | "context"
       | "classify"
       | "screening"
+      | "retrieval"
       | "example",
       { title: string; description: string }
     >;

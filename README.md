@@ -1826,6 +1826,14 @@ authenticated backend operations and model tools through the
 [plugin APIs](docs/full-stack-plugins.md). The independent
 [bookmarks example](examples/deerflow-extension-bookmarks/README.md) demonstrates
 one package with persistent user data, its own sidebar page and a read-only search tool.
+Model tools can opt into separate structured artifacts with
+`response_format="content_and_artifact"` and `PluginToolResult` (extension-api
+0.2.6). Artifact object keys must be strings at every depth. Existing tools keep
+their JSON text output. The
+[local retrieval example](examples/deerflow-extension-retrieval/README.md)
+demonstrates bounded, read-only results and checkpoint replay without an external
+knowledge service; artifacts do not automatically enable citations. It also appears
+in the extension catalog with localized installation-guide metadata.
 Reopening a bookmark resolves the conversation's current agent through the host, so
 custom-agent conversations retain their original chat entry point, including older bookmarks.
 The independent [Agent teams example](examples/deerflow-extension-agent-teams/README.md)

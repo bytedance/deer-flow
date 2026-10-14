@@ -418,14 +418,16 @@ Tests for hook behavior must create and invoke their own hook fixtures.
 
 ## Full-stack contributions
 
-`registry.plugin(PluginContribution(...))` registers optional browser code, backend actions
-and model tools under one deployment-owned namespace. The public method defaults to False
-for older hosts; accepted contributions share source attribution and positional rollback.
-`plugins.py` in Gateway serves descriptors, hashed JS assets and authenticated action calls.
-No online settings write API is added. `plugin_tools.py` joins normal tool assembly with
-the run's extension snapshot; task delegation passes that snapshot explicitly. Browser
-public-field projection is an allowlist. Package code is trusted, not sandboxed. See
-`docs/full-stack-plugins.md` and the independently packaged bookmark example.
+`registry.plugin(PluginContribution(...))` adds browser/backend/tools under one
+namespace; old hosts return False. Preserve source attribution and positional rollback.
+Gateway `plugins.py`: descriptors, hashed JS, authenticated actions; no online
+settings write API. `plugin_tools.py` uses the run snapshot, passed explicitly
+to delegation. Browser fields are allowlisted. Code is trusted, not sandboxed.
+
+`ModelTool` defaults to JSON content. Opt-in `content_and_artifact` requires
+`PluginToolResult`. Require string artifact keys throughout; validate JSON jointly
+within 64 KiB and snapshot artifacts. Keep identity, policy/deadline and citation
+gates. Test ToolNode and checkpoint replay. See `docs/full-stack-plugins.md`.
 
 Full Agent run control is an optional `deerflow_extension_api.AgentRuns` handle
 on action/tool contexts and the request resolver. Gateway owns principal binding,
