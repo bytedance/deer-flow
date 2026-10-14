@@ -4,8 +4,10 @@ import subprocess
 from html import escape, unescape
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse, uses_relative
+from uuid import uuid4
 
 from bs4 import BeautifulSoup
+from markdownify import MarkdownConverter
 from markdownify import markdownify as md
 from readabilipy import simple_json_from_html_string
 
@@ -33,10 +35,23 @@ class Article:
         return markdown
 
     def to_message(self) -> list[dict]:
-        image_pattern = r"!\[.*?\]\((.*?)\)"
+        marker = f"DEERFLOWIMAGE{uuid4().hex}X"
+        image_urls: list[str] = []
+
+        class ImageMessageConverter(MarkdownConverter):
+            def convert_img(self, el, text, parent_tags):
+                if "_inline" in parent_tags and el.parent.name not in self.options["keep_inline_images_in"]:
+                    return super().convert_img(el, text, parent_tags)
+                image_urls.append(el.attrs.get("src", "") or "")
+                return f"{marker}{len(image_urls) - 1}END"
+
+        image_pattern = rf"{marker}(\d+)END"
 
         content: list[dict[str, str]] = []
-        markdown = self.to_markdown()
+        if self.html_content is None or not str(self.html_content).strip():
+            markdown = self.to_markdown()
+        else:
+            markdown = f"# {self.title}\n\n{ImageMessageConverter().convert(self.html_content)}"
 
         if not markdown or not markdown.strip():
             return [{"type": "text", "text": "No content available"}]
@@ -45,7 +60,7 @@ class Article:
 
         for i, part in enumerate(parts):
             if i % 2 == 1:
-                image_url = urljoin(self.url, part.strip())
+                image_url = urljoin(self.url, image_urls[int(part)].strip())
                 content.append({"type": "image_url", "image_url": {"url": image_url}})
             else:
                 text_part = part.strip()
