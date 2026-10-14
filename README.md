@@ -133,6 +133,8 @@ That prompt is intended for coding agents. It tells the agent to clone the repo 
 
 ### Configuration
 
+With `run_events.backend: db`, caller-supplied ISO 8601 event timestamps are normalized to UTC before storage, preserving their instant when SQLite drops timezone information. Timestamps without an offset are treated as UTC. Previously stored timestamps are not rewritten.
+
 Operators can extend lead-agent, subagent, and DeerMem extraction prompts with
 literal prepend/append configuration without editing source templates. See
 [prompt overlays](backend/docs/CONFIGURATION.md#prompt-overlays).
