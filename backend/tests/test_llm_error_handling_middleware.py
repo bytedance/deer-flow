@@ -16,6 +16,7 @@ import openai
 import pytest
 from langchain.agents import create_agent
 from langchain.agents.middleware.types import ModelResponse
+from langchain_core.callbacks import AsyncCallbackHandler
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
@@ -3401,3 +3402,47 @@ async def test_in_stream_error_from_a_real_openai_stream_is_retried() -> None:
     assert isinstance(result, AIMessage)
     assert result.content == "recovered"
     assert "deerflow_error_fallback" not in result.additional_kwargs
+
+
+@pytest.mark.anyio
+async def test_in_stream_error_after_partial_output_is_retried_from_the_start() -> None:
+    """An ``error`` event after content chunks retries the whole call.
+
+    The result holds only the retried answer, but the tokens the first attempt
+    already streamed reached the callbacks (which feed a live stream) and are
+    not taken back. Mid-stream ``ReadError`` retries behave the same way; this
+    pins that accepted outcome.
+    """
+    middleware = _build_middleware(retry_max_attempts=3, retry_base_delay_ms=1, retry_cap_delay_ms=1)
+    requests: list[httpx.Request] = []
+    streamed: list[str] = []
+
+    class RecordTokens(AsyncCallbackHandler):
+        async def on_llm_new_token(self, token: str, **kwargs: Any) -> None:
+            streamed.append(token)
+
+    def chunk(delta: dict[str, Any], finish_reason: str | None = None) -> dict[str, Any]:
+        return {"id": "chatcmpl-retry", "object": "chat.completion.chunk", "created": 0, "model": "glm-5.3", "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}]}
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            error = {"error": {"message": "[504]: upstream timed out", "type": "server_error", "code": "gateway_timeout"}}
+            body = "".join(f"data: {json.dumps(event)}\n\n" for event in (chunk({"role": "assistant", "content": "partial answ"}), error))
+        else:
+            body = "".join(f"data: {json.dumps(event)}\n\n" for event in (chunk({"role": "assistant", "content": "recovered"}), chunk({}, "stop"))) + "data: [DONE]\n\n"
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        model = ChatOpenAI(model="glm-5.3", api_key="offline-test-key", base_url="https://llm.invalid/v1", streaming=True, max_retries=0, http_async_client=client)
+
+        async def handler(_request) -> AIMessage:
+            return await model.ainvoke([HumanMessage(content="hello")], config={"callbacks": [RecordTokens()]})
+
+        result = await middleware.awrap_model_call(SimpleNamespace(), handler)
+
+    assert len(requests) == 2
+    assert isinstance(result, AIMessage)
+    assert result.content == "recovered"
+    assert "deerflow_error_fallback" not in result.additional_kwargs
+    assert "".join(streamed) == "partial answrecovered"

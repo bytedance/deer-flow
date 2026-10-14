@@ -632,6 +632,8 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         # inside the stream; the openai SDK raises it as a bare ``APIError`` with
         # no status code and no response. Only such status-less errors take a
         # status from their own fields and text (``_extract_in_band_status``).
+        # As with a mid-stream ``ReadError``, a retry re-runs the whole call:
+        # tokens the failed attempt already streamed are not taken back.
         status_less = status_code is None
 
         if isinstance(exc, EmptyModelResponseError):
