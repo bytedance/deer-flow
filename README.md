@@ -2989,3 +2989,8 @@ activation remain pending.
 now covers native SQL reads and HTTP feedback mutations, including withdrawn
 space permissions and replaced conversations before commit. Remaining file,
 frontend and runtime integration still gate full tenant activation.
+
+[Terminal Run artifact archives](docs/tenant-workspaces-api.md#terminal-run-artifact-archives-partial-m3)
+now preserve selected private-space delivery and close temporary archives when
+publication is refused or cancelled. Remaining file editing, frontend and full
+runtime integration still gate tenant activation.

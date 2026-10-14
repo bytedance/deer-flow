@@ -634,3 +634,10 @@ The concrete next M3 gaps are:
 Use one real SQL/JWT/file archive main and directly affected native regressions
 before broad fault matrices. No change has been made for these gaps yet; they
 remain mandatory under the original full M0–M11 scope and activation gate.
+
+M3 native archive checkpoint: #83 RED missing scope/owned-file close;
+#84 GREEN (9 passed, 47.55s), both real SQL/JWT/ZIP mains plus native selection,
+manifest/busy/wrong-thread/cancellation checks. Prepared archive closes on
+post-materialization or pre-header refusal and cancellation. Source bytes match,
+exact resources empty. Artifact GET entry identity/PUT/client and M4-M11 remain;
+M3 unchecked and activation closed.

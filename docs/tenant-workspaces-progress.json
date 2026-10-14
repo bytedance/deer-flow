@@ -1551,8 +1551,8 @@
     "work_package": "M3",
     "status": "partial",
     "last_verified_job": "deerflow-tenant-m1-postgres",
-    "last_verified_build": 82,
-    "next": "remaining artifact/PUT/history file paths, then frontend workspace selection/caches; full M0-M11 remains required",
+    "last_verified_build": 84,
+    "next": "single-artifact entry identity then scoped PUT publication; frontend switching/caches and full M0-M11 remain required",
     "tenant_activation": "closed",
     "deployment": "none"
   },
@@ -1589,6 +1589,41 @@
       "full factory/startup scope-required wiring and M4 producers",
       "physical races/crash/cancellation, complete credential-reset/role/OAuth workflows M6/M11",
       "M4-M11 and full activation remain incomplete"
+    ]
+  },
+  "workspace_run_archives": {
+    "status": "partial_M3_verified_archive_main",
+    "job": "deerflow-tenant-m1-postgres",
+    "red": {
+      "build": 83,
+      "result": "FAILURE",
+      "tests_failed": 3,
+      "elapsed_seconds": 40.08,
+      "archive_sha256": "8799cf4592317fdb7060b449a133dd8ea5b1eeeb9cb2a4999bba9bc33ecdba5c",
+      "reason": "native archive owner check lacked workspace binding in both metadata dialects; response lacked owned-file cleanup support"
+    },
+    "green": {
+      "build": 84,
+      "result": "SUCCESS",
+      "tests_passed": 9,
+      "elapsed_seconds": 47.55,
+      "archive_sha256": "6913aaf7b176d1eaa99cbc136db4e9e3bef326ddfb6512fefb136b7c4d3ac535",
+      "command": "python -m pytest tests/test_workspace_http.py tests/test_artifact_archive.py::test_private_archive_response_closes_owned_file_on_cancellation tests/test_artifact_archive.py::test_archive_download_contains_only_presented_files tests/test_artifact_archive.py::test_archive_manifest_counts_only_verified_delivery_paths tests/test_artifact_archive.py::test_archive_hides_a_run_from_another_thread tests/test_artifact_archive.py::test_archive_conflicts_with_an_active_run tests/test_artifact_archive.py::test_repeated_cancellation_keeps_the_archive_slot_until_worker_exit -q --tb=short --no-showlocals"
+    },
+    "source_sha256": {
+      "backend/app/gateway/workspaces/file_response.py": "28af32826324d2a32d375f93528bf50502e5516add7a42f0221108474a7a5017",
+      "backend/app/gateway/workspaces/dependencies.py": "0b7b552e6234095b8476203d9ecf8f47c28d5cd0697af4ebb7f34f30f71f0581",
+      "backend/app/gateway/routers/thread_runs.py": "293548a2cbe1e8b42a24c807a3d302fb2cb1dc66a883c87b92bf6540a770a0bc",
+      "backend/tests/test_workspace_http.py": "c2e8c698f807903744986b2f1bbd10b8be2742dbd042a08e3a6b79f3a86b7b5f",
+      "backend/tests/test_artifact_archive.py": "37ac940438397cd5a7c90a686ab6571e64590a82005882745fdf843b22f5009f"
+    },
+    "cleanup": "#83/#84 exact ownership-labelled container/network inventories independently empty",
+    "warning": "existing Starlette TestClient/httpx deprecation warning",
+    "remaining": [
+      "single-artifact entry identity and PUT host/remote publication",
+      "frontend workspace switching and M4 normal Run/event producer factories",
+      "continuous credential/role/transport and distributed/crash/load evidence M6/M11",
+      "full M0-M11 and tenant activation remain incomplete"
     ]
   }
 }

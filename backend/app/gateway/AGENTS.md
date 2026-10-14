@@ -481,3 +481,11 @@ pass the original HTTP entry nonce into FeedbackRepository; response revalidatio
 alone cannot authorize a write that already committed. Legacy calls omit new
 keywords. #82 verifies policy/nonce changes before real SQL writes preserve data;
 full credential and distributed lifecycle gates remain M6/M11.
+
+Terminal Run archive GET/POST binds private entry identity; POST wraps the native
+StreamingResponse with WorkspaceThreadResponse. Its optional explicit owned-file
+callback closes on ASGI exit and on workspace decorator post-return refusal.
+Do not run arbitrary response background tasks on denial. Archive construction
+retains ownership through reservation release and response construction; native
+builder/reservation semantics stay intact. #84 covers SQL/JWT/ZIP and resource
+close edges; continuous credential/transport acceptance remains M6/M11.

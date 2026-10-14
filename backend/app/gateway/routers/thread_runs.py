@@ -47,7 +47,7 @@ from app.gateway.conversation_reader import (
 from app.gateway.conversation_reader import (
     scan_visible_thread_messages as _scan_visible_thread_messages,
 )
-from app.gateway.deps import get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
+from app.gateway.deps import get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge, get_thread_store
 from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE, get_trusted_internal_owner_user_id
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.run_models import RunCreateRequest
@@ -61,7 +61,9 @@ from app.gateway.services import (
 )
 from app.gateway.sse_headers import sse_response_headers
 from app.gateway.utils import sanitize_log_param
+from app.gateway.workspaces.checkpoints import capture_checkpoint_thread_identity
 from app.gateway.workspaces.dependencies import workspace_resource_scope
+from app.gateway.workspaces.file_response import WorkspaceThreadResponse
 from app.gateway.workspaces.observer import wrap_private_observer
 from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.middlewares.dynamic_context_middleware import strip_injected_user_message_id_suffix
@@ -72,6 +74,7 @@ from deerflow.runtime import CancelOutcome, ConflictError, RunRecord, RunStatus,
 from deerflow.runtime.runs.store.base import format_run_cursor_created_at, normalize_run_created_at_iso
 from deerflow.runtime.secret_context import redact_config_secrets, redact_metadata_secrets
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.utils.file_io import await_drained
 from deerflow.utils.llm_text import strip_leading_think_blocks
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
 from deerflow.utils.thread_id import ThreadId
@@ -1755,6 +1758,7 @@ async def _archive_presented_paths(thread_id: ThreadId, run_id: str, request: Re
     "/{thread_id}/runs/{run_id}/artifacts/archive",
     response_model=ArtifactArchiveManifestResponse,
 )
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("runs", "read", owner_check=True, require_existing=True)
 async def get_run_artifact_archive_manifest(
     thread_id: ThreadId,
@@ -1768,13 +1772,16 @@ async def get_run_artifact_archive_manifest(
 
 
 @router.post("/{thread_id}/runs/{run_id}/artifacts/archive")
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("runs", "read", owner_check=True, require_existing=True)
 async def create_run_artifact_archive(
     thread_id: ThreadId,
     run_id: str,
     request: Request,
-) -> StreamingResponse:
+) -> Response:
     """Download the current contents of the files presented by one terminal run."""
+    context = get_current_workspace()
+    incarnation = await capture_checkpoint_thread_identity(request, thread_id)
     await _require_run_visible_to_scope(run_id, thread_id, request)
     presented_paths = await _archive_presented_paths(thread_id, run_id, request)
 
@@ -1787,6 +1794,8 @@ async def create_run_artifact_archive(
     user_data_dir = paths.sandbox_user_data_dir(thread_id, user_id=effective_user_id)
     outputs_dir = paths.sandbox_outputs_dir(thread_id, user_id=effective_user_id)
 
+    result = None
+    handed_off = False
     try:
         async with get_run_manager(request).reserve_thread_operation(
             thread_id,
@@ -1799,31 +1808,49 @@ async def create_run_artifact_archive(
                 presented_paths,
                 extra_reserved_dir_names=extra_reserved_dir_names,
             )
+
+        safe_run_id = re.sub(r"[^A-Za-z0-9_-]", "", run_id)[:32] or "run"
+        logger.info(
+            "Created artifact archive thread_id=%s run_id=%s members=%d input_bytes=%d output_bytes=%d",
+            sanitize_log_param(thread_id),
+            sanitize_log_param(run_id),
+            result.member_count,
+            result.input_bytes,
+            result.size,
+        )
+        response = StreamingResponse(
+            _archive_response_chunks(result),
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="artifacts-{safe_run_id}.zip"',
+                "Content-Length": str(result.size),
+                "Cache-Control": "private, no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
+            background=BackgroundTask(result.file.close),
+        )
+
+        if context is not None:
+            response = WorkspaceThreadResponse(
+                response,
+                workspace_service=request.app.state.workspace_service,
+                repository=get_thread_store(request),
+                context=context,
+                thread_id=thread_id,
+                incarnation=incarnation,
+                close_unpublished=result.file.close,
+            )
+        handed_off = True
+        return response
     except ConflictError as exc:
         raise HTTPException(status_code=409, detail="Artifacts are currently being modified; try again shortly") from exc
     except ArtifactArchiveError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
-
-    safe_run_id = re.sub(r"[^A-Za-z0-9_-]", "", run_id)[:32] or "run"
-    logger.info(
-        "Created artifact archive thread_id=%s run_id=%s members=%d input_bytes=%d output_bytes=%d",
-        sanitize_log_param(thread_id),
-        sanitize_log_param(run_id),
-        result.member_count,
-        result.input_bytes,
-        result.size,
-    )
-    return StreamingResponse(
-        _archive_response_chunks(result),
-        media_type="application/zip",
-        headers={
-            "Content-Disposition": f'attachment; filename="artifacts-{safe_run_id}.zip"',
-            "Content-Length": str(result.size),
-            "Cache-Control": "private, no-store",
-            "X-Content-Type-Options": "nosniff",
-        },
-        background=BackgroundTask(result.file.close),
-    )
+    finally:
+        # A builder result can exist even if reservation release or response
+        # construction fails. After hand-off the wrapper owns early/ASGI cleanup.
+        if result is not None and not handed_off:
+            await await_drained(asyncio.to_thread(result.file.close))
 
 
 @router.get("/{thread_id}/runs/{run_id}/events")

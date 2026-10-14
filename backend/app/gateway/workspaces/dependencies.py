@@ -7,6 +7,7 @@ from fastapi import HTTPException, Request
 
 from app.gateway.auth_disabled import AUTH_SOURCE_SESSION
 from app.gateway.deps import get_current_user_from_request, get_thread_store
+from app.gateway.workspaces.file_response import WorkspaceThreadResponse
 from deerflow.authz.workspace import reset_current_workspace, set_current_workspace
 from deerflow.persistence.thread_meta import ThreadMetaRepository
 from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
@@ -66,6 +67,7 @@ def workspace_resource_scope(*, allow_query_selector=False, private_thread_read=
             token = set_current_workspace(context)
             previous_identity = getattr(request.state, "workspace_checkpoint_identity", None)
             identity_bound = False
+            result = None
             try:
                 repository = None
                 admitted_incarnation = None
@@ -87,7 +89,13 @@ def workspace_resource_scope(*, allow_query_selector=False, private_thread_read=
                         raise HTTPException(status_code=404, detail="Thread not found")
                 return result
             except WorkspaceAccessDenied:
+                if isinstance(result, WorkspaceThreadResponse):
+                    await result.discard_unpublished()
                 raise HTTPException(status_code=404, detail="Workspace or resource not found") from None
+            except BaseException:
+                if isinstance(result, WorkspaceThreadResponse):
+                    await result.discard_unpublished()
+                raise
             finally:
                 if identity_bound:
                     if previous_identity is None:

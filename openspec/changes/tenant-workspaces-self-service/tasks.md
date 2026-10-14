@@ -105,3 +105,10 @@ locks. Actual withdrawal/replacement preserves data. Generic scoped bulk cleanup
 refuses bypass of canonical deletion receipt. Exact resources empty, archive
 bytes match. Files/client, full factories/producers and M4–M11 remain pending;
 M3 stays unchecked and activation closed.
+
+M3 native archive checkpoint: #83 RED missing scope/owned-file close;
+#84 GREEN (9 passed, 47.55s), both real SQL/JWT/ZIP mains plus native selection,
+manifest/busy/wrong-thread/cancellation checks. Prepared archive closes on
+post-materialization or pre-header refusal and cancellation. Source bytes match,
+exact resources empty. Artifact GET entry identity/PUT/client and M4-M11 remain;
+M3 unchecked and activation closed.

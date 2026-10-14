@@ -247,3 +247,11 @@ HTTP tests commit policy/nonce changes immediately before the actual repository
 method and inspect persisted rating/row count after refusal; do not mock a
 successful mutation or test only the 404 status. Native feedback tests retain
 unbound owner/statistics/deletion compatibility. Full fault matrices remain M11.
+
+Workspace archive main uses actual SQL delivery events and current file bytes,
+including an unpresented file that must never enter the ZIP. Observe native
+builder file handles and assert close after normal send, post-materialization
+policy refusal, and delayed ASGI refusal. Cancellation test separately checks
+owned close/context restore. Personal SQL retention now has three events
+(message/change/delivery), exactly one in other seeded child tables, zero for
+the deleted space. Never relax this to an arbitrary positive count.

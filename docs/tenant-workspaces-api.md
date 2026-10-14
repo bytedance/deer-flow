@@ -763,3 +763,30 @@ The existing TestClient/httpx warning is unchanged.
 These results do not prove all multiprocess/crash/cancellation or credential-reset
 and role/OAuth boundaries. Remaining files/artifact/PUT/history, frontend, producer
 and scope-required factory integration and M4–M11 still gate tenant activation.
+
+## Terminal Run artifact archives (partial M3)
+
+Native archive manifest GET and download POST bind private workspace/entry
+identity before owner admission. Matching terminal Run and SQL delivery events
+remain authoritative; client-supplied file lists cannot expand delivery. Native
+archive generation and reservation/cancellation behavior are retained.
+The download response rebinds its captured context and checks live policy plus
+original parent before headers. An explicit owned-file close callback is drained
+on normal send, ASGI refusal/cancellation, or decorator post-materialization
+refusal. Reservation-release/response-construction failure also retains file
+ownership for cleanup. Unrelated background actions are not executed on refusal.
+
+#83 RED found absent scope and close support; #84 passed 9 checks in 47.55s.
+Actual SQLite/PostgreSQL JWT/SQL/file mains verify distinct personal/team ZIP
+bytes, verified delivery selection, manifest count, peer/foreign/Run mismatch and
+owner-replacement denial. Actual policy changes after building or before ASGI
+return 404 and the held native temporary file is closed. A cancellation unit
+also checks file close and context restoration; native selection, busy conflict,
+wrong-thread and repeated-builder-cancel regressions remain passing. Current
+source bytes match the archive; #83/#84 exact resources independently empty.
+Personal retention fixture now preserves exactly three events: message,
+workspace change, delivery. Other personal child tables remain exactly one.
+
+Single-artifact entry identity/PUT, frontend, normal producers/factories and
+M4-M11 remain pending. This before-header proof is not continuous credential/
+role/physical transport or cross-process/crash/load acceptance. No activation.

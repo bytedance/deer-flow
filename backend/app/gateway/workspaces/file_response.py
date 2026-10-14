@@ -1,10 +1,16 @@
 """Workspace file publication checks before ASGI emits response headers."""
 
+import asyncio
+import logging
+
 from fastapi import HTTPException
 from fastapi.responses import FileResponse, Response
 
 from deerflow.authz.workspace import reset_current_workspace, set_current_workspace
 from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
+from deerflow.utils.file_io import await_drained
+
+logger = logging.getLogger(__name__)
 
 
 class WorkspaceFileResponse(FileResponse):
@@ -34,7 +40,7 @@ class WorkspaceFileResponse(FileResponse):
 class WorkspaceThreadResponse(Response):
     """Fence native file and bounded archive responses before any ASGI headers."""
 
-    def __init__(self, response, *, workspace_service, repository, context, thread_id, incarnation):
+    def __init__(self, response, *, workspace_service, repository, context, thread_id, incarnation, close_unpublished=None):
         super().__init__(status_code=response.status_code, media_type=response.media_type, background=response.background)
         self.raw_headers = response.raw_headers
         self.headers["Cache-Control"] = "private, no-store"
@@ -44,6 +50,17 @@ class WorkspaceThreadResponse(Response):
         self._context = context
         self._thread_id = thread_id
         self._incarnation = incarnation
+        self._close_unpublished = close_unpublished
+
+    async def discard_unpublished(self):
+        """Release only this response's owned resource, never arbitrary background work."""
+        close, self._close_unpublished = self._close_unpublished, None
+        if close is not None:
+            try:
+                await await_drained(asyncio.to_thread(close))
+            except Exception as exc:
+                # Preserve authorization/transport failures without logging paths.
+                logger.error("Failed to close owned workspace response (%s)", type(exc).__name__)
 
     async def __call__(self, scope, receive, send):
         token = set_current_workspace(self._context)
@@ -58,4 +75,7 @@ class WorkspaceThreadResponse(Response):
         except WorkspaceAccessDenied:
             raise HTTPException(status_code=404, detail="Workspace or resource not found") from None
         finally:
-            reset_current_workspace(token)
+            try:
+                await self.discard_unpublished()
+            finally:
+                reset_current_workspace(token)

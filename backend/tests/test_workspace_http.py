@@ -3,6 +3,7 @@
 import asyncio
 import importlib
 import importlib.util
+import io
 import json
 import zipfile
 from datetime import UTC, datetime
@@ -239,6 +240,14 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
             @app.get("/api/workspace-delayed-artifact/{thread_id}/{path:path}")
             async def delayed_artifact(request: Request, thread_id: str, path: str):
                 response = await artifacts.get_artifact(thread_id=thread_id, path=path, request=request, download=False)
+                async with sf() as session:
+                    await session.execute(sa.text("UPDATE workspaces SET policy_version=policy_version+1 WHERE id=:id"), {"id": request.headers["X-Deerflow-Workspace"]})
+                    await session.commit()
+                return response
+
+            @app.post("/api/workspace-delayed-archive/{thread_id}/{run_id}")
+            async def delayed_archive(request: Request, thread_id: str, run_id: str):
+                response = await thread_runs.create_run_artifact_archive(thread_id=thread_id, run_id=run_id, request=request)
                 async with sf() as session:
                     await session.execute(sa.text("UPDATE workspaces SET policy_version=policy_version+1 WHERE id=:id"), {"id": request.headers["X-Deerflow-Workspace"]})
                     await session.commit()
@@ -871,6 +880,70 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                         patch.setattr(repository, method, supplementary_read_then_replace)
                         assert (await client.get(team_run_base + suffix, headers=team_headers)).status_code == 404
 
+                # Actual SQL delivery receipts select actual current file bytes.
+                archive_files = []
+                archive_withdrawal = {"enabled": False}
+                native_archive_builder = thread_runs._build_archive_without_abandoning_worker
+
+                async def observed_archive_builder(*args, **kwargs):
+                    result = await native_archive_builder(*args, **kwargs)
+                    archive_files.append(result.file)
+                    if archive_withdrawal["enabled"]:
+                        archive_withdrawal["enabled"] = False
+                        async with sf() as session:
+                            await session.execute(sa.text("UPDATE workspaces SET policy_version=policy_version+1 WHERE id=:id"), {"id": team})
+                            await session.commit()
+                    return result
+
+                with monkeypatch.context() as archive_patch:
+                    archive_patch.setattr(thread_runs, "_build_archive_without_abandoning_worker", observed_archive_builder)
+                    for label, headers, thread_id, run_id, workspace in (("team", team_headers, delete_ids["team"], team_run, team), ("personal", {}, delete_ids["personal"], personal_run, personal)):
+                        outputs = tmp_path / "files" / "workspaces" / workspace / "users" / identities["alice"] / "threads" / thread_id / "user-data" / "outputs"
+                        outputs.mkdir(exist_ok=True)
+                        (outputs / "report.md").write_bytes((label + " report bytes").encode())
+                        (outputs / "unpresented.md").write_bytes(b"not delivered")
+                        async with sf() as session:
+                            session.add(
+                                RunEventRow(
+                                    thread_id=thread_id,
+                                    run_id=run_id,
+                                    workspace_id=workspace,
+                                    user_id=identities["alice"],
+                                    event_type="run.delivery",
+                                    category="outputs",
+                                    seq=3,
+                                    content=json.dumps({"by_tool": {"present_files": ["/mnt/user-data/outputs/report.md"]}}),
+                                    event_metadata={"content_is_json": True},
+                                )
+                            )
+                            await session.commit()
+                        archive_url = "/api/threads/" + thread_id + "/runs/" + run_id + "/artifacts/archive"
+                        manifest = await client.get(archive_url, headers=headers)
+                        assert manifest.status_code == 200 and manifest.json()["file_count"] == 1, manifest.text
+                        download = await client.post(archive_url, headers=headers, json={"paths": ["/mnt/user-data/outputs/unpresented.md"]})
+                        assert download.status_code == 200, download.text
+                        with zipfile.ZipFile(io.BytesIO(download.content)) as bundle:
+                            assert bundle.namelist() == ["report.md"]
+                            assert bundle.read("report.md") == (label + " report bytes").encode()
+                        assert archive_files[-1].closed, "completed archive retained native file"
+                    team_archive_url = team_run_base + "/runs/" + team_run + "/artifacts/archive"
+                    for method in ("get", "post"):
+                        assert (await client.request(method, team_archive_url)).status_code == 404
+                        assert (await client.request(method, team_run_base + "/runs/" + personal_run + "/artifacts/archive", headers=team_headers)).status_code == 404
+                        as_user("bob")
+                        assert (await client.request(method, team_archive_url, headers=team_headers)).status_code == 404
+                        as_user("alice")
+                        owner_replacement["thread_id"] = delete_ids["team"]
+                        assert (await client.request(method, team_archive_url, headers=team_headers)).status_code == 404
+                    archive_withdrawal["enabled"] = True
+                    refused_archive = await client.post(team_archive_url, headers=team_headers)
+                    assert refused_archive.status_code == 404, refused_archive.text
+                    assert archive_files[-1].closed, "route post-materialization denial leaked native archive"
+                    delayed_archive_response = await client.post("/api/workspace-delayed-archive/" + delete_ids["team"] + "/" + team_run, headers=team_headers)
+                    assert delayed_archive_response.status_code == 404, delayed_archive_response.text
+                    assert archive_files[-1].closed, "pre-header denial leaked native archive"
+                assert all(handle.closed for handle in archive_files)
+
                 # Feedback writes use the entry nonce inside their SQL transaction.
                 feedback_url = team_run_base + "/runs/" + team_run + "/feedback"
                 listed_feedback = await client.get(feedback_url, headers=team_headers)
@@ -1026,8 +1099,8 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                     assert await session.get(ThreadMetaRow, delete_ids["personal"]) is not None
                     for table in (RunRow, RunEventRow, FeedbackRow, ThreadReadMarkerRow, ScheduledTaskEventRow):
                         assert await session.scalar(sa.select(sa.func.count()).select_from(table).where(table.thread_id == delete_id)) == 0
-                        # The preserved personal history has one message and one file-change event.
-                        assert await session.scalar(sa.select(sa.func.count()).select_from(table).where(table.thread_id == delete_ids["personal"])) == (2 if table is RunEventRow else 1)
+                        # The preserved personal history has one message, one file-change and one delivery event.
+                        assert await session.scalar(sa.select(sa.func.count()).select_from(table).where(table.thread_id == delete_ids["personal"])) == (3 if table is RunEventRow else 1)
                 assert await app.state.run_event_store.list_events(delete_id, delete_id + "-run", limit=100, user_id=identities["alice"]) == []
                 assert len(await app.state.run_event_store.list_events(delete_ids["personal"], delete_ids["personal"] + "-run", limit=100, user_id=identities["alice"])) == 1
                 uncertain_id = str(uuid4())
