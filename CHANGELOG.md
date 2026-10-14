@@ -5893,7 +5893,7 @@ This release closes that milestone with **621 merged pull requests**.
   database created before revision 0023 logged one on upgrade, and a schema
   whose head stamp was lost logged 29 (SQLite) or 36 (Postgres), burying the
   real type mismatch the warning exists to catch. Both sides are now compared
-  as the connected database spells them.
+  as the connected database spells them. ([#6865])
 
 ### Security
 
@@ -11676,3 +11676,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6798]: https://github.com/bytedance/deer-flow/pull/6798
 [#6844]: https://github.com/bytedance/deer-flow/pull/6844
 [#6852]: https://github.com/bytedance/deer-flow/pull/6852
+[#6865]: https://github.com/bytedance/deer-flow/pull/6865
