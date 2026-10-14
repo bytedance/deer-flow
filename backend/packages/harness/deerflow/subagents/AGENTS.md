@@ -34,7 +34,7 @@ citation references, and opaque base64/URL/image sources.
 
 `task` preserves the host incarnation, including null/missing/invalid values; never recapture it.
 
-**Direct runtime shutdown**: `SubagentRuntime.stop()` holds its lifecycle lock through an unbounded service drain; propagate first caller cancellation, chaining service failure. Test terminal outcomes/repeated cancellation in `tests/test_subagent_runtime.py`. Batch stops shield/join one cleanup generation. Restart resets its owner only after success; failed cleanup keeps startup fenced.
+**Direct runtime shutdown**: `SubagentRuntime.stop()` holds its lifecycle lock through an unbounded service drain; propagate first caller cancellation, chaining service failure. Test terminal outcomes/repeated cancellation in `tests/test_subagent_runtime.py`. Batch stops shield/join one cleanup generation. An item leaving a live run cancels it; `_release_execution` drops the registry entry once terminal (forced after the lease). Restart resets its owner only after success; failed cleanup keeps startup fenced.
 
 **Interrupted usage**: After stream cleanup, publish the collector's final
 snapshot on cancellation/timeout; callbacks can precede values chunks.

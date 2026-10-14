@@ -2301,11 +2301,29 @@ changing the root.
 E2B acquisition uses a bounded executor. Waiting acquisitions do not use the
 default asyncio executor.
 
+When an E2B sandbox expires between conversation turns, its replacement restores
+the same user's saved thread files from `workspace`, `uploads`, `outputs`, and
+the ACP workspace before tools can use it. Live sandbox reuse does not overwrite
+remote files with older saved copies. Restoration failure or an exceeded upload
+limit rejects the new sandbox. Transient failures may succeed on a later attempt.
+Capacity breaches report the resource tree and exceeded cap: 100 MiB per file,
+2,000 files / 512 MiB per tree, and 2,000 files / 512 MiB across the creation pass.
+An operator must archive or remove unneeded files from the Gateway's persisted
+thread directories to fit those limits before retrying; retrying unchanged data
+cannot resolve a capacity breach. Deleting only the remote copies is insufficient.
+Other restoration errors identify the resource tree and cause category; Gateway
+logs retain the underlying exception for diagnosis.
+Recovery requires the Gateway's persisted thread directories to remain available;
+files that never synchronized before the VM disappeared cannot be recovered.
+The existing release sync saves workspace/output files but does not mirror file
+deletions, so saved copies of remotely deleted files can reappear on recreation.
+
 Each E2B mount upload pass accepts at most 512 MiB and 2,000 files. The pass
-also has a cooperative 120-second deadline. Skill projections and configured
-mounts share these limits. The provider checks the deadline before each mount
-and during directory preflight. The deadline stops new file uploads after it
-expires. It does not interrupt active filesystem or E2B SDK calls.
+also has a cooperative 120-second deadline. Thread restoration runs first and
+shares these limits with skill projections and configured mounts. The provider
+checks the deadline before each mount and during directory preflight. The deadline
+stops new file uploads after it expires. It does not interrupt active filesystem
+or E2B SDK calls.
 
 An E2B VM keeps its slot until E2B confirms destruction. This rule covers
 create and reclaim operations. Discovery can find a VM from another Gateway.
@@ -2688,7 +2706,10 @@ DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-
 MindIE XML tool-call arguments support signed, fractional, and exponent JSON
 numbers. If a number overflows, underflows to zero, or exceeds Python's integer
 digit limit, the complete argument stays a string, including nested JSON lists
-and objects, so parsing does not silently change its value.
+and objects, so parsing does not silently change its value. Python-literal sets
+and tuples containing non-finite floats also retain the complete argument as
+text, including when nested in other containers. Dictionary keys and values
+are checked recursively as well.
 
 ## Embedded Python Client
 
