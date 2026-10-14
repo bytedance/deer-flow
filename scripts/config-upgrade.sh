@@ -5,6 +5,13 @@
 # 1. Runs version-specific migrations (value replacements, renames, etc.)
 # 2. Merges missing fields from the example into the user config
 # 3. Backs up config.yaml to config.yaml.bak before modifying.
+#
+# Both `uv run` invocations pass --no-sync: the backend environment is a
+# prerequisite of every caller (make install before make dev/start, the
+# pre-built Docker image), so the upgrade must use it as-is. Re-resolving
+# here would consult the package index — breaking hosts whose uv points at
+# a restricting mirror, and overriding operator index configuration — for
+# no benefit: the upgrade changes config.yaml, never dependencies.
 
 set -e
 
@@ -17,12 +24,22 @@ else
     REPO_ROOT_WIN="$REPO_ROOT"
 fi
 
+# serve.sh deliberately supports un-installed checkouts and calls this script
+# before its own dependency-install step, but `uv run --no-sync` never
+# bootstraps an environment. When the environment the upgrade needs is not
+# there yet, degrade to a warning instead of aborting `make dev`: this run's
+# install step proceeds, and the next start upgrades the config normally.
+if ! (cd "$REPO_ROOT/backend" && uv run --no-sync python -c "import deerflow" >/dev/null 2>&1); then
+    echo "⚠ Backend environment not installed yet — skipping the config upgrade (the next start upgrades normally)."
+    exit 0
+fi
+
 # Upgrade the config.yaml the Gateway loads. Ask the harness resolver rather
 # than copying its order: with both <checkout>/config.yaml and
 # backend/config.yaml present, `make dev` reads the checkout copy. The import
 # loads .env as the Gateway does; DEER_FLOW_PROJECT_ROOT then defaults to the
 # checkout, as in serve.sh. Prints nothing when no config exists yet.
-CONFIG="$(cd "$REPO_ROOT/backend" && REPO_ROOT_WIN_PATH="$REPO_ROOT_WIN" uv run python -c "
+CONFIG="$(cd "$REPO_ROOT/backend" && REPO_ROOT_WIN_PATH="$REPO_ROOT_WIN" uv run --no-sync python -c "
 import os
 import sys
 
@@ -61,7 +78,7 @@ else
     EXAMPLE_WIN="$EXAMPLE"
 fi
 
-cd "$REPO_ROOT/backend" && CONFIG_WIN_PATH="$CONFIG_WIN" EXAMPLE_WIN_PATH="$EXAMPLE_WIN" uv run python -c "
+cd "$REPO_ROOT/backend" && CONFIG_WIN_PATH="$CONFIG_WIN" EXAMPLE_WIN_PATH="$EXAMPLE_WIN" uv run --no-sync python -c "
 import os
 import sys, shutil, copy, re, secrets
 from pathlib import Path
@@ -105,7 +122,6 @@ RAGFLOW_PROVIDER_KEYS = (
     'max_chars_per_chunk',
     'max_total_chars',
 )
-
 
 def migrate_knowledge_provider_settings(data):
     # Move legacy RAGFlow settings to the provider tool and remove them from the generic block.
@@ -157,7 +173,6 @@ def migrate_knowledge_provider_settings(data):
         del knowledge_base[key]
     return changes
 
-
 MIGRATIONS = {
     1: {
         'description': 'Rename src.* module paths to deerflow.*',
@@ -173,7 +188,6 @@ MIGRATIONS = {
         'data_transform': migrate_knowledge_provider_settings,
     },
 }
-
 
 def migrate_pii_token_secret(data):
     # token_secret became mandatory whenever pii_redaction is enabled (v47).
@@ -191,7 +205,6 @@ def migrate_pii_token_secret(data):
     pii['token_secret'] = secrets.token_urlsafe(32)
     changes.append('pii_redaction.token_secret generated (required for enabled redaction; a random value was persisted to config.yaml)')
     return changes
-
 
 MIGRATIONS[47] = {
     'description': 'Generate a token_secret for deployments with pii_redaction enabled (now mandatory)',
