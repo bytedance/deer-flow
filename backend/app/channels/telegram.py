@@ -13,8 +13,8 @@ from typing import Any
 
 from app.channels.allowed_users import parse_allowed_users
 from app.channels.base import Channel, ChannelStopTimeout
-from app.channels.inbound_files import coerce_file_size, safe_inbound_filename
 from app.channels.connection_identity import attach_connection_identity
+from app.channels.inbound_files import coerce_file_size, safe_inbound_filename
 from app.channels.message_bus import (
     INBOUND_FILE_CONTENT_KEY,
     InboundMessage,
