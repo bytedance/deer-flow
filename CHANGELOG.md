@@ -946,6 +946,27 @@ This release closes that milestone with **621 merged pull requests**.
 
 #### Channels
 
+- **channels:** IM channels can run on several Gateway instances. With
+  `channels.leader_lease` active (`auto`, the default, follows the
+  multi-process signal), each provider's platform connection belongs to the
+  one instance holding its row in the new `channel_leases` table (migration
+  `0042_channel_leases`): a single upsert decides ownership against the
+  database clock, renewals carry a fencing epoch, and the holder stops its
+  transport on its own monotonic deadline before a peer may connect, so a
+  stalled database cannot leave two Telegram pollers or two Discord sessions
+  running. A crashed holder is replaced within `lease_seconds + grace_seconds`
+  plus one renewal interval; a cleanly stopped one releases and hands over on
+  the peer's next tick, and a transport whose stop timed out keeps its lease
+  until it expires. GitHub webhooks, the message bus and the manager stay on
+  every instance. `GET /api/channels/` reports each provider's `leader`, and
+  `running` reflects the holder's transport on every instance, so the web UI's
+  provider list and connect flow work wherever the load balancer sends them;
+  scheduled-task IM notifications are claimed only by the provider's holder.
+  The startup gate now recommends `auto`/`true` when it refuses `enabled:
+  false`, and refuses an explicit `enabled: true` without a SQL database.
+  Credentials saved from the web UI still reach the holder only when it next
+  starts the channel, and a failover cancels the IM replies in flight. ([#6843])
+
 - **channels:** New `channels.leader_lease` section (`enabled: auto|true|false`,
   `lease_seconds`, `grace_seconds`; startup-only), reserved for the per-provider
   leader lease that will give one Gateway instance each IM platform connection
@@ -1225,6 +1246,17 @@ This release closes that milestone with **621 merged pull requests**.
   because a run is still going keeps the draft and says so. ([#6556])
 
 ### Fixed
+
+- **deploy:** The Gateway container now shuts down gracefully. The production
+  compose `command`, both `CMD`s in `backend/Dockerfile` and the Helm chart
+  started it as `sh -c "cd backend && … uv run … uvicorn …"`, which leaves `sh`
+  as PID 1 with no SIGTERM handler, so the kernel dropped the stop signal:
+  uvicorn never shut down, the lifespan teardown (memory queue flush, run
+  drain, channel, scheduler and MCP shutdown) never ran, and every stop waited
+  out the grace period and ended in SIGKILL (exit 137). Every production launch
+  path now `exec`s the server, as `docker/dev-entrypoint.sh` already did, and
+  the compose gateway sets `init: true` so orphaned grandchildren are still
+  reaped. (issue #6835, [#6836])
 
 - **channels:** `FeishuChannel.stop()` and `DingTalkChannel.stop()` now end
   their SDK threads instead of timing out. Both SDKs run on a thread-private
@@ -5885,6 +5917,15 @@ This release closes that milestone with **621 merged pull requests**.
   80 such requests failed. The same race in IM conversation binding, such as
   a first message arriving together with `/new`, no longer fails the message.
   The losing write now updates the row the other one created. ([#6852])
+- **persistence:** Startup schema upgrades no longer log a false
+  `safe_add_column ... drifts from the model definition` warning for columns
+  that already match the model. The check compared the model's generic type
+  and default names (`STRING`, `BIGINTEGER`, `DefaultClause('0')`) with the
+  database's own (`VARCHAR`, `BIGINT`, `'0'`), so every Postgres or SQLite
+  database created before revision 0023 logged one on upgrade, and a schema
+  whose head stamp was lost logged 29 (SQLite) or 36 (Postgres), burying the
+  real type mismatch the warning exists to catch. Both sides are now compared
+  as the connected database spells them. ([#6865])
 
 ### Security
 
@@ -11665,5 +11706,8 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6781]: https://github.com/bytedance/deer-flow/pull/6781
 [#6785]: https://github.com/bytedance/deer-flow/pull/6785
 [#6798]: https://github.com/bytedance/deer-flow/pull/6798
+[#6836]: https://github.com/bytedance/deer-flow/pull/6836
+[#6843]: https://github.com/bytedance/deer-flow/pull/6843
 [#6844]: https://github.com/bytedance/deer-flow/pull/6844
 [#6852]: https://github.com/bytedance/deer-flow/pull/6852
+[#6865]: https://github.com/bytedance/deer-flow/pull/6865

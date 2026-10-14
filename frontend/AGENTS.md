@@ -76,6 +76,23 @@ Keep IM notification preferences viewer-fenced and separate from browser alerts;
 
 ## Architecture
 
+Knowledge evidence is parsed in `core/citations/sources.ts` from version-1
+ToolMessage artifacts. Message rows receive sources from preceding loaded tool
+messages. `#knowledge-source-ID` links resolve to `KnowledgeCitation` and an
+expandable source panel with actual excerpts. Missing URLs/pages remain absent.
+Web citations and old history remain compatible. Never infer evidence from
+assistant labels or numbered legacy text.
+Shared records use the `RetrievalSource` type (native RAGFlow retains
+`KnowledgeSource`). Accept raw and `#user-content-knowledge-source-ID`
+fragments without disabling sanitizer clobber protection. Validate immutable
+tool messages through `createKnowledgeSourceReader` to reuse per-object parses.
+Cross-component field bounds live in `contracts/knowledge_sources.v1.json`.
+Completed `SubtaskCard` reports read shared evidence only from the matching
+`task` ToolMessage after its invocation in the current subagent group, selected
+by `findSubtaskResultMessage`. Prompts/earlier steps do not borrow final evidence.
+Remount report Markdown when validated source IDs change: Streamdown caches
+unchanged text blocks independently of renderer components.
+
 ```
 Frontend (Next.js) ──▶ LangGraph SDK ──▶ LangGraph Backend (lead_agent)
                                               ├── Sub-Agents
@@ -86,22 +103,16 @@ Users create **threads** (conversations), send messages, set thread-scoped `/goa
 
 ### Source Layout (`src/`)
 
-- **`app/`** — Next.js App Router. Routes include `/` (landing), `/showcase/[thread_id]` (allowlisted public read-only demos), `/workspace/chats/[thread_id]` (authenticated chat), `/workspace/agents/[agent_name]` and `/workspace/agents/new` (custom agents), `/artifacts/view` (chrome-free window that renders Markdown or CSV/TSV artifacts with the panel's own renderer), `/blog/…`, the `(auth)/{login,setup,auth/callback}` flow, `/[lang]/docs/…`, and `/api/…` route handlers (e.g. `/api/memory`).
-- **`components/`** — React components:
-  - `ui/` — Shadcn UI primitives (auto-generated, ESLint-ignored)
-  - `ai-elements/` — Vercel AI SDK elements (auto-generated, ESLint-ignored)
-  - `workspace/` — Chat page components (messages, artifacts, settings)
-  - `landing/` — Landing page sections
-  - `docs/` — Docs / MDX rendering components
-- **`core/`** — Business logic, the heart of the app. Domains include `threads/` (creation, streaming, state), `api/` (LangGraph client singleton), `agents/` (custom agents), `subagents/` (runtime worker catalog and administrator mutations), `auth/` (authentication), `artifacts/`, `channels/` (IM connections), `integrations/` (managed third-party integration status/install clients such as Lark CLI), `i18n/` (en-US, zh-CN), `settings/`, `memory/`, `skills/`, `messages/`, `mcp/`, `models/`, `input-polish/` (pre-send draft rewrite API), `voice-input/` (browser speech-recognition helpers), `suggestions/`, `tasks/`, `todos/`, `tools/`, `workspace-changes/` (run-scoped changed-file summaries and diff fetching), `config/`, `notification/`, `blog/`, plus rendering helpers (`rehype/`, `streamdown/`) and `utils/`.
-- **`hooks/`** — Shared React hooks
-- **`lib/`** — Utilities (`cn()` from clsx + tailwind-merge)
-- **`content/`** — MDX content (blog posts, docs) rendered by the app
-- **`styles/`** — Global CSS with Tailwind v4 `@import` syntax and CSS variables for theming
-- **`typings/`** — Ambient TypeScript declarations
-- Root files: `env.js` (env validation), `mdx-components.ts` (MDX component map)
+- `app/` — Next.js routes: chat/workspace, agents, auth, showcase, artifact views,
+  localized docs/blog, and API handlers.
+- `components/` — generated `ui/` and `ai-elements/`; application components under
+  `workspace/`, `landing/`, and `docs/`.
+- `core/` — domain logic, API clients, state/hooks, i18n, and Markdown renderers.
+- `hooks/`, `lib/`, `typings/` — shared hooks, utilities, and ambient types.
+- `content/`, `styles/` — MDX content and Tailwind styles.
+- `env.js`, `mdx-components.ts` — environment validation and MDX component map.
 
-More specific `AGENTS.md` files under `src/` contain the frontend sections split from this file.
+Read [src/AGENTS.md](src/AGENTS.md) for component and domain ownership.
 
 ## Code Style
 
@@ -375,10 +386,11 @@ a model switch without changing the backend's direct legacy-request behavior.
 
 ## Full-stack plugin UI
 
-Before changing plugin loaders, pages or conversation actions, read the mandatory
-[Frontend implementation invariants](../docs/full-stack-plugins.md#frontend-implementation-invariants).
-Preserve authenticated, viewer-bound loading, native actions, localization and
-mount/dispose plus abort fencing; Shadow DOM is not a security sandbox.
+Follow [invariants](../docs/full-stack-plugins.md#frontend-implementation-invariants) for
+plugin loaders/pages/actions: viewer-bound auth, native actions, i18n and
+mount/dispose/abort fencing. Shadow DOM is not a sandbox. Bundled extensions need
+typed en/zh `core/extensions/catalog.ts` entries with their namespace.
+Catalog entries are not proof of installation or activation.
 
 ### Composer references
 
