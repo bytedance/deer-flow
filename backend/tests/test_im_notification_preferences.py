@@ -270,6 +270,66 @@ async def test_normal_finalization_enqueues_only_enabled_channels_and_no_qq_grou
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("binding", [None, {"status": "disconnected"}, {"provider": "slack"}, {"owner_user_id": "bob"}, {"external_account_id": ""}, {"provider": ""}])
+async def test_finalization_without_push_recipients_skips_preference_queries(repositories, binding):
+    from app.scheduler.service import ScheduledTaskService
+    from deerflow.persistence.channel_connections.model import ChannelConnectionRow
+
+    _, deliveries = repositories
+    sessions = deliveries.session_factory
+    if binding is not None:
+        async with sessions() as session, session.begin():
+            values = {"id": "binding", "owner_user_id": "alice", "provider": "wecom", "status": "connected", "external_account_id": "recipient"}
+            session.add(ChannelConnectionRow(**{**values, **binding}))
+    service = ScheduledTaskService(task_repo=SimpleNamespace(), task_run_repo=SimpleNamespace(), launch_run=None, connection_repo=object(), notification_repo=deliveries, poll_interval_seconds=5, lease_seconds=30, max_concurrent_runs=1)
+    task = SimpleNamespace(id="task", user_id="alice", title="Digest", origin_thread_id=None, notification_group_connection_id=None)
+    occurrence = SimpleNamespace(id="occurrence", trigger="scheduled", status="success", run_id="run", error=None)
+    statements = []
+
+    def record_statement(_connection, _cursor, statement, _parameters, _context, _executemany):
+        statements.append(statement)
+
+    async with sessions() as session, session.begin():
+        engine = session.get_bind()
+        event.listen(engine, "before_cursor_execute", record_statement)
+        try:
+            await service._on_finalization(session, task, occurrence, events=("run_completed",))
+        finally:
+            event.remove(engine, "before_cursor_execute", record_statement)
+    assert any("channel_connections" in statement for statement in statements)
+    assert not any("im_notification_preferences" in statement for statement in statements)
+    async with sessions() as session:
+        assert (await session.scalars(select(NotificationDeliveryRow))).all() == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_group_only_finalization_still_locks_and_honors_preferences(repositories, monkeypatch, enabled):
+    from app.scheduler.service import ScheduledTaskService
+    from deerflow.persistence.user.im_notifications import ImNotificationPreferencesRepository
+
+    preferences, deliveries = repositories
+    await preferences.patch("alice", {"feishu": enabled})
+    original = ImNotificationPreferencesRepository.get_in_session
+    locks = []
+
+    async def record_preference_lookup(session, user_id, *, lock_owner=False):
+        locks.append((session, user_id, lock_owner))
+        return await original(session, user_id, lock_owner=lock_owner)
+
+    monkeypatch.setattr(ImNotificationPreferencesRepository, "get_in_session", staticmethod(record_preference_lookup))
+    service = ScheduledTaskService(task_repo=SimpleNamespace(), task_run_repo=SimpleNamespace(), launch_run=None, connection_repo=object(), notification_repo=deliveries, poll_interval_seconds=5, lease_seconds=30, max_concurrent_runs=1)
+    task = SimpleNamespace(id="task", user_id="alice", title="Digest", origin_thread_id=None, notification_group_connection_id="feishu-group")
+    occurrence = SimpleNamespace(id="occurrence", trigger="scheduled", status="success", run_id="run", error=None)
+    async with deliveries.session_factory() as session, session.begin():
+        await service._on_finalization(session, task, occurrence, events=("run_completed",))
+        assert locks == [(session, "alice", True)]
+    async with deliveries.session_factory() as session:
+        rows = (await session.scalars(select(NotificationDeliveryRow))).all()
+    assert [(row.provider, row.target, row.payload_json["target_type"]) for row in rows] == ([("feishu", "feishu-group", "group")] if enabled else [])
+
+
+@pytest.mark.anyio
 async def test_worker_does_not_send_canceled_claim_after_fast_reenable(repositories):
     from app.scheduler.notification_delivery import NotificationDeliveryWorker
 
