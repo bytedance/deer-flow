@@ -26,6 +26,7 @@ path variables and compare storage defaults with the launcher's actual shell blo
 ## Dependency Check Diagnostics
 
 `check_extension.py` checks wheels with Gateway's asset validator.
+CI builds and checks all bundled examples in `extension-package-check.yml`.
 Tests: `backend/tests/test_extension_check_script.py`.
 
 `check.py` decodes captured output as UTF-8 with replacement and runs pnpm with

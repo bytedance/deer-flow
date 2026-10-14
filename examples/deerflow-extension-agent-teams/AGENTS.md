@@ -10,6 +10,15 @@ spans owners for scheduling bookkeeping and is never exposed as a public read.
 Native mentions use Gateway's stamped
 runtime identity and delegated capability, never an owner from mention content.
 Thread sharing is not team sharing. Keep peer content on human-message channels.
+History/result tools require the owner and a current member thread on every read.
+Project retained records explicitly; never expose frozen inputs, resume payloads
+or host capabilities. Bind cursors to the tool, team and filters, and anchor them
+to record IDs, not shifting offsets. Report expired anchors instead of silently
+resetting pagination. Bound the complete serialized JSON response, including
+metadata and escaping, to 24,000 UTF-8 bytes. Preserve result-truncation provenance;
+legacy unknown flags stay null. Queries never reconnect or admit Agent runs.
+Hash cursor anchors independently of job-ID syntax. Cancelled jobs have no
+available answer; their cancellation notices remain shared history events.
 
 Persist run input and idempotency keys before admission. Serialize by thread and
 record a terminal result and its follow-up receipt in one SQLite transaction.

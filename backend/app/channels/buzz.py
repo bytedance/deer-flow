@@ -49,6 +49,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from app.channels import buzz_nostr
+from app.channels.allowed_users import parse_allowed_users, parse_channel_ids
 from app.channels.base import Channel
 from app.channels.buzz_seen_events import BuzzSeenEventStore
 from app.channels.commands import is_known_channel_command
@@ -249,6 +250,30 @@ def _is_transient_close(reason: str) -> bool:
     return not any(marker in text for marker in _PERMANENT_CLOSE_MARKERS)
 
 
+def _parse_member_pubkey(value: Any) -> str | None:
+    """Return the member's hex pubkey, or None when the entry is not one.
+
+    Shared parse_allowed_users coerces config entries through this, so a
+    scalar pubkey is one member and an unusable entry is dropped with a
+    warning instead of aborting channel construction.
+    """
+    try:
+        return buzz_nostr.parse_pubkey(str(value))
+    except ValueError:
+        return None
+
+
+def _parse_mention_free_channels(mention_free_channels: Any) -> frozenset[str]:
+    """Parse Buzz mention exemptions without splitting scalar channel IDs."""
+    return parse_channel_ids(
+        mention_free_channels,
+        logger=logger,
+        channel_name="buzz",
+        key_name="mention_free_channels",
+        warn_on_scalar_separators=True,
+    )
+
+
 class BuzzChannel(Channel):
     _connect: Any = None  # test seam: async callable returning an async-context-manager transport
 
@@ -265,9 +290,20 @@ class BuzzChannel(Channel):
         self._workspace_id = urlparse(self._relay_url).netloc
         self._private_key_raw = str(config.get("private_key", ""))
         self._keys: buzz_nostr.NostrKeys | None = None  # parsed in start() so coincurve stays lazy
-        self._allowed_users = {buzz_nostr.parse_pubkey(v) for v in config.get("allowed_users", []) or []}
+        self._allowed_users = (
+            parse_allowed_users(
+                config.get("allowed_users"),
+                parse_user_id=_parse_member_pubkey,
+                logger=logger,
+                channel_name="buzz",
+                expected_id="a 64-hex or npub1... member pubkey",
+                valid_id_name="member pubkey",
+                warn_on_scalar_separators=True,
+            )
+            or frozenset()
+        )
         self._require_mention = bool(config.get("require_mention", True))
-        self._mention_free = {str(c) for c in config.get("mention_free_channels", []) or []}
+        self._mention_free: frozenset[str] = _parse_mention_free_channels(config.get("mention_free_channels"))
         self._channel_meta: dict[str, dict[str, Any]] = {}
         self._stream_targets: dict[tuple[str, str | None], str] = {}
         self._stream_tails: dict[tuple[str, str | None], list[str]] = {}  # overflow chunk ids beyond chunk 0, per conversation

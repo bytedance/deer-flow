@@ -33,6 +33,7 @@ from app.gateway.routers import (
     features,
     feedback,
     github_webhooks,
+    im_notification_preferences,
     input_polish,
     integrations,
     knowledge,
@@ -503,6 +504,7 @@ async def _start_scheduled_task_notification_delivery(app: FastAPI, startup_conf
         from app.scheduler.notification_delivery import NotificationDeliveryWorker
         from deerflow.persistence.engine import get_session_factory
         from deerflow.persistence.run import RunRepository
+        from deerflow.persistence.user.im_notifications import ImNotificationPreferencesRepository
 
         run_repo = RunRepository(get_session_factory())
 
@@ -521,6 +523,7 @@ async def _start_scheduled_task_notification_delivery(app: FastAPI, startup_conf
             # Both repositories come from the same session factory, so the
             # connection repository is present whenever the outbox one is.
             resolve_connections=connection_repo.list_connections,
+            resolve_notification_preferences=ImNotificationPreferencesRepository(get_session_factory()).get,
             poll_interval_seconds=startup_config.scheduler.poll_interval_seconds,
             # Language of notices whose owner has no UI language preference.
             default_locale=startup_config.channel_connections.notification_locale,
@@ -1335,6 +1338,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # Auth API is mounted at /api/v1/auth
     app.include_router(auth.router)
     app.include_router(user_preferences.router)
+    app.include_router(im_notification_preferences.router)
 
     # Feedback API is mounted at /api/threads/{thread_id}/runs/{run_id}/feedback
     app.include_router(feedback.router)

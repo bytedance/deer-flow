@@ -207,7 +207,7 @@ def test_get_providers_uses_existing_channels_config(tmp_path):
         "discord": False,
         "feishu": True,
         "dingtalk": False,
-        "wechat": False,
+        "wechat": True,
         "wecom": True,
     }
 
@@ -832,6 +832,66 @@ def test_configure_provider_runtime_credentials_survive_local_restart(tmp_path):
         "bot_token": "xoxb-ui",
         "app_token": "xapp-ui",
     }
+
+    anyio.run(repo.close)
+
+
+def test_runtime_config_saved_on_peer_workers_both_survive_restart(tmp_path):
+    """Each Gateway worker keeps its own store; a save must not drop a peer's provider."""
+    import anyio
+
+    repo = anyio.run(_make_repo, tmp_path)
+    config = _enabled_connections_config()
+    runtime_config_path = tmp_path / "channels" / "runtime-config.json"
+    # Both workers load the (empty) file before either one saves.
+    worker_a = _make_app(config, repo, {}, runtime_config_store=ChannelRuntimeConfigStore(runtime_config_path))
+    worker_b = _make_app(config, repo, {}, runtime_config_store=ChannelRuntimeConfigStore(runtime_config_path))
+
+    with TestClient(worker_a) as client:
+        telegram_response = client.post(
+            "/api/channels/telegram/runtime-config",
+            json={"values": {"bot_token": "tg-token", "bot_username": "ui_bot"}},
+        )
+    with TestClient(worker_b) as client:
+        slack_response = client.post(
+            "/api/channels/slack/runtime-config",
+            json={"values": {"bot_token": "xoxb-ui", "app_token": "xapp-ui"}},
+        )
+
+    assert telegram_response.status_code == 200
+    assert slack_response.status_code == 200
+    assert ChannelRuntimeConfigStore(runtime_config_path).load_all() == {
+        "telegram": {"enabled": True, "bot_token": "tg-token", "bot_username": "ui_bot"},
+        "slack": {"enabled": True, "bot_token": "xoxb-ui", "app_token": "xapp-ui"},
+    }
+
+    anyio.run(repo.close)
+
+
+def test_runtime_disconnect_on_one_worker_is_not_undone_by_a_peer_save(tmp_path):
+    import anyio
+
+    repo = anyio.run(_make_repo, tmp_path)
+    config = _enabled_connections_config()
+    runtime_config_path = tmp_path / "channels" / "runtime-config.json"
+    slack_config = {"enabled": True, "bot_token": "xoxb-ui", "app_token": "xapp-ui"}
+    ChannelRuntimeConfigStore(runtime_config_path).set_provider_config("slack", slack_config)
+    worker_a = _make_app(config, repo, {"slack": dict(slack_config)}, runtime_config_store=ChannelRuntimeConfigStore(runtime_config_path))
+    worker_b = _make_app(config, repo, {"slack": dict(slack_config)}, runtime_config_store=ChannelRuntimeConfigStore(runtime_config_path))
+
+    with TestClient(worker_a) as client:
+        disconnect_response = client.delete("/api/channels/slack/runtime-config")
+    with TestClient(worker_b) as client:
+        telegram_response = client.post(
+            "/api/channels/telegram/runtime-config",
+            json={"values": {"bot_token": "tg-token", "bot_username": "ui_bot"}},
+        )
+
+    assert disconnect_response.status_code == 200
+    assert telegram_response.status_code == 200
+    persisted = ChannelRuntimeConfigStore(runtime_config_path).load_all()
+    assert persisted["slack"] == {"enabled": False, "_runtime_disabled": True}
+    assert persisted["telegram"]["bot_token"] == "tg-token"
 
     anyio.run(repo.close)
 
@@ -1534,7 +1594,7 @@ def test_qq_provider_exposes_binding_flow_and_masks_secret(tmp_path):
             assert provider["auth_mode"] == "binding_code"
             assert provider["configured"] is True
             assert provider["connectable"] is True
-            assert provider["proactive_notifications"] is False
+            assert provider["proactive_notifications"] is True
             assert "fixture-private-secret" not in response.text
             fields = {field["name"]: field for field in provider["credential_fields"]}
             assert fields["app_id"]["type"] == "text"

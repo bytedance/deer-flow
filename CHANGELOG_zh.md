@@ -4452,12 +4452,33 @@
   任务，现在显示为任务时区当天的零点，与服务端实际执行时间一致。此前界面把末尾的
   `-07` 误认为 UTC 偏移量，显示成 UTC 零点：在 `Asia/Shanghai` 显示为 08:00，在 UTC
   以西的时区则显示为前一天晚上；任务列表、详情、对话卡片和编辑表单的预填时间都受影响。([#6692])
+- **子代理：** 持久批处理工作器在不再监管仍在运行的子代理时，现在会取消它，并在它
+  停止后从注册表中移除对应条目。此前，在长期运行的进程中停止批处理服务（SDK 的
+  `SubagentRuntime` 停止）会让每个仍在运行的 `SubagentResult`（包括完整对话
+  记录）永久留在进程级注册表中；轮询时的存储库错误会把条目标记为失败或重新排队，
+  却让其子代理在无人监管的情况下继续运行，因此重试可能把同一条目执行两次。始终不
+  停止的条目会在其租约过期后被移除。([#6785])
 - **网关：** 子代理批次 JSONL 导出
   （`GET /api/threads/{thread_id}/subagent-batches/{batch_id}/results.jsonl`）
   现在每次读取 10 行已存储结果，而不是 500 行。每行最多可包含 `max_result_chars`
   的报告和同等长度的证据 JSON，而导出会先把整页载入内存再开始输出，因此默认上限下
   单个请求约占用 280 MB（上限 1,000,000 时约 1.7 GB），并且每页会阻塞事件循环
   半秒以上。导出的行及其顺序不变。([#6706])
+- **网关：** 子代理批次条目列表
+  （`GET /api/threads/{thread_id}/subagent-batches/{batch_id}/items`，批次运行时工作区
+  每 2 秒轮询一次）不再为了只返回预览而载入每个条目的完整报告、证据 JSON 和提示词。
+  默认 `max_result_chars` 下，一页 100 个条目约占用 34 MB，并阻塞事件循环约 70 ms
+  （`limit=500` 时为 170 MB 和 300 ms）；现在不到 1 MB。响应内容不变。([#6781])
+- **渠道：** 在渠道设置页保存或断开机器人时，不再覆盖经由其他 Gateway worker
+  保存的机器人。每个 worker 都保留启动时读入的 `runtime-config.json` 内容，并用这份
+  副本重写整个文件，因此在两个 worker 下，一个 worker 上保存的 Telegram 机器人会在
+  另一个 worker 保存 Slack 机器人时丢失，已断开的机器人也会重新出现。现在每次保存
+  都会在跨进程共享的锁下重新读取文件，只修改自己的 provider。([#6844])
+- **持久化：** 同一用户同时对同一个运行首次评分（两个标签页、两台设备或客户端重试）时，
+  不再有一个请求返回 500。两个请求都会查不到已有记录并插入，第二个插入会触发
+  `(thread, run, user)` 唯一约束；在 Postgres 上，80 个这样的请求中有 26 个失败。
+  IM 会话绑定中的同类竞争（例如首条消息与 `/new` 同时到达）也不再导致消息处理失败。
+  落后的写入现在会更新另一方创建的记录。([#6852])
 
 ### 安全
 
@@ -9296,3 +9317,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6702]: https://github.com/bytedance/deer-flow/pull/6702
 [#6706]: https://github.com/bytedance/deer-flow/pull/6706
 [#6746]: https://github.com/bytedance/deer-flow/pull/6746
+[#6781]: https://github.com/bytedance/deer-flow/pull/6781
+[#6785]: https://github.com/bytedance/deer-flow/pull/6785
+[#6844]: https://github.com/bytedance/deer-flow/pull/6844
+[#6852]: https://github.com/bytedance/deer-flow/pull/6852
