@@ -454,3 +454,33 @@ prove session/account synchronization and expected-principal consistency, also
 when both actors belong to the same workspace. Never grant authority to an actor
 header. Full real backend/browser acceptance and M4-M11 remain; M3 unchecked,
 activation closed, no deployment/push/local runtime/model calls.
+
+
+M3 confirmed Context checkpoint: frontend #24 RED used a legacy-passthrough
+contract scaffold and reproduced absent confirmed context and resource mounting
+before validation. #25 SUCCESS passes three real React/StrictMode mains plus
+nine cache/REST/SDK regressions, four-file formatting, zero-warning target lint
+and full frontend pnpm check. Runtime/test bytes match its archive; exact
+#24-#25 and formatter owned inventories independently empty.
+
+The typed fixed-GET metadata adapter validates active list shape, unique own
+personal membership and current actor/selector/membership/policy tuple before
+publishing a newly fetched list. Its native cookie, no-store, no-redirect reads
+are cancelled around headers/JSON. Per-actor WorkspaceSession owns local epochs,
+aborts the old lifetime immediately, ignores late selections and creates fixed
+REST/SDK clients plus a fresh cacheKey only after confirmation. Context controls
+remain available while pending; WorkspaceReadyBoundary gates resources and
+query cache. Nested disabled wrappers preserve the parent; genuine unmount
+closes the store, while StrictMode replay retains its lease.
+
+Evidence is two mounted trees and network doubles, not actual browser/server
+authorization. WorkspaceContent does not mount the new Context yet and no
+server capability bootstrap/selector exists. Next integrate those and every
+real resource consumer. Include native artifact panel sessionStorage bootstrap,
+thread UI stores and React reconnect metadata in the scope/reset inventory;
+a QueryClient remount alone is insufficient. Selection/manual refresh only:
+active revocation/session watchers and native principal consistency after
+promotion remain M4/M6/M11. Same-workspace cookie actor change between metadata
+reads is covered; post-promotion cross-tab credential proof still is not.
+M3 and M4-M11 remain open; activation closed, no deployment/push/local runtime
+or model calls. Preserve original DeerFlow style in the coming selector UI.

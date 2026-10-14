@@ -1978,5 +1978,44 @@
       "shared HttpOnly credential/account changes across tabs need native-session principal consistency, including two members of same workspace; client actor metadata is not authentication",
       "real backend/browser two-tab acceptance and M4-M11; activation remains closed"
     ]
+  },
+  "frontend_confirmed_context": {
+    "job": "deerflow-tenant-frontend",
+    "status": "opt-in Context/metadata/session foundation verified; app shell and real consumers not mounted",
+    "red": {
+      "build": 24,
+      "result": "FAILURE",
+      "tests_failed": 3,
+      "test_seconds": 2.68,
+      "build_seconds": 16.144,
+      "archive_sha256": "153cc732e6dc94169fb5cd1e5805b9c050d63bac4c7f2b748e969c5fe84607bf",
+      "reason": "Legacy-passthrough contract scaffold yields no confirmed context and mounts the resource subtree before confirmation. Real React assertions; no dependency/import failure."
+    },
+    "green": {
+      "build": 25,
+      "result": "SUCCESS",
+      "tests_passed": 12,
+      "tests_added": 3,
+      "main_test_seconds": 2.91,
+      "regression_test_seconds": 4.07,
+      "build_seconds": 397.889,
+      "archive_sha256": "3ef5ea5227bb36cd310642da861ead62cf15125e82e3a6482c8317a1a5e9b054",
+      "checks": "three real React/StrictMode Context mains, nine cache/REST/SDK regressions, four-file Prettier, targeted ESLint max-warnings 0, full pnpm check"
+    },
+    "source_sha256": {
+      "frontend/src/core/workspaces/api.ts": "c955d61c9c5dab9e9e6344a7b35594a47746f8de12ba00c5cb5f09adf82d1af4",
+      "frontend/src/core/workspaces/session.ts": "07509afbf6f4d03db7f31ed4d4b7a47826071d5091c66507700f8886b892ec65",
+      "frontend/src/core/workspaces/context.tsx": "6e577a35e634ab62e34d868a93a156fc240e5d8c3f65d29092623539df623621",
+      "frontend/tests/unit/core/workspaces/context.dom.test.tsx": "9e12e2383a5996d6f0548b40ae5218768ac5303f53dc9487ac3846bb0ba29e1d"
+    },
+    "scope": "Fixed GET-only native-cookie metadata reads with cancellation/JSON fences; own unique personal default and actor/selector/version confirmation before any new list publication; immutable per-entry clients/metadata; local epoch suppresses late selection results; immediate old-scope abort; StrictMode-safe provider leases; gated resource subtree/fresh query cache; native account/null change and disabled-parent inheritance",
+    "cleanup": "#24-#25 terminal; exact owned container/network and context-format probe inventories independently empty; private dependency cache retained",
+    "remaining": [
+      "server capability bootstrap and actual WorkspaceContent/native selector integration",
+      "all resource consumers must use bound lifetime clients, scope/reset artifact panel bootstrap, thread UI stores and React reconnect storage",
+      "further-await mutation/publication fences and active membership/session watchers",
+      "native credential/principal proof after promotion and actual backend/browser two-tab acceptance",
+      "M4-M11 and full tenant activation; all parent work packages remain incomplete"
+    ]
   }
 }

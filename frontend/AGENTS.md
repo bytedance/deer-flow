@@ -412,3 +412,25 @@ workspace lifetime. Shared scoped fetch dispatches the resolved/validated absolu
 URL (or original native Request), not a raw relative string that the browser
 would resolve against a different page/base URL. No actor header is invented.
 The workspace selector/context and consumer wiring remain required work.
+
+
+`core/workspaces/context.tsx` provides the opt-in WorkspaceProvider and
+WorkspaceReadyBoundary. Provider enablement must come from server runtime
+capability; disabled nested wrappers preserve an existing parent context.
+Each native actor owns one WorkspaceSession; its read-only metadata adapter
+validates the active list, unique own personal workspace and current actor,
+selector and membership/policy versions before publishing any new names/roles
+or constructing REST/SDK clients. Selection aborts the previous lifetime first;
+a stale completion cannot overwrite a later selection. Snapshot data and
+client scope are immutable; the per-entry cacheKey includes the versions and
+a local epoch. Refcounted microtask release keeps StrictMode's immediate effect
+replay alive but permanently closes a genuinely unmounted store.
+Controls may read useWorkspaceContext while pending; all resource consumers
+belong under WorkspaceReadyBoundary. useWorkspaceLifetime returns null only
+without enabled context and refuses pending/denied context, rather than falling
+back to native unscoped clients. Ready content owns the matching query cache.
+This component is not yet mounted in the app shell: runtime capability/bootstrap,
+consumer clients, selector UI and stored thread/artifact/reconnect metadata still
+need integration. No automatic membership/session watcher is installed here;
+selection and explicit refresh revalidate. Cross-tab credentials/native principal
+consistency and physical Run behavior remain M4/M6/M11 requirements.

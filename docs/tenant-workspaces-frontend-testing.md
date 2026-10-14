@@ -186,3 +186,60 @@ partitioning and selector capture alone do not prove that property. Include a
 case where both actors belong to the same workspace, so a workspace-only guard
 cannot mask the identity mismatch. Do not grant authority to a supplied actor
 header or infer authentication from the client snapshot.
+
+
+## Confirmed Context and selection lifecycle
+
+The opt-in WorkspaceProvider reads optional native AuthProvider identity. An
+enabled actor gets a separate WorkspaceSession; enabled/no actor is closed,
+while disabled/public wrappers preserve existing context or native behavior.
+WorkspaceReadyBoundary mounts resources only for confirmed scope and owns that
+entry's query cache. Pending/error content never falls back to an unscoped
+client. useWorkspaceLifetime refuses resource use outside that ready state.
+
+The fixed GET-only metadata adapter uses native session credentials, no redirect
+and no-store. It checks cancellation around response/body completion, validates
+canonical workspace IDs/roles/versions, unique own personal membership, and the
+current actor/selector/version tuple against the freshly read list. It does not
+publish newly fetched names/roles before identity confirmation. Name length
+uses Unicode code points to match the native backend. Server metadata is a
+projection, never browser-issued authorization. HTTP errors become closed state;
+there is no old metadata login redirect and no automatic fallback to another
+workspace. Explicit select() can request personal recovery; refresh preserves
+the last requested selector.
+
+Every selection immediately aborts the old scope, clears active content and
+claims a local epoch. Only its own still-live completion can publish a new
+immutable context, fixed REST/SDK pair and fresh cacheKey. StrictMode leases
+share initial setup; genuine unmount closes the store permanently. Control
+operations are metadata GETs and never create/cancel background Runs.
+
+Three real React/StrictMode mains cover two independent mounted trees, personal
+default, one-tree selection, fixed REST/SDK dispatch, fast A→B selection with a
+late A response, invalid actor/selector/membership/policy metadata, blocked
+resource mount, account/null transitions and a cookie actor change between
+list/current reads. These are DOM/network-double tests, not real-browser or
+server-authentication acceptance. Nine cache/REST/SDK checks are the related
+regressions.
+
+The Context is not yet mounted in WorkspaceContent or a capability bootstrap.
+All real resource hooks must consume its fixed clients; query lifetime alone
+does not isolate the native artifact panel's sessionStorage bootstrap cache,
+thread-local UI stores, React SDK reconnect markers or callbacks after further
+awaits. Inventory and namespace/reset those stores during consumer integration.
+Selection/manual refresh revalidate; no automatic membership/session watcher
+exists in this slice. Cross-tab credential/principal proof after promotion,
+actual two-tab backend testing, M4-M11 and activation gates remain required.
+
+```sh
+python3 scripts/pnpm.py exec rstest run tests/unit/core/workspaces/context.dom.test.tsx
+python3 scripts/pnpm.py exec rstest run tests/unit/core/workspaces/cache.dom.test.tsx \
+  tests/unit/core/workspaces/rest.test.ts tests/unit/core/workspaces/sdk.test.ts
+python3 scripts/pnpm.py exec prettier --check src/core/workspaces/api.ts \
+  src/core/workspaces/session.ts src/core/workspaces/context.tsx \
+  tests/unit/core/workspaces/context.dom.test.tsx
+python3 scripts/pnpm.py exec eslint src/core/workspaces/api.ts \
+  src/core/workspaces/session.ts src/core/workspaces/context.tsx \
+  tests/unit/core/workspaces/context.dom.test.tsx --max-warnings 0
+python3 scripts/pnpm.py check
+```

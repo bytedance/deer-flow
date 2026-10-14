@@ -79,3 +79,15 @@ Upload DELETE checkpoint #35: SQL policy withdrawal between native admission and
 Thread read checkpoint #38: native compiled graph with real persistent SQLite checkpoint reopen plus SQLite/PostgreSQL metadata; detail/state/history/goal retain distinct personal/team content and refuse foreign scope. Actual SQL incarnation change during materialization refuses the prepared response. Read-clock and write/lifecycle/background paths, Postgres checkpoint/recovery, delta and browser acceptance remain required.
 
 Read-marker checkpoint #40/#41: actual scoped SQL/HTTP read marking, private Run/thread parent filtering, independent workspace viewer clocks, idempotent repeated reads, and persisted withdrawal without marker changes on both dialects. Current native migration 0038 retains native clocks/keys. Native Run/activity feeds, controlled commit cancellation and scoped thread cleanup remain required.
+
+
+Frontend Context checkpoint (frontend #25): explicit metadata GETs are a
+browser-session control-plane entry before a content scope exists. Fixed
+endpoints and expected actor/selector/version checks precede list publication
+and REST/SDK creation. Resource mounts are gated by the confirmed lifetime;
+current app-shell/consumer wiring and real browser acceptance remain M3/M7.
+Inventory also includes the native artifact panel's sessionStorage bootstrap,
+thread UI stores and React SDK reconnect markers. Each needs actor/workspace/
+incarnation-safe namespacing or reset; query cache remount is not proof for
+those stores. Native session/principal changes after promotion still require
+M6/M11 proof, including same-workspace actors. No activation gate is removed.
