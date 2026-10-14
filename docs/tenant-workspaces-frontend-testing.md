@@ -103,3 +103,36 @@ The late-HTTP check currently rejects a Response returned after cancellation.
 A Response accepted before cancellation may still be parsing; post-parse state
 publication fences belong to the pending REST/provider integration. Do not
 interpret the transport check as proof that all hook/cache updates are fenced.
+
+
+## Page query-cache ownership
+
+QueryClientProvider no longer uses a module-global singleton. Each mounted
+instance owns a lazily initialized native QueryClient. It keys the descendant
+tree by the optional native AuthProvider actor ID and an explicit cacheKey for
+a workspace lifetime; account change/logout therefore reset actual existing
+authenticated page trees. Changing cacheKey creates a fresh cache before the
+new subtree renders. The selector/provider must still supply and renew that
+lifetime key; the property is not workspace authentication or automatic
+selection. Public page layouts without AuthProvider remain supported.
+
+A real React/TanStack main covers independent page trees, explicit workspace-key change,
+query cancellation and late completion, actor switch/logout, and StrictMode
+with genuine-unmount cache cleanup. The cleanup microtask compares a captured
+generation object to avoid destroying a cache during StrictMode replay.
+Existing feature discovery, offline banner and static-mode checks are the
+related regression slice. This does not prove arbitrary mutation callback
+cancellation, physical Run STOP, standalone-viewer session synchronization,
+REST/SDK lifetime wiring or real authenticated two-tab backend behavior.
+
+```sh
+python3 scripts/pnpm.py exec rstest run tests/unit/core/workspaces/cache.dom.test.tsx
+python3 scripts/pnpm.py exec rstest run tests/unit/core/features/hooks.dom.test.tsx \
+  tests/unit/components/workspace/gateway-offline-banner.dom.test.tsx \
+  tests/unit/core/api/static-mode.test.ts
+python3 scripts/pnpm.py exec prettier --check src/components/query-client-provider.tsx \
+  src/core/auth/AuthProvider.tsx tests/unit/core/workspaces/cache.dom.test.tsx
+python3 scripts/pnpm.py exec eslint src/components/query-client-provider.tsx \
+  src/core/auth/AuthProvider.tsx tests/unit/core/workspaces/cache.dom.test.tsx --max-warnings 0
+python3 scripts/pnpm.py check
+```

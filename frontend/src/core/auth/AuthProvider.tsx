@@ -172,6 +172,11 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
+/** Display identity for cache partitioning, also usable in public page trees. */
+export function useOptionalAuthUserId(): string | null {
+  return useContext(AuthContext)?.user?.id ?? null;
+}
+
 /**
  * Hook to access authentication context
  * Throws if used outside AuthProvider - this is intentional for proper usage

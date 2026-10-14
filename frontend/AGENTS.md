@@ -379,3 +379,19 @@ so it never waits through network retry backoff. Keep native unscoped/demo
 behavior unchanged. SDK reconnect markers are actor/workspace/thread-keyed;
 the React hook's own resumable storage and provider/cache integration remain
 unwired and must not be described as full tab isolation.
+
+
+QueryClientProvider owns a lazily created QueryClient per mounted page tree.
+It reads optional AuthProvider display identity and keys the query subtree by
+actor ID plus an explicit `cacheKey`; account changes/logout immediately render
+a fresh cache, including when the workspace key stays the same. Public artifact
+and showcase trees can omit authentication context and still get independent
+caches. The future workspace provider must pass a stable key for one validated
+workspace lifetime and renew it on workspace/credential/policy lifetime changes;
+a mutable browser-global current-workspace value is not a cache identity.
+Genuine unmount clears query/mutation caches and cancels queries. Cleanup uses
+a captured generation object and a microtask to distinguish real unmount from
+React StrictMode's immediate effect replay; do not clear the still-live cache
+during that replay. Cache removal does not cancel server-side Runs, physical
+work or arbitrary mutation callbacks; their request/publication lifetimes remain
+separate required fences. This foundation does not wire the workspace selector.

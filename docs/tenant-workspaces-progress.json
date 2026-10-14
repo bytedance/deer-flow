@@ -1873,5 +1873,51 @@
       "React SDK resumable sessionStorage integration, native-style selector and full UI",
       "real authenticated backend browser two-tab acceptance; M4-M11; activation closed"
     ]
+  },
+  "frontend_query_cache": {
+    "job": "deerflow-tenant-frontend",
+    "status": "cache ownership foundation verified; workspace selector/lifetime binding incomplete",
+    "red": {
+      "build": 16,
+      "result": "FAILURE",
+      "tests_failed": 3,
+      "test_seconds": 3.99,
+      "build_seconds": 19.364,
+      "archive_sha256": "1a6f5f150e2afd9f6561d4e5252153430c2cad4e82beccc0ffc1c32a7f4fc7f8",
+      "reason": "Actual mounted page trees share one QueryClient; explicit workspace lifetime change reuses old client; unmounted page retains cached queries"
+    },
+    "intermediate": {
+      "build": 17,
+      "result": "ABORTED",
+      "tests_passed": 21,
+      "main_test_seconds": 2.85,
+      "regression_test_seconds": 9.61,
+      "build_seconds": 159.064,
+      "archive_sha256": "52604f73159e7d02e9bdd776ed01f42e825363edf401a498157898dd74b1b2cc",
+      "reason": "Three mains and eighteen related regressions passed with format; targeted lint warned about direct ref access inside deferred cleanup. Stopped own running build to correct capture instead of spending full-check time on old source; independent resource check empty"
+    },
+    "green": {
+      "build": 18,
+      "result": "SUCCESS",
+      "tests_passed": 21,
+      "tests_added": 3,
+      "main_test_seconds": 2.81,
+      "regression_test_seconds": 8.19,
+      "build_seconds": 397.877,
+      "archive_sha256": "30f96ca259160d60a38a4b9acb1474c66283054692633a8990c91329933f30d6",
+      "checks": "three real React/TanStack mains, eighteen native feature/offline/static regressions, changed-file Prettier, targeted ESLint max-warnings 0, full pnpm check"
+    },
+    "source_sha256": {
+      "frontend/src/components/query-client-provider.tsx": "8a1f9c7cb042a7c248ed308b92843543ac39ba26ebe2d6908993f2b1a70bcad7",
+      "frontend/src/core/auth/AuthProvider.tsx": "469a4b865c9aba772b5847d121496ea2e3c3e9307cf71ed785b070305071867a",
+      "frontend/tests/unit/core/workspaces/cache.dom.test.tsx": "669315805644c89d14579b58a0aaea8008e4fd9dd94a5736920cd840ecbf5ddb"
+    },
+    "scope": "Each actual provider owns a lazy QueryClient; optional native actor display identity and explicit workspace lifetime cacheKey remount query subtree; account/null change automatic in existing authenticated pages; genuine unmount clears cache/cancels queries; captured generation object avoids StrictMode replay destroying live queries; public pages without AuthProvider supported",
+    "cleanup": "#16-#18 terminal, exact owned containers/networks and cache-format probe independently empty; private frozen-lock dependency cache retained",
+    "remaining": [
+      "native workspace selector/provider must supply validated per-tab lifetime key and bind REST/SDK clients",
+      "post-parse request/mutation publication fences and native React reconnect storage",
+      "actual backend/browser two-tab switching; physical Run cancellation/revocation and M4-M11; activation stays closed"
+    ]
   }
 }

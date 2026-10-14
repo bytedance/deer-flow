@@ -401,3 +401,26 @@ per-lifetime query/cache reset, logout/switch/post-parse publication fences and
 React resumable storage are next. Keep original DeerFlow styling as approved.
 Real authenticated two-tab browser acceptance, M4-M11 and physical isolation
 remain required; M3 unchecked, activation closed, no deployment/push.
+
+
+M3 query-cache checkpoint: frontend #16 RED reproduced the actual shared
+module-global QueryClient, cache reuse after a workspace lifetime key change
+and retained query data after unmount. #17 passed three mains and eighteen
+related native regressions, then was explicitly stopped to correct the new
+cleanup-ref lint warning; no test failed. #18 SUCCESS passes the same 21,
+modified-file formatting, targeted ESLint with zero warnings and full frontend
+pnpm check. Runtime/test bytes match its archive; exact #16-#18 and formatter
+owned resource inventories are independently empty.
+
+The actual QueryClientProvider now owns a lazy client per page tree and keys
+its child tree by optional native AuthProvider actor plus explicit workspace
+lifetime cacheKey. Existing authenticated pages reset on account/null changes;
+public pages require no AuthProvider. Changing cacheKey renders an empty client
+before the new subtree can show old cache data, and real unmount clears the
+old queries/mutations and cancels queries. A captured generation object and
+microtask preserve live StrictMode effect replay. This is cache ownership, not
+authorization or physical Run/mutation cancellation. Native-style workspace
+selector/context, real validated lifetime keys, shared REST/SDK wiring, response
+publication and React reconnect storage remain next; real authenticated two-tab
+backend acceptance and M4-M11 remain required. M3 unchecked, activation closed;
+no deployment/push/local runtime or model calls.
