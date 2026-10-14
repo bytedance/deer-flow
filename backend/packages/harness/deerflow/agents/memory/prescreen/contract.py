@@ -24,7 +24,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal, Protocol, runtime_checkable
 
-from deerflow.reflection import resolve_variable
+from deerflow.agents.memory import judging
 
 MODE_OFF = "off"
 MODE_SHADOW = "shadow"
@@ -109,20 +109,20 @@ def resolve_memory_prescreen(
     is unusable or the provider rejects its configuration — never a silent
     fallback to "no pre-screen", which would hide a deployment mistake behind a
     behavior nothing records.
+
+    The mechanics are the shared judging resolution
+    (``agents/memory/judging.py::resolve_judging_provider``); this side contributes
+    its own ``MODES`` and ``MODE_OFF``, so the pre-screen's vocabulary --
+    ``off``/``shadow``/``enforce`` -- stays declared here.
     """
-    if mode == MODE_OFF:
-        return None
-    if mode not in MODES:
-        raise ValueError(f"{configuration_source} mode must be one of {list(MODES)}, got {mode!r}")
-    if not use:
-        raise ValueError(f"{configuration_source} needs 'use' when mode={mode!r}")
-    try:
-        provider_class = resolve_variable(use)
-    except (ImportError, ValueError) as exc:
-        raise ValueError(f"{configuration_source} use={use!r} could not be resolved: {exc}") from exc
-    if not callable(provider_class):
-        raise ValueError(f"{configuration_source} use={use!r} is not instantiable")
-    return provider_class(mode=mode, **dict(config or {}))
+    return judging.resolve_judging_provider(
+        mode=mode,
+        use=use,
+        config=config,
+        configuration_source=configuration_source,
+        modes=MODES,
+        off_mode=MODE_OFF,
+    )
 
 
 __all__ = [

@@ -22,7 +22,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
-from deerflow.reflection import resolve_variable
+from deerflow.agents.memory import judging
 
 MODE_OFF = "off"
 MODE_SHADOW = "shadow"
@@ -103,23 +103,20 @@ def resolve_memory_signal_classifier(
 ) -> MemorySignalProvider | None:
     """Resolve the configured classifier, or ``None`` when its mode is off.
 
-    Same rules as the pre-screen's resolver: ``off`` resolves nothing and
-    validates nothing; any other mode fails loudly rather than silently
-    degrading to "no model hints".
+    The mechanics are the shared judging resolution
+    (``agents/memory/judging.py::resolve_judging_provider``), the same owner the
+    pre-screen's resolver delegates to; this side contributes its own ``MODES``
+    and ``MODE_OFF`` so ``off``/``shadow``/``hints`` stays declared here. Fails
+    loudly rather than silently degrading to "no model hints".
     """
-    if mode == MODE_OFF:
-        return None
-    if mode not in MODES:
-        raise ValueError(f"{configuration_source} mode must be one of {list(MODES)}, got {mode!r}")
-    if not use:
-        raise ValueError(f"{configuration_source} needs 'use' when mode={mode!r}")
-    try:
-        provider_class = resolve_variable(use)
-    except (ImportError, ValueError) as exc:
-        raise ValueError(f"{configuration_source} use={use!r} could not be resolved: {exc}") from exc
-    if not callable(provider_class):
-        raise ValueError(f"{configuration_source} use={use!r} is not instantiable")
-    return provider_class(mode=mode, **dict(config or {}))
+    return judging.resolve_judging_provider(
+        mode=mode,
+        use=use,
+        config=config,
+        configuration_source=configuration_source,
+        modes=MODES,
+        off_mode=MODE_OFF,
+    )
 
 
 def direction_labels(affirmation: float | None, negation: float | None, *, hint_threshold: float) -> frozenset[str]:

@@ -1,14 +1,17 @@
 """Shared pieces for the memory judging hooks: pre-screening and signal classification.
 
-Both hooks judge **the same batch text**, build **the same wire state** and need
-**the same kind of answer cache**, so those three things live here instead of
-three times over (two adapters plus the coordinator).
+Both hooks judge **the same batch text**, build **the same wire state**, need
+**the same kind of answer cache**, and resolve **their provider the same way**,
+so those four things live here instead of three times over (two adapters plus
+the coordinator) or twice over (the two contract resolvers).
 
 What deliberately does **not** live here: the questions, rubrics, thresholds,
-decision direction, modes, and failure policy. Pre-screening skips a call when the
-text looks worthless (failure ⇒ extract as usual); signal classification only adds
-hint text (failure ⇒ fall back to the deterministic signals). Those are adapter
-policy, documented in:
+decision direction, modes, and failure policy -- ``resolve_judging_provider``
+takes each side's ``modes`` and ``off_mode`` as arguments rather than naming
+them, so which spellings exist stays with the side that owns them. Pre-screening
+skips a call when the text looks worthless (failure ⇒ extract as usual); signal
+classification only adds hint text (failure ⇒ fall back to the deterministic
+signals). Those are adapter policy, documented in:
 
 * the pre-screen: ``backend/docs/MEMORY_IMPROVEMENTS.md``, ``prescreen/contract.py``
 * the classifier: ``backend/docs/MEMORY_IMPROVEMENTS.md``, ``signals/contract.py``
@@ -21,7 +24,9 @@ import time
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from typing import Any
 
+from deerflow.reflection import resolve_variable
 from deerflow.typesafe.client import Answer
 
 _DIGEST_CHARS = 16
@@ -129,4 +134,51 @@ class AnswerCache:
             self._entries.popitem(last=False)
 
 
-__all__ = ["AnswerCache", "CachedVerdict", "batch_chars", "batch_digest", "conversation_tail_state"]
+def resolve_judging_provider(
+    *,
+    mode: str,
+    use: str | None,
+    config: Mapping[str, object] | None,
+    configuration_source: str,
+    modes: tuple[str, ...],
+    off_mode: str,
+) -> Any:
+    """Resolve one judging side's provider class path, or ``None`` when its mode is off.
+
+    ``prescreen.contract.resolve_memory_prescreen`` and
+    ``signals.contract.resolve_memory_signal_classifier`` carried byte-identical
+    bodies for this: reject an unknown mode, require ``use`` for any live mode,
+    resolve the class path, insist it is instantiable, and construct it with
+    ``mode`` plus the config. Both sides also fail **loudly** rather than
+    silently degrading to "no provider", which would hide a deployment mistake
+    behind behavior nothing records.
+
+    The two sides' vocabularies stay theirs: ``modes`` and ``off_mode`` are passed
+    in from each contract module, because which spellings exist and which one
+    means "construct nothing" is adapter policy (see this module's docstring).
+    Only the mechanics move here, so a fix to the fail-loudly rule lands once
+    instead of per side.
+    """
+    if mode == off_mode:
+        return None
+    if mode not in modes:
+        raise ValueError(f"{configuration_source} mode must be one of {list(modes)}, got {mode!r}")
+    if not use:
+        raise ValueError(f"{configuration_source} needs 'use' when mode={mode!r}")
+    try:
+        provider_class = resolve_variable(use)
+    except (ImportError, ValueError) as exc:
+        raise ValueError(f"{configuration_source} use={use!r} could not be resolved: {exc}") from exc
+    if not callable(provider_class):
+        raise ValueError(f"{configuration_source} use={use!r} is not instantiable")
+    return provider_class(mode=mode, **dict(config or {}))
+
+
+__all__ = [
+    "AnswerCache",
+    "CachedVerdict",
+    "batch_chars",
+    "batch_digest",
+    "conversation_tail_state",
+    "resolve_judging_provider",
+]
