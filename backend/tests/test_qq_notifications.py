@@ -304,7 +304,7 @@ async def test_notification_cancellation_propagates_without_retry():
         assert len(requests) == 1
 
 
-async def test_qq_group_bind_sets_disambiguated_workspace_name():
+async def test_qq_group_bind_does_not_use_raw_ids_as_display_names():
     from unittest.mock import AsyncMock
 
     async with connected() as (channel, _requests):
@@ -335,6 +335,6 @@ async def test_qq_group_bind_sets_disambiguated_workspace_name():
         calls = channel._connection_repo.upsert_connection.await_args_list
         assert len(calls) == 2
         assert calls[0].kwargs["workspace_id"] == "app1:group:group-open-1"
-        assert calls[0].kwargs["workspace_name"] == "QQ group (group-open-1)"
+        assert calls[0].kwargs["workspace_name"] is None
         assert calls[1].kwargs["workspace_id"] == "app1:group:group-open-2"
-        assert calls[1].kwargs["workspace_name"] == "QQ group (group-open-2)"
+        assert calls[1].kwargs["workspace_name"] is None

@@ -586,7 +586,6 @@ class RunManager:
                 if existing is not None and existing.get("status") == requested_status:
                     if record is not None and requested_status == record.status.value:
                         record.terminal_status_persisted = True
-                    return
                 if existing is not None and existing.get("status") != requested_status:
                     existing_status = existing.get("status")
                     logger.warning(

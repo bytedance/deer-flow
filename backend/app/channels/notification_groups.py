@@ -5,6 +5,16 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 
+def notification_group_display_name(metadata: object) -> str | None:
+    """Read the bounded label from the owner's browser-issued binding state."""
+    if not isinstance(metadata, Mapping):
+        return None
+    value = metadata.get("notification_group_name")
+    if not isinstance(value, str):
+        return None
+    return " ".join(value.split())[:256] or None
+
+
 def is_feishu_notification_group(*, provider: object, status: object, workspace_id: object, metadata: object) -> bool:
     """Check the Feishu group shape; callers must separately verify owner and ID."""
     return (

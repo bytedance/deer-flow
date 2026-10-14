@@ -23,7 +23,7 @@ from app.channels.base import Channel, ChannelUnavailable
 from app.channels.commands import extract_connect_code, is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage
-from app.channels.notification_groups import qq_notification_group_openid
+from app.channels.notification_groups import notification_group_display_name, qq_notification_group_openid
 from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
@@ -450,7 +450,7 @@ class QQChannel(Channel):
                 group_name = str(data.get("group_name") or "").strip() if group else ""
                 upsert_kwargs: dict[str, Any] = {}
                 if group:
-                    upsert_kwargs["workspace_name"] = group_name or f"QQ group ({target})"
+                    upsert_kwargs["workspace_name"] = notification_group_display_name(state.get("metadata")) or group_name[:256] or None
                 await self._connection_repo.upsert_connection(
                     owner_user_id=state["owner_user_id"],
                     provider="qq",

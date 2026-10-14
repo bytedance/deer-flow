@@ -405,13 +405,92 @@ async def test_unpersisted_terminal_status_does_not_emit_premature_success_notif
         async def put(self, run_id, **kwargs):
             return None
 
-        async def set_status(self, run_id, status, **kwargs):
+        async def update_status(self, run_id, status, **kwargs):
             raise RuntimeError("db write failed")
 
     manager = RunManager(store=FailingRunStore())
     created = await manager.create(thread_id="thread-101", assistant_id="lead_agent", user_id="alice")
     await manager.set_status(created.run_id, RunStatus.success, persist=True)
     assert created.terminal_status_persisted is False
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("completion_recovers", [False, True])
+@pytest.mark.parametrize("outcome", ["completed", "human_input", "failed"])
+async def test_worker_notifies_only_after_terminal_status_is_confirmed(env, completion_recovers, outcome):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.graph import END, START, StateGraph
+
+    from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
+    from deerflow.agents.thread_state import ThreadState
+    from deerflow.runtime.events.store.memory import MemoryRunEventStore
+    from deerflow.runtime.runs.manager import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+    from deerflow.runtime.runs.worker import RunContext, run_agent
+
+    sessions, preferences, _, service = env
+    await preferences.patch(
+        "alice",
+        {"run_completed": True, "run_failed": True, "human_input_requested": True, "wecom": False, "wechat": False, "qq": False},
+    )
+
+    class FailingTerminalStore(MemoryRunStore):
+        async def update_status(self, run_id, status, **kwargs):
+            if status not in {"pending", "running"}:
+                raise RuntimeError("terminal status write unavailable")
+            return await super().update_status(run_id, status, **kwargs)
+
+        async def update_run_completion(self, run_id, *, status, **kwargs):
+            if not completion_recovers:
+                raise RuntimeError("completion fallback unavailable")
+            return await super().update_run_completion(run_id, status=status, **kwargs)
+
+    store = FailingTerminalStore()
+    manager = RunManager(store=store)
+    record = await manager.create(f"thread-{outcome}-{completion_recovers}", user_id="alice")
+    checkpointer = InMemorySaver()
+
+    def fixed_node(state):
+        if outcome == "failed":
+            raise RuntimeError("fixed execution failure")
+        if outcome == "human_input":
+            call = {"id": "call-confirm", "name": "ask_clarification", "args": {"question": "Which environment?"}, "type": "tool_call"}
+            request = ClarificationMiddleware()._handle_clarification(SimpleNamespace(tool_call=call))
+            return {"messages": [AIMessage(content="", tool_calls=[call]), *request.update["messages"]]}
+        return {"messages": [AIMessage(content="Fixed completed answer")]}
+
+    builder = StateGraph(ThreadState)
+    builder.add_node("fixed", fixed_node)
+    builder.add_edge(START, "fixed")
+    builder.add_edge("fixed", END)
+    graph = builder.compile(checkpointer=checkpointer)
+    completion_hook = AsyncMock(wraps=service.handle_run_completion)
+    await run_agent(
+        SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock()),
+        manager,
+        record,
+        ctx=RunContext(checkpointer=checkpointer, event_store=MemoryRunEventStore(), on_run_completed=completion_hook),
+        agent_factory=lambda *, config: graph,
+        graph_input={"messages": [HumanMessage(content="Run the fixed task")]},
+        config={"configurable": {"thread_id": record.thread_id}},
+    )
+
+    stored = await store.get(record.run_id, user_id="alice")
+    async with sessions() as session:
+        rows = (await session.scalars(select(NotificationDeliveryRow))).all()
+    assert record.terminal_status_persisted is completion_recovers
+    if completion_recovers:
+        assert stored["status"] == record.status.value
+        completion_hook.assert_awaited_once_with(record)
+        expected_event = {"completed": "run_completed", "human_input": "human_input_requested", "failed": "run_failed"}[outcome]
+        assert [(row.run_id, row.event) for row in rows] == [(record.run_id, expected_event)]
+    else:
+        assert stored["status"] == "running"
+        completion_hook.assert_not_awaited()
+        assert rows == []
 
 
 @pytest.mark.anyio

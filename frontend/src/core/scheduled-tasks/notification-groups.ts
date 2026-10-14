@@ -115,14 +115,16 @@ export function notificationGroupName(
 ): string | null {
   if (!connection) return null;
   const name = connection.workspace_name?.trim();
-  if (name) return name;
+  if (!name) return null;
+  // Older bindings used raw platform IDs as generated labels. Require a real
+  // group name or an owner-chosen label before making them selectable.
   if (connection.provider === "qq") {
     const groupId = qqGroupId(connection);
-    return groupId ? `QQ group (${groupId})` : null;
+    if (groupId && name === `QQ group (${groupId})`) return null;
   }
   if (connection.provider === "wecom") {
     const groupId = wecomGroupId(connection);
-    return groupId ? `WeCom group (${groupId})` : null;
+    if (groupId && name === `WeCom group (${groupId})`) return null;
   }
-  return null;
+  return name;
 }

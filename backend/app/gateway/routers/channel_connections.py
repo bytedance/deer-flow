@@ -90,6 +90,10 @@ class ChannelConnectResponse(BaseModel):
     expires_in: int
 
 
+class ChannelConnectRequest(BaseModel):
+    group_name: str | None = Field(default=None, max_length=256)
+
+
 class WechatQRLoginResponse(BaseModel):
     id: str
     status: Literal["pending", "scanned", "verification_required", "confirmed", "expired", "failed"]
@@ -359,6 +363,7 @@ async def _create_state(
     *,
     owner_user_id: str,
     provider: str,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     now = datetime.now(UTC)
     state = _new_binding_code()
@@ -371,6 +376,7 @@ async def _create_state(
         expires_at=now + timedelta(seconds=_STATE_TTL_SECONDS),
         max_pending=_MAX_PENDING_CONNECT_CODES_PER_PROVIDER,
         now=now,
+        metadata=metadata,
     )
     if not inserted:
         raise HTTPException(
@@ -653,7 +659,7 @@ async def _disconnect_channel_provider_runtime(provider: str, request: Request) 
 
 
 @router.post("/{provider}/connect", response_model=ChannelConnectResponse)
-async def connect_channel_provider(provider: str, request: Request) -> ChannelConnectResponse:
+async def connect_channel_provider(provider: str, request: Request, body: ChannelConnectRequest | None = None) -> ChannelConnectResponse:
     config = await _get_channel_connections_config(request)
     channels_config = await _get_channels_config(request)
     if not config.enabled:
@@ -672,10 +678,14 @@ async def connect_channel_provider(provider: str, request: Request) -> ChannelCo
         raise HTTPException(status_code=400, detail="Channel provider is not configured")
 
     repo = _get_repository(request, config)
+    group_name = body.group_name.strip() if body and body.group_name else ""
+    if group_name and not supports_proactive_group_notifications(provider):
+        raise HTTPException(status_code=422, detail="This channel does not support notification group names.")
     code = await _create_state(
         repo,
         owner_user_id=_get_user_id(request),
         provider=provider,
+        metadata={"notification_group_name": group_name} if group_name else None,
     )
     return ChannelConnectResponse(
         provider=provider,

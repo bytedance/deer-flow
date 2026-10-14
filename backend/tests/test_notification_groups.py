@@ -2,6 +2,24 @@
 
 import pytest
 
+from app.channels.notification_groups import notification_group_display_name
+
+
+@pytest.mark.parametrize(
+    "metadata,expected",
+    [
+        ({"notification_group_name": "Release team"}, "Release team"),
+        ({"notification_group_name": "  发布  小组  "}, "发布 小组"),
+        ({"notification_group_name": "名" * 300}, "名" * 256),
+        ({}, None),
+        ({"notification_group_name": 123}, None),
+        ({"notification_group_name": "  "}, None),
+        (None, None),
+    ],
+)
+def test_group_binding_names_are_explicit_bounded_labels(metadata, expected):
+    assert notification_group_display_name(metadata) == expected
+
 
 @pytest.mark.parametrize(
     "overrides,expected",

@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useId, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -17,6 +17,7 @@ type GroupChannelProvider = "feishu" | "wecom" | "qq";
 interface CachedGroupBinding {
   data: ChannelConnectResponse;
   expiresAt: number;
+  groupName?: string;
 }
 
 /** Group binding needs its own command; a connected private chat is not completion. */
@@ -26,6 +27,10 @@ export function BindFeishuGroup() {
   const queryClient = useQueryClient();
   const [visible, setVisible] = useState(false);
   const [provider, setProvider] = useState<GroupChannelProvider>("feishu");
+  const [namesByProvider, setNamesByProvider] = useState<
+    Partial<Record<GroupChannelProvider, string>>
+  >({});
+  const groupNameId = useId();
   const [cachedByProvider, setCachedByProvider] = useState<
     Partial<Record<GroupChannelProvider, CachedGroupBinding>>
   >({});
@@ -33,9 +38,17 @@ export function BindFeishuGroup() {
   const [copyFailed, setCopyFailed] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const binding = useMutation({
-    mutationFn: (targetProvider: GroupChannelProvider) =>
-      connectChannelProvider(targetProvider),
-    onSuccess: (result, targetProvider) => {
+    mutationFn: ({
+      targetProvider,
+      groupName,
+    }: {
+      targetProvider: GroupChannelProvider;
+      groupName?: string;
+    }) =>
+      groupName
+        ? connectChannelProvider(targetProvider, { groupName })
+        : connectChannelProvider(targetProvider),
+    onSuccess: (result, { targetProvider, groupName }) => {
       setCopied(false);
       setCopyFailed(false);
       setCachedByProvider((prev) => ({
@@ -43,20 +56,33 @@ export function BindFeishuGroup() {
         [targetProvider]: {
           data: result,
           expiresAt: Date.now() + result.expires_in * 1000,
+          groupName,
         },
       }));
     },
   });
   const currentCached = cachedByProvider[provider];
-  const command = currentCached ? `/connect ${currentCached.data.code}` : "";
+  const needsName = provider !== "feishu";
+  const groupName = (namesByProvider[provider] ?? "").trim();
+  const command =
+    currentCached && (!needsName || currentCached.groupName === groupName)
+      ? `/connect ${currentCached.data.code}`
+      : "";
   const expiresAt = currentCached?.expiresAt ?? null;
   const startBind = (targetProvider: GroupChannelProvider) => {
     setProvider(targetProvider);
     setVisible(true);
     setCopied(false);
     setCopyFailed(false);
-    if (!cachedByProvider[targetProvider]) {
-      binding.mutate(targetProvider);
+    const cached = cachedByProvider[targetProvider];
+    const name = namesByProvider[targetProvider]?.trim();
+    if (
+      (!cached ||
+        cached.expiresAt <= Date.now() ||
+        cached.groupName !== name) &&
+      (targetProvider === "feishu" || name)
+    ) {
+      binding.mutate({ targetProvider, groupName: name });
     }
   };
   const copy = async () => {
@@ -125,6 +151,27 @@ export function BindFeishuGroup() {
           data-testid="feishu-group-binding"
         >
           <p className="text-sm">{labels.bindInstructions}</p>
+          {needsName && (
+            <>
+              <label htmlFor={groupNameId} className="text-sm font-medium">
+                {labels.name}
+              </label>
+              <Input
+                id={groupNameId}
+                value={namesByProvider[provider] ?? ""}
+                maxLength={256}
+                onChange={(event) => {
+                  setNamesByProvider((previous) => ({
+                    ...previous,
+                    [provider]: event.target.value,
+                  }));
+                  setCopied(false);
+                  setCopyFailed(false);
+                }}
+              />
+              <p className="text-muted-foreground text-xs">{labels.nameHint}</p>
+            </>
+          )}
           {binding.isPending && (
             <p role="status" className="text-muted-foreground text-xs">
               {labels.generating}
@@ -169,8 +216,13 @@ export function BindFeishuGroup() {
               type="button"
               variant="ghost"
               size="sm"
-              disabled={binding.isPending}
-              onClick={() => binding.mutate(provider)}
+              disabled={binding.isPending || (needsName && !groupName)}
+              onClick={() =>
+                binding.mutate({
+                  targetProvider: provider,
+                  groupName: needsName ? groupName : undefined,
+                })
+              }
             >
               {labels.newCode}
             </Button>

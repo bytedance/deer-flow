@@ -100,10 +100,28 @@ describe("additional Feishu notification groups", () => {
         wechatGroup,
       ]),
     ).toEqual([qqGroup, qqGroup2, wecomGroup, wecomGroup2]);
-    expect(notificationGroupName(qqGroup)).toBe("QQ group (group-openid)");
-    expect(notificationGroupName(qqGroup2)).toBe("QQ group (group-openid-2)");
-    expect(notificationGroupName(wecomGroup)).toBe("WeCom group (wr_chat_1)");
-    expect(notificationGroupName(wecomGroup2)).toBe("WeCom group (wr_chat_2)");
+    expect(notificationGroupName(qqGroup)).toBeNull();
+    expect(notificationGroupName(qqGroup2)).toBeNull();
+    expect(notificationGroupName(wecomGroup)).toBeNull();
+    expect(notificationGroupName(wecomGroup2)).toBeNull();
+    expect(
+      notificationGroupName({ ...qqGroup, workspace_name: "Release team" }),
+    ).toBe("Release team");
+    expect(
+      notificationGroupName({ ...qqGroup2, workspace_name: "Support team" }),
+    ).toBe("Support team");
+    expect(
+      notificationGroupName({
+        ...qqGroup,
+        workspace_name: "QQ group (group-openid)",
+      }),
+    ).toBeNull();
+    expect(
+      notificationGroupName({
+        ...wecomGroup,
+        workspace_name: "WeCom group (wr_chat_1)",
+      }),
+    ).toBeNull();
     expect(
       notificationGroupName({ ...wecomGroup, workspace_name: "Ops War Room" }),
     ).toBe("Ops War Room");

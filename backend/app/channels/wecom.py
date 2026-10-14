@@ -5,7 +5,7 @@ import base64
 import hashlib
 import inspect
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, cast
 
 from app.channels.base import Channel, ChannelUnavailable
@@ -18,7 +18,7 @@ from app.channels.message_bus import (
     OutboundMessage,
     ResolvedAttachment,
 )
-from app.channels.notification_groups import wecom_notification_group_chat_id
+from app.channels.notification_groups import notification_group_display_name, wecom_notification_group_chat_id
 
 logger = logging.getLogger(__name__)
 
@@ -625,17 +625,23 @@ class WeComChannel(Channel):
         aibotid = str(inbound.metadata.get("aibotid") or "").strip() or None
         chattype = inbound.metadata.get("chattype")
         chatid = str(inbound.metadata.get("chatid") or "").strip() or None
-        if chattype == "group" and chatid:
+        if chattype == "group":
+            if not chatid or self._connection_repo is None:
+                return inbound
             workspace_id = f"{aibotid}:group:{chatid}" if aibotid else f"group:{chatid}"
-            inbound = await attach_connection_identity(
-                inbound,
-                repo=self._connection_repo,
-                provider="wecom",
-                workspace_id=workspace_id,
-                fallback_without_workspace=False,
-            )
+            inbound = await attach_connection_identity(inbound, repo=self._connection_repo, provider="wecom", workspace_id=workspace_id, fallback_without_workspace=False)
             if inbound.connection_id:
                 return inbound
+            # Pre-group-target versions stored group bindings under the bot ID,
+            # without chatid. Preserve that existing chat identity, but never
+            # let a new private binding authorize an unbound group.
+            legacy = await self._connection_repo.find_connection_by_external_identity(provider="wecom", external_account_id=inbound.user_id, workspace_id=aibotid)
+            metadata = legacy.get("metadata") if isinstance(legacy, Mapping) else None
+            if isinstance(metadata, Mapping) and metadata.get("chattype") == "group" and "chatid" not in metadata and metadata.get("aibotid") == aibotid:
+                inbound.connection_id = legacy["id"]
+                inbound.owner_user_id = legacy["owner_user_id"]
+                inbound.workspace_id = legacy.get("workspace_id")
+            return inbound
         return await attach_connection_identity(
             inbound,
             repo=self._connection_repo,
@@ -668,7 +674,7 @@ class WeComChannel(Channel):
                 return True
             workspace_id = f"{aibotid}:group:{chatid}" if aibotid else f"group:{chatid}"
             raw_group_name = str(body.get("chatname") or body.get("group_name") or "").strip()
-            workspace_name = raw_group_name or f"WeCom group ({chatid})"
+            workspace_name = notification_group_display_name(state.get("metadata")) or raw_group_name[:256] or None
             metadata: dict[str, Any] = {
                 "aibotid": aibotid,
                 "chattype": "group",

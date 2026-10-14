@@ -842,6 +842,8 @@ export interface Translations {
       bind: string;
       bindWecom: string;
       bindQq: string;
+      name: string;
+      nameHint: string;
       refresh: string;
       bindInstructions: string;
       generating: string;
