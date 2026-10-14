@@ -10,6 +10,7 @@ import threading
 from concurrent.futures import Future
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -17,6 +18,7 @@ from app.channels.allowed_users import parse_channel_ids
 from app.channels.base import Channel
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
+from app.channels.inbound_files import coerce_file_size, safe_inbound_filename
 from app.channels.message_bus import (
     INBOUND_FILE_CONTENT_KEY,
     InboundMessage,
@@ -26,7 +28,6 @@ from app.channels.message_bus import (
     OutboundMessage,
     ResolvedAttachment,
 )
-from deerflow.uploads.manager import is_upload_staging_file, normalize_filename
 from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,8 @@ DISCORD_UPLOAD_TIMEOUT_SECONDS = 120.0
 
 # Match Discord's default non-Nitro upload ceiling for inbound attachments.
 DISCORD_MAX_INBOUND_FILE_BYTES = 25 * 1024 * 1024
+# Bot Authorization is only attached for these CDN host suffixes.
+DISCORD_CDN_HOST_SUFFIXES = frozenset({"discordapp.net", "discordapp.com", "discord.com"})
 
 
 def _parse_discord_guild_id(entry: Any) -> int | None:
@@ -993,6 +996,7 @@ class DiscordChannel(Channel):
                 continue
 
             if content is None:
+                # Stream aborted for size; encoding refusals raise above.
                 unavailable.append(f"{filename} (exceeds the download limit)")
                 continue
 
@@ -1017,10 +1021,28 @@ class DiscordChannel(Channel):
             msg.text = f"{msg.text}\n\n{notice}" if msg.text else notice
         return msg
 
+    @classmethod
+    def _is_discord_cdn_url(cls, url: str) -> bool:
+        """True when *url* targets a Discord CDN host (dot-boundary aware)."""
+        try:
+            host = (urlsplit(url).hostname or "").lower()
+        except ValueError:
+            return False
+        if not host:
+            return False
+        return any(host == suffix or host.endswith(f".{suffix}") for suffix in DISCORD_CDN_HOST_SUFFIXES)
+
     async def _download_attachment(self, url: str, token: str | None) -> bytes | None:
-        """Stream a Discord attachment CDN URL; never log the URL."""
+        """Stream a Discord attachment CDN URL; never log the URL.
+
+        Bot Authorization is attached only for Discord CDN hosts so a foreign
+        URL on the bus can never carry the bot token off-platform. Returns
+        ``None`` only when the streamed body exceeds the per-file cap; a
+        non-identity ``Content-Encoding`` raises so callers report
+        ``(download failed)`` instead of a misleading size-limit notice.
+        """
         headers = {"Accept-Encoding": "identity"}
-        if token:
+        if token and self._is_discord_cdn_url(url):
             headers["Authorization"] = f"Bot {token}"
         chunks: list[bytes] = []
         total = 0
@@ -1033,7 +1055,7 @@ class DiscordChannel(Channel):
                         "[Discord] inbound file response uses Content-Encoding %r, dropping before decode",
                         encoding,
                     )
-                    return None
+                    raise RuntimeError(f"unsupported content-encoding: {encoding}")
                 async for chunk in response.aiter_raw():
                     total += len(chunk)
                     if total > DISCORD_MAX_INBOUND_FILE_BYTES:
@@ -1093,27 +1115,11 @@ class DiscordChannel(Channel):
 
     @staticmethod
     def _safe_inbound_filename(value: Any, fallback: str) -> str:
-        if not isinstance(value, str):
-            return fallback
-        try:
-            candidate = normalize_filename(value.strip())
-        except (UnicodeError, ValueError):
-            return fallback
-        if is_upload_staging_file(candidate) or any(ord(char) < 32 for char in candidate):
-            return fallback
-        return candidate
+        return safe_inbound_filename(value, fallback)
 
     @staticmethod
     def _file_size(value: Any) -> int | None:
-        if isinstance(value, bool):
-            return None
-        if isinstance(value, int):
-            return value if value >= 0 else None
-        if isinstance(value, float) and value.is_integer() and value >= 0:
-            return int(value)
-        if isinstance(value, str) and value.strip().isdigit():
-            return int(value.strip())
-        return None
+        return coerce_file_size(value)
 
     def _run_client(self) -> None:
         self._discord_loop = asyncio.new_event_loop()

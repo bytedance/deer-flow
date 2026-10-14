@@ -255,3 +255,119 @@ class TestDiscordReceiveFile:
         result = await channel.receive_file(msg, "thread-1")
         assert result.files == []
         assert "download unavailable" in result.text
+
+
+    @pytest.mark.asyncio
+    async def test_bot_token_not_sent_to_foreign_host(self, monkeypatch):
+        from app.channels import discord as discord_mod
+
+        seen: dict[str, str] = {}
+
+        class _FakeStreamResponse:
+            def __init__(self):
+                self.headers = {"content-encoding": "identity"}
+
+            def raise_for_status(self) -> None:
+                return None
+
+            async def aiter_raw(self):
+                yield b"ok"
+
+        class _FakeStreamContext:
+            async def __aenter__(self):
+                return _FakeStreamResponse()
+
+            async def __aexit__(self, *exc_info):
+                return False
+
+        class _FakeAsyncClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc_info):
+                return False
+
+            def stream(self, method: str, url: str, **kwargs):
+                seen["authorization"] = kwargs.get("headers", {}).get("Authorization", "")
+                return _FakeStreamContext()
+
+        monkeypatch.setattr(discord_mod.httpx, "AsyncClient", _FakeAsyncClient)
+        channel = DiscordChannel(MessageBus(), {"bot_token": "discord-bot-token"})
+        content = await channel._download_attachment(
+            "https://evil.example/attachments/1/2/report.pdf",
+            "discord-bot-token",
+        )
+        assert content == b"ok"
+        assert seen["authorization"] == ""
+
+    @pytest.mark.asyncio
+    async def test_content_encoding_refusal_is_download_failed(self, monkeypatch):
+        from app.channels import discord as discord_mod
+
+        class _FakeStreamResponse:
+            def __init__(self):
+                self.headers = {"content-encoding": "gzip"}
+
+            def raise_for_status(self) -> None:
+                return None
+
+            async def aiter_raw(self):
+                if False:
+                    yield b""
+
+        class _FakeStreamContext:
+            async def __aenter__(self):
+                return _FakeStreamResponse()
+
+            async def __aexit__(self, *exc_info):
+                return False
+
+        class _FakeAsyncClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc_info):
+                return False
+
+            def stream(self, method: str, url: str, **kwargs):
+                return _FakeStreamContext()
+
+        monkeypatch.setattr(discord_mod.httpx, "AsyncClient", _FakeAsyncClient)
+        channel = DiscordChannel(MessageBus(), {"bot_token": "discord-bot-token"})
+        msg = InboundMessage(
+            channel_name="discord",
+            chat_id="456",
+            user_id="123",
+            text="caption",
+            files=[
+                {
+                    "type": "file",
+                    "filename": "report.pdf",
+                    "mime_type": "application/pdf",
+                    "size": 4,
+                    "url": "https://cdn.discordapp.com/attachments/1/2/report.pdf",
+                }
+            ],
+        )
+        result = await channel.receive_file(msg, "thread-1")
+        assert result.files == []
+        assert "download failed" in result.text
+        assert "exceeds the download limit" not in result.text
+
+
+class TestDiscordCdnHostGate:
+    def test_allows_discord_cdn_hosts(self):
+        assert DiscordChannel._is_discord_cdn_url("https://cdn.discordapp.com/attachments/1/2/x")
+        assert DiscordChannel._is_discord_cdn_url("https://media.discordapp.net/attachments/1/2/x")
+        assert DiscordChannel._is_discord_cdn_url("https://discord.com/api/attachments/1")
+
+    def test_rejects_lookalike_hosts(self):
+        assert not DiscordChannel._is_discord_cdn_url("https://evil.example/x")
+        assert not DiscordChannel._is_discord_cdn_url("https://cdn.discordapp.com.evil.io/x")
+        assert DiscordChannel._is_discord_cdn_url("http://cdn.discordapp.com/x")  # host-only gate

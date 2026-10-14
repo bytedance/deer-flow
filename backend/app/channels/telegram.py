@@ -13,6 +13,7 @@ from typing import Any
 
 from app.channels.allowed_users import parse_allowed_users
 from app.channels.base import Channel, ChannelStopTimeout
+from app.channels.inbound_files import coerce_file_size, safe_inbound_filename
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import (
     INBOUND_FILE_CONTENT_KEY,
@@ -23,7 +24,6 @@ from app.channels.message_bus import (
     OutboundMessage,
     ResolvedAttachment,
 )
-from deerflow.uploads.manager import is_upload_staging_file, normalize_filename
 
 logger = logging.getLogger(__name__)
 
@@ -848,25 +848,11 @@ class TelegramChannel(Channel):
 
     @staticmethod
     def _file_size(value: Any) -> int | None:
-        if isinstance(value, bool):
-            return None
-        try:
-            size = int(value)
-        except (TypeError, ValueError):
-            return None
-        return size if size >= 0 else None
+        return coerce_file_size(value)
 
     @staticmethod
     def _safe_inbound_filename(value: Any, fallback: str) -> str:
-        if not isinstance(value, str):
-            return fallback
-        try:
-            candidate = normalize_filename(value.strip())
-        except (UnicodeError, ValueError):
-            return fallback
-        if is_upload_staging_file(candidate) or any(ord(char) < 32 for char in candidate):
-            return fallback
-        return candidate
+        return safe_inbound_filename(value, fallback)
 
     @classmethod
     def _extract_inbound_files(cls, message: Any) -> list[dict[str, Any]]:
