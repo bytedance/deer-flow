@@ -560,30 +560,46 @@ class ChannelConnectionRepository:
         thread_id: str,
         external_topic_id: str | None = None,
     ) -> None:
+        """Bind a conversation to ``thread_id``, creating or updating its row.
+
+        Two writers binding a new conversation (a first message racing ``/new``
+        on another task, or two Gateway instances) can both miss the SELECT;
+        the later INSERT then violates
+        ``uq_channel_conversation_connection_external``. Like
+        ``upsert_connection``, that writer rolls back and retries as an update.
+        """
         topic_id = external_topic_id or ""
+        stmt = select(ChannelConversationRow).where(
+            ChannelConversationRow.connection_id == connection_id,
+            ChannelConversationRow.external_conversation_id == external_conversation_id,
+            ChannelConversationRow.external_topic_id == topic_id,
+        )
         async with self.session_factory() as session:
-            stmt = select(ChannelConversationRow).where(
-                ChannelConversationRow.connection_id == connection_id,
-                ChannelConversationRow.external_conversation_id == external_conversation_id,
-                ChannelConversationRow.external_topic_id == topic_id,
-            )
-            row = (await session.execute(stmt)).scalar_one_or_none()
-            if row is None:
-                row = ChannelConversationRow(
-                    id=self._new_id(),
-                    connection_id=connection_id,
-                    owner_user_id=owner_user_id,
-                    provider=provider,
-                    external_conversation_id=external_conversation_id,
-                    external_topic_id=topic_id,
-                    thread_id=thread_id,
-                )
-                session.add(row)
-            else:
-                row.thread_id = thread_id
-                row.owner_user_id = owner_user_id
-                row.provider = provider
-            await session.commit()
+            last_error: IntegrityError | None = None
+            for _ in range(_UPSERT_MAX_ATTEMPTS):
+                try:
+                    row = (await session.execute(stmt)).scalar_one_or_none()
+                    if row is None:
+                        row = ChannelConversationRow(
+                            id=self._new_id(),
+                            connection_id=connection_id,
+                            owner_user_id=owner_user_id,
+                            provider=provider,
+                            external_conversation_id=external_conversation_id,
+                            external_topic_id=topic_id,
+                            thread_id=thread_id,
+                        )
+                        session.add(row)
+                    else:
+                        row.thread_id = thread_id
+                        row.owner_user_id = owner_user_id
+                        row.provider = provider
+                    await session.commit()
+                    return
+                except IntegrityError as exc:
+                    last_error = exc
+                    await session.rollback()
+            raise last_error  # type: ignore[misc]  # loop runs at least once
 
     async def get_thread_id(
         self,
