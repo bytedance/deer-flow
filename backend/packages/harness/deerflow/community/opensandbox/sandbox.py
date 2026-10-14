@@ -251,6 +251,11 @@ class OpenSandboxSandbox(Sandbox):
         merged_env = {**self._default_env, **(env or {})} or None
         try:
             execution = self._run(command, env=merged_env, timeout=timeout)
+        except TimeoutError:
+            # A command deadline is a shell outcome, not a provider hiccup:
+            # end with the same Exit Code: 124 marker Local/AIO/Tenki/E2B/BoxLite
+            # emit on timeout so evidence consumers recover the real status.
+            return "Error: command timed out\nExit Code: 124"
         except Exception as exc:
             logger.error("Failed to execute command in OpenSandbox %s: %s", self.id, exc)
             return f"Error: {exc}"

@@ -1113,6 +1113,21 @@ def test_operations_renew_remote_lifetime_and_bound_default_commands() -> None:
     assert remote.renew_calls[-1] == timedelta(seconds=60)
 
 
+def test_execute_command_timeout_appends_exit_marker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A command deadline is a shell outcome, not a provider hiccup: the result
+    must end with the same ``Exit Code: 124`` marker Local/AIO/Tenki/E2B/BoxLite
+    emit on timeout (#6847 family)."""
+    remote = _FakeRemote("remote")
+
+    def timed_out_run(command: str, *, opts: _FakeRunCommandOpts | None = None) -> _Execution:
+        raise TimeoutError
+
+    remote.commands.run = timed_out_run  # type: ignore[method-assign]
+    box = _box(remote, sandbox_timeout=timedelta(seconds=60), default_command_timeout=120)
+
+    assert box.execute_command("sleep 9999", timeout=5) == "Error: command timed out\nExit Code: 124"
+
+
 def test_short_operation_cannot_shorten_in_flight_command_renewal() -> None:
     remote = _FakeRemote("remote")
     remote.file_data["/mnt/user-data/workspace/note.txt"] = b"note"
