@@ -1447,8 +1447,9 @@ class SubagentExecutor:
         from deerflow.tools.builtins.tool_search import assemble_deferred_tools, get_deferred_tools_prompt_section, get_mcp_routing_hints_prompt_section
 
         # Skills are discoverable metadata until explicitly slash-activated or
-        # loaded through read_file. Their allowed-tools declarations are applied
-        # dynamically by SkillToolPolicyMiddleware, not eagerly here.
+        # loaded through read_file. Their allowed-tools declarations are
+        # compatibility metadata only, not tool authority; loading them here
+        # does not filter any tool.
         skills = await self._load_skills()
         self._assembled_skills = list(skills)
         self._available_skill_names = {skill.name for skill in skills}

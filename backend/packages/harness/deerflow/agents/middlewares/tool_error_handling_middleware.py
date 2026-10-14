@@ -75,7 +75,8 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             self._skills_root = app_config.skills.container_path
 
     def _storage(self):
-        # Same resolution order as SkillActivationMiddleware/SkillToolPolicyMiddleware:
+        # Same resolution order as SkillActivationMiddleware: the canonical
+        # path comes from the same user-scoped registry.
         # the registry must be the user-scoped one when a user context exists,
         # or per-user custom skills would never resolve to their Skill.name.
         from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
@@ -602,12 +603,11 @@ def build_subagent_runtime_middlewares(
         user_id=user_id,
     )
 
-    # Enabled/configured skills are discoverable metadata, not automatically
-    # active authority. Mirror the lead agent's activation + policy pair so a
-    # subagent keeps its ordinary tool set until a slash command or a completed
-    # SKILL.md read activates the corresponding allowed-tools declaration.
+    # Enabled/configured skills are discoverable metadata, not authority over
+    # the tool set. Slash activation or a completed SKILL.md read loads the
+    # skill body (and binds its required-secrets) without narrowing tools;
+    # agent assembly/execution authorization owns the permission ceiling.
     from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
-    from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
 
     slash_source_owner_token = secrets.token_urlsafe(24)
     middlewares.append(
@@ -623,17 +623,6 @@ def build_subagent_runtime_middlewares(
         from deerflow.agents.middlewares.tool_promotion_audit_middleware import DeferredToolPromotionAuditMiddleware
 
         middlewares.append(DeferredToolPromotionAuditMiddleware(deferred_setup.deferred_names, deferred_setup.catalog_hash))
-    middlewares.append(
-        SkillToolPolicyMiddleware(
-            available_skills=available_skills,
-            app_config=app_config,
-            user_id=user_id,
-            slash_source_owner_token=slash_source_owner_token,
-            # Persisted skill_context entries are re-authorized against the
-            # skill:activate decision before their allowed-tools apply.
-            skill_authorization=skill_authorization,
-        )
-    )
 
     if model_name is None and app_config.models:
         model_name = app_config.models[0].name

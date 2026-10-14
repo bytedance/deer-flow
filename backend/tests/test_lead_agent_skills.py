@@ -337,17 +337,6 @@ def test_make_lead_agent_custom_skill_allowlist_does_not_activate_tool_policy(mo
     assert "describe_skill" in tool_names
 
 
-def test_skill_allowed_tools_default_does_not_preserve_read_file_for_subagents():
-    from deerflow.skills.tool_policy import filter_tools_by_skill_allowed_tools
-
-    tools = [NamedTool("read_file"), NamedTool("dataagent_query"), NamedTool("bash")]
-    skills = [_make_skill("data-query", ["dataagent_query"])]
-
-    filtered = filter_tools_by_skill_allowed_tools(tools, skills)
-
-    assert [tool.name for tool in filtered] == ["dataagent_query"]
-
-
 def test_make_lead_agent_all_legacy_skills_preserve_all_tools(monkeypatch):
     from unittest.mock import MagicMock
 

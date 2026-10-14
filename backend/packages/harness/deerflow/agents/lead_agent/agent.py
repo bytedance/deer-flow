@@ -594,30 +594,13 @@ def build_middlewares(
         )
     )
 
-    # Observe the final tool_search Command after every inner policy/result
+    # Observe the final tool_search Command after every inner result
     # transformer has run. Tool wrappers are first-in-list outermost, so this
-    # must be registered before SkillToolPolicyMiddleware.
+    # must be registered before the deferred filter below.
     if deferred_setup is not None and deferred_setup.deferred_names:
         from deerflow.agents.middlewares.tool_promotion_audit_middleware import DeferredToolPromotionAuditMiddleware
 
         middlewares.append(DeferredToolPromotionAuditMiddleware(deferred_setup.deferred_names, deferred_setup.catalog_hash))
-
-    # Enabled skills are only discoverable metadata. Apply allowed-tools at
-    # runtime after explicit slash activation or an actual skill-file load.
-    from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
-
-    middlewares.append(
-        SkillToolPolicyMiddleware(
-            available_skills=available_skills,
-            app_config=resolved_app_config,
-            user_id=user_id,
-            slash_source_owner_token=slash_source_owner_token,
-            # Persisted skill_context entries are re-authorized against the
-            # skill:activate decision before their allowed-tools apply (the
-            # policy may have changed since the entry was stamped).
-            skill_authorization=skill_authorization,
-        )
-    )
 
     # Capture completed task delegations and loaded skill files before
     # summarization can compact them, then inject durable context channels
@@ -706,8 +689,8 @@ def build_middlewares(
 
     # Hide deferred tool schemas from model binding until tool_search promotes them.
     # The lead deferred set + catalog hash come from the full build-time MCP
-    # catalog; SkillToolPolicyMiddleware separately filters model visibility,
-    # tool_search results, and execution for the active skill at runtime.
+    # catalog. Skill `allowed-tools` is compatibility metadata only; agent
+    # assembly/execution authorization owns the permission ceiling.
     if deferred_setup is not None and deferred_setup.deferred_names:
         from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
 

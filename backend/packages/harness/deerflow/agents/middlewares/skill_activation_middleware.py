@@ -54,7 +54,8 @@ _SLASH_SKILL_ACTIVATION_TARGET_ID_KEY = "slash_skill_activation_target_id"
 # misses — resolved per the carried fail-closed/fail-open policy with a
 # WARNING, never a silent synchronous fallback.
 # Entries bind nothing for that call instead (fail closed by construction).
-# Same marker pattern as SkillToolPolicyMiddleware._REGISTRY_LOAD_FAILED.
+# Same marker pattern as the registry-load marker used by the secret-binding
+# resolution below.
 _REGISTRY_LOAD_FAILED = object()
 
 # _SECRETS_BINDING_AUDIT_KEY: last audited binding (skill and secret names only,
