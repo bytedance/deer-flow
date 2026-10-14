@@ -7,6 +7,7 @@ import html
 import logging
 import re
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from markdown_to_mrkdwn import SlackMarkdownConverter
@@ -30,6 +31,10 @@ SLACK_STOP_TIMEOUT_SECONDS = 5.0
 # Match the manager's URL download ceiling. Slack workspace limits may be higher;
 # this keeps a single upload from exhausting Gateway memory.
 SLACK_MAX_INBOUND_FILE_BYTES = 50 * 1024 * 1024
+# Cap total in-memory bytes for one file_share message (N files × per-file max).
+SLACK_MAX_INBOUND_MESSAGE_BYTES = SLACK_MAX_INBOUND_FILE_BYTES
+# Private download URLs are Slack-hosted; gate Bearer fetches to this suffix.
+SLACK_ALLOWED_FILE_HOST_SUFFIXES = frozenset({"files.slack.com"})
 # User-authored subtypes we still want to turn into chat turns. Everything else
 # (edits, deletes, joins, bot_message, thread_broadcast, …) stays ignored so we
 # do not double-fire or treat platform noise as a user message.
@@ -312,15 +317,19 @@ class SlackChannel(Channel):
         except Exception:
             logger.warning("[Slack] failed to resolve bot user id; app mention text may include the bot mention", exc_info=True)
 
-    async def _get_web_client_for_message(self, msg: OutboundMessage):
-        if msg.connection_id and self._connection_repo is not None:
-            credentials = await self._connection_repo.get_credentials(msg.connection_id)
+    async def _web_client_for_connection(self, connection_id: str | None):
+        """Resolve a WebClient for *connection_id*, falling back to the operator client.
+
+        WebClient keeps its own HTTP session and rate-limit state, so reuse one
+        per connection until its token changes. Shared by outbound sends and
+        inbound private-file downloads so the cache cannot drift.
+        """
+        if connection_id and self._connection_repo is not None:
+            credentials = await self._connection_repo.get_credentials(connection_id)
             access_token = credentials.get("access_token") if credentials else None
             if not access_token:
                 return self._web_client
-            # WebClient keeps its own HTTP session and rate-limit state, so
-            # reuse one per connection until its token changes.
-            cached = self._connection_web_clients.get(msg.connection_id)
+            cached = self._connection_web_clients.get(connection_id)
             if cached is not None and cached[0] == access_token:
                 return cached[1]
             if self._web_client_factory is None:
@@ -328,9 +337,12 @@ class SlackChannel(Channel):
 
                 self._web_client_factory = WebClient
             web_client = self._web_client_factory(token=access_token)
-            self._connection_web_clients[msg.connection_id] = (access_token, web_client)
+            self._connection_web_clients[connection_id] = (access_token, web_client)
             return web_client
         return self._web_client
+
+    async def _get_web_client_for_message(self, msg: OutboundMessage):
+        return await self._web_client_for_connection(msg.connection_id)
 
     @staticmethod
     def _add_reaction_with_client(web_client, channel_id: str, timestamp: str, emoji: str) -> None:
@@ -515,6 +527,7 @@ class SlackChannel(Channel):
 
         materialized: list[dict[str, Any]] = []
         unavailable: list[str] = []
+        materialized_bytes = 0
 
         for file_info in msg.files:
             if not isinstance(file_info, dict):
@@ -526,6 +539,10 @@ class SlackChannel(Channel):
                 logger.warning("[Slack] inbound file exceeds download limit, skipping: %s", filename)
                 unavailable.append(f"{filename} (exceeds the download limit)")
                 continue
+            if declared_size is not None and materialized_bytes + declared_size > SLACK_MAX_INBOUND_MESSAGE_BYTES:
+                logger.warning("[Slack] inbound message exceeds aggregate download limit, skipping: %s", filename)
+                unavailable.append(f"{filename} (exceeds the message download limit)")
+                continue
 
             url = file_info.get("url_private_download")
             if not isinstance(url, str) or not url.strip():
@@ -533,8 +550,21 @@ class SlackChannel(Channel):
                 unavailable.append(f"{filename} (download unavailable)")
                 continue
 
+            url = url.strip()
+            if not self._is_allowed_private_file_url(url):
+                logger.warning("[Slack] inbound file URL host is not allowlisted, skipping: %s", filename)
+                unavailable.append(f"{filename} (download unavailable)")
+                continue
+
+            remaining_budget = SLACK_MAX_INBOUND_MESSAGE_BYTES - materialized_bytes
+            per_file_cap = min(SLACK_MAX_INBOUND_FILE_BYTES, remaining_budget)
+            if per_file_cap <= 0:
+                logger.warning("[Slack] inbound message aggregate download budget exhausted, skipping: %s", filename)
+                unavailable.append(f"{filename} (exceeds the message download limit)")
+                continue
+
             try:
-                content = await self._download_private_file(url.strip(), token)
+                content = await self._download_private_file(url, token, max_bytes=per_file_cap)
             except Exception as exc:
                 logger.error(
                     "[Slack] failed to download inbound file %s: %s",
@@ -545,12 +575,17 @@ class SlackChannel(Channel):
                 continue
 
             if content is None:
+                # Stream aborted for size; encoding refusals raise above.
                 unavailable.append(f"{filename} (exceeds the download limit)")
                 continue
 
             if len(content) > SLACK_MAX_INBOUND_FILE_BYTES:
                 logger.warning("[Slack] downloaded inbound file exceeds limit, skipping: %s", filename)
                 unavailable.append(f"{filename} (exceeds the download limit)")
+                continue
+            if materialized_bytes + len(content) > SLACK_MAX_INBOUND_MESSAGE_BYTES:
+                logger.warning("[Slack] downloaded inbound file exceeds aggregate message limit, skipping: %s", filename)
+                unavailable.append(f"{filename} (exceeds the message download limit)")
                 continue
 
             materialized.append(
@@ -562,6 +597,7 @@ class SlackChannel(Channel):
                     INBOUND_FILE_CONTENT_KEY: content,
                 }
             )
+            materialized_bytes += len(content)
 
         msg.files = materialized
         if unavailable:
@@ -571,24 +607,29 @@ class SlackChannel(Channel):
 
     async def _get_web_client_for_inbound(self, msg: InboundMessage):
         """Resolve the WebClient whose token can fetch private Slack files."""
-        if msg.connection_id and self._connection_repo is not None:
-            credentials = await self._connection_repo.get_credentials(msg.connection_id)
-            access_token = credentials.get("access_token") if credentials else None
-            if access_token:
-                cached = self._connection_web_clients.get(msg.connection_id)
-                if cached is not None and cached[0] == access_token:
-                    return cached[1]
-                if self._web_client_factory is None:
-                    from slack_sdk import WebClient
+        return await self._web_client_for_connection(msg.connection_id)
 
-                    self._web_client_factory = WebClient
-                web_client = self._web_client_factory(token=access_token)
-                self._connection_web_clients[msg.connection_id] = (access_token, web_client)
-                return web_client
-        return self._web_client
+    @classmethod
+    def _is_allowed_private_file_url(cls, url: str) -> bool:
+        """Gate Bearer downloads to https://*.files.slack.com (and the bare host)."""
+        try:
+            parsed = urlsplit(url)
+        except ValueError:
+            return False
+        if parsed.scheme != "https":
+            return False
+        host = (parsed.hostname or "").lower()
+        if not host:
+            return False
+        return any(host == suffix or host.endswith(f".{suffix}") for suffix in SLACK_ALLOWED_FILE_HOST_SUFFIXES)
 
-    async def _download_private_file(self, url: str, token: str) -> bytes | None:
-        """Stream a Slack private file URL with Bearer auth; never log the URL."""
+    async def _download_private_file(self, url: str, token: str, *, max_bytes: int = SLACK_MAX_INBOUND_FILE_BYTES) -> bytes | None:
+        """Stream a Slack private file URL with Bearer auth; never log the URL.
+
+        Returns ``None`` only when the streamed body exceeds *max_bytes*.
+        A non-identity ``Content-Encoding`` raises so callers can report
+        ``(download failed)`` instead of a misleading size-limit notice.
+        """
         chunks: list[bytes] = []
         total = 0
         async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
@@ -607,13 +648,13 @@ class SlackChannel(Channel):
                         "[Slack] inbound file response uses Content-Encoding %r, dropping before decode",
                         encoding,
                     )
-                    return None
+                    raise RuntimeError(f"unsupported content-encoding: {encoding}")
                 async for chunk in response.aiter_raw():
                     total += len(chunk)
-                    if total > SLACK_MAX_INBOUND_FILE_BYTES:
+                    if total > max_bytes:
                         logger.warning(
                             "[Slack] inbound file exceeds %d bytes download limit, dropping",
-                            SLACK_MAX_INBOUND_FILE_BYTES,
+                            max_bytes,
                         )
                         return None
                     chunks.append(chunk)

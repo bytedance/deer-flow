@@ -249,9 +249,10 @@ class TestSlackReceiveFile:
             channel2 = SlackChannel(MessageBus(), {"bot_token": "xoxb-test"})
             channel2._web_client = SimpleNamespace(token="xoxb-test")
 
-            async def fake_download(url: str, token: str) -> bytes | None:
+            async def fake_download(url: str, token: str, *, max_bytes: int = 0) -> bytes | None:
                 assert token == "xoxb-test"
                 assert url.endswith("/download/report.pdf")
+                assert max_bytes > 0
                 return b"data"
 
             channel2._download_private_file = fake_download  # type: ignore[method-assign]
@@ -309,3 +310,173 @@ class TestSlackReceiveFile:
 
         assert result.files == []
         assert "bot token missing" in result.text
+
+
+    def test_rejects_non_slack_host_without_fetching(self):
+        from app.channels.slack import SlackChannel
+
+        channel = SlackChannel(MessageBus(), {"bot_token": "xoxb-test"})
+        channel._web_client = SimpleNamespace(token="xoxb-test")
+        called = {"download": False}
+
+        async def fake_download(url: str, token: str, *, max_bytes: int = 0) -> bytes | None:
+            called["download"] = True
+            return b"nope"
+
+        channel._download_private_file = fake_download  # type: ignore[method-assign]
+        msg = InboundMessage(
+            channel_name="slack",
+            chat_id="C123",
+            user_id="U123",
+            text="caption",
+            files=[
+                {
+                    "type": "file",
+                    "filename": "evil.pdf",
+                    "mime_type": "application/pdf",
+                    "size": 4,
+                    "url_private_download": "https://evil.example/report.pdf",
+                }
+            ],
+        )
+        result = _run(channel.receive_file(msg, "thread-1"))
+        assert called["download"] is False
+        assert result.files == []
+        assert "download unavailable" in result.text
+
+    def test_content_encoding_refusal_is_download_failed(self, monkeypatch):
+        from app.channels import slack as slack_mod
+        from app.channels.slack import SlackChannel
+
+        class _FakeStreamResponse:
+            def __init__(self):
+                self.headers = {"content-encoding": "gzip"}
+
+            def raise_for_status(self) -> None:
+                return None
+
+            async def aiter_raw(self):
+                if False:
+                    yield b""
+
+        class _FakeStreamContext:
+            async def __aenter__(self):
+                return _FakeStreamResponse()
+
+            async def __aexit__(self, *exc_info):
+                return False
+
+        class _FakeAsyncClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc_info):
+                return False
+
+            def stream(self, method: str, url: str, **kwargs):
+                return _FakeStreamContext()
+
+        monkeypatch.setattr(slack_mod.httpx, "AsyncClient", _FakeAsyncClient)
+
+        channel = SlackChannel(MessageBus(), {"bot_token": "xoxb-test"})
+        channel._web_client = SimpleNamespace(token="xoxb-test")
+        msg = InboundMessage(
+            channel_name="slack",
+            chat_id="C123",
+            user_id="U123",
+            text="caption",
+            files=[
+                {
+                    "type": "file",
+                    "filename": "report.pdf",
+                    "mime_type": "application/pdf",
+                    "size": 4,
+                    "url_private_download": "https://files.slack.com/files-pri/T-F/download/report.pdf",
+                }
+            ],
+        )
+        result = _run(channel.receive_file(msg, "thread-1"))
+        assert result.files == []
+        assert "download failed" in result.text
+        assert "exceeds the download limit" not in result.text
+
+    def test_aggregate_message_byte_cap(self):
+        from app.channels import slack as slack_mod
+        from app.channels.slack import SlackChannel
+
+        channel = SlackChannel(MessageBus(), {"bot_token": "xoxb-test"})
+        channel._web_client = SimpleNamespace(token="xoxb-test")
+        payloads = {
+            "https://files.slack.com/a.bin": b"a" * 10,
+            "https://files.slack.com/b.bin": b"b" * 10,
+        }
+
+        async def fake_download(url: str, token: str, *, max_bytes: int = 0) -> bytes | None:
+            body = payloads[url]
+            if len(body) > max_bytes:
+                return None
+            return body
+
+        channel._download_private_file = fake_download  # type: ignore[method-assign]
+        # Shrink aggregate so two tiny files exceed it.
+        monkey_limit = 15
+        original = slack_mod.SLACK_MAX_INBOUND_MESSAGE_BYTES
+        slack_mod.SLACK_MAX_INBOUND_MESSAGE_BYTES = monkey_limit
+        try:
+            msg = InboundMessage(
+                channel_name="slack",
+                chat_id="C123",
+                user_id="U123",
+                text="caption",
+                files=[
+                    {
+                        "type": "file",
+                        "filename": "a.bin",
+                        "mime_type": "application/octet-stream",
+                        "size": 10,
+                        "url_private_download": "https://files.slack.com/a.bin",
+                    },
+                    {
+                        "type": "file",
+                        "filename": "b.bin",
+                        "mime_type": "application/octet-stream",
+                        "size": 10,
+                        "url_private_download": "https://files.slack.com/b.bin",
+                    },
+                ],
+            )
+            result = _run(channel.receive_file(msg, "thread-1"))
+        finally:
+            slack_mod.SLACK_MAX_INBOUND_MESSAGE_BYTES = original
+
+        assert len(result.files) == 1
+        assert result.files[0]["filename"] == "a.bin"
+        assert "message download limit" in result.text
+
+
+class TestSlackPrivateFileUrlAllowlist:
+    def test_allows_files_slack_com_https(self):
+        from app.channels.slack import SlackChannel
+
+        assert SlackChannel._is_allowed_private_file_url(
+            "https://files.slack.com/files-pri/T-F/download/x"
+        )
+        assert SlackChannel._is_allowed_private_file_url(
+            "https://cdn.files.slack.com/files-pri/T-F/download/x"
+        )
+
+    def test_rejects_http_and_foreign_hosts(self):
+        from app.channels.slack import SlackChannel
+
+        assert not SlackChannel._is_allowed_private_file_url(
+            "http://files.slack.com/files-pri/T-F/download/x"
+        )
+        assert not SlackChannel._is_allowed_private_file_url(
+            "https://evil.example/x"
+        )
+        assert not SlackChannel._is_allowed_private_file_url(
+            "https://notfiles.slack.com.evil.io/x"
+        )
