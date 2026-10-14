@@ -44,6 +44,12 @@ SummaryResolver = Callable[[str, str | None], Any]
 # it to confirm, at send time, that the delivery's target is still bound.
 ConnectionResolver = Callable[[str], Any]
 
+# Returns the providers this instance must not claim rows for, or None for no
+# restriction. Under ``channels.leader_lease`` (``ChannelService
+# .notification_excluded_providers``) these are the providers another instance
+# holds the transport of: claiming their rows here would only park them.
+ExcludedProvidersResolver = Callable[[], Any]
+
 # A claimed row stuck in "sending" longer than this is considered orphaned
 # (process died between claim and the final status write) and flipped back
 # to pending. Generous on purpose: a healthy send plus status write finishes
@@ -68,6 +74,7 @@ class NotificationDeliveryWorker:
         batch_size: int = 10,
         resolve_run_summary: SummaryResolver | None = None,
         resolve_connections: ConnectionResolver | None = None,
+        excluded_providers: ExcludedProvidersResolver | None = None,
         stale_sending_timeout_seconds: int = _STALE_SENDING_TIMEOUT_SECONDS,
         stop_timeout_seconds: float = _STOP_TIMEOUT_SECONDS,
         default_locale: str = DEFAULT_NOTIFICATION_LOCALE,
@@ -76,6 +83,7 @@ class NotificationDeliveryWorker:
         self._resolve_channel = resolve_channel
         self._resolve_run_summary = resolve_run_summary
         self._resolve_connections = resolve_connections
+        self._excluded_providers = excluded_providers
         self._poll_interval_seconds = poll_interval_seconds
         self._batch_size = batch_size
         self._stale_sending_timeout_seconds = stale_sending_timeout_seconds
@@ -119,7 +127,11 @@ class NotificationDeliveryWorker:
 
     async def run_once(self, *, now: datetime) -> None:
         await self._recover_stale_sending(now)
-        rows = await self._delivery_repo.claim_due_deliveries(now=now, limit=self._batch_size)
+        excluded = self._current_exclusions()
+        if excluded is None:
+            rows = await self._delivery_repo.claim_due_deliveries(now=now, limit=self._batch_size)
+        else:
+            rows = await self._delivery_repo.claim_due_deliveries(now=now, limit=self._batch_size, exclude_providers=excluded)
         for row in rows:
             try:
                 await self._deliver(row)
@@ -133,6 +145,15 @@ class NotificationDeliveryWorker:
                     await self._delivery_repo.mark_failed(row["id"], claim_token=row.get("claim_token"), error="delivery crashed before completion")
                 except Exception:
                     logger.warning("Could not mark crashed delivery %s as failed; stale reset will recover it", row.get("id"), exc_info=True)
+
+    def _current_exclusions(self) -> frozenset[str] | None:
+        """Providers to leave to the instance holding their transport (read fresh every poll)."""
+        if self._excluded_providers is None:
+            return None
+        excluded = self._excluded_providers()
+        if not isinstance(excluded, (set, frozenset, list, tuple)) or not excluded:
+            return None
+        return frozenset(str(provider) for provider in excluded)
 
     async def _recover_stale_sending(self, now: datetime) -> None:
         """Lease-style reconciliation, run before every claim (the first poll

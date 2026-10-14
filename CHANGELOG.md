@@ -946,6 +946,27 @@ This release closes that milestone with **621 merged pull requests**.
 
 #### Channels
 
+- **channels:** IM channels can run on several Gateway instances. With
+  `channels.leader_lease` active (`auto`, the default, follows the
+  multi-process signal), each provider's platform connection belongs to the
+  one instance holding its row in the new `channel_leases` table (migration
+  `0041_channel_leases`): a single upsert decides ownership against the
+  database clock, renewals carry a fencing epoch, and the holder stops its
+  transport on its own monotonic deadline before a peer may connect, so a
+  stalled database cannot leave two Telegram pollers or two Discord sessions
+  running. A crashed holder is replaced within `lease_seconds + grace_seconds`
+  plus one renewal interval; a cleanly stopped one releases and hands over on
+  the peer's next tick, and a transport whose stop timed out keeps its lease
+  until it expires. GitHub webhooks, the message bus and the manager stay on
+  every instance. `GET /api/channels/` reports each provider's `leader`, and
+  `running` reflects the holder's transport on every instance, so the web UI's
+  provider list and connect flow work wherever the load balancer sends them;
+  scheduled-task IM notifications are claimed only by the provider's holder.
+  The startup gate now recommends `auto`/`true` when it refuses `enabled:
+  false`, and refuses an explicit `enabled: true` without a SQL database.
+  Credentials saved from the web UI still reach the holder only when it next
+  starts the channel, and a failover cancels the IM replies in flight.
+
 - **channels:** New `channels.leader_lease` section (`enabled: auto|true|false`,
   `lease_seconds`, `grace_seconds`; startup-only), reserved for the per-provider
   leader lease that will give one Gateway instance each IM platform connection

@@ -729,6 +729,21 @@
 
 #### 渠道
 
+- **channels:** IM 通道可以在多个 Gateway 实例上运行。`channels.leader_lease`
+  生效时（默认 `auto` 跟随多进程信号），每个 provider 的平台连接只属于在新表
+  `channel_leases`（迁移 `0041_channel_leases`）中持有该行的那个实例：归属由一条
+  upsert 依据数据库时钟判定，续约携带防护 epoch，持有者按自己的单调时钟在对端
+  可以连接之前先停传输，因此数据库卡住也不会出现两个 Telegram 轮询者或两个
+  Discord 会话。持有者崩溃后，对端在 `lease_seconds + grace_seconds` 再加一个续约
+  周期内接管；正常停止的持有者会释放租约，对端在下一次心跳接手；停止超时的传输保留
+  租约直到过期。GitHub webhook、消息总线和 manager 仍在每个实例上运行。
+  `GET /api/channels/` 会报告每个 provider 的 `leader`，`running` 在每个实例上都反映
+  持有者的传输状态，所以无论负载均衡把请求发到哪个实例，Web UI 的 provider 列表和
+  连接流程都能正常工作；定时任务的 IM 通知只由该 provider 的持有者认领。启动门禁在
+  拒绝 `enabled: false` 时改为推荐 `auto`/`true`，并拒绝没有 SQL 数据库的显式
+  `enabled: true`。从 Web UI 保存的凭据仍要等持有者下次启动该通道才生效，故障切换会
+  取消进行中的 IM 回复。
+
 - **channels:** 新增 `channels.leader_lease` 配置段（`enabled: auto|true|false`、
   `lease_seconds`、`grace_seconds`；仅启动时读取），为按 provider 的 leader 租约预留，
   落地后每个 IM 平台连接只由一个 Gateway 实例持有（传输归属本身另行提交，在此之前

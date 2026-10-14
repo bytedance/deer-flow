@@ -621,6 +621,15 @@ directory is already trusted as secret storage. WeChat QR login auth state
 follows the same local-runtime model and may persist a QR-derived bot token in
 the channel state directory.
 
+With several Gateway instances, `channels.leader_lease` gives each provider's
+platform connection to one instance: the holder of the provider's row in
+`channel_leases`. Bindings, connect codes and conversations are shared SQL
+state, so the connect flow works on any instance; `GET /api/channels/` names
+each provider's `leader`. Runtime credentials saved on an instance that does
+not hold the provider apply on the holder only when it next starts the
+channel. See
+[IM channel leader lease](CONFIGURATION.md#im-channel-leader-lease-channelsleader_lease).
+
 ## Security Notes
 
 - Browser APIs remain authenticated and CSRF-protected.

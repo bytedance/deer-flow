@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -185,8 +186,12 @@ class NotificationDeliveryRepository:
             )
             return result.scalar_one_or_none()
 
-    async def claim_due_deliveries(self, *, now: datetime, limit: int) -> list[dict[str, Any]]:
+    async def claim_due_deliveries(self, *, now: datetime, limit: int, exclude_providers: Collection[str] = ()) -> list[dict[str, Any]]:
         """Atomically claim due pending rows by flipping them to ``sending``.
+
+        ``exclude_providers`` leaves rows for those providers pending for
+        another worker: under the IM leader lease, the instance that holds a
+        provider's transport delivers its rows.
 
         The UPDATE is guarded by ``status = 'pending'`` and returns its own
         result set via ``RETURNING`` (SQLite >= 3.35, Postgres), so the rows
@@ -207,6 +212,7 @@ class NotificationDeliveryRepository:
                         .where(
                             NotificationDeliveryRow.status == "pending",
                             NotificationDeliveryRow.available_at <= now,
+                            *((NotificationDeliveryRow.provider.not_in(sorted(exclude_providers)),) if exclude_providers else ()),
                         )
                         .order_by(NotificationDeliveryRow.available_at, NotificationDeliveryRow.created_at)
                         .limit(limit)
