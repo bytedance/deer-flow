@@ -4467,7 +4467,7 @@
   保存的机器人。每个 worker 都保留启动时读入的 `runtime-config.json` 内容，并用这份
   副本重写整个文件，因此在两个 worker 下，一个 worker 上保存的 Telegram 机器人会在
   另一个 worker 保存 Slack 机器人时丢失，已断开的机器人也会重新出现。现在每次保存
-  都会在跨进程共享的锁下重新读取文件，只修改自己的 provider。
+  都会在跨进程共享的锁下重新读取文件，只修改自己的 provider。([#6844])
 
 ### 安全
 
@@ -9307,3 +9307,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6706]: https://github.com/bytedance/deer-flow/pull/6706
 [#6746]: https://github.com/bytedance/deer-flow/pull/6746
 [#6781]: https://github.com/bytedance/deer-flow/pull/6781
+[#6844]: https://github.com/bytedance/deer-flow/pull/6844

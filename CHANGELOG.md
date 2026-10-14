@@ -5869,7 +5869,7 @@ This release closes that milestone with **621 merged pull requests**.
   file from that copy, so with two workers a Telegram bot saved on one worker
   was dropped when a Slack bot was saved on the other, and a disconnected bot
   came back. Every save now rereads the file under a lock shared across
-  processes and changes only its own provider.
+  processes and changes only its own provider. ([#6844])
 
 ### Security
 
@@ -11649,3 +11649,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6746]: https://github.com/bytedance/deer-flow/pull/6746
 [#6781]: https://github.com/bytedance/deer-flow/pull/6781
 [#6798]: https://github.com/bytedance/deer-flow/pull/6798
+[#6844]: https://github.com/bytedance/deer-flow/pull/6844
