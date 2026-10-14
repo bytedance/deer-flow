@@ -2435,6 +2435,9 @@ Failed upload commits report the original error even if temporary-file cleanup
 also fails, for example because of a Windows sharing violation.
 Once the file is published, a temporary-file cleanup failure is logged without
 failing the upload; hidden staging files are left for the startup sweep.
+If that sweep cannot scan an uploads directory, it logs a warning and preserves
+its files while continuing cleanup elsewhere. A directory that disappears
+during cleanup is skipped quietly.
 
 Uploads, new skill support files, and new local sandbox paths reject Windows
 reserved device names on every platform, including `COM¹`, `LPT²`, the console
