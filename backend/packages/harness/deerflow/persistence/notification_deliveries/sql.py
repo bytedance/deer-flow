@@ -259,6 +259,14 @@ class NotificationDeliveryRepository:
             await session.commit()
             return result.rowcount
 
+    async def is_active_claim(self, delivery_id: str, *, claim_token: str | None = None) -> bool:
+        """Do not send a row canceled while resolving its summary or preferences."""
+        conditions = [NotificationDeliveryRow.id == delivery_id, NotificationDeliveryRow.status.in_(("pending", "sending"))]
+        if claim_token is not None:
+            conditions += [NotificationDeliveryRow.status == "sending", NotificationDeliveryRow.claim_token == claim_token]
+        async with self.session_factory() as session:
+            return await session.scalar(select(NotificationDeliveryRow.id).where(*conditions)) is not None
+
     async def mark_sent(self, delivery_id: str, *, claim_token: str | None = None) -> dict[str, Any]:
         async with self.session_factory() as session:
             row = await session.get(NotificationDeliveryRow, delivery_id)
