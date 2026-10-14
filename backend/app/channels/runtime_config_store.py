@@ -7,14 +7,25 @@ import logging
 import os
 import tempfile
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback
+    fcntl = None  # type: ignore[assignment]
+    import msvcrt
+
 logger = logging.getLogger(__name__)
 
 RUNTIME_CHANNEL_DISABLED_FLAG = "_runtime_disabled"
+
+# Matches the extensions manager's retry cadence for the same Windows
+# limitation of the blocking lock mode.
+_LOCK_RETRY_INTERVAL_SECONDS = 0.2
 
 
 @contextmanager
@@ -29,28 +40,34 @@ def _runtime_config_file_lock(path: Path) -> Iterator[None]:
     target_path = path.resolve(strict=False) if path.is_symlink() else path.absolute()
     lock_path = target_path.parent / f".{target_path.name}.lock"
     with open(lock_path, "a+b") as lock_file:
-        if os.name == "nt":
-            import msvcrt
-
+        if fcntl is not None:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        else:  # pragma: no cover - Windows fallback
             lock_file.seek(0, os.SEEK_END)
             if lock_file.tell() == 0:
                 lock_file.write(b"\0")
                 lock_file.flush()
+            # Windows' blocking mode (``msvcrt.LK_LOCK``) gives up after roughly
+            # ten seconds and surfaces contention as Permission denied, while
+            # this lock exists to serialize concurrent Gateway workers'
+            # read-modify-write cycles. Retry the non-blocking acquisition until
+            # the region frees, mirroring the extensions manager's lock.
             lock_file.seek(0)
-            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            while True:
+                try:
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    time.sleep(_LOCK_RETRY_INTERVAL_SECONDS)
 
         try:
             yield
         finally:
-            if os.name == "nt":
+            if fcntl is not None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            else:  # pragma: no cover - Windows fallback
                 lock_file.seek(0)
                 msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 class ChannelRuntimeConfigStore:
