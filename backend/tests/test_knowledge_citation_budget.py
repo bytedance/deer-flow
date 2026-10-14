@@ -178,3 +178,50 @@ def test_mixed_contract_budget_keeps_unified_citations_alongside_native(limit):
     # Its structured record must survive paired with the visible link.
     retrieval_sources = (result.artifact or {}).get("retrieval_sources") or []
     assert any(source.get("id") == unified.id for source in retrieval_sources)
+
+
+@pytest.mark.parametrize("prefix", ["", "user-content-"])
+@pytest.mark.parametrize(
+    "fragment",
+    ["](#{}knowledge-source-abc12", "#{}knowledge-source-" + "b" * 32, "[citation:Broken](#{}knowledge-source-" + "b" * 32, "[citation:Broken](#{}knowledge-source-" + "b" * 33 + ")"],
+    ids=["partial-id", "orphan", "unclosed-link", "overlong-id"],
+)
+def test_mixed_contract_budget_removes_dangling_unified_fragments(prefix, fragment):
+    unified = KnowledgeSource(provider="lightrag", title="UnifiedDoc", excerpt="unified evidence excerpt alpha that is clearly load bearing content")
+    original, rag_id = mixed_contract_task_message(unified)
+    fragment = fragment.format(prefix)
+    original = original.model_copy(update={"content": f"Task completed. {fragment}\n{original.content}"})
+
+    result = _patch_result(original, ToolOutputConfig(externalize_min_chars=0, fallback_max_chars=7000), None)
+
+    assert fragment not in result.content
+    assert f"](#knowledge-source-{unified.id})" in result.content
+    assert f"](#knowledge-{rag_id})" in result.content
+    assert [source["id"] for source in result.artifact["retrieval_sources"]] == [unified.id]
+    assert len(result.content) <= 7000
+
+
+@pytest.mark.parametrize("prefix", ["", "user-content-"])
+def test_native_budget_preserves_complete_unified_links_with_escaped_labels(prefix):
+    original = message("task")
+    shared_link = rf"[citation:Guide \[draft\]](#{prefix}knowledge-source-{'b' * 32})"
+    content, _ = budget_source_artifact(original.content, original.artifact, 7000, summary=f"Task completed. {shared_link}")
+
+    assert shared_link in content
+
+
+@pytest.mark.parametrize("prefix", ["", "user-content-"])
+@pytest.mark.parametrize("side", ["head", "tail"])
+def test_native_summary_truncation_removes_new_unified_fragments(prefix, side):
+    original = message("task")
+    destination = f"#{prefix}knowledge-source-{'b' * 32}"
+    link = f"[citation:Guide]({destination})"
+    # A 2,000-character output gives this synopsis a 500-character head/tail
+    # budget. Split the head inside the ID or start the tail at its '#'.
+    summary = "x" * 200 + link + "y" * 1000 if side == "head" else "x" * 1000 + link + "y" * (249 - len(destination) - 1)
+
+    content, _ = budget_source_artifact(original.content, original.artifact, 2000, summary=summary)
+
+    assert "#knowledge-source-" not in content
+    assert "#user-content-knowledge-source-" not in content
+    assert len(content) <= 2000
