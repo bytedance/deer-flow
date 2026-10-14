@@ -742,7 +742,7 @@
   连接流程都能正常工作；定时任务的 IM 通知只由该 provider 的持有者认领。启动门禁在
   拒绝 `enabled: false` 时改为推荐 `auto`/`true`，并拒绝没有 SQL 数据库的显式
   `enabled: true`。从 Web UI 保存的凭据仍要等持有者下次启动该通道才生效，故障切换会
-  取消进行中的 IM 回复。
+  取消进行中的 IM 回复。 ([#6843])
 
 - **channels:** 新增 `channels.leader_lease` 配置段（`enabled: auto|true|false`、
   `lease_seconds`、`grace_seconds`；仅启动时读取），为按 provider 的 leader 租约预留，
@@ -9311,3 +9311,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6702]: https://github.com/bytedance/deer-flow/pull/6702
 [#6706]: https://github.com/bytedance/deer-flow/pull/6706
 [#6746]: https://github.com/bytedance/deer-flow/pull/6746
+[#6843]: https://github.com/bytedance/deer-flow/pull/6843

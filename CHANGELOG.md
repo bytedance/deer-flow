@@ -965,7 +965,7 @@ This release closes that milestone with **621 merged pull requests**.
   The startup gate now recommends `auto`/`true` when it refuses `enabled:
   false`, and refuses an explicit `enabled: true` without a SQL database.
   Credentials saved from the web UI still reach the holder only when it next
-  starts the channel, and a failover cancels the IM replies in flight.
+  starts the channel, and a failover cancels the IM replies in flight. ([#6843])
 
 - **channels:** New `channels.leader_lease` section (`enabled: auto|true|false`,
   `lease_seconds`, `grace_seconds`; startup-only), reserved for the per-provider
@@ -11655,3 +11655,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6706]: https://github.com/bytedance/deer-flow/pull/6706
 [#6746]: https://github.com/bytedance/deer-flow/pull/6746
 [#6798]: https://github.com/bytedance/deer-flow/pull/6798
+[#6843]: https://github.com/bytedance/deer-flow/pull/6843
