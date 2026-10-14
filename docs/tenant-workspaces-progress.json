@@ -1919,5 +1919,64 @@
       "post-parse request/mutation publication fences and native React reconnect storage",
       "actual backend/browser two-tab switching; physical Run cancellation/revocation and M4-M11; activation stays closed"
     ]
+  },
+  "frontend_rest_scope": {
+    "job": "deerflow-tenant-frontend",
+    "status": "explicit REST transport/JSON foundation verified; Context/consumer integration incomplete",
+    "history": [
+      {
+        "build": 19,
+        "result": "FAILURE",
+        "build_seconds": 13.579,
+        "archive_sha256": "de8c8f98a197d7490b3221630883eb97e64748445856ead59a890381943fedd8",
+        "reason": "Interface absence only: factory not a function. Not counted as business authorization/cancellation RED; next source only scaffolds native fetch."
+      },
+      {
+        "build": 20,
+        "result": "FAILURE",
+        "build_seconds": 13.32,
+        "archive_sha256": "ab5faa876aea848fa7d826b024843f578ae735971010102e224c60cb02fec434",
+        "reason": "Real business RED: both selectors null; foreign destination dispatched; late 401 becomes UnauthorizedError/login handling; both actual late JSON decodes fulfilled after cancellation."
+      },
+      {
+        "build": 21,
+        "result": "ABORTED",
+        "build_seconds": 166.1,
+        "archive_sha256": "796b199f46a5f2f739cfe9a278438fd46ec14601b6356ee04bf797ab6989b4b6",
+        "reason": "Three mains and nineteen related checks passed, formatting and zero-warning lint clean; explicitly stopped full check after source inspection found relative URL validate/dispatch mismatch. No test failure."
+      },
+      {
+        "build": 22,
+        "result": "FAILURE",
+        "build_seconds": 13.368,
+        "archive_sha256": "867e4f71ee2168ef06c6daba775e1328ef80e2a17386fbddfc122b3bd40a5cbe",
+        "reason": "Real URL RED: expected /api/threads but outer browser-resolution fetch double recorded /workspace/chats/api/threads; two other mains passed. Actual absolute destination now resolved once for dispatch and validation."
+      }
+    ],
+    "green": {
+      "build": 23,
+      "result": "SUCCESS",
+      "tests_passed": 22,
+      "tests_added": 3,
+      "main_test_seconds": 0.669,
+      "regression_test_seconds": 4.49,
+      "build_seconds": 383.045,
+      "archive_sha256": "98adee4c8846535f2039882622344429ecd0207b3b52c8bad01fc999e6704d82",
+      "checks": "three native Request/Response/ReadableStream REST mains, nineteen native Request/static/scoped SDK regressions, modified-file Prettier, targeted ESLint max-warnings 0, full pnpm check"
+    },
+    "source_sha256": {
+      "frontend/src/core/api/fetcher.ts": "e25bace3a8ecc0a6fea7ab59a8d87f62e7b19122558764870c1679043e094ade",
+      "frontend/src/core/workspaces/request-scope.ts": "90b9844d7971c900dd150a57d4e9cc104c9b9c6fbff61014c4c6b55f4cef9846",
+      "frontend/tests/unit/core/workspaces/rest.test.ts": "86e11b4460a6097aa9aecdf5404cc9f8ab93bd38e2847d005177f903cb66bf27"
+    },
+    "scope": "Fixed client scope/API root; native Request body/method/CSRF/credentials; lifetime+caller cancellation; signal:null clears inherited Request signal only; late Response before native login redirect and exact post-JSON combined-signal fence; resolved/validated absolute dispatch destination; native unscoped/static behavior retained",
+    "cleanup": "#19-#23 terminal; exact owned containers/networks and REST-format probe independently empty; private frozen-lock dependency cache retained",
+    "remaining": [
+      "typed workspace list/current adapters must validate server response context against expected actor/selector",
+      "Workspace Context/selector/cacheKey and all consumer request/publication/reconnect wiring",
+      "raw Response/Blob reads and further consumer await publication fences",
+      "shared HttpOnly credential/account changes across tabs need native-session principal consistency, including two members of same workspace; client actor metadata is not authentication",
+      "real backend/browser two-tab acceptance and M4-M11; activation remains closed"
+    ]
   }
 }

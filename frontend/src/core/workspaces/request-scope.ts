@@ -66,7 +66,10 @@ export function prepareWorkspaceRequest(
     throw new Error("Request workspace differs from its captured lifetime");
   }
   headers.set("X-Deerflow-Workspace", scope.workspaceId);
-  const callerSignal = init?.signal ?? request?.signal;
+  // Explicit null clears the inherited Request signal, like native fetch.
+  // The workspace signal is always combined below and cannot be cleared.
+  const callerSignal =
+    init?.signal === null ? undefined : (init?.signal ?? request?.signal);
   const signal =
     callerSignal && callerSignal !== scope.signal
       ? AbortSignal.any([scope.signal, callerSignal])
@@ -86,9 +89,14 @@ export function createWorkspaceFetch(
   apiUrl: string,
 ): typeof globalThis.fetch {
   return async (input, init) => {
-    const prepared = prepareWorkspaceRequest(scope, apiUrl, input, init);
+    // Send the same resolved destination we validate. A raw relative string
+    // would otherwise resolve against the page/base URL during native fetch.
+    // Keep Request inputs intact so their body and native method survive.
+    const destination =
+      input instanceof Request ? input : new URL(input, apiUrl);
+    const prepared = prepareWorkspaceRequest(scope, apiUrl, destination, init);
     try {
-      const response = await globalThis.fetch(input, prepared);
+      const response = await globalThis.fetch(destination, prepared);
       if (prepared.signal?.aborted) {
         try {
           await response.body?.cancel();

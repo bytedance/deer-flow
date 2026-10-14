@@ -136,3 +136,53 @@ python3 scripts/pnpm.py exec eslint src/components/query-client-provider.tsx \
   src/core/auth/AuthProvider.tsx tests/unit/core/workspaces/cache.dom.test.tsx --max-warnings 0
 python3 scripts/pnpm.py check
 ```
+
+
+## Bound REST materialization
+
+`createWorkspaceRESTClient(scope)` captures actor/workspace/lifetime and API root.
+Its `fetch()` reuses native credential/CSRF/error handling and scoped transport;
+its `json()` additionally retains the exact combined signal through actual JSON
+decoding and checks it again before returning data or a GatewayApiError. A late
+401 is rejected by the scoped transport before the native login redirect path.
+Caller cancellation is combined with the workspace lifetime; explicit signal:null
+only removes the original Request's signal. JSON is typed but not schema-validated
+by this transport: workspace list/context adapters must validate their responses.
+
+The shared transport now sends the absolute URL it resolved and validated, while
+forwarding original native Request bodies/methods. Checking a relative URL and
+then sending the raw relative string can select a different browser page/base
+path. The existing main reproduces that at a nested chat URL. Foreign origins,
+non-API paths and conflicting workspace headers are refused before dispatch.
+The scope is request metadata, never membership authorization.
+
+The three node-environment mains use real Request/Response/ReadableStream JSON
+decoding with only the outer network replaced. They cover pinned metadata, CSRF,
+Request body/signal/null override, dispatch bounds, late HTTP/401 and JSON
+completion after workspace or caller cancellation. Native Request/CSRF, static
+mode and scoped SDK checks are the related regressions. This is an explicit
+REST primitive, not automatic Context/selector integration or real two-tab
+server acceptance. Raw Response/Blob readers and caller code performing further
+awaits still require their own publication checks.
+
+```sh
+python3 scripts/pnpm.py exec rstest run tests/unit/core/workspaces/rest.test.ts
+python3 scripts/pnpm.py exec rstest run tests/unit/core/workspaces/request.dom.test.ts \
+  tests/unit/core/api/fetcher.dom.test.ts tests/unit/core/api/static-mode.test.ts \
+  tests/unit/core/workspaces/sdk.test.ts
+python3 scripts/pnpm.py exec prettier --check src/core/api/fetcher.ts \
+  src/core/workspaces/request-scope.ts tests/unit/core/workspaces/rest.test.ts
+python3 scripts/pnpm.py exec eslint src/core/api/fetcher.ts \
+  src/core/workspaces/request-scope.ts tests/unit/core/workspaces/rest.test.ts --max-warnings 0
+python3 scripts/pnpm.py check
+```
+
+The captured actor ID remains client metadata; fetch credentials come from the
+native browser session. A shared HttpOnly cookie can change in another tab while
+this tab still holds an old displayed actor. Context bootstrap must compare the
+server current-context actor, and M6/M11 must prove cross-tab credential/session
+reset and per-request expected-principal consistency before activation. Cache
+partitioning and selector capture alone do not prove that property. Include a
+case where both actors belong to the same workspace, so a workspace-only guard
+cannot mask the identity mismatch. Do not grant authority to a supplied actor
+header or infer authentication from the client snapshot.

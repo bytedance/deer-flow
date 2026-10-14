@@ -395,3 +395,20 @@ React StrictMode's immediate effect replay; do not clear the still-live cache
 during that replay. Cache removal does not cancel server-side Runs, physical
 work or arbitrary mutation callbacks; their request/publication lifetimes remain
 separate required fences. This foundation does not wire the workspace selector.
+
+
+Browser workspace REST callers use `createWorkspaceRESTClient(scope)` from the
+shared fetcher. The factory copies the actor/workspace/signal and configured API
+root once; its fetch keeps native Request body/method, CSRF and live-401 behavior
+while binding the selector and cancellation through the shared transport.
+Prefer its `json()` for materialized JSON: it checks the captured combined signal
+after decoding and before returning data or a parsed GatewayApiError, so late
+results/errors cannot survive a cancelled lifetime. Raw fetch Response consumers
+still own their post-decode/publication fences. Returning a value does not fence
+a caller that starts another await before applying it. Native unscoped fetch and
+static demos retain their original behavior; explicit workspace clients reject
+demo mode. RequestInit signal:null clears an inherited Request signal, never the
+workspace lifetime. Shared scoped fetch dispatches the resolved/validated absolute
+URL (or original native Request), not a raw relative string that the browser
+would resolve against a different page/base URL. No actor header is invented.
+The workspace selector/context and consumer wiring remain required work.

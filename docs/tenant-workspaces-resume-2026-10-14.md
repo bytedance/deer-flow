@@ -424,3 +424,33 @@ selector/context, real validated lifetime keys, shared REST/SDK wiring, response
 publication and React reconnect storage remain next; real authenticated two-tab
 backend acceptance and M4-M11 remain required. M3 unchecked, activation closed;
 no deployment/push/local runtime or model calls.
+
+
+M3 bound REST checkpoint: frontend #19 only established absent factory API;
+it is not business RED. #20 used a native-transport-only scaffold and reproduced
+missing selectors, foreign dispatch and accepted late JSON results; a late 401
+entered native login handling. #21 passed 22 checks/format/target lint, then was
+explicitly stopped to correct a source-inspected relative-URL destination issue.
+#22 reproduced that actual /workspace/chats/api/threads dispatch instead of the
+validated /api/threads target. #23 SUCCESS passes the same three mains plus 19
+related Request/static/scoped SDK checks, modified-file formatting, zero-warning
+target lint and full pnpm check. Runtime/test bytes match its archive; exact
+#19-#23 and formatter owned resource inventories independently empty.
+
+The REST factory freezes scope metadata and API root, preserves native Request
+body/method and credential/CSRF behavior, and checks the exact combined signal
+after real JSON decoding before returning a value/error. Shared scoped fetch
+sends its resolved/validated URL or the original native Request. Explicit null
+removes only the inherited Request signal; workspace cancellation stays bound.
+Native unscoped/static behavior remains; no scope client is activated in demos.
+
+Next implement typed workspace list/current adapters and the tab-local Context
+using the actual server current-context actor/workspace/version tuple. Then wire
+the validated lifetime into cacheKey, REST/SDK consumers, native selector and
+React reconnect storage. Raw body/Blob readers and caller publication after
+further awaits still need fences. A changed shared HttpOnly cookie can change
+the native principal while another tab has old display metadata: M6/M11 must
+prove session/account synchronization and expected-principal consistency, also
+when both actors belong to the same workspace. Never grant authority to an actor
+header. Full real backend/browser acceptance and M4-M11 remain; M3 unchecked,
+activation closed, no deployment/push/local runtime/model calls.

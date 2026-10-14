@@ -1,7 +1,14 @@
 import { buildLoginUrl } from "@/core/auth/types";
+import { getBackendBaseURL } from "@/core/config";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
+import {
+  captureWorkspaceRequestScope,
+  createWorkspaceFetch,
+  prepareWorkspaceRequest,
+  type WorkspaceRequestScope,
+} from "@/core/workspaces/request-scope";
 
-import { UnauthorizedError } from "./errors";
+import { parseGatewayApiError, UnauthorizedError } from "./errors";
 import { staticApiResponse } from "./static-response";
 
 /** HTTP methods that the gateway's CSRFMiddleware checks. */
@@ -57,9 +64,10 @@ export function readCsrfCookie(): string | null {
  * preserved; the helper only ADDS the CSRF header when it isn't already
  * present, so explicit overrides win.
  */
-export async function fetch(
+async function fetchAuthenticated(
   input: RequestInfo | URL,
   init?: RequestInit,
+  transport?: typeof globalThis.fetch,
 ): Promise<Response> {
   const request = input instanceof Request ? input : undefined;
   const url =
@@ -97,7 +105,7 @@ export async function fetch(
 
   // Forward the original Request so its body, method and cancellation signal
   // survive. Reducing it to a URL loses explicit workspace selectors as well.
-  const res = await globalThis.fetch(input, {
+  const res = await (transport ?? globalThis.fetch)(input, {
     ...init,
     headers,
     credentials: "include",
@@ -129,4 +137,55 @@ export async function fetch(
 export function getCsrfHeaders(): HeadersInit {
   const token = readCsrfCookie();
   return token ? { "X-CSRF-Token": token } : {};
+}
+
+/** Native REST callers retain their existing unscoped behavior. */
+export async function fetch(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<Response> {
+  return fetchAuthenticated(input, init);
+}
+
+/** Bind browser REST calls to one immutable actor/workspace lifetime. */
+export function createWorkspaceRESTClient(scope: WorkspaceRequestScope) {
+  if (isStaticWebsiteOnly())
+    throw new Error("Workspace clients are unavailable in demo mode");
+  const snapshot = captureWorkspaceRequestScope(scope);
+  const origin =
+    typeof window === "undefined"
+      ? "http://localhost:2026"
+      : window.location.origin;
+  const apiRoot = new URL(`${getBackendBaseURL()}/api`, origin).toString();
+  const transport = createWorkspaceFetch(snapshot, apiRoot);
+  const scopedFetch = (input: RequestInfo | URL, init?: RequestInit) =>
+    fetchAuthenticated(input, init, transport);
+  return Object.freeze({
+    fetch: scopedFetch,
+    async json<T = unknown>(
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ): Promise<T> {
+      // Retain this exact combined signal through decoding, rather than reread
+      // mutable caller options or a newly selected workspace after an await.
+      const prepared = prepareWorkspaceRequest(snapshot, apiRoot, input, init);
+      const response = await scopedFetch(input, prepared);
+      let body: unknown;
+      try {
+        body = await response.json();
+      } catch (error) {
+        prepared.signal?.throwIfAborted();
+        if (response.ok) throw error;
+        body = {};
+      }
+      prepared.signal?.throwIfAborted();
+      if (!response.ok)
+        throw parseGatewayApiError(
+          body,
+          response.status,
+          "Workspace request failed",
+        );
+      return body as T;
+    },
+  });
 }
