@@ -197,6 +197,12 @@ class BoxliteBox(Sandbox):
         merged_env = {**self._default_env, **(env or {})} or None
         try:
             result = self._exec("sh", "-lc", command, env=merged_env, timeout=timeout)
+        except TimeoutError:
+            # A command deadline is a shell outcome, not a provider hiccup:
+            # end with the same Exit Code: 124 marker Local/AIO/Tenki emit on
+            # timeout so evidence consumers recover the real status. Covers
+            # both the SDK's in-VM exec timeout and the bridge future's.
+            return "Error: command timed out\nExit Code: 124"
         except Exception as e:
             logger.error("Failed to execute command in BoxLite box %s: %s", self.id, e)
             return f"Error: {e}"

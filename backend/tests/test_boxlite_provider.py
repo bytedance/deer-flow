@@ -187,6 +187,20 @@ def test_execute_command_appends_exit_marker_when_failure_has_output(monkeypatch
     assert box.execute_command("make test") == "5 passed, 1 error\n\nExit Code: 1"
 
 
+def test_execute_command_timeout_appends_exit_marker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A command deadline is a shell outcome, not a provider hiccup: the result
+    must end with the same ``Exit Code: 124`` marker Local/AIO/Tenki emit on
+    timeout, whatever layer raised it (SDK in-VM exec or the bridge future)
+    (#6847)."""
+    box = BoxliteBox("box-id", box=object(), run=_fake_run)
+
+    def _slow_exec(*argv, **kwargs):
+        raise TimeoutError
+
+    monkeypatch.setattr(box, "_exec", _slow_exec)
+    assert box.execute_command("sleep 9999", timeout=5) == "Error: command timed out\nExit Code: 124"
+
+
 def test_read_file_supports_optional_line_ranges(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[str, ...]] = []
 

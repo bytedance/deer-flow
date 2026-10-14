@@ -1839,6 +1839,22 @@ def test_execute_command_does_not_mark_dead_on_unrelated_error():
     assert sb.is_dead is False
 
 
+def test_execute_command_timeout_appends_exit_marker():
+    """A command deadline is a shell outcome, not a provider hiccup: the result
+    must end with the same ``Exit Code: 124`` marker Local/AIO/Tenki emit on
+    timeout, so the acceptance-checklist harvest recovers the real status
+    (#6847)."""
+
+    def slow(_cmd: str, **kwargs) -> Any:
+        raise TimeoutException("deadline exceeded")
+
+    client = FakeClient(commands=FakeCommandsAPI([slow]))
+    sb = _make_sandbox(client)
+    out = sb.execute_command("sleep 9999", timeout=5)
+    assert out == "Error: command timed out\nExit Code: 124"
+    assert sb.is_dead is False
+
+
 def test_execute_command_forwards_env_and_timeout_to_commands_run():
     """execute_command(env=..., timeout=...) routes env as ``envs`` and the
     timeout through to ``commands.run`` so request-scoped secrets (#3861) reach
