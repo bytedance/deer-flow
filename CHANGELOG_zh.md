@@ -4479,6 +4479,13 @@
   `(thread, run, user)` 唯一约束；在 Postgres 上，80 个这样的请求中有 26 个失败。
   IM 会话绑定中的同类竞争（例如首条消息与 `/new` 同时到达）也不再导致消息处理失败。
   落后的写入现在会更新另一方创建的记录。([#6852])
+- **持久化：** 启动时的 schema 升级不再为已与模型一致的列记录虚假的
+  `safe_add_column ... drifts from the model definition` 警告。该检查拿模型的通用类型名
+  和默认值写法（`STRING`、`BIGINTEGER`、`DefaultClause('0')`）去比较数据库自己的写法
+  （`VARCHAR`、`BIGINT`、`'0'`），因此 revision 0023 之前创建的 Postgres 或 SQLite
+  数据库升级时都会记录一条，丢失 head stamp 的 schema 会记录 29 条（SQLite）或
+  36 条（Postgres），淹没了这个警告本应发现的真实类型不一致。现在两侧都按所连接
+  数据库的写法进行比较。
 
 ### 安全
 
