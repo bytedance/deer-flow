@@ -5877,7 +5877,7 @@ This release closes that milestone with **621 merged pull requests**.
   second insert hit the `(thread, run, user)` unique key. On Postgres, 26 of
   80 such requests failed. The same race in IM conversation binding, such as
   a first message arriving together with `/new`, no longer fails the message.
-  The losing write now updates the row the other one created.
+  The losing write now updates the row the other one created. ([#6852])
 
 ### Security
 
@@ -11658,3 +11658,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6781]: https://github.com/bytedance/deer-flow/pull/6781
 [#6785]: https://github.com/bytedance/deer-flow/pull/6785
 [#6798]: https://github.com/bytedance/deer-flow/pull/6798
+[#6852]: https://github.com/bytedance/deer-flow/pull/6852

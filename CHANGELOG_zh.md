@@ -4473,7 +4473,7 @@
   不再有一个请求返回 500。两个请求都会查不到已有记录并插入，第二个插入会触发
   `(thread, run, user)` 唯一约束；在 Postgres 上，80 个这样的请求中有 26 个失败。
   IM 会话绑定中的同类竞争（例如首条消息与 `/new` 同时到达）也不再导致消息处理失败。
-  落后的写入现在会更新另一方创建的记录。
+  落后的写入现在会更新另一方创建的记录。([#6852])
 
 ### 安全
 
@@ -9314,3 +9314,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6746]: https://github.com/bytedance/deer-flow/pull/6746
 [#6781]: https://github.com/bytedance/deer-flow/pull/6781
 [#6785]: https://github.com/bytedance/deer-flow/pull/6785
+[#6852]: https://github.com/bytedance/deer-flow/pull/6852
