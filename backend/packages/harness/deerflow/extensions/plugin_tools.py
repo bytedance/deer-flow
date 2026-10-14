@@ -13,7 +13,7 @@ from types import MappingProxyType
 
 from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
 from deerflow_extension_api.auth import ExtensionPrincipal
-from deerflow_extension_api.plugins import ToolContext
+from deerflow_extension_api.plugins import PluginToolResult, ToolContext
 from jsonschema import Draft202012Validator
 from langchain.tools import ToolRuntime
 from langchain_core.tools import StructuredTool, ToolException
@@ -23,6 +23,8 @@ from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.tool_provenance import tag_plugin_tool
 
 logger = logging.getLogger(__name__)
+
+_PLUGIN_RESULT_MAX_BYTES = 64 * 1024
 
 
 def plugin_settings(source, plugin):
@@ -64,6 +66,31 @@ def _build_tool(source, plugin, declaration):
     schema = deepcopy(dict(declaration.input_schema))
     validator = Draft202012Validator(schema)
 
+    def encode_result(result):
+        if declaration.response_format == "content":
+            encoded = json.dumps(result, ensure_ascii=False, allow_nan=False)
+            if len(encoded.encode()) > _PLUGIN_RESULT_MAX_BYTES:
+                raise ToolException("Plugin result exceeds 64 KiB.")
+            return encoded
+
+        if not isinstance(result, PluginToolResult) or not isinstance(result.content, str):
+            raise ToolException("Structured plugin tools must return PluginToolResult.")
+        artifact = result.artifact
+        if artifact is not None and not isinstance(artifact, Mapping):
+            raise ToolException("Plugin artifact must be a JSON object or null.")
+        if artifact is not None and any(not isinstance(key, str) for key in artifact):
+            raise ToolException("Plugin artifact keys must be strings.")
+        try:
+            # Round-trip through JSON to reject non-JSON values and detach the
+            # artifact from handler-owned mutable state before ToolMessage sees it.
+            artifact_snapshot = json.loads(json.dumps(dict(artifact) if artifact is not None else None, ensure_ascii=False, allow_nan=False))
+            encoded = json.dumps({"content": result.content, "artifact": artifact_snapshot}, ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ToolException("Plugin artifact must be JSON serializable.") from exc
+        if len(encoded.encode()) > _PLUGIN_RESULT_MAX_BYTES:
+            raise ToolException("Plugin result exceeds 64 KiB.")
+        return result.content, artifact_snapshot
+
     async def invoke(runtime: ToolRuntime, **payload):
         try:
             settings = await asyncio.to_thread(plugin_settings, source, plugin)
@@ -81,17 +108,14 @@ def _build_tool(source, plugin, declaration):
             )
             async with asyncio.timeout(30):
                 result = await declaration.handler(MappingProxyType(payload), tool_context)
-            encoded = json.dumps(result, ensure_ascii=False, allow_nan=False)
-            if len(encoded.encode()) > 64 * 1024:
-                raise ToolException("Plugin result exceeds 64 KiB.")
-            return encoded
+            return encode_result(result)
         except ToolException:
             raise
         except Exception as exc:
             logger.warning("Plugin tool failed: %s/%s (%s)", plugin.namespace, declaration.name, type(exc).__name__)
             raise ToolException("Plugin tool unavailable or input rejected.") from None
 
-    tool = StructuredTool(name=plugin_tool_name(plugin.namespace, declaration.name), description=declaration.description, args_schema=schema, coroutine=invoke, handle_tool_error=True)
+    tool = StructuredTool(name=plugin_tool_name(plugin.namespace, declaration.name), description=declaration.description, args_schema=schema, coroutine=invoke, handle_tool_error=True, response_format=declaration.response_format)
     tag_plugin_tool(tool, namespace=plugin.namespace, declaration=declaration.name, installation=source)
     return tool
 

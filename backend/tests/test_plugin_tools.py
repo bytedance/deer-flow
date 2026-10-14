@@ -5,7 +5,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
-from deerflow_extension_api.plugins import ModelTool, PluginContribution
+from deerflow_extension_api.plugins import ModelTool, PluginContribution, PluginToolResult
 from langchain_core.messages import AIMessage
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
@@ -164,3 +164,98 @@ async def test_model_tool_receives_run_control_from_host_runtime(installed):
     )
     handle.for_plugin.assert_called_once_with(plugin.namespace)
     assert calls[0].agent_runs is scoped
+
+
+@pytest.mark.asyncio
+async def test_content_and_artifact_mode_keeps_evidence_out_of_model_content():
+    async def retrieve(payload, context):
+        return PluginToolResult(
+            "Found one matching source.",
+            {"query": payload["query"], "sources": [{"id": "doc-1", "excerpt": "A bounded excerpt"}]},
+        )
+
+    plugin = PluginContribution(
+        namespace="community.retrieval",
+        title="Retrieval",
+        enabled=True,
+        tools=(
+            ModelTool(
+                "retrieve",
+                "Retrieve source evidence",
+                {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"], "additionalProperties": False},
+                retrieve,
+                response_format="content_and_artifact",
+            ),
+        ),
+    )
+    registry = ExtensionRegistry()
+    with registry.attributed_to("retrieval"):
+        registry.plugin(plugin)
+    (tool,) = build_plugin_tools(registry.build())
+    assert tool.response_format == "content_and_artifact"
+
+    graph = StateGraph(MessagesState)
+    graph.add_node("tools", ToolNode([tool]))
+    graph.add_edge(START, "tools")
+    graph.add_edge("tools", END)
+    result = await graph.compile().ainvoke(
+        {"messages": [AIMessage(content="", tool_calls=[{"id": "call", "name": tool.name, "args": {"query": "deer"}}])]},
+        context={"user_id": "reader"},
+    )
+    message = result["messages"][-1]
+    assert message.content == "Found one matching source."
+    assert message.artifact == {"query": "deer", "sources": [{"id": "doc-1", "excerpt": "A bounded excerpt"}]}
+    assert "doc-1" not in message.content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "returned, expected",
+    [
+        ({"content": "summary", "artifact": {"id": "wrong-carrier"}}, "PluginToolResult"),
+        (PluginToolResult("summary", ["not-an-object"]), "JSON object"),
+        (PluginToolResult("x" * 65500, {"evidence": "y" * 1000}), "64 KiB"),
+    ],
+)
+async def test_content_and_artifact_mode_rejects_invalid_or_oversized_results(returned, expected):
+    async def retrieve(payload, context):
+        return returned
+
+    plugin = PluginContribution(
+        namespace="community.invalid-retrieval",
+        title="Invalid retrieval",
+        enabled=True,
+        tools=(
+            ModelTool(
+                "retrieve",
+                "Retrieve source evidence",
+                {"type": "object", "properties": {}, "additionalProperties": False},
+                retrieve,
+                response_format="content_and_artifact",
+            ),
+        ),
+    )
+    registry = ExtensionRegistry()
+    with registry.attributed_to("invalid"):
+        registry.plugin(plugin)
+    (tool,) = build_plugin_tools(registry.build())
+    graph = StateGraph(MessagesState)
+    graph.add_node("tools", ToolNode([tool]))
+    graph.add_edge(START, "tools")
+    graph.add_edge("tools", END)
+    result = (
+        await graph.compile().ainvoke(
+            {"messages": [AIMessage(content="", tool_calls=[{"id": "call", "name": tool.name, "args": {}}])]},
+            context={"user_id": "reader"},
+        )
+    )["messages"][-1]
+    assert result.status == "error"
+    assert expected in result.content
+
+
+def test_registration_rejects_unknown_response_format(installed):
+    _, plugin, _ = installed
+    registry = ExtensionRegistry()
+    with registry.attributed_to("test"):
+        with pytest.raises(ValueError, match="response format"):
+            registry.plugin(replace(plugin, tools=(replace(plugin.tools[0], response_format="xml"),)))

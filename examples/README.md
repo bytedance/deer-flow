@@ -7,6 +7,7 @@ independent Python package using the public `deerflow-extension-api` contract.
 | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
 | [Extension example](deerflow-extension-example/README.md)        | Middleware, task lifecycle, model observations, services, and HTTP routes. Start here for backend extensions.                  |
 | [Conversation bookmarks](deerflow-extension-bookmarks/README.md) | A browser page, conversation action, backend actions, packaged resources, and a model tool. Start here for full-stack plugins. |
+| [Structured artifact retrieval](deerflow-extension-structured-artifact/README.md) | A deterministic read-only model tool that keeps concise summaries separate from structured evidence artifacts. |
 | [Agent teams](deerflow-extension-agent-teams/README.md)          | Full Agent orchestration. Use this after the basic contribution and lifecycle patterns are familiar.                           |
 
 Additional examples cover [text-list classification](deerflow-extension-jev-classify/README.md),

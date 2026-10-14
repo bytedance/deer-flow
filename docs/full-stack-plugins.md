@@ -3,7 +3,7 @@
 A deployment-installed Python extension can register a `PluginContribution` with
 optional browser code, authenticated backend actions and model tools. This extends
 the existing `install(registry, config)` workflow. MCP and Skills keep their existing
-APIs and lifecycles. Public contracts live in `deerflow_extension_api` (0.2.5).
+APIs and lifecycles. Public contracts live in `deerflow_extension_api` (0.2.6).
 
 Backend actions and model tools may use the optional host-bound
 `context.agent_runs` capability to create, continue, inspect, resume, and cancel
@@ -40,10 +40,17 @@ the existing positional rollback and source attribution.
   loads a versioned resource manifest from an installed package (details below).
 - `BackendAction(name, handler)` declares an async handler receiving a JSON object and
   `ActionContext(principal, settings)`. The principal comes from host authentication.
-- `ModelTool(name, description, input_schema, handler, group="extensions")` declares
-  an async handler with a `ToolContext` that additionally carries the thread ID.
-  Object schemas must be inline: reference resolution is rejected. Tools enter the
-  ordinary host tool assembly, including group filtering and later authorization.
+- `ModelTool(name, description, input_schema, handler, group="extensions", response_format="content")`
+  declares an async handler with a `ToolContext` that additionally carries the
+  thread ID. Object schemas must be inline: reference resolution is rejected. Tools
+  enter the ordinary host tool assembly, including group filtering and later
+  authorization. The default `content` mode JSON-encodes the handler return value
+  exactly as before. Opt into `response_format="content_and_artifact"` and return a
+  `PluginToolResult(content, artifact)` to keep a short model-visible summary beside
+  a JSON-object evidence artifact in the ordinary `ToolMessage.artifact` channel.
+  The host snapshots the artifact and bounds the combined JSON payload to 64 KiB;
+  invalid or oversized results become ordinary tool errors and are never moved into
+  model content.
 - `SettingsField` describes a non-secret deployment value. There is no online override
   store or settings write API. Browser clients see only `enabled` and explicitly
   listed public fields. Plugin code remains responsible for business authorization.
@@ -59,6 +66,11 @@ registers one model tool and a status action, no browser code: the agent labels 
 list of texts through a deployment-configured Jev or chat-model backend, and the
 plugin keeps the whole call inside those bounds with its own batch and deadline
 limits. It requires deployment opt-in and a separate backend API key.
+
+The [structured artifact example](../examples/deerflow-extension-structured-artifact/README.md)
+is a small read-only retrieval plugin. Its tool returns a concise source summary to
+the model and structured source records to the host, showing the opt-in contract
+without adding a provider or a new citation reader.
 
 Durable `batch_task` workers pin the Gateway app's extension snapshot at startup
 and use it for both plugin tools and subagent execution. Recovered items use the

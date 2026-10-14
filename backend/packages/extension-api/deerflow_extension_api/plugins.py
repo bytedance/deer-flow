@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from deerflow_extension_api.agent_runs import AgentRuns
 from deerflow_extension_api.auth import ExtensionPrincipal
@@ -41,12 +41,27 @@ class ToolContext(ActionContext):
 
 
 @dataclass(frozen=True)
+class PluginToolResult:
+    """Separate model-visible content from JSON artifact metadata.
+
+    ``artifact`` is retained by the host in ``ToolMessage.artifact`` and is
+    never appended to the ordinary content sent back to the model. The host
+    validates the complete JSON payload and snapshots the mapping before it
+    reaches LangChain, so a handler cannot mutate a result after returning it.
+    """
+
+    content: str
+    artifact: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True)
 class ModelTool:
     name: str
     description: str
     input_schema: Mapping[str, Any]
     handler: Callable[[Mapping[str, Any], ToolContext], Awaitable[Any]]
     group: str = "extensions"
+    response_format: Literal["content", "content_and_artifact"] = "content"
 
 
 @dataclass(frozen=True)

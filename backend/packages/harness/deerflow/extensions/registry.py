@@ -116,6 +116,8 @@ class ExtensionRegistry(ExtensionRegistryContract):
         for tool in contribution.tools:
             if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", tool.name) or tool.name in tool_names or not tool.description or not inspect.iscoroutinefunction(tool.handler):
                 raise ValueError("Model tools require unique names, descriptions and async handlers")
+            if tool.response_format not in {"content", "content_and_artifact"}:
+                raise ValueError("Unsupported model tool response format")
             validate_schema(tool.input_schema, tool=True)
             tool_names.add(tool.name)
         names = set()
