@@ -3157,6 +3157,7 @@ def test_in_stream_error_takes_its_status_from_structured_fields(error_fields: d
         pytest.param(_in_stream_error("Upstream request failed.", code="rate_limit_exceeded"), id="snake-case-code"),
         pytest.param(_in_stream_error("Request exceeded the local execution expiration.", code="RATE_LIMIT_EXECUTION_TIMEOUT"), id="upper-snake-case-code"),
         pytest.param(RuntimeError("Codex API response.failed (rate_limit_exceeded): slow down"), id="codex-response-failed"),
+        pytest.param(_in_stream_error("rate-limit header malformed"), id="separator-busy-without-a-status"),
     ],
 )
 def test_status_less_error_matches_busy_patterns_across_separators(exc: Exception) -> None:
@@ -3191,6 +3192,8 @@ def test_status_less_error_matches_busy_patterns_across_separators(exc: Exceptio
         pytest.param(_in_stream_error("upstream returned HTTP 400 after [503]"), id="leftmost-message-status-decides"),
         pytest.param(_in_stream_error("invalid value at messages[502].content"), id="message-index"),
         pytest.param(_in_stream_error("invalid tool call at tools[0][503].function"), id="nested-index"),
+        pytest.param(_in_stream_error("rate-limit header malformed", code=400), id="code-400-beats-separator-busy"),
+        pytest.param(_in_stream_error("HTTP 400: rate-limit header malformed"), id="message-400-beats-separator-busy"),
     ],
 )
 def test_in_stream_error_without_a_retriable_signal_stays_generic(exc: openai.APIError) -> None:

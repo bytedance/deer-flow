@@ -685,7 +685,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             return True, "transient"
         if _matches_any(lowered, _BUSY_PATTERNS):
             return True, "busy"
-        if status_less and (_matches_any(_normalize_separators(detail), _BUSY_PATTERNS) or _matches_any(_normalize_separators(str(error_code)), _BUSY_PATTERNS)):
+        if status_code is None and (_matches_any(_normalize_separators(detail), _BUSY_PATTERNS) or _matches_any(_normalize_separators(str(error_code)), _BUSY_PATTERNS)):
             return True, "busy"
 
         return False, "generic"
