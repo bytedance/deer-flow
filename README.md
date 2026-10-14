@@ -1809,7 +1809,8 @@ Model tools can opt into separate structured artifacts with
 their JSON text output. The
 [local retrieval example](examples/deerflow-extension-retrieval/README.md)
 demonstrates bounded, read-only results and checkpoint replay without an external
-knowledge service; artifacts do not automatically enable citations.
+knowledge service; artifacts do not automatically enable citations. It also appears
+in the extension catalog with localized installation-guide metadata.
 Reopening a bookmark resolves the conversation's current agent through the host, so
 custom-agent conversations retain their original chat entry point, including older bookmarks.
 The independent [Agent teams example](examples/deerflow-extension-agent-teams/README.md)
