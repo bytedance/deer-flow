@@ -818,6 +818,58 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                 owner_replacement["thread_id"] = delete_ids["team"]
                 assert (await client.get(team_run_base + "/messages", headers=team_headers)).status_code == 404
 
+                # Native usage and workspace-change views use the same private parent.
+                for label, headers, thread_id, run_id, tokens in (("team", team_headers, delete_ids["team"], team_run, 17), ("personal", {}, delete_ids["personal"], personal_run, 31)):
+                    async with sf() as session:
+                        await session.execute(sa.update(RunRow).where(RunRow.run_id == run_id).values(total_tokens=tokens, total_input_tokens=tokens - 2, total_output_tokens=2))
+                        session.add(
+                            RunEventRow(
+                                thread_id=thread_id,
+                                run_id=run_id,
+                                workspace_id=team if label == "team" else personal,
+                                user_id=identities["alice"],
+                                event_type="workspace_changes",
+                                category="workspace",
+                                content="Recorded workspace changes",
+                                event_metadata={"workspace_changes": {"version": 1, "files": [{"path": "/mnt/user-data/outputs/" + label + ".md", "diff": "+" + label}], "summary": {"created": 1}}},
+                                seq=2,
+                            )
+                        )
+                        await session.commit()
+                    base = "/api/threads/" + thread_id
+                    for query in ("", "?include_active=true"):
+                        usage = await client.get(base + "/token-usage" + query, headers=headers)
+                        assert usage.status_code == 200, usage.text
+                        assert usage.json()["total_tokens"] == tokens and usage.json()["total_runs"] == 1, usage.text
+                    change_url = base + "/runs/" + run_id + "/workspace-changes"
+                    changes = await client.get(change_url, headers=headers)
+                    assert changes.status_code == 200, changes.text
+                    assert changes.json()["available"] and changes.json()["files"][0]["diff"] == "+" + label, changes.text
+                    summary_only = await client.get(change_url + "?include_files=false", headers=headers)
+                    assert summary_only.status_code == 200 and summary_only.json()["files"] == [], summary_only.text
+                    no_diff = await client.get(change_url + "?include_diff=false", headers=headers)
+                    assert no_diff.status_code == 200 and no_diff.json()["files"][0]["diff"] == "", no_diff.text
+                change_suffix = "/runs/" + team_run + "/workspace-changes"
+                for suffix in ("/token-usage", change_suffix):
+                    assert (await client.get(team_run_base + suffix)).status_code == 404
+                    as_user("bob")
+                    assert (await client.get(team_run_base + suffix, headers=team_headers)).status_code == 404
+                    as_user("alice")
+                    owner_replacement["thread_id"] = delete_ids["team"]
+                    assert (await client.get(team_run_base + suffix, headers=team_headers)).status_code == 404
+                assert (await client.get(team_run_base + "/runs/" + personal_run + "/workspace-changes", headers=team_headers)).status_code == 404
+                for repository, method, suffix in ((app.state.run_event_store, "list_events", change_suffix), (thread_runs, "build_context_usage", "/token-usage")):
+                    original_read = getattr(repository, method)
+
+                    async def supplementary_read_then_replace(*args, _read=original_read, **kwargs):
+                        result = await _read(*args, **kwargs)
+                        await rotate_private_parent()
+                        return result
+
+                    with monkeypatch.context() as patch:
+                        patch.setattr(repository, method, supplementary_read_then_replace)
+                        assert (await client.get(team_run_base + suffix, headers=team_headers)).status_code == 404
+
                 class ScopeChangingBridge(MemoryStreamBridge):
                     def __init__(self, mode):
                         super().__init__()
@@ -920,7 +972,8 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                     assert await session.get(ThreadMetaRow, delete_ids["personal"]) is not None
                     for table in (RunRow, RunEventRow, FeedbackRow, ThreadReadMarkerRow, ScheduledTaskEventRow):
                         assert await session.scalar(sa.select(sa.func.count()).select_from(table).where(table.thread_id == delete_id)) == 0
-                        assert await session.scalar(sa.select(sa.func.count()).select_from(table).where(table.thread_id == delete_ids["personal"])) == 1
+                        # The preserved personal history has one message and one file-change event.
+                        assert await session.scalar(sa.select(sa.func.count()).select_from(table).where(table.thread_id == delete_ids["personal"])) == (2 if table is RunEventRow else 1)
                 assert await app.state.run_event_store.list_events(delete_id, delete_id + "-run", limit=100, user_id=identities["alice"]) == []
                 assert len(await app.state.run_event_store.list_events(delete_ids["personal"], delete_ids["personal"] + "-run", limit=100, user_id=identities["alice"])) == 1
                 uncertain_id = str(uuid4())

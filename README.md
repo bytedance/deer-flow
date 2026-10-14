@@ -2979,3 +2979,8 @@ now preserve the selected private workspace and reject conversation replacement
 before returning. Remaining feedback operations, client flows and full tenant
 activation are still pending. New workspace/team controls will reuse native
 DeerFlow styling, as confirmed for the tenant UI plan.
+
+[Native usage and file-change reads](docs/tenant-workspaces-api.md#native-usage-and-file-change-reads-partial-m3)
+now apply selected private-workspace authorization while retaining native
+statistics and diff options. Feedback operations, frontend and full tenant
+activation remain pending.

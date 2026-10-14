@@ -152,3 +152,31 @@ frontend switching, event writes/Run producers and M4-M11 remain requirements;
 tenant activation stays closed.
 
 User confirmed native DeerFlow styling; the M7 plan records reuse without a new visual redesign. Next: token/workspace-change read binding, then feedback repository transaction fences and remaining M3 paths. Full M0-M11 scope remains active; no tenant push or deployment.
+
+## Native usage and file-change reads (partial M3)
+
+GET /api/threads/{thread_id}/token-usage and
+/api/threads/{thread_id}/runs/{run_id}/workspace-changes now bind the same
+private workspace/entry-incarnation wrapper before native owner checks. Existing
+SQL aggregation, checkpoint context usage, native Run matching and SQL event
+filtering remain authoritative. No new usage engine or file-diff generator.
+Both views recheck live scope and captured parent identity after materialization.
+
+#78 RED found missing scope. #79 reached/passed the new two-space usage/change
+assertions and eleven native regressions, but its subsequent deletion check had
+an outdated fixed personal-event count: the fixture now has one message and one
+workspace-change event. Final revision changes only that expectation to exactly
+two events (other personal child tables still one; deleted-space children zero).
+#80 passed all 13 checks in 45.12s: SQLite/PostgreSQL JWT/SQL HTTP mains and eleven
+native token/context/file-change regressions. Personal/team totals are distinct,
+include_active keeps the native shape, each diff belongs to its space, summary
+and no-diff options work, and foreign space/peer/mismatched Run or changed entry
+nonce refuses the response. Real SQL nonce changes after event/context reads
+are also rejected. Runtime/test bytes match the final archive; #78-#80 resources
+were independently checked empty. Existing TestClient/httpx warning remains.
+
+Feedback repository/HTTP mutation fences, remaining artifact/PUT/history and
+frontend flows, event writers/producers/factories and M4-M11 are still required.
+This does not enable tenant mode or prove full usage accounting/quota admission.
+
+Latest continuation: #76/#77 global Run reads and #78/#79/#80 usage/file-change reads are recorded; all five builds terminal and exact owned inventories empty. No live validation job remains. User confirmed native UI style. Next: FeedbackRepository scope/read/write transaction guards plus feedback routes, then remaining file/artifact/PUT/history entries and frontend space selection/caches. M0-M11 remains active and incomplete; no tenant push/deployment, compiled activation closed.

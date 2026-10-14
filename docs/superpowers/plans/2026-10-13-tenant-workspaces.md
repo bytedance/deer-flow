@@ -590,3 +590,11 @@ post-materialization incarnation replacement with both metadata dialects, plus
 native global Run API compatibility. Archive/source bytes match; dedicated
 resources empty. Feedback transactions, remaining reads/writes/client and
 M4-M11 stay pending; M3 remains unchecked and activation closed.
+
+M3 native usage/file-change reads: #78 RED missing scope; #79 new assertions
+passed but later deletion fixture expected one instead of its two seeded events;
+#80 GREEN (13 passed, 45.12s). Both dialect HTTP mains prove distinct actual
+usage/diffs, native query options, foreign/peer/Run mismatch refusal and
+entry/materialization nonce fencing, plus eleven native regressions. Archive
+bytes match and exact resources empty. Feedback transactions, remaining files,
+frontend and M4-M11 remain; M3 unchecked and activation closed.

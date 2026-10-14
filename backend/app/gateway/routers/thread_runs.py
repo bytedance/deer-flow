@@ -1868,6 +1868,7 @@ async def list_run_events(
 
 
 @router.get("/{thread_id}/runs/{run_id}/workspace-changes")
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("runs", "read", owner_check=True)
 async def get_run_workspace_changes(
     thread_id: ThreadId,
@@ -1891,6 +1892,7 @@ async def get_run_workspace_changes(
 
 
 @router.get("/{thread_id}/token-usage", response_model=ThreadTokenUsageResponse)
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("threads", "read", owner_check=True)
 async def thread_token_usage(
     thread_id: ThreadId,

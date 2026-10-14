@@ -467,3 +467,10 @@ Run/thread association and fence the materialized response. Unbound calls keep
 native keyword/return/pagination contracts. #77 verifies both metadata dialects
 and native global API regressions; FeedbackRepository mutation fencing and
 normal Run producers remain separate requirements.
+
+Native token-usage and Run workspace-changes GETs bind private workspace scope
+before owner checks, then keep native aggregate/context/event implementations.
+The wrapper fences the materialized result against the entry incarnation and
+live versions. #80 verifies actual two-dialect payloads/options and eleven native
+regressions. Usage quota admission, event production and remaining feedback/
+file/client paths are not implied by these read checks.

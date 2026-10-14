@@ -89,3 +89,10 @@ Same-space messages/feedback, foreign/peer refusal and materialization-span
 parent replacement are verified. Feedback mutation fences, remaining APIs,
 client and M4-M11 remain pending; M3 unchecked, activation closed. Native UI
 styling reuse confirmed by user on 2026-10-14, not yet implemented/accepted.
+
+M3 native usage/file-change reads: #78 missing-scope RED, #79 fixture-count
+failure, #80 GREEN (13 passed, 45.12s) on actual two-dialect HTTP mains and eleven
+native regressions. Distinct usage/diffs and native options, foreign/peer denial
+and changed entry/materialization nonce refusal verified. Exact child retention
+checks preserved after new event fixture. Feedback/files/client and M4-M11
+remain pending; M3 unchecked and activation closed.

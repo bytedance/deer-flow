@@ -234,3 +234,9 @@ with real JWTs; after materialization they rotate the persisted parent nonce
 and assert the prepared JSON is refused. Restore method patches before later
 SSE/lifecycle checks. Native global API tests preserve unbound paging and
 optional-storage behavior; these do not prove feedback write authorization.
+
+The workspace HTTP usage/change stage seeds distinct persisted token totals and
+one workspace_changes event per space, tests native include flags and SQL nonce
+replacement after reads. Later deletion must retain exactly two personal SQL
+events (message plus file change), one row in each other seeded child table, and
+zero rows for the deleted space. Do not loosen retention to a nonzero count.
