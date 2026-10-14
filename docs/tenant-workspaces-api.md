@@ -447,3 +447,35 @@ SQL incarnation replacement for PUT goal, POST state and DELETE goal, each
 returning 404 with unchanged checkpoint IDs, as well as both complete authenticated
 HTTP mains and six native regressions. The existing TestClient SDK warning
 remains diagnostic only. All final runtime/test bytes match the #51 archive.
+
+## Checkpoint-only ID admission (partial M3)
+
+Scoped POST /threads and new-chat PUT goal refuse to allocate metadata when a
+caller-selected ID already has any checkpoint but no visible private ThreadMeta.
+The bounded native alist occupancy probe omits checkpoint_ns to cover root and
+subgraph namespaces, closes its iterator before proceeding and never returns
+checkpoint content. Existing data yields generic 404; unsupported/storage-failed
+validation yields 503 before allocation. Existing matching private metadata still
+uses native idempotency. Unbound legacy behavior remains unchanged.
+
+Scoped POST thread initializes its root only after durable native reservation and
+the existing live incarnation fence. It preserves the original metadata fields,
+but skips an already-initialized root: a same-owner admitted goal can legitimately
+commit between metadata allocation and the creating request's initialization.
+It must not be overwritten by a new empty root.
+
+Jenkins #52 reproduced actual checkpoint-only IDs being claimed (both metadata
+dialects). #53 passed 8 checks in 35.22s: both real HTTP mains reject root-only
+legacy IDs through POST thread/PUT goal and subgraph-only IDs through POST thread,
+leave metadata absent and original checkpoints/markers unchanged, and preserve
+a real native goal committed through RunManager between allocation and root
+initialization. Six native creation/goal regressions cover caller IDs, insert
+races, owner conflict, storage error and trusted internal ownership. The existing
+Starlette TestClient SDK deprecation warning remains diagnostic.
+
+The checkpointer here is durable SQLite with SQLite/PostgreSQL metadata. This
+probe is not atomic across stores and does not authorize mixed-version writers;
+rollout fencing, orphan inventory/attribution and physical restore remain M10.
+Postgres-checkpointer/cancellation/storage-fault acceptance, complete branch/
+delete/compact/feed/client and normal Run lifecycle remain required. Activation
+stays closed.

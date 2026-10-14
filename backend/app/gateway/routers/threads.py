@@ -44,7 +44,7 @@ from app.gateway.services import (
     strip_server_owned_state_metadata,
 )
 from app.gateway.utils import sanitize_log_param
-from app.gateway.workspaces.checkpoints import capture_checkpoint_thread_identity, commit_checkpoint_write
+from app.gateway.workspaces.checkpoints import capture_checkpoint_thread_identity, commit_checkpoint_write, require_unallocated_checkpoint_id
 from app.gateway.workspaces.dependencies import workspace_resource_scope
 from deerflow.agents.thread_state import THREAD_STATE_REDUCER_FIELDS
 from deerflow.authz.workspace import get_current_workspace
@@ -712,6 +712,7 @@ async def _ensure_thread_for_goal(thread_id: str, request: Request, *, metadata_
                 await thread_store.update_owner(thread_id, thread_owner_user_id, user_id=None)
             record = await thread_store.get(thread_id, **thread_owner_kwargs)
     if record is None:
+        await require_unallocated_checkpoint_id(request, thread_id)
         try:
             await thread_store.create(thread_id, metadata={}, **thread_owner_kwargs)
         except IntegrityError:
@@ -975,6 +976,8 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
     if existing_record is not None:
         return _existing_thread_response(thread_id, existing_record)
 
+    await require_unallocated_checkpoint_id(request, thread_id)
+
     # Write thread_meta so the thread appears in /threads/search immediately
     from deerflow.persistence.projects import ProjectNotAssignableError
 
@@ -1030,7 +1033,23 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
             **metadata,
             "created_at": now,
         }
-        await checkpointer.aput(config, empty_checkpoint(), ckpt_metadata, {})
+
+        async def initialize_checkpoint():
+            if get_current_workspace() is not None and await checkpointer.aget_tuple(config) is not None:
+                # An admitted same-owner goal can have initialized this new
+                # thread while allocation was completing. Preserve its state.
+                return
+            await checkpointer.aput(config, empty_checkpoint(), ckpt_metadata, {})
+
+        if get_current_workspace() is not None:
+            async with reserve_checkpoint_write(request, thread_id, user_id=get_effective_user_id()):
+                await commit_checkpoint_write(request, thread_id, incarnation=created_record.get("incarnation"), commit=initialize_checkpoint)
+        else:
+            await initialize_checkpoint()
+    except ConflictError:
+        raise HTTPException(status_code=409, detail="Thread has work in flight. Retry creation after it finishes.") from None
+    except (HTTPException, WorkspaceAccessDenied):
+        raise
     except Exception:
         logger.exception("Failed to create checkpoint for thread %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to create thread")

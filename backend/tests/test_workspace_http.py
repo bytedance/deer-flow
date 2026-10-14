@@ -44,9 +44,9 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
     from deerflow.persistence.thread_reads import ThreadReadRepository
     from deerflow.persistence.user.model import UserRow
     from deerflow.persistence.workspaces.sql import WorkspaceRepository
-    from deerflow.runtime import RunManager
+    from deerflow.runtime import RunManager, ThreadOperationKind
     from deerflow.runtime.events.store.memory import MemoryRunEventStore
-    from deerflow.runtime.goal import build_goal_state
+    from deerflow.runtime.goal import build_goal_state, write_thread_goal
     from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
 
     names = ("app.gateway.workspaces.service", "app.gateway.workspaces.dependencies", "app.gateway.routers.workspaces", "app.gateway.routers.admin_workspaces")
@@ -96,6 +96,7 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
             delete_revocation = {}
             checkpoint_replacement = {}
             owner_replacement = {}
+            initialization_goals = {}
 
             class ReplacingCheckpointSaver(AsyncSqliteSaver):
                 async def aget_tuple(self, config):
@@ -109,6 +110,16 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                     return result
 
             class RevokingThreadRepository(ThreadMetaRepository):
+                async def create(self, thread_id, **kwargs):
+                    row = await super().create(thread_id, **kwargs)
+                    objective = initialization_goals.pop(thread_id, None)
+                    if objective is not None:
+                        # A real native writer commits after metadata allocation
+                        # and before the creating HTTP request initializes root.
+                        async with app.state.run_manager.reserve_thread_operation(thread_id, kind=ThreadOperationKind.checkpoint_write, user_id=row["user_id"]):
+                            await write_thread_goal(app.state.checkpointer, thread_id, build_goal_state(objective), create_if_missing=True)
+                    return row
+
                 async def check_access(self, thread_id, user_id, *, require_existing=False):
                     allowed = await super().check_access(thread_id, user_id, require_existing=require_existing)
                     if allowed and owner_replacement.get("thread_id") == thread_id:
@@ -224,6 +235,30 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                     assert row.workspace_id == team and row.user_id == identities["alice"]
                 personal_thread = await client.post("/api/threads", json={"thread_id": "personal-research-thread", "project_id": personal_project})
                 assert personal_thread.status_code == 200, personal_thread.text
+                for entry, namespace in (("thread", ""), ("goal", ""), ("thread", "legacy-subgraph")):
+                    orphan_id = str(uuid4())
+                    orphan_config = {"configurable": {"thread_id": orphan_id, "checkpoint_ns": namespace}}
+                    orphan_checkpoint = empty_checkpoint()
+                    orphan_checkpoint["channel_values"] = {"messages": [HumanMessage(content="unattributed legacy private sentinel")]}
+                    orphan_checkpoint["channel_versions"] = {"messages": app.state.checkpointer.get_next_version(None, None)}
+                    await app.state.checkpointer.aput(orphan_config, orphan_checkpoint, {"step": 0, "source": "update", "writes": {}, "parents": {}}, orphan_checkpoint["channel_versions"])
+                    before_claim = await app.state.checkpointer.aget_tuple(orphan_config)
+                    if entry == "thread":
+                        refused = await client.post("/api/threads", headers=team_headers, json={"thread_id": orphan_id})
+                    else:
+                        refused = await client.put("/api/threads/" + orphan_id + "/goal", headers=team_headers, json={"objective": "New objective must not adopt legacy data"})
+                    assert refused.status_code == 404, "checkpoint-only ID was claimed through " + entry + ": " + refused.text
+                    async with sf() as session:
+                        assert await session.get(ThreadMetaRow, orphan_id) is None, "refused checkpoint claim still allocated metadata"
+                    after_claim = await app.state.checkpointer.aget_tuple(orphan_config)
+                    assert after_claim.config == before_claim.config
+                    assert after_claim.checkpoint["channel_values"]["messages"][0].content == "unattributed legacy private sentinel"
+                interleaved_id = str(uuid4())
+                initialization_goals[interleaved_id] = "Already committed native goal"
+                interleaved_create = await client.post("/api/threads", headers=team_headers, json={"thread_id": interleaved_id})
+                assert interleaved_create.status_code == 200, interleaved_create.text
+                preserved_goal = await client.get("/api/threads/" + interleaved_id + "/goal", headers=team_headers)
+                assert preserved_goal.status_code == 200 and preserved_goal.json()["goal"]["objective"] == "Already committed native goal", "thread initialization overwrote admitted native goal"
                 for thread_id, marker in (("team-research-thread", "team checkpoint sentinel"), ("personal-research-thread", "personal checkpoint sentinel")):
                     old = await app.state.checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
                     checkpoint = empty_checkpoint()

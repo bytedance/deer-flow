@@ -51,3 +51,5 @@
 补充：#50发现 owner-check 期间替换会话仍能提交目标，现已按最初准入身份绑定修复。#51完整定向检查8项通过（34.31s），覆盖真实 SQL 替换下 goal/state/clear 不修改 checkpoint。完整生命周期、Run/feed和前端仍是下一工作，不得把这次验收当作整个 M3 完成。
 
 下一轮生命周期准入还需检查：只有 legacy checkpoint、没有 ThreadMeta 的同名 ID，不能因新建元数据而被接管；同时审计原生 POST thread 和 goal 新建路径。当前未验证这一边界，多租户激活继续关闭。
+
+当前接续更新：上一条所列 checkpoint-only ID guard 已由 #52 RED/#53 GREEN 验证，另有真实原生目标交错初始化保护。下次直接从 M3 分支/删除/压缩生命周期及 Run/feed/客户端切换继续；多租户仍未激活或部署。

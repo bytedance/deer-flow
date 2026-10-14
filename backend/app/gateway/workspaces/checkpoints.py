@@ -4,9 +4,11 @@ Build graphs and prepare mutations outside these locks. Only native prepared
 checkpoint IO belongs in commit; run admission/reservation remains authoritative.
 """
 
+from contextlib import aclosing
+
 from fastapi import HTTPException, Request
 
-from app.gateway.deps import get_thread_store
+from app.gateway.deps import get_checkpointer, get_thread_store
 from deerflow.authz.workspace import get_current_workspace
 from deerflow.persistence.thread_meta import ThreadMetaRepository
 from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
@@ -39,3 +41,24 @@ async def commit_checkpoint_write(request: Request, thread_id: str, *, incarnati
     if not isinstance(repository, ThreadMetaRepository):
         raise HTTPException(status_code=503, detail="Checkpoint writes require persistent workspace scope")
     return await repository.commit_checkpoint_under_live_lock(thread_id, incarnation=incarnation, commit=commit, user_id=context.actor_user_id)
+
+
+async def require_unallocated_checkpoint_id(request: Request, thread_id: str) -> None:
+    """Refuse metadata allocation over any unattributed checkpoint namespace.
+
+    This is an occupancy probe, not permission to return checkpoint content.
+    A missing namespace selector deliberately checks root and subgraph records.
+    Legacy unbound allocation keeps its native behavior. Mixed-version writers
+    still require the rollout fence; this read is not a cross-store transaction.
+    """
+    if get_current_workspace() is None:
+        return
+    try:
+        config = {"configurable": {"thread_id": thread_id}}
+        async with aclosing(get_checkpointer(request).alist(config, limit=1)) as entries:
+            async for _ in entries:
+                raise WorkspaceAccessDenied("thread identity is unavailable")
+    except WorkspaceAccessDenied:
+        raise
+    except Exception:
+        raise HTTPException(status_code=503, detail="Checkpoint identity validation unavailable") from None

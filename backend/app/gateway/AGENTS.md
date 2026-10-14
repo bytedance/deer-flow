@@ -399,3 +399,12 @@ A subsequent live lookup compares this captured identity; it cannot replace it
 with a new incarnation. PUT goal captures identity before its delegated native
 owner-check, after metadata-only allocation. This prevents authorization awaits
 from silently moving an in-flight write onto a replacement conversation.
+
+Before scoped thread metadata allocation, require_unallocated_checkpoint_id
+probes the native saver across all namespaces using bounded alist and closes
+the iterator. An unattributed checkpoint ID cannot be claimed via POST thread
+or new-chat goal; read failures refuse allocation. This is occupancy, never
+content authorization. Scoped POST root initialization uses native reservation
+and final live fence, and leaves an already-initialized same-owner root intact.
+Legacy unbound behavior is unchanged. Mixed-version writer exclusion and actual
+checkpoint inventory remain rollout prerequisites, not proven by this probe.
