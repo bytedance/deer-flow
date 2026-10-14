@@ -1128,11 +1128,14 @@ def test_circuit_breaker_trips_and_recovers(monkeypatch: pytest.MonkeyPatch) -> 
     waits: list[float] = []
     monkeypatch.setattr("time.sleep", lambda d: waits.append(d))
 
-    # Mock time.time to decouple from private implementation details and enable time travel
+    # Drive the breaker's recovery timing through its injectable monotonic clock
+    # so the test can time-travel deterministically. The breaker measures the
+    # recovery window on this clock (not wall time), so advancing it is what
+    # moves the open->half_open transition.
     current_time = 1000.0
-    monkeypatch.setattr("time.time", lambda: current_time)
 
     middleware = _build_middleware(circuit_failure_threshold=3, circuit_recovery_timeout_sec=10)
+    middleware._circuit_clock = lambda: current_time
     monkeypatch.setattr(middleware, "_classify_error", mock_classify_retriable)
 
     request: Any = {"messages": []}
@@ -1294,10 +1297,11 @@ async def test_async_circuit_breaker_trips_and_recovers(monkeypatch: pytest.Monk
 
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
 
+    # Time-travel via the breaker's injectable monotonic clock (see the sync twin).
     current_time = 1000.0
-    monkeypatch.setattr("time.time", lambda: current_time)
 
     middleware = _build_middleware(circuit_failure_threshold=3, circuit_recovery_timeout_sec=10)
+    middleware._circuit_clock = lambda: current_time
     monkeypatch.setattr(middleware, "_classify_error", mock_classify_retriable)
 
     async def async_failing_handler(request: Any) -> Any:
@@ -2979,3 +2983,78 @@ def test_concurrent_burst_failures_get_distinct_jittered_delays() -> None:
         _random.setstate(saved_state)
     assert all(5000 <= d <= 8000 for d in delays)
     assert len(set(delays)) > 1  # de-synchronized, not a single 5000ms tick
+
+
+class _FakeMonotonic:
+    """A manually advanced monotonic clock for deterministic recovery timing."""
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self._now = start
+
+    def __call__(self) -> float:
+        return self._now
+
+    def advance(self, seconds: float) -> None:
+        self._now += seconds
+
+
+def _trip_circuit_open(middleware: LLMErrorHandlingMiddleware) -> None:
+    """Drive the breaker to OPEN with a configurable recovery window."""
+    middleware.circuit_failure_threshold = 1
+    middleware.circuit_recovery_timeout_sec = 60
+    middleware._record_failure()
+    assert middleware._circuit_state == "open"
+    assert middleware._check_circuit() is True  # fast-fail while open
+
+
+def test_circuit_recovery_is_measured_on_the_injected_monotonic_clock() -> None:
+    """The open->half_open transition tracks monotonic *elapsed* time.
+
+    The breaker stores ``_circuit_open_until = clock() + recovery_timeout_sec``
+    and fast-fails while ``clock() < _circuit_open_until``. Reading the recovery
+    deadline from the injected monotonic clock means it recovers after exactly
+    ``recovery_timeout_sec`` of elapsed time, independent of any wall-clock move.
+    """
+    clock = _FakeMonotonic()
+    middleware = _build_middleware(retry_max_attempts=1)
+    middleware._circuit_clock = clock
+    _trip_circuit_open(middleware)
+
+    # Just before the window elapses: still open.
+    clock.advance(59.9)
+    assert middleware._check_circuit() is True
+    assert middleware._circuit_state == "open"
+
+    # Once the monotonic window elapses: a single probe is admitted (half_open).
+    clock.advance(0.1)
+    assert middleware._check_circuit() is False
+    assert middleware._circuit_state == "half_open"
+    assert middleware._circuit_probe_in_flight is True
+
+
+def test_circuit_recovery_survives_a_backward_wall_clock_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A backward wall-clock step must not extend the fast-fail window.
+
+    Regression for the breaker measuring recovery with wall-clock ``time.time()``:
+    an NTP correction / VM resume / manual clock change that steps the wall clock
+    backward while the circuit is open would hold ``now < _circuit_open_until``
+    true far past ``recovery_timeout_sec``, shedding every LLM call until the wall
+    clock caught back up. Monotonic timing is immune: the recovery window advances
+    with real elapsed time regardless of what the wall clock does.
+    """
+    import deerflow.agents.middlewares.llm_error_handling_middleware as mod
+
+    clock = _FakeMonotonic()
+    middleware = _build_middleware(retry_max_attempts=1)
+    middleware._circuit_clock = clock
+    _trip_circuit_open(middleware)
+
+    # Simulate a large backward wall-clock step (e.g. the host's clock is pulled
+    # back by an hour) after the circuit opened. Monotonic elapsed time still
+    # reaches the recovery window, so the breaker must probe on schedule.
+    monkeypatch.setattr(mod.time, "time", lambda: 1_000_000.0 - 3600.0)
+    clock.advance(60.0)
+
+    assert middleware._check_circuit() is False
+    assert middleware._circuit_state == "half_open"
+    assert middleware._circuit_probe_in_flight is True

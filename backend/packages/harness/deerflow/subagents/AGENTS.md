@@ -16,7 +16,7 @@ Durable batch specs store overlays as JSON and restore them before execution.
 
 Batch evidence uses nullable `result_artifact` (migration 0033), persisted with
 successful results under the same lease fence. Only full-result exports expose
-bounded, cited RAG snapshots; compact item projections omit them. Cancelled,
+bounded, cited RAG snapshots; compact `list_items` defers them. Cancelled,
 failed and stale attempts cannot publish evidence; retry clears it. Cover the
 formatter/step capture -> worker -> reopened SQLite -> authorized export chain
 in `tests/test_batch_rag_evidence.py`; no provider fetch or preview UI is added.
@@ -34,7 +34,7 @@ citation references, and opaque base64/URL/image sources.
 
 `task` preserves the host incarnation, including null/missing/invalid values; never recapture it.
 
-**Direct runtime shutdown**: `SubagentRuntime.stop()` holds its lifecycle lock through an unbounded service drain; propagate first caller cancellation, chaining service failure. Test terminal outcomes/repeated cancellation in `tests/test_subagent_runtime.py`. Batch stops shield/join one cleanup generation. Restart resets its owner only after success; failed cleanup keeps startup fenced.
+**Direct runtime shutdown**: `SubagentRuntime.stop()` holds its lifecycle lock through an unbounded service drain; propagate first caller cancellation, chaining service failure. Test terminal outcomes/repeated cancellation in `tests/test_subagent_runtime.py`. Batch stops shield/join one cleanup generation. An item leaving a live run cancels it; `_release_execution` drops the registry entry once terminal (forced after the lease). Restart resets its owner only after success; failed cleanup keeps startup fenced.
 
 **Interrupted usage**: After stream cleanup, publish the collector's final
 snapshot on cancellation/timeout; callbacks can precede values chunks.

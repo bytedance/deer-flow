@@ -5859,6 +5859,14 @@ This release closes that milestone with **621 merged pull requests**.
   the trailing `-07` as a UTC offset and displayed UTC midnight instead: 08:00 in
   `Asia/Shanghai`, and the previous evening west of UTC, in the task list,
   detail, chat card and the edit form's prefilled time. ([#6692])
+- **subagents:** A durable batch worker that stops supervising a subagent
+  still in flight now cancels it and removes its registry entry once it stops.
+  Before, stopping the batch service in a long-lived process (an SDK
+  `SubagentRuntime` stop) left every in-flight `SubagentResult`, transcript
+  included, in the process-wide registry for good, and a repository error while
+  polling failed or requeued the item but left its subagent running
+  unsupervised, so a retry could run the same item twice. An entry that never
+  stops is removed once the item's lease has passed. ([#6785])
 - **gateway:** The subagent batch JSONL export
   (`GET /api/threads/{thread_id}/subagent-batches/{batch_id}/results.jsonl`)
   now reads stored results 10 rows at a time instead of 500. Each row can hold
@@ -5867,6 +5875,20 @@ This release closes that milestone with **621 merged pull requests**.
   default limit (roughly 1.7 GB at the 1,000,000 ceiling) and stalled the event
   loop for over half a second per page. The exported lines and their order are
   unchanged. ([#6706])
+- **gateway:** The subagent batch item list
+  (`GET /api/threads/{thread_id}/subagent-batches/{batch_id}/items`), which the
+  workspace polls every 2 seconds while a batch runs, no longer loads each
+  item's full report, evidence JSON and prompt only to return its preview.
+  With the default `max_result_chars`, one 100-item page held about 34 MB and
+  blocked the event loop for about 70 ms (170 MB and 300 ms at `limit=500`);
+  it now holds under 1 MB. The response is unchanged. ([#6781])
+- **channels:** Saving or disconnecting a bot from the channel setup page no
+  longer overwrites bots saved through another Gateway worker. Each worker kept
+  the `runtime-config.json` contents it loaded at startup and rewrote the whole
+  file from that copy, so with two workers a Telegram bot saved on one worker
+  was dropped when a Slack bot was saved on the other, and a disconnected bot
+  came back. Every save now rereads the file under a lock shared across
+  processes and changes only its own provider. ([#6844])
 
 ### Security
 
@@ -11644,5 +11666,8 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6702]: https://github.com/bytedance/deer-flow/pull/6702
 [#6706]: https://github.com/bytedance/deer-flow/pull/6706
 [#6746]: https://github.com/bytedance/deer-flow/pull/6746
+[#6781]: https://github.com/bytedance/deer-flow/pull/6781
+[#6785]: https://github.com/bytedance/deer-flow/pull/6785
 [#6798]: https://github.com/bytedance/deer-flow/pull/6798
 [#6836]: https://github.com/bytedance/deer-flow/pull/6836
+[#6844]: https://github.com/bytedance/deer-flow/pull/6844

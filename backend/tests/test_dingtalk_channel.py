@@ -22,8 +22,8 @@ from app.channels.dingtalk import (
     _DingTalkMessageHandler,
     _extract_text_from_rich_text,
     _is_dingtalk_command,
-    _normalize_allowed_users,
     _normalize_conversation_type,
+    _parse_allowed_users,
 )
 from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
@@ -120,32 +120,55 @@ class TestDingTalkMessageHandlerSdkContract:
 
 
 # ---------------------------------------------------------------------------
-# _normalize_allowed_users tests
+# _parse_allowed_users tests
 # ---------------------------------------------------------------------------
 
 
-class TestNormalizeAllowedUsers:
-    def test_none_returns_empty(self):
-        assert _normalize_allowed_users(None) == set()
+class TestParseAllowedUsers:
+    @pytest.mark.parametrize("allowed_users", [None, [], (), set(), frozenset(), "", " "])
+    def test_unset_or_empty_allows_everyone_quietly(self, allowed_users, caplog):
+        with caplog.at_level(logging.WARNING, logger="app.channels.dingtalk"):
+            assert _parse_allowed_users(allowed_users) is None
+        assert caplog.records == []
 
-    def test_empty_list_returns_empty(self):
-        assert _normalize_allowed_users([]) == set()
+    @pytest.mark.parametrize("collection", [list, tuple, set, frozenset])
+    def test_listed_staff_ids(self, collection):
+        assert _parse_allowed_users(collection(["user1", " user2 "])) == {"user1", "user2"}
 
-    def test_list_of_strings(self):
-        result = _normalize_allowed_users(["user1", "user2"])
-        assert result == {"user1", "user2"}
-
-    def test_single_string(self):
-        result = _normalize_allowed_users("user1")
-        assert result == {"user1"}
+    def test_single_string_is_one_entry(self):
+        assert _parse_allowed_users("user1") == {"user1"}
 
     def test_numeric_values_converted_to_string(self):
-        result = _normalize_allowed_users([123, 456])
-        assert result == {"123", "456"}
+        assert _parse_allowed_users([123, 456]) == {"123", "456"}
 
-    def test_scalar_treated_as_single_value(self):
-        result = _normalize_allowed_users(12345)
-        assert result == {"12345"}
+    def test_numeric_scalar_is_one_entry(self):
+        assert _parse_allowed_users(12345) == {"12345"}
+
+    @pytest.mark.parametrize("allowed_users", ["user1,user2", ","])
+    def test_scalar_with_separators_stays_one_literal_id_and_warns(self, allowed_users, caplog):
+        with caplog.at_level(logging.WARNING, logger="app.channels.dingtalk"):
+            assert _parse_allowed_users(allowed_users) == {allowed_users}
+        assert "YAML list" in caplog.text
+
+    def test_invalid_entries_are_dropped_with_a_warning(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="app.channels.dingtalk"):
+            assert _parse_allowed_users(["user1", True, 4.2, None, "  "]) == {"user1"}
+        assert "True" in caplog.text
+        assert "4.2" in caplog.text
+        assert not any(record.levelno == logging.ERROR for record in caplog.records)
+
+    @pytest.mark.parametrize(
+        "allowed_users",
+        [[""], ["", "  "], [None], [True], {"user1": True}, {}, True, 4.2],
+        ids=["blank-entry", "blank-entries", "null-entry", "bool-entry", "mapping", "empty-mapping", "bool-scalar", "float-scalar"],
+    )
+    def test_allowlist_without_a_valid_staff_id_denies_everyone(self, allowed_users, caplog):
+        # A mapping must not authorize its keys, and a list whose entries are
+        # all blank (e.g. ``[$DINGTALK_STAFF_ID]`` with the variable set to an
+        # empty string) must not turn into "allow all".
+        with caplog.at_level(logging.ERROR, logger="app.channels.dingtalk"):
+            assert _parse_allowed_users(allowed_users) == frozenset()
+        assert any(record.levelno == logging.ERROR for record in caplog.records)
 
 
 # ---------------------------------------------------------------------------
@@ -645,6 +668,28 @@ class TestAllowedUsersFiltering:
             channel._bind_connection_from_connect_code.assert_awaited_once()
             bus.publish_inbound.assert_not_awaited()
             assert bus.inbound_queue.empty()
+
+        _run(go())
+
+    @pytest.mark.parametrize(
+        ("allowed_users", "admitted"),
+        [([""], False), ({"user_001": True}, False), ([" user_001 "], True), (frozenset({"user_001"}), True)],
+        ids=["blank-entry", "mapping", "padded-entry", "frozenset"],
+    )
+    def test_allowlist_gate_uses_parsed_staff_ids(self, allowed_users, admitted):
+        async def go():
+            bus = MessageBus()
+            bus.publish_inbound = AsyncMock()
+            channel = DingTalkChannel(bus, config={"allowed_users": allowed_users})
+            channel._client_id = "test_key"
+            channel._main_loop = asyncio.get_event_loop()
+            channel._running = True
+            channel._send_running_reply = AsyncMock()
+
+            channel._on_chatbot_message(_make_chatbot_message(sender_staff_id="user_001"))
+
+            await asyncio.sleep(0.1)
+            assert (not bus.inbound_queue.empty()) is admitted
 
         _run(go())
 
@@ -1687,7 +1732,7 @@ class TestCardMode:
             mock_message.rich_text_content = None
 
             channel._main_loop = asyncio.get_running_loop()
-            channel._allowed_users = set()
+            channel._allowed_users = None
             channel._running = True
             channel._send_running_reply = AsyncMock()
 
