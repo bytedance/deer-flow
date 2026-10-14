@@ -362,3 +362,20 @@ its Request constructor does not consume the worker Headers instance like native
 fetch; keep actual selector/body/signal assertions. Shanghai frontend #6 verifies
 this foundation and full check, not automatic workspace/client/cache switching.
 All frontend tests/typecheck here run in Shanghai, not local Docker/Node runtime.
+
+
+The SDK factory accepts an explicit `WorkspaceRequestScope` as its second
+argument: actor ID, canonical workspace UUID and AbortSignal for one page
+lifetime. It snapshots metadata and memoizes only by that lifetime object;
+never mutate an existing scope to switch workspaces. Main, run-creation and
+recovery transports all bind the same selector and combined signal. Creation
+keeps zero retries; recovery GETs retain the native retry budget. Workspace
+streams use `onDisconnect: "continue"` so detaching a page does not implicitly
+cancel its background Run. Stream and join/recovery options must carry the
+combined lifetime signal into the SDK's own reconnect loop, not just fetch.
+SDK 1.6 classifies fetch cancellation by message prefix: normalize aborted
+fetch failures to an Error named AbortError with an AbortError-prefixed message
+so it never waits through network retry backoff. Keep native unscoped/demo
+behavior unchanged. SDK reconnect markers are actor/workspace/thread-keyed;
+the React hook's own resumable storage and provider/cache integration remain
+unwired and must not be described as full tab isolation.

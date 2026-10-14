@@ -74,3 +74,32 @@ Next slices must verify immutable request scopes, SDK streams/recovery, per-spac
 query/cache lifecycle and native-style selection. M7/M11 still require actual
 backend browser flows; M4/M5/M11 still require signed producers, physical sandbox
 and NAS/fault proof. Keep tenant activation closed until those gates pass.
+
+
+## Explicit SDK workspace scope
+
+`getAPIClient(false, scope)` takes `{ actorUserId, workspaceId, signal }` for one
+immutable client lifetime. The factory copies metadata, rejects subsequent
+metadata mutation on reuse and keeps old instances bound to the original
+selector. This selector is request metadata, never a substitute for server
+authentication, membership or policy validation. API origin/prefix and redirects
+are fenced before credentials and selector dispatch. Every SDK transport,
+including zero-retry creation and normally retried recovery GET, uses the bound
+fetch. A dead lifetime refuses new dispatch, late HTTP results and old stream
+frames. SDK stream/join options carry the combined signal so cancelled streams
+do not enter the internal reconnect backoff. Aborted fetch errors are normalized
+for SDK 1.6's message-prefix cancellation classification.
+
+Workspace streams force `onDisconnect: "continue"`; explicit user cancellation
+still uses the native cancel API. SDK gap-recovery markers include actor,
+workspace and thread. Legacy callers retain their native singleton and storage
+behavior. These explicit APIs are not yet automatically selected by the React
+workspace tree. Shared REST capture, per-lifetime QueryClient, logout/account
+reset, React SDK resumable storage, selector UI, actual server capability and
+real authenticated two-tab testing are remaining work. Tenant activation stays
+closed; this slice does not prove remote Run/NAS isolation.
+
+The late-HTTP check currently rejects a Response returned after cancellation.
+A Response accepted before cancellation may still be parsing; post-parse state
+publication fences belong to the pending REST/provider integration. Do not
+interpret the transport check as proof that all hook/cache updates are fenced.

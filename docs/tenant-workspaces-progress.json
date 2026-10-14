@@ -1788,5 +1788,90 @@
       "real browser + actual authenticated backend two-tab acceptance M7/M11, not proved by happy-dom/HTTP doubles",
       "M4-M11 and full tenant activation; goal remains active and incomplete"
     ]
+  },
+  "frontend_sdk_scope": {
+    "job": "deerflow-tenant-frontend",
+    "status": "explicit API foundation verified; React wiring incomplete",
+    "history": [
+      {
+        "build": 7,
+        "result": "FAILURE",
+        "build_seconds": 16.08,
+        "archive_sha256": "64bb493482caba1fa31ea3e7b0a2dd7be628a09d490bd9004ea98f0b6ba25546",
+        "reason": "business RED: shared client, missing selectors in creation/reload/resume, accepted late HTTP response"
+      },
+      {
+        "build": 8,
+        "result": "FAILURE",
+        "build_seconds": 23.179,
+        "archive_sha256": "4ab6191e9f1bb6369ea88fd89fbc99325d00894accfcd5c518401f530d894734",
+        "reason": "37 passed, one timed out: SDK retries default DOMException abort message"
+      },
+      {
+        "build": 9,
+        "result": "FAILURE",
+        "build_seconds": 19.172,
+        "archive_sha256": "ed4991524e84b0f6969a820552098fb320d5d17b036b0bed3948ee19ca1b6d35",
+        "reason": "same cancellation timeout; diagnostic never crossed HTTP-rejection boundary; locked SDK confirms message-prefix retry classification"
+      },
+      {
+        "build": 10,
+        "result": "FAILURE",
+        "build_seconds": 23.421,
+        "archive_sha256": "4fb9ceee10cc05cfcad3fa56091cbfdcbea47285fd28dd1d92a5ef37b18794d9",
+        "reason": "38 passed; modified-file Prettier failure"
+      },
+      {
+        "build": 11,
+        "result": "FAILURE",
+        "build_seconds": 247.984,
+        "archive_sha256": "38525083476590b2a0af7d89717d7033bb93a0bde26cdefe5c0814b2e9888d6e",
+        "reason": "38 passed and formatting clean; full ESLint found RequestInfo default stringification in test"
+      },
+      {
+        "build": 12,
+        "result": "FAILURE",
+        "build_seconds": 0.857,
+        "archive_sha256": "01d3dd7a342af68a89b9d38f5a3afdbc222381ed93a44eae274736d8e2a5b4c0",
+        "reason": "no tests started: Jenkins customWorkspace @2 AccessDenied; reconfiguration dropped serialized job property while previous build still ran; generator now persists DisableConcurrentBuildsJobProperty"
+      },
+      {
+        "build": 13,
+        "result": "FAILURE",
+        "build_seconds": 23.127,
+        "archive_sha256": "b0d5f7a2a1dbf0462b1abf399e90c3d9575c922a3235812b865a281ecbb56913",
+        "reason": "38 passed including cancelled transport reconnect case; test URL branch needed formatting"
+      },
+      {
+        "build": 14,
+        "result": "FAILURE",
+        "build_seconds": 337.939,
+        "archive_sha256": "361f2330ebc82eb9719074575b3ddce6c6d03e687228903c8b0708333df855d3",
+        "reason": "38 passed and formatting/full ESLint clean; TypeScript found afterEach returned RstestUtilities; callback now has explicit void body"
+      }
+    ],
+    "green": {
+      "build": 15,
+      "result": "SUCCESS",
+      "tests_passed": 38,
+      "tests_added": 3,
+      "test_seconds": 3.67,
+      "build_seconds": 353.057,
+      "archive_sha256": "a0be77df68e61fdc18c7734c6f48c89beda9f12ce48a3e34a7b8f15049e6fdfd",
+      "checks": "38 behavior checks, changed-file Prettier, full pnpm check (ESLint and TypeScript)"
+    },
+    "source_sha256": {
+      "frontend/src/core/api/api-client.ts": "a8e3302fcf452f3800c5e727f11d859f44771f7613a1b88a96f61f3dabe2c511",
+      "frontend/src/core/workspaces/request-scope.ts": "b0fa6b15b9622031f92faaebe5187e00a05d05336a2875d79190364e174ec279",
+      "frontend/tests/unit/core/workspaces/sdk.test.ts": "d611f34ce9926e84802b4c7923c77729209f1550fef8e13d65351df50e05f13d"
+    },
+    "scope": "Immutable explicit actor/workspace/lifetime client; native main, zero-retry creation and retry-preserving recovery transport; same-scope gap state/resume; actor/workspace reconnect marker; late Response and stream rejection; scoped streams continue background Run on disconnect; combined SDK internal reconnect signal; abort-error classification compatible with locked SDK 1.6",
+    "cleanup": "frontend #7-#15 terminal; exact owned containers/networks and SDK/source/format/reader probes independently empty; frozen-lock private dependency cache retained",
+    "remaining": [
+      "automatic tab-local scope and shared REST capture",
+      "per-lifetime QueryClient and logout/account/switch publication fences, including post-parse HTTP results",
+      "React SDK resumable sessionStorage integration, native-style selector and full UI",
+      "real authenticated backend browser two-tab acceptance; M4-M11; activation closed"
+    ]
   }
 }

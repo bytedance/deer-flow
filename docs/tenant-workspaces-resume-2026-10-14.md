@@ -378,3 +378,26 @@ cross-tab last-workspace cookie/localStorage to retarget another tab. Switching
 must detach old observation without automatically cancelling its background Run;
 confirm native SDK/on_disconnect behavior during M4 integration. Preserve full
 M0-M11 scope and activation gates; no push/deployment.
+
+
+M3 explicit SDK workspace checkpoint: frontend #7 RED reproduced shared clients,
+missing creation/state/resume selectors and late HTTP acceptance. #8/#9 traced
+the abort timeout to locked SDK 1.6's message-prefix retry classification;
+cancelled fetches now normalize AbortError and stream/join carry the lifetime
+signal into the internal reconnect loop. #10 formatting, #11 test URL lint,
+#12 Jenkins @2 permission/setup, #13 formatting and #14 cleanup-callback type
+history remain in JSON.
+#15 SUCCESS passes 38 checks (three new plus 35 existing), modified-file Prettier
+and full frontend pnpm check. Exact runtime/test bytes match its archive and
+#7-#15 plus source/format/reader probes have independently empty owned inventories.
+Jenkins reconfiguration now retains the no-concurrent-build property.
+
+The explicit SDK API fixes clients to copied actor/workspace metadata, all SDK
+transports/replay/recovery, actor/workspace reconnect markers, late Response and
+stream cancellation. Scoped onDisconnect continues background Runs; explicit
+cancel retains native behavior. Legacy/demo mode remains native. This is still
+not React workspace integration: shared REST capture, tab-local provider,
+per-lifetime query/cache reset, logout/switch/post-parse publication fences and
+React resumable storage are next. Keep original DeerFlow styling as approved.
+Real authenticated two-tab browser acceptance, M4-M11 and physical isolation
+remain required; M3 unchecked, activation closed, no deployment/push.
