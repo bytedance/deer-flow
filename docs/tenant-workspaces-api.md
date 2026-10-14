@@ -808,3 +808,42 @@ bytes. Archive/source bytes match, and #85/#86 exact resources are empty.
 PUT host/remote publication and filesystem races, frontend switching, normal
 producers/factories and M4-M11 remain. This entry identity fix is not continuous
 credential/role/physical-transport revocation; tenant activation stays closed.
+
+## Mounted artifact editing (partial M3)
+
+PUT artifact binds the original private entry before owner admission. Mounted
+host writes retain native artifact_write reservation and validate live SQL
+workspace/actor/thread plus original nonce under publish_under_live_lock. Only
+bounded file IO is inside this lock; no remote sandbox API call is held there.
+The POSIX publisher walks absolute directory components using O_DIRECTORY and
+O_NOFOLLOW, pins the parent descriptor, opens a regular single-link file without
+following links, bounds and validates UTF-8 bytes, and checks the requested digest
+and file identity at final publication. A unique owned temp file is flushed and
+atomically replaced relative to that same directory; cleanup only unlinks a temp
+that was actually created. Successful publication invalidates the native digest
+cache. Unbound native remote sync/rollback/cancellation remains unchanged.
+
+Current scoped admission refuses non-mounted providers or native remote executor
+hosts with 503 before acquisition/mutation. These paths still require the M4/M5
+scoped worker/provider protocol; this is an unfinished integration gate, not removal
+of the remote requirement. Unsupported file-descriptor platforms also fail closed.
+No local Docker/pytest, real sandbox execution or production NAS proof is implied.
+
+#87 RED found missing entry scope. #88 passed eight native cases but its HTTP
+fixture omitted the actual LocalSandboxProvider binding for artifacts and tried
+to load absent production config.yaml. Final revision adds only that fixture
+binding, matching uploads. #89 passed ten checks in 51.07s: actual SQLite/PostgreSQL
+JWT/SQL/file mains and eight native editor cases. Correct personal/team bytes,
+digest/size, stale 412, peer/foreign/entry denial, policy/nonce withdrawal before
+final publication and changed-revision preservation are verified. An actual parent
+directory replacement with a symlink is refused without changing either original
+or outside bytes or leaving outside temporary files. Unsupported remote acquisition
+is not called. Source/archive bytes match; #87-#89 exact resources are empty.
+
+This proves controlled pre-publication withdrawal and path replacement, not
+uncooperative concurrent writers, distributed filesystem/crash/cancellation or
+physical STOP. Rename acknowledgement failures return unconfirmed 503 without
+backend retry/rollback; durable unknown-outcome reconciliation/admission fencing
+still needs M11 proof. A revocation committed after an already authorized write is
+not retroactive rollback. Full credential/role checks, sandbox/NAS isolation,
+remote producers/factories, frontend and complete M0-M11 remain; activation closed.

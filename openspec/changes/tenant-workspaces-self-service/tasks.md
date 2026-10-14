@@ -119,3 +119,14 @@ text/Range/ETag regressions. Capture before owner check, recheck before file
 preparation; old request 404 and fresh request valid. Exact resources empty,
 source/archive bytes match. PUT/remote/filesystem/client and M4-M11 still required;
 M3 remains unchecked, activation closed.
+
+M3 mounted artifact edit checkpoint: #87 missing-scope RED; #88 fixture config
+failure (eight native regressions passed); #89 GREEN (10 passed, 51.07s). Both
+SQL/JWT mains verify actual space bytes, CAS/nonce/policy refusal and parent
+symlink replacement preserving protected bytes. Bound publication is drained
+under original-thread SQL fencing with descriptor-relative atomic replacement;
+unbound native remote/rollback/cancellation remains passing. Scoped remote hosts
+and non-mounted providers still need M4/M5 protocol (currently 503); unsupported
+platform and uncertain filesystem outcomes do not bypass gates. Physical/NAS/
+distributed fault/unknown-outcome reconciliation and client/M4-M11 remain required.
+Exact resources empty, sources match archive; M3 unchecked and activation closed.

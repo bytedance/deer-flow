@@ -19,7 +19,8 @@ from pydantic import BaseModel, Field
 from app.gateway.authz import SandboxRequestLease, require_permission, try_acquire_sandbox_for_request
 from app.gateway.deps import get_run_manager, get_thread_store
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
-from app.gateway.path_utils import normalize_outputs_virtual_path, resolve_outputs_confined_path, resolve_thread_virtual_path
+from app.gateway.path_utils import OUTPUTS_VIRTUAL_ROOT, normalize_outputs_virtual_path, resolve_outputs_confined_path, resolve_thread_virtual_path
+from app.gateway.workspaces.artifact_edit import replace_mounted_artifact
 from app.gateway.workspaces.checkpoints import capture_checkpoint_thread_identity
 from app.gateway.workspaces.dependencies import workspace_resource_scope
 from app.gateway.workspaces.file_response import WorkspaceThreadResponse
@@ -27,6 +28,7 @@ from deerflow.authz.sandbox_authz import safe_app_config
 from deerflow.authz.workspace import get_current_workspace
 from deerflow.config.paths import make_safe_user_id
 from deerflow.persistence.thread_meta import ThreadMetaRepository
+from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 from deerflow.runtime import ConflictError, ThreadOperationKind
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
@@ -551,6 +553,7 @@ async def _get_artifact_response(thread_id: ThreadId, path: str, request: Reques
     summary="Update Artifact File",
     description="Replace an existing UTF-8 text artifact after verifying that its content has not changed.",
 )
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("threads", "write", owner_check=True, require_existing=True)
 async def update_artifact(
     thread_id: ThreadId,
@@ -567,59 +570,92 @@ async def update_artifact(
     denied ``sandbox:execute`` skips sandbox sync and updates only the host file.
     """
     virtual_path = _normalize_editable_artifact_path(path)
+    context = get_current_workspace()
+    incarnation = await capture_checkpoint_thread_identity(request, thread_id)
     raw_owner_user_id = get_trusted_internal_owner_user_id(request)
-    effective_user_id = make_safe_user_id(raw_owner_user_id) if raw_owner_user_id else get_effective_user_id()
+    effective_user_id = context.actor_user_id if context is not None else (make_safe_user_id(raw_owner_user_id) if raw_owner_user_id else get_effective_user_id())
 
     sandbox_lease: SandboxRequestLease | None = None
     sandbox = None
     try:
         async with reserve_artifact_write(request, thread_id, user_id=effective_user_id):
-            actual_path = await asyncio.to_thread(
-                resolve_outputs_confined_path,
-                thread_id,
-                virtual_path,
-                user_id=effective_user_id,
-            )
-            current, file_stat = await asyncio.to_thread(
-                _load_editable_artifact,
-                actual_path,
-                virtual_path,
-                body.expected_sha256,
-            )
-            updated = _encode_artifact_update(body.content)
+            if context is not None:
+                sandbox_provider = get_sandbox_provider()
+                if not bool(getattr(sandbox_provider, "uses_thread_data_mounts", False)) or getattr(request.app.state, "native_run_admission_host", None) is not None:
+                    # Remote edits require a scoped provider/worker protocol;
+                    # never pretend a host-only update synchronized remote bytes.
+                    raise HTTPException(status_code=503, detail="Workspace editing is not available for this execution environment")
+                updated = _encode_artifact_update(body.content)
+                repository = get_thread_store(request)
+                if not isinstance(repository, ThreadMetaRepository):
+                    raise HTTPException(status_code=503, detail="Workspace editing requires persistent thread scope")
 
-            sandbox_provider = get_sandbox_provider()
-            if not bool(getattr(sandbox_provider, "uses_thread_data_mounts", False)):
-                # Phase 3: enforce sandbox:execute before acquiring — a denied
-                # role skips the sandbox sync; the host-side artifact update
-                # still completes (the agent cannot consume the sandbox copy
-                # anyway when sandbox execution is denied).
-                sandbox_lease = await try_acquire_sandbox_for_request(
-                    request,
-                    sandbox_provider,
+                def publish_file():
+                    from deerflow.config.paths import get_paths
+
+                    replace_mounted_artifact(
+                        get_paths().sandbox_outputs_dir(thread_id, user_id=effective_user_id),
+                        virtual_path.removeprefix(OUTPUTS_VIRTUAL_ROOT + "/"),
+                        updated,
+                        expected_sha256=body.expected_sha256,
+                        max_bytes=MAX_EDITABLE_ARTIFACT_BYTES,
+                        temp_prefix=_ARTIFACT_EDIT_TEMP_PREFIX,
+                    )
+                    _sha256_of_file_cached.cache_clear()
+
+                async def publish():
+                    await asyncio.to_thread(publish_file)
+
+                await repository.publish_under_live_lock(thread_id, user_id=effective_user_id, incarnation=incarnation, publish=publish)
+            else:
+                actual_path = await asyncio.to_thread(
+                    resolve_outputs_confined_path,
                     thread_id,
+                    virtual_path,
                     user_id=effective_user_id,
-                    app_config=safe_app_config(),
-                    owner_prefix="gateway:artifact",
                 )
-                sandbox = sandbox_lease.sandbox
-                if not sandbox_lease.denied and sandbox is None:
-                    raise RuntimeError("Failed to acquire sandbox for artifact update")
+                current, file_stat = await asyncio.to_thread(
+                    _load_editable_artifact,
+                    actual_path,
+                    virtual_path,
+                    body.expected_sha256,
+                )
+                updated = _encode_artifact_update(body.content)
 
-            # A cancelled request must not release the thread-operation reservation
-            # or sandbox request lease while either mutation is still running in a
-            # worker thread. Drain the complete remote/local transaction so it
-            # reaches a coherent commit or rollback before cancellation propagates.
-            await await_drained(
-                _commit_artifact_update(
-                    sandbox=sandbox,
-                    virtual_path=virtual_path,
-                    actual_path=actual_path,
-                    current=current,
-                    updated=updated,
-                    file_stat=file_stat,
+                sandbox_provider = get_sandbox_provider()
+                if not bool(getattr(sandbox_provider, "uses_thread_data_mounts", False)):
+                    # Phase 3: enforce sandbox:execute before acquiring — a denied
+                    # role skips the sandbox sync; the host-side artifact update
+                    # still completes (the agent cannot consume the sandbox copy
+                    # anyway when sandbox execution is denied).
+                    sandbox_lease = await try_acquire_sandbox_for_request(
+                        request,
+                        sandbox_provider,
+                        thread_id,
+                        user_id=effective_user_id,
+                        app_config=safe_app_config(),
+                        owner_prefix="gateway:artifact",
+                    )
+                    sandbox = sandbox_lease.sandbox
+                    if not sandbox_lease.denied and sandbox is None:
+                        raise RuntimeError("Failed to acquire sandbox for artifact update")
+
+                # A cancelled request must not release the thread-operation reservation
+                # or sandbox request lease while either mutation is still running in a
+                # worker thread. Drain the complete remote/local transaction so it
+                # reaches a coherent commit or rollback before cancellation propagates.
+                await await_drained(
+                    _commit_artifact_update(
+                        sandbox=sandbox,
+                        virtual_path=virtual_path,
+                        actual_path=actual_path,
+                        current=current,
+                        updated=updated,
+                        file_stat=file_stat,
+                    )
                 )
-            )
+    except WorkspaceAccessDenied:
+        raise
     except ConflictError:
         raise HTTPException(status_code=409, detail="Thread has a run in flight. Save after the run finishes.") from None
     except HTTPException:

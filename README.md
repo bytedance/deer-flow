@@ -2999,3 +2999,8 @@ runtime integration still gate tenant activation.
 now refuses requests whose conversation is replaced during owner admission,
 while preserving native Range and ETag behavior. File editing, frontend and full
 runtime integration remain pending before tenant activation.
+
+[Mounted artifact editing](docs/tenant-workspaces-api.md#mounted-artifact-editing-partial-m3)
+now checks private workspace and conversation identity at publication while
+preserving native digest checks. Scoped remote editing, frontend and production
+filesystem/fault acceptance remain unfinished gates before tenant activation.

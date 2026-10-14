@@ -496,3 +496,14 @@ nonce again before file preparation; do not reacquire a fresh nonce after owner
 checks and treat it as original authority. #86 proves old-admission replacement
 refusal and fresh valid download while native Range/ETag remains passing. PUT
 and continuous credential/transport gates remain separate unfinished work.
+
+Scoped artifact PUT uses the original private entry nonce and the existing
+artifact_write reservation. Final mounted-file mutation is a bounded callback
+under ThreadMetaRepository.publish_under_live_lock; workspaces/artifact_edit.py
+pins directory descriptors, refuses links, rechecks digest/identity and replaces
+relative to the pinned parent. Never hold this lock over remote sandbox APIs.
+Unbound native synchronization remains unchanged. Scoped remote/non-mounted
+providers currently fail 503 and require M4/M5 protocol before full acceptance.
+Unknown filesystem outcomes require later persistent reconciliation/admission
+proof; a 503 is not evidence of rollback. #89 verifies controlled two-dialect
+HTTP/SQL/byte cases, not production OS/NAS or full fault isolation.

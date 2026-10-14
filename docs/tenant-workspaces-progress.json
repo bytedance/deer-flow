@@ -1551,8 +1551,8 @@
     "work_package": "M3",
     "status": "partial",
     "last_verified_job": "deerflow-tenant-m1-postgres",
-    "last_verified_build": 86,
-    "next": "scoped PUT artifact final publication (mounted host + remote provider protocol), then frontend workspace selection/caches; full M0-M11 remains required",
+    "last_verified_build": 89,
+    "next": "frontend workspace selection/request/cache integration M3; scoped remote edit/physical fencing M4/M5 and full fault acceptance M11 remain mandatory under M0-M11",
     "tenant_activation": "closed",
     "deployment": "none"
   },
@@ -1656,6 +1656,50 @@
       "frontend switching/caches, normal Run/event producers/factories M4",
       "continuous credential/role/physical transport and full fault evidence M6/M11",
       "M0-M11 acceptance and activation remain incomplete"
+    ]
+  },
+  "workspace_mounted_artifact_writes": {
+    "status": "partial_M3_verified_mounted_write_main",
+    "job": "deerflow-tenant-m1-postgres",
+    "red": {
+      "build": 87,
+      "result": "FAILURE",
+      "tests_failed": 2,
+      "elapsed_seconds": 40.68,
+      "archive_sha256": "a77f0b06bc667959535f12828fe95149b58f4b151b2b3ca63f60c1c7a72997aa",
+      "reason": "native PUT owner check lacked required workspace scope"
+    },
+    "intermediate": [
+      {
+        "build": 88,
+        "result": "FAILURE",
+        "tests_failed": 2,
+        "tests_passed": 8,
+        "elapsed_seconds": 40.22,
+        "archive_sha256": "f3a6d23f773e1f7dcf393261e346eb044e95e47f4f5ce4d6d2085ec9709f212a",
+        "reason": "isolated HTTP fixture omitted artifact get_sandbox_provider binding and tried absent production config.yaml; final changes only add real LocalSandboxProvider fixture binding already used by uploads"
+      }
+    ],
+    "green": {
+      "build": 89,
+      "result": "SUCCESS",
+      "tests_passed": 10,
+      "elapsed_seconds": 51.07,
+      "archive_sha256": "eb3637110b37931740820b700460d4019631ea5c83bde3e9babc5da7cc625100",
+      "command": "python -m pytest tests/test_workspace_http.py tests/test_artifacts_router.py::test_update_artifact_replaces_utf8_text_atomically tests/test_artifacts_router.py::test_update_artifact_rejects_stale_revision_without_changing_file tests/test_artifacts_router.py::test_update_artifact_rejects_symlink_escaping_outputs tests/test_artifacts_router.py::test_update_artifact_syncs_non_mounted_sandbox tests/test_artifacts_router.py::test_update_artifact_rolls_back_remote_when_local_replace_fails tests/test_artifacts_router.py::test_update_artifact_cancellation_drains_remote_sync_before_releasing_write tests/test_artifacts_router.py::test_update_artifact_reports_active_run_conflict tests/test_artifacts_router.py::test_update_artifact_rejects_binary_file -q --tb=short --no-showlocals"
+    },
+    "source_sha256": {
+      "backend/app/gateway/workspaces/artifact_edit.py": "2b073b0becef06357770f6459238a6bb3cc4a29792fb9891d7cd291ece6cb1e0",
+      "backend/app/gateway/routers/artifacts.py": "eb68de04ae2c7d23e5e4b6b206a92c74b60b90c3fb33de746f6203b9a74e87b6",
+      "backend/tests/test_workspace_http.py": "67d043f9cb8468266c6d96b4fb19130fac0c1eb8b7a76ad1ac57c46eb87c8647"
+    },
+    "cleanup": "#87/#88/#89 exact ownership-labelled container/network inventories independently empty",
+    "warning": "existing Starlette TestClient/httpx deprecation warning",
+    "remaining": [
+      "scoped non-mounted remote editor and native executor host edit/physical STOP protocol M4/M5; currently 503 before acquiring/mutating",
+      "real production sandbox/NAS isolation and filesystem capability acceptance M5/M11; LocalSandboxProvider tests are not OS isolation proof",
+      "continuous credential/role/reset and multiprocess/fault/cancellation/crash/uncertain-NFS persistent reconciliation and admission fencing M6/M11",
+      "frontend transport/cache switching and complete M0-M11 acceptance; activation closed"
     ]
   }
 }

@@ -1,6 +1,7 @@
 """Real JWT/RBAC/CSRF and native SQL for managed workspace onboarding."""
 
 import asyncio
+import hashlib
 import importlib
 import importlib.util
 import io
@@ -91,6 +92,7 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
     monkeypatch.setattr(context_compaction, "get_app_config", lambda: configuration)
     monkeypatch.setattr(paths_module, "_paths", Paths(tmp_path / "files"))
     monkeypatch.setattr(uploads, "get_sandbox_provider", lambda: LocalSandboxProvider())
+    monkeypatch.setattr(artifacts, "get_sandbox_provider", lambda: LocalSandboxProvider())
     monkeypatch.setattr(auth_config, "_auth_config", auth_config.AuthConfig(jwt_secret="synthetic-isolated-workspace-http-key-64-characters-for-test-only!!"))
     monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
     driver = "sqlite+aiosqlite" if native_engine.dialect.name == "sqlite" else "postgresql+asyncpg"
@@ -952,6 +954,87 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                     assert delayed_archive_response.status_code == 404, delayed_archive_response.text
                     assert archive_files[-1].closed, "pre-header denial leaked native archive"
                 assert all(handle.closed for handle in archive_files)
+
+                # Edit actual mounted artifact bytes, keeping native digest/CAS behavior.
+                for label, headers, thread_id, workspace in (("team", team_headers, delete_ids["team"], team), ("personal", {}, delete_ids["personal"], personal)):
+                    output = tmp_path / "files" / "workspaces" / workspace / "users" / identities["alice"] / "threads" / thread_id / "user-data" / "outputs" / "report.md"
+                    edit_url = "/api/threads/" + thread_id + "/artifacts/mnt/user-data/outputs/report.md"
+                    before = output.read_bytes()
+                    updated_bytes = (label + " edited report").encode()
+                    edit_body = {"content": updated_bytes.decode(), "expected_sha256": hashlib.sha256(before).hexdigest()}
+                    edited = await client.put(edit_url, headers=headers, json=edit_body)
+                    assert edited.status_code == 200 and output.read_bytes() == updated_bytes, edited.text
+                    assert edited.json()["sha256"] == hashlib.sha256(updated_bytes).hexdigest() and edited.json()["size"] == len(updated_bytes)
+                    stale = await client.put(edit_url, headers=headers, json=edit_body)
+                    assert stale.status_code == 412 and output.read_bytes() == updated_bytes, stale.text
+                team_output = tmp_path / "files" / "workspaces" / team / "users" / identities["alice"] / "threads" / delete_ids["team"] / "user-data" / "outputs" / "report.md"
+                team_edit_url = team_run_base + "/artifacts/mnt/user-data/outputs/report.md"
+                live_bytes = team_output.read_bytes()
+                live_edit_body = {"content": "must not publish", "expected_sha256": hashlib.sha256(live_bytes).hexdigest()}
+                assert (await client.put(team_edit_url, json=live_edit_body)).status_code == 404
+                as_user("bob")
+                assert (await client.put(team_edit_url, headers=team_headers, json=live_edit_body)).status_code == 404
+                as_user("alice")
+                owner_replacement["thread_id"] = delete_ids["team"]
+                assert (await client.put(team_edit_url, headers=team_headers, json=live_edit_body)).status_code == 404
+                assert team_output.read_bytes() == live_bytes
+                native_publication = app.state.thread_store.publish_under_live_lock
+                for change, expected_status in (("policy", 404), ("incarnation", 404), ("bytes", 412)):
+
+                    async def change_before_publication(*args, _change=change, **kwargs):
+                        async with sf() as session:
+                            if _change == "policy":
+                                await session.execute(sa.text("UPDATE workspaces SET policy_version=policy_version+1 WHERE id=:id"), {"id": team})
+                            elif _change == "incarnation":
+                                await session.execute(sa.update(ThreadMetaRow).where(ThreadMetaRow.thread_id == delete_ids["team"]).values(incarnation=uuid4().hex))
+                            else:
+                                team_output.write_bytes(b"new external revision")
+                            await session.commit()
+                        return await native_publication(*args, **kwargs)
+
+                    with monkeypatch.context() as patch:
+                        patch.setattr(app.state.thread_store, "publish_under_live_lock", change_before_publication)
+                        denied = await client.put(team_edit_url, headers=team_headers, json=live_edit_body)
+                        assert denied.status_code == expected_status, denied.text
+                    assert team_output.read_bytes() == (b"new external revision" if change == "bytes" else live_bytes), "refused edit overwrote protected bytes"
+                    team_output.write_bytes(live_bytes)
+                subdir = team_output.parent / "subdir"
+                subdir.mkdir()
+                (subdir / "report.md").write_bytes(live_bytes)
+                outside_dir = tmp_path / "other-space-artifacts"
+                outside_dir.mkdir()
+                (outside_dir / "report.md").write_bytes(b"foreign protected file")
+                moved_dir = team_output.parent / "subdir-original"
+
+                async def replace_parent_before_publication(*args, **kwargs):
+                    subdir.rename(moved_dir)
+                    subdir.symlink_to(outside_dir, target_is_directory=True)
+                    return await native_publication(*args, **kwargs)
+
+                try:
+                    with monkeypatch.context() as patch:
+                        patch.setattr(app.state.thread_store, "publish_under_live_lock", replace_parent_before_publication)
+                        escaped = await client.put(team_run_base + "/artifacts/mnt/user-data/outputs/subdir/report.md", headers=team_headers, json=live_edit_body)
+                        assert escaped.status_code in (400, 415), escaped.text
+                    assert (outside_dir / "report.md").read_bytes() == b"foreign protected file"
+                    assert (moved_dir / "report.md").read_bytes() == live_bytes
+                    assert list(outside_dir.iterdir()) == [outside_dir / "report.md"]
+                finally:
+                    if subdir.is_symlink():
+                        subdir.unlink()
+                    if moved_dir.exists():
+                        moved_dir.rename(subdir)
+
+                class UnsupportedRemoteEditor:
+                    uses_thread_data_mounts = False
+
+                    async def acquire_async(self, *args, **kwargs):
+                        pytest.fail("unscoped remote editor must not acquire or mutate")
+
+                with monkeypatch.context() as patch:
+                    patch.setattr(artifacts, "get_sandbox_provider", lambda: UnsupportedRemoteEditor())
+                    remote_edit = await client.put(team_edit_url, headers=team_headers, json=live_edit_body)
+                    assert remote_edit.status_code == 503 and team_output.read_bytes() == live_bytes, remote_edit.text
 
                 # Feedback writes use the entry nonce inside their SQL transaction.
                 feedback_url = team_run_base + "/runs/" + team_run + "/feedback"

@@ -261,3 +261,12 @@ nonce inside native check_access. The old request must return 404, then a new
 request must still read correct bytes. #85 failed with 200; #86 passes. This is
 separate from existing prepared-response policy withdrawal and archive close
 checks; do not replace it with a pre-denied canned owner response.
+
+Workspace editor main configures artifacts and uploads with actual local provider
+instances (no production config/credentials). After real private PUT, inspect
+bytes/digest/size; inject actual policy/nonce/revision changes just before the
+repository publication and assert old/new external bytes remain. Replace an
+actual parent directory with a symlink and inspect both original/outside files
+and outside temp inventory. Restore the directory in finally. No sandbox/model
+execution or production physical isolation is implied. Native remote tests remain
+unbound compatibility; scoped remote integration is still M4/M5.
