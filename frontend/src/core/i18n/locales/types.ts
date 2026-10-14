@@ -33,6 +33,7 @@ export interface Translations {
       | "classify"
       | "screening"
       | "retrieval"
+      | "knowledge"
       | "example",
       { title: string; description: string }
     >;

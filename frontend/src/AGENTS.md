@@ -237,6 +237,12 @@ Resolve knowledge destinations before testing the label in message and artifact
 link renderers: Sources lists use ordinary titles without a `citation:` prefix.
 
 Custom-agent settings store an optional `knowledge_scope` retrieval default.
+The shared selector queries `/api/knowledge/capabilities` for that exact Agent.
+Only catalog + dataset_filter enable dataset selection; only documents +
+document_filter enable file selection. Pending/failed capability reads must
+not issue catalog queries or permit unsupported selections. Preserve historical
+document filters when capabilities change and block Apply until the user
+explicitly changes the scope; do not silently replace them with all documents.
 `knowledgeScopeToSelection` restores all execution IDs; missing display names
 fall back to IDs. Save only edited scopes, except removing knowledge tool access
 must atomically clear the default. Catalog selection needs saved and draft access.

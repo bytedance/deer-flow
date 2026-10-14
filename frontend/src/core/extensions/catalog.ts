@@ -35,6 +35,11 @@ export const extensionCatalog = [
     package: "deerflow-extension-retrieval",
     namespace: "example.retrieval",
   },
+  {
+    key: "knowledge",
+    package: "deerflow-extension-knowledge",
+    namespace: null,
+  },
   { key: "example", package: "deerflow-extension-example", namespace: null },
 ] as const;
 

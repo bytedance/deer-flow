@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
@@ -805,6 +805,7 @@ wheels = [
 name = "deer-flow"
 version = "2.2.0.dev0"
 source = { virtual = "." }
+default-groups = ["dev", "extensions"]
 dependencies = [
     { name = "bcrypt" },
     { name = "deerflow-extension-api" },
@@ -922,7 +923,7 @@ extensions = []
 
 [[package]]
 name = "deerflow-extension-api"
-version = "0.2.6"
+version = "0.2.7"
 source = { editable = "packages/extension-api" }
 
 [[package]]
@@ -4575,8 +4576,8 @@ name = "standard-aifc"
 version = "3.13.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "audioop-lts", marker = "python_full_version >= '3.13'" },
-    { name = "standard-chunk", marker = "python_full_version >= '3.13'" },
+    { name = "audioop-lts" },
+    { name = "standard-chunk" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/c4/53/6050dc3dde1671eb3db592c13b55a8005e5040131f7509cef0215212cb84/standard_aifc-3.13.0.tar.gz", hash = "sha256:64e249c7cb4b3daf2fdba4e95721f811bde8bdfc43ad9f936589b7bb2fae2e43", size = 15240, upload-time = "2024-10-30T16:01:31.772Z" }
 wheels = [
