@@ -2504,6 +2504,7 @@ def _server_snapshot(servers: dict, name: str) -> str:
 def _seed_entry(name: str, snapshot: str, *, pool=None, binding=None):
     entry = cache_module._ServerToolCacheEntry(
         snapshot=snapshot,
+        interceptors="[]",
         result=ServerDiscoveryResult(tools=(_FakeTool(name),), pool=pool, binding=binding),
     )
     cache_module._server_tool_cache[name] = entry
@@ -2777,6 +2778,7 @@ def test_reconciliation_state_counts_server_entries_without_baseline(reconciler)
 
     cache_module._server_tool_cache["A"] = cache_module._ServerToolCacheEntry(
         snapshot="orphan",
+        interceptors="[]",
         result=ServerDiscoveryResult(tools=()),
     )
 

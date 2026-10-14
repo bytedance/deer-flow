@@ -102,13 +102,15 @@ class _ServerToolCacheEntry:
     """A published per-server discovery result and its config identity.
 
     ``snapshot`` is the server's canonical config identity at publication (see
-    ``_server_config_snapshot``) and ``result`` is the exact
-    ``ServerDiscoveryResult`` published for it. Both are excluded from ``repr``:
+    ``_server_config_snapshot``), ``interceptors`` records the normalized global
+    chain used to wrap the tools, and ``result`` is the exact
+    ``ServerDiscoveryResult`` published for it. All are excluded from ``repr``:
     the snapshot may embed resolved credentials and the result carries ownership
     handles.
     """
 
     snapshot: str = field(repr=False)
+    interceptors: str = field(repr=False)
     result: ServerDiscoveryResult = field(repr=False)
 
 
@@ -1035,10 +1037,18 @@ async def initialize_mcp_tools() -> list[BaseTool]:
                 # and the pool are both fixed under this lock, and ``_binding_matches``
                 # proves the entry still owns the pool's current binding. An
                 # untrusted revision (``loaded_revision is None``) reuses nothing.
+                # Compare each entry's wrapper chain, not the applied baseline:
+                # a claim can observe an interceptor edit after reconciliation,
+                # and a failed claim already advanced that baseline on retry.
                 if loaded_revision is not None:
                     for name in loaded_config.get_enabled_mcp_servers():
                         entry = _server_tool_cache.get(name)
-                        if entry is not None and loaded_revision.server_snapshots.get(name) == entry.snapshot and _binding_matches(entry.result, name, loaded_fingerprints.get(name), claimed_pool):
+                        if (
+                            entry is not None
+                            and loaded_revision.server_snapshots.get(name) == entry.snapshot
+                            and loaded_revision.interceptors == entry.interceptors
+                            and _binding_matches(entry.result, name, loaded_fingerprints.get(name), claimed_pool)
+                        ):
                             reusable_entries[name] = entry
         finally:
             if retired_before_claim is not None:
@@ -1078,7 +1088,7 @@ async def initialize_mcp_tools() -> list[BaseTool]:
             for name, result in discovered_groups.items():
                 snapshot = loaded_revision.server_snapshots.get(name)
                 if snapshot is not None:
-                    pending_entries[name] = _ServerToolCacheEntry(snapshot=snapshot, result=result)
+                    pending_entries[name] = _ServerToolCacheEntry(snapshot=snapshot, interceptors=loaded_revision.interceptors, result=result)
         if enabled_names and not candidate_groups:
             # No enabled server produced a successful discovery result: this is
             # a total discovery failure, not a legitimately empty configuration

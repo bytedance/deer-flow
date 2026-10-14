@@ -660,14 +660,16 @@ both actions explicitly.
 
 MCP tool discovery is cached per server. The cache is keyed by server name and
 holds, for each server, the discovered tools together with a canonical snapshot
-of that server's configuration and the pooled stdio session binding they were
-discovered against.
+of that server's configuration, the normalized global interceptor chain and the
+pooled stdio session binding they were discovered against.
 
 - **Reuse.** On every (re)initialization, a server's cached tools are reused only
-  when its configuration snapshot is unchanged *and* it still owns the process's
-  current binding. An unchanged server therefore keeps the exact same tool
-  objects and is not re-discovered, so it does not re-fetch OAuth headers or
-  respawn its stdio process. Only changed servers are re-discovered.
+  when its configuration snapshot and global interceptor chain are unchanged
+  *and* it still owns the process's current binding. The chain is checked against
+  each entry's published wrappers, including after a failed initialization attempt
+  or an edit between reconciliation and initialization. An unchanged server keeps
+  the exact same tool objects and is not re-discovered, so it does not re-fetch
+  OAuth headers or respawn its stdio process. Only changed servers are re-discovered.
 - **Invalidation.** Editing a server's configuration (connection, description,
   routing, tool prefixes, ...) drops that server's entry; deleting or disabling a
   server drops it; an explicit cache reset or a shared reset marker clears every
@@ -684,7 +686,7 @@ discovered against.
   or edit the server) to force re-discovery, which the shared reset marker
   propagates to every worker mounting the same config directory.
 
-Because reuse is scoped to one server, changing one server never re-discovers,
+Because reuse is scoped to one server, changing only one server never re-discovers,
 re-authenticates, or restarts the others.
 
 ## How It Works

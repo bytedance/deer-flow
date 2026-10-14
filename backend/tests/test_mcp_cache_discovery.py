@@ -1,10 +1,11 @@
 """Coverage for the per-server MCP discovery cache.
 
 The cache may reuse a server's already-published ``ServerDiscoveryResult`` only
-when both of these still hold:
+when all of these still hold:
 
 * the server's canonical configuration identity is unchanged
-  (``_server_config_snapshot``), and
+  (``_server_config_snapshot``),
+* the normalized global interceptor chain is unchanged, and
 * the discovery result is still owned by the pool's *current* session binding
   (``_binding_matches``).
 
@@ -206,6 +207,7 @@ def test_server_cache_entry_repr_hides_snapshot_and_ownership_handles():
     pool, binding = _pool_with_binding(name="A", fingerprint="secret-fingerprint")
     entry = _ServerToolCacheEntry(
         snapshot='{"env": {"TOKEN": "super-secret-token"}}',
+        interceptors="[]",
         result=ServerDiscoveryResult(tools=(), pool=pool, binding=binding),
     )
 
@@ -294,10 +296,12 @@ def _stdio(name: str, command: str | None = None, **extra) -> dict:
     return {"enabled": True, "type": "stdio", "command": command or f"cmd-{name}", **extra}
 
 
-def _write_config(cfg, servers: dict, *, tokens: dict | None = None) -> None:
+def _write_config(cfg, servers: dict, *, tokens: dict | None = None, interceptors: list[str] | str | None = None) -> None:
     payload: dict = {"mcpServers": servers, "skills": {}}
     if tokens is not None:
         payload["mcpLifecycle"] = {"version": 1, "servers": tokens}
+    if interceptors is not None:
+        payload["mcpInterceptors"] = interceptors
     cfg.write_text(json.dumps(payload), encoding="utf-8")
 
 
@@ -631,6 +635,106 @@ def _http(name: str, url: str | None = None) -> dict:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "before,after,fail_once",
+    [
+        ([], ["pkg.one:build"], False),
+        (["pkg.one:build"], [], False),
+        (["pkg.one:build"], ["pkg.two:build"], False),
+        (["pkg.one:build", "pkg.two:build"], ["pkg.two:build", "pkg.one:build"], False),
+        ("pkg.one:build", ["pkg.one:build"], False),
+        ([], ["pkg.one:build"], True),
+    ],
+    ids=["add", "remove", "replace", "reorder", "equivalent-spelling", "failed-claim-retry"],
+)
+async def test_claim_time_interceptor_change_rewraps_unchanged_servers(discovery_cache, monkeypatch, before, after, fail_once):
+    """A global change between reconciliation and the claim must reach every tool."""
+    from langchain_mcp_adapters.tools import convert_mcp_tool_to_langchain_tool
+    from mcp.types import CallToolResult, TextContent, Tool
+
+    cfg = discovery_cache
+    servers = {"A": _http("A"), "B": _http("B")}
+    _write_config(cfg, servers, interceptors=before)
+    discovered: list[str] = []
+    invoked: list[tuple[str, str]] = []
+    fail_discovery = False
+
+    class OfflineSession:
+        async def call_tool(self, name, arguments, **kwargs):
+            return CallToolResult(content=[TextContent(type="text", text="ok")])
+
+    class OfflineClient:
+        def __init__(self, connections, *, tool_interceptors, **kwargs):
+            self.tool_interceptors = tool_interceptors
+
+        async def get_tools(self, *, server_name):
+            discovered.append(server_name)
+            if fail_discovery:
+                raise RuntimeError("offline discovery failure")
+            return [
+                convert_mcp_tool_to_langchain_tool(
+                    OfflineSession(),
+                    Tool(name="probe", inputSchema={"type": "object", "properties": {}}),
+                    server_name=server_name,
+                    tool_interceptors=self.tool_interceptors,
+                    tool_name_prefix=True,
+                )
+            ]
+
+    def resolve_builder(path):
+        async def interceptor(request, handler):
+            invoked.append((request.server_name, path))
+            return await handler(request)
+
+        return lambda: interceptor
+
+    monkeypatch.setattr("langchain_mcp_adapters.client.MultiServerMCPClient", OfflineClient)
+    monkeypatch.setattr("deerflow.mcp.tools.resolve_variable", resolve_builder)
+    initial_tools = await cache_module.initialize_mcp_tools()
+    initial_b = next(tool for tool in initial_tools if tool.name == "B_probe")
+
+    servers["A"] = _http("A", url="https://a.test/changed")
+    _write_config(cfg, servers, interceptors=before)
+    assert cache_module.refresh_mcp_cache_if_active() is True
+    assert "B" in cache_module._server_tool_cache
+
+    real_from_file = ExtensionsConfig.from_file
+    change_pending = True
+
+    def change_before_claim(*args, **kwargs):
+        nonlocal change_pending
+        if change_pending:
+            change_pending = False
+            _write_config(cfg, servers, interceptors=after)
+        return real_from_file(*args, **kwargs)
+
+    monkeypatch.setattr(ExtensionsConfig, "from_file", change_before_claim)
+    if fail_once:
+        fail_discovery = True
+        with pytest.raises(RuntimeError, match="no results"):
+            await cache_module.initialize_mcp_tools()
+        assert cache_module._initializing_generation is None
+        fail_discovery = False
+
+    updated_tools = await cache_module.initialize_mcp_tools()
+    for tool in updated_tools:
+        await tool.ainvoke({})
+    assert invoked == [(name, path) for name in ("A", "B") for path in after]
+
+    repeated_tools = await asyncio.to_thread(cache_module.get_cached_mcp_tools)
+    assert all(current is repeated for current, repeated in zip(updated_tools, repeated_tools, strict=True))
+    invoked.clear()
+    for tool in repeated_tools:
+        await tool.ainvoke({})
+    assert invoked == [(name, path) for name in ("A", "B") for path in after]
+
+    changed = ([before] if isinstance(before, str) else before) != after
+    assert discovered == ["A", "B", *(["A", "B"] if fail_once else []), "A", *(["B"] if changed else [])]
+    updated_b = next(tool for tool in updated_tools if tool.name == "B_probe")
+    assert (updated_b is initial_b) is (not changed)
+
+
+@pytest.mark.asyncio
 async def test_interceptor_change_without_baseline_drops_retained_entries(discovery_cache, monkeypatch):
     """With no applied baseline, a retained HTTP entry must not outlive an interceptor change."""
     cfg = discovery_cache
@@ -656,6 +760,7 @@ def test_shared_reset_counts_retained_entries(discovery_cache):
 
     cache_module._server_tool_cache["A"] = cache_module._ServerToolCacheEntry(
         snapshot="orphan",
+        interceptors="[]",
         result=ServerDiscoveryResult(tools=()),
     )
 
