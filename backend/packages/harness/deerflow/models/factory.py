@@ -429,6 +429,37 @@ def _apply_stream_chunk_timeout_default(model_class: type, model_settings_from_c
     model_settings_from_config["stream_chunk_timeout"] = _DEFAULT_STREAM_CHUNK_TIMEOUT_SECONDS
 
 
+# gpt-6 family must use the OpenAI Responses API when tools are attached.
+#
+# The locked ``langchain-openai==1.2.1`` still routes tool use through
+# ``/v1/chat/completions`` for every model that is not in its hard-coded
+# ``_RESPONSES_API_ONLY_PREFIXES`` tuple (gpt-5-pro style names only). OpenAI
+# rejects function tools for the gpt-6 family on that endpoint ("Function tools
+# with reasoning_effort are not supported for gpt-6.<x> in /v1/chat/completions"),
+# so a gpt-6 model configured with ``langchain_openai:ChatOpenAI`` plus any tool
+# fails every tool call with a 400. Newer langchain-openai (1.7.1+) added a
+# ``gpt-6 + tools`` → Responses API branch; backport that behaviour here so the
+# pinned dependency does not silently break the whole gpt-6 family.
+#
+# Behaviour:
+#
+# * A ``BaseChatOpenAI`` subclass whose ``model`` starts with ``gpt-6`` gets
+#   ``use_responses_api: true`` + ``output_version: responses/v1`` injected
+#   unless the operator already configured an explicit value. An explicit
+#   ``use_responses_api: false`` is honored and left untouched.
+# * Any other model family or client (e.g. ChatAnthropic) is left untouched.
+def _apply_openai_responses_api_default(model_class: type, model_settings_from_config: dict) -> None:
+    if not issubclass(model_class, BaseChatOpenAI):
+        return
+    model_name = model_settings_from_config.get("model")
+    if not isinstance(model_name, str) or not model_name.lower().startswith("gpt-6"):
+        return
+    if "use_responses_api" in model_settings_from_config or "output_version" in model_settings_from_config:
+        return
+    model_settings_from_config["use_responses_api"] = True
+    model_settings_from_config["output_version"] = "responses/v1"
+
+
 def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *, app_config: AppConfig | None = None, attach_tracing: bool = True, model_overrides: dict | None = None, **kwargs) -> BaseChatModel:
     """Create a chat model instance from the config.
 
@@ -547,6 +578,8 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     # heuristics (stream_usage default below / stream_chunk_timeout) see the canonical endpoint key.
     _normalize_openai_base_url(model_class, model_settings_from_config)
     _apply_stream_chunk_timeout_default(model_class, model_settings_from_config)
+    # gpt-6 + tools must route through the Responses API (see the helper docstring).
+    _apply_openai_responses_api_default(model_class, model_settings_from_config)
 
     # For Codex Responses API models: map thinking mode to reasoning_effort
     if is_codex_model:

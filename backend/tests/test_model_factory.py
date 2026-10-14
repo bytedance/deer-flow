@@ -2552,3 +2552,70 @@ def test_legacy_profiles_are_untouched_by_the_contract_machinery(monkeypatch):
 
     assert captured["extra_body"] == {"thinking": {"type": "disabled"}}
     assert captured["reasoning_effort"] == "minimal"
+
+
+# ---------------------------------------------------------------------------
+# gpt-6 → OpenAI Responses API default routing (issue #6841)
+# ---------------------------------------------------------------------------
+
+
+def test_gpt6_model_routes_through_responses_api_by_default(monkeypatch):
+    """A gpt-6 model configured with ``langchain_openai:ChatOpenAI`` must receive
+    ``use_responses_api=true`` + ``output_version=responses/v1`` by default, so
+    tool use goes through ``/v1/responses`` instead of the chat-completions
+    endpoint that OpenAI rejects for the gpt-6 family (locked
+    langchain-openai==1.2.1 has no gpt-6 routing branch).
+    """
+    from langchain_openai import ChatOpenAI
+
+    model = _make_model("gpt-6.1-sol", use="langchain_openai:ChatOpenAI")
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
+    factory_module.create_chat_model(name="gpt-6.1-sol")
+
+    assert captured.get("use_responses_api") is True
+    assert captured.get("output_version") == "responses/v1"
+
+
+def test_gpt6_explicit_responses_config_not_overridden(monkeypatch):
+    """If the operator already set ``use_responses_api``/``output_version`` on a
+    gpt-6 model, the factory must not clobber the explicit value.
+    """
+    from langchain_openai import ChatOpenAI
+
+    model = ModelConfig(
+        name="gpt-6-custom",
+        display_name="GPT-6 custom",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="gpt-6.1-sol",
+        use_responses_api=False,  # operator deliberately opted out
+        output_version=None,
+    )
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
+    factory_module.create_chat_model(name="gpt-6-custom")
+
+    assert captured.get("use_responses_api") is False
+    assert captured.get("output_version") is None
+
+
+def test_non_gpt6_openai_model_not_rerouted(monkeypatch):
+    """The default must not fire for non-gpt-6 OpenAI models (gpt-4o, gpt-5, …),
+    which keep their historical chat-completions routing.
+    """
+    from langchain_openai import ChatOpenAI
+
+    model = _make_model("gpt-4o", use="langchain_openai:ChatOpenAI")
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
+    factory_module.create_chat_model(name="gpt-4o")
+
+    assert captured.get("use_responses_api") is None
+    assert captured.get("output_version") is None
