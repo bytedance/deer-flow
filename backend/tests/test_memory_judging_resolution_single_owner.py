@@ -135,7 +135,40 @@ def test_live_mode_constructs_with_mode_and_config(side, monkeypatch):
     # Each provider constructor validates its own mode spelling and refuses one
     # outside its modes, so reaching a constructed provider here is the proof
     # that the live mode was forwarded rather than dropped or defaulted.
+    assert not isinstance(provider, type), "the owner must hand back a constructed provider, not the class"
     assert isinstance(provider, entry["protocol"]), "a live mode must construct the resolved class against the side's contract"
+
+
+def test_the_owner_asks_its_caller_which_mode_means_off():
+    """``off_mode`` is load-bearing: the owner must not decide the off spelling.
+
+    A bespoke vocabulary whose off mode is not ``"off"`` has to resolve to
+    ``None`` with an unusable class path, which only holds if the owner compares
+    against the caller's ``off_mode`` rather than a literal it picked itself.
+    """
+    assert (
+        judging.resolve_judging_provider(
+            mode="quiet",
+            use="not.a.real.module:Cls",
+            config=None,
+            configuration_source="memory.example.config",
+            modes=("quiet", "live"),
+            off_mode="quiet",
+        )
+        is None
+    )
+
+    with pytest.raises(ValueError, match=r"mode must be one of \['quiet', 'live'\]") as excinfo:
+        judging.resolve_judging_provider(
+            mode="off",
+            use=_PRESCREEN,
+            config=None,
+            configuration_source="memory.example.config",
+            modes=("quiet", "live"),
+            off_mode="quiet",
+        )
+
+    assert "memory.example.config" in str(excinfo.value), "the caller's source label must reach the message"
 
 
 def test_empty_config_still_constructs(side, monkeypatch):
