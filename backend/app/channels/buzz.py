@@ -875,11 +875,21 @@ class BuzzChannel(Channel):
         comes back under the cap (the history is exhausted) or reaches the ``since`` the
         walk started from (everything at or before that is already processed).
 
+        A floor (the live REQ's ``since``, frozen in ``_backlog_floor``) is REQUIRED:
+        without one the walk has no semantic stop short of ``MAX_BACKLOG_PAGES``, which
+        is the case on a channel's first connect (no stored watermark) and again after a
+        ``MAX_CACHED_CHANNELS`` eviction of its cursor. Walking there would turn the
+        newest-2000 first-connect replay into up to ``MAX_BACKLOG_PAGES *
+        RELAY_HISTORY_LIMIT`` events per channel, so the walk is skipped and first-connect
+        behaviour stays exactly as it was. The backlog-loss case this method exists for
+        always has a watermark (``_seen_created_at`` survives reconnects and restarts),
+        so it always has a floor.
+
         Best effort by construction: every exit here (no transport, a raised ``send``,
-        the page bound, a page under the cap) only means no further page is fetched --
-        exactly the behaviour that existed before this method did. Nothing about the
-        live subscription, its filter, or the watermark is touched, so a failure can
-        never make delivery worse than it already was.
+        no floor, the page bound, a page under the cap) only means no further page is
+        fetched -- exactly the behaviour that existed before this method did. Nothing
+        about the live subscription, its filter, or the watermark is touched, so a
+        failure can never make delivery worse than it already was.
         """
         channel_id = self._page_channel(sub_id)
         if channel_id is None:
@@ -887,7 +897,9 @@ class BuzzChannel(Channel):
         oldest = self._page_oldest.get(sub_id)
         saturated = oldest is not None and self._page_seen.get(sub_id, 0) >= RELAY_HISTORY_LIMIT
         floor = self._backlog_floor.get(channel_id)
-        if not saturated or (floor is not None and oldest <= floor):
+        # No floor means no walk -- see the docstring: first connect and an evicted
+        # cursor have nothing to stop at, so they keep the newest-2000 behaviour.
+        if not saturated or floor is None or oldest <= floor:
             await self._finish_backlog_walk(channel_id, sub_id)
             return
         pages = self._backlog_pages.get(channel_id, 0)

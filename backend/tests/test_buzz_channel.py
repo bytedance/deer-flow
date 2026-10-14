@@ -2217,10 +2217,11 @@ def test_backlog_walk_stops_when_the_page_reaches_the_live_since_floor(monkeypat
 
 
 def test_backlog_walk_is_bounded_by_max_pages_and_says_what_it_dropped(monkeypatch, caplog):
-    """Without a floor the walk is bounded; hitting the bound is logged, not silent.
+    """A real walk that never reaches its floor is bounded; the bound is logged, not silent.
 
-    A relay that keeps returning full pages on a channel with no cursor could
-    otherwise be paged forever. The bound ends the walk and names the oldest
+    A relay that keeps answering "saturated" while the walk advances towards an
+    ever-lower ``until`` could otherwise be paged forever. With a floor present the
+    walk still needs a hard cap; hitting it ends the walk and names the oldest
     ``created_at`` that was not fetched, so a truncated walk never reads as a
     complete one.
     """
@@ -2230,7 +2231,8 @@ def test_backlog_walk_is_bounded_by_max_pages_and_says_what_it_dropped(monkeypat
     ch, _ = _started()
     transport = FakeTransport()
     ch._transport = transport
-    # No watermark -> no floor -> the walk is bounded only by MAX_BACKLOG_PAGES.
+    # A floor exists, but every page stays above it: only MAX_BACKLOG_PAGES stops the walk.
+    ch._seen_created_at[CHANNEL] = 1700000000
 
     asyncio.run(ch._ensure_chat_subscription(CHANNEL))
     live_sub = f"buzz-chat-{CHANNEL}"
@@ -2238,7 +2240,7 @@ def test_backlog_walk_is_bounded_by_max_pages_and_says_what_it_dropped(monkeypat
     asyncio.run(ch.handle_relay_frame(json.dumps(["EOSE", live_sub])))
 
     backlog_sub = f"buzz-backlog-{CHANNEL}"
-    for created_at in (1700000400, 1700000300):  # pages 1 and 2, each saturated, never reaching a floor
+    for created_at in (1700000400, 1700000300):  # pages 1 and 2, each saturated, never reaching the floor
         asyncio.run(ch.handle_relay_frame(json.dumps(["EVENT", backlog_sub, _event(created_at=created_at)])))
         asyncio.run(ch.handle_relay_frame(json.dumps(["EOSE", backlog_sub])))
 
@@ -2249,12 +2251,41 @@ def test_backlog_walk_is_bounded_by_max_pages_and_says_what_it_dropped(monkeypat
     assert backlog_sub in _closed_subs(transport)
 
 
+def test_no_floor_first_connect_never_walks_the_backlog(monkeypatch):
+    """A saturated page with NO floor is left alone: first connect keeps its old shape.
+
+    Without a stored watermark there is nothing for the walk to stop at, so paging
+    would fetch up to MAX_BACKLOG_PAGES * RELAY_HISTORY_LIMIT events on a channel's
+    FIRST connect -- a large multiple of the newest-2000 replay the relay already
+    sends. The walk is skipped instead, and the saturated page's own events are still
+    delivered exactly as before.
+    """
+    monkeypatch.setattr("app.channels.buzz.RELAY_HISTORY_LIMIT", 1, raising=False)
+    ch, captured = _started()
+    transport = FakeTransport()
+    ch._transport = transport
+    # No watermark -> floor is None -> no walk.
+
+    asyncio.run(ch._ensure_chat_subscription(CHANNEL))
+    live_sub = f"buzz-chat-{CHANNEL}"
+    only = _event(created_at=1700000500)
+    asyncio.run(ch.handle_relay_frame(json.dumps(["EVENT", live_sub, only])))
+    asyncio.run(ch.handle_relay_frame(json.dumps(["EOSE", live_sub])))
+
+    # The live page was saturated (it hit the cap), but no backlog page was opened ...
+    assert not [f for f in transport.sent if f[0] == "REQ" and str(f[1]).startswith("buzz-backlog-")]
+    assert CHANNEL not in ch._backlog_pages and CHANNEL not in ch._backlog_floor
+    # ... and its own events still reached publish, so first-connect delivery is unchanged.
+    assert [m.metadata["event_id"] for m in captured] == [only["id"]]
+
+
 def test_a_closed_backlog_page_only_drops_the_walk_and_never_touches_the_live_subscription(monkeypatch):
     """A relay CLOSED for a backlog page is best effort: the live subscription survives."""
     monkeypatch.setattr("app.channels.buzz.RELAY_HISTORY_LIMIT", 1, raising=False)
     ch, _ = _started()
     transport = FakeTransport()
     ch._transport = transport
+    ch._seen_created_at[CHANNEL] = 1700000000  # a floor, so the saturated live page does open a walk
 
     asyncio.run(ch._ensure_chat_subscription(CHANNEL))
     live_sub = f"buzz-chat-{CHANNEL}"
@@ -2283,6 +2314,7 @@ def test_reopening_the_live_subscription_closes_an_in_flight_backlog_page(monkey
     ch, _ = _started()
     transport = FakeTransport()
     ch._transport = transport
+    ch._seen_created_at[CHANNEL] = 1700000000  # a floor, so the saturated live page does open a walk
 
     asyncio.run(ch._ensure_chat_subscription(CHANNEL))
     live_sub = f"buzz-chat-{CHANNEL}"
