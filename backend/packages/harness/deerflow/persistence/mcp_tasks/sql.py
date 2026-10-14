@@ -324,7 +324,10 @@ class McpTaskRepository:
             # clears the poll lease for the cancellation worker; writing the
             # lease back would hold off the remote cancel until it expires.
             # Each conditional UPDATE re-checks the claim predicates, and a
-            # row that stopped being claimable is skipped.
+            # row that stopped being claimable is skipped. It is not replaced
+            # from beyond the LIMIT: such a batch comes back short (SQLite
+            # only; Postgres row locks keep candidates claimable) and the
+            # remaining due rows are claimed on the next poll cycle.
             claimed_ids: list[str] = []
             for task_id in candidate_ids:
                 update_result = await session.execute(
