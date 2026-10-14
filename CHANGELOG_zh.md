@@ -4478,7 +4478,7 @@
   而不是最多延迟 `mcp_tasks.lease_seconds`（默认 120 秒）。由于 SQLite 上 `FOR UPDATE`
   不起作用，在轮询器认领任务期间提交的取消请求所清除的轮询租约会被写回；取消工作器
   随后要等该租约过期，任务还会被多轮询一次，而结果会被丢弃。现在每次认领在写入租约时
-  都会重新确认任务仍可认领。Postgres 不受影响。
+  都会重新确认任务仍可认领。Postgres 不受影响。([#6859])
 
 ### 安全
 
@@ -9320,3 +9320,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6781]: https://github.com/bytedance/deer-flow/pull/6781
 [#6785]: https://github.com/bytedance/deer-flow/pull/6785
 [#6844]: https://github.com/bytedance/deer-flow/pull/6844
+[#6859]: https://github.com/bytedance/deer-flow/pull/6859

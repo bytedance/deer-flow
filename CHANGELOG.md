@@ -5885,7 +5885,7 @@ This release closes that milestone with **621 merged pull requests**.
   `FOR UPDATE` is a no-op on SQLite. The cancellation worker then waited for
   that lease to expire, and the task was polled once more for a result that
   was thrown away. Each claim now re-checks that the task is still claimable
-  when it writes the lease. Postgres was not affected.
+  when it writes the lease. Postgres was not affected. ([#6859])
 
 ### Security
 
@@ -11667,3 +11667,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6785]: https://github.com/bytedance/deer-flow/pull/6785
 [#6798]: https://github.com/bytedance/deer-flow/pull/6798
 [#6844]: https://github.com/bytedance/deer-flow/pull/6844
+[#6859]: https://github.com/bytedance/deer-flow/pull/6859
