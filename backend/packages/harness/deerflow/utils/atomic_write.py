@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import stat
+from contextlib import suppress
 from pathlib import Path
 from uuid import uuid4
 
@@ -40,7 +41,11 @@ def publish_bytes_atomically(path: Path, content: bytes) -> None:
             os.fsync(handle.fileno())
         os.replace(temporary, path)
     except BaseException:
+        # Cleanup is best-effort: keep the publication error (or interruption)
+        # and attempt unlink even if closing an untransferred descriptor fails.
         if fd is not None:
-            os.close(fd)
-        temporary.unlink(missing_ok=True)
+            with suppress(OSError):
+                os.close(fd)
+        with suppress(OSError):
+            temporary.unlink(missing_ok=True)
         raise
