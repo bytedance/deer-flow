@@ -57,3 +57,22 @@
 分支接续更新：#54 RED/#55 GREEN 已验证私有原生分支主干和六项原生回归。源码通过后以当前提交/进度文件哈希为准；接下来处理删除/压缩、Run/feed与前端。失败分支的私有未发布文件/跨库 checkpoint 需要故障回收证据，不得猜测回滚后删除可能已提交的数据；仍未开启多租户部署。
 
 压缩接续更新：#56 RED/#57 GREEN 已完成原生压缩的空间入口/模型前复核/最终 checkpoint fence 主干（8项，36.66s）。实际摘要中间件保留，只有模型响应确定化；租户记忆/归档和真实模型仍未验收。接下来处理删除生命周期、Run/feed和前端空间切换，M4–M11继续保持完整范围，未部署多租户。
+
+## 本次暂停检查点：私有会话删除（用户要求明天继续）
+
+状态：暂停；最后已验证提交 `b8dae318`（压缩）。本次 DELETE 实现和测试以 WIP 保存，尚未通过 GREEN，不代表 M3 完成。
+
+- Jenkins `deerflow-tenant-m1-postgres` #58：RED，2 failed，34.13s；归档 SHA256 `9e352861b80bc6d7cb753b53894e4c2aa337b8dc34cba55f95cafc2e7f734159`。原入口缺可信空间上下文。该构建已观察到终态，尚未独立复核其 ownership label 清理。
+- 当前草稿增加删除 tombstone、捕获 incarnation/token 的清理凭据、精确 SQL 子记录清理、原生预约和受控物理清理；失败后保留 tombstone，拒绝盲目重试。legacy 删除入口保留。
+- 双数据库 HTTP 主干草稿覆盖私有/个人数据隔离、准入后撤权、删除中禁止读写和重建、失败后保留及拒绝重试。仅本地 Ruff 检查通过；未运行 GREEN，未部署、未推送远程。
+- 草稿仅允许 local sandbox 且无 remote admission host，任何持久 MCP task 都拒绝清理；远端 STOP、崩溃恢复、其他执行器清理仍须 M4/M8/M10/M11 完整验收，不能视为已支持。
+
+明天优先：
+
+1. 检查 Git 和 Jenkins 实际状态。不要重复启动运行中的任务。
+2. 审查旧上传/转存请求在删除后同 ID 重建时的 generation 隔离：`publish_under_live_lock` 目前没有 expected incarnation 参数。先检查 ingestion/项目文件转存闭包是否已捕获原 incarnation；如缺失，修正最终发布校验，补一条有意义的旧请求跨代拒绝验证。不要直接宣称当前 DELETE 安全完成。
+3. 重新打包当前源码，从 `/private/tmp/deerflow-tenant-m3-delete-red-job.py` PG 模板派生 GREEN，仅在上海运行主干及必要原生回归。临时 GREEN 包 `709c3302162ec955b05947dca84c05bfaf7755f013831ddd3aa58b5c6afeddf3` 尚未上传/触发，任何源码变化后作废。
+4. 终态后独立检查 #58 和新构建专属容器/网络清理，对照归档源码哈希，更新证据再提交正式实现。
+5. 继续 M3 Run/feed/前端切换，然后顺序 M4–M11。全功能范围不变，租户 compiled activation 仍关闭。
+
+本次不启动新测试，不执行云部署或远程推送。所有 pytest/模型/Docker 仍在上海；不运行本地 Docker Desktop。临时打包/实施脚本可能丢失，优先以已提交的源码与本记录恢复，勿重复执行字符串修改脚本。

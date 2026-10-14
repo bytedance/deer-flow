@@ -958,7 +958,7 @@ class RunRepository(RunStore):
                 # Short admission only: workspace -> actor -> private thread,
                 # then the existing global clock -> Run row order. No checkpoint
                 # or model IO is held under this database transaction.
-                thread = await ThreadMetaRepository(self._sf)._locked_row(session, thread_id, resolved_user_id, context)
+                thread = await ThreadMetaRepository(self._sf)._locked_row(session, thread_id, resolved_user_id, context, include_deleting=operation_kind == "delete")
                 if thread is None or not thread.incarnation:
                     raise WorkspaceAccessDenied("private thread is unavailable")
             # Keep the global clock -> run-row lock order used by every other

@@ -38,13 +38,17 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
     from deerflow.config import paths as paths_module
     from deerflow.config.app_config import AppConfig
     from deerflow.config.paths import Paths
+    from deerflow.persistence.feedback.model import FeedbackRow
+    from deerflow.persistence.models.run_event import RunEventRow
     from deerflow.persistence.projects import ProjectDocumentRepository, ProjectRepository
     from deerflow.persistence.projects.model import ProjectDocumentRow, ProjectRow
     from deerflow.persistence.run.model import RunRow
     from deerflow.persistence.run.sql import RunRepository
+    from deerflow.persistence.scheduled_task_events.model import ScheduledTaskEventRow
     from deerflow.persistence.thread_meta import ThreadMetaRepository
     from deerflow.persistence.thread_meta.model import ThreadMetaRow
     from deerflow.persistence.thread_reads import ThreadReadRepository
+    from deerflow.persistence.thread_reads.model import ThreadReadMarkerRow
     from deerflow.persistence.user.model import UserRow
     from deerflow.persistence.workspaces.sql import WorkspaceRepository
     from deerflow.runtime import RunManager, ThreadOperationKind, context_compaction
@@ -101,8 +105,38 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
             checkpoint_replacement = {}
             owner_replacement = {}
             initialization_goals = {}
+            deletion_probe = {}
+            deletion_attempts = {}
+            deletion_admission = {}
+
+            class RevokingRunRepository(RunRepository):
+                async def create_thread_operation_atomic(self, *args, **kwargs):
+                    result = await super().create_thread_operation_atomic(*args, **kwargs)
+                    workspace_id = deletion_admission.pop("workspace_id", None) if kwargs.get("operation_kind") == "delete" else None
+                    if workspace_id:
+                        async with sf() as session:
+                            await session.execute(sa.text("UPDATE workspaces SET policy_version=policy_version+1 WHERE id=:id"), {"id": workspace_id})
+                            await session.commit()
+                    return result
 
             class ReplacingCheckpointSaver(AsyncSqliteSaver):
+                async def adelete_thread(self, thread_id):
+                    deletion_attempts[thread_id] = deletion_attempts.get(thread_id, 0) + 1
+                    probe = dict(deletion_probe) if deletion_probe.get("thread_id") == thread_id else {}
+                    if probe:
+                        deletion_probe.clear()
+                        if probe.get("fail"):
+                            raise RuntimeError("Synthetic checkpoint deletion failure; do not replay unknown cleanup")
+                    await super().adelete_thread(thread_id)
+                    if probe:
+                        async with sf() as session:
+                            assert (await session.get(ThreadMetaRow, thread_id)).status == "deleting", "cleanup did not persist its lifecycle fence"
+                            assert await session.scalar(sa.select(sa.func.count()).select_from(RunRow).where(RunRow.thread_id == thread_id, RunRow.operation_kind == "delete", RunRow.status == "pending")) == 1
+                        nested = probe["client"]
+                        assert (await nested.get("/api/threads/" + thread_id + "/state", headers=probe["headers"])).status_code == 404
+                        assert (await nested.post("/api/threads/" + thread_id + "/uploads", headers=probe["headers"], files={"files": ("during.txt", b"must not publish", "text/plain")})).status_code == 404
+                        assert (await nested.post("/api/threads", headers=probe["headers"], json={"thread_id": thread_id})).status_code == 404
+
                 async def aget_tuple(self, config):
                     result = await super().aget_tuple(config)
                     thread_id = config.get("configurable", {}).get("thread_id")
@@ -141,7 +175,7 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
 
             app.state.thread_store = RevokingThreadRepository(sf, workspace_required=True)
             app.state.thread_read_repo = ThreadReadRepository(sf, workspace_required=True)
-            app.state.run_store = RunRepository(sf, workspace_required=True)
+            app.state.run_store = RevokingRunRepository(sf, workspace_required=True)
             app.state.run_manager = RunManager(store=app.state.run_store, worker_id="checkpoint-http-writer")
             app.state.checkpointer = ReplacingCheckpointSaver(checkpoint_connection)
             await app.state.checkpointer.setup()
@@ -630,6 +664,60 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                 assert len(summary_inputs) == calls_before
                 as_user("alice")
                 configuration.summarization.enabled = False
+                delete_ids = {}
+                for delete_space, delete_headers, delete_workspace in (("team", team_headers, team), ("personal", {}, personal)):
+                    delete_id = str(uuid4())
+                    delete_ids[delete_space] = delete_id
+                    assert (await client.post("/api/threads", headers=delete_headers, json={"thread_id": delete_id})).status_code == 200
+                    assert (await client.post("/api/threads/" + delete_id + "/uploads", headers=delete_headers, files={"files": ("delete.txt", (delete_space + " private bytes").encode(), "text/plain")})).status_code == 200
+                    async with sf() as session:
+                        session.add(RunRow(run_id=delete_id + "-run", thread_id=delete_id, workspace_id=delete_workspace, user_id=identities["alice"], status="success", change_seq=200))
+                        session.add(RunEventRow(thread_id=delete_id, run_id=delete_id + "-run", workspace_id=delete_workspace, user_id=identities["alice"], event_type="llm.ai.response", category="message", content="owned event", seq=1))
+                        session.add(FeedbackRow(feedback_id=delete_id, run_id=delete_id + "-run", thread_id=delete_id, user_id=identities["alice"], rating=1))
+                        session.add(ThreadReadMarkerRow(user_id=identities["alice"], thread_id=delete_id, seen_change_seq=200))
+                        session.add(
+                            ScheduledTaskEventRow(
+                                id=delete_id, task_id=delete_id, thread_id=delete_id, workspace_id=delete_workspace, user_id=identities["alice"], anchor="fixture", event="task_finished", reason_code="completed", payload_json={}
+                            )
+                        )
+                        await session.commit()
+                    await app.state.run_event_store.put(thread_id=delete_id, run_id=delete_id + "-run", event_type="llm.ai.response", category="message", content="owned history")
+                delete_id = delete_ids["team"]
+                assert (await client.delete("/api/threads/" + delete_id)).status_code == 404
+                as_user("bob")
+                assert (await client.delete("/api/threads/" + delete_id, headers=team_headers)).status_code == 404
+                as_user("alice")
+                deletion_admission["workspace_id"] = team
+                refused_delete = await client.delete("/api/threads/" + delete_id, headers=team_headers)
+                assert refused_delete.status_code == 404, refused_delete.text
+                async with sf() as session:
+                    assert (await session.get(ThreadMetaRow, delete_id)).status == "idle"
+                delete_path = tmp_path / "files" / "workspaces" / team / "users" / identities["alice"] / "threads" / delete_id
+                assert (delete_path / "user-data" / "uploads" / "delete.txt").read_bytes() == b"team private bytes"
+                deletion_probe.update(thread_id=delete_id, client=client, headers=team_headers)
+                deleted = await client.delete("/api/threads/" + delete_id, headers=team_headers)
+                assert deleted.status_code == 200 and deleted.json()["success"] is True, deleted.text
+                assert not delete_path.exists()
+                assert await app.state.checkpointer.aget_tuple({"configurable": {"thread_id": delete_id, "checkpoint_ns": ""}}) is None
+                async with sf() as session:
+                    assert await session.get(ThreadMetaRow, delete_id) is None
+                    assert await session.get(ThreadMetaRow, delete_ids["personal"]) is not None
+                    for table in (RunRow, RunEventRow, FeedbackRow, ThreadReadMarkerRow, ScheduledTaskEventRow):
+                        assert await session.scalar(sa.select(sa.func.count()).select_from(table).where(table.thread_id == delete_id)) == 0
+                        assert await session.scalar(sa.select(sa.func.count()).select_from(table).where(table.thread_id == delete_ids["personal"])) == 1
+                assert await app.state.run_event_store.list_events(delete_id, limit=100, user_id=identities["alice"]) == []
+                assert len(await app.state.run_event_store.list_events(delete_ids["personal"], limit=100, user_id=identities["alice"])) == 1
+                uncertain_id = str(uuid4())
+                assert (await client.post("/api/threads", headers=team_headers, json={"thread_id": uncertain_id})).status_code == 200
+                deletion_probe.update(thread_id=uncertain_id, fail=True)
+                uncertain = await client.delete("/api/threads/" + uncertain_id, headers=team_headers)
+                assert uncertain.status_code == 503, "uncertain deletion reported success: " + uncertain.text
+                async with sf() as session:
+                    assert (await session.get(ThreadMetaRow, uncertain_id)).status == "deleting"
+                assert (await client.get("/api/threads/" + uncertain_id + "/state", headers=team_headers)).status_code == 404
+                assert (await client.post("/api/threads", headers=team_headers, json={"thread_id": uncertain_id})).status_code == 404
+                assert (await client.delete("/api/threads/" + uncertain_id, headers=team_headers)).status_code == 409
+                assert deletion_attempts[uncertain_id] == 1, "unknown physical cleanup was replayed"
                 branch_source = str(uuid4())
                 created_source = await client.post("/api/threads", headers=team_headers, json={"thread_id": branch_source, "project_id": shared_project})
                 assert created_source.status_code == 200, created_source.text

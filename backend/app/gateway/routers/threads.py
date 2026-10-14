@@ -45,12 +45,14 @@ from app.gateway.services import (
 )
 from app.gateway.utils import sanitize_log_param
 from app.gateway.workspaces.checkpoints import capture_checkpoint_thread_identity, commit_checkpoint_write, require_unallocated_checkpoint_id
+from app.gateway.workspaces.deletion import delete_private_thread
 from app.gateway.workspaces.dependencies import workspace_resource_scope
 from deerflow.agents.thread_state import THREAD_STATE_REDUCER_FIELDS
 from deerflow.authz.workspace import get_current_workspace
 from deerflow.config.paths import Paths, get_paths
 from deerflow.config.summarization_config import ContextSize
 from deerflow.persistence.thread_meta import PROJECT_FILTER_UNSET, THREAD_ARCHIVED_METADATA_KEY, THREAD_PINNED_METADATA_KEY, THREAD_PROJECT_METADATA_KEY, ThreadOwnershipConflictError
+from deerflow.persistence.thread_meta.base import THREAD_DELETION_METADATA_KEY
 from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 from deerflow.runtime import ThreadOperationKind, serialize_channel_values_for_api
 from deerflow.runtime.checkpoint_mode import CheckpointModeMismatchError, CheckpointModeReconfigurationError
@@ -121,7 +123,9 @@ def _checkpoint_mode_http_error(exc: Exception, thread_id: str) -> HTTPException
 # the auth contextvar; this list closes the metadata-blob echo gap.
 # ``deerflow_origin`` marks a thread the server created for a schedule or an
 # extension; only the server sets it (``create_thread`` below, run admission).
-_SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id", "workspace_id", "actor_user_id", "workspace_context", "membership_version", "policy_version", THREAD_PROJECT_METADATA_KEY, DEERFLOW_ORIGIN_KEY})
+_SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset(
+    {"owner_id", "user_id", "workspace_id", "actor_user_id", "workspace_context", "membership_version", "policy_version", THREAD_PROJECT_METADATA_KEY, DEERFLOW_ORIGIN_KEY, THREAD_DELETION_METADATA_KEY}
+)
 _SIDECAR_METADATA_KEY = "deerflow_sidecar"
 _BRANCH_METADATA_KEY = "deerflow_branch"
 _BRANCH_TITLE_SEQUENCE_METADATA_KEY = "branch_title_sequence"
@@ -743,8 +747,19 @@ async def _ensure_thread_for_goal(thread_id: str, request: Request, *, metadata_
 
 
 @router.delete("/{thread_id}", response_model=ThreadDeleteResponse)
-@require_permission("threads", "delete", owner_check=True, require_existing=True)
+@workspace_resource_scope()
+@require_permission("threads", "delete")
 async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteResponse:
+    if get_current_workspace() is not None:
+        try:
+            return ThreadDeleteResponse.model_validate(await delete_private_thread(request, thread_id))
+        except ConflictError:
+            raise HTTPException(status_code=409, detail="Thread has work in flight. Delete it after the work finishes.") from None
+    return await _delete_thread_data_authorized(thread_id=thread_id, request=request)
+
+
+@require_permission("threads", "delete", owner_check=True, require_existing=True)
+async def _delete_thread_data_authorized(thread_id: str, request: Request) -> ThreadDeleteResponse:
     """Delete local persisted filesystem data for a thread.
 
     Cleans DeerFlow-managed thread directories, removes checkpoint data,

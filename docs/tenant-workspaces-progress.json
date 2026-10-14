@@ -984,17 +984,30 @@
     }
   },
   "pause_checkpoint": {
-    "date": "2026-10-14",
-    "reason": "User explicitly requested saving current progress and continuing tomorrow",
-    "last_verified_commit": "4c0ea948",
-    "handoff": "docs/tenant-workspaces-resume-2026-10-14.md",
-    "draft_file": "backend/tests/test_workspace_http.py",
-    "draft_sha256": "be88c7136f7e5768ec4ff3a775b132b9b5fe63f4abc7f9ec5fdb47b7779c2c2f",
-    "draft_verification": "Ruff check only; pytest not run; no cloud upload/build started",
-    "draft_archive_sha256": "976ec90433e69f4ff8b98f25d404a5ee86937f864703d219c40f7b0fbf4072fb",
-    "next": "Run actual HTTP RED for goal/state writes, then integrate scoped new-thread metadata provisioning and short checkpoint commit fencing; keep M0–M11 scope intact",
-    "status": "resumed",
-    "resumed_date": "2026-10-14"
+    "status": "paused_by_user",
+    "reason": "保存当前进度，明天继续",
+    "last_verified_commit": "b8dae318",
+    "work_package": "M3 private thread deletion WIP",
+    "red": {
+      "build": 58,
+      "result": "FAILURE",
+      "tests_failed": 2,
+      "elapsed_seconds": 34.13,
+      "archive_sha256": "9e352861b80bc6d7cb753b53894e4c2aa337b8dc34cba55f95cafc2e7f734159"
+    },
+    "green": "not_started",
+    "cleanup_58": "independent_check_pending",
+    "next": "Audit captured incarnation in upload/transfer publication before running deletion GREEN",
+    "source_sha256": {
+      "backend/app/gateway/routers/threads.py": "046dcdb9843daa5af9e0b6b23f8ac62fc46a2a291d7124311952a68f38f6207a",
+      "backend/packages/harness/deerflow/persistence/run/sql.py": "81fe8c42bcbde9f69f543743950a5434356725e255ac4e8cdb9491640443ba0a",
+      "backend/packages/harness/deerflow/persistence/thread_meta/base.py": "625608df78b1f625cd3a675803413768f07b537a8f1af1bc0eac3feb47371d5b",
+      "backend/packages/harness/deerflow/persistence/thread_meta/sql.py": "90282ee27f5fe0c3d33e0f35a9a4643e4dff842464a0a2b147e60820e3527c36",
+      "backend/tests/test_workspace_http.py": "d224d9bb809d43042705585983b3775b5d653aed04ed25c9b0f1487715ec0dd7",
+      "backend/packages/harness/deerflow/persistence/thread_meta/deletion.py": "bc086cf082cb5e214ffc6b79218847705e7d8cf7e41fb0cb239c66359150c4ca",
+      "backend/app/gateway/workspaces/deletion.py": "d708631da698f386306ac08c96d021ddee393c989e26454cc18256885e32fdcb"
+    },
+    "deployment": "none; tenant activation remains closed"
   },
   "checkpoint_writes": {
     "base_commit": "33f7e1ef",

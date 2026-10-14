@@ -36,10 +36,12 @@ class ThreadMetaRepository(ThreadMetaStore):
         return context
 
     @staticmethod
-    def _owned_scope(stmt, user_id, context):
+    def _owned_scope(stmt, user_id, context, *, include_deleting=False):
         if user_id is not None:
             stmt = stmt.where(ThreadMetaRow.user_id == user_id)
         if context is not None:
+            if not include_deleting:
+                stmt = stmt.where(ThreadMetaRow.status != "deleting")
             from deerflow.persistence.projects.model import ProjectRow
 
             parent = select(ProjectRow.id).where(ProjectRow.id == ThreadMetaRow.project_id, ProjectRow.workspace_id == context.workspace_id).correlate(ThreadMetaRow).exists()
@@ -53,9 +55,9 @@ class ThreadMetaRepository(ThreadMetaStore):
         elif session.get_bind().dialect.name == "sqlite":
             await session.execute(text("BEGIN IMMEDIATE"))
 
-    async def _locked_row(self, session, thread_id, user_id, context):
+    async def _locked_row(self, session, thread_id, user_id, context, *, include_deleting=False):
         await self._begin_write(session, context)
-        return await session.scalar(self._owned_scope(select(ThreadMetaRow).where(ThreadMetaRow.thread_id == thread_id), user_id, context).with_for_update())
+        return await session.scalar(self._owned_scope(select(ThreadMetaRow).where(ThreadMetaRow.thread_id == thread_id), user_id, context, include_deleting=include_deleting).with_for_update())
 
     @staticmethod
     async def _project_available(session, project_id, user_id, context):
