@@ -8,6 +8,7 @@ two instances inside one test process.
 
 from __future__ import annotations
 
+import os
 import threading
 
 import pytest
@@ -126,3 +127,49 @@ def test_peer_mutation_waits_for_the_file_lock_before_reading(tmp_path):
 
     assert b_loaded.is_set()
     assert ChannelRuntimeConfigStore(_path(tmp_path)).load_all() == {"telegram": TELEGRAM, "slack": SLACK}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="creating symlinks needs extra privileges on Windows")
+def test_symlinked_store_path_shares_the_lock_of_its_target(tmp_path):
+    """A worker configured with a symlinked spelling of the file must still exclude peers."""
+    target = _path(tmp_path)
+    target.parent.mkdir(parents=True)
+    target.write_text("{}", encoding="utf-8")
+    link = target.parent / "runtime-config-link.json"
+    link.symlink_to(target)
+    via_link = ChannelRuntimeConfigStore(link)
+    via_target = ChannelRuntimeConfigStore(target)
+    link_saving = threading.Event()
+    release_link = threading.Event()
+    target_loaded = threading.Event()
+
+    real_save = via_link._save
+
+    def stalled_save(data):
+        link_saving.set()
+        assert release_link.wait(timeout=5)
+        real_save(data)
+
+    real_load = via_target._load
+
+    def observed_load(*args, **kwargs):
+        target_loaded.set()
+        return real_load(*args, **kwargs)
+
+    via_link._save = stalled_save
+    via_target._load = observed_load
+
+    thread_link = threading.Thread(target=via_link.set_provider_config, args=("telegram", TELEGRAM))
+    thread_target = threading.Thread(target=via_target.set_provider_config, args=("slack", SLACK))
+    thread_link.start()
+    try:
+        assert link_saving.wait(timeout=5)
+        thread_target.start()
+        assert not target_loaded.wait(timeout=0.5)
+    finally:
+        release_link.set()
+        thread_link.join(timeout=5)
+        if thread_target.ident is not None:
+            thread_target.join(timeout=5)
+
+    assert target_loaded.is_set()

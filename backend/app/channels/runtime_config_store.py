@@ -22,9 +22,12 @@ def _runtime_config_file_lock(path: Path) -> Iterator[None]:
     """Exclude read-modify-write cycles of this file in other Gateway processes.
 
     The lock is an advisory sidecar next to the store file, so it covers every
-    worker and embedded client that resolves the same ``DEER_FLOW_HOME``.
+    worker and embedded client that resolves the same ``DEER_FLOW_HOME``. The
+    path is normalized first, as in ``extensions_config_file_lock``, so a
+    symlinked spelling of the file shares the lock of the file it points to.
     """
-    lock_path = path.parent / f".{path.name}.lock"
+    target_path = path.resolve(strict=False) if path.is_symlink() else path.absolute()
+    lock_path = target_path.parent / f".{target_path.name}.lock"
     with open(lock_path, "a+b") as lock_file:
         if os.name == "nt":
             import msvcrt
