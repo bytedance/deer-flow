@@ -47,6 +47,7 @@ import {
   patchThreadMetadata,
   searchThreadsByArchive,
   type ThreadMetadataPatch,
+  type ThreadRequestOptions,
 } from "./api";
 import {
   dedupeMessagesByIdentity,
@@ -3372,9 +3373,17 @@ export function useThreadHistory(
 export function useThreads(
   params: ThreadSearchParams = DEFAULT_THREAD_SEARCH_PARAMS,
 ) {
-  const apiClient = getAPIClient();
+  const lifetime = useWorkspaceLifetime();
+  const apiClient = lifetime?.sdk ?? getAPIClient();
+  const options = buildThreadsSearchQueryOptions(apiClient, params);
   return useQuery<AgentThread[]>({
-    ...buildThreadsSearchQueryOptions(apiClient, params),
+    ...options,
+    queryFn: async () => {
+      lifetime?.scope.signal.throwIfAborted();
+      const rows = await options.queryFn();
+      lifetime?.scope.signal.throwIfAborted();
+      return rows;
+    },
   });
 }
 
@@ -3419,7 +3428,13 @@ export async function fetchInfiniteThreadsPage(
   params: InfiniteThreadsParams,
   pageParam: number,
   pageSize: number = INFINITE_THREADS_PAGE_SIZE,
+  options?: ThreadRequestOptions,
 ): Promise<AgentThread[]> {
+  options?.signal?.throwIfAborted();
+  const archiveSearch = options
+    ? (params: Parameters<typeof searchThreadsByArchive>[0]) =>
+        searchThreadsByArchive(params, options)
+    : searchThreadsByArchive;
   const threads: AgentThread[] = [];
   let offset = pageParam;
   let nextPageParam: number | undefined;
@@ -3433,7 +3448,7 @@ export async function fetchInfiniteThreadsPage(
             limit: currentLimit,
             offset,
           })) as AgentThread[])
-        : await searchThreadsByArchive({
+        : await archiveSearch({
             ...params,
             archived: params.archived,
             metadata: params.metadata ?? undefined,
@@ -3441,6 +3456,7 @@ export async function fetchInfiniteThreadsPage(
             offset,
           });
 
+    options?.signal?.throwIfAborted();
     threads.push(...filterThreadSearchResults(response, params));
     offset += response.length;
 
@@ -3600,7 +3616,8 @@ export function useInfiniteThreads(
   },
   { enabled = true }: { enabled?: boolean } = {},
 ) {
-  const apiClient = getAPIClient();
+  const lifetime = useWorkspaceLifetime();
+  const apiClient = lifetime?.sdk ?? getAPIClient();
   return useInfiniteQuery<
     AgentThread[],
     Error,
@@ -3610,13 +3627,28 @@ export function useInfiniteThreads(
   >({
     queryKey: [...INFINITE_THREADS_QUERY_KEY_PREFIX, params],
     initialPageParam: 0,
-    queryFn: async ({ pageParam }) =>
-      fetchInfiniteThreadsPage(
-        apiClient,
-        params,
-        pageParam,
-        INFINITE_THREADS_PAGE_SIZE,
-      ),
+    queryFn: async ({ pageParam, signal }) => {
+      lifetime?.scope.signal.throwIfAborted();
+      const rows = lifetime
+        ? await fetchInfiniteThreadsPage(
+            apiClient,
+            params,
+            pageParam,
+            INFINITE_THREADS_PAGE_SIZE,
+            {
+              rest: lifetime.rest,
+              signal: AbortSignal.any([signal, lifetime.scope.signal]),
+            },
+          )
+        : await fetchInfiniteThreadsPage(
+            apiClient,
+            params,
+            pageParam,
+            INFINITE_THREADS_PAGE_SIZE,
+          );
+      lifetime?.scope.signal.throwIfAborted();
+      return rows;
+    },
     getNextPageParam: (lastPage, allPages) =>
       getInfiniteThreadsNextPageParam(lastPage, allPages),
     refetchOnWindowFocus: false,
@@ -3705,6 +3737,7 @@ export function useThreadTokenUsage(
 }
 
 export function useBranchThread() {
+  const lifetime = useWorkspaceLifetime();
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async ({
@@ -3717,8 +3750,16 @@ export function useBranchThread() {
       messageId: string;
       messageIds?: string[];
       title?: string;
-    }) => branchThreadFromTurn(threadId, { messageId, messageIds, title }),
+    }) =>
+      lifetime
+        ? branchThreadFromTurn(
+            threadId,
+            { messageId, messageIds, title },
+            { rest: lifetime.rest, signal: lifetime.scope.signal },
+          )
+        : branchThreadFromTurn(threadId, { messageId, messageIds, title }),
     onSuccess(response, { threadId }) {
+      lifetime?.scope.signal.throwIfAborted();
       void queryClient.invalidateQueries({
         queryKey: ["thread", "metadata", response.thread_id],
       });
@@ -3734,6 +3775,7 @@ export function useBranchThread() {
 }
 
 export function usePinThread() {
+  const lifetime = useWorkspaceLifetime();
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async ({
@@ -3742,16 +3784,23 @@ export function usePinThread() {
     }: {
       threadId: string;
       pinned: boolean;
-    }) =>
-      patchThreadMetadata(threadId, {
-        [THREAD_PINNED_METADATA_KEY]: pinned,
-      }),
+    }) => {
+      const metadata = { [THREAD_PINNED_METADATA_KEY]: pinned };
+      return lifetime
+        ? patchThreadMetadata(threadId, metadata, {
+            rest: lifetime.rest,
+            signal: lifetime.scope.signal,
+          })
+        : patchThreadMetadata(threadId, metadata);
+    },
     onSuccess(_response, { threadId, pinned }) {
+      lifetime?.scope.signal.throwIfAborted();
       setThreadMetadataInCaches(queryClient, threadId, {
         [THREAD_PINNED_METADATA_KEY]: pinned,
       });
     },
     onSettled() {
+      if (lifetime?.scope.signal.aborted) return;
       void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
       void queryClient.invalidateQueries({
         queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
@@ -3773,6 +3822,7 @@ export function useMoveThreadToProject(options?: {
     variables: { threadId: string; projectId: string | null },
   ) => void;
 }) {
+  const lifetime = useWorkspaceLifetime();
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async ({
@@ -3781,24 +3831,36 @@ export function useMoveThreadToProject(options?: {
     }: {
       threadId: string;
       projectId: string | null;
-    }) => moveThreadToProject(threadId, projectId),
+    }) =>
+      lifetime
+        ? moveThreadToProject(threadId, projectId, {
+            rest: lifetime.rest,
+            signal: lifetime.scope.signal,
+          })
+        : moveThreadToProject(threadId, projectId),
     // Hook-level error handler: survives the caller's dropdown unmounting,
     // unlike a per-mutate `onError` passed from inside a closing menu.
-    onError: options?.onError,
+    onError: (error, variables) => {
+      if (!lifetime?.scope.signal.aborted) options?.onError?.(error, variables);
+    },
     async onSuccess(_response, { threadId, projectId }) {
+      lifetime?.scope.signal.throwIfAborted();
       // An older GET must not overwrite the confirmed affiliation. Match all
       // metadata variants, including an initial read with no cached snapshot.
       await queryClient.cancelQueries({
         queryKey: ["thread", "metadata", threadId],
       });
+      lifetime?.scope.signal.throwIfAborted();
       setThreadMetadataInCaches(queryClient, threadId, {
         [THREAD_PROJECT_METADATA_KEY]: projectId,
       });
       await queryClient.invalidateQueries({
         queryKey: ["thread", "metadata", threadId],
       });
+      lifetime?.scope.signal.throwIfAborted();
     },
     onSettled() {
+      if (lifetime?.scope.signal.aborted) return;
       void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
       void queryClient.invalidateQueries({
         queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
@@ -3813,42 +3875,56 @@ export function useMoveThreadToProject(options?: {
 }
 
 export function useRunDetail(threadId: string, runId: string) {
-  const apiClient = getAPIClient();
+  const lifetime = useWorkspaceLifetime();
+  const apiClient = lifetime?.sdk ?? getAPIClient();
   return useQuery<Run>({
     queryKey: ["thread", threadId, "run", runId],
     queryFn: async () => {
       const response = await apiClient.runs.get(threadId, runId);
+      lifetime?.scope.signal.throwIfAborted();
       return response;
     },
     refetchOnWindowFocus: false,
   });
 }
 
-async function deleteLocalThreadData(threadId: string) {
-  const response = await fetch(
+async function deleteLocalThreadData(
+  threadId: string,
+  options?: ThreadRequestOptions,
+) {
+  const response = await (options?.rest.fetch ?? fetch)(
     `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}`,
     {
       method: "DELETE",
+      ...(options?.signal ? { signal: options.signal } : {}),
     },
   );
 
-  // A 404 means the thread is already gone — the desired end state. The prior
-  // `apiClient.threads.delete` call hits the same gateway handler (nginx
-  // rewrites /api/langgraph/threads/* to /api/threads/*) and removes the
-  // thread_meta row, so this second delete's ownership guard 404s. Treat it as
-  // success to keep the delete idempotent.
-  if (!response.ok && response.status !== 404) {
-    const error = await response
-      .json()
-      .catch(() => ({ detail: "Failed to delete local thread data." }));
-    throw new Error(error.detail ?? "Failed to delete local thread data.");
-  }
+  const decode = async (response: Response) => {
+    // A 404 is idempotent success. In the native unscoped compatibility path,
+    // the preceding SDK delete can already have removed the metadata row.
+    // Scoped callers use this canonical Gateway endpoint only once.
+    if (!response.ok && response.status !== 404) {
+      const error = await response
+        .json()
+        .catch(() => ({ detail: "Failed to delete local thread data." }));
+      throw new Error(error.detail ?? "Failed to delete local thread data.");
+    }
+  };
+  return options ? options.rest.consume(response, decode) : decode(response);
 }
 
 async function deleteThreadEverywhere(
   apiClient: ThreadDeleteClient,
   threadId: string,
+  options?: ThreadRequestOptions,
 ) {
+  if (options) {
+    // The scoped Gateway is the canonical owner of metadata, Run and file
+    // cleanup. Avoid a second fresh DELETE after SDK deletion of the same ID.
+    await deleteLocalThreadData(threadId, options);
+    return;
+  }
   try {
     await apiClient.threads.delete(threadId);
   } catch (error) {
@@ -3862,7 +3938,9 @@ async function deleteThreadEverywhere(
 export async function findSidecarThreadIdsForParent(
   apiClient: ThreadSidecarSearchClient,
   parentThreadId: string,
+  signal?: AbortSignal,
 ) {
+  signal?.throwIfAborted();
   const threadIds: string[] = [];
   const limit = 100;
   let offset = 0;
@@ -3880,6 +3958,7 @@ export async function findSidecarThreadIdsForParent(
       select: ["thread_id", "metadata"],
     });
 
+    signal?.throwIfAborted();
     for (const thread of response) {
       if (
         isSidecarThread(thread) &&
@@ -3901,14 +3980,17 @@ export async function findSidecarThreadIdsForParent(
 async function deleteSidecarThreadsForParent(
   apiClient: ThreadDeleteClient,
   parentThreadId: string,
+  options?: ThreadRequestOptions,
 ) {
   let sidecarThreadIds: string[];
   try {
     sidecarThreadIds = await findSidecarThreadIdsForParent(
       apiClient,
       parentThreadId,
+      options?.signal,
     );
   } catch (err) {
+    options?.signal?.throwIfAborted();
     console.warn(
       `Failed to look up sidecar threads for parent ${parentThreadId}; skipping cascade cleanup. Orphaned sidecar threads may remain.`,
       err,
@@ -3916,12 +3998,14 @@ async function deleteSidecarThreadsForParent(
     return [];
   }
 
+  options?.signal?.throwIfAborted();
   const results = await Promise.allSettled(
     sidecarThreadIds.map((threadId) =>
-      deleteThreadEverywhere(apiClient, threadId),
+      deleteThreadEverywhere(apiClient, threadId, options),
     ),
   );
 
+  options?.signal?.throwIfAborted();
   const failedDeletions = results
     .map((result, index) =>
       result.status === "rejected"
@@ -3945,8 +4029,9 @@ async function deleteSidecarThreadsForParent(
 }
 
 export function useDeleteThread() {
+  const lifetime = useWorkspaceLifetime();
   const queryClient = useQueryClient();
-  const apiClient = getAPIClient() as ThreadDeleteClient;
+  const apiClient = (lifetime?.sdk ?? getAPIClient()) as ThreadDeleteClient;
   return useMutation({
     mutationFn: async ({
       threadId,
@@ -3955,15 +4040,23 @@ export function useDeleteThread() {
       threadId: string;
       onDeleted?: () => void;
     }) => {
+      lifetime?.scope.signal.throwIfAborted();
+      const options = lifetime
+        ? { rest: lifetime.rest, signal: lifetime.scope.signal }
+        : undefined;
       const deletedSidecarThreadIds = await deleteSidecarThreadsForParent(
         apiClient,
         threadId,
+        options,
       );
-      await deleteThreadEverywhere(apiClient, threadId);
+      lifetime?.scope.signal.throwIfAborted();
+      await deleteThreadEverywhere(apiClient, threadId, options);
+      lifetime?.scope.signal.throwIfAborted();
       onDeleted?.();
       return deletedSidecarThreadIds;
     },
     onSuccess(deletedSidecarThreadIds, { threadId }) {
+      lifetime?.scope.signal.throwIfAborted();
       const deletedThreadIds = new Set([threadId, ...deletedSidecarThreadIds]);
       queryClient.setQueriesData(
         {
@@ -3991,6 +4084,7 @@ export function useDeleteThread() {
     },
 
     onSettled() {
+      if (lifetime?.scope.signal.aborted) return;
       void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
       void queryClient.invalidateQueries({
         queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
@@ -4005,8 +4099,9 @@ export function useDeleteThread() {
 }
 
 export function useRenameThread() {
+  const lifetime = useWorkspaceLifetime();
   const queryClient = useQueryClient();
-  const apiClient = getAPIClient();
+  const apiClient = lifetime?.sdk ?? getAPIClient();
   return useMutation({
     mutationFn: async ({
       threadId,
@@ -4015,11 +4110,14 @@ export function useRenameThread() {
       threadId: string;
       title: string;
     }) => {
+      lifetime?.scope.signal.throwIfAborted();
       await apiClient.threads.updateState(threadId, {
         values: { title },
       });
+      lifetime?.scope.signal.throwIfAborted();
     },
     async onSuccess(_, { threadId, title }) {
+      lifetime?.scope.signal.throwIfAborted();
       const filters: QueryFilters[] = Object.values(
         getThreadSnapshotCacheFilters(threadId),
       );
@@ -4028,6 +4126,7 @@ export function useRenameThread() {
       await Promise.all(
         filters.map((filter) => queryClient.cancelQueries(filter)),
       );
+      lifetime?.scope.signal.throwIfAborted();
       setThreadTitleInCaches(queryClient, threadId, title);
       for (const filter of filters) {
         void queryClient.invalidateQueries(filter);

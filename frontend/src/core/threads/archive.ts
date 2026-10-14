@@ -1,5 +1,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 
+import { useWorkspaceLifetime } from "@/core/workspaces/context";
+
 import { PROJECTS_QUERY_KEY } from "../projects/api";
 
 import { patchThreadMetadata, type ThreadMetadataPatchResponse } from "./api";
@@ -23,17 +25,24 @@ export type ArchiveThreadOptions = {
 };
 
 export function useArchiveThread(options: ArchiveThreadOptions = {}) {
+  const lifetime = useWorkspaceLifetime();
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ threadId, archived }: ArchiveThreadVariables) =>
-      patchThreadMetadata(threadId, {
-        [THREAD_ARCHIVED_METADATA_KEY]: archived,
-      }),
+    mutationFn: ({ threadId, archived }: ArchiveThreadVariables) => {
+      const metadata = { [THREAD_ARCHIVED_METADATA_KEY]: archived };
+      return lifetime
+        ? patchThreadMetadata(threadId, metadata, {
+            rest: lifetime.rest,
+            signal: lifetime.scope.signal,
+          })
+        : patchThreadMetadata(threadId, metadata);
+    },
     // The callback is registered at the mutation level, not per `mutate` call:
     // per-call handlers are dropped when the originating row unmounts (the
     // archived chat leaves the sidebar list mid-flight), which silently lost
     // the success toast before.
     async onSuccess(_response, { threadId, archived }) {
+      lifetime?.scope.signal.throwIfAborted();
       // A response started before the write must not put the old state back.
       await Promise.all([
         queryClient.cancelQueries({
@@ -44,6 +53,7 @@ export function useArchiveThread(options: ArchiveThreadOptions = {}) {
           queryKey: ["thread", "metadata", threadId],
         }),
       ]);
+      lifetime?.scope.signal.throwIfAborted();
       setThreadMetadataInCaches(queryClient, threadId, {
         [THREAD_ARCHIVED_METADATA_KEY]: archived,
       });
@@ -65,10 +75,11 @@ export function useArchiveThread(options: ArchiveThreadOptions = {}) {
           queryKey: [...PROJECTS_QUERY_KEY, "threads"],
         }),
       ]);
+      lifetime?.scope.signal.throwIfAborted();
       options.onSuccess?.(_response, { threadId, archived });
     },
     onError: (error, variables) => {
-      options.onError?.(error, variables);
+      if (!lifetime?.scope.signal.aborted) options.onError?.(error, variables);
     },
   });
 }

@@ -2120,5 +2120,48 @@
       "actual app capability bootstrap, native selector and browser/backend two-tab acceptance",
       "credential/principal consistency, active revocation, physical runtime and all M4-M11 gates; no tenant activation"
     ]
+  },
+  "user_pause_checkpoint": {
+    "date": "2026-10-15",
+    "document": "docs/tenant-workspaces-resume-2026-10-15.md",
+    "reason": "User requested stop for today, save progress and local commit only; do not automatically continue",
+    "work_package": "M3 partial; all M0-M11 parent gates remain open"
+  },
+  "frontend_thread_actions_wip": {
+    "job": "deerflow-tenant-frontend",
+    "status": "WIP saved on user pause; behavior tests pass but full check fails TypeScript; not accepted",
+    "red": {
+      "build": 33,
+      "result": "FAILURE",
+      "tests_failed": 3,
+      "test_seconds": 7.97,
+      "archive_sha256": "31da46f958a9534af910768ecf6020c820fa1fbb5bcbe8460ababa3b4b885a6f"
+    },
+    "latest": {
+      "build": 34,
+      "result": "FAILURE",
+      "tests_passed": 50,
+      "tests_added": 3,
+      "main_test_seconds": 5.75,
+      "regression_test_seconds": 30.4,
+      "build_seconds": 443.119,
+      "archive_sha256": "08dd1dd952819db1669ee1501bc28984200b1920a74d789618041d0c962a69b6",
+      "passed": "3 main + 47 existing tests, Prettier, targeted ESLint, full ESLint",
+      "failed": "TypeScript TS2533: workspace-actions.dom.test.tsx(275,9), nullable metadata access"
+    },
+    "source_sha256": {
+      "frontend/src/core/threads/api.ts": "2504f1d6ef3caa498e94ef0e5a8df1f81f89437ef7ec77c4745d67cba052c003",
+      "frontend/src/core/threads/hooks.ts": "aca8abf4b6a662d3c95e67b54657f3ed5b0b3afb46639652251b2eb94945ebd1",
+      "frontend/src/core/threads/archive.ts": "56f15b8ff853ceaeb392cb3c4f35d950719cb6858de871e1a926f644d2bfc9c5",
+      "frontend/tests/unit/core/threads/workspace-actions.dom.test.tsx": "78f5d95af8c304ba28548644d92f2858df4e4620e69e1173f205fca305cb3caf"
+    },
+    "cleanup": "#33/#34 terminal and exact owned container/network inventories empty; actions formatter probe empty; private dependency cache retained",
+    "scope": "WIP bound sidebar search/archive search/Run detail and branch/pin/archive/move/rename/delete hooks; expiry after async cache cancellation, no stale deletion/callback; scoped canonical Gateway deletion avoids duplicate SDK+REST DELETE; native unscoped compatibility retained",
+    "remaining": [
+      "fix test nullable metadata access and rerun full Shanghai frontend check after user resumes",
+      "replay/compact/createThread and UI caller await/toast/router fences",
+      "other resource clients, artifact/thread storage and app-shell/native selector integration",
+      "actual browser/backend two-tab, session/principal/revocation, physical isolation and remaining M4-M11 acceptance; activation closed"
+    ]
   }
 }

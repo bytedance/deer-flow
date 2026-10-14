@@ -458,5 +458,17 @@ map only lg:stream keys to actor/workspace/thread keys, refuse operations after
 scope abort, and leave native unscoped keys untouched. Recovery helpers use this
 same adapter. A stored marker is only a hint; server-side Run/resource ownership
 must be revalidated. Switching workspace must not cancel background Runs.
-Search/CRUD/replay/compact and actual shell activation remain unintegrated; do
-not infer complete client isolation from ordinary-chat network-double tests.
+Sidebar search/CRUD hooks have WIP lifetime bindings; see the 2026-10-15
+resume checkpoint for the failing test typecheck. Replay/compact, UI caller
+publication, remaining resources/stores and shell activation are still pending.
+Do not infer complete client isolation from network-double tests.
+
+
+Scoped thread-action WIP uses optional ThreadRequestOptions for REST domain
+decoding and captures the SDK for search/Run detail/rename. Recheck expiry after
+async cache cancellation before publishing mutation effects. Sidecar lookup
+cancellation must not fall through to best-effort parent deletion. Scoped delete
+uses the canonical Gateway REST endpoint once per normally enumerated thread;
+retain SDK-plus-local-cleanup only for native unscoped compatibility. Full
+acceptance is pending TS2533 in the new workspace-actions test and later real
+backend/browser checks; tenant activation remains closed.

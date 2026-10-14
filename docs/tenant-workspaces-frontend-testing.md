@@ -307,3 +307,6 @@ with project-thread creation, artifacts, remaining resources and storage.
 App-shell/bootstrap/native selector and real two-tab acceptance remain next.
 M3 and M4-M11 stay open; tenant activation closed, no deployment/push/local
 application runtime/model calls. Continue reusing native DeerFlow styling.
+
+
+2026-10-15 用户暂停：保存本地 WIP，详见 `docs/tenant-workspaces-resume-2026-10-15.md`。前端 #33 三条 RED；#34 的 50 项行为测试、格式和 ESLint 通过，但完整 pnpm check 在 workspace-actions.dom.test.tsx:275 的 nullable metadata 访问报 TS2533，构建 FAILURE。未补跑、未宣称完成。#33/#34 专属容器和网络、actions-format 探针资源均为空。下次先修复该测试类型并完成上海完整检查，然后继续其余客户端/页面调用方/存储/空间入口；全部父验收仍未完成，activation 关闭。用户恢复前不要继续构建、部署或推送。
