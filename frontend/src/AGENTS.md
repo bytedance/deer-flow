@@ -10,10 +10,10 @@ failure/replay-gap paths. Draft and confirmation regressions live in
 Answer details use `workspace/message-details` descriptors; skill run scoping
 is documented in `docs/skill-usage-ui.md`.
 
-Encode raw artifact paths, preserving literal percent sequences. Markdown
-decodes once; relative images match decoded names to raw paths before encoding.
-Preserve sanitization; key Streamdown by file/thread/mock context and scroll key.
-Detect basename file types, including Dockerfile/Makefile.
+Encode raw paths preserving literal percent escapes. Decode Markdown once;
+match image names to raw paths.
+Sanitize URLs; key Streamdown by file/thread/mock context and scroll key.
+Detect file types by basename, including Dockerfile/Makefile.
 Language maps use own properties; `constructor`/`__proto__` keep fallback.
 HTML bases skip DOM without base text; inert templates ignore comments/scripts
 and templates. `preview-base.dom.test.ts` (happy-dom); RCDATA needs
@@ -21,9 +21,9 @@ browser checks; other helpers use node.
 HTML assets: credential GET, no 401 navigation; current-thread only, no redirects,
 bound bytes/count/CSS depth/time/expansion; keep doctype, rewrite SVG style.
 Keep opaque sandbox/data URLs; external refs stay browser-loaded.
-Abort stale work; revoke URLs;
-gate content/URL/scroll identity. Tests: `html-assets.dom.test.ts`,
-`artifact-file-preview.dom.test.tsx`, `tests/e2e/artifact-preview.spec.ts`.
+Abort stale work; revoke URLs; gate content/URL/scroll.
+Tests: `html-assets.dom.test.ts`, `artifact-file-preview.dom.test.tsx`,
+`tests/e2e/artifact-preview.spec.ts`.
 
 1. Optional composer helpers such as `core/input-polish` can rewrite the local draft before submission, and `core/voice-input` can transcribe browser microphone input into that same local draft; confirmed user input then flows to thread hooks (`core/threads/hooks.ts`) → LangGraph SDK streaming. Voice transcript joining separates every adjacent pair of trimmed word segments, preserves CJK joins and provider whitespace, and attaches leading punctuation/percent signs while retaining spaces after sentence punctuation. Regression cases live in `tests/unit/core/voice-input/speech-recognition.test.ts`.
 2. Stream events update thread state (messages, artifacts, todos, goal). The main thread stream uses the LangGraph SDK's `throttle: true` mode so updates received in the same macrotask coalesce before React is notified; do not replace it with a numeric delay without validating the SDK's trailing-debounce behavior on a continuous stream.
