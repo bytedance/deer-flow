@@ -448,6 +448,70 @@ Neither can make anything be *acted on*. The `allowed_users` allowlist and per-e
 
 **Bound identity:** once a pubkey completes `/connect`, its inbound messages resolve to that connection and run under the bound DeerFlow user (memory, files, and artifacts land in that user's buckets). Bindings are scoped to the relay host, so the same pubkey on a different relay is a different identity and must bind separately.
 
+### Feishu / Lark TLS troubleshooting
+
+If Gateway startup succeeds but the Lark SDK keeps logging
+`connect failed, err: [SSL: CERTIFICATE_VERIFY_FAILED] ... self-signed certificate in certificate chain`,
+the channel worker has started but its connection has not passed TLS verification.
+Changing the App ID, App Secret, or event permissions does not repair a certificate
+trust failure. A browser that can reach Feishu does not prove that the Gateway's
+Python environment trusts the same CA certificates.
+
+The SDK first obtains a connection URL over HTTPS using Requests, then opens a
+WebSocket using Python's default SSL context. Check both trust sources in the
+**same environment and process configuration as the Gateway**. From the repository
+root, after installing backend dependencies:
+
+```bash
+uv run --no-sync --project backend python -c "import ssl; print(ssl.get_default_verify_paths()); print(ssl.create_default_context().cert_store_stats())"
+uv run --no-sync --project backend python -c "import requests; print(requests.certs.where()); print(requests.Session().merge_environment_settings('https://open.feishu.cn', {}, None, None, None)['verify'])"
+```
+
+These commands inspect trust configuration without sending app credentials or
+connecting to Feishu. They do not establish that the remote certificate chain
+is valid. Run them inside the Gateway container when using Docker; host Python
+and the container can have different trust stores.
+
+If a corporate proxy or security product inspects TLS, ask its administrator for
+the approved root/intermediate CA certificates in PEM format and verify their
+provenance. Use a CA bundle that retains the public roots needed by other Gateway
+connections and includes those approved certificates. If no TLS inspection is
+expected, investigate the presented certificate chain and repair the Python or
+container CA installation before adding any certificate to trust.
+
+Set **both** variables to the absolute path of that bundle in the Gateway's
+environment, for example in the root `.env`:
+
+```dotenv
+SSL_CERT_FILE=/absolute/path/to/approved-ca-bundle.pem
+REQUESTS_CA_BUNDLE=/absolute/path/to/approved-ca-bundle.pem
+```
+
+`SSL_CERT_FILE` selects the default OpenSSL CA file for the WebSocket connection
+(and clients such as HTTPX); `REQUESTS_CA_BUNDLE` selects the Requests CA bundle
+for connection discovery and synchronous API calls. Setting only the Requests
+variable can leave the WebSocket handshake failing. The diagnostic commands above
+do not load `.env` themselves: export these variables in the diagnostic shell as
+well, using your shell's environment-variable syntax.
+
+For Docker, mount the bundle read-only into the `gateway` service and use its
+**container path** in both variables. A host path in `.env` is not automatically
+mounted. Recreate the Gateway container after changing its environment or mounts;
+for local development, restart the Gateway process. These variables configure
+trust for the whole Gateway, so use an operator-approved bundle.
+
+Do not disable certificate or hostname verification (`verify=False`,
+`CERT_NONE`, or an unverified SSL context) to make the bot connect. Confirm recovery
+by checking that the certificate errors stop and that the bot receives and replies
+to a test message; the earlier "channel started" log alone is not a handshake or
+message-delivery check. If the error persists, compare the CA issuer and trust
+configuration for both the configured Feishu/Lark API domain and the WebSocket
+host. When sharing diagnostics, omit app secrets, tokens, and connection-URL query
+parameters.
+
+References: [Python SSL trust paths](https://docs.python.org/3.12/library/ssl.html#ssl.get_default_verify_paths),
+[Requests CA bundles](https://requests.readthedocs.io/en/latest/user/advanced/#ssl-cert-verification).
+
 ### Feishu scheduled-task notifications
 
 Feishu/Lark sends scheduled-task result and lifecycle notices as static Markdown
