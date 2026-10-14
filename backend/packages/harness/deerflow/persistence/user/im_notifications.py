@@ -45,19 +45,21 @@ class ImNotificationPreferencesRepository:
         lock_owner: bool = False,
         include_events: bool = False,
     ) -> dict[str, bool]:
-        # Serialize enqueue with opt-out on Postgres. The scheduler already holds
-        # SQLite's writer lock; a patch takes it at its first upsert below.
+        # Serialize enqueue with opt-out on Postgres and SQLite. Materializing
+        # provider defaults acquires SQLite's writer lock (or row locks on
+        # Postgres) in deterministic key order before reading preferences.
         statement = select(ImNotificationPreferenceRow.provider, ImNotificationPreferenceRow.enabled).where(
             ImNotificationPreferenceRow.owner_user_id == user_id,
             ImNotificationPreferenceRow.provider.in_(IM_NOTIFICATION_PREFERENCE_KEYS),
         )
-        if lock_owner and session.get_bind().dialect.name == "postgresql":
-            # Materialize missing defaults so even the first opt-out serializes
-            # with enqueue. Locks are always acquired in key order.
-            for key in sorted(IM_NOTIFICATION_PREFERENCE_KEYS):
-                default_enabled = key in IM_NOTIFICATION_PROVIDERS
-                await session.execute(pg_insert(ImNotificationPreferenceRow).values(owner_user_id=user_id, provider=key, enabled=default_enabled).on_conflict_do_nothing())
-            statement = statement.order_by(ImNotificationPreferenceRow.provider).with_for_update()
+        if lock_owner:
+            dialect = session.get_bind().dialect.name
+            if dialect in ("postgresql", "sqlite"):
+                insert_fn = pg_insert if dialect == "postgresql" else sqlite_insert
+                for key in sorted(IM_NOTIFICATION_PROVIDERS):
+                    await session.execute(insert_fn(ImNotificationPreferenceRow).values(owner_user_id=user_id, provider=key, enabled=True).on_conflict_do_nothing())
+                if dialect == "postgresql":
+                    statement = statement.order_by(ImNotificationPreferenceRow.provider).with_for_update()
         rows = await session.execute(statement)
         stored = dict(rows.all())
         result = {provider: stored.get(provider, True) is True for provider in IM_NOTIFICATION_PROVIDERS}
@@ -79,7 +81,7 @@ class ImNotificationPreferencesRepository:
             raise ValueError("Invalid IM notification preference")
         async with self.sessions() as session, session.begin():
             dialect = session.get_bind().dialect.name
-            if dialect == "postgresql":
+            if dialect in ("postgresql", "sqlite"):
                 await self.get_in_session(session, user_id, lock_owner=True)
             insert = pg_insert if dialect == "postgresql" else sqlite_insert
             for key, value in sorted(values.items()):

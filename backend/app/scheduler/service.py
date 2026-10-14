@@ -382,7 +382,22 @@ class ScheduledTaskService:
         if group_connection_id:
             group_row = await session.scalar(select(ChannelConnectionRow).where(ChannelConnectionRow.id == group_connection_id))
             if group_row is None:
-                group_provider: str | None = "feishu"
+                # Normal disconnects soft-revoke ChannelConnectionRow (status="revoked"),
+                # keeping group_row.provider intact. If the row was hard-deleted after a
+                # prior delivery, recover its provider from the outbox history before
+                # falling back to legacy "feishu".
+                from deerflow.persistence.notification_deliveries.model import NotificationDeliveryRow
+
+                prior_provider = await session.scalar(
+                    select(NotificationDeliveryRow.provider)
+                    .where(
+                        NotificationDeliveryRow.owner_user_id == task.user_id,
+                        NotificationDeliveryRow.target == group_connection_id,
+                    )
+                    .order_by(NotificationDeliveryRow.created_at.desc())
+                    .limit(1)
+                )
+                group_provider: str | None = prior_provider if isinstance(prior_provider, str) and supports_proactive_group_notifications(prior_provider) else "feishu"
             elif group_row.owner_user_id == task.user_id and isinstance(group_row.provider, str) and supports_proactive_group_notifications(group_row.provider):
                 group_provider = group_row.provider
             else:
@@ -965,6 +980,8 @@ class ScheduledTaskService:
         )
 
     async def handle_run_completion(self, record: RunRecord) -> None:
+        if getattr(record, "terminal_status_persisted", True) is False:
+            return
         metadata = record.metadata or {}
         task_id = metadata.get("scheduled_task_id")
         task_run_id = metadata.get("scheduled_task_run_id")
@@ -1017,6 +1034,8 @@ class ScheduledTaskService:
 
     async def _handle_ordinary_run_completion(self, record: RunRecord) -> None:
         if self._notification_repo is None or self._connection_repo is None:
+            return
+        if getattr(record, "terminal_status_persisted", True) is False:
             return
         user_id = record.user_id
         if not isinstance(user_id, str) or not user_id.strip():
@@ -1071,17 +1090,29 @@ class ScheduledTaskService:
         session_factory = getattr(self._notification_repo, "session_factory", None)
         if session_factory is None:
             return
-        async with session_factory() as session, session.begin():
-            preferences = await ImNotificationPreferencesRepository.get_in_session(
+        group_connection_id = metadata.get("notification_group_connection_id")
+        if not isinstance(group_connection_id, str) or not group_connection_id.strip():
+            group_connection_id = None
+        else:
+            group_connection_id = group_connection_id.strip()
+
+        async with session_factory() as session:
+            # Cheap read-only pre-gate: runtime notices are opt-in (default False),
+            # so runs for users who have not enabled this event exit without
+            # scanning bindings, querying thread metadata, or taking write locks.
+            unlocked_preferences = await ImNotificationPreferencesRepository.get_in_session(
                 session,
                 user_id,
-                lock_owner=True,
+                lock_owner=False,
                 include_events=True,
             )
-            if not preferences.get(event, False):
+            if not unlocked_preferences.get(event, False):
                 return
-            bindings = [
-                binding
+            persisted_run = await session.get(RunRow, record.run_id)
+            if persisted_run is not None and persisted_run.status != record.status.value:
+                return
+            candidate_bindings = [
+                (binding.provider, binding.external_account_id)
                 for binding in await session.scalars(
                     select(ChannelConnectionRow).where(
                         ChannelConnectionRow.owner_user_id == user_id,
@@ -1091,15 +1122,25 @@ class ScheduledTaskService:
                 if binding.provider
                 and binding.external_account_id
                 and supports_proactive_notifications(binding.provider)
-                and preferences.get(binding.provider, False)
                 and (binding.provider != "qq" or ((binding.metadata_json or {}).get("chat_type") == "c2c" and (binding.workspace_id or "").endswith(":c2c")))
             ]
-            group_connection_id = metadata.get("notification_group_connection_id")
-            if not isinstance(group_connection_id, str) or not group_connection_id.strip():
-                group_connection_id = None
-            else:
-                group_connection_id = group_connection_id.strip()
-            if not bindings and not group_connection_id:
+            candidate_group_provider: str | None = None
+            if group_connection_id:
+                group_row = await session.scalar(select(ChannelConnectionRow).where(ChannelConnectionRow.id == group_connection_id))
+                if (
+                    group_row is not None
+                    and group_row.owner_user_id == user_id
+                    and isinstance(group_row.provider, str)
+                    and supports_proactive_group_notifications(group_row.provider)
+                    and is_notification_group(
+                        provider=group_row.provider,
+                        status=group_row.status,
+                        workspace_id=group_row.workspace_id,
+                        metadata=group_row.metadata_json,
+                    )
+                ):
+                    candidate_group_provider = group_row.provider
+            if not candidate_bindings and candidate_group_provider is None:
                 return
 
             thread_title = None
@@ -1117,46 +1158,41 @@ class ScheduledTaskService:
                 thread_title = raw_title.strip() if isinstance(raw_title, str) and raw_title.strip() else None
             else:
                 thread_title = thread_title.strip()
-
             locale = await self._owner_locale(session, user_id)
-            run_status = "success" if record.status.value == "success" else "failed"
-            payload: dict[str, Any] = {
-                "payload_version": NOTIFICATION_PAYLOAD_VERSION,
-                "source_kind": source_kind,
-                "thread_id": record.thread_id,
-                "task_title": thread_title,
-                "locale": locale,
-                "run_status": run_status,
-            }
-            if event == "human_input_requested":
-                payload["request_id"] = request_id
-                if question:
-                    payload["question"] = question
-            elif event == "run_completed":
-                verdict = getattr(record, "goal_verdict", None)
-                if isinstance(verdict, Mapping) and verdict.get("satisfied") is True:
-                    payload["relied_on_assumption"] = verdict.get("relied_on_assumption") is True
-                last_ai = getattr(record, "last_ai_message", None)
-                if isinstance(last_ai, str) and last_ai.strip():
-                    payload["result_summary"] = last_ai
 
-            recipients = [(binding.provider, binding.external_account_id, payload) for binding in bindings]
-            if group_connection_id:
-                group_row = await session.scalar(select(ChannelConnectionRow).where(ChannelConnectionRow.id == group_connection_id))
-                if (
-                    group_row is not None
-                    and group_row.owner_user_id == user_id
-                    and isinstance(group_row.provider, str)
-                    and supports_proactive_group_notifications(group_row.provider)
-                    and is_notification_group(
-                        provider=group_row.provider,
-                        status=group_row.status,
-                        workspace_id=group_row.workspace_id,
-                        metadata=group_row.metadata_json,
-                    )
-                    and preferences.get(group_row.provider, False)
-                ):
-                    recipients.append((group_row.provider, group_connection_id, {**payload, "target_type": "group"}))
+        run_status = "success" if record.status.value == "success" else "failed"
+        payload: dict[str, Any] = {
+            "payload_version": NOTIFICATION_PAYLOAD_VERSION,
+            "source_kind": source_kind,
+            "thread_id": record.thread_id,
+            "task_title": thread_title,
+            "locale": locale,
+            "run_status": run_status,
+        }
+        if event == "human_input_requested":
+            payload["request_id"] = request_id
+            if question:
+                payload["question"] = question
+        elif event == "run_completed":
+            verdict = getattr(record, "goal_verdict", None)
+            if isinstance(verdict, Mapping) and verdict.get("satisfied") is True:
+                payload["relied_on_assumption"] = verdict.get("relied_on_assumption") is True
+            last_ai = getattr(record, "last_ai_message", None)
+            if isinstance(last_ai, str) and last_ai.strip():
+                payload["result_summary"] = last_ai
+
+        async with session_factory() as session, session.begin():
+            preferences = await ImNotificationPreferencesRepository.get_in_session(
+                session,
+                user_id,
+                lock_owner=True,
+                include_events=True,
+            )
+            if not preferences.get(event, False):
+                return
+            recipients = [(provider, target, payload) for provider, target in candidate_bindings if preferences.get(provider, False)]
+            if group_connection_id and candidate_group_provider and preferences.get(candidate_group_provider, False):
+                recipients.append((candidate_group_provider, group_connection_id, {**payload, "target_type": "group"}))
             for provider, target, notice_payload in recipients:
                 await self._notification_repo.enqueue_in_session(
                     session,

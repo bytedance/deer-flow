@@ -625,17 +625,17 @@ class WeComChannel(Channel):
         aibotid = str(inbound.metadata.get("aibotid") or "").strip() or None
         chattype = inbound.metadata.get("chattype")
         chatid = str(inbound.metadata.get("chatid") or "").strip() or None
-        if chattype == "group":
-            if not chatid:
-                return inbound
+        if chattype == "group" and chatid:
             workspace_id = f"{aibotid}:group:{chatid}" if aibotid else f"group:{chatid}"
-            return await attach_connection_identity(
+            inbound = await attach_connection_identity(
                 inbound,
                 repo=self._connection_repo,
                 provider="wecom",
                 workspace_id=workspace_id,
                 fallback_without_workspace=False,
             )
+            if inbound.connection_id:
+                return inbound
         return await attach_connection_identity(
             inbound,
             repo=self._connection_repo,
@@ -660,12 +660,15 @@ class WeComChannel(Channel):
         body = frame.get("body", {}) or {}
         aibotid = str(body.get("aibotid") or "").strip() or None
         chattype = body.get("chattype")
+        workspace_name: str | None = None
         if chattype == "group":
             chatid = str(body.get("chatid") or "").strip()
             if not chatid:
                 await self._send_connection_reply(frame, "WeCom connection could not be completed from this message.")
                 return True
             workspace_id = f"{aibotid}:group:{chatid}" if aibotid else f"group:{chatid}"
+            raw_group_name = str(body.get("chatname") or body.get("group_name") or "").strip()
+            workspace_name = raw_group_name or f"WeCom group ({chatid})"
             metadata: dict[str, Any] = {
                 "aibotid": aibotid,
                 "chattype": "group",
@@ -682,6 +685,7 @@ class WeComChannel(Channel):
             provider="wecom",
             external_account_id=user_id,
             workspace_id=workspace_id,
+            workspace_name=workspace_name,
             metadata=metadata,
             status="connected",
         )

@@ -365,3 +365,266 @@ async def test_worker_rechecks_human_input_pending_and_drops_resolved_requests(e
     async with sessions() as session:
         row = await session.get(NotificationDeliveryRow, claimed_live["id"])
         assert row.status == "sent"
+
+
+@pytest.mark.anyio
+async def test_unpersisted_terminal_status_does_not_emit_premature_success_notification(env):
+    from deerflow.persistence.run.model import RunRow
+    from deerflow.runtime.runs.manager import RunManager
+
+    sessions, preferences, _, service = env
+    await preferences.patch(
+        "alice",
+        {"run_completed": True, "human_input_requested": True},
+    )
+
+    # Case 1: in-memory RunRecord explicitly marked terminal_status_persisted=False.
+    unpersisted_record = _make_run(run_id="run-unpersisted-flag", status=RunStatus.success)
+    unpersisted_record.terminal_status_persisted = False
+    await service.handle_run_completion(unpersisted_record)
+
+    # Case 2: durable RunRow still says "running" because terminal persistence failed.
+    async with sessions() as session, session.begin():
+        session.add(
+            RunRow(
+                run_id="run-still-running-in-db",
+                thread_id="thread-101",
+                assistant_id="lead_agent",
+                user_id="alice",
+                status="running",
+            )
+        )
+    stale_db_record = _make_run(run_id="run-still-running-in-db", status=RunStatus.success)
+    await service.handle_run_completion(stale_db_record)
+
+    async with sessions() as session:
+        assert (await session.scalars(select(NotificationDeliveryRow))).all() == []
+
+    # Case 3: RunManager.set_status marks terminal_status_persisted=False when store write fails.
+    class FailingRunStore:
+        async def put(self, run_id, **kwargs):
+            return None
+
+        async def set_status(self, run_id, status, **kwargs):
+            raise RuntimeError("db write failed")
+
+    manager = RunManager(store=FailingRunStore())
+    created = await manager.create(thread_id="thread-101", assistant_id="lead_agent", user_id="alice")
+    await manager.set_status(created.run_id, RunStatus.success, persist=True)
+    assert created.terminal_status_persisted is False
+
+
+@pytest.mark.anyio
+async def test_sqlite_lock_owner_materializes_rows_and_serializes_opt_out(env):
+    import asyncio
+
+    from deerflow.persistence.user.im_notifications import ImNotificationPreferenceRow
+
+    sessions, preferences, _, service = env
+    # Before any patch, get_in_session(lock_owner=True) on SQLite materializes the 4 provider rows
+    # so SQLite acquires an immediate write lock on the transaction's first statement.
+    async with sessions() as session, session.begin():
+        locked = await ImNotificationPreferencesRepository.get_in_session(
+            session,
+            "bob",
+            lock_owner=True,
+            include_events=True,
+        )
+        assert locked["feishu"] is True
+        assert locked["run_completed"] is False
+    async with sessions() as session:
+        bob_rows = (await session.scalars(select(ImNotificationPreferenceRow).where(ImNotificationPreferenceRow.owner_user_id == "bob"))).all()
+        assert len(bob_rows) == 4
+
+    await preferences.patch("alice", {"run_completed": True})
+    await asyncio.gather(
+        service.handle_run_completion(_make_run(run_id="run-concurrent-optout", status=RunStatus.success)),
+        preferences.patch("alice", {"run_completed": False}),
+    )
+    # After opt-out completes, re-enabling must never leave a pending row from before opt-out
+    # if the opt-out ran after enqueue, nor enqueue a row if opt-out ran before enqueue.
+    final_events = await preferences.get_event_preferences("alice")
+    assert final_events["run_completed"] is False
+    async with sessions() as session:
+        pending = (
+            await session.scalars(
+                select(NotificationDeliveryRow).where(
+                    NotificationDeliveryRow.run_id == "run-concurrent-optout",
+                    NotificationDeliveryRow.status == "pending",
+                )
+            )
+        ).all()
+        assert pending == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["full", "delta"])
+async def test_gateway_notification_delivery_human_input_closure_works_in_both_checkpoint_modes(
+    env,
+    mode,
+    monkeypatch,
+):
+    from fastapi import FastAPI
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.graph import StateGraph
+    from langgraph.store.memory import InMemoryStore
+
+    import app.channels.service as channel_service_mod
+    import app.gateway.app as gateway_app_mod
+    import app.gateway.deps as gateway_deps
+    import app.gateway.services as gateway_services
+    from deerflow.agents.thread_state import get_thread_state_schema
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.runtime.checkpoint_mode import inject_checkpoint_mode
+
+    sessions, preferences, deliveries, service = env
+    await preferences.patch(
+        "alice",
+        {"human_input_requested": True, "wecom": False, "wechat": False, "qq": False},
+    )
+
+    checkpointer = InMemorySaver()
+    store = InMemoryStore()
+    thread_store = MemoryThreadMetaStore(store)
+    await thread_store.create("thread-gw-ask", assistant_id="lead_agent", user_id="alice")
+
+    state_schema = get_thread_state_schema(mode)
+
+    def _noop_node(state):
+        return {}
+
+    builder = StateGraph(state_schema)
+    builder.add_node("agent", _noop_node)
+    builder.set_entry_point("agent")
+    builder.set_finish_point("agent")
+    graph = builder.compile(checkpointer=checkpointer)
+
+    monkeypatch.setattr(
+        gateway_services,
+        "resolve_agent_factory",
+        lambda assistant_id=None: lambda config: graph,
+    )
+    monkeypatch.setattr(gateway_deps, "get_config", lambda: SimpleNamespace(models=[]))
+
+    pending_ai = AIMessage(
+        content="",
+        id="ai-gw-1",
+        tool_calls=[
+            {
+                "id": "call-gw-1",
+                "name": "ask_clarification",
+                "args": {"question": "Proceed with migration?", "clarification_type": "confirmation"},
+            }
+        ],
+    )
+    prompt_tool = ToolMessage(
+        content="Proceed with migration?",
+        id="tool-gw-1",
+        tool_call_id="call-gw-1",
+        name="ask_clarification",
+        artifact={
+            "human_input": {
+                "version": 1,
+                "kind": "human_input_request",
+                "source": "ask_clarification",
+                "request_id": "req-gw-1",
+                "question": "Proceed with migration?",
+            }
+        },
+    )
+    config = {"configurable": {"thread_id": "thread-gw-ask", "checkpoint_ns": ""}}
+    inject_checkpoint_mode(config, mode)
+    await graph.ainvoke(
+        {"messages": [HumanMessage(content="Start", id="h-gw-1"), pending_ai, prompt_tool]},
+        config,
+    )
+
+    sent_messages = []
+
+    class FakeChannel:
+        is_running = True
+
+        async def send_notification_for_owner(self, **kwargs):
+            sent_messages.append(kwargs)
+
+    fake_channel_service = SimpleNamespace(
+        get_channel=lambda provider: FakeChannel() if provider == "feishu" else None,
+        notification_excluded_providers=lambda: frozenset(),
+    )
+    monkeypatch.setattr(channel_service_mod, "get_channel_service", lambda: fake_channel_service)
+    monkeypatch.setattr("deerflow.persistence.engine.get_session_factory", lambda: sessions)
+
+    app = FastAPI()
+    app.state.scheduled_task_service = service
+    app.state.checkpointer = checkpointer
+    app.state.store = store
+    app.state.thread_store = thread_store
+    app.state.run_event_store = SimpleNamespace()
+    app.state.checkpoint_channel_mode = mode
+    app.state.checkpoint_snapshot_frequency = None
+
+    startup_config = SimpleNamespace(
+        scheduler=SimpleNamespace(poll_interval_seconds=60),
+        channel_connections=SimpleNamespace(notification_locale="en-US"),
+    )
+    conn_repo = SimpleNamespace(
+        list_connections=lambda user_id: [
+            {
+                "id": "personal-feishu",
+                "owner_user_id": user_id,
+                "provider": "feishu",
+                "status": "connected",
+                "external_account_id": "feishu-user",
+            }
+        ]
+    )
+
+    await gateway_app_mod._start_scheduled_task_notification_delivery(
+        app,
+        startup_config,
+        deliveries,
+        conn_repo,
+    )
+    worker = app.state.notification_delivery_worker
+    try:
+        # 1. Unanswered request in checkpoint -> gateway closure returns True and delivers.
+        await service.handle_run_completion(
+            _make_run(
+                run_id=f"run-gw-live-{mode}",
+                thread_id="thread-gw-ask",
+                status=RunStatus.success,
+                human_input_request={"request_id": "req-gw-1", "question": "Proceed with migration?"},
+            )
+        )
+        await worker.run_once(now=datetime.now(UTC))
+        assert len(sent_messages) == 1
+
+        # 2. User answers in checkpoint -> gateway closure returns False and marks terminal failed.
+        answer_msg = HumanMessage(
+            content="Yes",
+            id="h-gw-2",
+            additional_kwargs={
+                HUMAN_INPUT_RESPONSE_KEY: {
+                    "version": 1,
+                    "kind": "human_input_response",
+                    "request_id": "req-gw-1",
+                }
+            },
+        )
+        await graph.ainvoke({"messages": [answer_msg]}, config)
+        await service.handle_run_completion(
+            _make_run(
+                run_id=f"run-gw-answered-{mode}",
+                thread_id="thread-gw-ask",
+                status=RunStatus.success,
+                human_input_request={"request_id": "req-gw-2", "question": "Proceed with migration?"},
+            )
+        )
+        await worker.run_once(now=datetime.now(UTC))
+        assert len(sent_messages) == 1
+        async with sessions() as session:
+            rows = (await session.scalars(select(NotificationDeliveryRow).where(NotificationDeliveryRow.run_id == f"run-gw-answered-{mode}"))).all()
+            assert len(rows) == 1
+            assert (rows[0].status, rows[0].last_error) == ("failed", "human_input_request_already_resolved")
+    finally:
+        await worker.stop()

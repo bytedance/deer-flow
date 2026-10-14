@@ -7,9 +7,17 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { connectChannelProvider } from "@/core/channels/api";
 import { channelConnectionsQueryKey } from "@/core/channels/hooks";
+import type { ChannelConnectResponse } from "@/core/channels/types";
 import { useI18n } from "@/core/i18n/hooks";
 
 import { fill } from "./shared";
+
+type GroupChannelProvider = "feishu" | "wecom" | "qq";
+
+interface CachedGroupBinding {
+  data: ChannelConnectResponse;
+  expiresAt: number;
+}
 
 /** Group binding needs its own command; a connected private chat is not completion. */
 export function BindFeishuGroup() {
@@ -17,19 +25,40 @@ export function BindFeishuGroup() {
   const labels = t.scheduledTasks.notificationGroup;
   const queryClient = useQueryClient();
   const [visible, setVisible] = useState(false);
+  const [provider, setProvider] = useState<GroupChannelProvider>("feishu");
+  const [cachedByProvider, setCachedByProvider] = useState<
+    Partial<Record<GroupChannelProvider, CachedGroupBinding>>
+  >({});
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const [expiresAt, setExpiresAt] = useState<number | null>(null);
   const binding = useMutation({
-    mutationFn: () => connectChannelProvider("feishu"),
-    onSuccess: (result) => {
+    mutationFn: (targetProvider: GroupChannelProvider) =>
+      connectChannelProvider(targetProvider),
+    onSuccess: (result, targetProvider) => {
       setCopied(false);
       setCopyFailed(false);
-      setExpiresAt(Date.now() + result.expires_in * 1000);
+      setCachedByProvider((prev) => ({
+        ...prev,
+        [targetProvider]: {
+          data: result,
+          expiresAt: Date.now() + result.expires_in * 1000,
+        },
+      }));
     },
   });
-  const command = binding.data ? `/connect ${binding.data.code}` : "";
+  const currentCached = cachedByProvider[provider];
+  const command = currentCached ? `/connect ${currentCached.data.code}` : "";
+  const expiresAt = currentCached?.expiresAt ?? null;
+  const startBind = (targetProvider: GroupChannelProvider) => {
+    setProvider(targetProvider);
+    setVisible(true);
+    setCopied(false);
+    setCopyFailed(false);
+    if (!cachedByProvider[targetProvider]) {
+      binding.mutate(targetProvider);
+    }
+  };
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(command);
@@ -58,12 +87,27 @@ export function BindFeishuGroup() {
           variant="outline"
           size="sm"
           disabled={binding.isPending}
-          onClick={() => {
-            setVisible(true);
-            if (!binding.data) binding.mutate();
-          }}
+          onClick={() => startBind("feishu")}
         >
           {labels.bind}
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={binding.isPending}
+          onClick={() => startBind("wecom")}
+        >
+          {labels.bindWecom}
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={binding.isPending}
+          onClick={() => startBind("qq")}
+        >
+          {labels.bindQq}
         </Button>
         <Button
           type="button"
@@ -126,7 +170,7 @@ export function BindFeishuGroup() {
               variant="ghost"
               size="sm"
               disabled={binding.isPending}
-              onClick={() => binding.mutate()}
+              onClick={() => binding.mutate(provider)}
             >
               {labels.newCode}
             </Button>

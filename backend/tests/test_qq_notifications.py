@@ -302,3 +302,39 @@ async def test_notification_cancellation_propagates_without_retry():
             with pytest.raises(asyncio.CancelledError):
                 await task
         assert len(requests) == 1
+
+
+async def test_qq_group_bind_sets_disambiguated_workspace_name():
+    from unittest.mock import AsyncMock
+
+    async with connected() as (channel, _requests):
+        channel._connection_repo.consume_oauth_state = AsyncMock(return_value={"owner_user_id": "owner"})
+        channel._connection_repo.upsert_connection = AsyncMock(return_value={"id": "bound"})
+        await channel._handle_inbound(
+            {
+                "t": "GROUP_AT_MESSAGE_CREATE",
+                "d": {
+                    "group_openid": "group-open-1",
+                    "author": {"member_openid": "member-1"},
+                    "id": "m-1",
+                    "content": "/connect code-1",
+                },
+            }
+        )
+        await channel._handle_inbound(
+            {
+                "t": "GROUP_AT_MESSAGE_CREATE",
+                "d": {
+                    "group_openid": "group-open-2",
+                    "author": {"member_openid": "member-1"},
+                    "id": "m-2",
+                    "content": "/connect code-2",
+                },
+            }
+        )
+        calls = channel._connection_repo.upsert_connection.await_args_list
+        assert len(calls) == 2
+        assert calls[0].kwargs["workspace_id"] == "app1:group:group-open-1"
+        assert calls[0].kwargs["workspace_name"] == "QQ group (group-open-1)"
+        assert calls[1].kwargs["workspace_id"] == "app1:group:group-open-2"
+        assert calls[1].kwargs["workspace_name"] == "QQ group (group-open-2)"

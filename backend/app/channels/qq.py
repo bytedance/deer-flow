@@ -447,6 +447,10 @@ class QQChannel(Channel):
             state = await self._connection_repo.consume_oauth_state(provider="qq", state=code)
             reply = "QQ connection code is invalid or expired."
             if state is not None:
+                group_name = str(data.get("group_name") or "").strip() if group else ""
+                upsert_kwargs: dict[str, Any] = {}
+                if group:
+                    upsert_kwargs["workspace_name"] = group_name or f"QQ group ({target})"
                 await self._connection_repo.upsert_connection(
                     owner_user_id=state["owner_user_id"],
                     provider="qq",
@@ -454,6 +458,7 @@ class QQChannel(Channel):
                     workspace_id=workspace,
                     metadata={"chat_type": "group", "group_openid": target} if group else {"chat_type": scope},
                     status="connected",
+                    **upsert_kwargs,
                 )
                 reply = "QQ connected to DeerFlow."
             await self.send(

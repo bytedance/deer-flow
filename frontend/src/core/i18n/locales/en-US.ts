@@ -1029,6 +1029,8 @@ export const enUS: Translations = {
         "This task has a saved group destination, but group notifications are unavailable on this server.",
       clearSaved: "Clear group notification",
       bind: "Bind a Feishu group",
+      bindWecom: "Bind a WeCom group",
+      bindQq: "Bind a QQ group",
       refresh: "Refresh group list",
       bindInstructions:
         "Add the bot to the group, then mention the bot and send this command in that group. Refresh the group list after binding.",

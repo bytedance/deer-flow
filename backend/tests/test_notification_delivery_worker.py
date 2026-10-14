@@ -1127,10 +1127,33 @@ async def test_wecom_group_notification_for_owner_and_multi_group_binding_isolat
         assert len(connections) == 3
         by_workspace = {row["workspace_id"]: row for row in connections}
         assert set(by_workspace) == {"bot-1", "bot-1:group:wr_group_1", "bot-1:group:wr_group_2"}
+        assert by_workspace["bot-1:group:wr_group_1"]["workspace_name"] == "WeCom group (wr_group_1)"
+        assert by_workspace["bot-1:group:wr_group_2"]["workspace_name"] == "WeCom group (wr_group_2)"
         g1_id = by_workspace["bot-1:group:wr_group_1"]["id"]
         g2_id = by_workspace["bot-1:group:wr_group_2"]["id"]
         priv_id = by_workspace["bot-1"]["id"]
         assert len({g1_id, g2_id, priv_id}) == 3
+
+        # Group-specific binding resolves for bound group chat; legacy bot-level binding falls back for unbound group chat.
+        bound_group_inbound = channel._make_inbound(
+            chat_id="wr_group_1",
+            user_id="GaoZhiChao",
+            text="hello",
+            metadata={"aibotid": "bot-1", "chattype": "group", "chatid": "wr_group_1"},
+        )
+        bound_group_inbound = await channel._attach_connection_identity(bound_group_inbound)
+        assert bound_group_inbound.connection_id == g1_id
+        assert bound_group_inbound.owner_user_id == "user-1"
+
+        legacy_group_inbound = channel._make_inbound(
+            chat_id="wr_legacy_group",
+            user_id="GaoZhiChao",
+            text="hello from legacy group",
+            metadata={"aibotid": "bot-1", "chattype": "group", "chatid": "wr_legacy_group"},
+        )
+        legacy_group_inbound = await channel._attach_connection_identity(legacy_group_inbound)
+        assert legacy_group_inbound.connection_id == priv_id
+        assert legacy_group_inbound.owner_user_id == "user-1"
 
         await channel.send_group_notification_for_owner(
             owner_user_id="user-1",

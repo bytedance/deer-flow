@@ -965,6 +965,8 @@ export const zhCN: Translations = {
       savedUnavailable: "已有群通知配置，当前服务未启用群通知。",
       clearSaved: "清除群通知",
       bind: "绑定飞书群",
+      bindWecom: "绑定企业微信群",
+      bindQq: "绑定 QQ 群",
       refresh: "刷新群列表",
       bindInstructions:
         "先把机器人加入群聊，再在群里 @机器人 并发送这条命令。完成绑定后刷新群列表。",

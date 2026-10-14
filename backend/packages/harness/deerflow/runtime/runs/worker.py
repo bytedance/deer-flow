@@ -1880,7 +1880,13 @@ async def run_agent(
                 except Exception:
                     logger.debug("Failed to inspect trailing human_input_request for run %s (non-fatal)", run_id, exc_info=True)
 
-            if not record.ownership_lost and ctx.on_run_completed is not None:
+            if not record.ownership_lost and not getattr(record, "terminal_status_persisted", True):
+                try:
+                    await run_manager.persist_current_status(run_id)
+                except Exception:
+                    logger.warning("Failed to confirm terminal status for run %s before completion hook", run_id, exc_info=True)
+
+            if not record.ownership_lost and getattr(record, "terminal_status_persisted", True) and ctx.on_run_completed is not None:
                 try:
                     await ctx.on_run_completed(record)
                 except Exception:

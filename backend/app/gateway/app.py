@@ -530,19 +530,24 @@ async def _start_scheduled_task_notification_delivery(app: FastAPI, startup_conf
             checkpointer = getattr(app.state, "checkpointer", None)
             if checkpointer is None:
                 return True
-            from deerflow.agents.human_input import extract_unanswered_human_input_request
-            from deerflow.runtime.checkpoint_state import CheckpointStateAccessor, graph_state_schema
+            from types import SimpleNamespace
 
-            accessor = CheckpointStateAccessor(
-                checkpointer,
-                graph_state_schema(),
-                channel_mode=getattr(app.state, "checkpoint_channel_mode", "full"),
-                snapshot_frequency=getattr(app.state, "checkpoint_snapshot_frequency", None),
-            )
-            snapshot = await accessor.aget({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
-            values = getattr(snapshot, "values", None) or {}
-            messages = values.get("messages") if isinstance(values, dict) else None
-            current_request = extract_unanswered_human_input_request(messages if isinstance(messages, list) else None)
+            from app.gateway.context_usage import _load_checkpoint_messages
+            from app.gateway.services import build_thread_checkpoint_state_accessor
+            from deerflow.agents.human_input import extract_unanswered_human_input_request
+            from deerflow.runtime.user_context import reset_current_user, set_current_user
+
+            owner_token = set_current_user(SimpleNamespace(id=owner_user_id)) if isinstance(owner_user_id, str) and owner_user_id else None
+            try:
+                accessor, checkpoint_config = await build_thread_checkpoint_state_accessor(
+                    SimpleNamespace(app=app, headers={}, state=SimpleNamespace(), cookies={}),
+                    thread_id=thread_id,
+                )
+                messages = await _load_checkpoint_messages(accessor, checkpoint_config)
+            finally:
+                if owner_token is not None:
+                    reset_current_user(owner_token)
+            current_request = extract_unanswered_human_input_request(messages)
             if current_request is None:
                 return False
             if isinstance(request_id, str) and request_id and current_request.get("request_id") != request_id:

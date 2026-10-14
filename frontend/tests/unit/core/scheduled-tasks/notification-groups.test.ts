@@ -78,11 +78,34 @@ describe("additional Feishu notification groups", () => {
       scopes: [],
       metadata: { chat_type: "group", chat_id: "group:wx_1" },
     };
+    const qqGroup2: ChannelConnection = {
+      ...qqGroup,
+      id: "qq-group-2",
+      workspace_id: "app1:group:group-openid-2",
+      metadata: { chat_type: "group", group_openid: "group-openid-2" },
+    };
+    const wecomGroup2: ChannelConnection = {
+      ...wecomGroup,
+      id: "wecom-group-2",
+      workspace_id: "bot1:group:wr_chat_2",
+      metadata: { aibotid: "bot1", chattype: "group", chatid: "wr_chat_2" },
+    };
     expect(
-      feishuNotificationGroups([qqGroup, wecomGroup, qqPrivate, wechatGroup]),
-    ).toEqual([qqGroup, wecomGroup]);
-    expect(notificationGroupName(qqGroup)).toBe("QQ group");
-    expect(notificationGroupName(wecomGroup)).toBe("WeCom group");
+      feishuNotificationGroups([
+        qqGroup,
+        qqGroup2,
+        wecomGroup,
+        wecomGroup2,
+        qqPrivate,
+        wechatGroup,
+      ]),
+    ).toEqual([qqGroup, qqGroup2, wecomGroup, wecomGroup2]);
+    expect(notificationGroupName(qqGroup)).toBe("QQ group (group-openid)");
+    expect(notificationGroupName(qqGroup2)).toBe("QQ group (group-openid-2)");
+    expect(notificationGroupName(wecomGroup)).toBe("WeCom group (wr_chat_1)");
+    expect(notificationGroupName(wecomGroup2)).toBe("WeCom group (wr_chat_2)");
+    expect(
+      notificationGroupName({ ...wecomGroup, workspace_name: "Ops War Room" }),
+    ).toBe("Ops War Room");
   });
 });
-

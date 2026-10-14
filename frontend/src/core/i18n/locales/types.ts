@@ -840,6 +840,8 @@ export interface Translations {
       savedUnavailable: string;
       clearSaved: string;
       bind: string;
+      bindWecom: string;
+      bindQq: string;
       refresh: string;
       bindInstructions: string;
       generating: string;

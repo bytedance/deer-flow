@@ -365,6 +365,34 @@ describe("TaskFormDialog", () => {
     );
   });
 
+  test("WeCom and QQ group bind buttons request provider-specific binding codes", async () => {
+    connectProvider.mockImplementation(async (provider: string) => ({
+      provider,
+      mode: "binding_code",
+      code: `${provider}-group-code`,
+      instruction: "unused",
+      expires_in: 600,
+    }));
+    renderForm({ mode: "create" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Bind a WeCom group" }));
+    const command = await screen.findByRole("textbox", {
+      name: "Group binding command",
+    });
+    await waitFor(() =>
+      expect(command).toHaveProperty("value", "/connect wecom-group-code"),
+    );
+    expect(connectProvider).toHaveBeenCalledWith("wecom");
+
+    fireEvent.click(screen.getByRole("button", { name: "Bind a QQ group" }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("textbox", { name: "Group binding command" }),
+      ).toHaveProperty("value", "/connect qq-group-code"),
+    );
+    expect(connectProvider).toHaveBeenCalledWith("qq");
+  });
+
   test("refreshing after binding discovers the group without changing the task automatically", async () => {
     listConnections.mockResolvedValueOnce([]).mockResolvedValue([group()]);
     renderForm({ mode: "create" });
