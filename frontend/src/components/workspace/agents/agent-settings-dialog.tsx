@@ -98,6 +98,9 @@ export function AgentSettingsDialog({
     plugins: agent.mcp_plugins ?? null,
     skills: agent.skills ?? null,
     toolGroups: agent.tool_groups ?? null,
+    model: agent.model ?? DEFAULT_MODEL_VALUE,
+    thinking: thinkingEnabledToSelection(agent.thinking_enabled),
+    reasoningEffort: agent.reasoning_effort ?? INHERIT_VALUE,
   }));
   const [plugins, setPlugins] = useState<string[] | null>(
     agent.mcp_plugins ?? null,
@@ -152,6 +155,10 @@ export function AgentSettingsDialog({
     () => resolveEffectiveModel(models, model),
     [models, model],
   );
+  const modelChanged = model !== initialSelections.model;
+  // Missing catalog data does not prove a model lacks reasoning support.
+  // Normalize dependent settings only after an intentional, known model switch.
+  const normalizeReasoning = modelChanged && selectedModel !== undefined;
   const supportsThinking = modelSupportsThinking(selectedModel);
   const thinkingRequired = isThinkingRequired(selectedModel);
   // Per-agent defaults keep the generic low/medium/high schema; offer only the
@@ -223,16 +230,29 @@ export function AgentSettingsDialog({
           ...(toolGroupsChanged && {
             tool_groups: toolGroups,
           }),
-          model: model === DEFAULT_MODEL_VALUE ? null : model,
+          ...(modelChanged && {
+            model: model === DEFAULT_MODEL_VALUE ? null : model,
+          }),
           model_settings: parsedSettings.modelSettings,
-          thinking_enabled: supportsThinking
-            ? selectionToThinkingEnabled(effectiveThinking)
-            : null,
-          reasoning_effort:
-            supportsReasoningEffort &&
-            reasoningEffortOptions.includes(reasoningEffort as ReasoningEffort)
-              ? (reasoningEffort as ReasoningEffort)
-              : null,
+          ...((thinking !== initialSelections.thinking ||
+            normalizeReasoning) && {
+            thinking_enabled:
+              selectedModel && !supportsThinking
+                ? null
+                : selectionToThinkingEnabled(effectiveThinking),
+          }),
+          ...((reasoningEffort !== initialSelections.reasoningEffort ||
+            normalizeReasoning) && {
+            reasoning_effort:
+              reasoningEffort === INHERIT_VALUE ||
+              (selectedModel &&
+                (!supportsReasoningEffort ||
+                  !reasoningEffortOptions.includes(
+                    reasoningEffort as ReasoningEffort,
+                  )))
+                ? null
+                : (reasoningEffort as ReasoningEffort),
+          }),
           allowed_subagents: selectionToAllowedSubagents(
             subagentAccess,
             selectedSubagents,

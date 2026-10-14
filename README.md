@@ -2112,6 +2112,11 @@ the stable English `name`. API callers can pass `display_name` to agent creation
 or update requests; an omitted update preserves it and `null` clears it. The
 same optional field is supported in the agent's `config.yaml`.
 
+Saving an unrelated Agent setting preserves its existing thinking and reasoning
+defaults, including while the model catalog is loading, unavailable, or missing
+the configured model. Explicit reasoning edits are saved independently; choosing
+a different known model clears defaults that the new model cannot support.
+
 Custom Agents migrated to `agent_storage.backend: db` remain editable through
 Agent settings and `update_agent` while the importer retains their old files
 for rollback. See [Agent Storage](backend/docs/CONFIGURATION.md#agent-storage)

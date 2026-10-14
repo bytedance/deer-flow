@@ -389,6 +389,12 @@ components directly. On a legacy model, `resolveReasoningEffort` keeps only its
 advertised generic values; this drops a remembered provider-specific token after
 a model switch without changing the backend's direct legacy-request behavior.
 
+`AgentSettingsDialog` compares model/thinking/effort drafts to its opening
+snapshot and omits untouched fields from updates. Normalize reasoning only for
+an intentional switch to a resolved model; an absent effective model (pending,
+failed, empty or missing catalog entry) is unknown capability, never proof of
+unsupported reasoning. Explicit `null` clears a setting; omission preserves it.
+
 ## Full-stack plugin UI
 
 Follow [invariants](../docs/full-stack-plugins.md#frontend-implementation-invariants) for
