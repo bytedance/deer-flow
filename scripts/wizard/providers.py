@@ -526,6 +526,7 @@ LLM_PROVIDERS: list[LLMProvider] = [
             "request_timeout": 600.0,
             "max_retries": 2,
             "max_tokens": 8192,
+            "temperature": 0.7,
         },
     ),
     LLMProvider(
