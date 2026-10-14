@@ -4452,6 +4452,12 @@
   任务，现在显示为任务时区当天的零点，与服务端实际执行时间一致。此前界面把末尾的
   `-07` 误认为 UTC 偏移量，显示成 UTC 零点：在 `Asia/Shanghai` 显示为 08:00，在 UTC
   以西的时区则显示为前一天晚上；任务列表、详情、对话卡片和编辑表单的预填时间都受影响。([#6692])
+- **子代理：** 持久批处理工作器在不再监管仍在运行的子代理时，现在会取消它，并在它
+  停止后从注册表中移除对应条目。此前，在长期运行的进程中停止批处理服务（SDK 的
+  `SubagentRuntime` 停止）会让每个仍在运行的 `SubagentResult`（包括完整对话
+  记录）永久留在进程级注册表中；轮询时的存储库错误会把条目标记为失败或重新排队，
+  却让其子代理在无人监管的情况下继续运行，因此重试可能把同一条目执行两次。始终不
+  停止的条目会在其租约过期后被移除。([#6785])
 - **网关：** 子代理批次 JSONL 导出
   （`GET /api/threads/{thread_id}/subagent-batches/{batch_id}/results.jsonl`）
   现在每次读取 10 行已存储结果，而不是 500 行。每行最多可包含 `max_result_chars`
@@ -9302,3 +9308,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6706]: https://github.com/bytedance/deer-flow/pull/6706
 [#6746]: https://github.com/bytedance/deer-flow/pull/6746
 [#6781]: https://github.com/bytedance/deer-flow/pull/6781
+[#6785]: https://github.com/bytedance/deer-flow/pull/6785
