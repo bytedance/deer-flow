@@ -10,6 +10,11 @@ ownership and capture cleanup. Retain the real XLSX conversion coverage.
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+Config-upgrade checkout fixtures clear inherited `DEER_FLOW_CONFIG_PATH`,
+`DEER_FLOW_PROJECT_ROOT` and `DEER_FLOW_ENV_FILE` before applying explicit test
+overrides. Exercise selector leaks through the real script with temporary
+configs; assert that the simulated developer config and its backup stay untouched.
+
 Image-context budget regressions use real PNG files through `view_image`, the
 state reducer, and both model-call wrappers. Check decoded payloads, cumulative
 base64 size and skipped file reads; keep count and byte limits independent.
@@ -197,6 +202,10 @@ report and resume must reject failed or old-schema rows. Stub live models so the
 tests never need credentials or network access.
 
 ## MCP claim fencing
+
+Notification recovery tests advance to the persisted `next_notification_at` after
+dispatch. It records completion time; a fixed scan-time offset can query before
+the notification is due on a slower runner. Preserve delivery and counter assertions.
 
 `test_mcp_task_repository.py` covers same-worker reclaim during an in-flight
 release, poll/cancel snapshot, or notification completion. Use explicit events

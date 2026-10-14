@@ -291,7 +291,8 @@ def test_channel_stop_flushes_pending_records(tmp_path):
     assert BuzzSeenEventStore(path).seen(CHANNEL, str(ev["id"]))
 
 
-def test_service_wiring_injects_persistent_store_path(tmp_path, monkeypatch):
+@pytest.mark.parametrize("custom_path", [None, "/custom/seen.json"])
+def test_service_wiring_injects_persistent_store_path(tmp_path, monkeypatch, custom_path):
     """The _start_channel wiring is what makes real deployments durable — a
     silent regression there would revert to memory-only with all unit tests green."""
     from app.channels.service import ChannelService
@@ -313,14 +314,14 @@ def test_service_wiring_injects_persistent_store_path(tmp_path, monkeypatch):
     monkeypatch.setattr("deerflow.reflection.resolve_class", lambda path, base_class=None: StubChannel)
 
     service = ChannelService(channels_config={})
-    started = asyncio.run(service._start_channel("buzz", {"relay_url": "wss://x", "private_key": SK3_HEX}))
+    service._running = True  # _start_channel is admitted only by a running service
+    config = {"relay_url": "wss://x", "private_key": SK3_HEX}
+    if custom_path is not None:
+        config["seen_event_store_path"] = custom_path
+    started = asyncio.run(service._start_channel("buzz", config))
     assert started
-    expected = str(tmp_path / "channels" / "buzz_seen_events.json")
+    expected = custom_path or str(tmp_path / "channels" / "buzz_seen_events.json")
     assert captured_config["seen_event_store_path"] == expected
-    # An explicitly configured path must win over the default wiring.
-    captured_config.clear()
-    asyncio.run(service._start_channel("buzz", {"relay_url": "wss://x", "private_key": SK3_HEX, "seen_event_store_path": "/custom/seen.json"}))
-    assert captured_config["seen_event_store_path"] == "/custom/seen.json"
 
 
 def test_stale_timer_from_closed_loop_does_not_block_rescheduling(tmp_path):
