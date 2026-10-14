@@ -5871,6 +5871,13 @@ This release closes that milestone with **621 merged pull requests**.
   With the default `max_result_chars`, one 100-item page held about 34 MB and
   blocked the event loop for about 70 ms (170 MB and 300 ms at `limit=500`);
   it now holds under 1 MB. The response is unchanged. ([#6781])
+- **persistence:** Two first ratings of one run by the same user at the same
+  moment (two tabs, two devices, a client retry) no longer fail one of them
+  with a 500. Both used to miss the existing-row lookup and insert, and the
+  second insert hit the `(thread, run, user)` unique key. On Postgres, 26 of
+  80 such requests failed. The same race in IM conversation binding, such as
+  a first message arriving together with `/new`, no longer fails the message.
+  The losing write now updates the row the other one created.
 
 ### Security
 

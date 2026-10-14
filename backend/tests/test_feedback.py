@@ -22,6 +22,37 @@ async def _cleanup():
     await close_engine()
 
 
+class _EmptyResult:
+    @staticmethod
+    def scalar_one_or_none():
+        return None
+
+
+class _MissFirstSelectSession:
+    """Make the first SELECT miss, as if a concurrent writer inserted right after it."""
+
+    def __init__(self, session):
+        self._session = session
+        self._missed = False
+
+    def __getattr__(self, name):
+        return getattr(self._session, name)
+
+    async def execute(self, *args, **kwargs):
+        result = await self._session.execute(*args, **kwargs)
+        if not self._missed:
+            self._missed = True
+            return _EmptyResult()
+        return result
+
+    async def __aenter__(self):
+        await self._session.__aenter__()
+        return self
+
+    async def __aexit__(self, *args):
+        return await self._session.__aexit__(*args)
+
+
 # -- FeedbackRepository --
 
 
@@ -172,6 +203,27 @@ class TestFeedbackRepository:
         assert second["rating"] == -1
         assert second["comment"] == "changed my mind"
         await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_upsert_retries_as_update_when_concurrent_insert_wins(self, tmp_path):
+        """A losing first-submission INSERT updates the winner's row instead of raising IntegrityError."""
+        repo = await _make_feedback_repo(tmp_path)
+        try:
+            first = await repo.upsert(run_id="r1", thread_id="t1", rating=1, user_id="u1")
+            real_factory = repo._sf
+            repo._sf = lambda: _MissFirstSelectSession(real_factory())
+            try:
+                second = await repo.upsert(run_id="r1", thread_id="t1", rating=-1, user_id="u1", comment="second tab")
+            finally:
+                repo._sf = real_factory
+
+            assert second["feedback_id"] == first["feedback_id"]
+            assert second["rating"] == -1
+            assert second["comment"] == "second tab"
+            rows = await repo.list_by_run("t1", "r1", user_id="u1")
+            assert [row["feedback_id"] for row in rows] == [first["feedback_id"]]
+        finally:
+            await _cleanup()
 
     @pytest.mark.anyio
     async def test_upsert_different_users_separate(self, tmp_path):
