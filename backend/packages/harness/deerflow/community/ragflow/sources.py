@@ -38,9 +38,13 @@ def budget_source_artifact(content: str, artifact: object, max_chars: int, *, su
 
     notice = "Knowledge sources omitted to fit output budget; request smaller excerpts."
     # Remove old destinations before shortening the report, including any link
-    # fragments left by the generic synopsis/truncation transform.
-    summary = re.sub(r"\[([^\]\n]*)\]\(#(?:user-content-)?knowledge-[^)\s]*\)", r"\1", summary)
-    summary = re.sub(r"#(?:user-content-)?knowledge-[\w-]*", "", summary)
+    # fragments left by the generic synopsis/truncation transform. Scope the
+    # match to the native ``#knowledge-<id>`` namespace: the unified
+    # ``#knowledge-source-<id>`` contract is a different namespace that
+    # ``prune_sources`` reconciles downstream, so flattening it here would
+    # strip a legitimate citation this budgeter never rebuilds.
+    summary = re.sub(r"\[([^\]\n]*)\]\(#(?:user-content-)?knowledge-(?!source-)[^)\s]*\)", r"\1", summary)
+    summary = re.sub(r"#(?:user-content-)?knowledge-(?!source-)[\w-]*", "", summary)
     summary_limit = min(1000, max_chars // 4) if max_chars >= 160 else 0
     if not summary_limit:
         summary = ""
