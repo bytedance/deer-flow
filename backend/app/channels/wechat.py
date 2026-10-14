@@ -31,6 +31,7 @@ from app.channels.message_bus import InboundMessage, InboundMessageType, Message
 from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
+_monotonic = time.monotonic
 
 
 class MessageItemType(IntEnum):
@@ -193,14 +194,13 @@ def _parse_wechat_user_id(entry: Any) -> str | None:
 
 def _parse_allowed_users(allowed_users: Any) -> frozenset[str] | None:
     """Parse iLink IDs without splitting a scalar string into multiple IDs."""
-    if isinstance(allowed_users, str) and ("," in allowed_users or any(char.isspace() for char in allowed_users.strip())):
-        logger.warning("[WeChat] allowed_users is a scalar string containing separators; treating it as one literal user ID. Use a YAML list for multiple IDs")
     return parse_allowed_users(
         allowed_users,
         parse_user_id=_parse_wechat_user_id,
         logger=logger,
         channel_name="WeChat",
         expected_id="a valid iLink user ID",
+        warn_on_scalar_separators=True,
     )
 
 
@@ -228,6 +228,9 @@ class WechatChannel(Channel):
     DEFAULT_QRCODE_POLL_INTERVAL = 2.0
     DEFAULT_QRCODE_POLL_TIMEOUT = 180.0
     DEFAULT_QRCODE_BOT_TYPE = 3
+    DEFAULT_QRCODE_STATUS_TIMEOUT = 30.0
+    # Browser QR login allows a small cushion over the channel polling timeout.
+    DEFAULT_QRCODE_ADMIN_STATUS_TIMEOUT = DEFAULT_QRCODE_STATUS_TIMEOUT + 5.0
     DEFAULT_API_TIMEOUT = 15.0
     DEFAULT_CONFIG_TIMEOUT = 10.0
     DEFAULT_CDN_TIMEOUT = 30.0
@@ -837,7 +840,11 @@ class WechatChannel(Channel):
         params = {"qrcode": qrcode}
         if verify_code:
             params["verify_code"] = verify_code
-        return await self._request_public_get_json("/ilink/bot/get_qrcode_status", params=params, timeout=timeout)
+        return await self._request_public_get_json(
+            "/ilink/bot/get_qrcode_status",
+            params=params,
+            timeout=self.DEFAULT_QRCODE_STATUS_TIMEOUT if timeout is None else timeout,
+        )
 
     async def _save_auth_state_drained(
         self,
@@ -882,9 +889,19 @@ class WechatChannel(Channel):
             qrcode_img_content=qrcode_img_content or None,
         )
 
-        deadline = time.monotonic() + max(self._qrcode_poll_timeout, 1.0)
-        while time.monotonic() < deadline:
-            status_data = await self.request_login_status(qrcode)
+        deadline = _monotonic() + max(self._qrcode_poll_timeout, 1.0)
+        while True:
+            remaining = deadline - _monotonic()
+            if remaining <= 0:
+                break
+            try:
+                async with asyncio.timeout(remaining):
+                    status_data = await self.request_login_status(
+                        qrcode,
+                        timeout=min(remaining, self.DEFAULT_QRCODE_STATUS_TIMEOUT),
+                    )
+            except TimeoutError:
+                break
             status = str(status_data.get("status") or "").strip().lower()
             if status == "confirmed":
                 token = str(status_data.get("bot_token") or "").strip()
@@ -1692,9 +1709,40 @@ class WechatChannel(Channel):
 
     @staticmethod
     def _coerce_str_set(value: Any, default: frozenset[str]) -> set[str]:
-        if not isinstance(value, (list, tuple, set, frozenset)):
+        """Normalize a configured extension allowlist, falling back to *default*.
+
+        A bare string is the single entry it names — the same shape
+        ``_coerce_host_suffixes`` accepts one line below — so
+        ``allowed_file_extensions: .pdf`` restricts the channel instead of
+        silently widening back to the default allowlist. Non-string entries are
+        reported and skipped rather than stringified into bogus members such as
+        ``.123``, every fallback to *default* is logged, and a scalar string
+        that looks like several entries warns the way ``_parse_allowed_users``
+        does: this set gates which files the Gateway may read, so a configured
+        restriction that changes shape without a trace is a posture change the
+        operator cannot see.
+        """
+        if value is None:
             return set(default)
-        normalized = {str(item).strip().lower() if str(item).strip().startswith(".") else f".{str(item).strip().lower()}" for item in value if str(item).strip()}
+        if isinstance(value, str):
+            if "," in value or any(char.isspace() for char in value.strip()):
+                logger.warning("[WeChat] allowed_file_extensions is a scalar string containing separators; treating it as one literal extension. Use a YAML list for multiple extensions")
+            values: list[Any] = [value]
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            values = list(value)
+        else:
+            logger.warning("[WeChat] ignoring allowed_file_extensions %r: expected a string or a list of strings, using the %d built-in extensions instead", value, len(default))
+            return set(default)
+        normalized: set[str] = set()
+        for entry in values:
+            if not isinstance(entry, str):
+                logger.warning("[WeChat] ignoring allowed_file_extensions entry %r: expected a file extension string", entry)
+                continue
+            text = entry.strip().lower()
+            if text:
+                normalized.add(text if text.startswith(".") else f".{text}")
+        if not normalized:
+            logger.warning("[WeChat] allowed_file_extensions %r lists no usable extension, using the %d built-in extensions instead", value, len(default))
         return normalized or set(default)
 
     def _coerce_host_suffixes(self, value: Any) -> frozenset[str]:

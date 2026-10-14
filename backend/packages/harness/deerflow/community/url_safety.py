@@ -8,6 +8,70 @@ from collections.abc import Callable
 from urllib.parse import urlparse
 
 _BLOCKED_HOSTNAMES = {"localhost", "metadata.google.internal"}
+_IDNA_DOT_TRANSLATION = str.maketrans("\u3002\uff0e\uff61", "...")
+
+
+def safe_public_result_url(value: object) -> str:
+    """Screen an untrusted result URL without doing DNS or network I/O.
+
+    This only filters URLs returned to callers. Downloaders must still check
+    the resolved address at connection time.
+    """
+    if not isinstance(value, str):
+        return ""
+    url = value.strip()
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname
+    except ValueError:
+        return ""
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or not host:
+        return ""
+    # IDNA clients treat these Unicode label separators as ASCII dots. Screen
+    # the normalized host so an IP literal cannot masquerade as a DNS name.
+    host = host.translate(_IDNA_DOT_TRANSLATION).lower().rstrip(".")
+    if not host or host in _BLOCKED_HOSTNAMES or host.endswith(".localhost"):
+        return ""
+
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        address = _decode_result_ipv4(host)
+        if address is None:
+            return url
+    if isinstance(address, ipaddress.IPv6Address):
+        embedded = address.ipv4_mapped or address.sixtofour
+        if embedded is None and address in ipaddress.ip_network("64:ff9b::/96"):
+            embedded = ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
+        if embedded is None and 1 < int(address) < 1 << 32:
+            embedded = ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
+        if embedded is not None and is_blocked_address(embedded):
+            return ""
+    return "" if is_blocked_address(address) else url
+
+
+def _decode_result_ipv4(host: str) -> ipaddress.IPv4Address | None:
+    """Recognize decimal, octal and hex IPv4 spellings accepted by clients."""
+    parts = host.split(".")
+    if not 1 <= len(parts) <= 4:
+        return None
+    values: list[int] = []
+    for part in parts:
+        try:
+            base = 16 if part.startswith(("0x", "0X")) else 8 if part.startswith("0") and len(part) > 1 else 10
+            values.append(int(part, base))
+        except ValueError:
+            return None
+    *leading, last = values
+    if any(not 0 <= value <= 255 for value in leading):
+        return None
+    remaining_bits = 8 * (4 - len(leading))
+    if not 0 <= last < 1 << remaining_bits:
+        return None
+    result = 0
+    for value in leading:
+        result = result << 8 | value
+    return ipaddress.IPv4Address(result << remaining_bits | last)
 
 
 def resolve_host_addresses(hostname: str) -> list[ipaddress._BaseAddress]:
