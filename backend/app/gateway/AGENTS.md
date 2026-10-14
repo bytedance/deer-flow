@@ -433,3 +433,9 @@ private_thread_read and passes the captured incarnation into the short file fenc
 failure cleanup must not unlink a recreated thread's reusable paths. Revoked
 cleanup defers for provenance-aware reconciliation. #62 verifies both metadata
 dialects and native cancellation drain; remote/background/client gates remain.
+
+GET /thread-activity binds workspace_resource_scope before native read permission
+and repository calls. Native Run SQL filters before keyset/limit, and the existing
+read repository selects the per-workspace viewer clock. The wrapper revalidates
+live policy before returning. #64 verifies both metadata dialects plus five
+legacy activity cases; RunManager cache, Run/SSE and frontend switching remain.

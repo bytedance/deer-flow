@@ -1277,5 +1277,35 @@
       "PostgreSQL checkpointer, NAS and physical cancellation/recovery",
       "M3 activity/feed/client and remaining M4-M11; tenant activation remains closed"
     ]
+  },
+  "workspace_activity_http": {
+    "status": "partial_M3_verified_main",
+    "red": {
+      "build": 63,
+      "result": "FAILURE",
+      "tests_failed": 2,
+      "elapsed_seconds": 27.32,
+      "archive_sha256": "65f67abb4e5e5070a91b522e409a26a2fa2831eaf8c761fcbccbe3a1adcc9a8f",
+      "reason": "activity route did not bind scope before required Run SQL reads"
+    },
+    "green": {
+      "build": 64,
+      "result": "SUCCESS",
+      "tests_passed": 7,
+      "elapsed_seconds": 39.36,
+      "archive_sha256": "554e6ed2d1412b44bd97b7259fbdc2809ef8998740b90fbf349ded94bff27bc9",
+      "command": "python -m pytest tests/test_workspace_http.py tests/test_thread_activity_router.py::test_first_poll_only_seeds_at_the_callers_head tests/test_thread_activity_router.py::test_cursor_advances_to_the_last_returned_row_without_skips_or_repeats tests/test_thread_activity_router.py::test_interactive_changes_advance_the_cursor_but_are_not_returned tests/test_thread_activity_router.py::test_other_users_runs_never_appear_even_with_their_cursor tests/test_thread_activity_router.py::test_read_version_moves_only_when_a_read_clears_something -q --tb=short --no-showlocals"
+    },
+    "source_sha256": {
+      "backend/app/gateway/routers/thread_activity.py": "410cad2a0343fd0eb125adaac86aa9423aee7fadfbd50285f9992c2f621a713b",
+      "backend/tests/test_workspace_http.py": "22eb3c703a533acadfeeadba561d3cb2894a1e32503deb6c563daaa3af5f7577"
+    },
+    "cleanup": "#63/#64 owned container and network lists independently empty",
+    "remaining": [
+      "RunManager resident cache and HTTP Run/message/event reads",
+      "SSE/reconnect and background writers",
+      "frontend workspace switch/cache/cursor lifecycle",
+      "remaining M4-M11; tenant activation closed"
+    ]
   }
 }

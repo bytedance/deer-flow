@@ -32,7 +32,7 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
     from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
     from app.gateway.auth_middleware import AuthMiddleware
     from app.gateway.csrf_middleware import CSRFMiddleware
-    from app.gateway.routers import artifacts, project_documents, projects, threads, uploads
+    from app.gateway.routers import artifacts, project_documents, projects, thread_activity, threads, uploads
     from deerflow.agents.middlewares import summarization_middleware as summary_module
     from deerflow.config import app_config
     from deerflow.config import paths as paths_module
@@ -108,8 +108,18 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
             deletion_probe = {}
             deletion_attempts = {}
             deletion_admission = {}
+            activity_revocation = {}
 
             class RevokingRunRepository(RunRepository):
+                async def latest_change(self, **kwargs):
+                    result = await super().latest_change(**kwargs)
+                    workspace_id = activity_revocation.pop("workspace_id", None)
+                    if workspace_id:
+                        async with sf() as session:
+                            await session.execute(sa.text("UPDATE workspaces SET policy_version=policy_version+1 WHERE id=:id"), {"id": workspace_id})
+                            await session.commit()
+                    return result
+
                 async def create_thread_operation_atomic(self, *args, **kwargs):
                     result = await super().create_thread_operation_atomic(*args, **kwargs)
                     workspace_id = deletion_admission.pop("workspace_id", None) if kwargs.get("operation_kind") == "delete" else None
@@ -187,6 +197,7 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
             app.include_router(artifacts.router)
             app.include_router(uploads.router)
             app.include_router(threads.router)
+            app.include_router(thread_activity.router)
             app.include_router(projects.router)
             app.include_router(project_documents.router)
             app.add_middleware(AuthMiddleware)
@@ -393,6 +404,35 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                 async with sf() as session:
                     position = await session.scalar(sa.text("SELECT seen_change_seq FROM thread_read_markers WHERE user_id=:user AND thread_id='team-research-thread'"), {"user": identities["alice"]})
                     assert position == 10, "withdrawn read admission mutated the marker"
+                # One viewer, independent activity/read heads in two spaces.
+                async with sf() as session:
+                    session.add(ThreadMetaRow(thread_id="peer-activity", workspace_id=team, user_id=identities["bob"], incarnation=uuid4().hex))
+                    session.add_all(
+                        [
+                            RunRow(run_id="peer-activity-run", thread_id="peer-activity", workspace_id=team, user_id=identities["bob"], status="success", change_seq=9, origin_kind="schedule"),
+                            RunRow(run_id="team-interactive-http", thread_id="team-research-thread", workspace_id=team, user_id=identities["alice"], status="success", change_seq=12),
+                            RunRow(run_id="personal-activity-http", thread_id="personal-research-thread", workspace_id=personal, user_id=identities["alice"], status="success", change_seq=22, origin_kind="schedule"),
+                            RunRow(run_id="foreign-stamp-http", thread_id="team-research-thread", workspace_id=personal, user_id=identities["alice"], status="success", change_seq=25, origin_kind="schedule"),
+                        ]
+                    )
+                    await session.commit()
+                team_head = await client.get("/api/thread-activity", headers=team_headers)
+                assert team_head.status_code == 200, team_head.text
+                assert team_head.json() == {"cursor": "12:team-interactive-http", "threads": [], "truncated": False, "read_version": 1}
+                personal_head = await client.get("/api/thread-activity")
+                assert personal_head.status_code == 200, personal_head.text
+                assert personal_head.json() == {"cursor": "22:personal-activity-http", "threads": [], "truncated": False, "read_version": 0}
+                team_activity = await client.get("/api/thread-activity?cursor=0:&limit=1", headers=team_headers)
+                assert team_activity.status_code == 200, team_activity.text
+                assert team_activity.json()["threads"] == [{"thread_id": "team-research-thread", "origin_kind": "schedule", "status": "success"}]
+                assert team_activity.json()["truncated"] is True
+                next_activity = await client.get("/api/thread-activity", headers=team_headers, params={"cursor": team_activity.json()["cursor"], "limit": 1})
+                assert next_activity.json() == team_head.json(), "interactive changes must advance only this space's cursor"
+                own_activity = await client.get("/api/thread-activity?cursor=0:")
+                assert own_activity.status_code == 200, own_activity.text
+                assert own_activity.json()["threads"] == [{"thread_id": "personal-research-thread", "origin_kind": "schedule", "status": "success"}]
+                activity_revocation["workspace_id"] = team
+                assert (await client.get("/api/thread-activity", headers=team_headers)).status_code == 404
                 thread_upload = await client.post("/api/threads/team-research-thread/uploads", headers=team_headers, files={"files": ("team.txt", b"private thread source", "text/plain")})
                 assert thread_upload.status_code == 200, thread_upload.text
                 private_upload = await client.post("/api/threads/personal-research-thread/uploads", files={"files": ("team.txt", b"personal different bytes", "text/plain")})

@@ -85,3 +85,8 @@ GREEN”的暂停记录已被本次证据更新；源码哈希以 progress JSON 
 当前目标 active，下一项继续 M3 activity/Run/feed（注意 RunManager 内存
 缓存不能绕过持久空间和父会话实例）及客户端切换，顺序 M4–M11 不变。
 远端 STOP、崩溃恢复和被拒绝清理的数据协调未完成，租户仍未部署/激活。
+
+最新接续：activity HTTP #63 RED/#64 GREEN 已完成（7 passed, 39.36s），
+#63/#64 专属资源已独立查空。下一项从 RunManager 内存缓存及 Run/message/
+event 读取继续；不可让缓存命中绕过 SQL 私有空间校验，也不可在存储故障时
+回退到未验证缓存。随后接 SSE 和客户端切换。目标 active，仍未部署。

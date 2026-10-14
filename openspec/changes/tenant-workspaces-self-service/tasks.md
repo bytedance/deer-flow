@@ -52,3 +52,8 @@ dialects and native drain regression. Tombstones and opaque internal receipts
 protect local cleanup, and file operations compare original incarnation.
 Remote STOP/recovery, retained task disposition, Run cache/history, physical
 NAS/PostgreSQL checkpoint and client acceptance remain; M3 stays unchecked.
+
+M3 activity HTTP: #63 RED missing scope; #64 GREEN (7 passed, 39.36s). Two real
+SQL/JWT mains and five native pagination/clock regressions prove independent
+workspace heads/read versions and pre-limit private filtering/withdrawal denial.
+Run cache, HTTP/SSE and client scope lifecycle remain; M3 stays unchecked.

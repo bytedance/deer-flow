@@ -2953,3 +2953,7 @@ Private conversation deletion and upload cleanup now preserve workspace and
 conversation-instance ownership in isolated local-sandbox acceptance. See
 [deletion limits and evidence](docs/tenant-workspaces-api.md#private-conversation-deletion-partial-m3).
 Remote lifecycle recovery, runtime/client isolation and tenant activation remain pending.
+
+The native activity feed now has isolated workspace heads and read clocks in
+[partial HTTP acceptance](docs/tenant-workspaces-api.md#workspace-activity-feed-partial-m3).
+Run/SSE and frontend workspace integration remain pending.

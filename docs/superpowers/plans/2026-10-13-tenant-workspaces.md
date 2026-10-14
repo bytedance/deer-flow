@@ -543,3 +543,10 @@ tombstones/receipts fence local cleanup, child attribution and same-ID reuse;
 file publication/cleanup/unlink checks captured incarnation. Remote STOP,
 unknown cleanup recovery, Run cache/background feeds, client and all remaining
 M4–M11 evidence remain required. M3 stays unchecked and activation closed.
+
+M3 activity checkpoint: #63 RED missing HTTP scope; #64 GREEN (7 passed, 39.36s).
+Native authenticated personal/team activity heads, pagination, read versions,
+peer/incompatible parent filtering and policy withdrawal are verified on both
+metadata dialects, with five legacy regressions. Next: RunManager resident
+cache/Run HTTP/message/event reads, SSE and frontend scope/cursor lifecycle.
+M3 and activation remain incomplete.

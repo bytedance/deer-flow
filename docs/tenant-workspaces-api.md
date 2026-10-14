@@ -579,3 +579,16 @@ Each build's dedicated containers/networks were independently checked empty.
 This verifies local deletion and generation-safe file cleanup mains, not full
 M3 or runtime activation. Run cache/background history, remote STOP/recovery,
 PostgreSQL checkpoints, NAS, full client flows and M4–M11 remain required.
+
+## Workspace activity feed (partial M3)
+
+GET /thread-activity binds the native browser workspace before permission and
+SQL reads, then revalidates before returning. It reuses native Run filtering,
+keyset pagination, interactive-change advancement and workspace viewer clocks.
+#63 RED reproduced missing scope; #64 GREEN passed 7 checks in 39.36s: real JWT
+HTTP on SQLite/PostgreSQL plus five native activity regressions. Personal/team
+heads and read versions remain independent; peer and mismatched-parent rows are
+filtered before pagination, and mid-request policy withdrawal returns 404.
+Source bytes match the recorded archive; both builds' owned resources are empty.
+RunManager cache/Run HTTP/SSE, frontend cursor/cache switching and M4–M11 remain
+unverified; this does not activate tenant mode.
