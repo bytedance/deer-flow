@@ -5917,6 +5917,15 @@ This release closes that milestone with **621 merged pull requests**.
   80 such requests failed. The same race in IM conversation binding, such as
   a first message arriving together with `/new`, no longer fails the message.
   The losing write now updates the row the other one created. ([#6852])
+- **persistence:** Startup schema upgrades no longer log a false
+  `safe_add_column ... drifts from the model definition` warning for columns
+  that already match the model. The check compared the model's generic type
+  and default names (`STRING`, `BIGINTEGER`, `DefaultClause('0')`) with the
+  database's own (`VARCHAR`, `BIGINT`, `'0'`), so every Postgres or SQLite
+  database created before revision 0023 logged one on upgrade, and a schema
+  whose head stamp was lost logged 29 (SQLite) or 36 (Postgres), burying the
+  real type mismatch the warning exists to catch. Both sides are now compared
+  as the connected database spells them. ([#6865])
 
 ### Security
 
@@ -11701,3 +11710,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6843]: https://github.com/bytedance/deer-flow/pull/6843
 [#6844]: https://github.com/bytedance/deer-flow/pull/6844
 [#6852]: https://github.com/bytedance/deer-flow/pull/6852
+[#6865]: https://github.com/bytedance/deer-flow/pull/6865
