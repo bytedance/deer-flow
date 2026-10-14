@@ -550,3 +550,11 @@ peer/incompatible parent filtering and policy withdrawal are verified on both
 metadata dialects, with five legacy regressions. Next: RunManager resident
 cache/Run HTTP/message/event reads, SSE and frontend scope/cursor lifecycle.
 M3 and activation remain incomplete.
+
+M3 resident Run checkpoint: #65 RED actual cache cross-space disclosure; #66
+collection failed on config/authz/runtime cycle; #67 GREEN (9 passed, 43.47s).
+Live control identity/status remains native after durable authorization; scoped
+cache/list/batch/replay reads refuse foreign/revoked/deleted rows and durable
+read faults. Required empty batches reject missing scope. Native hydration and
+pagination remain verified. Next integrate Run/message/event HTTP and SSE, then
+client switching; normal admission/worker generation/lease remains M4.

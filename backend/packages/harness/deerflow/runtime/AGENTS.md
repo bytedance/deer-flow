@@ -298,3 +298,13 @@ configuration, generation or middleware execution. Gateway tenant callers bind
 these to private entry identity and the final live SQL checkpoint fence. Native
 unbound callers retain their existing behavior. These adapters do not establish
 workspace memory/archive authorization, which needs M5 provider integration.
+
+Scoped RunManager reads require the store's explicit supports_workspace_reads
+capability; workspace_scope_required is captured from operator construction.
+A cache hit never authenticates a Run. get checks durable private scope first
+and retains live controls only for matching Run/thread/user/operation/created_at.
+List, batch and replay overlays authorize only resident IDs through scoped SQL.
+Scope/store errors cannot use legacy memory fallback; empty batches still check
+required scope. Unbound legacy behavior is unchanged. #67 verifies both dialects
+and native live-object/status precedence. Worker/admission/lease/result scope
+remains M4 work, not implied by these read checks.

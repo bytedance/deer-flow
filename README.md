@@ -2957,3 +2957,7 @@ Remote lifecycle recovery, runtime/client isolation and tenant activation remain
 The native activity feed now has isolated workspace heads and read clocks in
 [partial HTTP acceptance](docs/tenant-workspaces-api.md#workspace-activity-feed-partial-m3).
 Run/SSE and frontend workspace integration remain pending.
+
+[Scoped resident Run reads](docs/tenant-workspaces-api.md#resident-run-authorization-partial-m3)
+now validate durable ownership before serving cached data. Full Run/event/SSE,
+worker and frontend integration remain pending; tenant activation stays closed.

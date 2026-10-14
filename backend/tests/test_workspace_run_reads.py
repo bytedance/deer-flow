@@ -17,6 +17,7 @@ def test_native_run_reads_keep_selected_private_thread_scope(native_engine):  # 
     from deerflow.persistence.thread_meta import ThreadMetaRepository
     from deerflow.persistence.user.model import UserRow
     from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied, WorkspaceRepository
+    from deerflow.runtime import RunManager, RunStatus
 
     with native_engine.begin() as conn:
         conn.execute(sa.update(UserRow).where(UserRow.id == "owner").values(email_verified_at=datetime.now(UTC)))
@@ -32,7 +33,25 @@ def test_native_run_reads_keep_selected_private_thread_scope(native_engine):  # 
             team = await workspaces.create_team("owner", "Run history", "run-read-main")
             contexts = {kind: await service.resolve_context("owner", row["id"]) for kind, row in (("personal", personal), ("team", team))}
             threads = ThreadMetaRepository(sf)
-            runs = RunRepository(sf)
+            unavailable = {"value": False}
+
+            class AvailableRunRepository(RunRepository):
+                async def get(self, *args, **kwargs):
+                    if unavailable["value"]:
+                        raise RuntimeError("Synthetic durable read outage")
+                    return await super().get(*args, **kwargs)
+
+                async def get_many_by_thread(self, *args, **kwargs):
+                    if unavailable["value"]:
+                        raise RuntimeError("Synthetic durable read outage")
+                    return await super().get_many_by_thread(*args, **kwargs)
+
+                async def list_by_thread(self, *args, **kwargs):
+                    if unavailable["value"]:
+                        raise RuntimeError("Synthetic durable read outage")
+                    return await super().list_by_thread(*args, **kwargs)
+
+            runs = AvailableRunRepository(sf)
             for kind in ("personal", "team"):
                 token = set_current_workspace(contexts[kind])
                 try:
@@ -65,8 +84,36 @@ def test_native_run_reads_keep_selected_private_thread_scope(native_engine):  # 
                         )
                     )
                 await session.commit()
+            # Populate the actual native resident registry from durable rows,
+            # as native adoption/hydration does, without starting any Agent.
+            manager = RunManager(store=runs)
+            async with sf() as session:
+                resident_rows = (await session.scalars(sa.select(RunRow))).all()
+                for row in resident_rows:
+                    record = manager._record_from_store(runs._row_to_dict(row))
+                    record.store_only = False
+                    manager._runs[record.run_id] = record
+                    manager._index_run_locked(record)
+            resident = manager._runs["team-valid"]
+            resident.status = RunStatus.error  # Preserve native current-status precedence.
             token = set_current_workspace(contexts["team"])
             try:
+                assert await manager.get("personal-valid", user_id="owner") is None, "resident Run bypassed workspace SQL authorization"
+                assert await manager.get("team-valid", user_id="owner") is resident, "authorized reads must retain the live task/abort record"
+                assert [r.run_id for r in await manager.list_by_thread("team-history", user_id="owner", limit=1)] == ["team-valid"]
+                assert await manager.list_by_thread("personal-history", user_id="owner") == []
+                assert set(await manager.get_many_by_thread("team-history", {"team-valid", "wrong-parent", "null-scope"}, user_id="owner")) == {"team-valid"}
+                assert await manager.list_successful_regenerate_sources("team-history", user_id="owner") == set()
+                visibility = await manager.list_edit_replay_visibility("team-history", user_id="owner")
+                assert visibility.hidden_source_run_ids == set() and visibility.hidden_attempt_run_ids == {"team-valid"}
+                unavailable["value"] = True
+                try:
+                    with pytest.raises(RuntimeError, match="durable read outage"):
+                        await manager.get("team-valid", user_id="owner")
+                    with pytest.raises(RuntimeError, match="durable read outage"):
+                        await manager.list_by_thread("team-history", user_id="owner")
+                finally:
+                    unavailable["value"] = False
                 assert await runs.get("personal-valid", user_id="owner") is None, "Run read exposes the same user's other workspace"
                 assert (await runs.get("team-valid", user_id="owner"))["workspace_id"] == team["id"]
                 for invisible in ("wrong-parent", "null-scope", "wrong-thread"):
@@ -86,6 +133,23 @@ def test_native_run_reads_keep_selected_private_thread_scope(native_engine):  # 
                 async with sf() as session:
                     await session.execute(sa.text("UPDATE workspaces SET policy_version=policy_version+1 WHERE id=:id"), {"id": team["id"]})
                     await session.commit()
+                assert await manager.get("team-valid", user_id="owner") is None, "revoked scope used resident Run data"
+                assert await manager.list_by_thread("team-history", user_id="owner") == []
+                assert await manager.get_many_by_thread("team-history", {"team-valid"}, user_id="owner") == {}
+                fresh = await service.resolve_context("owner", team["id"])
+                refreshed = set_current_workspace(fresh)
+                try:
+                    async with sf() as session:
+                        await session.execute(sa.delete(RunRow).where(RunRow.run_id == "team-valid"))
+                        await session.commit()
+                    assert "team-valid" in manager._runs, "fixture must retain the old native cache entry"
+                    assert await manager.get("team-valid", user_id="owner") is None, "deleted durable Run resurrected from cache"
+                    assert await manager.list_by_thread("team-history", user_id="owner") == []
+                    assert await manager.get_many_by_thread("team-history", {"team-valid"}, user_id="owner") == {}
+                    assert await manager.list_successful_regenerate_sources("team-history", user_id="owner") == set()
+                    assert (await manager.list_edit_replay_visibility("team-history", user_id="owner")).hidden_attempt_run_ids == set()
+                finally:
+                    reset_current_workspace(refreshed)
                 assert await runs.get("team-valid", user_id="owner") is None
                 assert await runs.latest_change(user_id="owner") is None
                 assert await runs.list_changed(after_change_seq=0, after_run_id="", user_id="owner") == []
@@ -97,6 +161,13 @@ def test_native_run_reads_keep_selected_private_thread_scope(native_engine):  # 
                 await required.get("team-valid", user_id="owner")
             with pytest.raises(WorkspaceAccessDenied):
                 await required.get_many_by_thread("team-history", [], user_id="owner")
+            required_manager = RunManager(store=required)
+            required_manager._runs[resident.run_id] = resident
+            required_manager._index_run_locked(resident)
+            with pytest.raises(WorkspaceAccessDenied):
+                await required_manager.get("team-valid", user_id="owner")
+            with pytest.raises(WorkspaceAccessDenied):
+                await required_manager.get_many_by_thread("team-history", set(), user_id="owner")
         finally:
             await engine.dispose()
 

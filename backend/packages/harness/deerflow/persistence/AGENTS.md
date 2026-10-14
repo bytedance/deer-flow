@@ -170,3 +170,10 @@ captured incarnation whenever scope is bound, including rejected-upload cleanup.
 Do not silently look up and adopt a replacement incarnation. #62 proves the
 local HTTP mains; remote STOP, Run cache/background writers and crash recovery
 remain integration requirements, so compiled tenant activation stays closed.
+
+RunRepository advertises supports_workspace_reads and freezes the public
+workspace_scope_required capability from its constructor flag, so native
+RunManager can validate cached reads without binding to a concrete SQL class.
+Its existing scoped get/get_many predicates remain the authorization authority;
+a capability flag alone does not authorize any record. #67 confirms resident
+filtering/withdrawal/deletion/fault refusal with both SQL dialects.

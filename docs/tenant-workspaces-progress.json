@@ -1307,5 +1307,47 @@
       "frontend workspace switch/cache/cursor lifecycle",
       "remaining M4-M11; tenant activation closed"
     ]
+  },
+  "workspace_resident_run_reads": {
+    "status": "partial_M3_verified_main",
+    "red": {
+      "build": 65,
+      "result": "FAILURE",
+      "tests_failed": 2,
+      "elapsed_seconds": 16.06,
+      "archive_sha256": "06a8e92606fcd038549f0404827de1375b4c34cd777c3c1274ba07d0a3f8d5c6",
+      "reason": "actual native resident Run bypassed workspace SQL authorization in both databases"
+    },
+    "intermediate": {
+      "build": 66,
+      "result": "FAILURE",
+      "archive_sha256": "e046473eb9798878bb0c435a1b898669c329e950af01a324925c8773ce2c30f3",
+      "elapsed_seconds": 6.45,
+      "reason": "independent native test collection exposed config.paths -> authz -> runtime -> incomplete config.paths cycle; no cache acceptance claimed"
+    },
+    "green": {
+      "build": 67,
+      "result": "SUCCESS",
+      "tests_passed": 9,
+      "elapsed_seconds": 43.47,
+      "archive_sha256": "2d49a6e2703a3e2685ef168c1339d5d2fc462574971761bfa640eb62fb54712c",
+      "command": "python -m pytest tests/test_workspace_run_reads.py tests/test_workspace_http.py tests/test_run_manager.py::test_get_hydrates_store_only_run tests/test_run_manager.py::test_get_prefers_in_memory_record_over_store tests/test_run_manager.py::test_list_by_thread_merges_store_runs_newest_first tests/test_run_manager.py::test_list_by_thread_limit_does_not_let_old_memory_hide_new_store_run tests/test_run_manager.py::test_list_by_thread_keyset_returns_older_page -q --tb=short --no-showlocals"
+    },
+    "source_sha256": {
+      "backend/packages/harness/deerflow/config/paths.py": "d40f000e525ee5cf45b09b6d09d9cdcade0894a38d5e415948605642396874d0",
+      "backend/packages/harness/deerflow/persistence/run/sql.py": "13e4c10d36a55f930e98b708e185ed367d561a29fcdfa80e1f5e0408f79ceeb0",
+      "backend/packages/harness/deerflow/runtime/runs/manager.py": "58f235bac0275500e12d29cbb7c838db08874fc9194ff9171e8f18150c03503a",
+      "backend/packages/harness/deerflow/runtime/runs/store/base.py": "7c7b8dc31500d1b7ca29ade3b0b330776fe762d8e4c835ee9574ede7f4384760",
+      "backend/tests/test_workspace_run_reads.py": "26c4f4a9e87ae7078678c7f96905bb73c3219c18c1516083395ee86dd0310487",
+      "backend/tests/test_workspace_http.py": "22eb3c703a533acadfeeadba561d3cb2894a1e32503deb6c563daaa3af5f7577"
+    },
+    "source_comparison": "all changed runtime/test bytes plus unchanged HTTP main match #67 archive",
+    "cleanup": "#65-#67 owned containers and networks independently empty",
+    "remaining": [
+      "Run/message/event HTTP and SSE integration",
+      "M4 normal admission, worker scope, generation/lease and result publication",
+      "frontend scope selection/cursor/cache lifecycle",
+      "M5-M11 and complete tenant activation acceptance"
+    ]
   }
 }

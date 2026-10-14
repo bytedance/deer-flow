@@ -5,7 +5,6 @@ import re
 import shutil
 from pathlib import Path, PureWindowsPath
 
-from deerflow.authz.workspace import get_current_workspace
 from deerflow.config.runtime_paths import runtime_home
 from deerflow.utils.host_paths import extended_length_path
 from deerflow.utils.thread_id import validate_thread_id
@@ -338,6 +337,8 @@ class Paths:
             ValueError: If `thread_id` or `user_id` contains unsafe characters (path
                         separators or `..`) that could cause directory traversal.
         """
+        from deerflow.authz.workspace import get_current_workspace
+
         context = get_current_workspace()
         if context is not None:
             owner = context.actor_user_id if user_id is None else user_id
@@ -375,6 +376,8 @@ class Paths:
     def user_projects_dir(self, user_id: str) -> Path:
         """Project root in the trusted workspace; legacy calls use the user root."""
         _validate_user_id(user_id)
+        from deerflow.authz.workspace import get_current_workspace
+
         context = get_current_workspace()
         if context is not None:
             if context.actor_user_id != user_id:
@@ -436,6 +439,8 @@ class Paths:
 
     def host_thread_dir(self, thread_id: str, *, user_id: str | None = None) -> str:
         """Host path for a thread directory, preserving Windows path syntax."""
+        from deerflow.authz.workspace import get_current_workspace
+
         context = get_current_workspace()
         if context is not None:
             owner = context.actor_user_id if user_id is None else user_id

@@ -592,3 +592,26 @@ filtered before pagination, and mid-request policy withdrawal returns 404.
 Source bytes match the recorded archive; both builds' owned resources are empty.
 RunManager cache/Run HTTP/SSE, frontend cursor/cache switching and M4–M11 remain
 unverified; this does not activate tenant mode.
+
+## Resident Run authorization (partial M3)
+
+RunManager now consults a workspace-capable durable store before returning
+resident records in scoped reads. get retains the exact live control object only
+when Run identity/owner/thread/operation/timestamp matches an authorized SQL row.
+Lists, batches and replay visibility filter resident IDs through scoped SQL;
+missing, deleted or revoked rows cannot reappear from cache. Scoped store errors
+propagate, rather than falling back to memory; required scope is checked even
+for empty batches. Unbound legacy providers retain native cache precedence.
+
+#65 RED reproduced resident cross-space disclosure on both metadata dialects.
+#66 found an import-time config.paths/authz/runtime cycle during native test
+collection; moving path workspace imports to call time removed that cycle.
+#67 passed 9 checks in 43.47s: two real SQL/cache mains, two complete HTTP mains
+and five native hydration/precedence/pagination regressions. Cached identity,
+latest error-status precedence, actual policy withdrawal, durable deletion and
+controlled durable-read failure are covered. Changed source bytes match its
+archive, and #65–#67 dedicated resources were independently checked empty.
+
+This does not establish native normal-run admission, worker lease/generation
+identity, event/SSE delivery or frontend cache isolation. Those remain required
+M3/M4–M11 work; no tenant runtime is activated.

@@ -48,6 +48,8 @@ def _origin_kind(operation_kind: str, metadata: Any) -> str | None:
 
 
 class RunRepository(RunStore):
+    supports_workspace_reads = True
+
     async def find_by_idempotency_key(self, key: str, *, user_id: str, thread_id: str) -> dict[str, Any] | None:
         """Owner-scoped recovery of an admission whose acknowledgement was lost."""
         async with self._sf() as session:
@@ -57,6 +59,7 @@ class RunRepository(RunStore):
     def __init__(self, session_factory: async_sessionmaker[AsyncSession], *, workspace_required=False) -> None:
         self._sf = session_factory
         self._workspace_required = workspace_required
+        self.workspace_scope_required = bool(workspace_required)
 
     def _read_scope(self, stmt, user_id):
         context = resolve_resource_scope(None, user_id, required=self._workspace_required)

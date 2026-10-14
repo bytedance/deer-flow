@@ -118,6 +118,11 @@ def run_is_before_cursor(
 
 
 class RunStore(abc.ABC):
+    # Trusted provider capabilities, fixed by operator construction. A bound
+    # workspace must never authorize resident data through an unscoped store.
+    supports_workspace_reads: bool = False
+    workspace_scope_required: bool = False
+
     async def list_changed(
         self,
         *,

@@ -18,6 +18,8 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 
 from deerflow.authz.workspace import get_current_workspace
+from deerflow.persistence.workspaces.scope import resolve_resource_scope
+from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user, resolve_user_id
 from deerflow.utils.time import is_lease_expired
 from deerflow.utils.time import now_iso as _now_iso
@@ -676,6 +678,40 @@ class RunManager:
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
 
+    def _workspace_read_required(self, user_id: str | None) -> bool:
+        if get_current_workspace() is None and getattr(self._store, "workspace_scope_required", False) is not True:
+            return False
+        resolve_resource_scope(None, user_id, required=True)
+        if getattr(self._store, "supports_workspace_reads", False) is not True:
+            raise WorkspaceAccessDenied("workspace reads require a scoped durable Run store")
+        return True
+
+    @staticmethod
+    def _resident_matches_durable(record: RunRecord, row: dict) -> bool:
+        return (
+            record.run_id == row.get("run_id")
+            and record.thread_id == row.get("thread_id")
+            and record.user_id == row.get("user_id")
+            and record.operation_kind.value == row.get("operation_kind", "run")
+            and canonical_run_created_at(record.created_at) == canonical_run_created_at(row["created_at"])
+        )
+
+    async def _authorized_resident_records(self, records: list[RunRecord], user_id: str | None) -> list[RunRecord]:
+        """Keep native live controls only after durable private-scope admission.
+
+        Query only resident IDs, not whole histories. SQL/provider errors must
+        propagate; missing/deleted/revoked rows cannot resurrect from memory.
+        """
+        if not self._workspace_read_required(user_id):
+            return records
+        groups: dict[str, set[str]] = {}
+        for record in records:
+            groups.setdefault(record.thread_id, set()).add(record.run_id)
+        allowed = {}
+        for thread_id, run_ids in groups.items():
+            allowed.update(await self._store.get_many_by_thread(thread_id, run_ids, user_id=user_id))
+        return [record for record in records if record.run_id in allowed and self._resident_matches_durable(record, allowed[record.run_id])]
+
     async def get(
         self,
         run_id: str,
@@ -691,6 +727,15 @@ class RunManager:
             raise_on_store_error: Propagate store hydration/mapping failures so
                 lifecycle callers can distinguish them from a missing run.
         """
+        if self._workspace_read_required(user_id):
+            row = await self._store.get(run_id, user_id=user_id)
+            if row is None:
+                return None
+            async with self._lock:
+                record = self._runs.get(run_id)
+            if record is not None and self._resident_matches_durable(record, row):
+                return record
+            return self._record_from_store(row)
         async with self._lock:
             record = self._runs.get(run_id)
         if record is not None:
@@ -787,6 +832,8 @@ class RunManager:
                     before_run_id=before_run_id,
                 )
             ]
+        scoped = self._workspace_read_required(user_id)
+        memory_records = await self._authorized_resident_records(memory_records, user_id)
         if self._store is None:
             return _page(memory_records)
         records_by_id = {record.run_id: record for record in memory_records}
@@ -803,6 +850,8 @@ class RunManager:
         try:
             rows = await self._store.list_by_thread(thread_id, **store_kwargs)
         except Exception:
+            if scoped:
+                raise
             logger.warning("Failed to hydrate runs for thread %s from store", thread_id, exc_info=True)
             return _page(memory_records)
         for row in rows:
@@ -832,6 +881,7 @@ class RunManager:
         async with self._lock:
             memory_records = [record for record in self._thread_records_locked(thread_id) if record.operation_kind == ThreadOperationKind.run and (resolved_user_id is None or record.user_id == resolved_user_id)]
 
+        memory_records = await self._authorized_resident_records(memory_records, resolved_user_id)
         sources = set(await self._store.list_successful_regenerate_sources(thread_id, user_id=resolved_user_id)) if self._store is not None else set()
         # _thread_records_locked preserves the insertion order of the thread
         # index. Applying records oldest-to-newest makes the latest in-memory
@@ -902,6 +952,7 @@ class RunManager:
 
         async with self._lock:
             memory_records = [record for record in self._thread_records_locked(thread_id) if resolved_user_id is None or record.user_id == resolved_user_id]
+        memory_records = await self._authorized_resident_records(memory_records, resolved_user_id)
         for record in memory_records:
             records_by_id[record.run_id] = record
 
@@ -1037,13 +1088,16 @@ class RunManager:
         user_id: str | None | _AutoSentinel = AUTO,
     ) -> dict[str, RunRecord]:
         """Batch-load selected thread runs with in-memory records preferred."""
+        resolved_user_id = resolve_user_id(user_id, method_name="RunManager.get_many_by_thread")
+        scoped = self._workspace_read_required(resolved_user_id)
         if not run_ids:
             return {}
-        resolved_user_id = resolve_user_id(user_id, method_name="RunManager.get_many_by_thread")
         async with self._lock:
             records_by_id = {
                 record.run_id: record for record in self._thread_records_locked(thread_id) if record.operation_kind == ThreadOperationKind.run and record.run_id in run_ids and (resolved_user_id is None or record.user_id == resolved_user_id)
             }
+        records = await self._authorized_resident_records(list(records_by_id.values()), resolved_user_id)
+        records_by_id = {record.run_id: record for record in records}
         if self._store is None:
             return records_by_id
 
@@ -1053,6 +1107,8 @@ class RunManager:
         try:
             rows = await self._store.get_many_by_thread(thread_id, set(remaining), user_id=resolved_user_id)
         except Exception:
+            if scoped:
+                raise
             logger.warning("Failed to batch-hydrate runs for thread %s", thread_id, exc_info=True)
             return records_by_id
         for run_id, row in rows.items():

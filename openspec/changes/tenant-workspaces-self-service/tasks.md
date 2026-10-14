@@ -57,3 +57,9 @@ M3 activity HTTP: #63 RED missing scope; #64 GREEN (7 passed, 39.36s). Two real
 SQL/JWT mains and five native pagination/clock regressions prove independent
 workspace heads/read versions and pre-limit private filtering/withdrawal denial.
 Run cache, HTTP/SSE and client scope lifecycle remain; M3 stays unchecked.
+
+M3 resident Run reads: #65 RED actual foreign-space cache hit; #66 independent
+native collection exposed eager path/authz cycle; #67 GREEN (9 passed, 43.47s).
+Both SQL/cache mains, both HTTP mains and five native cache/pagination cases
+pass. Durable read faults cannot fall back to cache. Run HTTP/event/SSE/client
+and M4 worker identity remain incomplete, so M3 stays unchecked.

@@ -202,3 +202,9 @@ now use workspaces/{workspace_id}/users/{actor_user_id}/threads/{thread_id}, wit
 explicit actor matching and legacy behavior only without scope. All child paths
 inherit this binding. Least-authorized physical sandbox/NAS mounts and background
 restoration of the persisted scope still need acceptance.
+
+Paths imports the workspace accessor only inside path-resolution methods.
+An eager authz import here enters guardrails/runtime while config.paths is
+partially initialized and breaks VIRTUAL_PATH_PREFIX imports. #66 exposed this
+in independent native test collection; #67 validates the call-time import while
+retaining real workspace thread/project path isolation.
