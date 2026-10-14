@@ -459,3 +459,11 @@ cancellation intent before waiting on teardown. #75 proves both metadata
 dialects/native memory bridge, Last-Event-ID, controlled withdrawal and six
 legacy/slow-close checks. Redis/load/physical, complete credential workflows,
 creating/POST producer paths and remaining APIs still gate activation.
+
+Global Run message/feedback GETs bind workspace scope before durable lookup,
+pass the real actor explicitly in scoped mode, and delegate to private helpers
+with a concrete thread_id. Helpers capture the entry incarnation, recheck the
+Run/thread association and fence the materialized response. Unbound calls keep
+native keyword/return/pagination contracts. #77 verifies both metadata dialects
+and native global API regressions; FeedbackRepository mutation fencing and
+normal Run producers remain separate requirements.

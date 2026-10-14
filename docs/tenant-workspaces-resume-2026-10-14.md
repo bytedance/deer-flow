@@ -127,3 +127,28 @@ Last-Event-ID有效，失效旧JWT重连401。用原生MemoryStreamBridge确定�
 history入口（反馈写入必须短SQL事务内复核原incarnation与Run，不能只加
 decorator），然后前端空间/缓存切换。事件写入/工厂/正常Run和签名B/C
 后台身份仍是M4；M5–M11范围不变。当前active、未推送/部署、激活关闭。
+
+## Global Run locator reads (partial M3)
+
+GET /api/runs/{run_id}/messages and /feedback bind the native authenticated
+workspace before resolving the durable Run. In scoped mode the actual actor is
+explicit. After discovery of thread_id, the private resource helper captures its
+entry incarnation, rechecks the Run/thread association, materializes only that
+actor's messages or feedback, then revalidates live scope and original parent
+identity before returning. Native unbound calls preserve their original keyword
+signatures, envelope/list shape and cursor trimming.
+
+Jenkins #76 RED found missing scope in both metadata dialects; #77 passed 27
+checks in 43.96s: actual SQLite/PostgreSQL JWT/SQL HTTP mains and the affected
+native global-Run API regressions. Both personal/team payloads are correct,
+foreign space and peer IDs return 404, and a real SQL incarnation change after
+message/feedback materialization refuses the response. Current runtime/test bytes
+match the successful archive. #76/#77 dedicated containers and networks were
+independently empty. Existing Starlette TestClient/httpx deprecation remains.
+
+This covers the two global HTTP reads, not FeedbackRepository mutation fencing
+or full thread feedback APIs. Token/workspace-change/artifact/PUT/history,
+frontend switching, event writes/Run producers and M4-M11 remain requirements;
+tenant activation stays closed.
+
+User confirmed native DeerFlow styling; the M7 plan records reuse without a new visual redesign. Next: token/workspace-change read binding, then feedback repository transaction fences and remaining M3 paths. Full M0-M11 scope remains active; no tenant push or deployment.

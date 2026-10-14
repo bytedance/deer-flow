@@ -82,3 +82,10 @@ HTTP/JWT/SQL memory-bridge mains prove entry, delivery-time withdrawal/replay
 and subscriber drain without cancelling Run. Native creator cancel precedes
 blocked teardown. Redis/physical/load, full credential workflows, producer
 paths and remaining M3-M11 integration still gate activation.
+
+M3 global Run reads checkpoint: #76 RED missing scope; #77 GREEN (27 passed,
+43.96s) covers two actual SQL/JWT HTTP mains and native global API regressions.
+Same-space messages/feedback, foreign/peer refusal and materialization-span
+parent replacement are verified. Feedback mutation fences, remaining APIs,
+client and M4-M11 remain pending; M3 unchecked, activation closed. Native UI
+styling reuse confirmed by user on 2026-10-14, not yet implemented/accepted.

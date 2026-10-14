@@ -336,6 +336,8 @@ python -m pytest tests/test_account_lifecycle.py tests/test_local_registration_g
 
 ### M7：团队管理、注册与共享资料界面
 
+2026-10-14 用户确认：前端沿用 DeerFlow 原有页面样式与组件，只补空间切换、团队管理和平台管理入口；不另起视觉重设计。M3/M7 仍需真实后端接线与浏览器验收，样式确认不代表界面已实现。
+
 **修改接点：**
 - `frontend/src/core/auth/AuthProvider.tsx`
 - `frontend/src/core/auth/types.ts`
@@ -581,3 +583,10 @@ no observer cancellation and drained subscribers. Six native checks preserve
 creator cancel and ordering. Redis/load/physical/account-expiry workflows and
 creating/POST producer paths remain pending. Next close global Run, feedback,
 token/artifact/PUT/history entrypoints and frontend; M3 stays unchecked.
+
+M3 global Run reads: #76 RED required scope; #77 GREEN (27 passed, 43.96s)
+verifies real personal/team messages and feedback, peer/foreign denial and
+post-materialization incarnation replacement with both metadata dialects, plus
+native global Run API compatibility. Archive/source bytes match; dedicated
+resources empty. Feedback transactions, remaining reads/writes/client and
+M4-M11 stay pending; M3 remains unchecked and activation closed.

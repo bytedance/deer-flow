@@ -684,3 +684,26 @@ execution or atomic packet recall. Redis/cross-process, slow-client/load, timed
 expiry and full account reset/OAuth scenarios still need M6/M11 evidence.
 Creating streams/POST cancellation, signed producers and full frontend lifecycle
 remain M4 and remaining M3–M11 work; tenant activation stays closed.
+
+## Global Run locator reads (partial M3)
+
+GET /api/runs/{run_id}/messages and /feedback bind the native authenticated
+workspace before resolving the durable Run. In scoped mode the actual actor is
+explicit. After discovery of thread_id, the private resource helper captures its
+entry incarnation, rechecks the Run/thread association, materializes only that
+actor's messages or feedback, then revalidates live scope and original parent
+identity before returning. Native unbound calls preserve their original keyword
+signatures, envelope/list shape and cursor trimming.
+
+Jenkins #76 RED found missing scope in both metadata dialects; #77 passed 27
+checks in 43.96s: actual SQLite/PostgreSQL JWT/SQL HTTP mains and the affected
+native global-Run API regressions. Both personal/team payloads are correct,
+foreign space and peer IDs return 404, and a real SQL incarnation change after
+message/feedback materialization refuses the response. Current runtime/test bytes
+match the successful archive. #76/#77 dedicated containers and networks were
+independently empty. Existing Starlette TestClient/httpx deprecation remains.
+
+This covers the two global HTTP reads, not FeedbackRepository mutation fencing
+or full thread feedback APIs. Token/workspace-change/artifact/PUT/history,
+frontend switching, event writes/Run producers and M4-M11 remain requirements;
+tenant activation stays closed.

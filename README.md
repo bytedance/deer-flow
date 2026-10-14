@@ -2973,3 +2973,9 @@ observation, remaining APIs, producers and frontend integration are still pendin
 [Private SSE observation](docs/tenant-workspaces-api.md#private-sse-observers-partial-m3)
 now rechecks delivery authority and closes revoked observers without cancelling
 background work. Full producer, Redis/physical and frontend acceptance remain pending.
+
+[Global Run message and feedback reads](docs/tenant-workspaces-api.md#global-run-locator-reads-partial-m3)
+now preserve the selected private workspace and reject conversation replacement
+before returning. Remaining feedback operations, client flows and full tenant
+activation are still pending. New workspace/team controls will reuse native
+DeerFlow styling, as confirmed for the tenant UI plan.

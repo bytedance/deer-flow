@@ -228,3 +228,9 @@ actual subscriber drain and unchanged running status/abort state. Token-version
 withdrawal also requires native reconnect 401 before the fixture mints its next
 valid token. A blocked-close native test pins cancellation intent before drain;
 do not replace these edges with sleeps or pre-authorized canned responses.
+
+Global Run reads in test_workspace_http use actual SQL messages and feedback
+with real JWTs; after materialization they rotate the persisted parent nonce
+and assert the prepared JSON is refused. Restore method patches before later
+SSE/lifecycle checks. Native global API tests preserve unbound paging and
+optional-storage behavior; these do not prove feedback write authorization.

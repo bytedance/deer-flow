@@ -33,7 +33,7 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
     from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
     from app.gateway.auth_middleware import AuthMiddleware
     from app.gateway.csrf_middleware import CSRFMiddleware
-    from app.gateway.routers import artifacts, project_documents, projects, thread_activity, thread_runs, threads, uploads
+    from app.gateway.routers import artifacts, project_documents, projects, runs, thread_activity, thread_runs, threads, uploads
     from deerflow.agents.middlewares import summarization_middleware as summary_module
     from deerflow.config import app_config
     from deerflow.config import paths as paths_module
@@ -203,6 +203,7 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
             app.include_router(uploads.router)
             app.include_router(threads.router)
             app.include_router(thread_activity.router)
+            app.include_router(runs.router)
             app.include_router(thread_runs.router)
             app.include_router(projects.router)
             app.include_router(project_documents.router)
@@ -773,6 +774,40 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                         assert visible.status_code == 200, visible.text
                         rows = visible.json() if isinstance(visible.json(), list) else visible.json()["data"]
                         assert len(rows) == 1 and rows[0]["content"]["content"] == expected, visible.text
+                # Global run locators must bind the same live private space as thread routes.
+                for headers, run_id, expected in ((team_headers, team_run, "team private response"), ({}, personal_run, "personal private response")):
+                    global_messages = await client.get("/api/runs/" + run_id + "/messages?limit=1", headers=headers)
+                    assert global_messages.status_code == 200, global_messages.text
+                    assert global_messages.json()["data"][0]["content"]["content"] == expected
+                    global_feedback = await client.get("/api/runs/" + run_id + "/feedback", headers=headers)
+                    assert global_feedback.status_code == 200, global_feedback.text
+                    assert len(global_feedback.json()) == 1 and global_feedback.json()[0]["run_id"] == run_id
+                for suffix in ("/messages", "/feedback"):
+                    assert (await client.get("/api/runs/" + team_run + suffix)).status_code == 404
+                    assert (await client.get("/api/runs/" + personal_run + suffix, headers=team_headers)).status_code == 404
+                    as_user("bob")
+                    assert (await client.get("/api/runs/" + team_run + suffix, headers=team_headers)).status_code == 404
+                    as_user("alice")
+
+                async def rotate_private_parent():
+                    async with sf() as session:
+                        await session.execute(sa.text("UPDATE threads_meta SET incarnation=:nonce WHERE thread_id=:id"), {"nonce": uuid4().hex, "id": delete_ids["team"]})
+                        await session.commit()
+
+                # Change the actual parent after SQL materialization, before response publication.
+                for method, repository, suffix in (("list_messages_by_run", app.state.run_event_store, "/messages"), ("list_by_run", app.state.feedback_repo, "/feedback")):
+                    original_read = getattr(repository, method)
+
+                    async def read_then_replace(*args, _read=original_read, **kwargs):
+                        result = await _read(*args, **kwargs)
+                        await rotate_private_parent()
+                        return result
+
+                    with monkeypatch.context() as patch:
+                        patch.setattr(repository, method, read_then_replace)
+                        replaced = await client.get("/api/runs/" + team_run + suffix, headers=team_headers)
+                        assert replaced.status_code == 404, replaced.text
+                    assert (await client.get("/api/runs/" + team_run + suffix, headers=team_headers)).status_code == 200
                 foreign_events = await client.get(team_run_base + "/runs/" + personal_run + "/events", headers=team_headers)
                 assert foreign_events.status_code == 404, foreign_events.text
                 foreign_messages = await client.get(team_run_base + "/runs/" + personal_run + "/messages", headers=team_headers)

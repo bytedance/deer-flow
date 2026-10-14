@@ -1466,5 +1466,42 @@
       "global Run/feedback/token/artifact/PUT/history and frontend entrypoints",
       "M4-M11; compiled activation remains closed"
     ]
+  },
+  "frontend_style_decision": {
+    "date": "2026-10-14",
+    "decision": "User approved reuse of original DeerFlow styling/components; add workspace selection, team and platform controls in native UI.",
+    "status": "design_confirmed_implementation_and_real_browser_acceptance_pending"
+  },
+  "workspace_global_run_http_reads": {
+    "status": "partial_M3_verified_read_main",
+    "job": "deerflow-tenant-m1-postgres",
+    "red": {
+      "build": 76,
+      "result": "FAILURE",
+      "tests_failed": 2,
+      "elapsed_seconds": 38.18,
+      "archive_sha256": "7ff230d4a502b2fc29a824a05083c168224a21c8e39b0c06379fe9008294785e",
+      "reason": "global Run locator lacked required trusted workspace scope"
+    },
+    "green": {
+      "build": 77,
+      "result": "SUCCESS",
+      "tests_passed": 27,
+      "elapsed_seconds": 43.96,
+      "archive_sha256": "d0594c313ded0c0d979a6db7ccdecd601735e0c1fd7e60d24bc55224d6b5c70d",
+      "command": "python -m pytest tests/test_workspace_http.py tests/test_runs_api_endpoints.py -q --tb=short --no-showlocals"
+    },
+    "source_sha256": {
+      "backend/app/gateway/routers/runs.py": "066882c9e3eaad339cedf5b43a418ee84c44895b139fd444ae2c6eb38f3d3661",
+      "backend/tests/test_workspace_http.py": "0aaf024e113b009d72ac3383bbf340c269434312a82d6252d0aa77f69ca5640d"
+    },
+    "cleanup": "#76/#77 ownership-labelled container/network inventories independently empty",
+    "warning": "existing Starlette TestClient/httpx deprecation warning",
+    "remaining": [
+      "FeedbackRepository guarded reads/writes and thread feedback HTTP endpoints",
+      "workspace-changes/token/artifact/PUT/history and frontend switching",
+      "normal Run producers and event writers/factories M4",
+      "M4-M11 and full activation remain incomplete"
+    ]
   }
 }
