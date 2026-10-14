@@ -1095,89 +1095,70 @@ def test_execute_forwards_env_timeout_and_combines_streams() -> None:
     assert box.execute_command("missing-complete") == "Error: OpenSandbox command completed without an exit code: stream ended"
 
 
-def _timeout_execution(*, stdout: tuple[str, ...] = (), error_value: str = "signal: killed", exit_code: int | None = -1) -> Any:
-    """An execd deadline kill as it reaches the adapter.
-
-    execd enforces the deadline server-side and reaps the process group with
-    SIGKILL, so a timed-out command arrives as a ``CommandExecError`` result
-    rather than an exception: init mode reports the signal death as ``-1``, and
-    when no code is recoverable the detail is free text.
-    """
-    return types.SimpleNamespace(
-        exit_code=exit_code,
-        logs=_Logs(stdout=[_Message(text) for text in stdout], stderr=[]),
-        result=[],
-        complete=None,
-        error=types.SimpleNamespace(name="CommandExecError", value=error_value),
-    )
+def _command_error_execution(*, error_value: str, exit_code: int | None = None, error_name: str = "CommandExecError", stdout: tuple[str, ...] = (), stderr: tuple[str, ...] = (), result: tuple[str, ...] = ()) -> Any:
+    execution = _execution(stdout=stdout, stderr=stderr, result=result, exit_code=exit_code)
+    return types.SimpleNamespace(**vars(execution), error=types.SimpleNamespace(name=error_name, value=error_value))
 
 
-def test_execute_command_timeout_appends_exit_marker() -> None:
-    """A command deadline is a shell outcome, not a provider hiccup: the result
-    must end with the same ``Exit Code: 124`` marker Local/AIO/Tenki/E2B/BoxLite
-    emit on timeout (#6847 family)."""
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "result", "expected_body"),
+    [
+        ((), (), (), ""),
+        (("partial output",), (), (), "partial output\n"),
+        (("out-1", "out-2"), ("stderr",), ("result",), "out-1\nout-2\nresult\nstderr\n"),
+    ],
+)
+def test_execute_command_server_side_deadline_appends_exit_marker(stdout: tuple[str, ...], stderr: tuple[str, ...], result: tuple[str, ...], expected_body: str) -> None:
+    # The SDK cannot parse this deadline error value as an integer, so it
+    # returns an Execution with exit_code=None rather than raising TimeoutError.
     remote = _FakeRemote("remote")
-
-    def timed_out_run(command: str, *, opts: _FakeRunCommandOpts | None = None) -> _Execution:
-        raise TimeoutError
-
-    remote.commands.run = timed_out_run  # type: ignore[method-assign]
+    remote.commands.run = lambda command, opts=None: _command_error_execution(error_value="context deadline exceeded", stdout=stdout, stderr=stderr, result=result)  # type: ignore[method-assign]
     box = _box(remote, sandbox_timeout=timedelta(seconds=60), default_command_timeout=120)
 
-    assert box.execute_command("sleep 9999", timeout=5) == "Error: command timed out\nExit Code: 124"
+    assert box.execute_command("sleep 9999", timeout=5) == f"{expected_body}Error: command timed out\nExit Code: 124"
 
 
-def test_execute_command_server_side_deadline_appends_exit_marker() -> None:
-    """execd enforces the deadline, so the timeout does not raise.
-
-    The SDK reports the SIGKILLed process group as exit code ``-1``; the adapter
-    must normalize that to the 124 marker instead of handing the model a bare
-    ``Exit Code: -1`` that no shell produces.
-    """
+@pytest.mark.parametrize("error_value", ["credential lookup failed", "context canceled", "signal: killed", "timeout while starting process", ""])
+def test_execute_command_other_missing_exit_codes_are_not_timeouts(error_value: str) -> None:
     remote = _FakeRemote("remote")
-    remote.commands.run = lambda command, opts=None: _timeout_execution(stdout=("partial output",))  # type: ignore[method-assign]
+    remote.commands.run = lambda command, opts=None: _command_error_execution(error_value=error_value)  # type: ignore[method-assign]
     box = _box(remote, sandbox_timeout=timedelta(seconds=60), default_command_timeout=120)
 
-    result = box.execute_command("sleep 9999", timeout=5)
-    assert result == "partial output\nError: command timed out\nExit Code: 124"
+    assert box.execute_command("true", timeout=5) == f"Error: OpenSandbox command completed without an exit code: CommandExecError: {error_value}"
 
 
-def test_execute_command_start_failure_is_not_reported_as_a_timeout() -> None:
-    """A start failure shares the CommandExecError shape but is not a deadline.
-
-    execd reports a failed launch (bad credential, bad cwd) through the same
-    error event with free text and no usable code, so the adapter cannot tell
-    the two apart from that shape alone. It must keep the existing
-    missing-exit-code reporting instead of claiming a timeout that never
-    happened.
-    """
+@pytest.mark.parametrize("exit_code", [-1, 7, 124])
+def test_execute_command_numeric_error_events_keep_their_exit_code(exit_code: int) -> None:
+    # execd sends ordinary nonzero exits through CommandExecError too. In
+    # particular, -1 only proves signal termination, not a command deadline.
     remote = _FakeRemote("remote")
-    remote.commands.run = lambda command, opts=None: _timeout_execution(error_value="credential lookup failed", exit_code=None)  # type: ignore[method-assign]
+    remote.commands.run = lambda command, opts=None: _command_error_execution(error_value=str(exit_code), exit_code=exit_code, stdout=("partial output",))  # type: ignore[method-assign]
+    box = _box(remote, sandbox_timeout=timedelta(seconds=60), default_command_timeout=120)
+
+    assert box.execute_command("exit-or-signal", timeout=5) == f"partial output\nCommandExecError: {exit_code}\nExit Code: {exit_code}"
+
+
+@pytest.mark.parametrize("exit_code", [None, 7])
+def test_execute_command_deadline_text_on_other_errors_is_not_a_command_timeout(exit_code: int | None) -> None:
+    remote = _FakeRemote("remote")
+    remote.commands.run = lambda command, opts=None: _command_error_execution(error_value="context deadline exceeded", exit_code=exit_code, error_name="OtherError")  # type: ignore[method-assign]
     box = _box(remote, sandbox_timeout=timedelta(seconds=60), default_command_timeout=120)
 
     result = box.execute_command("true", timeout=5)
-    assert result.startswith("Error: OpenSandbox command completed without an exit code:")
+    assert "OtherError: context deadline exceeded" in result
+    assert "command timed out" not in result
     assert not result.endswith("Exit Code: 124")
 
 
-def test_execute_command_ordinary_failures_keep_their_own_exit_code() -> None:
-    """Only a CommandExecError is a deadline outcome.
-
-    A script that exits nonzero on its own, and a result with no error event at
-    all, must keep their existing reporting: rewriting either to 124 would hide
-    a real failure behind a timeout marker.
-    """
+@pytest.mark.parametrize("message", ["", "context deadline exceeded"])
+def test_execute_command_transport_exception_is_not_a_shell_timeout(message: str) -> None:
     remote = _FakeRemote("remote")
+    remote.command_error = TimeoutError(message)
     box = _box(remote, sandbox_timeout=timedelta(seconds=60), default_command_timeout=120)
 
-    assert box.execute_command("mixed-output", timeout=5).endswith("Exit Code: 7")
-    assert box.execute_command("missing-complete") == "Error: OpenSandbox command completed without an exit code: stream ended"
-
-    def negative_exit(command: str, *, opts: _FakeRunCommandOpts | None = None) -> _Execution:
-        return _execution(stdout=("script output",), exit_code=-1)
-
-    remote.commands.run = negative_exit  # type: ignore[method-assign]
-    assert box.execute_command("negative", timeout=5) == "script output\nExit Code: -1"
+    # Even an injected builtin TimeoutError must not turn a provider/renewal
+    # failure into an authoritative shell exit. The real SDK wraps this error.
+    assert box.execute_command("true", timeout=5) == f"Error: {message}"
 
 
 def test_operations_renew_remote_lifetime_and_bound_default_commands() -> None:

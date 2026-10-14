@@ -103,33 +103,14 @@ def execution_body(execution: Any) -> str:
     return _append_output(output, stderr)
 
 
-#: execd's deadline kill reaps the process group with SIGKILL. os/exec and the
-#: init-mode supervisor both report the signal death as -1, which is not an
-#: exit status any shell produces, so it only reaches here for a killed command.
-_SIGNAL_KILLED_EXIT_CODE = -1
-
-
 def _is_timeout_execution(execution: Any, exit_code: int | None) -> bool:
-    """Return whether a finished execution is execd's command deadline.
+    """Recognize an explicit command deadline, not an ambiguous signal kill.
 
-    Only a ``CommandExecError`` whose exit code is the signal-death ``-1``
-    counts. That pairing is what the deadline produces: execd receives the
-    timeout, SIGKILLs the process group, and reports the reaped status.
-
-    Two lookalikes are deliberately excluded, because execd reports them
-    through the same ``CommandExecError`` event with no distinguishing field:
-
-    - a command that exits non-zero on its own arrives as an ordinary result
-      (``complete`` set, no error event), so it never matches here;
-    - a command that failed to *start* (bad credential, bad cwd) also carries a
-      free-text detail and no usable code. It is not a deadline, so the
-      missing-code shape is left to the existing "completed without an exit
-      code" reporting rather than being relabelled a timeout.
+    The SDK leaves exit_code unset when the error value is nonnumeric. A
+    bare -1 only indicates signal termination and cannot prove a timeout.
     """
     error = getattr(execution, "error", None)
-    if error is None or getattr(error, "name", None) != "CommandExecError":
-        return False
-    return exit_code == _SIGNAL_KILLED_EXIT_CODE
+    return exit_code is None and getattr(error, "name", None) == "CommandExecError" and getattr(error, "value", None) == "context deadline exceeded"
 
 
 class OpenSandboxSandbox(Sandbox):
@@ -290,20 +271,13 @@ class OpenSandboxSandbox(Sandbox):
         merged_env = {**self._default_env, **(env or {})} or None
         try:
             execution = self._run(command, env=merged_env, timeout=timeout)
-        except TimeoutError:
-            # A command deadline is a shell outcome, not a provider hiccup: end
-            # with the same Exit Code: 124 marker Local/AIO/Tenki/E2B/BoxLite
-            # emit on timeout so evidence consumers recover the real status.
-            return "Error: command timed out\nExit Code: 124"
         except Exception as exc:
             logger.error("Failed to execute command in OpenSandbox %s: %s", self.id, exc)
             return f"Error: {exc}"
         exit_code = getattr(execution, "exit_code", None)
-        # The deadline is enforced by execd, so a timed-out command does not
-        # raise here: it ends as a CommandExecError whose process group was
-        # SIGKILLed, reported as the signal-death exit code -1. Normalize that
-        # to the 124 marker the other providers emit, rather than handing the
-        # model a bare "-1" that no shell produces.
+        # Command deadlines arrive as execution error events, not builtin
+        # TimeoutError. Normalize only the explicit deadline result; transport
+        # errors, launch failures and signal-only exits keep their own details.
         if _is_timeout_execution(execution, exit_code):
             body = execution_body(execution)
             message = "Error: command timed out\nExit Code: 124"
