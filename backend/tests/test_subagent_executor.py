@@ -6260,6 +6260,37 @@ class TestBashExecutionHarvest:
         assert entry["status"] == "success"
         assert "12 passed" in entry["output_tail"]
 
+    @pytest.mark.parametrize(
+        "output,checked,holds",
+        [
+            ("[INFO] BUILD SUCCESS", False, False),
+            ("Tests run: 3, Failures: 0, Errors: 0, Skipped: 3\nBUILD SUCCESS", False, False),
+            ("Tests run: 3, Failures: 1, Errors: 0, Skipped: 0\nBUILD SUCCESS", True, False),
+            ("Tests run: 3, Failures: 0, Errors: 0, Skipped: 0\nBUILD SUCCESS", True, True),
+        ],
+    )
+    def test_build_summary_reaches_acceptance_through_stamped_tool_messages(self, classes, monkeypatch, output, checked, holds):
+        from deerflow.subagents.acceptance_checks import check_acceptance_criteria, render_acceptance_section
+
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_result_meta", _module("deerflow.agents.middlewares.tool_result_meta", TOOL_META_KEY="deerflow_tool_meta"))
+        sandbox = SimpleNamespace(persistent_shell_sessions=False)
+        monkeypatch.setattr("deerflow.sandbox.sandbox_provider.get_sandbox_provider", lambda: SimpleNamespace(get=lambda _id: sandbox))
+        state = self._final_state(classes)
+        state["sandbox"] = {"sandbox_id": "sb-jvm"}
+        state["messages"][1].tool_calls[0]["args"]["command"] = "mvn test"
+        state["messages"][2].content = output
+        state["messages"][2].additional_kwargs["deerflow_tool_meta"] = {"status": "success"}
+
+        executions = executor_module._harvest_bash_executions(state)
+        assert executions[0]["shell_persistent"] is False
+        verdict = check_acceptance_criteria(["tests_passed:mvn test"], bash_executions=executions)
+        leaf = verdict["leaves"][0]
+        assert (leaf["checked"], leaf["holds"]) == (checked, holds)
+        assert verdict["all_hold"] is holds
+        if not checked:
+            assert "[UNVERIFIED]" in render_acceptance_section(verdict)
+
     def test_status_comes_from_tool_meta_when_present(self, classes, monkeypatch):
         executor_module = importlib.import_module("deerflow.subagents.executor")
         monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_result_meta", _module("deerflow.agents.middlewares.tool_result_meta", TOOL_META_KEY="deerflow_tool_meta"))
