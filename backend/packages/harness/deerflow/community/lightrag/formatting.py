@@ -5,13 +5,29 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from deerflow.knowledge import KnowledgeCapabilities, KnowledgeSource, RetrievalHit, RetrievalResult
+from deerflow.knowledge.sources import truncate as _truncate
 
-def _truncate(value: str, max_chars: int, *, marker: str = "…") -> str:
-    if len(value) <= max_chars:
-        return value
-    if max_chars <= len(marker):
-        return marker[:max_chars]
-    return f"{value[: max_chars - len(marker)].rstrip()}{marker}"
+CAPABILITIES = KnowledgeCapabilities(operations=frozenset({"search", "sources"}))
+
+
+def normalize_retrieval_result(result: Mapping[str, Any]) -> RetrievalResult:
+    """Use /query/data chunks and joined references, never graph summaries."""
+    references = _reference_file_paths(result.get("references"))
+    hits = []
+    for chunk in _chunks(result.get("chunks")):
+        content = chunk.get("content")
+        if not isinstance(content, str) or not content.strip():
+            continue
+        content = content.strip()[:100_000]
+        title = chunk.get("file_path")
+        if not isinstance(title, str) or not title.strip():
+            title = references.get(str(chunk.get("reference_id")))
+        source = None
+        if isinstance(title, str) and title.strip() and title.strip().lower() not in {"unknown", "unknown_source", "unknown document"}:
+            source = KnowledgeSource(provider="lightrag", title=title.strip()[:500], excerpt=content)
+        hits.append(RetrievalHit(content=content, source=source))
+    return RetrievalResult(hits=hits)
 
 
 def _chunks(value: object) -> list[Mapping[str, Any]]:

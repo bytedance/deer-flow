@@ -1,5 +1,14 @@
 ### Subagent System (`packages/harness/deerflow/subagents/`)
 
+Validated ToolMessage knowledge evidence accumulates across values frames in
+`SubagentResult.knowledge_sources` (100 sources, deduplicated by evidence ID).
+Publication precedes terminal state and survives compaction. Ordinary `task`
+forwards reported handles with a bounded evidence appendix and source artifact.
+Mixed task results keep native RAGFlow snapshots in `knowledge_sources` and
+shared evidence in `retrieval_sources`; pruning must preserve the native snapshot.
+Shared evidence scans start at the changed message suffix; compaction or prefix
+replacement resets that boundary. Null frames must not crash the accumulator.
+
 Result-reader acceptance runs on SQLite and, with TEST_POSTGRES_URI, an isolated
 PostgreSQL schema; both exercise submission, completion, reopen and ToolNode
 continuation without paid model work. Always clean up the temporary schema.

@@ -168,9 +168,11 @@ environment with `uv run --no-sync --project backend` from the repository root.
 `--project` preserves the caller's working directory and relative runtime/config
 selectors; `--no-sync` retains installed extras such as PostgreSQL drivers.
 
-More specific `AGENTS.md` files in backend code directories contain the subsystem sections split from this file. Follow the nearest file in the directory tree.
+Read the nearest scoped `AGENTS.md` for subsystem ownership.
 
 ## Architecture
+
+Read-only knowledge: [contract](docs/KNOWLEDGE.md).
 
 ### Harness / App Split
 
