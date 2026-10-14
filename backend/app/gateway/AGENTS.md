@@ -447,3 +447,15 @@ do not bypass SQL through resident cache. list_run_messages passes explicit
 user_id in scoped mode while preserving the legacy custom-manager signature.
 #71 verifies two real SQL HTTP mains and four native permissions/history/page
 cases. SSE/global Run/token/artifact/feedback and producer scope remain pending.
+
+Private GET Run join/stream wraps the existing native SSE response with
+workspaces/observer.py. Capture entry incarnation and a browser principal
+snapshot (password cleared, no JWT persisted); bind its WorkspaceContext again
+when ASGI consumes the generator. Before headers and each produced chunk,
+check native runs:read policy, expiry and the SQL private Run/thread/account
+snapshot. Changes close observation without END or worker cancellation.
+Drain the native generator and its bridge subscription; preserve creator
+cancellation intent before waiting on teardown. #75 proves both metadata
+dialects/native memory bridge, Last-Event-ID, controlled withdrawal and six
+legacy/slow-close checks. Redis/load/physical, complete credential workflows,
+creating/POST producer paths and remaining APIs still gate activation.

@@ -653,3 +653,34 @@ peer access, and reject owner-admission incarnation changes before response.
 Source bytes match its archive; both dedicated resource inventories are empty.
 SSE, global Run routes, token/artifact/feedback coverage, event writers, full
 client flows and M4–M11 remain requirements; this does not activate tenants.
+
+## Private SSE observers (partial M3)
+
+GET thread Run /join and /stream bind private entry identity and wrap the native
+StreamingResponse. Before headers and each produced chunk, the wrapper checks
+JWT expiry, native hot-reloaded runs:read permission and one read-only SQL
+predicate for the original workspace, private thread incarnation, Run and
+account token-version/principal attributes. No writer transaction spans network
+streaming. The principal snapshot clears its password hash and stores no JWT.
+
+Authority changes committed before the next delivery check stop further chunks.
+The connection closes without synthesizing native END or cancelling the Run;
+its consumer and bridge generator are drained. Reconnect preserves native
+Last-Event-ID behavior and repeats admission. Creator cancellation intent stays
+ahead of possibly blocking subscription teardown, and teardown still drains.
+
+#72 RED found missing join scope; #73 passed seven main/native checks. The
+subsequent slow-close check #74 reproduced delayed creator cancellation. #75
+passed eight checks in 41.02s: SQLite/PostgreSQL JWT/SQL/native MemoryStreamBridge
+HTTP mains plus six native disconnect/teardown regressions. Controlled SQL
+policy/incarnation/token-version changes and real native RBAC config reload
+stop the second frame; a pre-ASGI policy change returns 404 before content;
+old-token reconnect returns 401. Observed running records and SQL status remain
+running, and the active observer counter returns to zero. All source bytes
+match its archive; #72–#75 dedicated resources were independently checked empty.
+
+This is deterministic native-bridge observation acceptance, not a real Agent
+execution or atomic packet recall. Redis/cross-process, slow-client/load, timed
+expiry and full account reset/OAuth scenarios still need M6/M11 evidence.
+Creating streams/POST cancellation, signed producers and full frontend lifecycle
+remain M4 and remaining M3–M11 work; tenant activation stays closed.

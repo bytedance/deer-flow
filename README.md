@@ -2969,3 +2969,7 @@ HTTP/SSE, event writers and full tenant rollout remain pending.
 [Private Run/message/event HTTP reads](docs/tenant-workspaces-api.md#private-run-message-and-event-http-reads-partial-m3)
 now preserve selected-space history and private conversation identity. Stream
 observation, remaining APIs, producers and frontend integration are still pending.
+
+[Private SSE observation](docs/tenant-workspaces-api.md#private-sse-observers-partial-m3)
+now rechecks delivery authority and closes revoked observers without cancelling
+background work. Full producer, Redis/physical and frontend acceptance remain pending.

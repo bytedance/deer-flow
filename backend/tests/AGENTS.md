@@ -220,3 +220,11 @@ FeedbackRepository on its isolated session factory for Run/message/event reads,
 then restores its native memory event fixture for the existing lifecycle main.
 Do not replace scoped event results with canned payloads or remove feedback
 enrichment. #71 verifies both dialects and entry-incarnation response fencing.
+
+The workspace HTTP SSE main uses real JWT, both SQL dialects, native resident
+Run records and native MemoryStreamBridge. The fixture publishes deterministic
+frames (no Agent execution), commits withdrawal between frames, and checks
+actual subscriber drain and unchanged running status/abort state. Token-version
+withdrawal also requires native reconnect 401 before the fixture mints its next
+valid token. A blocked-close native test pins cancellation intent before drain;
+do not replace these edges with sleeps or pre-authorized canned responses.

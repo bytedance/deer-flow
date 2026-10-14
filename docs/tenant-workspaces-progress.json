@@ -1412,5 +1412,59 @@
       "event writer/factory/background native Run scope M4",
       "frontend switching/caches and M4-M11; activation closed"
     ]
+  },
+  "workspace_sse_observers": {
+    "status": "partial_M3_verified_observer_main",
+    "red": {
+      "build": 72,
+      "result": "FAILURE",
+      "tests_failed": 2,
+      "elapsed_seconds": 36.78,
+      "archive_sha256": "cb334a8e9182c5130312feb5d8bbc46559dc31e5ec5c9694fa34d5ecd3fc4858",
+      "reason": "GET join lacked required workspace scope"
+    },
+    "intermediate": [
+      {
+        "build": 73,
+        "result": "SUCCESS",
+        "tests_passed": 7,
+        "elapsed_seconds": 41.48,
+        "archive_sha256": "bc2c8715320237cba560415e9689c6687e6d31751f5b171b3beb97d8ecb51643",
+        "scope": "both SSE HTTP mains and five native regressions; later slow-close concern not yet checked"
+      },
+      {
+        "build": 74,
+        "result": "FAILURE",
+        "tests_failed": 1,
+        "elapsed_seconds": 11.44,
+        "archive_sha256": "db44ea13eadf04093bdff67396bc908a5958b6c7524434d12411c9d45bba4c4c",
+        "reason": "blocking subscription close delayed creator cancellation intent"
+      }
+    ],
+    "green": {
+      "build": 75,
+      "result": "SUCCESS",
+      "tests_passed": 8,
+      "elapsed_seconds": 41.02,
+      "archive_sha256": "2c362044ab377ccec768ee5f9768e1133e29ef03c912b0c6d0f201c5da4edc04",
+      "command": "python -m pytest tests/test_workspace_http.py tests/test_sse_observer_disconnect.py::test_creator_cancellation_is_not_delayed_by_subscription_close tests/test_sse_observer_disconnect.py::test_creator_stream_disconnect_applies_cancel_policy tests/test_sse_observer_disconnect.py::test_creator_stream_request_cancellation_applies_disconnect_policy tests/test_sse_observer_disconnect.py::test_creator_stream_anyio_cancel_scope_drains_disconnect_policy tests/test_sse_observer_disconnect.py::test_observer_join_disconnect_does_not_cancel tests/test_sse_observer_disconnect.py::test_join_routes_wire_sse_consumer_as_observers -q --tb=short --no-showlocals"
+    },
+    "source_sha256": {
+      "backend/app/gateway/workspaces/observer.py": "6cf460df17e76cea7c709bc6565fce6023d464f201e251882d3448e52f3c09d8",
+      "backend/app/gateway/routers/thread_runs.py": "92572e118f1fa33c7979cc485856b515c9ce582332d78f9b6f3b269172744975",
+      "backend/app/gateway/services.py": "19eaae3a56a08ccde11e37ec9c8b418fa3a89b04e19ba0f43344948a5efc0491",
+      "backend/packages/harness/deerflow/persistence/run/sql.py": "fd2c5494196d4d878bbdd8ec49609db9118311836c675373764e86036db3e1cf",
+      "backend/tests/test_workspace_http.py": "e426cfcc3910c820491268adaa22c16d5ccf8d30a631d377b3ae4ac12e71b62f",
+      "backend/tests/test_sse_observer_disconnect.py": "32055020c740090c9947c1a4388f9e438f0fcc69e0f39a083a14a240d0ace705"
+    },
+    "cleanup": "#72-#75 owned container/network inventories independently empty",
+    "implementation": "before-header and per-produced-chunk native permission plus read-only SQL private Run/thread/incarnation/account snapshot fence; native JWT expiry checked, principal hash redacted, no persisted session credential",
+    "remaining": [
+      "Redis/cross-process/slow-client/throughput and physical network acceptance",
+      "full token expiry/native role/OAuth reset workflow fault matrix with M6/M11",
+      "creating streams and POST cancellation, signed M4 producer/admission/lease scope",
+      "global Run/feedback/token/artifact/PUT/history and frontend entrypoints",
+      "M4-M11; compiled activation remains closed"
+    ]
   }
 }

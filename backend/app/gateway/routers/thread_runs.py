@@ -62,6 +62,7 @@ from app.gateway.services import (
 from app.gateway.sse_headers import sse_response_headers
 from app.gateway.utils import sanitize_log_param
 from app.gateway.workspaces.dependencies import workspace_resource_scope
+from app.gateway.workspaces.observer import wrap_private_observer
 from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.middlewares.dynamic_context_middleware import strip_injected_user_message_id_suffix
 from deerflow.authz.sandbox_authz import safe_app_config_async
@@ -1319,25 +1320,27 @@ async def cancel_run(
 
 
 @router.get("/{thread_id}/runs/{run_id}/join")
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("runs", "read", owner_check=True)
-async def join_run(thread_id: ThreadId, run_id: str, request: Request) -> StreamingResponse:
+async def join_run(thread_id: ThreadId, run_id: str, request: Request) -> Response:
     """Join an existing run's SSE stream."""
     await _require_run_visible_to_scope(run_id, thread_id, request)
     run_mgr = get_run_manager(request)
-    record = await run_mgr.get(run_id)
+    record = await run_mgr.get(run_id, user_id=get_current_workspace().actor_user_id) if get_current_workspace() is not None else await run_mgr.get(run_id)
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     bridge = get_stream_bridge(request)
     if record.store_only and not bridge.supports_cross_process:
         raise HTTPException(status_code=409, detail=f"Run {run_id} is not active on this worker and cannot be streamed")
 
-    return StreamingResponse(
+    response = StreamingResponse(
         # Joins are read-only observation: the creator's cancel-on-disconnect
         # policy must not fire because an observer closed their connection.
         sse_consumer(bridge, record, request, run_mgr, apply_on_disconnect=False),
         media_type="text/event-stream",
         headers=sse_response_headers(),
     )
+    return await wrap_private_observer(response, request, thread_id=thread_id, run_id=run_id)
 
 
 def _reject_get_stream_action(
@@ -1373,7 +1376,7 @@ async def _stream_existing_run(
 
     await _require_run_visible_to_scope(run_id, thread_id, request)
     run_mgr = get_run_manager(request)
-    record = await run_mgr.get(run_id)
+    record = await run_mgr.get(run_id, user_id=get_current_workspace().actor_user_id) if get_current_workspace() is not None else await run_mgr.get(run_id)
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     bridge = get_stream_bridge(request)
@@ -1413,7 +1416,7 @@ async def _stream_existing_run(
             )
             return Response(status_code=204 if completed else 202)
 
-    return StreamingResponse(
+    response = StreamingResponse(
         # Both methods of this handler are join surfaces: a POST carrying an
         # action cancels explicitly above (already gated by
         # require_cancel_permission_when_action), and an action-less join is
@@ -1424,10 +1427,14 @@ async def _stream_existing_run(
         headers=sse_response_headers(),
     )
 
+    return await wrap_private_observer(response, request, thread_id=thread_id, run_id=run_id)
+
 
 # Register POST before GET to preserve the historical route precedence and
 # Allow header, while separate signatures keep cancel-only parameters off the
 # GET schema. The shared route name keeps generated operationIds stable.
+
+
 @router.post("/{thread_id}/runs/{run_id}/stream", response_model=None, name="stream_existing_run")
 @require_permission("runs", "read", owner_check=True)
 async def stream_existing_run(
@@ -1447,6 +1454,7 @@ async def stream_existing_run(
     dependencies=[Depends(_reject_get_stream_action)],
     name="stream_existing_run",
 )
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("runs", "read", owner_check=True)
 async def join_existing_run_stream(thread_id: ThreadId, run_id: str, request: Request) -> Response:
     """Join an existing run's observation-only SSE stream."""

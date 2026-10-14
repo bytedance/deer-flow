@@ -315,3 +315,10 @@ matching. Synthetic/inherited branch seed Run IDs remain readable without a
 new execution record. workspace_required currently gates reads only; journal
 write attribution and runtime factory/alternative-backend policy remain M4
 integration work. #69 verifies both dialects, withdrawal and native read parity.
+
+Native sse_consumer now owns/drains its bridge subscription with
+close_agent_stream. In finally, preserve the original creator cancellation
+intent first, then drain teardown even if cancellation fails; a blocked close
+must not delay cancel. Observer callers keep apply_on_disconnect=False.
+#74 exposed the ordering window and #75 verifies it plus native cancellation
+and scoped observer mains. No new inference/stream engine is introduced.

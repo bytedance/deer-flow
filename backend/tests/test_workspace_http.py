@@ -53,10 +53,11 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
     from deerflow.persistence.thread_reads.model import ThreadReadMarkerRow
     from deerflow.persistence.user.model import UserRow
     from deerflow.persistence.workspaces.sql import WorkspaceRepository
-    from deerflow.runtime import RunManager, ThreadOperationKind, context_compaction
+    from deerflow.runtime import DisconnectMode, MemoryStreamBridge, RunManager, RunStatus, ThreadOperationKind, context_compaction
     from deerflow.runtime.events.store.db import DbRunEventStore
     from deerflow.runtime.events.store.memory import MemoryRunEventStore
     from deerflow.runtime.goal import build_goal_state, write_thread_goal
+    from deerflow.runtime.runs.stream_cleanup import close_agent_stream
     from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
 
     names = ("app.gateway.workspaces.service", "app.gateway.workspaces.dependencies", "app.gateway.routers.workspaces", "app.gateway.routers.admin_workspaces")
@@ -241,12 +242,22 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                     await session.commit()
                 return response
 
+            @app.get("/api/workspace-delayed-observer/{thread_id}/{run_id}")
+            async def delayed_observer(request: Request, thread_id: str, run_id: str):
+                response = await thread_runs.join_run(thread_id=thread_id, run_id=run_id, request=request)
+                async with sf() as session:
+                    await session.execute(sa.text("UPDATE workspaces SET policy_version=policy_version+1 WHERE id=:id"), {"id": request.headers["X-Deerflow-Workspace"]})
+                    await session.commit()
+                return response
+
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost", headers={"Origin": "http://localhost", "X-CSRF-Token": "synthetic-csrf"}) as client:
                 assert (await client.get("/api/workspaces")).status_code == 401
 
+                session_versions = {}
+
                 def as_user(name):
                     client.cookies.clear()
-                    client.cookies.set("access_token", create_access_token(identities[name]))
+                    client.cookies.set("access_token", create_access_token(identities[name], token_version=session_versions.get(name, 0)))
                     client.cookies.set("csrf_token", "synthetic-csrf")
 
                 as_user("bob")
@@ -771,6 +782,86 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                 as_user("alice")
                 owner_replacement["thread_id"] = delete_ids["team"]
                 assert (await client.get(team_run_base + "/messages", headers=team_headers)).status_code == 404
+
+                class ScopeChangingBridge(MemoryStreamBridge):
+                    def __init__(self, mode):
+                        super().__init__()
+                        self.mode = mode
+                        self.active_observers = 0
+
+                    async def subscribe(self, run_id, **kwargs):
+                        self.active_observers += 1
+                        source = super().subscribe(run_id, **kwargs)
+                        try:
+                            async for entry in source:
+                                yield entry
+                                if getattr(entry, "event", None) == "values" and self.mode is not None:
+                                    mode, self.mode = self.mode, None
+                                    async with sf() as session:
+                                        if mode == "policy":
+                                            await session.execute(sa.text("UPDATE workspaces SET policy_version=policy_version+1 WHERE id=:id"), {"id": team})
+                                        elif mode == "incarnation":
+                                            await session.execute(sa.text("UPDATE threads_meta SET incarnation=:nonce WHERE thread_id=:id"), {"nonce": uuid4().hex, "id": delete_ids["team"]})
+                                        elif mode == "token_version":
+                                            await session.execute(sa.text("UPDATE users SET token_version=token_version+1 WHERE id=:id"), {"id": identities["alice"]})
+                                        elif mode == "route_policy":
+                                            configuration.authorization = configuration.authorization.model_copy(deep=True)
+                                            configuration.authorization.provider.config["roles"]["user"]["routes"]["deny"] = ["runs:read"]
+                                        await session.commit()
+                        finally:
+                            await close_agent_stream(source)
+                            self.active_observers -= 1
+
+                for stream_case in (None, "policy", "incarnation", "token_version", "route_policy"):
+                    previous_authorization = configuration.authorization
+                    bridge = ScopeChangingBridge(stream_case)
+                    app.state.stream_bridge = bridge
+                    async with sf() as session:
+                        await session.execute(sa.update(RunRow).where(RunRow.run_id == team_run).values(status="running"))
+                        await session.commit()
+                        stored = await session.get(RunRow, team_run)
+                        observer_record = app.state.run_manager._record_from_store(app.state.run_store._row_to_dict(stored))
+                    observer_record.store_only = False
+                    observer_record.on_disconnect = DisconnectMode.cancel
+                    async with app.state.run_manager._lock:
+                        app.state.run_manager._runs[team_run] = observer_record
+                        app.state.run_manager._index_run_locked(observer_record)
+                    try:
+                        await bridge.publish(team_run, "values", {"title": "first authorized frame"})
+                        await bridge.publish(team_run, "values", {"title": "second private frame"})
+                        await bridge.publish_end(team_run)
+                        first_event_id = bridge._streams[team_run].events[0].id
+                        streamed = await client.get(team_run_base + "/runs/" + team_run + "/join", headers=team_headers)
+                        assert streamed.status_code == 200, streamed.text
+                        assert "first authorized frame" in streamed.text
+                        if stream_case is None:
+                            assert "second private frame" in streamed.text and "event: end" in streamed.text
+                            resumed = await client.get(team_run_base + "/runs/" + team_run + "/stream", headers={**team_headers, "Last-Event-ID": first_event_id})
+                            assert resumed.status_code == 200 and "first authorized frame" not in resumed.text and "second private frame" in resumed.text, resumed.text
+                            delayed_stream = await client.get("/api/workspace-delayed-observer/" + delete_ids["team"] + "/" + team_run, headers=team_headers)
+                            assert delayed_stream.status_code == 404 and "first authorized frame" not in delayed_stream.text
+                            assert (await client.get(team_run_base + "/runs/" + team_run + "/join")).status_code == 404
+                            as_user("bob")
+                            assert (await client.get(team_run_base + "/runs/" + team_run + "/stream", headers=team_headers)).status_code == 404
+                            as_user("alice")
+                        else:
+                            assert "second private frame" not in streamed.text, "observer forwarded data after captured authority changed"
+                            assert "event: end" not in streamed.text, "observer closure must not claim the Run completed"
+                        assert bridge.active_observers == 0, "response abandoned its native bridge subscription"
+                        assert observer_record.status == RunStatus.running and not observer_record.abort_event.is_set(), "closing an observer cancelled background work"
+                        async with sf() as session:
+                            assert (await session.get(RunRow, team_run)).status == "running"
+                        if stream_case == "token_version":
+                            assert (await client.get(team_run_base + "/runs/" + team_run + "/join", headers=team_headers)).status_code == 401
+                            session_versions["alice"] = 1
+                            as_user("alice")
+                    finally:
+                        async with sf() as session:
+                            await session.execute(sa.update(RunRow).where(RunRow.run_id == team_run).values(status="success"))
+                            await session.commit()
+                        configuration.authorization = previous_authorization
+                        observer_record.status = RunStatus.success
+                        await app.state.run_manager.cleanup(team_run, delay=0)
                 app.state.run_event_store = memory_events
                 delete_id = delete_ids["team"]
                 assert (await client.delete("/api/threads/" + delete_id)).status_code == 404

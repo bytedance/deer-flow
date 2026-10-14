@@ -91,6 +91,7 @@ from deerflow.runtime.journal import build_checkpoint_history_seed_events
 from deerflow.runtime.keyed_lock import KeyedLockTable
 from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY, make_origin
 from deerflow.runtime.runs.naming import resolve_root_run_name
+from deerflow.runtime.runs.stream_cleanup import close_agent_stream
 from deerflow.runtime.secret_context import (
     LegacyRunMetadataSecretError,
     redact_config_secrets,
@@ -2593,8 +2594,9 @@ async def sse_consumer(
     gap_emitted = False
     terminal_emitted = False
     disconnect_observed = False
+    subscription = bridge.subscribe(record.run_id, last_event_id=last_event_id)
     try:
-        async for entry in bridge.subscribe(record.run_id, last_event_id=last_event_id):
+        async for entry in subscription:
             if await request.is_disconnected():
                 disconnect_observed = True
                 break
@@ -2638,14 +2640,17 @@ async def sse_consumer(
         disconnect_observed = True
         raise
     finally:
-        # store_only records are cross-worker observation handles. An explicit
-        # cancel-then-stream action has already persisted its request before
-        # subscribing; a plain join disconnect must not invent a new
-        # cancellation request. Only apply on_disconnect to locally-owned runs,
-        # and only on the creator's own stream — never on an observer join.
-        if disconnect_observed and apply_on_disconnect and not gap_emitted and not terminal_emitted and not record.store_only and record.status in (RunStatus.pending, RunStatus.running):
-            if record.on_disconnect == DisconnectMode.cancel:
-                await await_drained(run_mgr.cancel(record.run_id))
+        try:
+            # store_only records are cross-worker observation handles. An explicit
+            # cancel-then-stream action has already persisted its request before
+            # subscribing; a plain join disconnect must not invent a new
+            # cancellation request. Only apply on_disconnect to locally-owned runs,
+            # and only on the creator's own stream — never on an observer join.
+            if disconnect_observed and apply_on_disconnect and not gap_emitted and not terminal_emitted and not record.store_only and record.status in (RunStatus.pending, RunStatus.running):
+                if record.on_disconnect == DisconnectMode.cancel:
+                    await await_drained(run_mgr.cancel(record.run_id))
+        finally:
+            await close_agent_stream(subscription)
 
 
 def serialize_wait_run_status(record: RunRecord) -> dict[str, Any]:

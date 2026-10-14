@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from deerflow.persistence.run.model import RunChangeClockRow, RunRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
+from deerflow.persistence.user.model import UserRow
 from deerflow.persistence.workspaces.scope import resolve_resource_scope
 from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 from deerflow.runtime.run_origin import origin_kind_of
@@ -61,16 +62,33 @@ class RunRepository(RunStore):
         self._workspace_required = workspace_required
         self.workspace_scope_required = bool(workspace_required)
 
-    def _read_scope(self, stmt, user_id):
+    def _read_scope(self, stmt, user_id, *, thread_incarnation=None):
         context = resolve_resource_scope(None, user_id, required=self._workspace_required)
         if user_id is not None:
             stmt = stmt.where(RunRow.user_id == user_id)
         if context is not None:
             # Filter before cursors, limits or reduction. A matching run alone
             # cannot authorize an incompatible or missing private thread parent.
-            parent = ThreadMetaRepository._owned_scope(select(ThreadMetaRow.thread_id).where(ThreadMetaRow.thread_id == RunRow.thread_id), user_id, context).correlate(RunRow).exists()
+            parent_query = ThreadMetaRepository._owned_scope(select(ThreadMetaRow.thread_id).where(ThreadMetaRow.thread_id == RunRow.thread_id), user_id, context)
+            if thread_incarnation is not None:
+                parent_query = parent_query.where(ThreadMetaRow.incarnation == thread_incarnation)
+            parent = parent_query.correlate(RunRow).exists()
             stmt = stmt.where(RunRow.workspace_id == context.workspace_id, parent)
         return stmt
+
+    async def can_observe_private_run(self, run_id, *, thread_id, incarnation, user_id, token_version, system_role, oauth_provider, oauth_id):
+        """One read-only SQL fence for a captured browser observer capability."""
+        resolve_resource_scope(None, user_id, required=True)
+        if not incarnation:
+            raise WorkspaceAccessDenied("observer requires captured thread identity")
+        principal = (
+            select(UserRow.id)
+            .where(UserRow.id == user_id, UserRow.token_version == token_version, UserRow.needs_setup.is_(False), UserRow.system_role == system_role, UserRow.oauth_provider == oauth_provider, UserRow.oauth_id == oauth_id)
+            .exists()
+        )
+        stmt = self._read_scope(select(RunRow.run_id).where(RunRow.run_id == run_id, RunRow.thread_id == thread_id, RunRow.operation_kind == "run", principal), user_id, thread_incarnation=incarnation)
+        async with self._sf() as session:
+            return await session.scalar(stmt) is not None
 
     @staticmethod
     async def _next_change_seq(session: AsyncSession) -> int:

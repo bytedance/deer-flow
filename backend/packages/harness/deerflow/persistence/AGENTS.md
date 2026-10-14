@@ -177,3 +177,11 @@ RunManager can validate cached reads without binding to a concrete SQL class.
 Its existing scoped get/get_many predicates remain the authorization authority;
 a capability flag alone does not authorize any record. #67 confirms resident
 filtering/withdrawal/deletion/fault refusal with both SQL dialects.
+
+RunRepository.can_observe_private_run is a read-only delivery predicate, not
+admission or execution authority. It checks a normal Run, original private
+thread incarnation and live workspace/actor, plus captured token version,
+setup/role/OAuth principal attributes in one statement. _read_scope keeps its
+legacy default and accepts optional thread_incarnation for this check.
+The Gateway owns JWT expiry and native route permission evaluation; no SQL
+writer lock spans delivery. Producer lease/generation scope remains M4.

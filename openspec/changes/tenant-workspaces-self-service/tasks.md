@@ -75,3 +75,10 @@ actual authenticated SQL events/feedback and four native read regressions.
 Seven read routes bind private scope, specific Run paths verify durable
 ownership, and entry incarnation is retained until response. SSE/global/other
 entrypoints and producer/client acceptance remain unchecked; M3 stays open.
+
+M3 read-only SSE: #72 RED missing scope; #73 initial seven checks pass; #74
+RED slow close delays creator cancel; #75 GREEN (8 passed, 41.02s). Native
+HTTP/JWT/SQL memory-bridge mains prove entry, delivery-time withdrawal/replay
+and subscriber drain without cancelling Run. Native creator cancel precedes
+blocked teardown. Redis/physical/load, full credential workflows, producer
+paths and remaining M3-M11 integration still gate activation.

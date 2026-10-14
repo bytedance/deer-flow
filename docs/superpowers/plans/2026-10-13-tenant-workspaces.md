@@ -572,3 +572,12 @@ Run/message DTOs; real SQL events/feedback are distinct per space, foreign Run
 IDs/peers are refused and incarnation rotation rejects responses. Next: SSE
 readonly observer delivery and remaining global/token/artifact/feedback paths,
 then frontend; normal Run/event producers and factory scope still need M4.
+
+M3 read-only SSE checkpoint: #72 RED entry scope; #73 seven checks pass; #74
+RED blocked close delays creator cancellation; #75 GREEN (8 passed, 41.02s).
+Both real JWT/SQL/native memory-bridge mains verify Last-Event-ID, pre-header
+and per-chunk policy/incarnation/token/native-RBAC withdrawal, no false END,
+no observer cancellation and drained subscribers. Six native checks preserve
+creator cancel and ordering. Redis/load/physical/account-expiry workflows and
+creating/POST producer paths remain pending. Next close global Run, feedback,
+token/artifact/PUT/history entrypoints and frontend; M3 stays unchecked.

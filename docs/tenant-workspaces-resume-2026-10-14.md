@@ -115,3 +115,15 @@ workspace_required 目前只覆盖读取；写入归属/工厂/后台 journal �
 关闭时 drain 原生 generator。不能仅给 route 加 decorator 后宣称流式
 隔离完成，因为生成器在请求函数返回后才消费。另需全局 /api/runs、
 反馈/token/artifact/PUT/history 路径，事件写入/工厂/后台归属仍在 M4。
+
+最新接续：SSE只读观察 #72 RED/#75 GREEN（8 passed, 41.02s）。#73已通过
+空间主干；#74额外复现慢订阅关闭拖延创建者取消，现已改为取消意图先发、
+清理仍drain。#72–#75专属资源查空，六个源码/测试文件匹配最终归档。
+GET join/stream 捕获原实例，ASGI发头前与每片段复核 native权限和SQL
+空间/私有会话/Run/凭据版本；版本变化关闭观察，不发END、不取消Run；
+Last-Event-ID有效，失效旧JWT重连401。用原生MemoryStreamBridge确定性
+帧验收，不代表真实Agent/Redis/物理网络/全账户流程完成。
+下一项：全局 /api/runs 读取、反馈、token/workspace-change/artifact/PUT/
+history入口（反馈写入必须短SQL事务内复核原incarnation与Run，不能只加
+decorator），然后前端空间/缓存切换。事件写入/工厂/正常Run和签名B/C
+后台身份仍是M4；M5–M11范围不变。当前active、未推送/部署、激活关闭。
