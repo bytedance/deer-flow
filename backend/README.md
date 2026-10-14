@@ -99,7 +99,9 @@ and acceptance checks. Each claim uses a fresh ownership token; a recovered
 attempt cannot be overwritten by an earlier worker's renewal or result. Workers
 exclude their own active items from local recovery, while other workers can still
 recover abandoned leases. Expiry recovery rechecks the captured lease so it cannot
-overwrite a heartbeat that renewed after the expiry read.
+overwrite a heartbeat that renewed after the expiry read. Pending promotion and
+queued claims use conditional database writes, so competing workers cannot claim
+the same item or undo a pause/cancellation observed after their initial read.
 
 ### Memory System
 

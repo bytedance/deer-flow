@@ -429,7 +429,7 @@ async def test_cancel_during_tool_assembly_skips_launch(monkeypatch, tmp_path) -
         )
         claimed = await repository.claim_items(
             now=datetime.now(UTC),
-            lease_owner=service._lease_owner,
+            lease_owner="assembly-claim",
             lease_seconds=60,
             limit=10,
         )
@@ -475,7 +475,7 @@ async def test_cancel_during_tool_assembly_skips_launch(monkeypatch, tmp_path) -
             ),
         )
 
-        item_task = asyncio.create_task(service._execute_item(item))
+        item_task = asyncio.create_task(service._execute_item(item, lease_owner="assembly-claim"))
         assert await asyncio.to_thread(assembly_started.wait, 15)
 
         cancelled = await service.cancel_batch(batch_id="batch-1", user_id="user-1")

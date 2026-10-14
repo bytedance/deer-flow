@@ -15,7 +15,7 @@ from deerflow.config.subagent_batches_config import SubagentBatchesConfig
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.subagent_batches import SubagentBatchRepository
-from deerflow.persistence.subagent_batches.model import SubagentBatchItemRow
+from deerflow.persistence.subagent_batches.model import SubagentBatchItemRow, SubagentBatchRow
 from deerflow.subagents import batch_service as service_module
 from deerflow.subagents.batch_service import SubagentBatchService
 
@@ -64,7 +64,8 @@ async def row_snapshot(repository, item_id):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["renew", "running", "finalize", "requeue"])
-async def test_in_flight_old_acknowledgement_cannot_change_reclaimed_row(repository, monkeypatch, operation):
+@pytest.mark.parametrize("peer_action", ["reclaim", "cancel"])
+async def test_in_flight_old_acknowledgement_cannot_change_reclaimed_row(repository, monkeypatch, operation, peer_action):
     await create_batch(repository)
     now = datetime.now(UTC)
     first = (await repository.claim_items(now=now, lease_owner="old-claim", lease_seconds=10, limit=1))[0]
@@ -109,14 +110,85 @@ async def test_in_flight_old_acknowledgement_cannot_change_reclaimed_row(reposit
     old_task = asyncio.create_task(acknowledge())
     try:
         await asyncio.wait_for(paused.wait(), 3)
-        replacement = await repository.claim_items(now=now + timedelta(seconds=11), lease_owner="new-claim", lease_seconds=10, limit=1)
-        assert replacement[0]["id"] == item_id and replacement[0]["attempt"] == 2
+        if peer_action == "reclaim":
+            replacement = await repository.claim_items(now=now + timedelta(seconds=11), lease_owner="new-claim", lease_seconds=10, limit=1)
+            assert replacement[0]["id"] == item_id and replacement[0]["attempt"] == 2
+        else:
+            await repository.cancel_batch("batch-lease-test", user_id="user-1")
         expected = await row_snapshot(repository, item_id)
     finally:
         release.set()
         outcome = await asyncio.wait_for(old_task, 3)
-    assert outcome == ({"valid": False, "cancel_requested": True} if operation == "renew" else False)
+    assert outcome == ({"valid": False, "cancel_requested": peer_action == "cancel"} if operation == "renew" else False)
     assert await row_snapshot(repository, item_id) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["pending", "queued"])
+@pytest.mark.parametrize("peer_action", ["claim", "cancel", "pause"])
+async def test_stale_claim_pass_preserves_peer_claim_or_control(repository, monkeypatch, phase, peer_action):
+    await create_batch(repository)
+    now = datetime.now(UTC)
+    item_id = (await repository.list_items("batch-lease-test", user_id="user-1"))[0]["id"]
+    if phase == "queued":
+        # Promote without claiming so the paused pass has not acquired SQLite's
+        # writer lock before its runnable-item read.
+        assert await repository.claim_items(now=now, lease_owner="seed", lease_seconds=10, limit=1, exclude_item_ids=(item_id,)) == []
+    paused, release = asyncio.Event(), asyncio.Event()
+    original = AsyncSession.execute
+    stale = None
+
+    async def execute(session, statement, *args, **kwargs):
+        result = await original(session, statement, *args, **kwargs)
+        if asyncio.current_task() is stale and not paused.is_set() and getattr(statement, "is_select", False) and "subagent_batch_items.status =" in str(statement) and len(statement.selected_columns) > 1:
+            if phase in statement.compile().params.values():
+                paused.set()
+                await release.wait()
+        return result
+
+    monkeypatch.setattr(AsyncSession, "execute", execute)
+    stale = asyncio.create_task(repository.claim_items(now=now, lease_owner="stale-claim", lease_seconds=10, limit=1))
+    try:
+        await asyncio.wait_for(paused.wait(), 3)
+        if peer_action == "claim":
+            peer = await repository.claim_items(now=now + timedelta(seconds=1), lease_owner="peer-claim", lease_seconds=10, limit=1)
+            assert len(peer) == 1 and peer[0]["attempt"] == 1
+        elif peer_action == "cancel":
+            await repository.cancel_batch("batch-lease-test", user_id="user-1")
+        else:
+            await repository.pause_batch("batch-lease-test", user_id="user-1")
+        expected = await row_snapshot(repository, item_id)
+        expected_batch = await repository.get_batch("batch-lease-test", user_id="user-1")
+    finally:
+        release.set()
+        claimed = await asyncio.wait_for(stale, 3)
+    assert claimed == [], "a stale read must not grant ownership over the peer's claim or control"
+    assert await row_snapshot(repository, item_id) == expected
+    assert await repository.get_batch("batch-lease-test", user_id="user-1") == expected_batch
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["missing", "wrong_owner", "item_cancelled", "batch_cancelled", "owned"])
+async def test_renewal_reports_only_explicit_cancellation(repository, case):
+    await create_batch(repository)
+    now = datetime.now(UTC)
+    item = (await repository.claim_items(now=now, lease_owner="claim", lease_seconds=10, limit=1))[0]
+    if case in ("item_cancelled", "batch_cancelled"):
+        async with repository._sf() as session:
+            if case == "item_cancelled":
+                (await session.get(SubagentBatchItemRow, item["id"])).cancel_requested_at = now
+            else:
+                (await session.get(SubagentBatchRow, "batch-lease-test")).status = "cancelled"
+            await session.commit()
+    outcome = await repository.renew_item_lease("missing" if case == "missing" else item["id"], lease_owner="peer" if case == "wrong_owner" else "claim", lease_seconds=10, now=now)
+    assert outcome == {"valid": case == "owned", "cancel_requested": case in ("item_cancelled", "batch_cancelled")}
+
+
+@pytest.mark.asyncio
+async def test_execution_requires_an_explicit_claim_owner(repository):
+    service = make_service(repository)
+    with pytest.raises(TypeError, match="lease_owner"):
+        await service._execute_item({"id": "missing"})
 
 
 def setup_executor(monkeypatch, started, release):

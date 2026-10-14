@@ -51,9 +51,10 @@ does not change retry policy.
 
 **Batch lease supervision**: `batch_lease.py` owns one drained heartbeat across tool
 assembly, execution and acceptance. Capture a fresh bounded claim owner each pass;
-exclude locally active IDs from recovery. Worker writes fence owner and active
-status in SQL, never by flushing a selected ORM item. Expiry recovery also compares
-the captured expiry. Keep PostgreSQL locks parent-first and status polling bounded
+exclude locally active IDs from recovery. Execution requires that explicit token.
+Promotion/claim writes fence item and parent status; worker writes fence owner and
+active status in SQL. Renewal reports cancellation only for explicit cancel state.
+Expiry recovery compares expiry. Keep PostgreSQL locks parent-first and polling bounded
 by lease/3. `tests/test_batch_lease_lifecycle.py` covers real SQLite interleavings,
 threaded initialization, peer cancellation and renewal drain.
 

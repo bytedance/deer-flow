@@ -250,8 +250,8 @@ class SubagentBatchService:
         # what lets another worker own the HTTP control request safely.
         return batch
 
-    async def _execute_item(self, item: dict[str, Any], *, lease_owner: str | None = None) -> None:
-        async with BatchItemLease(self._repository, item_id=item["id"], owner=lease_owner or self._lease_owner, seconds=self._config.lease_seconds) as lease:
+    async def _execute_item(self, item: dict[str, Any], *, lease_owner: str) -> None:
+        async with BatchItemLease(self._repository, item_id=item["id"], owner=lease_owner, seconds=self._config.lease_seconds) as lease:
             if lease.valid:
                 await self._execute_leased_item(item, lease)
 
