@@ -11502,7 +11502,7 @@ class TestTelegramInboundMessages:
                 ch._tg_loop = telegram_loop
                 ch._thread = loop_thread
                 ch._running = True
-                ch._application = SimpleNamespace(bot=SimpleNamespace())
+                ch._application = SimpleNamespace(bot=SimpleNamespace(shutdown=AsyncMock()), updater=SimpleNamespace(running=False), running=False, shutdown=AsyncMock())
                 ch._download_bot = DownloadBot()
 
                 stop_task = asyncio.create_task(ch.stop())
@@ -11574,7 +11574,7 @@ class TestTelegramInboundMessages:
                 ch._tg_loop = telegram_loop
                 ch._thread = loop_thread
                 ch._running = True
-                ch._application = SimpleNamespace(bot=SimpleNamespace())
+                ch._application = SimpleNamespace(bot=SimpleNamespace(shutdown=AsyncMock()), updater=SimpleNamespace(running=False), running=False, shutdown=AsyncMock())
                 ch._download_bot = DownloadBot()
 
                 first = asyncio.create_task(ch.stop())
@@ -11639,7 +11639,7 @@ class TestTelegramInboundMessages:
                 ch._tg_loop = telegram_loop
                 ch._thread = loop_thread
                 ch._running = True
-                ch._application = SimpleNamespace(bot=SimpleNamespace())
+                ch._application = SimpleNamespace(bot=SimpleNamespace(shutdown=AsyncMock()), updater=SimpleNamespace(running=False), running=False, shutdown=AsyncMock())
                 ch._download_bot = DownloadBot()
                 monkeypatch.setattr(telegram_module, "TELEGRAM_SHUTDOWN_TIMEOUT_SECONDS", 0.01)
 

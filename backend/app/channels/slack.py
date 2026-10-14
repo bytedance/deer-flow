@@ -11,12 +11,13 @@ from typing import Any
 from markdown_to_mrkdwn import SlackMarkdownConverter
 
 from app.channels.allowed_users import parse_allowed_users, parse_string_or_int_user_id
-from app.channels.base import Channel
+from app.channels.base import Channel, ChannelStopTimeout
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import InboundMessageType, InboundReservation, MessageBus, OutboundMessage, ResolvedAttachment
 
 logger = logging.getLogger(__name__)
+SLACK_STOP_TIMEOUT_SECONDS = 5.0
 
 _slack_md_converter = SlackMarkdownConverter()
 
@@ -100,6 +101,7 @@ class SlackChannel(Channel):
     def __init__(self, bus: MessageBus, config: dict[str, Any]) -> None:
         super().__init__(name="slack", bus=bus, config=config)
         self._socket_client = None
+        self._socket_connect_future: asyncio.Future[None] | None = None
         self._socket_close_task: asyncio.Task[None] | None = None
         self._web_client = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -112,6 +114,10 @@ class SlackChannel(Channel):
     async def start(self) -> None:
         if self._running:
             return
+        if self._socket_client is not None or self._socket_close_task is not None:
+            # A timed-out or cancelled stop still owns its SDK work. Reuse its
+            # bounded wait rather than replacing a client that can still dial.
+            await self.stop()
 
         try:
             from slack_sdk import WebClient
@@ -149,12 +155,11 @@ class SlackChannel(Channel):
         self._running = True
         self.bus.subscribe_outbound(self._on_outbound)
 
-        # Start socket mode in background thread. Go through
-        # ``_connect_socket_mode`` so a connect failure gets logged: nothing
-        # awaits the future ``run_in_executor`` returns, so an exception stored
-        # on it would never surface.
+        # Start socket mode in a background thread.
+        # ``_connect_socket_mode`` logs startup failures. Retain the future so
+        # stop() can wait for an in-flight dial before closing its socket.
         socket_client = self._socket_client
-        asyncio.get_event_loop().run_in_executor(None, self._connect_socket_mode, socket_client)
+        self._socket_connect_future = asyncio.get_event_loop().run_in_executor(None, self._connect_socket_mode, socket_client)
         logger.info("Slack channel started")
 
     def _connect_socket_mode(self, socket_client: Any) -> None:
@@ -163,7 +168,7 @@ class SlackChannel(Channel):
         Mirrors the Telegram and Discord channels, whose background threads log
         their errors instead of letting them vanish with the thread.
         """
-        if socket_client is not self._socket_client:
+        if not self._running or socket_client is not self._socket_client:
             return
         try:
             socket_client.connect()
@@ -174,23 +179,34 @@ class SlackChannel(Channel):
         self._running = False
         self.bus.unsubscribe_outbound(self._on_outbound)
         await self._close_and_drain_threadsafe_futures()
-        # ``SocketModeClient.close()`` joins the SDK's message-processor thread
-        # (up to ~1s) and waits for in-flight listeners, whose blocking Web API
-        # calls run up to the WebClient timeout, so it runs off the event loop.
-        # The client is detached first so a still-queued connect skips it. The
-        # close task is shielded and tracked: a cancelled stop() leaves it
-        # running, and a retried stop() awaits it instead of closing twice.
-        socket_client, self._socket_client = self._socket_client, None
-        if socket_client is not None:
-            self._socket_close_task = asyncio.create_task(asyncio.to_thread(socket_client.close))
+        # The SDK can publish a session after close() if connect() is already
+        # waiting for its URL. One owned task drains that connect and then
+        # closes off-loop. A timeout or cancellation keeps it available for
+        # retry; cancelling an executor future would not stop its thread.
+        if self._socket_close_task is None and self._socket_client is not None:
+            self._socket_close_task = asyncio.create_task(self._close_socket_client(self._socket_client, self._socket_connect_future))
         close_task = self._socket_close_task
         if close_task is not None:
             try:
-                await asyncio.shield(close_task)
-            finally:
+                await asyncio.wait_for(asyncio.shield(close_task), timeout=SLACK_STOP_TIMEOUT_SECONDS)
+            except TimeoutError as exc:
                 if close_task.done():
+                    close_task.result()
+                else:
+                    raise ChannelStopTimeout("Slack Socket Mode cleanup is still running") from exc
+            finally:
+                if close_task.done() and self._socket_close_task is close_task:
                     self._socket_close_task = None
         logger.info("Slack channel stopped")
+
+    async def _close_socket_client(self, socket_client: Any, connect_future: asyncio.Future[None] | None) -> None:
+        if connect_future is not None:
+            await asyncio.shield(connect_future)
+        await asyncio.to_thread(socket_client.close)
+        if self._socket_client is socket_client:
+            self._socket_client = None
+        if self._socket_connect_future is connect_future:
+            self._socket_connect_future = None
 
     async def send(self, msg: OutboundMessage, *, _max_retries: int = 3) -> None:
         web_client = await self._get_web_client_for_message(msg)

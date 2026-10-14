@@ -87,6 +87,7 @@ def test_wait_for_sandbox_ready_bypasses_environment_proxy_for_docker_host(monke
 
         def get(self, url: str, *, timeout: float):
             assert url == "http://host.docker.internal:8080/v1/sandbox"
+            # Ample budget remains, so the per-probe timeout clamps to the 5s ceiling.
             assert timeout == 5
             return SimpleNamespace(status_code=200)
 
@@ -96,7 +97,7 @@ def test_wait_for_sandbox_ready_bypasses_environment_proxy_for_docker_host(monke
     assert (
         readiness.wait_for_sandbox_ready(
             "http://host.docker.internal:8080",
-            timeout=1,
+            timeout=30,
             headers=headers,
         )
         is True
@@ -199,5 +200,113 @@ async def test_wait_for_sandbox_ready_async_clamps_request_and_sleep_to_deadline
     assert await readiness.wait_for_sandbox_ready_async("http://sandbox", timeout=2, poll_interval=1.0) is False
 
     assert calls == ["http://sandbox/v1/sandbox"]
+    assert request_timeouts == [1.5]
+    assert sleeps == [0.25]
+
+
+def test_wait_for_sandbox_ready_times_out_on_the_monotonic_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The sync readiness budget is measured on the monotonic clock.
+
+    Regression for the sync poller measuring its ``timeout`` with wall-clock
+    ``time.time()``: a backward wall-clock step (NTP / VM resume / manual change)
+    while polling must not stretch the readiness wait past ``timeout`` — on the
+    acquisition path that would pin the acquiring thread far past the budget. The
+    async twin already deadlines on ``loop.time()``; this pins the sync twin to
+    the same monotonic contract.
+
+    The monotonic clock is scripted to advance past the deadline after two polls
+    while the wall clock steps backward on every read. With the fix the loop
+    exits on the monotonic deadline after exactly two polls; a wall-clock loop
+    would never reach ``timeout`` and keep polling until the scripted response
+    queue is exhausted, surfacing as a hard failure instead of a hang.
+    """
+    # start, loop1 top, after get1, loop2 top, after get2, loop3 top (past deadline)
+    monotonic_values = iter([100.0, 100.1, 100.2, 100.3, 100.4, 102.5])
+
+    def fake_monotonic() -> float:
+        return next(monotonic_values)
+
+    wall = 1_000_000.0
+
+    def fake_wall_time() -> float:
+        # Steps backward on every read; a wall-clock loop never reaches timeout.
+        nonlocal wall
+        wall -= 1_000.0
+        return wall
+
+    sleeps: list[float] = []
+
+    class FakeSession:
+        trust_env = True
+
+        def __init__(self) -> None:
+            self.headers: dict[str, str] = {}
+            # Exactly two "not ready" probes are scripted. The monotonic loop
+            # makes two polls before the deadline; a wall-clock loop would make a
+            # third and raise StopIteration here.
+            self._responses = iter([SimpleNamespace(status_code=503), SimpleNamespace(status_code=503)])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc_info) -> None:
+            return None
+
+        def get(self, url: str, *, timeout: float):
+            return next(self._responses)
+
+    monkeypatch.setattr(readiness.requests, "Session", FakeSession)
+    monkeypatch.setattr(readiness.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(readiness.time, "time", fake_wall_time)
+    monkeypatch.setattr(readiness.time, "sleep", lambda delay: sleeps.append(delay))
+
+    assert readiness.wait_for_sandbox_ready("http://sandbox", timeout=2) is False
+    assert sleeps == [1.0, 1.0]
+
+
+def test_wait_for_sandbox_ready_clamps_request_and_sleep_to_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The sync poller clamps the per-probe timeout and sleep to the budget.
+
+    Regression for the sync twin overshooting ``timeout``: it polled with a
+    fixed 5s request timeout and slept a fixed 1s, so a single slow probe plus
+    its backoff could run the wait up to ~6s past the budget — on the 5s
+    acquisition path (``local_backend``) that roughly doubles it. Mirror the
+    async twin's clamp (``min(5.0, remaining)`` / ``min(1.0, remaining)``) so the
+    budget the readiness comment now promises is actually honored. Scripted
+    monotonic values match ``...async_clamps_request_and_sleep_to_deadline``.
+    """
+    # start, loop top, after get (503), loop top (past deadline)
+    monotonic_values = iter([100.0, 100.5, 101.75, 102.0])
+
+    def fake_monotonic() -> float:
+        return next(monotonic_values)
+
+    request_timeouts: list[float] = []
+    sleeps: list[float] = []
+
+    class FakeSession:
+        trust_env = True
+
+        def __init__(self) -> None:
+            self.headers: dict[str, str] = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc_info) -> None:
+            return None
+
+        def get(self, url: str, *, timeout: float):
+            request_timeouts.append(timeout)
+            return SimpleNamespace(status_code=503)
+
+    monkeypatch.setattr(readiness.requests, "Session", FakeSession)
+    monkeypatch.setattr(readiness.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(readiness.time, "sleep", lambda delay: sleeps.append(delay))
+
+    # timeout=2 -> deadline at +2. First probe sees remaining 1.5 (clamped under
+    # the 5s ceiling); the post-probe remaining is 0.25, clamping the sleep; the
+    # next loop check is exactly at the deadline and exits.
+    assert readiness.wait_for_sandbox_ready("http://sandbox", timeout=2) is False
     assert request_timeouts == [1.5]
     assert sleeps == [0.25]

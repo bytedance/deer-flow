@@ -742,6 +742,10 @@ async def task_tool(
       syntax up to 50,000 bytes, rejecting NaN/Infinity. Oversize files, incomplete reads,
       or parser resource limits return UNVERIFIED. No schema or business validation;
       .json files are not checked automatically.
+    - CSV deliverables can opt into `file:<path> csv-columns:["id","name"]`: check the
+      first UTF-8 header record (optional BOM), with exact required names and extra columns
+      allowed. Empty/duplicate headers fail; incomplete or oversized headers are UNVERIFIED.
+      The header budget is 50,000 bytes; data rows are not validated.
     - `completed` means execution ended, not task acceptance. Read each criterion
       and retain useful work. For `does not hold`, inspect the reason and repair
       or recheck only the unmet condition, reusing unaffected outputs.
