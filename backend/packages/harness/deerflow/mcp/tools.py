@@ -1086,9 +1086,14 @@ async def _discover_server_tools(
     except (asyncio.CancelledError, StaleMCPBindingError, McpTaskConfigurationError):
         raise
     except Exception as e:
+        # Never interpolate ``e`` nor attach its traceback: ``ExtensionsConfig``
+        # resolves ``$VAR`` before validation, so a discovery error message can
+        # embed a resolved-credential request URL. Keep the server name and the
+        # exception type for diagnosis.
         logger.warning(
-            f"Skipping MCP server '{server_name}' after tool discovery failed: {e}",
-            exc_info=True,
+            "Skipping MCP server '%s' after tool discovery failed (%s)",
+            server_name,
+            type(e).__name__,
         )
         return server_name, None
 
@@ -1432,5 +1437,7 @@ async def get_mcp_tools(
     except (McpTaskConfigurationError, StaleMCPBindingError):
         raise
     except Exception as e:
-        logger.error(f"Failed to load MCP tools: {e}", exc_info=True)
+        # Only the exception type is logged: the message/traceback can carry a
+        # resolved-credential request URL (see ``_discover_server_tools``).
+        logger.error("Failed to load MCP tools (%s)", type(e).__name__)
         return []

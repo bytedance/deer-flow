@@ -229,14 +229,14 @@ def _apply_legacy_thinking_settings(
         if model_config.when_thinking_disabled is not None:
             # User-provided disable settings win on conflicts; profile keys survive.
             _merge_thinking_payload(settings, model_config.when_thinking_disabled)
-        elif has_thinking_settings and effective_wte.get("extra_body", {}).get("thinking", {}).get("type"):
+        elif has_thinking_settings and ((effective_wte.get("extra_body") or {}).get("thinking") or {}).get("type"):
             # OpenAI-compatible gateway: thinking is nested under extra_body
             _merge_thinking_payload(settings, {"extra_body": {"thinking": {"type": "disabled"}}})
             settings["reasoning_effort"] = "minimal"
-        elif has_thinking_settings and (disable_chat_template_kwargs := _vllm_disable_chat_template_kwargs(effective_wte.get("extra_body", {}).get("chat_template_kwargs") or {})):
+        elif has_thinking_settings and (disable_chat_template_kwargs := _vllm_disable_chat_template_kwargs((effective_wte.get("extra_body") or {}).get("chat_template_kwargs") or {})):
             # vLLM uses chat template kwargs to switch thinking on/off.
             _merge_thinking_payload(settings, {"extra_body": {"chat_template_kwargs": disable_chat_template_kwargs}})
-        elif has_thinking_settings and effective_wte.get("thinking", {}).get("type"):
+        elif has_thinking_settings and (effective_wte.get("thinking") or {}).get("type"):
             # Native langchain_anthropic: thinking is a direct constructor parameter
             settings["thinking"] = {"type": "disabled"}
 
