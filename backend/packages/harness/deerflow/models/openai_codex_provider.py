@@ -34,6 +34,23 @@ def _is_valid_call_id(call_id: Any) -> bool:
     return isinstance(call_id, str) and bool(call_id.strip())
 
 
+def _convert_tool_choice(tool_choice: str | dict | bool | None) -> str | dict | None:
+    """Normalize LangChain function selection to the Responses API format."""
+    if tool_choice is None or tool_choice is False:
+        return None
+    if tool_choice is True or tool_choice == "any":
+        return "required"
+    if isinstance(tool_choice, str) and tool_choice:
+        if tool_choice in ("auto", "none", "required"):
+            return tool_choice
+        return {"type": "function", "name": tool_choice}
+    if isinstance(tool_choice, dict) and tool_choice.get("type") == "function":
+        function = tool_choice.get("function", tool_choice)
+        if isinstance(function, dict) and isinstance(function.get("name"), str) and function["name"]:
+            return {"type": "function", "name": function["name"]}
+    raise ValueError("tool_choice must be auto, none, required, any, a function name/selection, a boolean, or None")
+
+
 def _build_usage_metadata(oai_usage: dict) -> dict:
     """Convert Codex/Responses API usage dict to LangChain usage_metadata format.
 
@@ -234,7 +251,7 @@ class CodexChatModel(BaseChatModel):
             responses_tools.append(converted)
         return responses_tools
 
-    def _call_codex_api(self, messages: list[BaseMessage], tools: list[dict] | None = None) -> dict:
+    def _call_codex_api(self, messages: list[BaseMessage], tools: list[dict] | None = None, tool_choice: str | dict | bool | None = None) -> dict:
         """Call the Codex Responses API and return the completed response."""
         instructions, input_items = self._convert_messages(messages)
 
@@ -249,6 +266,9 @@ class CodexChatModel(BaseChatModel):
 
         if tools:
             payload["tools"] = self._convert_tools(tools)
+        converted_choice = _convert_tool_choice(tool_choice)
+        if converted_choice is not None:
+            payload["tool_choice"] = converted_choice
 
         headers = {
             "Authorization": f"Bearer {self._access_token}",
@@ -465,11 +485,11 @@ class CodexChatModel(BaseChatModel):
     ) -> ChatResult:
         """Generate a response using Codex Responses API."""
         tools = kwargs.get("tools", None)
-        response = self._call_codex_api(messages, tools=tools)
+        response = self._call_codex_api(messages, tools=tools, tool_choice=kwargs.get("tool_choice"))
         return self._parse_response(response)
 
-    def bind_tools(self, tools: list, **kwargs: Any) -> Any:
-        """Bind tools for function calling."""
+    def bind_tools(self, tools: list, *, tool_choice: str | dict | bool | None = None, **kwargs: Any) -> Any:
+        """Bind function tools and their selection policy."""
         from langchain_core.runnables import RunnableBinding
         from langchain_core.tools import BaseTool
         from langchain_core.utils.function_calling import convert_to_openai_function
@@ -495,4 +515,4 @@ class CodexChatModel(BaseChatModel):
                 else:
                     formatted_tools.append(tool)
 
-        return RunnableBinding(bound=self, kwargs={"tools": formatted_tools}, **kwargs)
+        return RunnableBinding(bound=self, kwargs={"tools": formatted_tools, "tool_choice": tool_choice}, **kwargs)

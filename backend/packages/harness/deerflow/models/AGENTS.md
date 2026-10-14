@@ -108,6 +108,13 @@ share `_convert_tools` so binding cannot discard the setting. Keep caller
 schemas and definitions unchanged. Offline sync/async request and tool-followup
 coverage: `tests/test_codex_tool_strict.py`.
 
+Codex forwards `tool_choice` from `bind_tools` and direct sync/async calls.
+Normalize `any`/`True` to `required`, named or wrapped function selections to
+Responses' flat `{type: function, name: ...}` shape, and omit `None`/`False`.
+Malformed or unsupported selections fail before HTTP. Per-call choices override
+bound choices without mutating caller definitions or history. Offline HTTP
+serialization and tool-followup coverage: `tests/test_codex_tool_choice.py`.
+
 ### Codex SSE termination (`packages/harness/deerflow/models/openai_codex_provider.py`)
 
 Completed responses with null, omitted, or empty `usage` retain their text,
