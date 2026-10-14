@@ -11,6 +11,7 @@ from telegram import Bot
 from telegram.error import BadRequest, NetworkError
 from telegram.request import BaseRequest
 
+from app.channels import telegram as telegram_module
 from app.channels.message_bus import MessageBus, OutboundMessage, ResolvedAttachment
 from app.channels.telegram import TelegramChannel
 
@@ -85,6 +86,53 @@ async def test_private_final_reply_survives_chat_history_cleared_during_run(tele
     assert request.calls[-1][1]["reply_parameters"]["message_id"] == old_reply
     assert channel._last_bot_message["12345"] in request.messages
     assert "12345:42" not in channel._stream_messages
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("chat_id", ["12345", "-12345"])
+@pytest.mark.parametrize("stage", ["running", "initial_stream", "replacement_stream"])
+async def test_deleted_inbound_target_is_optional_only_for_private_previews(telegram_channel, monkeypatch, chat_id, stage):
+    channel, request = telegram_channel
+    key = f"{chat_id}:42"
+    monkeypatch.setattr(telegram_module, "_monotonic", lambda: 10.0)
+    if stage == "replacement_stream":
+        await channel.send(_reply(chat_id, thread_ts="42", is_final=False))
+        assert channel._stream_messages[key]["message_id"] in request.messages
+        monkeypatch.setattr(telegram_module, "_monotonic", lambda: 20.0)
+
+    # Deletion removes the inbound target and, when present, the preview too.
+    request.messages.clear()
+    before = len(request.calls)
+    if stage == "running":
+        await channel._send_running_reply(chat_id, 42)
+    else:
+        await channel.send(OutboundMessage(channel_name="telegram", chat_id=chat_id, thread_id="thread", thread_ts="42", text="Updated preview", is_final=False))
+
+    expected_calls = ["editMessageText", "sendMessage"] if stage == "replacement_stream" else ["sendMessage"]
+    assert [endpoint for endpoint, _ in request.calls[before:]] == expected_calls
+    reply = request.calls[-1][1]["reply_parameters"]
+    assert reply["message_id"] == 42
+    state = channel._stream_messages.get(key)
+    if int(chat_id) > 0:
+        assert reply["allow_sending_without_reply"] is True
+        assert state is not None and state["message_id"] in request.messages
+        assert state["last_text"] == ("Working on it..." if stage == "running" else "Updated preview")
+    else:
+        assert not reply.get("allow_sending_without_reply")
+        assert state is None or state["message_id"] not in request.messages
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("chat_id", ["12345", "-12345"])
+@pytest.mark.parametrize("stage", ["running", "initial_stream"])
+async def test_existing_inbound_target_remains_attached_to_preview(telegram_channel, chat_id, stage):
+    channel, request = telegram_channel
+    if stage == "running":
+        await channel._send_running_reply(chat_id, 42)
+    else:
+        await channel.send(_reply(chat_id, thread_ts="42", is_final=False))
+    assert request.calls[-1][1]["reply_parameters"]["message_id"] == 42
+    assert channel._stream_messages[f"{chat_id}:42"]["message_id"] in request.messages
 
 
 @pytest.mark.asyncio

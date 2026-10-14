@@ -370,6 +370,8 @@ class TelegramChannel(Channel):
         send_kwargs: dict[str, Any] = {"chat_id": chat_id, "text": display}
         if reply_to:
             send_kwargs["reply_to_message_id"] = reply_to
+            if chat_id > 0:
+                send_kwargs["allow_sending_without_reply"] = True
 
         if state is None:
             try:
@@ -975,11 +977,11 @@ class TelegramChannel(Channel):
             return
         try:
             bot = self._application.bot
-            sent = await bot.send_message(
-                chat_id=int(chat_id),
-                text="Working on it...",
-                reply_to_message_id=reply_to_message_id,
-            )
+            numeric_chat_id = int(chat_id)
+            kwargs: dict[str, Any] = {"chat_id": numeric_chat_id, "text": "Working on it...", "reply_to_message_id": reply_to_message_id}
+            if numeric_chat_id > 0:
+                kwargs["allow_sending_without_reply"] = True
+            sent = await bot.send_message(**kwargs)
             self._register_stream_message(
                 self._stream_key(chat_id, str(reply_to_message_id)),
                 message_id=sent.message_id,
