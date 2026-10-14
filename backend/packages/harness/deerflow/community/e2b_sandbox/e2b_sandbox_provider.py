@@ -212,7 +212,7 @@ class _MountPassLimitExceeded(Exception):
 
 
 class _MountPassCapacityExceeded(_MountPassLimitExceeded):
-    """A creation pass exceeds its file or byte cap, rather than its deadline."""
+    """A mount upload pass exceeds its file or byte cap, rather than its deadline."""
 
 
 @dataclass(frozen=True)
@@ -2764,9 +2764,9 @@ class E2BSandboxProvider(SandboxProvider):
                 if budget is not None:
                     budget.check_deadline()
                 if budget is not None and budget.attempted_files >= _MAX_MOUNT_PASS_FILES:
-                    raise _MountPassCapacityExceeded(f"shared creation file count cap {_MAX_MOUNT_PASS_FILES}")
+                    raise _MountPassCapacityExceeded(f"mount upload pass file count cap {_MAX_MOUNT_PASS_FILES}")
                 if budget is not None and budget.attempted_bytes + expected_size > _MAX_MOUNT_PASS_TOTAL_BYTES:
-                    raise _MountPassCapacityExceeded(f"shared creation total byte budget {_MAX_MOUNT_PASS_TOTAL_BYTES}")
+                    raise _MountPassCapacityExceeded(f"mount upload pass total byte budget {_MAX_MOUNT_PASS_TOTAL_BYTES}")
                 try:
                     make_dir = getattr(client.files, "make_dir", None)
                     if callable(make_dir):
