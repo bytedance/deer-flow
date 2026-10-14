@@ -3,6 +3,7 @@
 import asyncio
 import importlib
 import importlib.util
+import json
 import zipfile
 from datetime import UTC, datetime
 from itertools import repeat as repeat_summary
@@ -32,13 +33,14 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
     from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
     from app.gateway.auth_middleware import AuthMiddleware
     from app.gateway.csrf_middleware import CSRFMiddleware
-    from app.gateway.routers import artifacts, project_documents, projects, thread_activity, threads, uploads
+    from app.gateway.routers import artifacts, project_documents, projects, thread_activity, thread_runs, threads, uploads
     from deerflow.agents.middlewares import summarization_middleware as summary_module
     from deerflow.config import app_config
     from deerflow.config import paths as paths_module
     from deerflow.config.app_config import AppConfig
     from deerflow.config.paths import Paths
     from deerflow.persistence.feedback.model import FeedbackRow
+    from deerflow.persistence.feedback.sql import FeedbackRepository
     from deerflow.persistence.models.run_event import RunEventRow
     from deerflow.persistence.projects import ProjectDocumentRepository, ProjectRepository
     from deerflow.persistence.projects.model import ProjectDocumentRow, ProjectRow
@@ -52,6 +54,7 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
     from deerflow.persistence.user.model import UserRow
     from deerflow.persistence.workspaces.sql import WorkspaceRepository
     from deerflow.runtime import RunManager, ThreadOperationKind, context_compaction
+    from deerflow.runtime.events.store.db import DbRunEventStore
     from deerflow.runtime.events.store.memory import MemoryRunEventStore
     from deerflow.runtime.goal import build_goal_state, write_thread_goal
     from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
@@ -190,6 +193,7 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
             app.state.checkpointer = ReplacingCheckpointSaver(checkpoint_connection)
             await app.state.checkpointer.setup()
             app.state.run_event_store = MemoryRunEventStore()
+            app.state.feedback_repo = FeedbackRepository(sf)
             app.state.project_repo = ProjectRepository(sf)
             app.state.project_document_repo = ProjectDocumentRepository(sf)
             app.include_router(routes.router)
@@ -198,6 +202,7 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
             app.include_router(uploads.router)
             app.include_router(threads.router)
             app.include_router(thread_activity.router)
+            app.include_router(thread_runs.router)
             app.include_router(projects.router)
             app.include_router(project_documents.router)
             app.add_middleware(AuthMiddleware)
@@ -712,7 +717,19 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                     assert (await client.post("/api/threads/" + delete_id + "/uploads", headers=delete_headers, files={"files": ("delete.txt", (delete_space + " private bytes").encode(), "text/plain")})).status_code == 200
                     async with sf() as session:
                         session.add(RunRow(run_id=delete_id + "-run", thread_id=delete_id, workspace_id=delete_workspace, user_id=identities["alice"], status="success", change_seq=200))
-                        session.add(RunEventRow(thread_id=delete_id, run_id=delete_id + "-run", workspace_id=delete_workspace, user_id=identities["alice"], event_type="llm.ai.response", category="message", content="owned event", seq=1))
+                        session.add(
+                            RunEventRow(
+                                thread_id=delete_id,
+                                run_id=delete_id + "-run",
+                                workspace_id=delete_workspace,
+                                user_id=identities["alice"],
+                                event_type="llm.ai.response",
+                                category="message",
+                                content=json.dumps({"type": "ai", "id": delete_id + "-message", "content": delete_space + " private response"}),
+                                event_metadata={"content_is_json": True},
+                                seq=1,
+                            )
+                        )
                         session.add(FeedbackRow(feedback_id=delete_id, run_id=delete_id + "-run", thread_id=delete_id, user_id=identities["alice"], rating=1))
                         session.add(ThreadReadMarkerRow(user_id=identities["alice"], thread_id=delete_id, seen_change_seq=200))
                         session.add(
@@ -722,6 +739,39 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                         )
                         await session.commit()
                     await app.state.run_event_store.put(thread_id=delete_id, run_id=delete_id + "-run", event_type="llm.ai.response", category="message", content="owned history")
+                # Read actual durable history via native HTTP and SQL event storage.
+                memory_events = app.state.run_event_store
+                app.state.run_event_store = DbRunEventStore(sf, workspace_required=True)
+                team_run = delete_ids["team"] + "-run"
+                personal_run = delete_ids["personal"] + "-run"
+                team_run_base = "/api/threads/" + delete_ids["team"]
+                personal_run_base = "/api/threads/" + delete_ids["personal"]
+                run_list = await client.get(team_run_base + "/runs", headers=team_headers)
+                assert run_list.status_code == 200, run_list.text
+                assert [row["run_id"] for row in run_list.json()] == [team_run]
+                run_page = await client.get(team_run_base + "/runs/page?limit=1", headers=team_headers)
+                assert run_page.status_code == 200 and [r["run_id"] for r in run_page.json()["data"]] == [team_run], run_page.text
+                run_detail = await client.get(team_run_base + "/runs/" + team_run, headers=team_headers)
+                assert run_detail.status_code == 200 and run_detail.json()["status"] == "success", run_detail.text
+                assert (await client.get(team_run_base + "/runs/" + personal_run, headers=team_headers)).status_code == 404
+                for suffix in ("/runs", "/runs/page", "/runs/" + team_run, "/messages", "/messages/page", "/runs/" + team_run + "/messages", "/runs/" + team_run + "/events"):
+                    assert (await client.get(team_run_base + suffix)).status_code == 404
+                for base, headers, run_id, expected in ((team_run_base, team_headers, team_run, "team private response"), (personal_run_base, {}, personal_run, "personal private response")):
+                    for suffix in ("/messages", "/messages/page?limit=1", "/runs/" + run_id + "/messages", "/runs/" + run_id + "/events"):
+                        visible = await client.get(base + suffix, headers=headers)
+                        assert visible.status_code == 200, visible.text
+                        rows = visible.json() if isinstance(visible.json(), list) else visible.json()["data"]
+                        assert len(rows) == 1 and rows[0]["content"]["content"] == expected, visible.text
+                foreign_events = await client.get(team_run_base + "/runs/" + personal_run + "/events", headers=team_headers)
+                assert foreign_events.status_code == 404, foreign_events.text
+                foreign_messages = await client.get(team_run_base + "/runs/" + personal_run + "/messages", headers=team_headers)
+                assert foreign_messages.status_code == 404, foreign_messages.text
+                as_user("bob")
+                assert (await client.get(team_run_base + "/messages", headers=team_headers)).status_code == 404
+                as_user("alice")
+                owner_replacement["thread_id"] = delete_ids["team"]
+                assert (await client.get(team_run_base + "/messages", headers=team_headers)).status_code == 404
+                app.state.run_event_store = memory_events
                 delete_id = delete_ids["team"]
                 assert (await client.delete("/api/threads/" + delete_id)).status_code == 404
                 as_user("bob")

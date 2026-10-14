@@ -634,3 +634,22 @@ and NULL stamps are excluded before paging, and branch-style history remains.
 Source bytes match its archive; dedicated #68/#69 resources are empty.
 HTTP Run/message/event admission, writer scope, SSE, physical recovery and full
 client flows still gate M3/M4–M11 and tenant activation.
+
+## Private Run, message and event HTTP reads (partial M3)
+
+Seven thread-scoped read routes now bind private workspace identity before
+native permission/owner checks: Run list/page/detail, thread messages/page,
+Run messages and Run events. The wrapper revalidates membership and the entry
+incarnation before returning. Specific Run subresources additionally require
+a scoped durable Run matching the path thread. Message duration enrichment
+passes the actual actor to scoped RunManager reads; unbound legacy calls keep
+their old signature and internal-owner semantics.
+
+#70 RED found the missing HTTP binding. #71 passed 6 checks in 40.62s: real
+JWT/SQL HTTP mains on SQLite/PostgreSQL and four native permission/page/history
+regressions. The mains read actual structured SQL event content and feedback
+from personal/team conversations, refuse foreign Run IDs, foreign space and
+peer access, and reject owner-admission incarnation changes before response.
+Source bytes match its archive; both dedicated resource inventories are empty.
+SSE, global Run routes, token/artifact/feedback coverage, event writers, full
+client flows and M4–M11 remain requirements; this does not activate tenants.

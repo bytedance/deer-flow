@@ -439,3 +439,11 @@ and repository calls. Native Run SQL filters before keyset/limit, and the existi
 read repository selects the per-workspace viewer clock. The wrapper revalidates
 live policy before returning. #64 verifies both metadata dialects plus five
 legacy activity cases; RunManager cache, Run/SSE and frontend switching remain.
+
+Thread-scoped Run list/page/detail, messages/page, Run messages and events bind
+private workspace scope before native owner checks. A scoped specific Run read
+requires its durable row to match the path thread and original actor; errors
+do not bypass SQL through resident cache. list_run_messages passes explicit
+user_id in scoped mode while preserving the legacy custom-manager signature.
+#71 verifies two real SQL HTTP mains and four native permissions/history/page
+cases. SSE/global Run/token/artifact/feedback and producer scope remain pending.

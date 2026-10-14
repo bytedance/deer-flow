@@ -1381,5 +1381,36 @@
       "background Run/branch seed/journal/recovery publication M4",
       "frontend and remaining M4-M11; activation closed"
     ]
+  },
+  "workspace_run_http_reads": {
+    "status": "partial_M3_verified_read_main",
+    "red": {
+      "build": 70,
+      "result": "FAILURE",
+      "tests_failed": 2,
+      "elapsed_seconds": 37.17,
+      "archive_sha256": "688674b93e75d39c4f3fb328cc071f50c3d861f6d8f1d05426aea87713111830",
+      "reason": "native Run HTTP owner check had no required workspace scope"
+    },
+    "green": {
+      "build": 71,
+      "result": "SUCCESS",
+      "tests_passed": 6,
+      "elapsed_seconds": 40.62,
+      "archive_sha256": "d3af952d82f0c9050112d14a5b0004fa361b6a1bc228e7f1d2d7f80a81ac224d",
+      "command": "python -m pytest tests/test_workspace_http.py tests/test_thread_runs_page.py::test_runs_page_returns_envelope_and_has_more tests/test_thread_runs_internal_scope.py::test_internal_caller_get_run_owner_stamped tests/test_thread_runs_internal_scope.py::test_browser_session_messages_keep_per_user_filter tests/test_thread_messages_page.py::test_legacy_thread_messages_apply_regenerate_and_edit_replay_visibility -q --tb=short --no-showlocals"
+    },
+    "source_sha256": {
+      "backend/app/gateway/routers/thread_runs.py": "31368dbdedcd02ffa09611195554b2c2bfe01cf1064a2d2775135de054ce7955",
+      "backend/tests/test_workspace_http.py": "6ded5856f2c122efb50dc944bcf4dc1f8dcf797b99344808bcf30ee7a59690bc"
+    },
+    "cleanup": "#70/#71 owned container/network inventories independently empty",
+    "warning": "existing Starlette TestClient/httpx deprecation warning",
+    "remaining": [
+      "SSE observer admission and delivery-time scope/credential revocation",
+      "global /api/runs routes, remaining token/artifact/feedback/PUT/history entrypoints",
+      "event writer/factory/background native Run scope M4",
+      "frontend switching/caches and M4-M11; activation closed"
+    ]
   }
 }

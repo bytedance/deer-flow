@@ -61,9 +61,11 @@ from app.gateway.services import (
 )
 from app.gateway.sse_headers import sse_response_headers
 from app.gateway.utils import sanitize_log_param
+from app.gateway.workspaces.dependencies import workspace_resource_scope
 from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.middlewares.dynamic_context_middleware import strip_injected_user_message_id_suffix
 from deerflow.authz.sandbox_authz import safe_app_config_async
+from deerflow.authz.workspace import get_current_workspace
 from deerflow.config.paths import get_paths, make_safe_user_id
 from deerflow.runtime import CancelOutcome, ConflictError, RunRecord, RunStatus, ThreadOperationKind, serialize_channel_values_for_api
 from deerflow.runtime.runs.store.base import format_run_cursor_created_at, normalize_run_created_at_iso
@@ -1167,6 +1169,12 @@ async def _require_run_visible_to_scope(run_id: str, thread_id: str, request: Re
     the legacy ``"default"`` stamp); every other caller and every
     established-ownership thread keeps its existing semantics.
     """
+    context = get_current_workspace()
+    if context is not None:
+        record = await get_run_manager(request).get(run_id, user_id=context.actor_user_id)
+        if record is None or record.thread_id != thread_id:
+            raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+        return
     state = getattr(request, "state", None)
     user = getattr(state, "user", None)
     if getattr(user, "system_role", None) != INTERNAL_SYSTEM_ROLE:
@@ -1183,6 +1191,7 @@ async def _require_run_visible_to_scope(run_id: str, thread_id: str, request: Re
 
 
 @router.get("/{thread_id}/runs", response_model=list[RunResponse])
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("runs", "read", owner_check=True)
 async def list_runs(thread_id: ThreadId, request: Request) -> list[RunResponse]:
     """List the newest runs for a thread (default 100, as a bare array)."""
@@ -1193,6 +1202,7 @@ async def list_runs(thread_id: ThreadId, request: Request) -> list[RunResponse]:
 
 
 @router.get("/{thread_id}/runs/page", response_model=ThreadRunsPageResponse)
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("runs", "read", owner_check=True)
 async def list_runs_page(
     thread_id: ThreadId,
@@ -1235,6 +1245,7 @@ async def list_runs_page(
 
 
 @router.get("/{thread_id}/runs/{run_id}", response_model=RunResponse)
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("runs", "read", owner_check=True)
 async def get_run(thread_id: ThreadId, run_id: str, request: Request) -> RunResponse:
     """Get details of a specific run."""
@@ -1448,6 +1459,7 @@ async def join_existing_run_stream(thread_id: ThreadId, run_id: str, request: Re
 
 
 @router.get("/{thread_id}/messages")
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("runs", "read", owner_check=True)
 async def list_thread_messages(
     thread_id: ThreadId,
@@ -1588,6 +1600,7 @@ async def _enrich_thread_message_page(
 
 
 @router.get("/{thread_id}/messages/page", response_model=ThreadMessagesPageResponse)
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("runs", "read", owner_check=True)
 async def list_thread_messages_page(
     thread_id: ThreadId,
@@ -1616,6 +1629,7 @@ async def list_thread_messages_page(
 
 
 @router.get("/{thread_id}/runs/{run_id}/messages")
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("runs", "read", owner_check=True)
 async def list_run_messages(
     thread_id: ThreadId,
@@ -1644,7 +1658,7 @@ async def list_run_messages(
 
     if data:
         run_mgr = get_run_manager(request)
-        record = await run_mgr.get(run_id)
+        record = await run_mgr.get(run_id, user_id=user_id) if get_current_workspace() is not None else await run_mgr.get(run_id)
         if record:
             durations = compute_run_durations([record])
             if durations:
@@ -1805,6 +1819,7 @@ async def create_run_artifact_archive(
 
 
 @router.get("/{thread_id}/runs/{run_id}/events")
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("runs", "read", owner_check=True)
 async def list_run_events(
     thread_id: ThreadId,

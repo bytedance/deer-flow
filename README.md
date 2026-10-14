@@ -2965,3 +2965,7 @@ worker and frontend integration remain pending; tenant activation stays closed.
 [Event SQL read isolation](docs/tenant-workspaces-api.md#event-sql-reads-partial-m3)
 preserves private workspace paging and branch history in isolated acceptance;
 HTTP/SSE, event writers and full tenant rollout remain pending.
+
+[Private Run/message/event HTTP reads](docs/tenant-workspaces-api.md#private-run-message-and-event-http-reads-partial-m3)
+now preserve selected-space history and private conversation identity. Stream
+observation, remaining APIs, producers and frontend integration are still pending.

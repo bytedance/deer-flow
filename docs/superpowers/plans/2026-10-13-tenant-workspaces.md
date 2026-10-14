@@ -565,3 +565,10 @@ space plus private live parent before reductions, preserving branch seeds
 without inventing Run rows. The constructor flag currently gates reads only.
 Next: HTTP Run/messages/events and SSE; writes, factories, background journal
 identity and physical recovery remain required M4/M10/M11 work.
+
+M3 Run/message/event HTTP checkpoint: #70 RED missing entry scope; #71 GREEN
+(6 passed, 40.62s). Seven read routes preserve private entry identity and native
+Run/message DTOs; real SQL events/feedback are distinct per space, foreign Run
+IDs/peers are refused and incarnation rotation rejects responses. Next: SSE
+readonly observer delivery and remaining global/token/artifact/feedback paths,
+then frontend; normal Run/event producers and factory scope still need M4.

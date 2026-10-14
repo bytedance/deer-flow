@@ -214,3 +214,9 @@ after real native checkpoint deletion, and uncertain cleanup checks no replay.
 The native cancellation unit targets _delete_thread_data_authorized.__wrapped__
 to retain its original authorization-bypassed lifecycle focus after the route
 adapter split; HTTP authorization remains exercised separately.
+
+The workspace HTTP main temporarily uses actual DbRunEventStore and
+FeedbackRepository on its isolated session factory for Run/message/event reads,
+then restores its native memory event fixture for the existing lifecycle main.
+Do not replace scoped event results with canned payloads or remove feedback
+enrichment. #71 verifies both dialects and entry-incarnation response fencing.

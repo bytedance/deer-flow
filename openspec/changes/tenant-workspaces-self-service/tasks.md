@@ -69,3 +69,9 @@ M3 event SQL reads: #68 RED foreign-space disclosure; #69 GREEN (9 passed,
 Filter event and private parent before limits/reductions, preserve synthetic
 branch IDs, and reject required unbound position queries. HTTP/SSE, event
 writes/factory/background integration and client acceptance remain unchecked.
+
+M3 thread Run/message/event HTTP: #70 RED scope; #71 GREEN (6 passed, 40.62s),
+actual authenticated SQL events/feedback and four native read regressions.
+Seven read routes bind private scope, specific Run paths verify durable
+ownership, and entry incarnation is retained until response. SSE/global/other
+entrypoints and producer/client acceptance remain unchecked; M3 stays open.

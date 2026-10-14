@@ -106,3 +106,12 @@ workspace_required 目前只覆盖读取；写入归属/工厂/后台 journal �
 下一项从 HTTP thread_runs 的 Run列表/详情、消息分页、事件入口开始，
 保留实时 Run 控制对象，并给 list_run_messages 的 get 传显式用户；
 随后 SSE/客户端切换。全局 runs 路由、反馈和后台回填不能遗漏。目标 active。
+
+最新接续：七个 thread Run/message/event HTTP 读取由 #70 RED/#71 GREEN
+验证（6 passed, 40.62s），#70/#71 资源查空。实际 SQL 事件与反馈、个人/
+团队数据区别、错 Run 路径、其他成员、错误空间和准入时替换实例均覆盖。
+下一项从只读 GET join/stream SSE 开始：捕获私有身份，ASGI 发头前复核，
+每个传送片段复核并在撤权/删除/实例变化后关闭观察者，不取消后台Run；
+关闭时 drain 原生 generator。不能仅给 route 加 decorator 后宣称流式
+隔离完成，因为生成器在请求函数返回后才消费。另需全局 /api/runs、
+反馈/token/artifact/PUT/history 路径，事件写入/工厂/后台归属仍在 M4。
