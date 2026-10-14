@@ -158,13 +158,19 @@ def build_multi_instance_config(
             sandbox["container_prefix"] = sandbox_container_prefix
             notes.append(f"set sandbox.container_prefix: {sandbox_container_prefix} (was {previous_prefix!r}) so the harness never adopts or reaps other sandbox containers")
 
-    channels = config.get("channels")
-    if not keep_channels and isinstance(channels, dict):
-        disabled = sorted(name for name, value in channels.items() if isinstance(value, dict) and value.get("enabled"))
-        for name in disabled:
-            channels[name]["enabled"] = False
-        if disabled:
-            notes.append(f"disabled IM channels {', '.join(disabled)}: both Gateways would connect the same bot (set DEERFLOW_MI_KEEP_CHANNELS=1 to keep them)")
+    if not keep_channels:
+        # UI-connectable providers can start transports after credentials arrive,
+        # so disable them as well as the static YAML providers. ``leader_lease``
+        # and the scalar connection settings are not providers.
+        for section_name in ("channels", "channel_connections"):
+            channels = config.get(section_name)
+            if not isinstance(channels, dict):
+                continue
+            disabled = sorted(name for name, value in channels.items() if name != "leader_lease" and isinstance(value, dict) and value.get("enabled"))
+            for name in disabled:
+                channels[name]["enabled"] = False
+            if disabled:
+                notes.append(f"disabled IM channels under {section_name}: {', '.join(disabled)}: the harness keeps your bots offline unless asked (set DEERFLOW_MI_KEEP_CHANNELS=1 to keep them; the leader lease then gives each bot to one Gateway)")
 
     memory = _section(config, "memory")
     manager_class = memory.get("manager_class")

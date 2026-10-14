@@ -19,6 +19,8 @@ class ScheduledTaskRow(Base):
     goal_objective: Mapped[str | None] = mapped_column(Text, nullable=True)
     # The user's normalized "stop when ..." rule; never part of ``prompt``.
     stop_condition: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Optional additional Feishu group; keep the reference after disconnection.
+    notification_group_connection_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     max_runs: Mapped[int | None] = mapped_column(Integer, nullable=True)
     end_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     standing_notes: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)

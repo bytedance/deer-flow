@@ -16,6 +16,7 @@ from deerflow.community.url_safety import validate_delegated_backend_url, valida
 from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.tools.types import Runtime
+from deerflow.utils.atomic_write import publish_bytes_atomically as _publish_bytes_atomically
 from deerflow.utils.readability import ReadabilityExtractor
 
 from .browserless_client import BrowserlessClient, BrowserlessFetchResult, BrowserlessScreenshotResult
@@ -247,7 +248,7 @@ def _write_capture_output(outputs_path: Path, output_name: str, content: bytes) 
     """Write ``content`` into ``outputs_path`` and return the actual filename used."""
     outputs_path.mkdir(parents=True, exist_ok=True)
     final_name = _dedupe_output_name(outputs_path, output_name)
-    (outputs_path / final_name).write_bytes(content)
+    _publish_bytes_atomically(outputs_path / final_name, content)
     return final_name
 
 

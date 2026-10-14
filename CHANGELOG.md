@@ -946,6 +946,43 @@ This release closes that milestone with **621 merged pull requests**.
 
 #### Channels
 
+- **channels:** IM channels can run on several Gateway instances. With
+  `channels.leader_lease` active (`auto`, the default, follows the
+  multi-process signal), each provider's platform connection belongs to the
+  one instance holding its row in the new `channel_leases` table (migration
+  `0042_channel_leases`): a single upsert decides ownership against the
+  database clock, renewals carry a fencing epoch, and the holder stops its
+  transport on its own monotonic deadline before a peer may connect, so a
+  stalled database cannot leave two Telegram pollers or two Discord sessions
+  running. A crashed holder is replaced within `lease_seconds + grace_seconds`
+  plus one renewal interval; a cleanly stopped one releases and hands over on
+  the peer's next tick, and a transport whose stop timed out keeps its lease
+  until it expires. GitHub webhooks, the message bus and the manager stay on
+  every instance. `GET /api/channels/` reports each provider's `leader`, and
+  `running` reflects the holder's transport on every instance, so the web UI's
+  provider list and connect flow work wherever the load balancer sends them;
+  scheduled-task IM notifications are claimed only by the provider's holder.
+  The startup gate now recommends `auto`/`true` when it refuses `enabled:
+  false`, and refuses an explicit `enabled: true` without a SQL database.
+  Credentials saved from the web UI still reach the holder only when it next
+  starts the channel, and a failover cancels the IM replies in flight. ([#6843])
+
+- **channels:** New `channels.leader_lease` section (`enabled: auto|true|false`,
+  `lease_seconds`, `grace_seconds`; startup-only), reserved for the per-provider
+  leader lease that will give one Gateway instance each IM platform connection
+  (the transport ownership itself ships separately; until then keep one
+  instance while channels are enabled). The
+  multi-process startup gate now refuses `enabled: false` while an IM channel
+  other than GitHub is enabled under `channels.*` or connectable through
+  `channel_connections`, naming the providers and only the remedies that work
+  today, and a malformed
+  block is refused on every topology. `auto` follows the multi-process signal, so
+  a single instance is unchanged. `ChannelService` no longer treats the block as
+  a provider, and the two-Gateway harness leaves it alone. `config_version` 60;
+  the Helm chart and docs keep the "keep 1 replica while channels are enabled"
+  guidance but no longer rely on that comment alone: the gate now enforces the
+  disabled-lease case. ([#6746])
+
 - **channels:** WeChat can be connected by scanning a QR code from the web UI.
   The connection dialog in the sidebar and Settings gains QR login with
   progress, pairing-code input, expiry and retry states, and a "Scan again"
@@ -1209,6 +1246,62 @@ This release closes that milestone with **621 merged pull requests**.
   because a run is still going keeps the draft and says so. ([#6556])
 
 ### Fixed
+
+- **channels:** Runs started from an IM channel no longer die with the Gateway
+  instance that received the message. The manager holds `runs.wait` /
+  `runs.stream` open for the whole run, and the Gateway cancels a run whose
+  creating request disconnects unless that request asked for
+  `on_disconnect: continue`; a leader hand-off, a rolling restart or a crash
+  of the receiving instance therefore cancelled every IM run in flight.
+  Channel runs now ask for `continue`, so the run finishes on the Gateway
+  executing it and its thread state is persisted — the answer stays readable
+  in the web UI even though the IM reply is lost with the old transport. The
+  same policy covers the SDK's 300s read timeout on a Slack/Discord
+  `runs.wait`: the chat still gets the error reply, but the run finishes in
+  the background instead of being cancelled. Because the run survives, the
+  manager now keeps the inbound dedupe key once the run request has left it
+  (a cancelled worker, a read timeout, a dropped connection): the provider's
+  redelivery on the new holder is dropped instead of executing the turn a
+  second time, while a request the Gateway rejected or a failure before
+  sending still releases the key for a retry. Fire-and-forget channels
+  (GitHub) are unchanged: `runs.create` returns as soon as the run is pending.
+  ([#6876])
+
+- **deploy:** The Gateway container now shuts down gracefully. The production
+  compose `command`, both `CMD`s in `backend/Dockerfile` and the Helm chart
+  started it as `sh -c "cd backend && … uv run … uvicorn …"`, which leaves `sh`
+  as PID 1 with no SIGTERM handler, so the kernel dropped the stop signal:
+  uvicorn never shut down, the lifespan teardown (memory queue flush, run
+  drain, channel, scheduler and MCP shutdown) never ran, and every stop waited
+  out the grace period and ended in SIGKILL (exit 137). Every production launch
+  path now `exec`s the server, as `docker/dev-entrypoint.sh` already did, and
+  the compose gateway sets `init: true` so orphaned grandchildren are still
+  reaped. (issue #6835, [#6836])
+
+- **channels:** `FeishuChannel.stop()` and `DingTalkChannel.stop()` now end
+  their SDK threads instead of timing out. Both SDKs run on a thread-private
+  event loop that only returned on a fatal error, so every stop joined for
+  5s, raised `ChannelStopTimeout`, and left the platform connection alive on
+  the old process — a restart, a redeploy, and the upcoming per-provider
+  leader hand-off could not release the connection. Each channel now
+  publishes that loop under a lock; `stop()` schedules a shutdown on it, then
+  joins. Feishu disarms lark-oapi's `_auto_reconnect` before closing the
+  socket and stopping the loop, because the SDK's `start()` otherwise swallows
+  the interrupted loop in its reconnect branch and dials again; DingTalk
+  drives its own copy of dingtalk-stream's connect loop (the SDK's is
+  `while True` and catches `CancelledError`), re-checks the running flag
+  before every dial, sends the ticket request itself through `httpx` with a
+  deadline (the SDK's `requests.post` has none, so a stalled endpoint could
+  pin the thread or process exit), and logs only the endpoint rather than
+  the ticket-bearing connection payload. When a peer never answers the close
+  frame, both channels abort the transport themselves instead of leaving the
+  socket to garbage collection, because the bounded close wait cancels
+  websockets' own close-timeout abort. A shared `shutdown_private_loop`
+  cancels the SDK's leftover tasks with a bounded drain and closes the loop,
+  and a stop requested before the client exists never dials.
+  `ChannelStopTimeout` is now reserved for a thread that genuinely wedges
+  inside an SDK call. Telegram already stopped its loop this way and is
+  unchanged. ([#6798])
 
 - **frontend:** The user-management settings page no longer renders a doomed
   query on the static-website demo, and a non-admin `?settings=users` deep
@@ -5791,6 +5884,15 @@ This release closes that milestone with **621 merged pull requests**.
   agent as an empty string, or as an unrelated host variable's value when that
   name existed. Values are now passed through as loaded, as BoxLite and the
   local provider already did. ([#6673])
+- **frontend:** Loading more chats in the sidebar and on the Chats page no longer
+  re-requests chats it already has. Side chats are hidden from these lists, so a
+  page of 50 visible chats can span more server rows; the page kept that offset
+  as a hidden property on its array, which TanStack Query's structural sharing
+  and the lists' own cache updates dropped. After a rename, a finished run or
+  any list refresh, the next page started too early and fetched overlapping
+  rows, and removing a chat from a full page stopped the list from loading more
+  until it refetched. Each cached page now records how many rows it hid and
+  whether the server has more. ([#6702])
 
 - **frontend:** A one-time scheduled task whose `run_at` is a bare date
   (`"2026-12-07"`, which a chat-created task can carry) now shows midnight of
@@ -5798,6 +5900,52 @@ This release closes that milestone with **621 merged pull requests**.
   the trailing `-07` as a UTC offset and displayed UTC midnight instead: 08:00 in
   `Asia/Shanghai`, and the previous evening west of UTC, in the task list,
   detail, chat card and the edit form's prefilled time. ([#6692])
+- **subagents:** A durable batch worker that stops supervising a subagent
+  still in flight now cancels it and removes its registry entry once it stops.
+  Before, stopping the batch service in a long-lived process (an SDK
+  `SubagentRuntime` stop) left every in-flight `SubagentResult`, transcript
+  included, in the process-wide registry for good, and a repository error while
+  polling failed or requeued the item but left its subagent running
+  unsupervised, so a retry could run the same item twice. An entry that never
+  stops is removed once the item's lease has passed. ([#6785])
+- **gateway:** The subagent batch JSONL export
+  (`GET /api/threads/{thread_id}/subagent-batches/{batch_id}/results.jsonl`)
+  now reads stored results 10 rows at a time instead of 500. Each row can hold
+  `max_result_chars` of report plus as much evidence JSON, and the export loads
+  a whole page before streaming it, so one request held about 280 MB with the
+  default limit (roughly 1.7 GB at the 1,000,000 ceiling) and stalled the event
+  loop for over half a second per page. The exported lines and their order are
+  unchanged. ([#6706])
+- **gateway:** The subagent batch item list
+  (`GET /api/threads/{thread_id}/subagent-batches/{batch_id}/items`), which the
+  workspace polls every 2 seconds while a batch runs, no longer loads each
+  item's full report, evidence JSON and prompt only to return its preview.
+  With the default `max_result_chars`, one 100-item page held about 34 MB and
+  blocked the event loop for about 70 ms (170 MB and 300 ms at `limit=500`);
+  it now holds under 1 MB. The response is unchanged. ([#6781])
+- **channels:** Saving or disconnecting a bot from the channel setup page no
+  longer overwrites bots saved through another Gateway worker. Each worker kept
+  the `runtime-config.json` contents it loaded at startup and rewrote the whole
+  file from that copy, so with two workers a Telegram bot saved on one worker
+  was dropped when a Slack bot was saved on the other, and a disconnected bot
+  came back. Every save now rereads the file under a lock shared across
+  processes and changes only its own provider. ([#6844])
+- **persistence:** Two first ratings of one run by the same user at the same
+  moment (two tabs, two devices, a client retry) no longer fail one of them
+  with a 500. Both used to miss the existing-row lookup and insert, and the
+  second insert hit the `(thread, run, user)` unique key. On Postgres, 26 of
+  80 such requests failed. The same race in IM conversation binding, such as
+  a first message arriving together with `/new`, no longer fails the message.
+  The losing write now updates the row the other one created. ([#6852])
+- **persistence:** Startup schema upgrades no longer log a false
+  `safe_add_column ... drifts from the model definition` warning for columns
+  that already match the model. The check compared the model's generic type
+  and default names (`STRING`, `BIGINTEGER`, `DefaultClause('0')`) with the
+  database's own (`VARCHAR`, `BIGINT`, `'0'`), so every Postgres or SQLite
+  database created before revision 0023 logged one on upgrade, and a schema
+  whose head stamp was lost logged 29 (SQLite) or 36 (Postgres), burying the
+  real type mismatch the warning exists to catch. Both sides are now compared
+  as the connected database spells them. ([#6865])
 
 ### Security
 
@@ -11572,3 +11720,15 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6689]: https://github.com/bytedance/deer-flow/pull/6689
 [#6691]: https://github.com/bytedance/deer-flow/pull/6691
 [#6692]: https://github.com/bytedance/deer-flow/pull/6692
+[#6702]: https://github.com/bytedance/deer-flow/pull/6702
+[#6706]: https://github.com/bytedance/deer-flow/pull/6706
+[#6746]: https://github.com/bytedance/deer-flow/pull/6746
+[#6781]: https://github.com/bytedance/deer-flow/pull/6781
+[#6785]: https://github.com/bytedance/deer-flow/pull/6785
+[#6798]: https://github.com/bytedance/deer-flow/pull/6798
+[#6836]: https://github.com/bytedance/deer-flow/pull/6836
+[#6843]: https://github.com/bytedance/deer-flow/pull/6843
+[#6844]: https://github.com/bytedance/deer-flow/pull/6844
+[#6852]: https://github.com/bytedance/deer-flow/pull/6852
+[#6865]: https://github.com/bytedance/deer-flow/pull/6865
+[#6876]: https://github.com/bytedance/deer-flow/pull/6876
