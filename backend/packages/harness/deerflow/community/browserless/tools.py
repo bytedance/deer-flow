@@ -230,10 +230,14 @@ def _reserve_output_name(outputs_path: Path, name: str) -> bool:
     The claim is an ``O_CREAT | O_EXCL`` open that leaves an empty placeholder
     behind, not an existence check: two writers that merely *observe* a free name
     would both go on to publish to it, and the second ``os.replace`` would
-    silently replace the first capture (#6883).
+    silently replace the first capture (#6883). ``0o666`` is passed explicitly
+    because ``publish_bytes_atomically`` preserves an existing file's mode, and
+    ``os.open`` would otherwise default the placeholder to ``0o777 & ~umask`` and
+    make every capture executable instead of the ``0o666 & ~umask`` a new file
+    gets from ``Path.write_bytes``.
     """
     try:
-        descriptor = os.open(outputs_path / name, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        descriptor = os.open(outputs_path / name, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
     except FileExistsError:
         return False
     os.close(descriptor)

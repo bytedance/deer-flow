@@ -13,6 +13,7 @@ generated stem's timestamp has second resolution.
 """
 
 import importlib
+import stat
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
@@ -58,6 +59,22 @@ def test_concurrent_captures_do_not_claim_the_same_name(outputs, monkeypatch):
     assert claimed["A"] != claimed["B"], f"both captures claimed {claimed}"
     assert (outputs / claimed["A"]).read_bytes() == b"first"
     assert (outputs / claimed["B"]).read_bytes() == b"second"
+
+
+def test_reserved_names_keep_new_file_permissions(outputs):
+    """Claiming a name must not change the mode the capture would already have had.
+
+    ``publish_bytes_atomically`` preserves an existing file's mode, so a
+    placeholder opened with the wrong default mode would make every capture
+    executable rather than ``0o666 & ~umask``.
+    """
+    reference = outputs / "reference.bin"
+    reference.write_bytes(b"x")
+    expected = stat.S_IMODE(reference.stat().st_mode)
+
+    claimed = tools._write_capture_output(outputs, "report.png", b"payload")
+
+    assert stat.S_IMODE((outputs / claimed).stat().st_mode) == expected
 
 
 def test_reservation_closes_the_descriptor_it_opened(outputs, monkeypatch):
