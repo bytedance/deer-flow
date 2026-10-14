@@ -1,6 +1,7 @@
 """Malformed client upload metadata must not abort a valid chat turn."""
 
 import asyncio
+import logging
 import os
 from copy import deepcopy
 from pathlib import Path
@@ -82,17 +83,18 @@ def test_parseable_size_cannot_overflow_context_rendering(upload_context, size):
     assert "Current document" in result["messages"][-1].content
 
 
-def test_large_renderable_size_keeps_the_existing_display_contract(upload_context):
+@pytest.mark.parametrize("size", [1024**4, 1024**4 + 1, 10**308], ids=["display-boundary", "above-boundary", "huge-finite"])
+def test_large_renderable_size_keeps_metadata_with_a_bounded_display(upload_context, size):
     middleware, _directory, context = upload_context
-    size = 10**308
     message = _gateway_message([{"filename": "current.md", "size": size}])
     result = middleware.before_agent({"messages": [message]}, SimpleNamespace(context=context))
     assert result["uploaded_files"][0]["size"] == size
-    assert " MB)" in result["messages"][-1].content
+    assert "current.md (>= 1 TB)" in result["messages"][-1].content
+    assert message.additional_kwargs["files"][0]["size"] == size
 
 
 @pytest.mark.parametrize("error", [PermissionError("unreadable"), OSError("file unavailable"), ValueError("invalid path")])
-def test_file_probe_failure_does_not_drop_a_valid_sibling(upload_context, monkeypatch, error):
+def test_file_probe_failure_does_not_drop_a_valid_sibling(upload_context, monkeypatch, caplog, error):
     middleware, directory, context = upload_context
     original_is_file = Path.is_file
 
@@ -103,9 +105,15 @@ def test_file_probe_failure_does_not_drop_a_valid_sibling(upload_context, monkey
 
     monkeypatch.setattr(Path, "is_file", unavailable)
     message = _gateway_message([{"filename": "unavailable.md"}, {"filename": "current.md"}])
-    result = middleware.before_agent({"messages": [message]}, SimpleNamespace(context=context))
+    with caplog.at_level(logging.DEBUG, logger="deerflow.agents.middlewares.uploads_middleware"):
+        result = middleware.before_agent({"messages": [message]}, SimpleNamespace(context=context))
     assert [file["filename"] for file in result["uploaded_files"]] == ["current.md"]
     assert "unavailable.md" not in result["messages"][-1].content
+    dropped = [record for record in caplog.records if "unavailable.md" in record.getMessage()]
+    assert len(dropped) == 1
+    assert dropped[0].levelno == logging.DEBUG
+    assert type(error).__name__ in dropped[0].getMessage()
+    assert str(error) in dropped[0].getMessage()
 
 
 def test_unexpected_probe_error_is_not_silenced(upload_context, monkeypatch):
@@ -162,7 +170,8 @@ class _UploadModel(FakeMessagesListChatModel):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("invoke_async", [False, True], ids=["sync", "async"])
-async def test_agent_graph_consumes_only_valid_owner_upload_context(upload_context, invoke_async):
+@pytest.mark.parametrize("size,size_label", [("1" + "0" * 400, "0.0 KB"), (10**308, ">= 1 TB")], ids=["overflowing", "huge-finite"])
+async def test_agent_graph_consumes_only_valid_owner_upload_context(upload_context, invoke_async, size, size_label):
     middleware, _directory, context = upload_context
     other_directory = middleware._paths.sandbox_uploads_dir("upload-thread", user_id="bob")
     other_directory.mkdir(parents=True)
@@ -170,7 +179,7 @@ async def test_agent_graph_consumes_only_valid_owner_upload_context(upload_conte
     model = _UploadModel(responses=[AIMessage(content="Processed")])
     agent = create_agent(model=model, tools=[], middleware=[middleware])
     message = _gateway_message(
-        [{"filename": 42}, {"filename": "current.md", "size": "1" + "0" * 400}, {"filename": "other-owner.md"}],
+        [{"filename": 42}, {"filename": "current.md", "size": size}, {"filename": "other-owner.md"}],
     )
 
     state = {"messages": [message]}
@@ -187,7 +196,7 @@ async def test_agent_graph_consumes_only_valid_owner_upload_context(upload_conte
     assert "Private other-owner evidence" not in rendered
     assert len(model.seen_messages) == 1
     model_input = message_content_to_text(model.seen_messages[0][0].content)
-    assert "current.md (0.0 KB)" in model_input
+    assert f"current.md ({size_label})" in model_input
     assert "Current document" in model_input
     assert "Private other-owner evidence" not in model_input
     assert message.content == "Read the attachment"

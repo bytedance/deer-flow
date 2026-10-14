@@ -36,11 +36,15 @@ class _FakeModel(FakeMessagesListChatModel):
 
 
 @pytest.mark.parametrize(
-    "files",
-    [None, [{"filename": 42}, {"filename": "existing.txt", "size": "1" + "0" * 400}]],
-    ids=["no-current-files", "malformed-with-valid-sibling"],
+    "files,size,size_label",
+    [
+        (None, None, None),
+        ([{"filename": 42}, {"filename": "existing.txt", "size": "1" + "0" * 400}], 0, "0.0 KB"),
+        ([{"filename": "existing.txt", "size": 10**308}], 10**308, ">= 1 TB"),
+    ],
+    ids=["no-current-files", "malformed-with-valid-sibling", "huge-finite-size"],
 )
-async def test_before_agent_uploads_scan_does_not_block_event_loop(tmp_path: Path, files) -> None:
+async def test_before_agent_uploads_scan_does_not_block_event_loop(tmp_path: Path, files, size, size_label) -> None:
     from langchain.agents import create_agent
 
     from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
@@ -61,5 +65,5 @@ async def test_before_agent_uploads_scan_does_not_block_event_loop(tmp_path: Pat
     assert result["messages"]
     if files:
         assert [file["filename"] for file in result["uploaded_files"]] == ["existing.txt"]
-        assert result["uploaded_files"][0]["size"] == 0
-        assert "existing.txt (0.0 KB)" in result["messages"][0].content
+        assert result["uploaded_files"][0]["size"] == size
+        assert f"existing.txt ({size_label})" in result["messages"][0].content

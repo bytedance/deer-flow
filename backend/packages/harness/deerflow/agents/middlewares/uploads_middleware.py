@@ -26,6 +26,7 @@ from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_t
 logger = logging.getLogger(__name__)
 
 _MAX_FILES_PER_CONTEXT_SECTION = 10
+_MAX_DISPLAY_FILE_SIZE_BYTES = 1024**4
 
 
 def _extension_label(file: dict) -> str:
@@ -85,8 +86,11 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         document cannot embed blocked authority tags inside the trusted
         ``<current_uploads>`` wrapper.
         """
-        size_kb = file["size"] / 1024
-        size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
+        if file["size"] >= _MAX_DISPLAY_FILE_SIZE_BYTES:
+            size_str = ">= 1 TB"
+        else:
+            size_kb = file["size"] / 1024
+            size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
         lines.append(f"- {neutralize_untrusted_tags(file['filename'])} ({size_str})")
         lines.append(f"  Path: {neutralize_untrusted_tags(file['path'])}")
         if file.get("selection_reason") == "query_match":
@@ -180,6 +184,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             if size < 0 or not math.isfinite(size / 1024):
                 return 0
         except (TypeError, ValueError, OverflowError):
+            # Both int(value) and the subsequent KB division can overflow.
             return 0
         return size
 
@@ -215,9 +220,10 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                     continue
                 if uploads_dir is not None and not (uploads_dir / filename).is_file():
                     continue
-            except (OSError, ValueError):
+            except (OSError, ValueError) as error:
                 # Invalid references and unavailable entries are per-file
                 # failures; they must not suppress valid sibling uploads.
+                logger.debug("Skipping uploaded file %r after %s during its filesystem probe: %s", filename, type(error).__name__, error)
                 continue
             files.append(
                 {
