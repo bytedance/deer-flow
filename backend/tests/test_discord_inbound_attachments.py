@@ -74,9 +74,7 @@ async def test_captioned_attachment_publishes_text_and_files() -> None:
     bus = MessageBus()
     channel = _ready_channel(bus)
 
-    await channel._on_message(
-        _make_discord_message("please review", attachments=[_attachment(filename="photo.png", content_type="image/png")])
-    )
+    await channel._on_message(_make_discord_message("please review", attachments=[_attachment(filename="photo.png", content_type="image/png")]))
 
     inbound = await asyncio.wait_for(bus.get_inbound(), timeout=5)
     bus.inbound_task_done()
@@ -114,9 +112,7 @@ async def test_mention_with_file_only_caption_still_publishes() -> None:
     # Avoid discord.py ChannelType / HTTPException stubs: fall back to channel replies.
     channel._create_thread = AsyncMock(return_value=None)
 
-    await channel._on_message(
-        _make_discord_message("<@999>", attachments=[_attachment()])
-    )
+    await channel._on_message(_make_discord_message("<@999>", attachments=[_attachment()]))
 
     inbound = await asyncio.wait_for(bus.get_inbound(), timeout=5)
     bus.inbound_task_done()
@@ -140,9 +136,7 @@ class TestDiscordExtractInboundFiles:
         assert files[1]["type"] == "file"
 
     def test_rejects_upload_staging_filename(self):
-        files = DiscordChannel._extract_inbound_files(
-            _make_discord_message("", attachments=[_attachment(id=7, filename=".upload-hidden.part")])
-        )
+        files = DiscordChannel._extract_inbound_files(_make_discord_message("", attachments=[_attachment(id=7, filename=".upload-hidden.part")]))
         assert files[0]["filename"] == "discord-file-7.bin"
 
 
@@ -255,7 +249,6 @@ class TestDiscordReceiveFile:
         result = await channel.receive_file(msg, "thread-1")
         assert result.files == []
         assert "download unavailable" in result.text
-
 
     @pytest.mark.asyncio
     async def test_bot_token_not_sent_to_foreign_host(self, monkeypatch):
