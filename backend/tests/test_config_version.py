@@ -776,3 +776,43 @@ def test_config_upgrade_creates_checkout_config_when_none_exists(tmp_path):
 
     assert "creating from example" in result.stdout
     assert (checkout / "config.yaml").read_bytes() == (checkout / "config.example.yaml").read_bytes()
+
+
+def test_config_upgrade_feeds_inline_python_on_stdin():
+    """The upgrade script must not pass its inline Python via a `python -c` argv payload.
+
+    On Windows setups where python/uv resolve through shim layers that reparse
+    arguments with cmd.exe (e.g. pyenv-win), multi-line argv payloads get
+    mangled mid-flight (observed as `IndentationError: unexpected indent` on
+    `|| goto :error`) and `make dev` fails before the Gateway starts. Feeding
+    the payload on stdin is safe across every spawn chain.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    script = (repo_root / "scripts" / "config-upgrade.sh").read_text(encoding="utf-8")
+    assert 'python -c "' not in script
+    assert script.count("<<'DEERFLOW_UPGRADE_PY'") == 2
+
+
+@pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
+def test_config_upgrade_honors_deer_flow_env_file_over_checkout_dotenv(tmp_path):
+    """An explicit DEER_FLOW_ENV_FILE selection must win over the checkout .env.
+
+    The Gateway loads the selected env file and upgrades the config it points
+    at; this script must not pre-load the checkout .env first, or its values
+    would shadow the selected file's (load_dotenv uses override=False).
+    """
+    checkout = tmp_path / "checkout"
+    live = tmp_path / "live" / "config.yaml"
+    other = tmp_path / "other" / "config.yaml"
+    _write_outdated_config(checkout / "config.yaml")
+    _write_outdated_config(live)
+    _write_outdated_config(other)
+    (checkout / ".env").write_text(f"DEER_FLOW_CONFIG_PATH={other}\n", encoding="utf-8")
+    stage = checkout / "stage.env"
+    stage.write_text(f"DEER_FLOW_CONFIG_PATH={live}\n", encoding="utf-8")
+
+    result = _run_config_upgrade_in_checkout(checkout, DEER_FLOW_ENV_FILE=str(stage))
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    assert yaml.safe_load(live.read_text(encoding="utf-8"))["config_version"] > 1
+    assert yaml.safe_load(other.read_text(encoding="utf-8"))["config_version"] == 1
