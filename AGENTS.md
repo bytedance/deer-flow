@@ -138,14 +138,12 @@ make up / down   # Build/stop the production Docker stack (browser at localhost:
 make docker-start / docker-stop / docker-logs   # Docker development environment
 ```
 
-Production uses the image's pre-built Python environment (`uv run --no-sync`).
-Launch paths `exec` the server to receive SIGTERM; Compose also sets `init: true`
-(`backend/tests/test_gateway_sigterm_delivery.py`). `make up` waits for Gateway's
-`/health` probe before reporting success; failures show Compose status and recent
-Gateway logs.
+Production uses image Python (`uv run --no-sync`) and `exec` for SIGTERM;
+Compose sets `init: true` (`backend/tests/test_gateway_sigterm_delivery.py`).
+`make up` waits for Gateway `/health`; failures show Compose status and Gateway logs.
 
-Docker log and restart commands resolve `DEER_FLOW_ROOT` from the current
-checkout before invoking Compose, matching the start and stop commands.
+Docker logs/restarts resolve `DEER_FLOW_ROOT` from this checkout before Compose,
+as start/stop do.
 
 Run `make help` for the full list.
 
