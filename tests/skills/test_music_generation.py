@@ -20,8 +20,13 @@ def _post_ok(captured):
         captured["url"] = url
         captured["headers"] = headers
         captured["json"] = json
-        return FakeResp({"data": {"audio": b"songbytes".hex(), "status": 2},
-                         "base_resp": {"status_code": 0}})
+        return FakeResp(
+            {
+                "data": {"audio": b"songbytes".hex(), "status": 2},
+                "base_resp": {"status_code": 0},
+            }
+        )
+
     return fake_post
 
 
@@ -30,8 +35,10 @@ def test_with_lyrics_payload_and_writes(monkeypatch, tmp_path):
     captured = {}
     monkeypatch.setattr(mus.requests, "post", _post_ok(captured))
     spec = tmp_path / "s.json"
-    spec.write_text('{"title":"X","prompt":"pop, happy","lyrics":"[verse]\\nla la"}',
-                    encoding="utf-8")
+    spec.write_text(
+        '{"title":"X","prompt":"pop, happy","lyrics":"[verse]\\nla la"}',
+        encoding="utf-8",
+    )
     out = tmp_path / "o.mp3"
     msg = mus.generate_music(str(spec), str(out))
     assert out.read_bytes() == b"songbytes"
@@ -81,7 +88,9 @@ def test_raises_on_base_resp_error(monkeypatch, tmp_path):
     monkeypatch.setenv("MINIMAX_API_KEY", "m")
 
     def fake_post(url, headers=None, json=None, **kw):
-        return FakeResp({"base_resp": {"status_code": 1008, "status_msg": "no balance"}})
+        return FakeResp(
+            {"base_resp": {"status_code": 1008, "status_msg": "no balance"}}
+        )
 
     monkeypatch.setattr(mus.requests, "post", fake_post)
     spec = tmp_path / "s.json"
@@ -119,7 +128,9 @@ def test_empty_prompt_raises(monkeypatch, tmp_path):
 
     monkeypatch.setattr(mus.requests, "post", fake_post)
     spec = tmp_path / "s.json"
-    spec.write_text('{"title":"X","lyrics":"[verse]\\nhi"}', encoding="utf-8")  # no prompt
+    spec.write_text(
+        '{"title":"X","lyrics":"[verse]\\nhi"}', encoding="utf-8"
+    )  # no prompt
     with pytest.raises(ValueError, match="prompt"):
         mus.generate_music(str(spec), str(tmp_path / "o.mp3"))
 
@@ -133,3 +144,51 @@ def test_empty_lyrics_falls_back_to_optimizer(monkeypatch, tmp_path):
     mus.generate_music(str(spec), str(tmp_path / "o.mp3"))
     assert captured["json"]["lyrics_optimizer"] is True
     assert "lyrics" not in captured["json"]
+
+
+@pytest.mark.parametrize("audio_hex", ["not-hex", "0", " \t\n", ["61"]])
+@pytest.mark.parametrize("existing", [False, True])
+def test_invalid_audio_does_not_touch_output(
+    monkeypatch, tmp_path, audio_hex, existing
+):
+    monkeypatch.setenv("MINIMAX_API_KEY", "m")
+    monkeypatch.setattr(
+        mus.requests,
+        "post",
+        lambda *args, **kwargs: FakeResp(
+            {"base_resp": {"status_code": 0}, "data": {"audio": audio_hex}}
+        ),
+    )
+    spec = tmp_path / "s.json"
+    spec.write_text('{"prompt":"jazz"}', encoding="utf-8")
+    out = tmp_path / "new-directory" / "song.mp3"
+    if existing:
+        out.parent.mkdir()
+        out.write_bytes(b"previous song")
+
+    with pytest.raises((ValueError, TypeError)):
+        mus.generate_music(str(spec), str(out))
+
+    if existing:
+        assert out.read_bytes() == b"previous song"
+    else:
+        assert not out.exists()
+        assert not out.parent.exists()
+
+
+def test_valid_spaced_hex_replaces_output(monkeypatch, tmp_path):
+    monkeypatch.setenv("MINIMAX_API_KEY", "m")
+    monkeypatch.setattr(
+        mus.requests,
+        "post",
+        lambda *args, **kwargs: FakeResp(
+            {"base_resp": {"status_code": 0}, "data": {"audio": "61 62\n63"}}
+        ),
+    )
+    spec = tmp_path / "s.json"
+    spec.write_text('{"prompt":"jazz"}', encoding="utf-8")
+    out = tmp_path / "song.mp3"
+    out.write_bytes(b"previous song")
+
+    assert "Successfully generated music" in mus.generate_music(str(spec), str(out))
+    assert out.read_bytes() == b"abc"

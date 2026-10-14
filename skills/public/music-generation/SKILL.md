@@ -67,6 +67,7 @@ Do NOT read the python file, just call it with the parameters.
 ## Output Handling
 
 - Music is saved as MP3 (typically in `/mnt/user-data/outputs/`).
+- Malformed or empty decoded audio is rejected before creating the output directory or opening the output file; an existing output is preserved.
 - Share the generated file with the user using the present_files tool.
 - Offer to iterate on style or lyrics if adjustments are needed.
 
