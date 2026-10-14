@@ -890,6 +890,35 @@ async def _await_task_stop_after_host_cancellation(
             deferred = _defer_finalization_interrupt(deferred, exc)
 
 
+async def _await_despite_host_cancellation(
+    awaitable: Any,
+    deferred: BaseException | None,
+) -> tuple[BaseException | None, Any]:
+    """Await one terminal-finalization step to completion despite cancellation.
+
+    ``asyncio.shield`` keeps the already-started ``awaitable`` running when the
+    host task is cancelled; the interruption is deferred (the host is
+    uncancelled) and the shield is re-awaited so the step is never silently
+    skipped by an early ``CancelledError`` escaping an ``except Exception``
+    guard. Returns ``(deferred, result)`` where ``deferred`` is the (possibly
+    updated) first pending interruption.
+    """
+    task = asyncio.ensure_future(awaitable)
+    try:
+        while True:
+            try:
+                return deferred, await asyncio.shield(task)
+            except asyncio.CancelledError as exc:
+                host = asyncio.current_task()
+                if host is None or not host.cancelling():
+                    # The awaited step itself was cancelled rather than the host.
+                    raise
+                deferred = _defer_finalization_interrupt(deferred, exc)
+    finally:
+        if not task.done():
+            task.cancel()
+
+
 async def run_agent(
     bridge: StreamBridge,
     run_manager: RunManager,
@@ -1704,31 +1733,43 @@ async def run_agent(
             # A fenced worker leaves receipt recovery to the peer that claimed it.
             if not record.ownership_lost and journal is not None:
                 try:
-                    await journal.flush()
+                    deferred_finalization_interrupt, _ = await _await_despite_host_cancellation(
+                        journal.flush(),
+                        deferred_finalization_interrupt,
+                    )
                 except Exception:
                     logger.warning("Failed to flush journal for run %s", run_id, exc_info=True)
 
                 if delivery_content is None:
                     if produced_output_paths is None:
-                        produced_output_paths = await _produced_output_paths(
-                            pre_run_workspace_snapshot,
-                            thread_id=thread_id,
-                            user_id=workspace_changes_user_id,
-                            extra_excluded_dir_names=workspace_excluded_dir_names,
+                        deferred_finalization_interrupt, produced_output_paths = await _await_despite_host_cancellation(
+                            _produced_output_paths(
+                                pre_run_workspace_snapshot,
+                                thread_id=thread_id,
+                                user_id=workspace_changes_user_id,
+                                extra_excluded_dir_names=workspace_excluded_dir_names,
+                            ),
+                            deferred_finalization_interrupt,
                         )
                     delivery_content = _delivery_content_with_outputs(journal.get_delivery_content(), produced_output_paths)
-                receipt_persisted = await _persist_delivery_receipt(
-                    event_store,
-                    thread_id=thread_id,
-                    run_id=run_id,
-                    content=delivery_content,
+                deferred_finalization_interrupt, receipt_persisted = await _await_despite_host_cancellation(
+                    _persist_delivery_receipt(
+                        event_store,
+                        thread_id=thread_id,
+                        run_id=run_id,
+                        content=delivery_content,
+                    ),
+                    deferred_finalization_interrupt,
                 )
                 if produced_output_paths and record.status == RunStatus.success and not receipt_persisted:
-                    await run_manager.set_status(
-                        run_id,
-                        RunStatus.error,
-                        error=_DELIVERY_RECEIPT_FAILED_ERROR,
-                        persist=False,
+                    deferred_finalization_interrupt, _ = await _await_despite_host_cancellation(
+                        run_manager.set_status(
+                            run_id,
+                            RunStatus.error,
+                            error=_DELIVERY_RECEIPT_FAILED_ERROR,
+                            persist=False,
+                        ),
+                        deferred_finalization_interrupt,
                     )
 
             if not record.ownership_lost and journal is not None and persist_completion:
@@ -1737,7 +1778,10 @@ async def run_agent(
                     # terminalizing the durable row. That active row continues to
                     # fence peer checkpoint writers through the duration write.
                     completion_data = journal.get_completion_data()
-                    await run_manager.update_finalizing_progress(run_id, **completion_data)
+                    deferred_finalization_interrupt, _ = await _await_despite_host_cancellation(
+                        run_manager.update_finalizing_progress(run_id, **completion_data),
+                        deferred_finalization_interrupt,
+                    )
                 except Exception:
                     logger.warning("Failed to persist finalizing run progress for %s (non-fatal)", run_id, exc_info=True)
 
@@ -1753,11 +1797,14 @@ async def run_agent(
                     # RunRecord lifetime in integer seconds, including admission
                     # delay. Persist zero for sub-second successful turns.
                     duration = max(0, int((updated - created).total_seconds()))
-                    await _persist_run_duration(
-                        checkpointer=checkpointer,
-                        thread_id=thread_id,
-                        run_id=run_id,
-                        duration_seconds=duration,
+                    deferred_finalization_interrupt, _ = await _await_despite_host_cancellation(
+                        _persist_run_duration(
+                            checkpointer=checkpointer,
+                            thread_id=thread_id,
+                            run_id=run_id,
+                            duration_seconds=duration,
+                        ),
+                        deferred_finalization_interrupt,
                     )
                 except Exception:
                     logger.debug("Failed to persist run duration for thread %s run %s (non-fatal)", thread_id, run_id)
@@ -1791,18 +1838,27 @@ async def run_agent(
                             # staged success; apply the accepted action, including
                             # rollback, before committing any terminal outcome.
                             await _finish_cancellation(record.abort_action, restore_checkpoint=not checkpoint_rollback_completed)
-                        await run_manager.persist_current_status(run_id)
+                        deferred_finalization_interrupt, _ = await _await_despite_host_cancellation(
+                            run_manager.persist_current_status(run_id),
+                            deferred_finalization_interrupt,
+                        )
                     else:
-                        cancel_action = await run_manager.set_status_if_not_cancelled(
-                            run_id,
-                            record.status,
-                            error=record.error,
-                            stop_reason=record.stop_reason,
-                            goal_verdict=record.goal_verdict,
+                        deferred_finalization_interrupt, cancel_action = await _await_despite_host_cancellation(
+                            run_manager.set_status_if_not_cancelled(
+                                run_id,
+                                record.status,
+                                error=record.error,
+                                stop_reason=record.stop_reason,
+                                goal_verdict=record.goal_verdict,
+                            ),
+                            deferred_finalization_interrupt,
                         )
                         if cancel_action is not None:
                             await _finish_cancellation(cancel_action)
-                            await run_manager.persist_current_status(run_id)
+                            deferred_finalization_interrupt, _ = await _await_despite_host_cancellation(
+                                run_manager.persist_current_status(run_id),
+                                deferred_finalization_interrupt,
+                            )
                 except Exception:
                     logger.warning("Failed to persist terminal status for run %s after delivery receipt attempts", run_id, exc_info=True)
             # The deferred commit has been attempted. A failed write is left to
@@ -1813,7 +1869,10 @@ async def run_agent(
                 try:
                     # Persist token usage + convenience fields to RunStore
                     completion_data = completion_data or journal.get_completion_data()
-                    await run_manager.update_run_completion(run_id, status=record.status.value, **completion_data)
+                    deferred_finalization_interrupt, _ = await _await_despite_host_cancellation(
+                        run_manager.update_run_completion(run_id, status=record.status.value, **completion_data),
+                        deferred_finalization_interrupt,
+                    )
                 except Exception:
                     logger.warning("Failed to persist run completion for %s (non-fatal)", run_id, exc_info=True)
 
@@ -1928,9 +1987,15 @@ async def run_agent(
                         run_id,
                     )
             if record.finalizing:
-                await run_manager.set_finalizing(run_id, False)
+                deferred_finalization_interrupt, _ = await _await_despite_host_cancellation(
+                    run_manager.set_finalizing(run_id, False),
+                    deferred_finalization_interrupt,
+                )
 
-            await bridge.publish_end(run_id)
+            deferred_finalization_interrupt, _ = await _await_despite_host_cancellation(
+                bridge.publish_end(run_id),
+                deferred_finalization_interrupt,
+            )
 
             if deferred_finalization_interrupt is not None:
                 raise deferred_finalization_interrupt
