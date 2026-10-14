@@ -17,7 +17,7 @@ from test_workspace_executor_migration import executor_engine, native_engine  # 
 
 def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, monkeypatch, tmp_path, caplog):  # noqa: F811
     import aiosqlite
-    from langchain_core.messages import HumanMessage
+    from langchain_core.messages import AIMessage, HumanMessage
     from langgraph.checkpoint.base import empty_checkpoint
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
@@ -558,6 +558,46 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                 as_user("alice")
                 content = await client.get(shared_docs + "/" + admin_document + "/content", headers=team_headers)
                 assert content.status_code == 200 and content.content == b"admin published source"
+                branch_source = str(uuid4())
+                created_source = await client.post("/api/threads", headers=team_headers, json={"thread_id": branch_source, "project_id": shared_project})
+                assert created_source.status_code == 200, created_source.text
+                branch_upload = await client.post("/api/threads/" + branch_source + "/uploads", headers=team_headers, files={"files": ("branch.txt", b"source branch private bytes", "text/plain")})
+                assert branch_upload.status_code == 200, branch_upload.text
+                source_config = {"configurable": {"thread_id": branch_source, "checkpoint_ns": ""}}
+                source_root = await app.state.checkpointer.aget_tuple(source_config)
+                source_checkpoint = empty_checkpoint()
+                source_checkpoint["channel_values"] = {"messages": [HumanMessage(id="branch-human", content="Private branch question"), AIMessage(id="branch-answer", content="Private branch answer")], "title": "Private branch source"}
+                source_checkpoint["channel_versions"] = {channel: app.state.checkpointer.get_next_version(None, None) for channel in ("messages", "title")}
+                await app.state.checkpointer.aput(source_root.config, source_checkpoint, {"step": 0, "source": "update", "writes": {}, "parents": {}}, source_checkpoint["channel_versions"])
+                branch_body = {"message_id": "branch-answer"}
+                branched = await client.post("/api/threads/" + branch_source + "/branches", headers=team_headers, json=branch_body)
+                assert branched.status_code == 200, branched.text
+                branch_id = branched.json()["thread_id"]
+                assert branched.json()["workspace_clone_mode"] == "current_thread_best_effort"
+                assert branched.json()["history_seed_mode"] == "seeded"
+                async with sf() as session:
+                    child = await session.get(ThreadMetaRow, branch_id)
+                    assert child.workspace_id == team and child.user_id == identities["alice"] and child.project_id == shared_project
+                branch_state = await client.get("/api/threads/" + branch_id + "/state", headers=team_headers)
+                assert branch_state.status_code == 200, branch_state.text
+                assert [m["content"] for m in branch_state.json()["values"]["messages"]] == ["Private branch question", "Private branch answer"]
+                child_file = tmp_path / "files" / "workspaces" / team / "users" / identities["alice"] / "threads" / branch_id / "user-data" / "uploads" / "branch.txt"
+                source_file = child_file.parents[3] / branch_source / "user-data" / "uploads" / "branch.txt"
+                assert child_file.read_bytes() == source_file.read_bytes() == b"source branch private bytes"
+                assert (await client.get("/api/threads/" + branch_id + "/state")).status_code == 404
+                assert (await client.post("/api/threads/" + branch_source + "/branches", json=branch_body)).status_code == 404
+                as_user("bob")
+                assert (await client.post("/api/threads/" + branch_source + "/branches", headers=team_headers, json=branch_body)).status_code == 404
+                assert (await client.get("/api/threads/" + branch_id + "/state", headers=team_headers)).status_code == 404
+                as_user("alice")
+                async with sf() as session:
+                    before_branch_ids = set((await session.execute(sa.select(ThreadMetaRow.thread_id))).scalars())
+                checkpoint_replacement["thread_id"] = branch_source
+                replaced_branch = await client.post("/api/threads/" + branch_source + "/branches", headers=team_headers, json=branch_body)
+                assert replaced_branch.status_code == 404, replaced_branch.text
+                async with sf() as session:
+                    after_branch_ids = set((await session.execute(sa.select(ThreadMetaRow.thread_id))).scalars())
+                    assert after_branch_ids == before_branch_ids, "replaced source still published branch metadata"
                 as_user("bob")
                 assert (await client.delete("/api/projects/" + shared_project, headers=team_headers)).status_code == 204
                 async with sf() as session:

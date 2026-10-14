@@ -408,3 +408,11 @@ content authorization. Scoped POST root initialization uses native reservation
 and final live fence, and leaves an already-initialized same-owner root intact.
 Legacy unbound behavior is unchanged. Mixed-version writer exclusion and actual
 checkpoint inventory remain rollout prerequisites, not proven by this probe.
+
+Branch admission uses private scope and captured source identity before native
+checkpoint preparation. Scoped mode drains native file staging outside writer
+locks, then publishes through ThreadMetaRepository.publish_branch_from_private_source.
+Native full/delta replay, event history and historical-file rules are retained.
+No source-project share grants access to another member's chat or branch.
+Cross-store uncertainty and unpublished staging require explicit reconciliation;
+do not infer completion of delete/compact/feed/client or tenant activation.

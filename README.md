@@ -2944,3 +2944,5 @@ Native Run history and usage repository reads now filter the selected workspace 
 Native non-run reservations now preserve workspace ownership through admission and cleanup after withdrawal. See [reservation validation and remaining HTTP/runtime work](docs/tenant-workspaces-api.md#scoped-native-operation-reservations-partial-m3); tenant activation remains closed.
 
 Workspace goal and state writes now preserve new-chat creation, native reservations and private lifecycle checks. New thread creation also refuses unattributed checkpoint IDs and preserves an already-committed goal. See [write validation and remaining integration](docs/tenant-workspaces-api.md#native-goal-and-state-writes-partial-m3); full tenant activation remains blocked.
+
+Native conversation branches now preserve private workspace ownership, history and file copying. See [branch validation and remaining lifecycle work](docs/tenant-workspaces-api.md#private-native-branches-partial-m3); tenant activation remains blocked.

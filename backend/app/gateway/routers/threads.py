@@ -1063,6 +1063,7 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
 
 
 @router.post("/{thread_id}/branches", response_model=ThreadBranchResponse)
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("threads", "write", owner_check=True, require_existing=True)
 async def branch_thread(thread_id: ThreadId, body: ThreadBranchRequest, request: Request) -> ThreadBranchResponse:
     """Create a new main-thread branch from a completed assistant turn."""
@@ -1090,6 +1091,8 @@ async def _branch_thread_with_reservation(
     from app.gateway.deps import get_thread_store
 
     thread_store = get_thread_store(request)
+    scoped = get_current_workspace() is not None
+    source_incarnation = await capture_checkpoint_thread_identity(request, thread_id)
 
     source_record = await thread_store.get(thread_id)
     if source_record is None:
@@ -1200,28 +1203,42 @@ async def _branch_thread_with_reservation(
         "created_at": now,
     }
     new_config.setdefault("metadata", {}).update(checkpoint_metadata_updates)
-    try:
-        head_config = new_config
-        if replay_base_tuple is not None:
-            head_config = await branch_accessor.aupdate(
-                new_config,
-                branch_values(replay_base_tuple),
+
+    async def _write_branch_checkpoints() -> None:
+        try:
+            head_config = new_config
+            if replay_base_tuple is not None:
+                head_config = await branch_accessor.aupdate(
+                    new_config,
+                    branch_values(replay_base_tuple),
+                    as_node="branch",
+                )
+                head_config.setdefault("metadata", {}).update(checkpoint_metadata_updates)
+            await branch_accessor.aupdate(
+                head_config,
+                branch_values(snapshot),
                 as_node="branch",
             )
-            head_config.setdefault("metadata", {}).update(checkpoint_metadata_updates)
-        await branch_accessor.aupdate(
-            head_config,
-            branch_values(snapshot),
-            as_node="branch",
-        )
-    except _CHECKPOINT_MODE_ERRORS as exc:
-        raise _checkpoint_mode_http_error(exc, new_thread_id) from exc
-    except Exception:
-        logger.exception("Failed to write branch checkpoint for thread %s", sanitize_log_param(new_thread_id))
-        raise HTTPException(status_code=500, detail="Failed to create branch") from None
+        except _CHECKPOINT_MODE_ERRORS as exc:
+            raise _checkpoint_mode_http_error(exc, new_thread_id) from exc
+        except Exception:
+            logger.exception("Failed to write branch checkpoint for thread %s", sanitize_log_param(new_thread_id))
+            raise HTTPException(status_code=500, detail="Failed to create branch") from None
 
     async def _write_branch_row(project_id: str | None) -> None:
         try:
+            if scoped:
+                await thread_store.publish_branch_from_private_source(
+                    thread_id,
+                    source_incarnation,
+                    new_thread_id,
+                    publish=_write_branch_checkpoints,
+                    assistant_id=source_record.get("assistant_id"),
+                    display_name=display_name,
+                    metadata=branch_metadata,
+                    project_id=project_id,
+                )
+                return
             await thread_store.create(
                 new_thread_id,
                 assistant_id=source_record.get("assistant_id"),
@@ -1230,11 +1247,19 @@ async def _branch_thread_with_reservation(
                 project_id=project_id,
                 **thread_owner_kwargs,
             )
-        except ProjectNotAssignableError:
+        except (ProjectNotAssignableError, WorkspaceAccessDenied, HTTPException):
             raise
         except Exception:
             logger.exception("Failed to write branch thread_meta for %s", sanitize_log_param(new_thread_id))
             raise HTTPException(status_code=500, detail="Failed to create branch") from None
+
+    if scoped:
+        await require_unallocated_checkpoint_id(request, new_thread_id)
+        # This generated private directory has no published metadata yet.
+        # Copy outside SQL writer locks and drain before deciding publication.
+        workspace_clone_mode = await await_drained(_copy_branch_user_data(thread_id, new_thread_id)) if branch_from_latest_turn else "skipped_historical_turn"
+    else:
+        await _write_branch_checkpoints()
 
     try:
         await _write_branch_row(source_project_id)
@@ -1268,10 +1293,11 @@ async def _branch_thread_with_reservation(
         logger.exception("Failed to seed branch history run-events for thread %s", sanitize_log_param(new_thread_id))
         history_seed_mode = "failed"
 
-    if branch_from_latest_turn:
-        workspace_clone_mode = await _copy_branch_user_data(thread_id, new_thread_id)
-    else:
-        workspace_clone_mode = "skipped_historical_turn"
+    if not scoped:
+        if branch_from_latest_turn:
+            workspace_clone_mode = await _copy_branch_user_data(thread_id, new_thread_id)
+        else:
+            workspace_clone_mode = "skipped_historical_turn"
     return ThreadBranchResponse(
         thread_id=new_thread_id,
         parent_thread_id=thread_id,

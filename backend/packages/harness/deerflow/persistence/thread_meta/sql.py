@@ -112,6 +112,58 @@ class ThreadMetaRepository(ThreadMetaStore):
             await session.commit()
             return result
 
+    async def publish_branch_from_private_source(
+        self,
+        source_thread_id: str,
+        source_incarnation: str,
+        new_thread_id: str,
+        *,
+        publish: Callable[[], Awaitable[Any]],
+        assistant_id: str | None = None,
+        display_name: str | None = None,
+        metadata: dict | None = None,
+        project_id: str | None = None,
+    ) -> dict:
+        """Publish prepared native checkpoints and branch metadata under source fencing.
+
+        Graph assembly and file staging precede this short transaction. The
+        caller owns the source's durable branch reservation. Metadata becomes
+        visible only after checkpoint IO succeeds; cross-store crash atomicity
+        is not implied, and uncertain commits must not trigger file deletion.
+        """
+        from deerflow.persistence.projects import ProjectNotAssignableError
+
+        owner = resolve_user_id(AUTO, method_name="ThreadMetaRepository.publish_branch_from_private_source")
+        context = self._scope(owner)
+        if context is None or not source_incarnation or new_thread_id == source_thread_id:
+            raise WorkspaceAccessDenied("branch publication requires private source identity")
+        now = datetime.now(UTC)
+        async with self._sf() as session:
+            source = await self._locked_row(session, source_thread_id, owner, context)
+            if source is None or source.incarnation != source_incarnation:
+                raise WorkspaceAccessDenied("branch source changed before publication")
+            if project_id is not None and (source.project_id != project_id or not await self._project_available(session, project_id, owner, context)):
+                raise ProjectNotAssignableError(project_id)
+            row = ThreadMetaRow(
+                thread_id=new_thread_id,
+                incarnation=uuid.uuid4().hex,
+                assistant_id=assistant_id,
+                user_id=owner,
+                workspace_id=context.workspace_id,
+                project_id=project_id,
+                display_name=display_name,
+                status="idle",
+                metadata_json=metadata or {},
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(row)
+            await session.flush()
+            await await_drained(publish())
+            result = self._row_to_dict(row)
+            await session.commit()
+            return result
+
     async def create(
         self,
         thread_id: str,

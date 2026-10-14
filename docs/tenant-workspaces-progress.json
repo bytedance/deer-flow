@@ -1120,5 +1120,44 @@
       "networks": [],
       "verified": "Each individual build label inspected on Shanghai Jenkins"
     }
+  },
+  "private_branches": {
+    "base_commit": "1a900408",
+    "job": "deerflow-tenant-m1-postgres",
+    "red": {
+      "build": 54,
+      "result": "FAILURE",
+      "tests_failed": 2,
+      "elapsed_seconds": 33.47,
+      "archive_sha256": "47c3711812c5b442cdba3d771da481726a7a2897f425a727641a9c44dc21b63d",
+      "reason": "native branch owner-check lacks trusted workspace scope"
+    },
+    "green": {
+      "build": 55,
+      "result": "SUCCESS",
+      "tests_passed": 8,
+      "elapsed_seconds": 35.34,
+      "archive_sha256": "18b1911c052e4dbcf4ee72c20f5a5782aad4d9c2241dc789c443414433f866ef",
+      "command": "python -m pytest tests/test_workspace_http.py tests/test_threads_router.py::test_branch_seeds_run_events_with_parent_history tests/test_threads_router.py::test_branch_thread_best_effort_copies_current_workspace tests/test_threads_router.py::test_branch_thread_from_historical_turn_skips_workspace_clone tests/test_threads_router.py::test_branch_inherits_source_project_membership tests/test_threads_router.py::test_branch_from_archived_project_thread_degrades_to_unassigned -q --tb=short --no-showlocals",
+      "warnings": [
+        "Existing Starlette TestClient/httpx SDK deprecation warning"
+      ]
+    },
+    "source_sha256": {
+      "backend/app/gateway/routers/threads.py": "43fa1fb0b6b5abafd48918f55c54bf382a95b64284965960bae6bf34ba9eb53c",
+      "backend/packages/harness/deerflow/persistence/thread_meta/sql.py": "859b8975112aab481a5b7f3379e63302c4f1a8780722162f9f76acbf42106452",
+      "backend/tests/test_workspace_http.py": "a828ebfc890b620452577f10394a5fe6f2ec6fa8be286baef9548f747916c413"
+    },
+    "scope": "Actual native branch graph/checkpoints, original source/child bytes, private actor/workspace/project ownership, history seeding, other-space/shared-peer-admin denial, persisted source incarnation rotation refusing new metadata. Six native regressions including full/delta.",
+    "remaining": "Postgres checkpointer, live model, physical NAS, callback/cancellation/crash faults and orphan staging reconciliation, delete/compact/feed/client, normal Run lifecycle and all M3–M11 final acceptance. Tenant activation remains closed.",
+    "cleanup": {
+      "builds": [
+        54,
+        55
+      ],
+      "containers": [],
+      "networks": [],
+      "verified": "Each build ownership label independently inspected on Shanghai Jenkins"
+    }
   }
 }

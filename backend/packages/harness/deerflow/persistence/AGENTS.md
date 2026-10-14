@@ -149,3 +149,12 @@ and drains prepared native checkpoint IO while authorization/lifecycle locks
 remain held. It cannot make separate checkpoint/metadata databases atomic; never
 put model/tool/graph setup in the callback. Crash/cancellation acceptance remains
 required beyond the current actual HTTP withdrawal/incarnation evidence.
+
+publish_branch_from_private_source is a tenant-only native branch publication
+transaction. It rechecks live source ownership/incarnation and current project
+assignability, adds and flushes child metadata in the same transaction, drains
+only prepared native checkpoint IO and commits metadata afterwards. Graph setup
+and file staging must occur before it, under durable source branch admission.
+Private files remain unpublished until metadata exists. It is not a cross-store
+atomic transaction; uncertain commits cannot authorize file cleanup. Orphan
+staging/retention and fault acceptance remain separate required work.

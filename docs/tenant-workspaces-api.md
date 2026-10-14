@@ -479,3 +479,37 @@ rollout fencing, orphan inventory/attribution and physical restore remain M10.
 Postgres-checkpointer/cancellation/storage-fault acceptance, complete branch/
 delete/compact/feed/client and normal Run lifecycle remain required. Activation
 stays closed.
+
+## Private native branches (partial M3)
+
+POST /threads/{id}/branches binds trusted private scope before native permission
+and owner checks and holds the original durable branch reservation. The source
+incarnation is captured before graph/history preparation. Native replay-base
+selection, effective schema, reducer replacement, excluded per-thread channels,
+branch metadata, history seeding and historical-turn file behavior remain in use.
+
+Scoped branch publication checks the generated destination ID for orphan
+checkpoints and stages the native latest-turn file copy under its unpublished
+private destination, outside SQL writer locks and drained across cancellation.
+It then locks live workspace/actor/private source, compares the captured
+incarnation, validates project inheritance and flushes the destination metadata
+within that transaction. Only prepared native checkpoint IO runs under the lock;
+metadata commits after that IO completes. The child retains the actual actor
+and workspace; unavailable/moved projects use the native unassigned fallback.
+Unbound legacy publication order remains unchanged.
+
+Jenkins #54 reproduced missing branch scope in both metadata databases. #55
+passed 8 checks in 35.34s: real authenticated native graph branching with durable
+SQLite checkpoints and SQLite/PostgreSQL metadata, actual private bytes copied
+without changing source, own-only child state, shared-project inheritance,
+other-space and peer-admin denial, native history seeding and persisted source
+incarnation replacement refusing any new metadata. Six native regressions cover
+full/delta event history, current/historical file behavior and active/archived
+project inheritance. The existing TestClient SDK warning remains diagnostic.
+
+Cross-store atomicity is not claimed: failed/cancelled/uncertain publication can
+leave inaccessible checkpoint or private file staging without published metadata.
+Do not delete files on an uncertain metadata commit; retention/reconciliation
+needs actual fault evidence and belongs with M4/M8/M10/M11. This is not physical
+NAS, PostgreSQL-checkpointer, live-model, browser/feed or full lifecycle proof.
+Delete/compact/feed/client and remaining M3–M11 acceptance still gate activation.
