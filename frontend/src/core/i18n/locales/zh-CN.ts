@@ -66,6 +66,11 @@ export const zhCN: Translations = {
         description:
           "演示中间件、任务生命周期、模型观察器、服务和 HTTP 路由的扩展方式。",
       },
+      retrieval: {
+        title: "本地检索示例",
+        description:
+          "使用固定示例文档演示只读检索与结构化工具结果，不连接外部知识库。",
+      },
     },
     pageUnavailable: "扩展页面不可用",
     pageUnavailableHint: "此页面未注册，或插件已停用、未能加载。",

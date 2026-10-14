@@ -3,7 +3,7 @@
 A deployment-installed Python extension can register a `PluginContribution` with
 optional browser code, authenticated backend actions and model tools. This extends
 the existing `install(registry, config)` workflow. MCP and Skills keep their existing
-APIs and lifecycles. Public contracts live in `deerflow_extension_api` (0.2.5).
+APIs and lifecycles. Public contracts live in `deerflow_extension_api` (0.2.6).
 
 Backend actions and model tools may use the optional host-bound
 `context.agent_runs` capability to create, continue, inspect, resume, and cancel
@@ -52,6 +52,45 @@ Tool names are namespace-derived and collision-checked. Tool inputs are bounded 
 256 KiB, outputs to 64 KiB and execution to 30 seconds. Backend actions accept object
 inputs up to 256 KiB and have a 30-second timeout. Cancellation does not guarantee
 rollback of external effects or already-running worker-thread operations.
+
+### Structured tool artifacts
+
+Existing model tools return JSON-encoded content. To return separate structured
+metadata, declare the keyword-only `response_format="content_and_artifact"` and
+return `PluginToolResult` from the async handler:
+
+```python
+from deerflow_extension_api import ModelTool, PluginToolResult
+
+async def search(payload, context):
+    return PluginToolResult(
+        content="Retrieved excerpt from the selected document.",
+        artifact={"documents": [{"title": "Guide", "excerpt": "Retrieved excerpt"}]},
+    )
+
+tool = ModelTool(
+    "search", "Search selected documents",
+    {"type": "object", "properties": {"query": {"type": "string"}}},
+    search, response_format="content_and_artifact",
+)
+```
+
+Content must be a string and artifact must be a JSON object or `None`, with string
+keys in every nested object. Non-string keys are rejected rather than coerced.
+Content and artifact share the 64 KiB UTF-8 JSON output cap. The host validates and snapshots the artifact
+before attaching it to `ToolMessage.artifact`; it does not append it to ordinary
+tool content or let it replace the tool name or call ID. Invalid result shapes,
+non-JSON values and oversize output use the normal sanitized tool-error path.
+The default `response_format="content"` preserves existing JSON encoding,
+including tuple/list results. The structured mode requires a typed result rather
+than a bare tuple; an older host cannot silently JSON-encode that carrier.
+
+Use the matching host and extension-api 0.2.6 or newer, and declare that API floor
+through the existing extension decorator and package requirement. Artifacts can
+be persisted and exposed to host clients; they are not secret storage. Generic
+artifact support does not grant citation trust or change native RAGFlow tool-name
+checks. See the [local retrieval example](../examples/deerflow-extension-retrieval/README.md)
+for a small, default-disabled plugin without a knowledge-management service.
 
 A plugin can also contribute tools alone. The
 [text classification example](../examples/deerflow-extension-jev-classify/README.md)
