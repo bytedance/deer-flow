@@ -150,6 +150,13 @@ class TestMergeViewedImages:
         existing = {"k1": {"mime_type": "image/png", "size": 1, "actual_path": "/a"}}
         assert merge_viewed_images(existing, {}) == {}
 
+    def test_revisited_path_becomes_most_recent(self):
+        existing = {"old": {"size": 1}, "recent": {"size": 2}}
+        merged = merge_viewed_images(existing, {"old": {"size": 3}})
+        assert list(merged) == ["recent", "old"]
+        assert merged["old"]["size"] == 3
+        assert list(existing) == ["old", "recent"]
+
 
 class TestMergeDelegations:
     """Reducer for completed subagent/task delegation records."""

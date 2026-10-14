@@ -5871,6 +5871,13 @@ This release closes that milestone with **621 merged pull requests**.
   With the default `max_result_chars`, one 100-item page held about 34 MB and
   blocked the event loop for about 70 ms (170 MB and 300 ms at `limit=500`);
   it now holds under 1 MB. The response is unchanged. ([#6781])
+- **channels:** Saving or disconnecting a bot from the channel setup page no
+  longer overwrites bots saved through another Gateway worker. Each worker kept
+  the `runtime-config.json` contents it loaded at startup and rewrote the whole
+  file from that copy, so with two workers a Telegram bot saved on one worker
+  was dropped when a Slack bot was saved on the other, and a disconnected bot
+  came back. Every save now rereads the file under a lock shared across
+  processes and changes only its own provider. ([#6844])
 - **persistence:** Two first ratings of one run by the same user at the same
   moment (two tabs, two devices, a client retry) no longer fail one of them
   with a 500. Both used to miss the existing-row lookup and insert, and the
@@ -11658,4 +11665,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6781]: https://github.com/bytedance/deer-flow/pull/6781
 [#6785]: https://github.com/bytedance/deer-flow/pull/6785
 [#6798]: https://github.com/bytedance/deer-flow/pull/6798
+[#6844]: https://github.com/bytedance/deer-flow/pull/6844
 [#6852]: https://github.com/bytedance/deer-flow/pull/6852

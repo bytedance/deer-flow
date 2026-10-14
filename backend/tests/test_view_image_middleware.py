@@ -23,6 +23,7 @@ Covered behavior:
 
 import base64
 import hashlib
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -33,6 +34,7 @@ from langchain.agents.middleware.types import ModelRequest
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
+from PIL import Image
 from support.symlinks import symlink_or_skip
 
 from deerflow.agents.middlewares.view_image_middleware import (
@@ -42,6 +44,108 @@ from deerflow.agents.middlewares.view_image_middleware import (
 from deerflow.agents.thread_state import merge_viewed_images
 from deerflow.config.paths import Paths
 from deerflow.storage import BlobRef
+from deerflow.tools.builtins.view_image_tool import view_image_tool
+
+
+@pytest.fixture
+def budget_image_runtime(tmp_path, monkeypatch):
+    paths = Paths(tmp_path)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+    monkeypatch.setattr("deerflow.storage.get_blob_store_if_enabled", lambda: None)
+    outputs = paths.sandbox_outputs_dir("thread-test", user_id="user-test")
+    outputs.mkdir(parents=True)
+    payloads = {}
+    for index in range(5):
+        buffer = BytesIO()
+        Image.new("RGB", (2, 2), (index * 40, 80, 160)).save(buffer, format="PNG")
+        payloads[f"/mnt/user-data/outputs/{index}.png"] = buffer.getvalue()
+        (outputs / f"{index}.png").write_bytes(buffer.getvalue())
+    runtime = SimpleNamespace(
+        state={"thread_data": {"outputs_path": str(outputs)}},
+        context={"user_id": "user-test", "thread_id": "thread-test"},
+        config={},
+    )
+    return runtime, payloads
+
+
+def _view_budget_image(runtime, image_path, call_id):
+    result = view_image_tool.func(runtime=runtime, image_path=image_path, tool_call_id=call_id)
+    assert result.update["messages"][0].content == "Successfully read image"
+    runtime.state["viewed_images"] = merge_viewed_images(runtime.state.get("viewed_images"), result.update["viewed_images"])
+    request = _model_request([AIMessage(content="", tool_calls=[_view_image_call(call_id, image_path)]), *result.update["messages"]])
+    return request.override(state={**runtime.state, "messages": request.messages}, runtime=runtime)
+
+
+async def _capture_budget_request(request, use_async):
+    seen = []
+
+    def handler(prepared):
+        seen.append(prepared)
+        return AIMessage(content="ok")
+
+    async def async_handler(prepared):
+        return handler(prepared)
+
+    middleware = ViewImageMiddleware()
+    if use_async:
+        await middleware.awrap_model_call(request, async_handler)
+    else:
+        middleware.wrap_model_call(request, handler)
+    assert len(seen) == 1
+    assert _image_context_messages(request.messages) == []
+    assert _image_context_messages(request.state["messages"]) == []
+    return _image_urls(seen[0])
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("use_async", [False, True])
+@pytest.mark.parametrize("budget_delta", [0, -1], ids=["exact-fit", "one-byte-short"])
+async def test_cumulative_image_bytes_reach_model_within_budget(budget_image_runtime, monkeypatch, use_async, budget_delta):
+    from deerflow.agents.middlewares import view_image_middleware as module
+
+    runtime, payloads = budget_image_runtime
+    selected_paths = list(payloads)[:3]
+    for index, path in enumerate(selected_paths):
+        request = _view_budget_image(runtime, path, f"view-{index}")
+    encoded = [base64.b64encode(payloads[path]).decode("ascii") for path in selected_paths]
+    budget = len(encoded[1]) + len(encoded[2]) + budget_delta
+    assert all(len(data) <= budget for data in encoded)
+    # Add attributes on the unfixed baseline too: RED must be behavioral,
+    # not an AttributeError caused by a missing budget constant.
+    monkeypatch.setattr(module, "_MAX_CONTEXT_IMAGES", 4, raising=False)
+    monkeypatch.setattr(module, "_MAX_CONTEXT_BASE64_BYTES", budget, raising=False)
+    reads = []
+    original_open = open
+
+    def record_open(file, *args, **kwargs):
+        if isinstance(file, (str, Path)) and Path(file).suffix == ".png":
+            reads.append(Path(file).name)
+        return original_open(file, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", record_open)
+    urls = await _capture_budget_request(request, use_async)
+    expected = selected_paths[1:] if budget_delta == 0 else selected_paths[2:]
+    actual = [url.split(",", 1)[1] for url in urls]
+    assert sum(len(data) for data in actual) <= budget
+    assert [base64.b64decode(data) for data in actual] == [payloads[path] for path in expected]
+    assert reads == [Path(path).name for path in reversed(expected)]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("use_async", [False, True])
+async def test_revisited_image_returns_to_model_context(budget_image_runtime, use_async):
+    runtime, payloads = budget_image_runtime
+    paths = list(payloads)
+    for index, path in enumerate(paths):
+        request = _view_budget_image(runtime, path, f"initial-{index}")
+    before = await _capture_budget_request(request, use_async)
+    assert [base64.b64decode(url.split(",", 1)[1]) for url in before] == [payloads[path] for path in paths[1:]]
+    saved = runtime.state["viewed_images"]
+    request = _view_budget_image(runtime, paths[0], "revisit-oldest")
+    after = await _capture_budget_request(request, use_async)
+    assert [base64.b64decode(url.split(",", 1)[1]) for url in after] == [payloads[path] for path in [*paths[2:], paths[0]]]
+    assert runtime.state["viewed_images"] == saved
+    assert list(saved) == paths
 
 
 def _view_image_call(call_id: str = "call_1", path: str = "/mnt/user-data/uploads/img.png") -> dict:
@@ -246,6 +350,71 @@ class TestAllToolsCompleted:
 
 
 class TestCreateImageDetailsMessage:
+    def test_keeps_recent_images_within_count_and_byte_budget(self, tmp_path, monkeypatch):
+        from deerflow.agents.middlewares import view_image_middleware as module
+
+        monkeypatch.setattr(module, "_MAX_CONTEXT_IMAGES", 2)
+        monkeypatch.setattr(module, "_MAX_CONTEXT_BASE64_BYTES", 16)
+        viewed = {f"/{name}.png": _make_viewed_image(tmp_path, f"{name}.png", data=b"123456") for name in ("old", "middle", "new")}
+        reads = []
+
+        def read(_cls, _state, image_path, *_args, **_kwargs):
+            reads.append(image_path)
+            return "data:image/png;base64,MTIzNDU2"
+
+        monkeypatch.setattr(ViewImageMiddleware, "_read_image_as_data_url", classmethod(read))
+        blocks = ViewImageMiddleware()._create_image_details_message({"viewed_images": viewed})
+
+        assert reads == ["/new.png", "/middle.png"]
+        assert [block["type"] for block in blocks].count("image_url") == 2
+        assert "Omitted viewed images: 1." in str(blocks)
+
+    @pytest.mark.parametrize("omitted_count", [1, 2])
+    def test_skips_oversized_image_without_reading_it(self, tmp_path, monkeypatch, omitted_count):
+        from deerflow.agents.middlewares import view_image_middleware as module
+
+        monkeypatch.setattr(module, "_MAX_CONTEXT_BASE64_BYTES", 8)
+        viewed = {f"/large-{i}.png": _make_viewed_image(tmp_path, f"large-{i}.png", data=b"1234567") for i in range(omitted_count)}
+        monkeypatch.setattr(
+            ViewImageMiddleware,
+            "_read_image_as_data_url",
+            lambda *_args, **_kwargs: pytest.fail("oversized image was read"),
+        )
+        blocks = ViewImageMiddleware()._create_image_details_message({"viewed_images": viewed})
+        assert all(block["type"] != "image_url" for block in blocks)
+        assert f"Omitted viewed images: {omitted_count}." in str(blocks)
+
+    def test_omission_notice_does_not_assume_omitted_image_is_older(self, tmp_path, monkeypatch):
+        from deerflow.agents.middlewares import view_image_middleware as module
+
+        monkeypatch.setattr(module, "_MAX_CONTEXT_BASE64_BYTES", 8)
+        viewed = {
+            "/old.png": _make_viewed_image(tmp_path, "old.png", data=b"123456"),
+            "/new.png": _make_viewed_image(tmp_path, "new.png", data=b"1234567"),
+        }
+        blocks = ViewImageMiddleware()._create_image_details_message({"viewed_images": viewed}, host_path_allowed=lambda _, actual: Path(actual).is_relative_to(tmp_path))
+        urls = [block["image_url"]["url"] for block in blocks if block["type"] == "image_url"]
+        assert [base64.b64decode(url.split(",", 1)[1]) for url in urls] == [b"123456"]
+        assert blocks[1] == {"type": "text", "text": "Omitted viewed images: 1. Call view_image again to inspect a specific image."}
+
+    def test_failed_reads_consume_slots_before_readable_older_image(self, tmp_path, monkeypatch):
+        viewed = {"/old.png": _make_viewed_image(tmp_path, "old.png")}
+        viewed.update({f"/stale-{i}.png": {"mime_type": "image/png", "size": 1} for i in range(4)})
+        middleware = ViewImageMiddleware()
+        original_read = middleware._read_image_as_data_url
+        reads = []
+
+        def record_read(state, image_path, *args, **kwargs):
+            reads.append(image_path)
+            return original_read(state, image_path, *args, **kwargs)
+
+        monkeypatch.setattr(middleware, "_read_image_as_data_url", record_read)
+        blocks = middleware._create_image_details_message({"viewed_images": viewed}, host_path_allowed=lambda _, actual: Path(actual).is_relative_to(tmp_path))
+        assert reads == [f"/stale-{i}.png" for i in reversed(range(4))]
+        assert sum("file unavailable or changed" in block.get("text", "") for block in blocks) == 4
+        assert all(block["type"] != "image_url" for block in blocks)
+        assert "Omitted viewed images: 1." in str(blocks)
+
     def test_returns_placeholder_when_no_images(self):
         mw = ViewImageMiddleware()
         state = {"viewed_images": {}}
