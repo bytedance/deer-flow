@@ -7,3 +7,7 @@ address policy. The screen reuses `is_blocked_address` for literal and embedded
 IPv4 addresses, including multicast/reserved forms. Shared regression coverage
 is in `tests/test_image_result_url_safety.py`; DDG tool coverage is in
 `tests/test_ddg_image_search_urls.py`.
+
+Normalize IDNA's Unicode dot separators before checking blocked hostnames or IP
+literals; preserve the original URL for allowed results. Client-normalization
+regressions are in `tests/test_image_result_idna_hosts.py`.

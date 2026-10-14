@@ -98,6 +98,43 @@ def test_config_mention_free_channel_scalar_with_separators_warns(caplog):
     assert "treating it as one literal channel id" in caplog.text
 
 
+def test_config_allowed_users_accepts_a_single_scalar_pubkey():
+    """One pubkey scalar is one member entry -- not the characters of it.
+
+    An ``allowed_users: $BUZZ_OWNER_PUBKEY`` style reference resolves to a
+    scalar string. Iterating it character by character fed each character to
+    ``parse_pubkey``, whose first non-hex character raised and aborted channel
+    construction. Sibling channels (QQ #6730, Discord) already treat a scalar
+    as a single entry.
+    """
+    assert _channel(allowed_users=OWNER)._allowed_users == frozenset({OWNER})
+    assert _channel(allowed_users=f"  {OWNER}  ")._allowed_users == frozenset({OWNER})
+
+
+def test_config_allowed_users_accepts_a_non_string_scalar_without_crashing():
+    """An unquoted scalar YAML typed as a number must not abort channel setup.
+
+    An int is not iterable, so constructing the channel raised
+    ``TypeError: 'int' object is not iterable``; the value is not a usable
+    pubkey, so the deny-by-default allowlist stays empty.
+    """
+    assert _channel(allowed_users=123)._allowed_users == frozenset()
+
+
+def test_config_allowed_users_drops_invalid_entries_with_a_warning(caplog):
+    """A mix of valid and unusable entries keeps the valid ones, fail-closed."""
+    with caplog.at_level(logging.WARNING, logger="app.channels.buzz"):
+        ch = _channel(allowed_users=[OWNER, "not-a-pubkey", 42])
+    assert ch._allowed_users == frozenset({OWNER})
+    assert "Ignoring allowed_users entry" in caplog.text
+
+
+def test_config_allowed_users_empty_shapes_still_deny_by_default():
+    """Unset, blank and empty shapes keep the empty allowlist (deny all)."""
+    for value in (None, "", "   ", [], frozenset()):
+        assert _channel(allowed_users=value)._allowed_users == frozenset()
+
+
 def test_config_rejects_non_websocket_relay_url():
     with pytest.raises(ValueError):
         _channel(relay_url="https://buzz.example.com")

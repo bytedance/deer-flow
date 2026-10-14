@@ -133,7 +133,18 @@ def test_wheel_paths_cannot_escape_temporary_directory(tmp_path, monkeypatch, na
     def fail_if_extracted(*args, **kwargs):
         pytest.fail("Unsafe wheel paths reached extraction")
 
+    # zipfile normalizes os.sep in entry names on Windows, so a wheel built
+    # through writestr never carries a verbatim backslash name there. Inject
+    # the hostile name into namelist unless the archive already stores it, so
+    # the guard contract is exercised with identical bytes on every host.
+    real_namelist = ZipFile.namelist
+
+    def namelist_with_hostile_entry(self):
+        stored = real_namelist(self)
+        return stored if name in stored else [*stored, name]
+
     monkeypatch.setattr(ZipFile, "extractall", fail_if_extracted)
+    monkeypatch.setattr(ZipFile, "namelist", namelist_with_hostile_entry)
     with pytest.raises(ValueError, match="wheel path"):
         checker.check_wheel(tmp_path, wheel(tmp_path, files={name: "no"}))
 

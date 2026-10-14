@@ -52,6 +52,30 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
 
     state_schema = ViewImageMiddlewareState
 
+    def __init__(
+        self,
+        *,
+        max_injected_images: int = 4,
+        max_injected_total_chars: int = 32_000_000,
+    ) -> None:
+        """Bound the per-request image context injected after view_image rounds.
+
+        ``viewed_images`` only grows (#6825): every model call that follows a
+        ``view_image`` round re-encodes and re-sends every entry ever viewed,
+        so a long PDF-inspection thread pushes the request body past provider
+        limits (e.g. Anthropic's 32 MB) even though each single image is
+        capped. A request admits at most four images and 28 MiB of base64.
+        These knobs may further cap how many images and how much payload
+        (in data-url characters) may be injected per model call; admission
+        runs newest-first so the most recently viewed images survive, and
+        over-budget entries keep their text bullet with a placeholder, so
+        nothing silently disappears. The 32M-character default keeps a single
+        max-size image injectable (20 MiB source -> ~27 MB base64) while
+        bounding accumulation below typical provider request limits.
+        """
+        self._max_injected_images = max(1, int(max_injected_images))
+        self._max_injected_total_chars = max(1, int(max_injected_total_chars))
+
     @staticmethod
     def _is_image_context_message(message: object) -> bool:
         """Return whether a message is trusted transient image context."""
@@ -322,6 +346,11 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         source sandbox id when applicable) is stored in ``viewed_images``,
         avoiding large duplicate payloads across every checkpoint (see #4138).
 
+        Content blocks are emitted oldest-first, but budget admission itself
+        runs newest-first (reversed insertion order) so the most recently
+        viewed images survive the caps (see #6825); an entry over budget keeps
+        its text bullet plus a placeholder instead of its base64 payload.
+
         Args:
             state: Current state containing viewed_images
 
@@ -334,10 +363,13 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
             return [{"type": "text", "text": "No images have been viewed."}]
 
         # Select newest first so older entries cannot consume the budget before
-        # the image that triggered this model call. Retain chronological order.
+        # the image that triggered this model call. Preserve chronological
+        # output and the upstream per-image omission placeholders.
         content_blocks: list[str | dict] = [{"type": "text", "text": "Here are the images you've viewed:"}]
         selected: list[list[dict]] = []
         encoded_bytes = 0
+        admitted_chars = 0
+        attempted_images = 0
         omitted = 0
         for image_path, image_data in reversed(list(viewed_images.items())):
             mime_type = image_data.get("mime_type", "unknown")
@@ -348,12 +380,16 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
             blob_ref = image_data.get("blob_ref")
 
             estimated_bytes = 4 * ((expected_size + 2) // 3) if isinstance(expected_size, int) and expected_size >= 0 else _MAX_CONTEXT_BASE64_BYTES + 1
-            # Failed reads also consume slots, bounding potentially remote read attempts.
-            if len(selected) >= _MAX_CONTEXT_IMAGES or encoded_bytes + estimated_bytes > _MAX_CONTEXT_BASE64_BYTES:
-                omitted += 1
-                continue
-
+            estimated_chars = estimated_bytes + len(f"data:{mime_type};base64,")
             blocks = [{"type": "text", "text": f"\n- **{image_path}** ({mime_type})"}]
+            # Failed reads also consume slots, bounding potentially remote read attempts.
+            if attempted_images >= min(_MAX_CONTEXT_IMAGES, self._max_injected_images) or encoded_bytes + estimated_bytes > _MAX_CONTEXT_BASE64_BYTES or admitted_chars + estimated_chars > self._max_injected_total_chars:
+                omitted += 1
+                blocks.append({"type": "text", "text": "  (omitted: image injection budget reached; call view_image again to re-view this image)"})
+                selected.append(blocks)
+                continue
+            attempted_images += 1
+            admitted_chars += estimated_chars
 
             # Read the image file on-demand and encode as base64 for the model
             data_url = self._read_image_as_data_url(

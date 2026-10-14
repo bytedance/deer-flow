@@ -16,7 +16,7 @@ from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypeVar
 
-from app.channels.base import Channel, ChannelStopTimeout, ChannelUnavailable
+from app.channels.base import Channel, ChannelStopTimeout, ChannelUnavailable, abort_connection_transport, shutdown_private_loop
 from app.channels.commands import is_known_channel_command, strip_leading_mentions
 from app.channels.connection_identity import attach_connection_identity, lookup_thread_id
 from app.channels.feishu_card_interaction import (
@@ -50,6 +50,10 @@ from deerflow.uploads.manager import (
 
 logger = logging.getLogger(__name__)
 PENDING_CLARIFICATION_TTL_SECONDS = 30 * 60
+# stop() budget for the lark-oapi thread: ask its private loop to close the
+# socket (bounded by the close timeout) and stop, then join the thread.
+FEISHU_STOP_TIMEOUT_SECONDS = 5
+FEISHU_WS_CLOSE_TIMEOUT_SECONDS = 2
 _PENDING_CARD_METADATA_KEY = "_feishu_pending_card_id"
 # Channel-store deadlines. ``_on_message`` runs on lark-oapi's private event loop,
 # which also carries the SDK's websocket reads, pongs and its 120s ping loop:
@@ -168,6 +172,11 @@ class FeishuChannel(Channel):
         super().__init__(name="feishu", bus=bus, config=config)
         self._thread: threading.Thread | None = None
         self._main_loop: asyncio.AbstractEventLoop | None = None
+        # The SDK thread's private loop and client, published under _ws_lock once
+        # constructed so stop() can shut them down from the Gateway loop.
+        self._ws_loop: asyncio.AbstractEventLoop | None = None
+        self._ws_client: Any = None
+        self._ws_lock = threading.Lock()
         self._api_client = None
         self._CreateMessageReactionRequest = None
         self._CreateMessageReactionRequestBody = None
@@ -363,6 +372,13 @@ class FeishuChannel(Channel):
         We work around this by creating a plain asyncio event loop for this
         thread and patching the SDK's module-level reference before calling
         ``start()``.
+
+        ``stop()`` ends this thread through ``_request_ws_shutdown``: lark-oapi
+        1.7 has no public stop, so ``start()`` only returns once this loop is
+        stopped from a callback scheduled on it — and only after that callback
+        disarmed ``_auto_reconnect``, because otherwise ``start()`` swallows the
+        interrupted ``run_until_complete`` in its reconnect branch and dials
+        again.
         """
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -383,11 +399,93 @@ class FeishuChannel(Channel):
                 log_level=lark.LogLevel.INFO,
                 domain=domain,
             )
+            with self._ws_lock:
+                if not self._running:
+                    # stop() ran before the client existed: never dial.
+                    return
+                self._ws_loop = loop
+                self._ws_client = ws_client
             ws_client.start()
         except Exception:
             if self._running:
                 logger.exception("Feishu WebSocket error")
+            else:
+                logger.debug("[Feishu] SDK loop exited after stop", exc_info=True)
             self._running = False
+        finally:
+            with self._ws_lock:
+                if self._ws_loop is loop:
+                    self._ws_loop = None
+                    self._ws_client = None
+            shutdown_private_loop(loop)
+
+    def _request_ws_shutdown(self) -> None:
+        """Ask the SDK thread to close its socket and stop its loop (non-blocking)."""
+        with self._ws_lock:
+            loop = self._ws_loop
+            ws_client = self._ws_client
+        if loop is None:
+            return
+        try:
+            loop.call_soon_threadsafe(self._begin_ws_shutdown, loop, ws_client)
+        except RuntimeError:
+            # The loop closed between the snapshot and the call: the thread is
+            # already on its way out and the join below observes that.
+            logger.debug("[Feishu] SDK loop already closed before shutdown could be scheduled")
+
+    def _begin_ws_shutdown(self, loop: asyncio.AbstractEventLoop, ws_client: Any) -> None:
+        loop.create_task(self._shutdown_ws(loop, ws_client))
+
+    async def _shutdown_ws(self, loop: asyncio.AbstractEventLoop, ws_client: Any) -> None:
+        """Runs on the SDK loop: disarm reconnects, close the socket, stop the loop."""
+        try:
+            if ws_client is not None:
+                # Must precede any await: once the loop stops, start() lands in
+                # its ``except Exception`` branch and consults this flag.
+                ws_client._auto_reconnect = False
+                deadline = loop.time() + FEISHU_WS_CLOSE_TIMEOUT_SECONDS
+                # _disconnect() clears _conn in its finally (also when cancelled
+                # mid-acquire), so take the handle first — once any in-flight
+                # dial has settled — and release the socket here if the close
+                # handshake does not finish, rather than whenever the
+                # connection object happens to be garbage-collected.
+                connection = await self._settled_ws_connection(ws_client, deadline)
+                disconnect = getattr(ws_client, "_disconnect", None)
+                if disconnect is not None:
+                    try:
+                        async with asyncio.timeout_at(deadline):
+                            await disconnect()
+                    except Exception:
+                        logger.debug("[Feishu] WebSocket close did not complete cleanly", exc_info=True)
+                if abort_connection_transport(connection):
+                    logger.warning("[Feishu] WebSocket close handshake did not finish within %ss; transport aborted", FEISHU_WS_CLOSE_TIMEOUT_SECONDS)
+                    await asyncio.sleep(0)  # let connection_lost run before the loop stops
+        except asyncio.CancelledError:
+            # The thread is already draining this loop; leave it to that.
+            raise
+        loop.stop()
+
+    @staticmethod
+    async def _settled_ws_connection(ws_client: Any, deadline: float) -> Any:
+        """Return the SDK's live connection once any in-flight ``_connect()`` has settled.
+
+        lark holds ``_lock`` across the whole dial and assigns ``_conn`` under
+        it, so a stop that lands mid-handshake would otherwise snapshot
+        ``None`` and leave the socket the dial produces to the SDK's cancelled
+        close. Waiting for the lock is bounded by the close deadline.
+        """
+        lock = getattr(ws_client, "_lock", None)
+        if lock is None:
+            return getattr(ws_client, "_conn", None)
+        try:
+            async with asyncio.timeout_at(deadline):
+                await lock.acquire()
+        except TimeoutError:
+            return getattr(ws_client, "_conn", None)
+        try:
+            return getattr(ws_client, "_conn", None)
+        finally:
+            lock.release()
 
     def _on_ignored_message_event(self, event) -> None:
         logger.debug("[Feishu] ignoring non-content message event: %s", type(event).__name__)
@@ -395,6 +493,9 @@ class FeishuChannel(Channel):
     async def stop(self) -> None:
         self._running = False
         self.bus.unsubscribe_outbound(self._on_outbound)
+        # Signal the SDK thread first so its loop winds down while the
+        # Gateway-side drain below runs.
+        self._request_ws_shutdown()
         await self._close_and_drain_threadsafe_futures()
 
         background_tasks = tuple(self._background_tasks)
@@ -408,14 +509,17 @@ class FeishuChannel(Channel):
         self._background_tasks.clear()
         self._running_card_tasks.clear()
         if self._thread:
-            # The SDK thread only returns on a fatal error, so this join
-            # normally waits out its full timeout; keep it off the event loop.
+            # The thread exits once its loop has stopped; keep the join off the
+            # event loop because a wedged SDK call can still use up the budget.
             thread = self._thread
-            await asyncio.to_thread(thread.join, timeout=5)
+            await asyncio.to_thread(thread.join, timeout=FEISHU_STOP_TIMEOUT_SECONDS)
             if thread.is_alive():
                 raise ChannelStopTimeout("Feishu SDK thread is still running after stop timeout")
             if self._thread is thread:
                 self._thread = None
+        with self._ws_lock:
+            self._ws_loop = None
+            self._ws_client = None
         logger.info("Feishu channel stopped")
 
     async def send(self, msg: OutboundMessage, *, _max_retries: int = 3) -> None:

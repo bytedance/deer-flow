@@ -4,6 +4,8 @@ Result-reader acceptance runs on SQLite and, with TEST_POSTGRES_URI, an isolated
 PostgreSQL schema; both exercise submission, completion, reopen and ToolNode
 continuation without paid model work. Always clean up the temporary schema.
 
+**CSV headers**: `file:<path> csv-columns:["id","name"]` uses shared file admission and authorized bounded reads. Require UTF-8-encodable decoded column names before file access. Parse only the first logical record; definite syntax errors within the header budget remain checked negatives regardless of later rows, while truncated quoting and exhausted budgets stay UNVERIFIED. Local reads and parsing share a cooperative 5-second deadline; remote transport keeps its own timeouts and parsing starts a separate 5-second deadline after the read returns. See README for exact matching and dialect.
+
 **JSON**: See README. Authorize before local metadata and reads; inaccessible paths stay UNVERIFIED.
 
 Apply each subagent's prompt overlay after assembling its full SystemMessage.
@@ -14,7 +16,7 @@ Durable batch specs store overlays as JSON and restore them before execution.
 
 Batch evidence uses nullable `result_artifact` (migration 0033), persisted with
 successful results under the same lease fence. Only full-result exports expose
-bounded, cited RAG snapshots; compact item projections omit them. Cancelled,
+bounded, cited RAG snapshots; compact `list_items` defers them. Cancelled,
 failed and stale attempts cannot publish evidence; retry clears it. Cover the
 formatter/step capture -> worker -> reopened SQLite -> authorized export chain
 in `tests/test_batch_rag_evidence.py`; no provider fetch or preview UI is added.
@@ -32,7 +34,7 @@ citation references, and opaque base64/URL/image sources.
 
 `task` preserves the host incarnation, including null/missing/invalid values; never recapture it.
 
-**Direct runtime shutdown**: `SubagentRuntime.stop()` holds its lifecycle lock through an unbounded service drain; propagate first caller cancellation, chaining service failure. Test terminal outcomes/repeated cancellation in `tests/test_subagent_runtime.py`. Batch stops shield/join one cleanup generation. Restart resets its owner only after success; failed cleanup keeps startup fenced.
+**Direct runtime shutdown**: `SubagentRuntime.stop()` holds its lifecycle lock through an unbounded service drain; propagate first caller cancellation, chaining service failure. Test terminal outcomes/repeated cancellation in `tests/test_subagent_runtime.py`. Batch stops shield/join one cleanup generation. An item leaving a live run cancels it; `_release_execution` drops the registry entry once terminal (forced after the lease). Restart resets its owner only after success; failed cleanup keeps startup fenced.
 
 **Interrupted usage**: After stream cleanup, publish the collector's final
 snapshot on cancellation/timeout; callbacks can precede values chunks.
