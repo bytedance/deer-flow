@@ -23,7 +23,7 @@ SKILL_CONTEXT_ENTRY_KEY = "skill_context_entry"
 # Stamped instead of SKILL_CONTEXT_ENTRY_KEY when the read SKILL.md belongs to
 # a skill whose action-scoped ``skill:activate`` decision is denied: the file
 # content was served (Layer 1 visibility allows it) but the skill must not
-# activate — no durable skill_context entry, tool policy, or secret binding.
+# activate — no durable skill_context entry or secret binding.
 # extract_skills uses it to skip the entry without the "missing skill read
 # metadata" warning that an unstamped read would otherwise produce.
 SKILL_CONTEXT_DENIED_KEY = "skill_context_denied"

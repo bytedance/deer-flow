@@ -21,8 +21,9 @@ class SubagentConfig:
         disallowed_tools: Optional list of tool names to deny.
         skills: Optional list of skill names to make discoverable and activatable.
                 If None, all enabled skills are available. If empty, skills are
-                disabled for this subagent. Skill bodies and their allowed-tools
-                policies take effect only after activation/loading at runtime.
+                disabled for this subagent. Skill bodies load lazily at runtime;
+                allowed-tools is compatibility metadata only and never restricts
+                this subagent's tools.
         model: Model to use - 'inherit' uses parent's model.
         max_turns: Maximum agent turns — model call plus the tools it runs —
             before stopping. Built-in agents use the value set here

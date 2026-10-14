@@ -267,9 +267,9 @@ def get_available_tools(
 
                         # Tag MCP-sourced tools so deferred-tool assembly at each
                         # agent construction site can identify them. Lead agents
-                        # assemble their full configured MCP catalog and apply active
-                        # skill policy at runtime; subagents may pass an already
-                        # policy-filtered list because their skills load at startup.
+                        # assemble their full configured MCP catalog; subagents
+                        # may pass an already filtered list reflecting their own
+                        # tool configuration and authorization.
                         for t in mcp_tools:
                             tag_mcp_tool(t)
                 else:

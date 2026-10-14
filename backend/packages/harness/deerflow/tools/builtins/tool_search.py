@@ -387,8 +387,8 @@ def get_deferred_tools_prompt_section(*, deferred_names: frozenset[str] = frozen
     Lists only names so the agent knows what exists and can use tool_search to
     load them. Returns empty string when there are no deferred tools. The set is
     computed at agent build time and passed in. Lead-agent sets contain the full
-    configured MCP catalog because active skill policy is applied at runtime;
-    subagent sets may already have been filtered by their startup skill policy.
+    configured MCP catalog; subagent sets may already have been narrowed by the
+    subagent's tool configuration and authorization.
 
     Lives here, next to the assembly that produces ``deferred_names``, so every
     agent-build path (lead, embedded client, subagent) renders the section the

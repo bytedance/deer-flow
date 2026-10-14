@@ -29,10 +29,11 @@ SECRETS_CONTEXT_KEY = "secrets"
 # tool. Both reserved keys are stripped from trace payloads (see tracing redactor).
 ACTIVE_SECRETS_CONTEXT_KEY = "__active_skill_secrets"
 
-# Reserved sub-key holding the active skill tool-policy decision for one model
-# step. The decision includes a middleware-instance owner token that prevents a
-# caller from forging an allow-all decision in its mergeable run context, so the
-# entire value must be stripped from every observable serialization surface.
+# Reserved HISTORICAL sub-key that once held the active skill tool-policy
+# decision for one model step. The policy was removed, but the key stays
+# reserved so existing payloads containing it remain redacted (see tracing
+# redactor); its value must stay stripped from every observable
+# serialization surface.
 SKILL_TOOL_POLICY_DECISION_CONTEXT_KEY = "__skill_tool_policy_decision"
 
 LEGACY_AUTH_TOKEN_METADATA_KEY = "auth_token"

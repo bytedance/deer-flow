@@ -832,9 +832,8 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         not keep binding secrets after the provider starts denying activation.
 
         *exclude_names* carries the slash-activated skill names: explicit slash
-        activation dominates for the rest of the run (the same rule the
-        tool-policy middleware applies), and the slash source is resolved from
-        a fresher registry than the entry snapshot — letting the same skill
+        activation dominates for the rest of the run, and the slash source is resolved
+        from a fresher registry than the entry snapshot — letting the same skill
         contribute both sources would bind two eras of its declarations when
         they change across the prepass→activation window. *exclude_paths*
         carries the authenticated slash identity's container path — the stable

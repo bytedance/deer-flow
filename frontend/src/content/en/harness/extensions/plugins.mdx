@@ -158,7 +158,7 @@ ModelTool(name, description, input_schema, handler, group="extensions")
 - **Limits.** The host validates each call's input against the schema and caps it at 256 KiB. The handler must return within 30 seconds, and its JSON-encoded result must fit in 64 KiB.
 - **Context.** The handler receives a `ToolContext`: `settings`, `thread_id` (`None` outside a thread), and `principal`. For tools, the principal carries **only** `user_id`, so `is_admin` is always `False` and `roles` is empty. Do not make tool authorization depend on them.
 - **Errors.** Any failure reaches the model as a generic tool error: `Invalid plugin tool input.`, `Plugin result exceeds 64 KiB.`, `Plugin disabled by administrator.`, or `Plugin tool unavailable or input rejected.`. The Gateway log records the plugin, tool, and exception type.
-- **Assembly and policy.** Plugin tools join the ordinary tool assembly. An agent restricted by `tool_groups` receives a tool only when the list contains the tool's `group`, which is `extensions` by default. The host's later authorization and skill tool policies apply as for any other tool.
+- **Assembly and policy.** Plugin tools join the ordinary tool assembly. An agent restricted by `tool_groups` receives a tool only when the list contains the tool's `group`, which is `extensions` by default. The host's later authorization applies as for any other tool.
 
 Tool descriptions are prompt text. State what the tool returns, that results are data rather than instructions, and whether it is read-only.
 

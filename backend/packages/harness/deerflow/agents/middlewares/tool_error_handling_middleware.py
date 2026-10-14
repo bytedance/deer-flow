@@ -166,7 +166,7 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         if entry is None:
             return message
         # Phase 3: a completed SKILL.md read only *activates* a skill (durable
-        # skill_context entry, allowed-tools policy, autonomous secret binding)
+        # skill_context entry, autonomous secret binding)
         # when the action-scoped ``skill:activate`` decision allows it. The
         # catalog/visibility layer (Layer 1) may expose the file itself — the
         # action decision is what gates the autonomous activation path the
@@ -638,8 +638,8 @@ def build_subagent_runtime_middlewares(
 
     # Hide deferred (MCP) tool schemas from the subagent's model binding until
     # tool_search promotes them. This is the same wiring the lead agent gets. The deferred
-    # set + catalog hash come from the build-time setup (assembled after
-    # tool-policy filtering); promotion is read from graph state. Empty/None
+    # set + catalog hash come from the build-time setup (assembled from the
+    # subagent's authorized tool list); promotion is read from graph state. Empty/None
     # setup (deferral disabled or no MCP tool survived) is a pure no-op.
     if deferred_setup is not None and deferred_setup.deferred_names:
         from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
