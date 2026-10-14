@@ -262,6 +262,15 @@ class OpenSandboxSandbox(Sandbox):
         output = format_execution(execution)
         exit_code = getattr(execution, "exit_code", None)
         if exit_code is None:
+            # execd enforces the command deadline server-side: on expiry it
+            # kills the process group and reports a CommandExecError error
+            # event instead of a completion, so a timed-out command arrives
+            # here without an exit code. Preserve the same Exit Code: 124
+            # marker Local/AIO/Tenki/E2B/BoxLite emit so evidence consumers
+            # recover the real status.
+            error = getattr(execution, "error", None)
+            if getattr(error, "name", None) == "CommandExecError" and "context deadline exceeded" in str(getattr(error, "value", "")):
+                return "Error: command timed out\nExit Code: 124"
             detail = output or "no completion or error event"
             return f"Error: OpenSandbox command completed without an exit code: {detail}"
         if exit_code != 0:

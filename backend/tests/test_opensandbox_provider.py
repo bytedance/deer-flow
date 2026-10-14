@@ -50,10 +50,17 @@ class _Logs:
 
 
 @dataclass
+class _Error:
+    name: str
+    value: str
+
+
+@dataclass
 class _Execution:
     exit_code: int | None = 0
     logs: _Logs = field(default_factory=_Logs)
     result: list[_Result] = field(default_factory=list)
+    error: _Error | None = None
 
 
 def _execution(*, stdout: tuple[str, ...] = (), stderr: tuple[str, ...] = (), result: tuple[str, ...] = (), exit_code: int | None = 0) -> _Execution:
@@ -1113,16 +1120,18 @@ def test_operations_renew_remote_lifetime_and_bound_default_commands() -> None:
     assert remote.renew_calls[-1] == timedelta(seconds=60)
 
 
-def test_execute_command_timeout_appends_exit_marker(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A command deadline is a shell outcome, not a provider hiccup: the result
-    must end with the same ``Exit Code: 124`` marker Local/AIO/Tenki/E2B/BoxLite
-    emit on timeout (#6847 family)."""
+def test_execute_command_timeout_appends_exit_marker() -> None:
+    """execd enforces the command deadline server-side and reports the kill as
+    a CommandExecError error event instead of a completion, so a timed-out
+    command arrives without an exit code and must still end with the
+    ``Exit Code: 124`` marker Local/AIO/Tenki/E2B/BoxLite emit on timeout
+    (#6847 family)."""
     remote = _FakeRemote("remote")
 
-    def timed_out_run(command: str, *, opts: _FakeRunCommandOpts | None = None) -> _Execution:
-        raise TimeoutError
+    def deadline_killed_run(command: str, *, opts: _FakeRunCommandOpts | None = None) -> _Execution:
+        return _Execution(exit_code=None, error=_Error(name="CommandExecError", value="context deadline exceeded"))
 
-    remote.commands.run = timed_out_run  # type: ignore[method-assign]
+    remote.commands.run = deadline_killed_run  # type: ignore[method-assign]
     box = _box(remote, sandbox_timeout=timedelta(seconds=60), default_command_timeout=120)
 
     assert box.execute_command("sleep 9999", timeout=5) == "Error: command timed out\nExit Code: 124"
