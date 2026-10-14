@@ -1260,6 +1260,7 @@ This release closes that milestone with **621 merged pull requests**.
   `runs.wait`: the chat still gets the error reply, but the run finishes in
   the background instead of being cancelled. Fire-and-forget channels
   (GitHub) are unchanged: `runs.create` returns as soon as the run is pending.
+  ([#6876])
 
 - **channels:** `FeishuChannel.stop()` and `DingTalkChannel.stop()` now end
   their SDK threads instead of timing out. Both SDKs run on a thread-private
@@ -11703,3 +11704,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6843]: https://github.com/bytedance/deer-flow/pull/6843
 [#6844]: https://github.com/bytedance/deer-flow/pull/6844
 [#6852]: https://github.com/bytedance/deer-flow/pull/6852
+[#6876]: https://github.com/bytedance/deer-flow/pull/6876

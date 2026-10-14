@@ -1009,7 +1009,7 @@
   Gateway 上完成并持久化对话线程状态——即使 IM 回复随旧传输丢失，答案仍可在 Web UI
   中查看。同一策略也覆盖 Slack/Discord `runs.wait` 遇到 SDK 300 秒读超时的情况：聊天里
   仍会收到错误回复，但运行会在后台完成而不再被取消。即发即弃渠道（GitHub）不受影响：
-  `runs.create` 在运行进入 pending 后即返回。
+  `runs.create` 在运行进入 pending 后即返回。 ([#6876])
 
 - **前端：** 用户管理设置页不再在静态网站演示中发出注定失败的查询，非管理员的
   `?settings=users` 深链接也不再打开仅管理员可见的面板。该页面此前只以
@@ -9346,3 +9346,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6843]: https://github.com/bytedance/deer-flow/pull/6843
 [#6844]: https://github.com/bytedance/deer-flow/pull/6844
 [#6852]: https://github.com/bytedance/deer-flow/pull/6852
+[#6876]: https://github.com/bytedance/deer-flow/pull/6876
