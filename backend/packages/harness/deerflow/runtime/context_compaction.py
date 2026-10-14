@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -139,6 +139,8 @@ async def compact_thread_context(
     agent_name: str | None = None,
     model_name: str | None = None,
     app_config: AppConfig | None = None,
+    validate_scope: Callable[[], Awaitable[object]] | None = None,
+    commit_update: Callable[[Callable[[], Awaitable[dict]]], Awaitable[dict]] | None = None,
 ) -> ThreadCompactionResult:
     """Summarize old messages in a thread and write a compacted checkpoint."""
     resolved_app_config = app_config or get_app_config()
@@ -148,6 +150,8 @@ async def compact_thread_context(
     checkpoint_id = snapshot_config.get("configurable", {}).get("checkpoint_id")
     if not checkpoint_id:
         raise LookupError(f"Thread {thread_id} checkpoint not found")
+    if validate_scope is not None:
+        await validate_scope()
 
     binding_known, checkpoint_agent_name = _checkpoint_agent_binding(getattr(snapshot, "metadata", None))
     # The body hint may still select a compatible summarization model for
@@ -184,6 +188,10 @@ async def compact_thread_context(
     if effective_agent_name:
         runtime_context["agent_name"] = effective_agent_name
     runtime = SimpleNamespace(context=runtime_context)
+    # Configuration/model preparation can await; validate again immediately
+    # before any summary request. No database writer lock spans generation.
+    if validate_scope is not None:
+        await validate_scope()
     try:
         # ``raise_on_failure`` is independent of ``force``: a manual caller always wants
         # a generation failure surfaced (even a force=False call that met the threshold),
@@ -202,15 +210,19 @@ async def compact_thread_context(
     update_config = dict(snapshot.config)
     if binding_known:
         update_config["metadata"] = {CHECKPOINT_AGENT_NAME_METADATA_KEY: (DEFAULT_AGENT_NAME_METADATA_VALUE if checkpoint_agent_name is None else checkpoint_agent_name)}
-    updated_config = await accessor.aupdate(
-        update_config,
-        {
-            "messages": Overwrite(list(result.preserved_messages)),
-            "summary_text": result.summary_text,
-            **({"task_history": result.task_history} if getattr(result, "task_history", None) is not None else {}),
-        },
-        as_node="manual_compaction",
-    )
+
+    async def write_update() -> dict:
+        return await accessor.aupdate(
+            update_config,
+            {
+                "messages": Overwrite(list(result.preserved_messages)),
+                "summary_text": result.summary_text,
+                **({"task_history": result.task_history} if getattr(result, "task_history", None) is not None else {}),
+            },
+            as_node="manual_compaction",
+        )
+
+    updated_config = await commit_update(write_update) if commit_update is not None else await write_update()
     new_checkpoint_id = updated_config.get("configurable", {}).get("checkpoint_id")
 
     return ThreadCompactionResult(

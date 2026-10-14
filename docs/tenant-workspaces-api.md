@@ -513,3 +513,32 @@ Do not delete files on an uncertain metadata commit; retention/reconciliation
 needs actual fault evidence and belongs with M4/M8/M10/M11. This is not physical
 NAS, PostgreSQL-checkpointer, live-model, browser/feed or full lifecycle proof.
 Delete/compact/feed/client and remaining M3–M11 acceptance still gate activation.
+
+## Private manual compaction (partial M3)
+
+POST /threads/{id}/compact binds private scope before native owner-check and
+retains the original durable checkpoint-write reservation. The Gateway captures
+the entry incarnation; the native compactor receives optional validate_scope
+and commit_update adapters. It validates after materializing the source and
+again after configuration/model preparation, before summary generation. Only
+the prepared native messages/summary checkpoint update enters the existing
+live workspace/actor/thread/incarnation fence. Model generation does not hold
+SQL writer locks. Unbound callers omit the adapters, retaining native behavior.
+
+Jenkins #56 reproduced missing compact scope. #57 passed 8 checks in 36.66s. The
+actual authenticated HTTP workflow uses native summarization middleware,
+selection/prompt construction, reducer replacement and durable SQLite graph
+checkpoints with SQLite/PostgreSQL metadata; only the model response boundary
+is deterministic. It summarizes the older pair, retains the latest pair and
+persists summary_text. Actual SQL policy withdrawal/incarnation replacement
+inside the model-call span returns 404 with unchanged checkpoint IDs; replacement
+during snapshot read and foreign/peer requests make no model call.
+
+Six native regressions retain delta mutation, extension channels, no-op/failure
+semantics, recorded-agent memory bucket behavior and cross-worker busy denial.
+The existing Starlette TestClient SDK deprecation warning remains diagnostic.
+Memory and task-continuity archive are disabled in the scoped HTTP main; the
+legacy memory regression is not workspace memory authorization. Live DeepSeek,
+workspace credentials/memory/archive effects, PostgreSQL checkpointer, fault
+recovery and full UI/event-history acceptance remain M4/M5/M9/M11 requirements.
+Delete/feed/client and full M3 still gate tenant activation.

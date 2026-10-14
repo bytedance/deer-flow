@@ -416,3 +416,10 @@ Native full/delta replay, event history and historical-file rules are retained.
 No source-project share grants access to another member's chat or branch.
 Cross-store uncertainty and unpublished staging require explicit reconciliation;
 do not infer completion of delete/compact/feed/client or tenant activation.
+
+Manual compaction binds private workspace identity before native owner-check
+and keeps native checkpoint-write admission. Runtime validation adapters refuse
+a replaced snapshot before model invocation; the final commit adapter refuses
+revoked/replaced writes after generation. SQL writer locks never span model
+generation. Tenant memory/task archive effects and model credentials remain M5
+coverage; deterministic compaction acceptance alone cannot enable tenant mode.

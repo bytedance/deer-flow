@@ -5,6 +5,7 @@ import importlib
 import importlib.util
 import zipfile
 from datetime import UTC, datetime
+from itertools import repeat as repeat_summary
 from uuid import uuid4
 
 import httpx
@@ -17,6 +18,7 @@ from test_workspace_executor_migration import executor_engine, native_engine  # 
 
 def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, monkeypatch, tmp_path, caplog):  # noqa: F811
     import aiosqlite
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
     from langchain_core.messages import AIMessage, HumanMessage
     from langgraph.checkpoint.base import empty_checkpoint
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -31,6 +33,7 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
     from app.gateway.auth_middleware import AuthMiddleware
     from app.gateway.csrf_middleware import CSRFMiddleware
     from app.gateway.routers import artifacts, project_documents, projects, threads, uploads
+    from deerflow.agents.middlewares import summarization_middleware as summary_module
     from deerflow.config import app_config
     from deerflow.config import paths as paths_module
     from deerflow.config.app_config import AppConfig
@@ -44,7 +47,7 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
     from deerflow.persistence.thread_reads import ThreadReadRepository
     from deerflow.persistence.user.model import UserRow
     from deerflow.persistence.workspaces.sql import WorkspaceRepository
-    from deerflow.runtime import RunManager, ThreadOperationKind
+    from deerflow.runtime import RunManager, ThreadOperationKind, context_compaction
     from deerflow.runtime.events.store.memory import MemoryRunEventStore
     from deerflow.runtime.goal import build_goal_state, write_thread_goal
     from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
@@ -76,6 +79,7 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
     monkeypatch.setattr(app_config, "get_app_config", lambda: configuration)
     monkeypatch.setattr(deps, "get_app_config", lambda: configuration)
     monkeypatch.setattr(services, "get_app_config", lambda: configuration)
+    monkeypatch.setattr(context_compaction, "get_app_config", lambda: configuration)
     monkeypatch.setattr(paths_module, "_paths", Paths(tmp_path / "files"))
     monkeypatch.setattr(uploads, "get_sandbox_provider", lambda: LocalSandboxProvider())
     monkeypatch.setattr(auth_config, "_auth_config", auth_config.AuthConfig(jwt_secret="synthetic-isolated-workspace-http-key-64-characters-for-test-only!!"))
@@ -558,6 +562,74 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                 as_user("alice")
                 content = await client.get(shared_docs + "/" + admin_document + "/content", headers=team_headers)
                 assert content.status_code == 200 and content.content == b"admin published source"
+                # Replace only model output; keep native compaction selection,
+                # summary middleware, graph mutation and durable storage real.
+                summary_inputs = []
+                summary_fault = {}
+
+                class DeterministicSummaryModel(GenericFakeChatModel):
+                    async def ainvoke(self, input, config=None, **kwargs):
+                        summary_inputs.append(str(input))
+                        workspace_id = summary_fault.pop("workspace_id", None)
+                        replaced_id = summary_fault.pop("thread_id", None)
+                        if workspace_id or replaced_id:
+                            async with sf() as session:
+                                if workspace_id:
+                                    await session.execute(sa.text("UPDATE workspaces SET policy_version=policy_version+1 WHERE id=:id"), {"id": workspace_id})
+                                if replaced_id:
+                                    await session.execute(sa.text("UPDATE threads_meta SET incarnation=:incarnation WHERE thread_id=:id"), {"incarnation": uuid4().hex, "id": replaced_id})
+                                await session.commit()
+                        return await super().ainvoke(input, config=config, **kwargs)
+
+                monkeypatch.setattr(summary_module, "create_chat_model", lambda *args, **kwargs: DeterministicSummaryModel(messages=repeat_summary("Deterministic summary of older team messages")))
+                configuration.summarization.enabled = True
+                compact_body = {"force": True, "keep": {"type": "messages", "value": 2}}
+                for compaction_case in ("success", "withdrawal", "replacement"):
+                    compact_id = str(uuid4())
+                    compact_created = await client.post("/api/threads", headers=team_headers, json={"thread_id": compact_id})
+                    assert compact_created.status_code == 200, compact_created.text
+                    compact_config = {"configurable": {"thread_id": compact_id, "checkpoint_ns": ""}}
+                    compact_root = await app.state.checkpointer.aget_tuple(compact_config)
+                    compact_checkpoint = empty_checkpoint()
+                    compact_checkpoint["channel_values"] = {
+                        "messages": [
+                            HumanMessage(id="old-human", content="Older team question " + compaction_case),
+                            AIMessage(id="old-ai", content="Older team answer"),
+                            HumanMessage(id="latest-human", content="Latest team question"),
+                            AIMessage(id="latest-ai", content="Latest team answer"),
+                        ]
+                    }
+                    compact_checkpoint["channel_versions"] = {"messages": app.state.checkpointer.get_next_version(None, None)}
+                    await app.state.checkpointer.aput(compact_root.config, compact_checkpoint, {"step": 0, "source": "update", "writes": {}, "parents": {}}, compact_checkpoint["channel_versions"])
+                    before_compact = await app.state.checkpointer.aget_tuple(compact_config)
+                    calls_before = len(summary_inputs)
+                    if compaction_case == "withdrawal":
+                        summary_fault["workspace_id"] = team
+                    elif compaction_case == "replacement":
+                        summary_fault["thread_id"] = compact_id
+                    compacted = await client.post("/api/threads/" + compact_id + "/compact", headers=team_headers, json=compact_body)
+                    assert len(summary_inputs) == calls_before + 1, "native summarizer did not reach deterministic model boundary"
+                    if compaction_case == "success":
+                        assert compacted.status_code == 200 and compacted.json()["compacted"] is True, compacted.text
+                        assert compacted.json()["removed_message_count"] == 2 and compacted.json()["preserved_message_count"] == 2
+                        compact_state = await client.get("/api/threads/" + compact_id + "/state", headers=team_headers)
+                        assert compact_state.json()["values"]["summary_text"] == "Deterministic summary of older team messages"
+                        assert [m["id"] for m in compact_state.json()["values"]["messages"]] == ["latest-human", "latest-ai"]
+                        assert "Older team question success" in summary_inputs[-1] and "personal checkpoint sentinel" not in summary_inputs[-1]
+                    else:
+                        assert compacted.status_code == 404, compacted.text
+                        after_compact = await app.state.checkpointer.aget_tuple(compact_config)
+                        assert after_compact.config == before_compact.config, "withdrawn/replaced compaction committed checkpoint bytes"
+                calls_before = len(summary_inputs)
+                checkpoint_replacement["thread_id"] = compact_id
+                assert (await client.post("/api/threads/" + compact_id + "/compact", headers=team_headers, json=compact_body)).status_code == 404
+                assert len(summary_inputs) == calls_before, "replaced snapshot was sent to the summary model"
+                assert (await client.post("/api/threads/" + compact_id + "/compact", json=compact_body)).status_code == 404
+                as_user("bob")
+                assert (await client.post("/api/threads/" + compact_id + "/compact", headers=team_headers, json=compact_body)).status_code == 404
+                assert len(summary_inputs) == calls_before
+                as_user("alice")
+                configuration.summarization.enabled = False
                 branch_source = str(uuid4())
                 created_source = await client.post("/api/threads", headers=team_headers, json={"thread_id": branch_source, "project_id": shared_project})
                 assert created_source.status_code == 200, created_source.text

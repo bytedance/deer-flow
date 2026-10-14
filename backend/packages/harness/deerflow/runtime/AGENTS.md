@@ -290,3 +290,11 @@ worker to scoped SQL cleanup. Ambient selection changes do not redirect release.
 Legacy calls omit the new cleanup keywords for custom-store compatibility.
 Scope-aware cleanup is mandatory for tenant stores; worker lifecycle/snapshots,
 leases and normal Run admission remain M4 integration work.
+
+compact_thread_context accepts optional validate_scope and commit_update
+adapters. It revalidates after reading a checkpoint and immediately before
+generation; commit_update wraps only the prepared accessor.aupdate, not model
+configuration, generation or middleware execution. Gateway tenant callers bind
+these to private entry identity and the final live SQL checkpoint fence. Native
+unbound callers retain their existing behavior. These adapters do not establish
+workspace memory/archive authorization, which needs M5 provider integration.

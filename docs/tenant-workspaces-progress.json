@@ -1159,5 +1159,44 @@
       "networks": [],
       "verified": "Each build ownership label independently inspected on Shanghai Jenkins"
     }
+  },
+  "private_compaction": {
+    "base_commit": "a6f9ddbe",
+    "job": "deerflow-tenant-m1-postgres",
+    "red": {
+      "build": 56,
+      "result": "FAILURE",
+      "tests_failed": 2,
+      "elapsed_seconds": 32.63,
+      "archive_sha256": "985fb58c599ffede95731d29850632a583b5f6d3c0e3291e464c30bf323ceb11",
+      "reason": "native compact owner-check lacks trusted workspace scope"
+    },
+    "green": {
+      "build": 57,
+      "result": "SUCCESS",
+      "tests_passed": 8,
+      "elapsed_seconds": 36.66,
+      "archive_sha256": "703c751394404fdc3a42bc9bb24ee67363969e301b5134a1070eceec618d3520",
+      "command": "python -m pytest tests/test_workspace_http.py tests/test_context_compaction.py::test_compact_thread_context_real_mutation_graph_finishes_without_scheduling tests/test_context_compaction.py::test_compact_thread_context_preserves_middleware_contributed_channels tests/test_context_compaction.py::test_compact_thread_context_returns_noop_without_writing tests/test_context_compaction.py::test_compact_thread_context_raises_on_summary_generation_failure tests/test_context_compaction.py::test_manual_compaction_uses_checkpoint_agent_for_flush_bucket tests/test_threads_router.py::test_compact_rejects_run_owned_by_another_worker -q --tb=short --no-showlocals",
+      "warnings": [
+        "Existing Starlette TestClient/httpx SDK deprecation warning"
+      ]
+    },
+    "source_sha256": {
+      "backend/app/gateway/routers/threads.py": "79f1e112480d22baf2be5a5265da73ac4bb6a5cd720ad32cb602de12b86a6434",
+      "backend/packages/harness/deerflow/runtime/context_compaction.py": "edfa466f2d56f154ca4282541fbf61b78b6efbea7927bdc3bd94e72310e9d406",
+      "backend/tests/test_workspace_http.py": "ac6168efc5a76f7dd84a9ed4597b22c2909b7ddfc3d175fa6fa1998ab2caeaf1"
+    },
+    "scope": "Real JWT/RBAC/CSRF, SQL, native summary middleware and durable SQLite checkpoint graph; deterministic model output. Summary/latest-tail writes succeed; SQL policy/incarnation changes inside model span preserve checkpoint IDs; snapshot replacement/foreign/peer access invoke no model. Six native regressions.",
+    "limits": "Scoped memory and task-continuity archive disabled. Legacy memory binding regression is not tenant memory proof. No live DeepSeek, scoped credentials/memory/archive provider, Postgres checkpointer, cancellation/crash, physical or browser/event-feed acceptance. Full M3–M11 remains required.",
+    "cleanup": {
+      "builds": [
+        56,
+        57
+      ],
+      "containers": [],
+      "networks": [],
+      "verified": "Each build label inspected independently on Shanghai Jenkins"
+    }
   }
 }

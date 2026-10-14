@@ -1607,9 +1607,17 @@ def _thread_compact_response(result: ThreadCompactionResult) -> ThreadCompactRes
 
 
 @router.post("/{thread_id}/compact", response_model=ThreadCompactResponse)
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("threads", "write", owner_check=True, require_existing=True)
 async def compact_thread(thread_id: ThreadId, body: ThreadCompactRequest, request: Request) -> ThreadCompactResponse:
     """Manually summarize old thread context while preserving the visible history."""
+    incarnation = await capture_checkpoint_thread_identity(request, thread_id)
+    scoped_kwargs = {}
+    if get_current_workspace() is not None:
+        scoped_kwargs = {
+            "validate_scope": lambda: capture_checkpoint_thread_identity(request, thread_id),
+            "commit_update": lambda update: commit_checkpoint_write(request, thread_id, incarnation=incarnation, commit=update),
+        }
     # Compaction writes only base-schema channels (messages + summary_text);
     # every other channel — including middleware-contributed ones — is carried
     # forward by checkpoint fork inheritance, so the base-schema mutation
@@ -1633,6 +1641,7 @@ async def compact_thread(thread_id: ThreadId, body: ThreadCompactRequest, reques
                 user_id=get_effective_user_id(),
                 agent_name=body.agent_name,
                 model_name=body.model_name,
+                **scoped_kwargs,
             )
     except ConflictError:
         raise HTTPException(status_code=409, detail="Thread has a run in flight. Compact after the run finishes.") from None
@@ -1644,7 +1653,7 @@ async def compact_thread(thread_id: ThreadId, body: ThreadCompactRequest, reques
         raise HTTPException(status_code=500, detail="Failed to compact thread context.") from None
     except LookupError:
         raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found") from None
-    except HTTPException:
+    except (HTTPException, WorkspaceAccessDenied):
         raise
     except Exception:
         logger.exception("Failed to compact thread %s", sanitize_log_param(thread_id))
