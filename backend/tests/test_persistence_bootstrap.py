@@ -542,6 +542,50 @@ def test_normalize_default_renders_model_defaults_like_reflection() -> None:
     assert _normalize_default(string_zero, sqlite_dialect) != _normalize_default("'1'", sqlite_dialect)
     assert _normalize_default(false_default, postgres_dialect) != _normalize_default("true", postgres_dialect)
 
+    # An explicit empty-string default is a default, not the absence of one.
+    empty_string = sa.Column("c", sa.Text(), server_default="").server_default
+    assert _normalize_default(empty_string, sqlite_dialect) == _normalize_default("''", sqlite_dialect) == ""
+    assert _normalize_default("''::text", postgres_dialect) == ""
+    assert _normalize_default(None) is None
+
+
+@asyncio_test
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+async def test_empty_string_default_stays_distinct_from_no_default(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    backend: str,
+) -> None:
+    """``DEFAULT ''`` and no default drift from each other, through real reflection."""
+    from deerflow.persistence.migrations._helpers import _check_column_drift
+
+    engine, schema = await _drift_engine(tmp_path, backend)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(sa.text("CREATE TABLE drift_defaults (empty_default TEXT DEFAULT '', no_default TEXT)"))
+
+        def check(sync_conn) -> None:
+            inspector = sa.inspect(sync_conn)
+            columns = {column["name"]: column for column in inspector.get_columns("drift_defaults")}
+            _check_column_drift("drift_defaults", sa.Column("no_default", sa.Text(), server_default=""), columns["no_default"], inspector.dialect)
+            _check_column_drift("drift_defaults", sa.Column("empty_default", sa.Text()), columns["empty_default"], inspector.dialect)
+            # Matching empty-string defaults stay quiet.
+            _check_column_drift("drift_defaults", sa.Column("empty_default", sa.Text(), server_default=""), columns["empty_default"], inspector.dialect)
+
+        with caplog.at_level("WARNING", logger="deerflow.persistence.migrations._helpers"):
+            async with engine.connect() as conn:
+                await conn.run_sync(check)
+
+        warned = [r.getMessage() for r in caplog.records if r.levelname == "WARNING" and r.name == "deerflow.persistence.migrations._helpers"]
+        assert len(warned) == 2, f"expected exactly the two mismatched defaults, got: {warned!r}"
+        assert "drift_defaults.no_default" in warned[0] and "server_default actual=None desired=''" in warned[0], warned[0]
+        assert "drift_defaults.empty_default" in warned[1] and "server_default actual='' desired=None" in warned[1], warned[1]
+    finally:
+        if schema:
+            async with engine.begin() as conn:
+                await conn.execute(sa.text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        await engine.dispose()
+
 
 # ---------------------------------------------------------------------------
 # Branch 4: versioned DB

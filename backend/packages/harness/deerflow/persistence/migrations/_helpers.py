@@ -64,11 +64,16 @@ def _normalize_default(value: object, dialect: sa.engine.Dialect | None = None) 
     Postgres-style type casts / one layer of single quotes are stripped so
     ``server_default="0"`` (DDL ``DEFAULT '0'``), SQLite's reflected ``'0'``
     and Postgres's reflected ``0`` or ``'0'::bigint`` all compare equal.
+    Returns ``None`` only when there is no default: a quoted empty literal
+    (``server_default=""``, reflected ``''``) stays ``""``.
     """
     if value is None:
         return None
     if isinstance(value, sa.schema.DefaultClause):
         value = value.arg
+        if isinstance(value, str):
+            # DDL renders a plain-string default as a quoted literal.
+            value = "'" + value.replace("'", "''") + "'"
     if isinstance(value, sa.sql.elements.TextClause):
         text = value.text
     elif isinstance(value, sa.sql.elements.ClauseElement):
@@ -84,9 +89,10 @@ def _normalize_default(value: object, dialect: sa.engine.Dialect | None = None) 
         text = text.split("::", 1)[0].strip()
     # Strip one layer of SQL string quoting: a plain-string ``server_default``
     # renders as a quoted literal, and dialects disagree on whether a numeric
-    # column reflects it back quoted.
+    # column reflects it back quoted. The unquoted value is returned even
+    # when empty: ``DEFAULT ''`` is a default, unlike no default at all.
     if len(text) >= 2 and text.startswith("'") and text.endswith("'"):
-        text = text[1:-1].replace("''", "'")
+        return text[1:-1].replace("''", "'")
     return text or None
 
 
