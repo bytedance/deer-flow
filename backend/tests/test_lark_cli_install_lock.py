@@ -48,7 +48,7 @@ def test_install_lock_retries_until_contention_clears(tmp_path, monkeypatch) -> 
     """Contention is retried on the Windows fallback instead of failing fast."""
     fake = _ContendedFakeMsvcrt(fail_times=3)
     monkeypatch.setattr(lark_cli, "fcntl", None)
-    monkeypatch.setattr(lark_cli, "msvcrt", fake)
+    monkeypatch.setattr(lark_cli, "msvcrt", fake, raising=False)
     sleeps: list[float] = []
     monkeypatch.setattr(lark_cli.time, "sleep", sleeps.append)
 
