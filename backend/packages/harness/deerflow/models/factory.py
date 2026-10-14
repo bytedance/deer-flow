@@ -441,12 +441,33 @@ def _apply_stream_chunk_timeout_default(model_class: type, model_settings_from_c
 # ``gpt-6 + tools`` → Responses API branch; backport that behaviour here so the
 # pinned dependency does not silently break the whole gpt-6 family.
 #
+# The model factory creates the client before any tool is bound, so a
+# "gpt-6 + tools" check is not expressible at this point — the injection is
+# necessarily broader than upstream's bind-time routing. Two gates keep that
+# blast radius small:
+#
+# * **Custom endpoints are never touched.** ``_normalize_openai_base_url`` ran
+#   just above, so an OpenAI-compatible gateway/proxy configured via
+#   ``base_url``/``openai_api_base`` already lands in ``model_settings_from_config``;
+#   those deployments (LiteLLM, vLLM, one-api, …) often lack ``/responses`` and
+#   must not be silently re-pointed. ``AzureChatOpenAI`` is skipped too: it
+#   subclasses ``BaseChatOpenAI``, and Azure's Responses API additionally
+#   requires ``api-version >= 2025-04-01-preview``.
+# * **The injection is logged**, so an operator can trace why their model began
+#   calling ``/responses`` even before they diagnose a failure.
+#
 # Behaviour:
 #
-# * A ``BaseChatOpenAI`` subclass whose ``model`` starts with ``gpt-6`` gets
-#   ``use_responses_api: true`` + ``output_version: responses/v1`` injected
-#   unless the operator already configured an explicit value. An explicit
-#   ``use_responses_api: false`` is honored and left untouched.
+# * An explicit ``use_responses_api`` always wins (true or false) — it is the
+#   operator's routing decision, even on a custom endpoint or Azure.
+# * Otherwise a ``BaseChatOpenAI`` subclass whose ``model`` starts with ``gpt-6``
+#   gets ``use_responses_api: true`` + ``output_version: responses/v1`` injected,
+#   unless the model targets a custom endpoint (``base_url``/``openai_api_base``)
+#   or is an ``AzureChatOpenAI``.
+# * An explicit ``output_version`` alone (without ``use_responses_api``) implies
+#   the operator expects Responses formatting: their value is preserved and
+#   ``use_responses_api: true`` is still injected, so the issue #6841 400s do not
+#   silently reappear.
 # * Any other model family or client (e.g. ChatAnthropic) is left untouched.
 def _apply_openai_responses_api_default(model_class: type, model_settings_from_config: dict) -> None:
     if not issubclass(model_class, BaseChatOpenAI):
@@ -454,10 +475,37 @@ def _apply_openai_responses_api_default(model_class: type, model_settings_from_c
     model_name = model_settings_from_config.get("model")
     if not isinstance(model_name, str) or not model_name.lower().startswith("gpt-6"):
         return
-    if "use_responses_api" in model_settings_from_config or "output_version" in model_settings_from_config:
+    # An explicit routing choice always wins, even on a custom endpoint or Azure.
+    if "use_responses_api" in model_settings_from_config:
+        return
+    # A custom endpoint means the operator already owns routing: OpenAI-compatible
+    # gateways/proxies (LiteLLM, vLLM, one-api) configured via base_url /
+    # openai_api_base (canonicalized just above by _normalize_openai_base_url),
+    # and Azure deployments, rarely implement /responses (Azure's additionally
+    # needs api-version >= 2025-04-01-preview). Leave them untouched. The Azure
+    # check walks the MRO so it also covers env-configured Azure deployments
+    # (which leave azure_endpoint out of the model settings) and any subclass.
+    if any(getattr(base, "__name__", "") == "AzureChatOpenAI" for base in model_class.__mro__):
+        return
+    if any(key in model_settings_from_config for key in ("base_url", "openai_api_base", "azure_endpoint")):
+        return
+    if "output_version" in model_settings_from_config:
+        # Operator pinned an output version — implying Responses formatting —
+        # without enabling routing. Honor the value but still turn the default on,
+        # otherwise gpt-6 stays on /v1/chat/completions and re-exposes #6841.
+        model_settings_from_config["use_responses_api"] = True
+        logger.debug(
+            "gpt-6 model '%s': enabling OpenAI Responses API routing (use_responses_api=true) with operator output_version=%r",
+            model_name,
+            model_settings_from_config["output_version"],
+        )
         return
     model_settings_from_config["use_responses_api"] = True
     model_settings_from_config["output_version"] = "responses/v1"
+    logger.info(
+        "gpt-6 model '%s': routing through the OpenAI Responses API (use_responses_api=true, output_version=responses/v1) because the pinned langchain-openai cannot call gpt-6 tools on /v1/chat/completions",
+        model_name,
+    )
 
 
 def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *, app_config: AppConfig | None = None, attach_tracing: bool = True, model_overrides: dict | None = None, **kwargs) -> BaseChatModel:

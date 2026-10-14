@@ -2619,3 +2619,105 @@ def test_non_gpt6_openai_model_not_rerouted(monkeypatch):
 
     assert captured.get("use_responses_api") is None
     assert captured.get("output_version") is None
+
+
+def test_gpt6_custom_base_url_not_rerouted(monkeypatch):
+    """A gpt-6 model pointed at an OpenAI-compatible gateway/proxy via ``base_url``
+    must not be silently re-pointed at ``/responses`` — many gateways (LiteLLM,
+    vLLM, one-api, …) do not implement it, so the operator owns routing there.
+    """
+    from langchain_openai import ChatOpenAI
+
+    model = ModelConfig(
+        name="gpt-6-gateway",
+        display_name="GPT-6 via gateway",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="gpt-6.1-sol",
+        base_url="https://my-gateway.example.com/v1",
+    )
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
+    factory_module.create_chat_model(name="gpt-6-gateway")
+
+    assert captured.get("use_responses_api") is None
+    assert captured.get("output_version") is None
+
+
+def test_gpt6_openai_api_base_alias_not_rerouted(monkeypatch):
+    """The legacy ``openai_api_base`` alias is treated like a custom endpoint:
+    after ``_normalize_openai_base_url`` it is the canonical key the gate reads.
+    """
+    from langchain_openai import ChatOpenAI
+
+    model = ModelConfig(
+        name="gpt-6-alias",
+        display_name="GPT-6 alias endpoint",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="gpt-6.1-sol",
+        openai_api_base="https://my-gateway.example.com/v1",
+    )
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
+    factory_module.create_chat_model(name="gpt-6-alias")
+
+    assert captured.get("use_responses_api") is None
+    assert captured.get("output_version") is None
+
+
+def test_gpt6_azure_not_rerouted(monkeypatch):
+    """``AzureChatOpenAI`` is a ``BaseChatOpenAI`` subclass, but Azure's Responses
+    API additionally requires ``api-version >= 2025-04-01-preview``; an Azure
+    gpt-6 deployment must not be silently flipped.
+    """
+    from langchain_openai import AzureChatOpenAI
+
+    model = ModelConfig(
+        name="gpt-6-azure",
+        display_name="GPT-6 Azure",
+        description=None,
+        use="langchain_openai:AzureChatOpenAI",
+        model="gpt-6.1-sol",
+        azure_endpoint="https://example.openai.azure.com/",
+        azure_deployment="gpt-6-deploy",
+        api_version="2024-02-01",
+    )
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(AzureChatOpenAI, captured))
+    factory_module.create_chat_model(name="gpt-6-azure")
+
+    assert captured.get("use_responses_api") is None
+    assert captured.get("output_version") is None
+
+
+def test_gpt6_output_version_only_still_routes(monkeypatch):
+    """An operator who pinned only ``output_version`` (implying Responses
+    formatting) without ``use_responses_api`` must still get Responses routing —
+    otherwise gpt-6 stays on /v1/chat/completions and the issue #6841 400s
+    silently reappear. The explicit ``output_version`` is preserved.
+    """
+    from langchain_openai import ChatOpenAI
+
+    model = ModelConfig(
+        name="gpt-6-output-version",
+        display_name="GPT-6 pinned output version",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="gpt-6.1-sol",
+        output_version="responses/v1",
+    )
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
+    factory_module.create_chat_model(name="gpt-6-output-version")
+
+    assert captured.get("use_responses_api") is True
+    assert captured.get("output_version") == "responses/v1"
