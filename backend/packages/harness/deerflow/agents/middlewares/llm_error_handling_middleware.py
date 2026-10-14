@@ -1108,7 +1108,7 @@ def _extract_in_band_status(exc: BaseException) -> int | None:
     Three sources, in order; the first that yields a status decides:
     a numeric ``code``/``status``/``status_code`` field (on the error, its body
     or the body's ``error`` object), an explicit status in the message
-    (``_IN_BAND_STATUS_RE``, leftmost match in 100-599), and ``type ==
+    (``_IN_BAND_STATUS_RE``, leftmost match in 400-599), and ``type ==
     "server_error"``, which OpenAI-compatible APIs use for 5xx failures (500).
     """
     body = getattr(exc, "body", None)
@@ -1129,7 +1129,7 @@ def _extract_in_band_status(exc: BaseException) -> int | None:
             return status
     for match in _IN_BAND_STATUS_RE.finditer(_extract_error_detail(exc).lower()):
         status = int(next(group for group in match.groups() if group))
-        if 100 <= status <= 599:
+        if 400 <= status <= 599:
             return status
     for value in (getattr(exc, "type", None), body.get("type"), error.get("type")):
         if isinstance(value, str) and value.strip().lower() == "server_error":
@@ -1138,11 +1138,11 @@ def _extract_in_band_status(exc: BaseException) -> int | None:
 
 
 def _as_http_status(value: Any) -> int | None:
-    """Return ``value`` as an HTTP status if it is an int or a three-digit string in 100-599."""
+    """Return ``value`` as an HTTP status if it is an int or a three-digit string in 400-599."""
     if isinstance(value, str):
         text = value.strip()
         value = int(text) if len(text) == 3 and text.isascii() and text.isdigit() else None
-    if isinstance(value, int) and not isinstance(value, bool) and 100 <= value <= 599:
+    if isinstance(value, int) and not isinstance(value, bool) and 400 <= value <= 599:
         return value
     return None
 

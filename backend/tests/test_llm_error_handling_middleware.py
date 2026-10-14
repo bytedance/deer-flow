@@ -26,6 +26,7 @@ from langgraph.errors import GraphBubbleUp
 from deerflow.agents.middlewares.llm_error_handling_middleware import (
     EmptyModelResponseError,
     LLMErrorHandlingMiddleware,
+    _extract_in_band_status,
     _extract_retry_after_ms,
 )
 from deerflow.config.app_config import AppConfig, LlmCallConfig
@@ -3123,6 +3124,7 @@ def test_omniroute_in_stream_504_is_transient(exc: openai.APIError) -> None:
         pytest.param("gateway [999] relayed HTTP 503", id="out-of-range-match-skipped"),
         pytest.param("error: [503] overloaded", id="bracketed-in-running-text"),
         pytest.param("openai-compatible-chat-conn:7b9b6797/glm-5.3: provider — [504]: upstream timed out (HTTP 504)", id="omniroute-combo-text"),
+        pytest.param("upstream answered HTTP 200, then failed with [503]", id="status-200-skipped-for-later-match"),
     ],
 )
 def test_in_stream_error_takes_its_status_from_the_message(message: str) -> None:
@@ -3143,11 +3145,30 @@ def test_in_stream_error_takes_its_status_from_the_message(message: str) -> None
         pytest.param({"type": "server_error"}, id="server-error-type"),
         pytest.param({"type": "SERVER_ERROR"}, id="server-error-type-upper-case"),
         pytest.param({"error": {"type": "server_error"}}, id="nested-server-error-type"),
+        pytest.param({"code": 200, "type": "server_error"}, id="code-200-skipped-for-server-error-type"),
+        pytest.param({"code": 200, "status": 503}, id="code-200-skipped-for-status"),
     ],
 )
 def test_in_stream_error_takes_its_status_from_structured_fields(error_fields: dict[str, Any]) -> None:
     exc = _in_stream_error("Upstream request failed.", **error_fields)
     assert _build_middleware()._classify_error(exc) == (True, "transient")
+
+
+def test_in_stream_non_error_status_does_not_hide_server_error_type() -> None:
+    exc = _in_stream_error("stream aborted after HTTP 200", type="server_error")
+    assert _build_middleware()._classify_error(exc) == (True, "transient")
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        pytest.param(_in_stream_error("stream aborted after HTTP 200"), id="message-http-200"),
+        pytest.param(_in_stream_error("Upstream request failed.", code=101), id="code-101"),
+        pytest.param(_in_stream_error("upstream redirected: status 302"), id="message-status-302"),
+    ],
+)
+def test_in_band_lookup_skips_non_error_statuses(exc: openai.APIError) -> None:
+    assert _extract_in_band_status(exc) is None
 
 
 @pytest.mark.parametrize(
