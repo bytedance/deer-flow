@@ -252,6 +252,29 @@ def test_exactly_the_two_summarize_scripts_alias_the_shared_reporting() -> None:
     assert aliasers == {"summarize_channels.py", "summarize_production.py"}
 
 
+# Declared deferrals, asserted rather than only commented: each site below is
+# known to read results with a related-but-different rule, and the recorded
+# reason is checked against the file. Folding one in makes this test fail until
+# the entry is removed, so the list can only shrink -- the same mechanic
+# tests/test_search_max_results_single_owner.py uses for its deferred providers.
+DEFERRED_REPORTERS = {
+    "scripts/benchmark/sandbox/summarize.py": (
+        "_COLUMNS",  # fixed columns, not the owner's row-discovered ones
+        '"(no data)"',  # its own empty-case notice, not NO_PAIRS_NOTICE
+        "def _load_jsonl",  # no input-index tag, no non-object rejection
+    ),
+}
+
+
+def test_the_deferred_reporter_still_defers_for_the_recorded_reason() -> None:
+    for rel, markers in DEFERRED_REPORTERS.items():
+        path = REPO_BACKEND / rel
+        text = path.read_text(encoding="utf-8")
+        for marker in markers:
+            assert marker in text, f"{rel} no longer matches the reason it was deferred for"
+        assert "checkpoint_bench_common" not in text, f"{rel} now reaches the owner; drop its deferral entry"
+
+
 def test_the_owner_still_exports_the_rest_of_the_family_contract() -> None:
     """The pre-existing shared API must not have been narrowed by the move."""
     for name in (
