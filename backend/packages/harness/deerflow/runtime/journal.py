@@ -1163,6 +1163,16 @@ class RunJournal(BaseCallbackHandler):
                 type(exc).__name__,
                 exc,
             )
+        else:
+            # Observability only: a late successful return is reported but does
+            # NOT clear quarantine, replay events, release successor writes, or
+            # make close(flush=False) report durability. "completed successfully"
+            # describes put_batch() returning, not an independent commit proof.
+            logger.warning(
+                "Journal store write for run %s completed successfully after writer abandonment (%d event(s)); quarantine policy remains unchanged",
+                self.run_id,
+                batch_size,
+            )
 
     async def _drain_pending_writes(self) -> None:
         """Settle every journal-owned write before any successor may start.

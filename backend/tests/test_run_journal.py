@@ -769,6 +769,56 @@ class TestWriteOwnership:
         assert "after the writer was abandoned" in caplog.text
 
     @pytest.mark.anyio
+    async def test_abandoned_store_success_is_logged_without_clearing_quarantine(self, monkeypatch, caplog):
+        """A late successful store return must be observable but change nothing else."""
+        import deerflow.runtime.journal as journal_module
+
+        monkeypatch.setattr(journal_module, "_WRITE_SETTLE_TIMEOUT_SECONDS", 0.02, raising=False)
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        class LateSuccessStore(MemoryRunEventStore):
+            def __init__(self) -> None:
+                super().__init__()
+                self.put_batch_calls = 0
+
+            async def put_batch(self, events):
+                self.put_batch_calls += 1
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    # Swallow the teardown cancel, keep the "I/O" running, then
+                    # complete successfully once released.
+                    await release.wait()
+                return await super().put_batch(events)
+
+        store = LateSuccessStore()
+        journal = RunJournal("r-late-ok", "t-late-ok", store, flush_threshold=100)
+        journal._put(event_type="A", category="trace", content="one")
+        journal._flush_sync()
+        await started.wait()
+
+        with caplog.at_level(logging.WARNING, logger="deerflow.runtime.journal"):
+            await asyncio.wait_for(journal.close(flush=False), timeout=2.0)
+            assert journal._closed is True
+            assert len(journal._abandoned_store_tasks) == 1, "inner store task was not supervised"
+            assert len(journal._quarantined_batches) == 1, "writer teardown should have quarantined the batch"
+
+            release.set()
+            for _ in range(10):
+                await asyncio.sleep(0)
+
+        assert journal._abandoned_store_tasks == {}
+        assert store.put_batch_calls == 1
+        # Observability only: the late success must not clear quarantine, replay,
+        # release successors, or make close(flush=False) report durability.
+        assert len(journal._quarantined_batches) == 1, "late success must not clear quarantine"
+        events = await store.list_events("t-late-ok", "r-late-ok")
+        assert [event["event_type"] for event in events] == ["A"]
+        assert "completed successfully after writer abandonment" in caplog.text
+
+    @pytest.mark.anyio
     async def test_store_self_cancellation_is_quarantined_not_replayed(self):
         class SelfCancellingStore(MemoryRunEventStore):
             def __init__(self) -> None:
