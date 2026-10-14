@@ -891,6 +891,199 @@ def _combine_llm_responses(*responses):
     return response
 
 
+async def _pump_loop(ticks: int = 30) -> None:
+    for _ in range(ticks):
+        await asyncio.sleep(0)
+
+
+def _returned_normally(task: asyncio.Task) -> bool:
+    if not task.done() or task.cancelled():
+        return False
+    return task.exception() is None
+
+
+class _GatedRunEventStore(MemoryRunEventStore):
+    """Records ``put_batch`` call order and blocks chosen event types on a gate."""
+
+    def __init__(self, gates: dict[str, asyncio.Event], failures: dict[str, BaseException] | None = None):
+        super().__init__()
+        self._gates = gates
+        self._failures = failures or {}
+        self.calls: list[str] = []
+
+    async def put_batch(self, events):
+        event_type = events[0]["event_type"]
+        self.calls.append(event_type)
+        gate = self._gates.get(event_type)
+        if gate is not None:
+            await gate.wait()
+        failure = self._failures.get(event_type)
+        if failure is not None:
+            raise failure
+        return await super().put_batch(events)
+
+
+class TestOperationOwnership:
+    """Normal flush/close are one serialised operation; force close preempts it.
+
+    Explicit flush and close(flush=True) share an operation lock so a successor
+    batch can never overtake an unsettled predecessor, every waiter observes the
+    same settlement, and a normal close only detaches after the whole buffer has
+    settled. close(flush=False) is a separate abort path that must not queue
+    behind a stuck flush and must never let an in-flight flush report success.
+    """
+
+    @pytest.mark.anyio
+    async def test_concurrent_close_waits_for_successor_batch(self):
+        gate_a = asyncio.Event()
+        gate_b = asyncio.Event()
+        store = _GatedRunEventStore({"A": gate_a, "B": gate_b})
+        journal = RunJournal("r-cclose", "t-cclose", store, flush_threshold=1)
+
+        journal._put(event_type="A", category="trace", content="a")
+        await _pump_loop()
+        assert store.calls == ["A"]
+        journal._put(event_type="B", category="trace", content="b")
+
+        close1 = asyncio.create_task(journal.close())
+        close2 = asyncio.create_task(journal.close())
+        await _pump_loop()
+
+        gate_a.set()
+        await _pump_loop()
+
+        early = [i for i, task in enumerate((close1, close2)) if _returned_normally(task)]
+        assert not early, f"close(s) {early} returned before successor batch settled; calls={store.calls}"
+
+        gate_b.set()
+        await asyncio.gather(close1, close2, return_exceptions=True)
+        assert store.calls == ["A", "B"]
+
+    @pytest.mark.anyio
+    async def test_concurrent_flushes_do_not_overtake_unsettled_predecessor(self):
+        gate_a = asyncio.Event()
+        gate_b = asyncio.Event()
+        store = _GatedRunEventStore({"A": gate_a, "B": gate_b})
+        journal = RunJournal("r-cflush", "t-cflush", store, flush_threshold=1)
+
+        journal._put(event_type="A", category="trace", content="a")
+        await _pump_loop()
+        assert store.calls == ["A"]
+        journal._put(event_type="B", category="trace", content="b")
+        journal._put(event_type="C", category="trace", content="c")
+
+        f1 = asyncio.create_task(journal.flush())
+        f2 = asyncio.create_task(journal.flush())
+        await _pump_loop()
+
+        gate_a.set()
+        await _pump_loop()
+
+        assert "C" not in store.calls, f"successor C overtook unsettled predecessor: calls={store.calls}"
+
+        gate_b.set()
+        await asyncio.gather(f1, f2, return_exceptions=True)
+
+    @pytest.mark.anyio
+    async def test_concurrent_flushes_all_report_unknown(self):
+        gate_a = asyncio.Event()
+        store = _GatedRunEventStore({"A": gate_a}, failures={"A": RuntimeError("unknown outcome")})
+        journal = RunJournal("r-cunknown", "t-cunknown", store, flush_threshold=1)
+
+        journal._put(event_type="A", category="trace", content="a")
+        await _pump_loop()
+        assert store.calls == ["A"]
+
+        f1 = asyncio.create_task(journal.flush())
+        f2 = asyncio.create_task(journal.flush())
+        await _pump_loop()
+        gate_a.set()
+        await asyncio.gather(f1, f2, return_exceptions=True)
+
+        reported = [not task.cancelled() and task.exception() is not None for task in (f1, f2)]
+        assert all(reported), f"some waiter did not report the UNKNOWN outcome: f1={f1!r} f2={f2!r}"
+
+    @pytest.mark.anyio
+    async def test_finishing_one_flush_does_not_release_operation_guard(self):
+        gate_a = asyncio.Event()
+        gate_b = asyncio.Event()
+        store = _GatedRunEventStore({"A": gate_a, "B": gate_b})
+        journal = RunJournal("r-cguard", "t-cguard", store, flush_threshold=1)
+
+        journal._put(event_type="A", category="trace", content="a")
+        await _pump_loop()
+        journal._put(event_type="B", category="trace", content="b")
+
+        f1 = asyncio.create_task(journal.flush())
+        f2 = asyncio.create_task(journal.flush())
+        await _pump_loop()
+        gate_a.set()
+        await _pump_loop()
+
+        assert journal._operation_lock.locked() is True, "operation guard was released while another flush was active"
+
+        gate_b.set()
+        await asyncio.gather(f1, f2, return_exceptions=True)
+
+    @pytest.mark.anyio
+    async def test_lease_loss_close_aborts_active_flush_without_success(self):
+        gate_a = asyncio.Event()
+        store = _GatedRunEventStore({"A": gate_a})
+        journal = RunJournal("r-lease", "t-lease", store, flush_threshold=1)
+
+        journal._put(event_type="A", category="trace", content="a")
+        await _pump_loop()
+
+        flush_task = asyncio.create_task(journal.flush())
+        await _pump_loop()
+        await journal.close(flush=False)
+        await _pump_loop()
+
+        assert not _returned_normally(flush_task), "active flush reported success after lease-loss close"
+        await asyncio.gather(flush_task, return_exceptions=True)
+
+    @pytest.mark.anyio
+    async def test_force_close_preempts_normal_close_without_success(self):
+        gate_a = asyncio.Event()
+        store = _GatedRunEventStore({"A": gate_a})
+        journal = RunJournal("r-mixclose", "t-mixclose", store, flush_threshold=1)
+
+        journal._put(event_type="A", category="trace", content="a")
+        await _pump_loop()
+        assert store.calls == ["A"]
+
+        normal_close = asyncio.create_task(journal.close())
+        await _pump_loop()
+        await journal.close(flush=False)
+        await _pump_loop()
+
+        assert not _returned_normally(normal_close), "normal close reported success after a force close"
+        await asyncio.gather(normal_close, return_exceptions=True)
+
+    @pytest.mark.anyio
+    async def test_concurrent_flush_not_committed_retry_is_characterised(self):
+        """Contract characterisation: a concurrent flush must not duplicate A."""
+        gate_a = asyncio.Event()
+        store = _GatedRunEventStore({"A": gate_a}, failures={"A": RunEventStoreNotCommittedError("not committed")})
+        journal = RunJournal("r-cnc", "t-cnc", store, flush_threshold=1)
+
+        journal._put(event_type="A", category="trace", content="a")
+        await _pump_loop()
+        assert store.calls == ["A"]
+
+        f1 = asyncio.create_task(journal.flush())
+        f2 = asyncio.create_task(journal.flush())
+        await _pump_loop()
+        gate_a.set()
+        await asyncio.gather(f1, f2, return_exceptions=True)
+        await _pump_loop()
+
+        # Only the durable-safety invariant is asserted here; the exact number of
+        # definite retries under concurrency is a maintainer contract decision.
+        events = await store.list_events("t-cnc", "r-cnc")
+        assert sum(1 for event in events if event["event_type"] == "A") <= 1
+
+
 class TestLlmCallbacks:
     @pytest.mark.anyio
     async def test_on_chat_model_start_persists_original_user_input_without_mutating_model_message(self, journal_setup):
