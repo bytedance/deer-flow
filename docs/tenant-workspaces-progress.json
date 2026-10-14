@@ -2017,5 +2017,42 @@
       "native credential/principal proof after promotion and actual backend/browser two-tab acceptance",
       "M4-M11 and full tenant activation; all parent work packages remain incomplete"
     ]
+  },
+  "frontend_upload_consumers": {
+    "job": "deerflow-tenant-frontend",
+    "status": "real native upload hooks bound to confirmed Context; app-shell activation and chat-stream submit remain pending",
+    "red": {
+      "build": 26,
+      "result": "FAILURE",
+      "tests_failed": 2,
+      "test_seconds": 3.7,
+      "build_seconds": 16.205,
+      "archive_sha256": "1e9e7511b8323a61a3b4b0a8a8e8a8c5b428196a35595a4d94dce798dbca8a9b",
+      "reason": "Existing actual hooks omit workspace selector and fulfill delayed decoded upload after selection. No scaffold or import failure."
+    },
+    "green": {
+      "build": 27,
+      "result": "SUCCESS",
+      "tests_passed": 21,
+      "tests_added": 2,
+      "main_test_seconds": 2.44,
+      "regression_test_seconds": 4.11,
+      "build_seconds": 397.952,
+      "archive_sha256": "b7af1b0220f0c51e308d97cff14cedace7cd9a29fb2b8b61f0896fa2497aa8e5",
+      "checks": "two actual React upload/list/limits/delete mains, 19 native upload/REST/Context regressions, modified-file Prettier, targeted ESLint max-warnings 0, full frontend pnpm check"
+    },
+    "source_sha256": {
+      "frontend/src/core/api/fetcher.ts": "d43fa61928d5fdaa4ef673492de2a89a0fe5e03d29477ba2b36edfc5587f3453",
+      "frontend/src/core/uploads/api.ts": "e8ef596c40675a59af3f52fd15e12264835aa3a12cc5632a45cf2e6e9f90b11f",
+      "frontend/src/core/uploads/hooks.ts": "8a698f43be8d27b1f467e6bdd2d23071a7235514e1234ebad222cc2a025aa038",
+      "frontend/tests/unit/core/uploads/workspace.dom.test.tsx": "bdc2bd21fa94e5307d9a5cd10d93f4ab3d37716cbfd7eaf594addaa2ac82d39c"
+    },
+    "scope": "Upload hooks capture confirmed immutable REST clients; query cancellation consumed; native multipart and error formatting retained; old decoded upload and retained callback refused; old mutation cannot invalidate the new cache. REST consume keeps native Response and fences native domain decoder success/error with captured combined signal.",
+    "cleanup": "#26-#27 terminal; exact owned container/network and upload-format probe inventories independently empty; dependency cache retained",
+    "remaining": [
+      "useThreadStream still calls direct uploadFiles and must bind upload+SDK+publication before real chat acceptance",
+      "thread/resource hooks, app capability bootstrap, selector and UI/storage/reconnect integration",
+      "real server/browser two-tab authorization; M4-M11 and full tenant activation remain open"
+    ]
   }
 }

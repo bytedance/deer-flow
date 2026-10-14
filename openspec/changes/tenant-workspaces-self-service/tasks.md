@@ -244,3 +244,26 @@ promotion remain M4/M6/M11. Same-workspace cookie actor change between metadata
 reads is covered; post-promotion cross-tab credential proof still is not.
 M3 and M4-M11 remain open; activation closed, no deployment/push/local runtime
 or model calls. Preserve original DeerFlow style in the coming selector UI.
+
+
+M3 actual upload consumer checkpoint: frontend #26 RED reproduced the existing
+hooks' missing selector and accepted late JSON upload. #27 SUCCESS passes two
+real React/StrictMode upload mains plus 19 upload/REST/Context regressions,
+modified-file formatting, zero-warning target lint and full pnpm check.
+Runtime/test files match the archived source; exact #26-#27 and formatter owned
+resources independently empty.
+
+Native upload/list/limits/delete hooks now capture the confirmed lifetime REST
+client. Scoped read queries consume TanStack cancellation; the REST client owns
+native Response objects in a private WeakMap and consume() checks the captured
+combined signal around whole domain decoders, preserving multipart/native
+structured errors. Switching aborts a delayed decoded upload and retained old
+mutation callback; a new workspace starts an empty observer/cache. Submit helper
+also checks lifetime before/after its await. Native unscoped callers retain their
+signatures and behavior.
+
+This is actual hook integration, still DOM/network doubles. useThreadStream's
+separate direct uploadFiles path and actual SDK/thread reads/submission are next;
+app-shell bootstrap/selector, storage/reconnect reset and actual browser/backend
+acceptance remain. No real business upload is claimed from this test. M3 and
+M4-M11 remain open, activation closed, no deployment/push/local runtime/model.

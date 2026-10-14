@@ -2,8 +2,26 @@
  * API functions for file uploads
  */
 
-import { fetch } from "../api/fetcher";
+import { fetch, type WorkspaceRESTClient } from "../api/fetcher";
 import { getBackendBaseURL } from "../config";
+
+export interface UploadRequestOptions {
+  rest?: WorkspaceRESTClient;
+  signal?: AbortSignal;
+}
+
+async function readUploadResponse<T>(
+  response: Response,
+  fallback: string,
+  rest?: WorkspaceRESTClient,
+): Promise<T> {
+  const decode = async (response: Response): Promise<T> => {
+    if (!response.ok)
+      throw new Error(await readErrorDetail(response, fallback));
+    return response.json();
+  };
+  return rest ? rest.consume(response, decode) : decode(response);
+}
 
 export interface UploadedFileInfo {
   filename: string;
@@ -126,6 +144,7 @@ async function readErrorDetail(
 export async function uploadFiles(
   threadId: string,
   files: File[],
+  options?: UploadRequestOptions,
 ): Promise<UploadResponse> {
   const formData = new FormData();
 
@@ -133,36 +152,35 @@ export async function uploadFiles(
     formData.append("files", file);
   });
 
-  const response = await fetch(
+  const response = await (options?.rest?.fetch ?? fetch)(
     `${getBackendBaseURL()}/api/threads/${threadId}/uploads`,
     {
       method: "POST",
       body: formData,
+      ...(options?.signal ? { signal: options.signal } : {}),
     },
   );
 
-  if (!response.ok) {
-    throw new Error(await readErrorDetail(response, "Upload failed"));
-  }
-
-  return response.json();
+  return readUploadResponse(response, "Upload failed", options?.rest);
 }
 
 /**
  * Load the upload limits enforced by the gateway for a thread
  */
-export async function getUploadLimits(threadId: string): Promise<UploadLimits> {
-  const response = await fetch(
+export async function getUploadLimits(
+  threadId: string,
+  options?: UploadRequestOptions,
+): Promise<UploadLimits> {
+  const response = await (options?.rest?.fetch ?? fetch)(
     `${getBackendBaseURL()}/api/threads/${threadId}/uploads/limits`,
+    ...(options?.signal ? ([{ signal: options.signal }] as const) : []),
   );
 
-  if (!response.ok) {
-    throw new Error(
-      await readErrorDetail(response, "Failed to load upload limits"),
-    );
-  }
-
-  return response.json();
+  return readUploadResponse(
+    response,
+    "Failed to load upload limits",
+    options?.rest,
+  );
 }
 
 /**
@@ -170,18 +188,18 @@ export async function getUploadLimits(threadId: string): Promise<UploadLimits> {
  */
 export async function listUploadedFiles(
   threadId: string,
+  options?: UploadRequestOptions,
 ): Promise<ListFilesResponse> {
-  const response = await fetch(
+  const response = await (options?.rest?.fetch ?? fetch)(
     `${getBackendBaseURL()}/api/threads/${threadId}/uploads/list`,
+    ...(options?.signal ? ([{ signal: options.signal }] as const) : []),
   );
 
-  if (!response.ok) {
-    throw new Error(
-      await readErrorDetail(response, "Failed to list uploaded files"),
-    );
-  }
-
-  return response.json();
+  return readUploadResponse(
+    response,
+    "Failed to list uploaded files",
+    options?.rest,
+  );
 }
 
 /**
@@ -190,18 +208,16 @@ export async function listUploadedFiles(
 export async function deleteUploadedFile(
   threadId: string,
   filename: string,
+  options?: UploadRequestOptions,
 ): Promise<{ success: boolean; message: string }> {
   const encodedFilename = encodeURIComponent(filename);
-  const response = await fetch(
+  const response = await (options?.rest?.fetch ?? fetch)(
     `${getBackendBaseURL()}/api/threads/${threadId}/uploads/${encodedFilename}`,
     {
       method: "DELETE",
+      ...(options?.signal ? { signal: options.signal } : {}),
     },
   );
 
-  if (!response.ok) {
-    throw new Error(await readErrorDetail(response, "Failed to delete file"));
-  }
-
-  return response.json();
+  return readUploadResponse(response, "Failed to delete file", options?.rest);
 }

@@ -403,7 +403,10 @@ root once; its fetch keeps native Request body/method, CSRF and live-401 behavio
 while binding the selector and cancellation through the shared transport.
 Prefer its `json()` for materialized JSON: it checks the captured combined signal
 after decoding and before returning data or a parsed GatewayApiError, so late
-results/errors cannot survive a cancelled lifetime. Raw fetch Response consumers
+results/errors cannot survive a cancelled lifetime. Native domain decoders use consume(response, reader), which accepts only
+a Response returned by this exact client and checks its combined signal before
+and after the whole success/error decoder, including caught parse failures.
+The Response itself remains native. Raw fetch consumers that skip consume()
 still own their post-decode/publication fences. Returning a value does not fence
 a caller that starts another await before applying it. Native unscoped fetch and
 static demos retain their original behavior; explicit workspace clients reject
@@ -434,3 +437,12 @@ consumer clients, selector UI and stored thread/artifact/reconnect metadata stil
 need integration. No automatic membership/session watcher is installed here;
 selection and explicit refresh revalidate. Cross-tab credentials/native principal
 consistency and physical Run behavior remain M4/M6/M11 requirements.
+
+
+Native upload hooks capture useWorkspaceLifetime and pass its REST client into
+upload/list/limits/delete APIs. Scoped list/limits queries consume their query
+AbortSignal; mutation cache effects skip expired lifetimes. The on-submit helper
+checks again after awaiting upload. Optional request options preserve native
+unscoped callers. useThreadStream's separate direct uploadFiles path is not yet
+bound by these hooks; it needs the same captured lifetime before chat activation.
+Do not infer complete chat isolation from the upload-hook checks.

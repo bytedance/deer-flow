@@ -158,34 +158,56 @@ export function createWorkspaceRESTClient(scope: WorkspaceRequestScope) {
       : window.location.origin;
   const apiRoot = new URL(`${getBackendBaseURL()}/api`, origin).toString();
   const transport = createWorkspaceFetch(snapshot, apiRoot);
-  const scopedFetch = (input: RequestInfo | URL, init?: RequestInit) =>
-    fetchAuthenticated(input, init, transport);
+  const responses = new WeakMap<Response, AbortSignal>();
+  const scopedFetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const prepared = prepareWorkspaceRequest(snapshot, apiRoot, input, init);
+    const response = await fetchAuthenticated(input, prepared, transport);
+    responses.set(response, prepared.signal!);
+    return response;
+  };
+  // Native domain decoders retain their status/error/Blob behavior. Ownership
+  // and the exact combined request signal survive all their decoding awaits.
+  const consume = async <T>(
+    response: Response,
+    reader: (response: Response) => Promise<T>,
+  ): Promise<T> => {
+    const signal = responses.get(response);
+    if (!signal) throw new Error("Response belongs to another REST client");
+    signal.throwIfAborted();
+    try {
+      const value = await reader(response);
+      signal.throwIfAborted();
+      return value;
+    } catch (error) {
+      signal.throwIfAborted();
+      throw error;
+    }
+  };
   return Object.freeze({
     fetch: scopedFetch,
+    consume,
     async json<T = unknown>(
       input: RequestInfo | URL,
       init?: RequestInit,
     ): Promise<T> {
-      // Retain this exact combined signal through decoding, rather than reread
-      // mutable caller options or a newly selected workspace after an await.
-      const prepared = prepareWorkspaceRequest(snapshot, apiRoot, input, init);
-      const response = await scopedFetch(input, prepared);
-      let body: unknown;
-      try {
-        body = await response.json();
-      } catch (error) {
-        prepared.signal?.throwIfAborted();
-        if (response.ok) throw error;
-        body = {};
-      }
-      prepared.signal?.throwIfAborted();
-      if (!response.ok)
-        throw parseGatewayApiError(
-          body,
-          response.status,
-          "Workspace request failed",
-        );
-      return body as T;
+      return consume(await scopedFetch(input, init), async (response) => {
+        let body: unknown;
+        try {
+          body = await response.json();
+        } catch (error) {
+          if (response.ok) throw error;
+          body = {};
+        }
+        if (!response.ok)
+          throw parseGatewayApiError(
+            body,
+            response.status,
+            "Workspace request failed",
+          );
+        return body as T;
+      });
     },
   });
 }
+
+export type WorkspaceRESTClient = ReturnType<typeof createWorkspaceRESTClient>;
