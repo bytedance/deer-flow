@@ -247,7 +247,7 @@ async def test_artifact_is_independent_json_snapshot(installed):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["plain", "tuple", "bad-content", "list-artifact", "nan", "object"])
+@pytest.mark.parametrize("kind", ["plain", "tuple", "bad-content", "list-artifact", "nan", "object", "int-key", "bool-key", "null-key", "float-key", "key-collision", "nested-key", "list-key", "tuple-key"])
 async def test_opt_in_invalid_result_is_sanitized_without_artifact(installed, kind):
     from deerflow_extension_api import PluginToolResult
 
@@ -259,6 +259,14 @@ async def test_opt_in_invalid_result_is_sanitized_without_artifact(installed, ki
         "list-artifact": PluginToolResult("visible", ["secret"]),
         "nan": PluginToolResult("visible", {"score": float("nan")}),
         "object": PluginToolResult("visible", {"sensitive": object()}),
+        "int-key": PluginToolResult("visible", {1: "secret"}),
+        "bool-key": PluginToolResult("visible", {True: "secret"}),
+        "null-key": PluginToolResult("visible", {None: "secret"}),
+        "float-key": PluginToolResult("visible", {1.5: "secret"}),
+        "key-collision": PluginToolResult("visible", {1: "secret", "1": "other"}),
+        "nested-key": PluginToolResult("visible", {"record": {1: "secret", "1": "other"}}),
+        "list-key": PluginToolResult("visible", {"rows": [{1: "secret"}]}),
+        "tuple-key": PluginToolResult("visible", {"rows": ({1: "secret"},)}),
     }
 
     async def handler(payload, context):
@@ -297,7 +305,7 @@ async def test_artifact_mode_combines_utf8_content_and_artifact_budget(installed
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("value", [{"text": "中文"}, ("legacy tuple", {"a": 1}), "quoted string", None])
+@pytest.mark.parametrize("value", [{"text": "中文"}, ("legacy tuple", {"a": 1}), "quoted string", None, {1: "integer", "nested": {None: "null"}}])
 async def test_default_mode_keeps_legacy_json_encoding(installed, value):
     _, plugin, _ = installed
 
