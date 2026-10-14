@@ -35,6 +35,11 @@ export const extensionCatalog = [
     package: "deerflow-extension-workflows",
     namespace: "community.workflows",
   },
+  {
+    key: "retrieval",
+    package: "deerflow-extension-retrieval",
+    namespace: "example.retrieval",
+  },
   { key: "example", package: "deerflow-extension-example", namespace: null },
 ] as const;
 

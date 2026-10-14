@@ -16,6 +16,7 @@ from urllib.parse import quote_plus
 
 import httpx
 
+from app.channels.allowed_users import parse_allowed_users, parse_string_or_int_user_id
 from app.channels.base import Channel, ChannelStopTimeout, abort_connection_transport, shutdown_private_loop
 from app.channels.commands import is_known_channel_command, strip_leading_mentions
 from app.channels.connection_identity import attach_connection_identity
@@ -72,20 +73,20 @@ def _normalize_conversation_type(raw: Any) -> str:
     return _CONVERSATION_TYPE_P2P
 
 
-def _normalize_allowed_users(allowed_users: Any) -> set[str]:
-    if allowed_users is None:
-        return set()
-    if isinstance(allowed_users, str):
-        values = [allowed_users]
-    elif isinstance(allowed_users, (list, tuple, set)):
-        values = allowed_users
-    else:
-        logger.warning(
-            "DingTalk allowed_users should be a list of user IDs; treating %s as one string value",
-            type(allowed_users).__name__,
-        )
-        values = [allowed_users]
-    return {str(uid) for uid in values if str(uid)}
+def _parse_allowed_users(allowed_users: Any) -> frozenset[str] | None:
+    """Parse DingTalk staff IDs with the shared fail-closed allowlist semantics.
+
+    Staff IDs are often all digits, so integer entries are accepted as text.
+    """
+    return parse_allowed_users(
+        allowed_users,
+        parse_user_id=parse_string_or_int_user_id,
+        logger=logger,
+        channel_name="DingTalk",
+        expected_id="a DingTalk staff ID (senderStaffId)",
+        valid_id_name="staff ID",
+        warn_on_scalar_separators=True,
+    )
 
 
 def _is_dingtalk_command(text: str) -> bool:
@@ -187,7 +188,7 @@ class DingTalkChannel(Channel):
         self._main_loop: asyncio.AbstractEventLoop | None = None
         self._client_id: str = ""
         self._client_secret: str = ""
-        self._allowed_users: set[str] = _normalize_allowed_users(config.get("allowed_users"))
+        self._allowed_users: frozenset[str] | None = _parse_allowed_users(config.get("allowed_users"))
         self._cached_token: str = ""
         self._token_expires_at: float = 0.0
         self._token_lock = asyncio.Lock()
@@ -603,7 +604,7 @@ class DingTalkChannel(Channel):
                     logger.warning("[DingTalk] main loop not running, cannot bind channel connection")
                 return
 
-            if self._allowed_users and sender_staff_id not in self._allowed_users:
+            if self._allowed_users is not None and sender_staff_id not in self._allowed_users:
                 logger.debug("[DingTalk] ignoring message from non-allowed user: %s", sender_staff_id)
                 return
 
