@@ -22,7 +22,7 @@ from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 
 REVISION = "0042_channel_leases"
 PREVIOUS = "0041_im_notice_preferences"
-CURRENT_HEAD = "0042_channel_leases"
+CURRENT_HEAD = "0043_webhook_claim_tokens"
 TABLE = "channel_leases"
 COLUMNS = {"provider", "owner_id", "epoch", "lease_expires_at", "transport_running", "updated_at"}
 pytestmark = pytest.mark.asyncio

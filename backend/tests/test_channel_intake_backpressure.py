@@ -249,7 +249,7 @@ async def test_stop_cancels_after_grace_drops_queue_and_releases_dedupe(tmp_path
     assert dedupe_key is not None
     # Cancellation must make the delivery retryable instead of black-holing it
     # in the dedupe store until TTL expiry.
-    assert await manager._inbound_dedupe_store.try_record(dedupe_key) is False
+    assert await manager._inbound_dedupe_store.try_record(dedupe_key) is not None
 
 
 @pytest.mark.asyncio

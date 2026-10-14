@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -52,7 +54,8 @@ async def test_repeated_cleanup_does_not_release_a_retry(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("reclaim", ["ttl", "capacity"])
 @pytest.mark.parametrize("old_outcome", ["success", "error", "cancel"])
-async def test_retired_worker_preserves_replacement_claim(monkeypatch, tmp_path, reclaim, old_outcome):
+@pytest.mark.parametrize("reuse_message", [False, True], ids=["new-envelope", "reused-envelope"])
+async def test_retired_worker_preserves_replacement_claim(monkeypatch, tmp_path, reclaim, old_outcome, reuse_message):
     clock = [0.0]
     # Replace only this module's clock, not asyncio's event-loop clock.
     monkeypatch.setattr(dedupe_module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
@@ -94,7 +97,8 @@ async def test_retired_worker_preserves_replacement_claim(monkeypatch, tmp_path,
     monkeypatch.setattr(manager, "_handle_message", handler)
     await manager.start()
     try:
-        await bus.publish_inbound(_message("old"))
+        original = _message("old")
+        await bus.publish_inbound(original)
         await asyncio.wait_for(old_started.wait(), 2)
         if reclaim == "ttl":
             clock[0] = dedupe_module.INBOUND_DEDUPE_TTL_SECONDS + 1
@@ -102,7 +106,11 @@ async def test_retired_worker_preserves_replacement_claim(monkeypatch, tmp_path,
             for index in range(2):
                 await bus.publish_inbound(_message(f"filler-{index}", message_id=f"other-{index}"))
                 await asyncio.wait_for(filler_handled[index].wait(), 2)
-        await bus.publish_inbound(_message("new"))
+        if reuse_message:
+            original.metadata = {**original.metadata, "attempt": "new"}
+            await bus.publish_inbound(original)
+        else:
+            await bus.publish_inbound(_message("new"))
         await asyncio.wait_for(new_started.wait(), 2)
         assert await manager._is_duplicate_inbound(_message("check-new-is-held")) is True
         if old_outcome == "cancel":
@@ -120,6 +128,47 @@ async def test_retired_worker_preserves_replacement_claim(monkeypatch, tmp_path,
         finish_new.set()
         await asyncio.wait_for(bus.join_inbound(), 2)
         await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_message_copy_keeps_the_original_cleanup_key(tmp_path):
+    manager = ChannelManager(bus=MessageBus(), store=JsonChannelStore(path=tmp_path / "store.json"))
+    original = _message("original")
+    other = _message("other", message_id="other-id")
+    assert await manager._is_duplicate_inbound(original) is False
+    assert await manager._is_duplicate_inbound(other) is False
+    copied = replace(original, metadata=dict(other.metadata))
+    assert copied._inbound_dedupe_claim is original._inbound_dedupe_claim
+    await manager._release_inbound_dedupe_key(copied)
+    assert await manager._is_duplicate_inbound(_message("retry")) is False
+    assert await manager._is_duplicate_inbound(_message("other-retry", message_id="other-id")) is True
+
+
+@pytest.mark.asyncio
+async def test_receive_file_replacement_keeps_the_admission_receipt(monkeypatch, tmp_path):
+    from app.channels import manager as manager_module
+    from app.channels import service as service_module
+
+    manager = ChannelManager(bus=MessageBus(), store=JsonChannelStore(path=tmp_path / "store.json"))
+    original = _message("original")
+    original.files = [{"filename": "example.txt"}]
+    assert await manager._is_duplicate_inbound(original) is False
+    rewritten = _message("rewritten", message_id="adapter-id")
+    channel = SimpleNamespace(receive_file=AsyncMock(return_value=rewritten))
+    monkeypatch.setattr(service_module, "get_channel_service", lambda: SimpleNamespace(get_channel=lambda name: channel))
+    monkeypatch.setattr(manager, "_resolve_run_params", lambda msg, thread_id: ("lead_agent", {}, {}))
+    monkeypatch.setattr(manager, "_apply_channel_policy", AsyncMock(return_value=None))
+    monkeypatch.setattr(manager, "_channel_supports_streaming", lambda name: True)
+    monkeypatch.setattr(manager_module, "_ingest_inbound_files", AsyncMock(return_value=[]))
+
+    async def consume_stream(client, message, *args, **kwargs):
+        assert message is rewritten
+        assert message._inbound_dedupe_claim is original._inbound_dedupe_claim
+        await manager._release_inbound_dedupe_key(message)
+
+    monkeypatch.setattr(manager, "_handle_streaming_chat", consume_stream)
+    await manager._handle_chat_on_thread(SimpleNamespace(), original, "thread", storage_user_id="owner")
+    assert await manager._is_duplicate_inbound(_message("retry")) is False
 
 
 @pytest.mark.asyncio

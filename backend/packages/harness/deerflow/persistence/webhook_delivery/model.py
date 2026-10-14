@@ -30,6 +30,8 @@ class WebhookDeliveryRow(Base):
     chat_id: Mapped[str] = mapped_column(String(512), nullable=False)
     message_id: Mapped[str] = mapped_column(String(1024), nullable=False)
     first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    # NULL legacy rows retain their TTL until a new admission supplies a token.
+    claim_token: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     __table_args__ = (
         PrimaryKeyConstraint("channel", "workspace_id", "chat_id", "message_id", name="pk_webhook_deliveries"),

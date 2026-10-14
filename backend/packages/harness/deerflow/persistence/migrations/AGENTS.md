@@ -32,7 +32,8 @@ The empty-DB path keeps using `create_all` because `Base.metadata` is the only a
 `0035_login_throttle` → `0036_run_idempotency_request` → `0037_project_document_summaries` →
 `0038_channel_thread_bindings` → `0039_user_disabled` →
 `0040_scheduled_group_notice` → `0041_im_notice_preferences` →
-`0042_channel_leases` (current head). The preference
+`0042_channel_leases` →
+`0043_webhook_claim_tokens` (current head). The preference
 revision adds a separate owner/key table with a cascading users foreign key and
 does not alter users; the project-documents revision adds a new owner-scoped
 shelf table, and the MCP lease-token revision adds two nullable token columns to
@@ -42,6 +43,11 @@ historical evidence. The run-idempotency revision adds a nullable private JSON
 request identity to `runs`; old Gateways ignore the column, so resume digests
 never enter public `kwargs_json`. Both revisions leave the bootstrap
 forward-compat floor unchanged.
+The webhook revision adds nullable `webhook_deliveries.claim_token` without a
+backfill or default. Legacy rows retain their TTL; admission rotates the token
+atomically with `first_seen`, and cleanup matches it in the same DELETE. Old
+replicas still delete by key, so all Gateway writers must be upgraded before
+per-admission cleanup is guaranteed. No bootstrap allowlist changes are needed.
 The incarnation revision deliberately retains the exact id audited by the
 rollback-floor binary; Alembic orders revisions by `down_revision`, not by the
 numeric prefix.

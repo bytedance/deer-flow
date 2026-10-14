@@ -86,13 +86,16 @@ async def test_two_stores_share_dedupe_state_across_pods():
     store_b = PostgresInboundDedupeStore(session_factory=sf)
     unique = uuid.uuid4().hex
     key = ("github", "repo", "repo", f"d-{unique}:uA:agentX")
+    claim = None
     try:
         # First pod records the delivery and proceeds.
-        assert await store_a.try_record(key) is False
+        claim = await store_a.try_record(key)
+        assert claim is not None
         # A redelivery landing on the second pod hits the same table -> duplicate.
-        assert await store_b.try_record(key) is True
+        assert await store_b.try_record(key) is None
     finally:
-        await store_a.release(key)
+        if claim is not None:
+            await store_a.release(claim)
 
 
 @pytest.mark.asyncio
@@ -147,6 +150,7 @@ async def test_expired_unreleased_row_is_reclaimed_on_next_redelivery():
     unique = uuid.uuid4().hex
     channel, workspace_id, chat_id, message_id = ("github", "repo", "repo", f"d-{unique}:expired")
     key = (channel, workspace_id, chat_id, message_id)
+    claim = None
     try:
         # Seed an already-expired, unreleased row for this key.
         async with sf() as session:
@@ -156,7 +160,8 @@ async def test_expired_unreleased_row_is_reclaimed_on_next_redelivery():
                     {"c": channel, "w": workspace_id, "ch": chat_id, "m": message_id, "age": INBOUND_DEDUPE_TTL_SECONDS + 1},
                 )
         # The expired row is reclaimed -> redelivery re-admitted (not a duplicate).
-        assert await store.try_record(key) is False
+        claim = await store.try_record(key)
+        assert claim is not None
         # Its first_seen is refreshed to ~now (well within the TTL).
         async with sf() as session:
             row = (
@@ -167,7 +172,8 @@ async def test_expired_unreleased_row_is_reclaimed_on_next_redelivery():
             ).fetchone()
         assert row is not None and row[0] is True
     finally:
-        await store.release(key)
+        if claim is not None:
+            await store.release(claim)
 
 
 @pytest.mark.asyncio
