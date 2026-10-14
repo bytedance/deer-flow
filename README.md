@@ -3198,6 +3198,15 @@ performs a production static-demo build for the fixture-backed workspace routes.
 It measures the unique JavaScript and CSS referenced by representative routes
 and writes the detailed result to `.next/performance-results.json`.
 
+### Script workflows (optional extension)
+
+The [script workflows extension](examples/deerflow-extension-workflows/README.md)
+adds inspectable JavaScript orchestration through full AgentRuns, background launch,
+bounded parallel execution, progress, retained results and cancellation. It is
+disabled by default and requires a POSIX Gateway and operator-authorized Agent
+references. Phase 1 does not support resume, human output approval, restart replay
+or a hard monetary budget. A runnable example and installation steps are included.
+
 ## License
 
 This project is open source and available under the [MIT License](./LICENSE).

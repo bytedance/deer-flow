@@ -85,6 +85,10 @@ compaction, or authentication. If existing hooks cannot express the feature, add
 generic hook to the extension contract plus an extension that uses it — do not
 hard-code business logic into core. Working examples:
 `examples/deerflow-extension-{example,bookmarks,agent-teams}`.
+The optional [script workflows extension](examples/deerflow-extension-workflows/README.md)
+uses only public AgentRuns and plugin contracts, with a POSIX isolated QuickJS worker,
+owner-scoped retained step records and supervised child cancellation. It is single-process
+per storage file; Phase 1 has no resume/restart replay or hard currency budget.
 
 Runtime config lives at the **repo root**: copy `config.example.yaml` → `config.yaml`
 (main app config) and `extensions_config.example.json` → `extensions_config.json` (MCP
