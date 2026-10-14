@@ -10,9 +10,9 @@ failure/replay-gap paths. Draft and confirmation regressions live in
 Answer details use `workspace/message-details` descriptors; skill run scoping
 is documented in `docs/skill-usage-ui.md`.
 
-Artifact URLs encode raw filesystem paths, preserving literal percent sequences.
-Only Markdown destinations decode once; relative images match decoded names
-against raw artifact paths before encoding.
+Encode raw paths preserving literal percent escapes. Decode Markdown destinations
+once; match image names to raw paths. Preserve sanitization; key Streamdown by
+file/thread/mock context plus scroll key.
 File-type detection uses the basename so extensionless `Dockerfile` and
 `Makefile` artifacts remain recognizable under nested or dotted directories.
 HTML preview base detection skips DOM construction without case-insensitive `base`
