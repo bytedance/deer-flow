@@ -949,6 +949,9 @@ configured value yielding no valid ID denies every guild and logs an error.
 of IDs exempt from `mention_only`, within allowed guilds. An empty value gives
 no exemptions, so `mention_only` applies everywhere when enabled.
 
+Discord inbound attachments have a 25 MiB download limit. Oversized-file notices
+show the enforced limit so senders can resize or compress the attachment.
+
 ```yaml
 channels:
   # LangGraph-compatible Gateway API base URL (default: http://localhost:8001/api)

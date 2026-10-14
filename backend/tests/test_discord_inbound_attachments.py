@@ -351,7 +351,7 @@ class TestDiscordReceiveFile:
         result = await channel.receive_file(msg, "thread-1")
         assert result.files == []
         assert "download failed" in result.text
-        assert "exceeds the download limit" not in result.text
+        assert "download limit" not in result.text
 
 
 class TestDiscordCdnHostGate:
@@ -364,3 +364,51 @@ class TestDiscordCdnHostGate:
         assert not DiscordChannel._is_discord_cdn_url("https://evil.example/x")
         assert not DiscordChannel._is_discord_cdn_url("https://cdn.discordapp.com.evil.io/x")
         assert DiscordChannel._is_discord_cdn_url("http://cdn.discordapp.com/x")  # host-only gate
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rejection", ["declared", "stream", "returned"])
+async def test_size_limit_notice_tracks_enforced_cap(monkeypatch, rejection):
+    from app.channels import discord as discord_mod
+
+    limit = 2 * 1024 * 1024
+    monkeypatch.setattr(discord_mod, "DISCORD_MAX_INBOUND_FILE_BYTES", limit)
+    channel = DiscordChannel(MessageBus(), {"bot_token": "discord-bot-token"})
+    download = AsyncMock(return_value=None if rejection == "stream" else b"x" * (limit + 1))
+    monkeypatch.setattr(channel, "_download_attachment", download)
+    msg = InboundMessage(
+        channel_name="discord",
+        chat_id="456",
+        user_id="123",
+        text="caption",
+        files=[{"filename": "report.pdf", "size": limit + 1 if rejection == "declared" else 4, "url": "https://cdn.discordapp.com/report.pdf"}],
+    )
+
+    result = await channel.receive_file(msg, "thread-1")
+
+    assert result.files == []
+    assert result.text == "caption\n\n[Discord attachment unavailable: report.pdf (exceeds the 2 MiB download limit)]"
+    if rejection == "declared":
+        download.assert_not_awaited()
+    else:
+        download.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_default_size_limit_notice_shows_25_mib(monkeypatch):
+    channel = DiscordChannel(MessageBus(), {"bot_token": "discord-bot-token"})
+    download = AsyncMock()
+    monkeypatch.setattr(channel, "_download_attachment", download)
+    msg = InboundMessage(
+        channel_name="discord",
+        chat_id="456",
+        user_id="123",
+        text="",
+        files=[{"filename": "large.pdf", "size": 26 * 1024 * 1024, "url": "https://cdn.discordapp.com/large.pdf"}],
+    )
+
+    result = await channel.receive_file(msg, "thread-1")
+
+    assert result.text == "[Discord attachment unavailable: large.pdf (exceeds the 25 MiB download limit)]"
+    assert result.files == []
+    download.assert_not_awaited()

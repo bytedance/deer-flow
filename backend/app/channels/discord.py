@@ -966,6 +966,7 @@ class DiscordChannel(Channel):
         token = self._bot_token or None
         materialized: list[dict[str, Any]] = []
         unavailable: list[str] = []
+        size_limit_notice = f"exceeds the {DISCORD_MAX_INBOUND_FILE_BYTES / (1024 * 1024):g} MiB download limit"
 
         for file_info in msg.files:
             if not isinstance(file_info, dict):
@@ -975,7 +976,7 @@ class DiscordChannel(Channel):
             declared_size = self._file_size(file_info.get("size"))
             if declared_size is not None and declared_size > DISCORD_MAX_INBOUND_FILE_BYTES:
                 logger.warning("[Discord] inbound file exceeds download limit, skipping: %s", filename)
-                unavailable.append(f"{filename} (exceeds the download limit)")
+                unavailable.append(f"{filename} ({size_limit_notice})")
                 continue
 
             url = file_info.get("url")
@@ -997,12 +998,12 @@ class DiscordChannel(Channel):
 
             if content is None:
                 # Stream aborted for size; encoding refusals raise above.
-                unavailable.append(f"{filename} (exceeds the download limit)")
+                unavailable.append(f"{filename} ({size_limit_notice})")
                 continue
 
             if len(content) > DISCORD_MAX_INBOUND_FILE_BYTES:
                 logger.warning("[Discord] downloaded inbound file exceeds limit, skipping: %s", filename)
-                unavailable.append(f"{filename} (exceeds the download limit)")
+                unavailable.append(f"{filename} ({size_limit_notice})")
                 continue
 
             materialized.append(
