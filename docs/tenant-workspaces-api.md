@@ -392,3 +392,58 @@ normal-run preservation, prior Run reads and three native compatibility tests.
 HTTP goal/state writes, new-thread provisioning, interrupted/cancelled commits,
 worker lease recovery and frontend remain separate acceptance requirements.
 Tenant activation stays closed; no full M3/M4 completion is claimed.
+
+## Native goal and state writes (partial M3)
+
+PUT/DELETE /threads/{id}/goal and POST /threads/{id}/state now bind trusted
+workspace scope before native ownership checks. A new-chat goal preserves the
+existing UUID-on-demand behavior: native threads:write permission and live scoped
+SQL metadata-only allocation precede the unchanged owner check; durable non-run
+admission then precedes any checkpoint creation. Foreign global IDs return 404
+without claiming ownership. Scope errors bypass generic ValueError/500 mapping.
+
+State graph/schema preparation happens outside resource SQL locks. The Gateway
+captures the private thread incarnation before checkpoint preparation; the final
+commit locks workspace -> actor -> thread and compares that incarnation and live
+policy before draining only prepared native checkpoint IO. Model/tool/graph setup
+is not allowed inside this callback. Native goal/checkpoint authority, state
+reducers, assistant bindings and durable reservations remain in use. This fence
+serializes authorization/lifecycle changes across checkpoint commit; it does not
+make separate metadata/checkpoint databases one atomic transaction.
+
+Jenkins #46 reproduced absent scope; #47 exposed new-chat metadata/owner-check
+ordering; #48 reached real graph writes and exposed integer versions manually
+seeded by the HTTP fixture versus SQLite saver string versions. The fixture now
+uses the actual saver allocator; production version handling is unchanged.
+#49 passed both real authenticated HTTP mains in 33.24s with SQLite/PostgreSQL
+metadata and durable native SQLite checkpoints: new goal creation, proper SQL
+ownership and reservation cleanup, state/title update, personal data preservation,
+foreign PUT/POST/DELETE denial, goal clear/read, real SQL incarnation replacement
+and goal/state policy withdrawal leaving checkpoint IDs unchanged.
+
+Six affected native regressions passed in #48 (the overall build remained failed
+for the HTTP fixture): new-chat goal, goal clear, cross-worker run conflict, real
+mutation graph and full/delta extension reducer channels. Archive comparison
+shows #48→#49 changed only test_workspace_http.py, so those regressions cover the
+unchanged production bytes. One existing Starlette TestClient SDK deprecation
+warning was recorded with that native regression run; no dependency workaround
+was added. Source hashes and all failures remain in the progress record.
+
+No new live-model, PostgreSQL-checkpointer, cancellation-during-commit, cross-store
+crash atomicity, physical migration or browser evidence is implied. Full Run/
+activity feeds, branch/delete/compact lifecycle and frontend switching remain
+M3/M4 requirements. Tenant activation stays closed.
+
+The follow-up owner-admission fault #50 exposed a narrower lifecycle window:
+re-reading incarnation after owner-check accepted a replacement and PUT goal
+returned 200. The final binding now preserves the entry private identity across
+owner-check; state/clear compare it before preparation, and PUT goal captures it
+before its delegated native owner-check. The request-local tuple is installed
+only by the trusted binder and restored on exit; it is never sourced from user
+input. Final SQL commit still checks that same identity under live locks.
+
+Jenkins #51 passed all 8 checks together in 34.31s, including actual owner-admission
+SQL incarnation replacement for PUT goal, POST state and DELETE goal, each
+returning 404 with unchanged checkpoint IDs, as well as both complete authenticated
+HTTP mains and six native regressions. The existing TestClient SDK warning
+remains diagnostic only. All final runtime/test bytes match the #51 archive.

@@ -2942,3 +2942,5 @@ Workspace read markers now use independent per-space viewer clocks and matching 
 Native Run history and usage repository reads now filter the selected workspace before pagination and aggregation. See [validation and remaining integration](docs/tenant-workspaces-api.md#native-run-read-isolation-partial-m3); tenant deployment remains blocked.
 
 Native non-run reservations now preserve workspace ownership through admission and cleanup after withdrawal. See [reservation validation and remaining HTTP/runtime work](docs/tenant-workspaces-api.md#scoped-native-operation-reservations-partial-m3); tenant activation remains closed.
+
+Workspace goal and state writes now preserve new-chat creation, native reservations and private lifecycle checks. See [write validation and remaining integration](docs/tenant-workspaces-api.md#native-goal-and-state-writes-partial-m3); full tenant activation remains blocked.

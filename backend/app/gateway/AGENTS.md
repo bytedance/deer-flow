@@ -382,3 +382,20 @@ workspaces.enabled flag. Scoped marker writes recheck live private thread
 access in the SQL mutation transaction; counters are per workspace/viewer and
 repeat reads write nothing. Thread activity and Run change feeds still need
 scoped integration; this does not activate multi-tenancy.
+
+Workspace goal/state writes use workspaces/checkpoints.py to capture private
+incarnation before preparation and fence the final prepared native checkpoint
+commit. PUT goal first checks native write permission, allocates only scoped SQL
+metadata for a new-chat UUID, then applies native owner-check and durable
+reservation; checkpoint creation remains inside final commit. Foreign global
+IDs are never claimed. WorkspaceAccessDenied inherits ValueError, so route
+handlers must preserve it before generic 422/500 handlers. DELETE goal and POST
+state require an existing private scoped thread. Tenant activation remains gated
+on the remaining M3–M11 coverage.
+
+Private-thread entry admission saves its workspace/actor/thread/incarnation on
+request.state for checkpoint writers, restoring any prior binding in finally.
+A subsequent live lookup compares this captured identity; it cannot replace it
+with a new incarnation. PUT goal captures identity before its delegated native
+owner-check, after metadata-only allocation. This prevents authorization awaits
+from silently moving an in-flight write onto a replacement conversation.

@@ -64,6 +64,8 @@ def workspace_resource_scope(*, allow_query_selector=False, private_thread_read=
             selector = request.query_params.get("workspace_id") if allow_query_selector else None
             context = await resolve_workspace_context(request, selector=selector)
             token = set_current_workspace(context)
+            previous_identity = getattr(request.state, "workspace_checkpoint_identity", None)
+            identity_bound = False
             try:
                 repository = None
                 admitted_incarnation = None
@@ -75,6 +77,8 @@ def workspace_resource_scope(*, allow_query_selector=False, private_thread_read=
                     admitted_incarnation = record.get("incarnation") if record is not None else None
                     if not isinstance(admitted_incarnation, str) or not admitted_incarnation:
                         raise HTTPException(status_code=404, detail="Thread not found")
+                    request.state.workspace_checkpoint_identity = (context.workspace_id, context.actor_user_id, bound.arguments["thread_id"], admitted_incarnation)
+                    identity_bound = True
                 result = await function(*args, **kwargs)
                 await service.revalidate(context)
                 if private_thread_read:
@@ -85,6 +89,11 @@ def workspace_resource_scope(*, allow_query_selector=False, private_thread_read=
             except WorkspaceAccessDenied:
                 raise HTTPException(status_code=404, detail="Workspace or resource not found") from None
             finally:
+                if identity_bound:
+                    if previous_identity is None:
+                        del request.state.workspace_checkpoint_identity
+                    else:
+                        request.state.workspace_checkpoint_identity = previous_identity
                 reset_current_workspace(token)
 
         scoped.__signature__ = signature

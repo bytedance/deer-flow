@@ -95,6 +95,7 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
             app.state.workspace_service = service
             delete_revocation = {}
             checkpoint_replacement = {}
+            owner_replacement = {}
 
             class ReplacingCheckpointSaver(AsyncSqliteSaver):
                 async def aget_tuple(self, config):
@@ -110,6 +111,11 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
             class RevokingThreadRepository(ThreadMetaRepository):
                 async def check_access(self, thread_id, user_id, *, require_existing=False):
                     allowed = await super().check_access(thread_id, user_id, require_existing=require_existing)
+                    if allowed and owner_replacement.get("thread_id") == thread_id:
+                        owner_replacement.clear()
+                        async with sf() as session:
+                            await session.execute(sa.text("UPDATE threads_meta SET incarnation=:incarnation WHERE thread_id=:id"), {"incarnation": uuid4().hex, "id": thread_id})
+                            await session.commit()
                     workspace_id = delete_revocation.pop("workspace_id", None)
                     if allowed and workspace_id is not None:
                         # Actual persisted withdrawal between owner admission and resource mutation.
@@ -222,7 +228,7 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                     old = await app.state.checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
                     checkpoint = empty_checkpoint()
                     checkpoint["channel_values"] = {"messages": [HumanMessage(content=marker, id=thread_id + "-message")], "title": marker, "goal": build_goal_state(marker + " objective")}
-                    checkpoint["channel_versions"] = {"messages": 1, "title": 1, "goal": 1}
+                    checkpoint["channel_versions"] = {channel: app.state.checkpointer.get_next_version(None, None) for channel in ("messages", "title", "goal")}
                     await app.state.checkpointer.aput(old.config, checkpoint, {"step": 0, "source": "update", "writes": {}, "parents": {}}, checkpoint["channel_versions"])
                 # Reopen a durable native checkpoint connection before exercising REST reads.
                 await checkpoint_connection.close()
@@ -277,6 +283,13 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                 assert replaced_update.status_code == 404, replaced_update.text
                 after_replaced = await app.state.checkpointer.aget_tuple({"configurable": {"thread_id": "team-research-thread", "checkpoint_ns": ""}})
                 assert after_replaced.config == before_replaced.config, "state committed across changed thread incarnation"
+                for method, suffix, payload in (("PUT", "/goal", {"objective": "Replaced owner goal"}), ("POST", "/state", {"values": {"title": "Replaced owner title"}}), ("DELETE", "/goal", None)):
+                    before_owner_change = await app.state.checkpointer.aget_tuple({"configurable": {"thread_id": "team-research-thread", "checkpoint_ns": ""}})
+                    owner_replacement["thread_id"] = "team-research-thread"
+                    rejected = await client.request(method, "/api/threads/team-research-thread" + suffix, headers=team_headers, json=payload)
+                    assert rejected.status_code == 404, rejected.text
+                    after_owner_change = await app.state.checkpointer.aget_tuple({"configurable": {"thread_id": "team-research-thread", "checkpoint_ns": ""}})
+                    assert after_owner_change.config == before_owner_change.config, "owner admission replacement still committed checkpoint bytes"
                 # Withdrawal after genuine native owner admission must not mutate checkpoints.
                 before_denied = await app.state.checkpointer.aget_tuple({"configurable": {"thread_id": "team-research-thread", "checkpoint_ns": ""}})
                 delete_revocation["workspace_id"] = team
@@ -284,6 +297,11 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                 assert denied_update.status_code == 404, denied_update.text
                 after_denied = await app.state.checkpointer.aget_tuple({"configurable": {"thread_id": "team-research-thread", "checkpoint_ns": ""}})
                 assert after_denied.config == before_denied.config
+                delete_revocation["workspace_id"] = team
+                denied_goal = await client.put("/api/threads/team-research-thread/goal", headers=team_headers, json={"objective": "Withdrawn objective"})
+                assert denied_goal.status_code == 404, denied_goal.text
+                after_denied_goal = await app.state.checkpointer.aget_tuple({"configurable": {"thread_id": "team-research-thread", "checkpoint_ns": ""}})
+                assert after_denied_goal.config == before_denied.config
                 async with sf() as session:
                     session.add(RunRow(run_id="team-read-http", thread_id="team-research-thread", workspace_id=team, user_id=identities["alice"], status="success", change_seq=10, origin_kind="schedule"))
                     await session.commit()

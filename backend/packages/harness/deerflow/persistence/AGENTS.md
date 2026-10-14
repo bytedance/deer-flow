@@ -140,3 +140,12 @@ captured workspace/user/worker and excludes normal runs; it deliberately does
 not require live membership/parent so withdrawal/deletion cannot strand cleanup.
 This release is not authority for reads/publication. Normal scoped Run lifecycle
 and HTTP goal/state writers remain unintegrated; activation stays refused.
+
+ThreadMetaRepository.commit_checkpoint_under_live_lock is a dedicated final
+checkpoint commit fence, separate from file publication. Callers hold durable
+non-run admission, capture incarnation before preparing state and construct
+graphs outside SQL locks. The fence rechecks workspace/actor/thread/incarnation
+and drains prepared native checkpoint IO while authorization/lifecycle locks
+remain held. It cannot make separate checkpoint/metadata databases atomic; never
+put model/tool/graph setup in the callback. Crash/cancellation acceptance remains
+required beyond the current actual HTTP withdrawal/incarnation evidence.

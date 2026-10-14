@@ -992,6 +992,94 @@
     "draft_sha256": "be88c7136f7e5768ec4ff3a775b132b9b5fe63f4abc7f9ec5fdb47b7779c2c2f",
     "draft_verification": "Ruff check only; pytest not run; no cloud upload/build started",
     "draft_archive_sha256": "976ec90433e69f4ff8b98f25d404a5ee86937f864703d219c40f7b0fbf4072fb",
-    "next": "Run actual HTTP RED for goal/state writes, then integrate scoped new-thread metadata provisioning and short checkpoint commit fencing; keep M0–M11 scope intact"
+    "next": "Run actual HTTP RED for goal/state writes, then integrate scoped new-thread metadata provisioning and short checkpoint commit fencing; keep M0–M11 scope intact",
+    "status": "resumed",
+    "resumed_date": "2026-10-14"
+  },
+  "checkpoint_writes": {
+    "base_commit": "33f7e1ef",
+    "job": "deerflow-tenant-m1-postgres",
+    "red": {
+      "build": 46,
+      "result": "FAILURE",
+      "tests_failed": 2,
+      "elapsed_seconds": 26.58,
+      "archive_sha256": "937d9481ae65618ad6391eabc34e3447726305c0ff466a3162d5f57ea280369b",
+      "reason": "goal PUT has no trusted scope before native owner admission"
+    },
+    "intermediate_failures": [
+      {
+        "build": 47,
+        "result": "FAILURE",
+        "tests_failed": 2,
+        "native_regressions_passed": 6,
+        "elapsed_seconds": 24.58,
+        "archive_sha256": "04bca0363e1a5d45f507eeed4d01ebfb38a9f8f545c6b36c4b9726a349b07b34",
+        "reason": "strict scoped owner-check precedes new-chat SQL metadata allocation"
+      },
+      {
+        "build": 48,
+        "result": "FAILURE",
+        "tests_failed": 2,
+        "native_regressions_passed": 6,
+        "elapsed_seconds": 26.65,
+        "archive_sha256": "8e1bab7c7a14b8a72168cbc33d29dcfce0e852be1fdf30ed175d6195dfd64825",
+        "reason": "HTTP fixture seeded integer channel versions incompatible with real SQLite saver allocator strings",
+        "command": "python -m pytest tests/test_workspace_http.py tests/test_threads_router.py::test_put_goal_creates_missing_thread_checkpoint_and_returns_goal tests/test_threads_router.py::test_goal_status_and_clear_round_trip tests/test_threads_router.py::test_goal_mutations_reject_run_owned_by_another_worker tests/test_threads_router.py::test_update_thread_state_real_mutation_graph_finishes_without_scheduling tests/test_threads_router.py::test_state_endpoints_preserve_extension_reducer_channels -q --tb=short --no-showlocals",
+        "warnings": [
+          "Existing Starlette TestClient/httpx SDK deprecation warning"
+        ]
+      },
+      {
+        "build": 50,
+        "result": "FAILURE",
+        "tests_failed": 2,
+        "elapsed_seconds": 26.14,
+        "archive_sha256": "5657a7e821f57507b7675fdf0e3c7688ed515675aeac0be77255d59a1c9610f8",
+        "reason": "actual owner admission incarnation replacement returned200 and committed a goal to the replacement"
+      }
+    ],
+    "green": {
+      "build": 51,
+      "result": "SUCCESS",
+      "tests_passed": 8,
+      "elapsed_seconds": 34.31,
+      "archive_sha256": "27758f457f90972ebc28e768aaee441cdee4f7a4661c4ef5e4151f3a96d3d1e2",
+      "command": "python -m pytest tests/test_workspace_http.py tests/test_threads_router.py::test_put_goal_creates_missing_thread_checkpoint_and_returns_goal tests/test_threads_router.py::test_goal_status_and_clear_round_trip tests/test_threads_router.py::test_goal_mutations_reject_run_owned_by_another_worker tests/test_threads_router.py::test_update_thread_state_real_mutation_graph_finishes_without_scheduling tests/test_threads_router.py::test_state_endpoints_preserve_extension_reducer_channels -q --tb=short --no-showlocals",
+      "warnings": [
+        "Existing Starlette TestClient/httpx SDK deprecation warning"
+      ]
+    },
+    "regression_evidence": "Final #51 passes both actual HTTP mains and six native regressions together; all final runtime/test bytes match its archive.",
+    "source_sha256": {
+      "backend/app/gateway/routers/threads.py": "d76f36e528a2d8da040f31f506b19cde1d35c41862a72a5cd34439bc3ebece42",
+      "backend/app/gateway/workspaces/checkpoints.py": "d342637ad722deb9938c437a02d66c6aab546451dbf2696767525f3542791264",
+      "backend/app/gateway/workspaces/dependencies.py": "113fa7b06d10aa301f0ceeeb4a4e6c643e2911eaf3b56f52900548b1f22a562f",
+      "backend/packages/harness/deerflow/persistence/thread_meta/sql.py": "3f123b407ea218dc6c269734b14725476a965e02bd6d3a969a955387f386bc52",
+      "backend/tests/test_workspace_http.py": "7a92fe9535e61240fde17c4f7667bed7a32839e92c2ac987c216f83633c1e464"
+    },
+    "scope": "Actual authenticated goal create/clear and state/title writes through native RunManager/repositories/checkpoints with both metadata dialects; foreign methods refused, actual policy withdrawal and incarnation rotation leave checkpoint IDs unchanged. Final #51 additionally proves owner-check replacement for PUT goal, POST state and DELETE goal cannot replace original admission identity or change checkpoint IDs.",
+    "remaining": "M3 checkpoint-only legacy ID collision/adoption guard, branch/delete/compact lifecycle, full Run/feed/client; PostgreSQL checkpointer, cancellation-in-commit/cross-store crash and physical deployment. M3 and later packages remain incomplete.",
+    "initial_http_green": {
+      "build": 49,
+      "result": "SUCCESS",
+      "tests_passed": 2,
+      "elapsed_seconds": 33.24,
+      "archive_sha256": "f8a37027e75b897eaeab88a908c442f46f10e45dcced05b0cf981e29f37303f0",
+      "command": "python -m pytest tests/test_workspace_http.py -q --tb=short --no-showlocals"
+    },
+    "cleanup": {
+      "builds": [
+        46,
+        47,
+        48,
+        49,
+        50,
+        51
+      ],
+      "containers": [],
+      "networks": [],
+      "verified": "Each build ownership label independently inspected on Jenkins"
+    }
   }
 }

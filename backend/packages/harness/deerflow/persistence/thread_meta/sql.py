@@ -92,6 +92,26 @@ class ThreadMetaRepository(ThreadMetaStore):
             await session.commit()
             return result
 
+    async def commit_checkpoint_under_live_lock[T](self, thread_id: str, *, incarnation: str, commit: Callable[[], Awaitable[T]], user_id: str | None | _AutoSentinel = AUTO) -> T:
+        """Fence only prepared native checkpoint IO, never graph/model/tool setup.
+
+        The caller must hold its durable non-run reservation. Metadata and
+        checkpoint storage need not share a transaction; the live SQL locks
+        serialize authorization/lifecycle changes across the drained write.
+        This does not make two databases an atomic transaction.
+        """
+        owner = resolve_user_id(user_id, method_name="ThreadMetaRepository.commit_checkpoint_under_live_lock")
+        context = self._scope(owner)
+        if context is None or not incarnation:
+            raise WorkspaceAccessDenied("checkpoint commit requires private thread identity")
+        async with self._sf() as session:
+            row = await self._locked_row(session, thread_id, owner, context)
+            if row is None or row.incarnation != incarnation:
+                raise WorkspaceAccessDenied("checkpoint thread changed before commit")
+            result = await await_drained(commit())
+            await session.commit()
+            return result
+
     async def create(
         self,
         thread_id: str,
