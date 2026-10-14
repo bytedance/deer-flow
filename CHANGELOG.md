@@ -1259,7 +1259,7 @@ This release closes that milestone with **621 merged pull requests**.
   `type: server_error` (500); only when none yields one does its busy check
   also match spellings such as `rate-limit` and `RATE_LIMIT_…`. Retry budget,
   backoff and circuit breaker treat it as the equivalent HTTP error; errors
-  that carry a status are classified as before.
+  that carry a status are classified as before. (issue #6896, [#6897])
 
 - **deploy:** The Gateway container now shuts down gracefully. The production
   compose `command`, both `CMD`s in `backend/Dockerfile` and the Helm chart
@@ -11725,3 +11725,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6844]: https://github.com/bytedance/deer-flow/pull/6844
 [#6852]: https://github.com/bytedance/deer-flow/pull/6852
 [#6865]: https://github.com/bytedance/deer-flow/pull/6865
+[#6897]: https://github.com/bytedance/deer-flow/pull/6897

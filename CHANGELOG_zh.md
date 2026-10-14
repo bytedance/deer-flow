@@ -1010,7 +1010,7 @@
   字段、消息中明确写出的 `[504]`、`HTTP 502` 或 `status 503`（`messages[502]` 这类
   数组下标不算）、以及 `type: server_error`（视为 500）中取得 4xx 或 5xx 状态码；都
   取不到时，繁忙判断才会额外匹配 `rate-limit`、`RATE_LIMIT_…` 等写法。重试预算、退避
-  和熔断器按对应的 HTTP 错误处理；带状态码的错误分类不变。
+  和熔断器按对应的 HTTP 错误处理；带状态码的错误分类不变。 (issue #6896, [#6897])
 
 - **前端：** 用户管理设置页不再在静态网站演示中发出注定失败的查询，非管理员的
   `?settings=users` 深链接也不再打开仅管理员可见的面板。该页面此前只以
@@ -9355,3 +9355,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6844]: https://github.com/bytedance/deer-flow/pull/6844
 [#6852]: https://github.com/bytedance/deer-flow/pull/6852
 [#6865]: https://github.com/bytedance/deer-flow/pull/6865
+[#6897]: https://github.com/bytedance/deer-flow/pull/6897
