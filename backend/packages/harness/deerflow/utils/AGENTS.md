@@ -7,6 +7,13 @@ umask; replacements preserve existing permission bits before publication. Never
 read the process umask by changing it in this threaded runtime. Behavioral tests
 for both tool imports live in `tests/test_browser_outputs_atomic.py`.
 
+Browserless captures use `overwrite=False`: link the complete sibling exclusively
+and retry a claimed destination name. Do not use a process-local lock or expose
+an empty reservation under the final name. Hard-link failures never fall back to
+replacement; cleanup after a successful link is best-effort. Cross-process
+ownership tests live in `tests/test_browser_atomic_no_overwrite.py`, and real
+helper/tool concurrency regressions in `tests/test_browserless_capture_collision.py`.
+
 ### Model Retry Hints
 
 `retry_after.py::bounded_retry_after_ms` shares the 24-hour provider-hint ceiling

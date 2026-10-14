@@ -2595,6 +2595,11 @@ after the complete file is written. New files use the host's normal creation
 permissions (typically `0644`), and replacements preserve existing permissions,
 so sandbox code can read captures when those permissions allow it.
 
+Concurrent Browserless `web_capture` calls keep distinct filenames and preserve
+every successful capture, including when they request the same name. Their host
+output filesystem must support hard links; publication reports an error if it
+cannot create one, rather than overwriting another capture.
+
 Browser dependency auto-detection accepts `name`, `group`, and `use` in any
 order within a tool entry, with either indented or indentless YAML lists.
 

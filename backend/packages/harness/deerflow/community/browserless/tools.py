@@ -32,7 +32,7 @@ _OUTPUT_FORMAT_TO_EXTENSION = {
     "webp": "webp",
 }
 _SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
-# Cap collision-suffix probing so a saturated outputs directory cannot spin forever.
+# Bound suffix probing and publication retries in a contended outputs directory.
 _MAX_FILENAME_COLLISION_PROBES = 1000
 DEFAULT_BASE_URL = "http://localhost:3032"
 _UNSET = object()
@@ -230,14 +230,14 @@ def _dedupe_output_name(outputs_path: Path, output_name: str) -> str:
     saturated with the bounded probe range.
     """
     candidate = outputs_path / output_name
-    if not candidate.exists():
+    if not os.path.lexists(candidate):
         return output_name
 
     stem = Path(output_name).stem
     suffix = Path(output_name).suffix
     for index in range(1, _MAX_FILENAME_COLLISION_PROBES + 1):
         probe = f"{stem}-{index}{suffix}"
-        if not (outputs_path / probe).exists():
+        if not os.path.lexists(outputs_path / probe):
             return probe
 
     timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S-%f")
@@ -247,9 +247,15 @@ def _dedupe_output_name(outputs_path: Path, output_name: str) -> str:
 def _write_capture_output(outputs_path: Path, output_name: str, content: bytes) -> str:
     """Write ``content`` into ``outputs_path`` and return the actual filename used."""
     outputs_path.mkdir(parents=True, exist_ok=True)
-    final_name = _dedupe_output_name(outputs_path, output_name)
-    _publish_bytes_atomically(outputs_path / final_name, content)
-    return final_name
+    for _ in range(_MAX_FILENAME_COLLISION_PROBES):
+        final_name = _dedupe_output_name(outputs_path, output_name)
+        try:
+            _publish_bytes_atomically(outputs_path / final_name, content, overwrite=False)
+        except FileExistsError:
+            # Another thread or process published after the advisory name check.
+            continue
+        return final_name
+    raise FileExistsError(f"Could not publish capture after {_MAX_FILENAME_COLLISION_PROBES} filename collisions")
 
 
 def _target_status_warning(result: BrowserlessScreenshotResult | BrowserlessFetchResult) -> str:
