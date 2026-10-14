@@ -122,6 +122,28 @@ test("parent feedback and title-only rerenders retain the original instant", () 
   );
 });
 
+test("a stored skipped midnight opens at the scheduler's time without rewriting it", () => {
+  const initial = once("2026-09-06", "America/Santiago");
+  const onChange = rs.fn();
+  const ui = render(
+    <ScheduledTaskScheduleInput
+      initial={initial}
+      onChange={onChange}
+      scheduleTypeLocked
+    />,
+  );
+  const input = ui.getByLabelText("Run at") as HTMLInputElement;
+  expect(input.value).toBe("2026-09-06T01:00");
+  expect(onChange).toHaveBeenLastCalledWith(initial);
+
+  fireEvent.change(input, { target: { value: "2026-09-06T02:00" } });
+  expect(onChange).toHaveBeenLastCalledWith(
+    once("2026-09-06T05:00:00+00:00", "America/Santiago"),
+  );
+  fireEvent.change(input, { target: { value: "2026-09-06T01:00" } });
+  expect(onChange).toHaveBeenLastCalledWith(initial);
+});
+
 test("changing timezone recomputes the instant and reverting restores seconds", () => {
   const initial = once("2027-06-01T12:30:45Z");
   const onChange = rs.fn();

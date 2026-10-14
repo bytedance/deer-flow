@@ -1012,6 +1012,18 @@
   取不到时，繁忙判断才会额外匹配 `rate-limit`、`RATE_LIMIT_…` 等写法。重试预算、退避
   和熔断器按对应的 HTTP 错误处理；带状态码的错误分类不变。 (issue #6896, [#6897])
 
+- **渠道：** 从 IM 渠道发起的运行不再随接收消息的 Gateway 实例一起消亡。manager 在整个
+  运行期间保持 `runs.wait` / `runs.stream` 请求打开，而 Gateway 会在创建请求断开时取消
+  运行，除非该请求声明了 `on_disconnect: continue`；因此 leader 切换、滚动重启或接收
+  实例崩溃都会取消所有进行中的 IM 运行。渠道运行现在声明 `continue`，运行会在执行它的
+  Gateway 上完成并持久化对话线程状态——即使 IM 回复随旧传输丢失，答案仍可在 Web UI
+  中查看。同一策略也覆盖 Slack/Discord `runs.wait` 遇到 SDK 300 秒读超时的情况：聊天里
+  仍会收到错误回复，但运行会在后台完成而不再被取消。由于运行会继续，manager 现在在运行
+  请求发出之后保留入站去重键（worker 被取消、读超时、连接断开）：provider 在新持有者上的
+  重投递会被丢弃，而不是把这一轮再执行一遍；Gateway 拒绝的请求或发送前的失败仍会释放该键
+  以便重试。即发即弃渠道（GitHub）不受影响：`runs.create` 在运行进入 pending 后即返回。
+  ([#6876])
+
 - **前端：** 用户管理设置页不再在静态网站演示中发出注定失败的查询，非管理员的
   `?settings=users` 深链接也不再打开仅管理员可见的面板。该页面此前只以
   `system_role === "admin"` 判断，而演示用户名义上是管理员，静态响应层又没有
@@ -9355,4 +9367,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6844]: https://github.com/bytedance/deer-flow/pull/6844
 [#6852]: https://github.com/bytedance/deer-flow/pull/6852
 [#6865]: https://github.com/bytedance/deer-flow/pull/6865
+[#6876]: https://github.com/bytedance/deer-flow/pull/6876
 [#6897]: https://github.com/bytedance/deer-flow/pull/6897
