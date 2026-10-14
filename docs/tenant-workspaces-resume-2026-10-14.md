@@ -212,3 +212,30 @@ and role/OAuth boundaries. Remaining files/artifact/PUT/history, frontend, produ
 and scope-required factory integration and M4–M11 still gate tenant activation.
 
 Latest: #81 FAILURE/#82 SUCCESS both terminal, resources empty, four runtime/test files matched #82 archive. Feedback SQL/HTTP main verified, not full M3. Next inspect remaining artifact/archive/PUT/history paths before frontend. Original M0–M11 active, no tenant push/deployment, activation closed.
+
+### Remaining artifact entry audit after #82
+
+Read-only inspection (not a runtime proof): native thread history POST is already
+private-scope bound; its deferred history metadata producer still belongs in M4.
+The concrete next M3 gaps are:
+- GET artifact currently binds general scope then captures its parent after native
+  owner admission. Capture private entry identity before owner check to prevent
+  adopting a replacement conversation during admission; retain query locators.
+- PUT artifact is not yet scope-bound. Preserve native operation reservation,
+  digest and UTF-8/size rules; final short mounted-host publication must check
+  captured identity under live SQL locks. Never hold SQL locks across remote
+  sandbox networking; non-mounted/remote publication needs the explicit M4/M5
+  provider protocol, not silent host-only success.
+- Native terminal Run archive manifest/download lack workspace binding. Add
+  exact private Run/parent checks and before-send response checks around native
+  archive generation, preserving real presented delivery events and current
+  bytes. The already-open native temporary archive must close on pre-header
+  refusal, decorator post-materialization refusal, cancellation and normal send;
+  a wrapper must not strand the file or execute unrelated background effects.
+- WorkspaceThreadResponse currently guards only before headers; continuous
+  credential/role/transport revocation remains explicitly M6/M11, not proven by
+  the existing prepared-file tests.
+
+Use one real SQL/JWT/file archive main and directly affected native regressions
+before broad fault matrices. No change has been made for these gaps yet; they
+remain mandatory under the original full M0–M11 scope and activation gate.
