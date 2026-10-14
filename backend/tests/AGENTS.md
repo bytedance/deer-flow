@@ -198,6 +198,10 @@ tests never need credentials or network access.
 
 ## MCP claim fencing
 
+Notification recovery tests advance to the persisted `next_notification_at` after
+dispatch. It records completion time; a fixed scan-time offset can query before
+the notification is due on a slower runner. Preserve delivery and counter assertions.
+
 `test_mcp_task_repository.py` covers same-worker reclaim during an in-flight
 release, poll/cancel snapshot, or notification completion. Use explicit events
 to pause the old operation at the persistence boundary, reclaim via the real
