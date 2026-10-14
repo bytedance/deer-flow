@@ -22,9 +22,12 @@ platform connection. This module keeps the holder's side of that contract:
   cannot hold a renewal past the deadline it protects. A call that times out
   after the statement committed only ever errs toward "not held".
 
-Peers' leases are cached from failed acquisitions so ``get_status`` (sync)
-can report who leads a provider and whether its transport was running at the
-holder's last renewal.
+Peers' leases are cached from one bounded read of the whole table per
+supervision round (:meth:`ChannelLeadership.observe_all`) and from failed
+acquisitions, so ``get_status`` (sync) and the notification claim filter know
+who leads *every* provider, including one this instance has no config for
+(a provider connected from the web UI on a peer never enters this instance's
+channel config).
 """
 
 from __future__ import annotations
@@ -49,11 +52,13 @@ class ChannelLeaseRepository(Protocol):
 
     async def acquire(self, provider: str, owner_id: str, *, ttl_seconds: float, grace_seconds: float) -> ChannelLeaseGrant | None: ...
 
-    async def renew(self, provider: str, owner_id: str, epoch: int, *, ttl_seconds: float, transport_running: bool) -> float | None: ...
+    async def renew(self, provider: str, owner_id: str, epoch: int, *, ttl_seconds: float, transport_running: bool) -> bool: ...
 
     async def release(self, provider: str, owner_id: str, epoch: int) -> bool: ...
 
     async def get(self, provider: str) -> ChannelLeaseState | None: ...
+
+    async def list_all(self) -> list[ChannelLeaseState]: ...
 
 
 class RenewOutcome(enum.Enum):
@@ -120,6 +125,13 @@ class ChannelLeadership:
         observed = self._observed.get(provider)
         return observed.owner_id if observed is not None and observed.live else None
 
+    def peer_leads(self, provider: str) -> bool:
+        """Whether a live lease held by another instance was last seen for ``provider``."""
+        if provider in self._held:
+            return False
+        observed = self._observed.get(provider)
+        return bool(observed is not None and observed.live and observed.owner_id != self.owner_id)
+
     def peer_transport_running(self, provider: str) -> bool:
         """Whether a live peer leader reported its transport running at its last renewal."""
         if provider in self._held:
@@ -162,11 +174,11 @@ class ChannelLeadership:
                 return RenewOutcome.LOST
             sent = self._clock()
             try:
-                expires_at = await self._bounded(self._repo.renew(provider, self.owner_id, held.epoch, ttl_seconds=self.lease_seconds, transport_running=transport_running))
+                renewed = await self._bounded(self._repo.renew(provider, self.owner_id, held.epoch, ttl_seconds=self.lease_seconds, transport_running=transport_running))
             except Exception:
                 logger.warning("Could not confirm the %s channel leader lease renewal (epoch %d)", provider, held.epoch, exc_info=True)
                 return RenewOutcome.UNCONFIRMED
-            if expires_at is None:
+            if not renewed:
                 logger.warning("Lost the %s channel leader lease (epoch %d): it expired or another instance took it", provider, held.epoch)
                 self._held.pop(provider, None)
                 return RenewOutcome.LOST
@@ -185,6 +197,15 @@ class ChannelLeadership:
                 logger.warning("Could not release the %s channel leader lease (epoch %d); it expires on its own", provider, held.epoch, exc_info=True)
                 return
             logger.info("Released the %s channel leader lease (epoch %d)", provider, held.epoch)
+
+    async def observe_all(self) -> None:
+        """Refresh the cached view of every provider's lease (best effort, one bounded read)."""
+        try:
+            states = await self._bounded(self._repo.list_all())
+        except Exception:
+            logger.debug("Could not read the channel leader lease table", exc_info=True)
+            return
+        self._observed = {state.provider: state for state in states if state.provider not in self._held}
 
     async def _observe(self, provider: str) -> None:
         try:

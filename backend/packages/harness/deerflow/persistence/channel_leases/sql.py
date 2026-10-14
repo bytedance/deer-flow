@@ -7,12 +7,13 @@ depends on an instance's wall clock:
 
 - ``acquire`` is one dialect-native upsert: ``INSERT ... ON CONFLICT
   (provider) DO UPDATE ... WHERE lease_expires_at + grace < now OR owner_id =
-  :me RETURNING epoch``. A missing row is created at epoch 1; an existing row
-  changes hands only when its lease has been expired for ``grace`` seconds (or
-  this owner already holds it), and every acquisition bumps ``epoch``. Two
-  instances racing on the same provider serialize on the row: PostgreSQL
-  evaluates the ``DO UPDATE`` predicate on the row version the winner
-  committed, and SQLite serializes writers, so exactly one gets a row back.
+  :me``. A missing row is created at epoch 1; an existing row changes hands
+  only when its lease has been expired for ``grace`` seconds (or this owner
+  already holds it), and every acquisition bumps ``epoch``. Two instances
+  racing on the same provider serialize on the row: PostgreSQL evaluates the
+  ``DO UPDATE`` predicate on the row version the winner committed, and SQLite
+  serializes writers, so exactly one statement changes a row. The winner reads
+  its new epoch back in the same transaction (its own write, still locked).
 - ``renew`` extends only a live lease: ``UPDATE ... WHERE owner_id = :me AND
   epoch = :epoch AND lease_expires_at > now``. A lease that already expired
   must be re-acquired (bumping the epoch) instead of silently revived, so a
@@ -20,6 +21,13 @@ depends on an instance's wall clock:
 - ``release`` sets ``lease_expires_at`` to 0 under the same owner/epoch fence,
   so a peer may acquire on its next attempt instead of waiting out the TTL.
   The row stays (its epoch keeps growing across holders).
+
+Outcomes are decided by the affected-row count, never by ``RETURNING``
+values: through SQLAlchemy's aiosqlite adapter, an ``UPDATE ... RETURNING``
+that runs while another connection reads the table has been observed to hand
+back one of the statement's own bind values instead of the column (the stored
+row is correct). A lease must not mistake such a row for a confirmed renewal,
+so writes report ``rowcount`` and the epoch is read with a plain ``SELECT``.
 
 The holder's own safety deadline is local and monotonic, and lives in
 ``app.channels.leadership``: the lease row only says who may connect, the
@@ -86,15 +94,17 @@ class SqlChannelLeaseRepository:
                     "updated_at": now,
                 },
                 where=or_(ChannelLeaseRow.lease_expires_at + grace_seconds < now, ChannelLeaseRow.owner_id == owner_id),
-            ).returning(ChannelLeaseRow.epoch, ChannelLeaseRow.lease_expires_at)
-            row = (await session.execute(stmt)).first()
+            )
+            if (await session.execute(stmt)).rowcount != 1:
+                await session.rollback()
+                return None
+            # Our own write, read inside the transaction that still holds it.
+            row = (await session.execute(select(ChannelLeaseRow.epoch, ChannelLeaseRow.lease_expires_at).where(ChannelLeaseRow.provider == provider, ChannelLeaseRow.owner_id == owner_id))).one()
             await session.commit()
-        if row is None:
-            return None
         return ChannelLeaseGrant(provider=provider, epoch=int(row.epoch), lease_expires_at=float(row.lease_expires_at))
 
-    async def renew(self, provider: str, owner_id: str, epoch: int, *, ttl_seconds: float, transport_running: bool) -> float | None:
-        """Extend a live lease this owner holds at ``epoch``; ``None`` means it is no longer held."""
+    async def renew(self, provider: str, owner_id: str, epoch: int, *, ttl_seconds: float, transport_running: bool) -> bool:
+        """Extend a live lease this owner holds at ``epoch``; ``False`` means it is no longer held."""
         async with self._sf() as session:
             now = db_now(_dialect(session))
             stmt = (
@@ -106,25 +116,19 @@ class SqlChannelLeaseRepository:
                     ChannelLeaseRow.lease_expires_at > now,
                 )
                 .values(lease_expires_at=now + ttl_seconds, transport_running=transport_running, updated_at=now)
-                .returning(ChannelLeaseRow.lease_expires_at)
             )
-            row = (await session.execute(stmt)).first()
+            renewed = (await session.execute(stmt)).rowcount == 1
             await session.commit()
-        return None if row is None else float(row.lease_expires_at)
+        return renewed
 
     async def release(self, provider: str, owner_id: str, epoch: int) -> bool:
         """Give up the lease held at ``epoch`` so a peer can take it at once; ``False`` if it was not ours."""
         async with self._sf() as session:
             now = db_now(_dialect(session))
-            stmt = (
-                update(ChannelLeaseRow)
-                .where(ChannelLeaseRow.provider == provider, ChannelLeaseRow.owner_id == owner_id, ChannelLeaseRow.epoch == epoch)
-                .values(lease_expires_at=0.0, transport_running=False, updated_at=now)
-                .returning(ChannelLeaseRow.epoch)
-            )
-            row = (await session.execute(stmt)).first()
+            stmt = update(ChannelLeaseRow).where(ChannelLeaseRow.provider == provider, ChannelLeaseRow.owner_id == owner_id, ChannelLeaseRow.epoch == epoch).values(lease_expires_at=0.0, transport_running=False, updated_at=now)
+            released = (await session.execute(stmt)).rowcount == 1
             await session.commit()
-        return row is not None
+        return released
 
     async def get(self, provider: str) -> ChannelLeaseState | None:
         """Read one provider's lease; ``live`` is judged against the database clock of the read."""

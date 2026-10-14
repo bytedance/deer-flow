@@ -102,12 +102,12 @@ async def test_renew_extends_only_the_holders_epoch_and_reports_the_transport(db
     a = db.repo(0)
     grant = await a.acquire("telegram", "A", ttl_seconds=TTL, grace_seconds=GRACE)
 
-    assert await a.renew("telegram", "A", grant.epoch, ttl_seconds=TTL, transport_running=True) is not None
+    assert await a.renew("telegram", "A", grant.epoch, ttl_seconds=TTL, transport_running=True) is True
     assert (await a.get("telegram")).transport_running is True
     # Another owner, or the right owner at a stale epoch, cannot renew.
-    assert await a.renew("telegram", "B", grant.epoch, ttl_seconds=TTL, transport_running=True) is None
-    assert await a.renew("telegram", "A", grant.epoch + 1, ttl_seconds=TTL, transport_running=True) is None
-    assert await a.renew("slack", "A", 1, ttl_seconds=TTL, transport_running=True) is None
+    assert await a.renew("telegram", "B", grant.epoch, ttl_seconds=TTL, transport_running=True) is False
+    assert await a.renew("telegram", "A", grant.epoch + 1, ttl_seconds=TTL, transport_running=True) is False
+    assert await a.renew("slack", "A", 1, ttl_seconds=TTL, transport_running=True) is False
 
 
 async def test_an_expired_lease_is_not_revived_by_renewal(db):
@@ -116,7 +116,7 @@ async def test_an_expired_lease_is_not_revived_by_renewal(db):
     grant = await a.acquire("telegram", "A", ttl_seconds=TTL, grace_seconds=GRACE)
     await db.set_expiry("telegram", seconds_from_now=-1)
 
-    assert await a.renew("telegram", "A", grant.epoch, ttl_seconds=TTL, transport_running=True) is None
+    assert await a.renew("telegram", "A", grant.epoch, ttl_seconds=TTL, transport_running=True) is False
     again = await a.acquire("telegram", "A", ttl_seconds=TTL, grace_seconds=GRACE)
     assert again is not None and again.epoch == grant.epoch + 1
 
@@ -133,7 +133,7 @@ async def test_a_peer_takes_an_expired_lease_only_after_the_grace_period(db):
     taken = await b.acquire("telegram", "B", ttl_seconds=TTL, grace_seconds=GRACE)
     assert taken is not None and taken.epoch == first.epoch + 1
     # The previous holder is fenced out of the new epoch.
-    assert await a.renew("telegram", "A", first.epoch, ttl_seconds=TTL, transport_running=True) is None
+    assert await a.renew("telegram", "A", first.epoch, ttl_seconds=TTL, transport_running=True) is False
     assert await a.release("telegram", "A", first.epoch) is False
     assert (await a.get("telegram")).owner_id == "B"
 
@@ -144,8 +144,8 @@ async def test_the_holder_reacquiring_bumps_the_epoch_and_fences_its_old_one(db)
     second = await a.acquire("telegram", "A", ttl_seconds=TTL, grace_seconds=GRACE)
 
     assert second.epoch == first.epoch + 1
-    assert await a.renew("telegram", "A", first.epoch, ttl_seconds=TTL, transport_running=False) is None
-    assert await a.renew("telegram", "A", second.epoch, ttl_seconds=TTL, transport_running=False) is not None
+    assert await a.renew("telegram", "A", first.epoch, ttl_seconds=TTL, transport_running=False) is False
+    assert await a.renew("telegram", "A", second.epoch, ttl_seconds=TTL, transport_running=False) is True
 
 
 async def test_release_hands_the_lease_over_at_once(db):
@@ -177,3 +177,36 @@ async def test_racing_instances_get_exactly_one_grant(db):
     grants = await asyncio.gather(*(repo.acquire("discord", f"next-{i}", ttl_seconds=TTL, grace_seconds=GRACE) for i, repo in enumerate(repos)))
     assert len([grant for grant in grants if grant is not None]) == 1
     assert (await repos[0].get("discord")).epoch == 2
+
+
+async def test_writes_do_not_trust_returning_rows_under_a_concurrent_read(tmp_path):
+    """Review follow-up on #6843: the supervisor reads the whole table while it renews.
+
+    Through SQLAlchemy's aiosqlite adapter, an ``UPDATE ... RETURNING`` running
+    while another connection reads the table intermittently handed back one of
+    its own bind values (the provider name) instead of ``lease_expires_at``, on
+    fresh engines in roughly a third of the rounds. Renew, release and acquire
+    therefore decide by affected-row count; every round here must confirm both
+    renewals and leave real numbers in the row.
+    """
+    for scenario in range(12):
+        url = f"sqlite+aiosqlite:///{(tmp_path / f'leases-{scenario}.db').as_posix()}"
+        engine = create_async_engine(url)
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all, tables=[ChannelLeaseRow.__table__])
+            repo = SqlChannelLeaseRepository(async_sessionmaker(engine, expire_on_commit=False))
+            grants = {provider: await repo.acquire(provider, "A", ttl_seconds=TTL, grace_seconds=GRACE) for provider in ("discord", "telegram")}
+            for _ in range(2):
+                read, *renewed = await asyncio.gather(
+                    repo.list_all(),
+                    repo.renew("discord", "A", grants["discord"].epoch, ttl_seconds=TTL, transport_running=False),
+                    repo.renew("telegram", "A", grants["telegram"].epoch, ttl_seconds=TTL, transport_running=True),
+                )
+                assert renewed == [True, True]
+                assert {state.provider for state in read} == {"discord", "telegram"}
+            async with engine.connect() as conn:
+                kinds = (await conn.execute(sa.text("SELECT typeof(lease_expires_at), typeof(updated_at) FROM channel_leases"))).all()
+            assert set(kinds) == {("real", "real")}
+        finally:
+            await engine.dispose()

@@ -345,6 +345,11 @@ class ChannelService:
             ", ".join(led_elsewhere) or "none",
         )
         if self._running and generation == self._shutdown_generation:
+            # Learn peers' leases before the first tick, so status and
+            # notification claims are right from the start.
+            await self._leadership.observe_all()
+        # Re-check after the read: a stop() during it must not be followed by a supervisor.
+        if self._running and generation == self._shutdown_generation:
             self._start_supervisor()
 
     async def ensure_ready_channels(self, *, attempts: int = 1) -> dict[str, bool]:
@@ -812,14 +817,18 @@ class ChannelService:
         """Providers whose scheduled-run notifications this instance must not claim.
 
         ``None`` without the leader lease. Otherwise the arbitrated providers
-        enabled here whose lease this instance does not hold: their holder
-        delivers over its own transport, and a claim here would only park the
-        row for the channel-down interval. Providers no instance runs stay
-        claimable, so their rows still settle.
+        whose lease this instance does not hold and that either are enabled
+        here or were last seen held by a live peer: their holder delivers over
+        its own transport, and a claim here would only park the row for the
+        channel-down interval. The peer check covers a provider connected from
+        the web UI on another instance, which never enters this instance's
+        config. Providers no instance runs stay claimable, so their rows still
+        settle.
         """
         if self._leadership is None:
             return None
-        return frozenset(name for name in _CHANNEL_REGISTRY if self._arbitrated(name) and self._wants_transport(name) and not self._leadership.has_record(name))
+        lead = self._leadership
+        return frozenset(name for name in _CHANNEL_REGISTRY if self._arbitrated(name) and not lead.has_record(name) and (self._wants_transport(name) or lead.peer_leads(name)))
 
     def _start_supervisor(self) -> None:
         if self._leadership is None or self._supervisor_task is not None:
@@ -858,8 +867,12 @@ class ChannelService:
         names.update(name for name in self._channels if self._arbitrated(name))
         ordered = sorted(names)
         # Lease calls are bounded and run concurrently; transport work is
-        # handed to per-provider tasks so it never delays a renewal.
-        decisions = await asyncio.gather(*(self._lease_round(name) for name in ordered), return_exceptions=True)
+        # handed to per-provider tasks so it never delays a renewal. The
+        # whole-table read keeps status and notification claims aware of
+        # leases this instance has no config for.
+        observed, *decisions = await asyncio.gather(self._leadership.observe_all(), *(self._lease_round(name) for name in ordered), return_exceptions=True)
+        if isinstance(observed, BaseException):
+            logger.error("Channel leader lease table read failed", exc_info=observed)
         for name, decision in zip(ordered, decisions):
             if isinstance(decision, BaseException):
                 logger.error("Channel %s leader lease round failed", name, exc_info=decision)

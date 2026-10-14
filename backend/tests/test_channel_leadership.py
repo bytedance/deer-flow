@@ -59,9 +59,9 @@ class FakeRepo:
         row = self.rows.get(provider)
         now = self.clock.now
         if row is None or row["owner"] != owner_id or row["epoch"] != epoch or row["expires"] <= now:
-            return None
+            return False
         row.update(expires=now + ttl_seconds, running=transport_running)
-        return row["expires"]
+        return True
 
     async def release(self, provider, owner_id, epoch):
         self._maybe_fail("release")
@@ -77,6 +77,10 @@ class FakeRepo:
         if row is None:
             return None
         return ChannelLeaseState(provider=provider, owner_id=row["owner"], epoch=row["epoch"], lease_expires_at=row["expires"], transport_running=row["running"], live=row["expires"] > self.clock.now)
+
+    async def list_all(self):
+        self._maybe_fail("list_all")
+        return [await self.get(provider) for provider in sorted(self.rows)]
 
 
 def _leadership(repo: FakeRepo, clock: Clock, owner: str = "A", *, lease_seconds: int = 30, grace_seconds: int = 10) -> ChannelLeadership:
@@ -212,3 +216,27 @@ async def test_release_is_fenced_by_epoch_and_best_effort():
     assert lead.has_record("discord") is False
     await lead.release("slack")  # nothing held: no call
     assert ("release",) in repo.calls
+
+
+async def test_observe_all_sees_peer_leases_this_instance_never_tried():
+    """A provider connected on a peer is in no local config, so no failed acquire ever observes it."""
+    clock = Clock()
+    repo = FakeRepo(clock)
+    peer = _leadership(repo, clock, owner="B")
+    await peer.acquire("telegram")
+    await peer.renew("telegram", transport_running=True)
+    lead = _leadership(repo, clock, owner="A")
+    await lead.acquire("discord")
+
+    assert lead.leader_of("telegram") is None
+    await lead.observe_all()
+    assert (lead.leader_of("telegram"), lead.peer_leads("telegram"), lead.peer_transport_running("telegram")) == ("B", True, True)
+    assert (lead.leader_of("discord"), lead.peer_leads("discord")) == ("A", False)  # our own row never reads as a peer's
+
+    clock.now += 100  # the peer's lease lapses
+    await lead.observe_all()
+    assert (lead.leader_of("telegram"), lead.peer_leads("telegram")) == (None, False)
+
+    repo.fail.add("list_all")
+    await lead.observe_all()  # logged, not raised; the last view stays
+    assert lead.leader_of("telegram") is None

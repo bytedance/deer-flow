@@ -290,6 +290,38 @@ async def test_notification_claims_are_left_to_the_holder(engine, tmp_path):
         await b.stop()
 
 
+async def test_a_provider_connected_on_a_peer_is_left_to_it_although_absent_from_local_config(engine, tmp_path):
+    """Review on #6843: a provider set up from the web UI on A never enters B's config.
+
+    B must still leave its notification rows to A (instead of claiming and
+    parking them) and report A as its leader, which it learns from the lease
+    table rather than from its own config.
+    """
+    a = _service(engine, "A", tmp_path, channels={"github": {"enabled": True}})
+    b = _service(engine, "B", tmp_path, channels={"github": {"enabled": True}})
+    await a.start()
+    await b.start()
+    try:
+        assert await a.configure_channel("telegram", {"enabled": True, "bot_token": "ui-token"}) is True
+        assert "telegram" in _running(a) and "telegram" not in b._config
+        await _round(a)  # A's renewal reports its transport running
+        assert "telegram" not in b.notification_excluded_providers()  # before B has seen the lease table
+
+        await _round(b)
+        assert b.notification_excluded_providers() == frozenset({"telegram"})
+        status = b.get_status()["channels"]["telegram"]
+        assert (status["leader"], status["leader_here"], status["running"]) == ("A", False, True)
+        assert "telegram" not in b._channels  # observing never starts anything
+
+        assert await a.remove_channel("telegram") is True  # released: no instance runs it now
+        await _round(b)
+        assert b.notification_excluded_providers() == frozenset()  # rows settle again (park / fail)
+        assert b.get_status()["channels"]["telegram"]["leader"] is None
+    finally:
+        await a.stop()
+        await b.stop()
+
+
 async def test_a_slow_start_never_delays_another_providers_renewal(engine, tmp_path):
     a = _service(engine, "A", tmp_path, channels={"telegram": {"enabled": True}, "discord": {"enabled": True}})
     await a.start()
