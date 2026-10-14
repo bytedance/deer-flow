@@ -956,8 +956,11 @@ class TestOperationOwnership:
         assert not early, f"close(s) {early} returned before successor batch settled; calls={store.calls}"
 
         gate_b.set()
-        await asyncio.gather(close1, close2, return_exceptions=True)
+        results = await asyncio.gather(close1, close2)
+        assert results == [None, None], "both normal closes must complete successfully"
         assert store.calls == ["A", "B"]
+        events = await store.list_events("t-cclose", "r-cclose")
+        assert [event["event_type"] for event in events] == ["A", "B"]
 
     @pytest.mark.anyio
     async def test_concurrent_flushes_do_not_overtake_unsettled_predecessor(self):
@@ -982,7 +985,9 @@ class TestOperationOwnership:
         assert "C" not in store.calls, f"successor C overtook unsettled predecessor: calls={store.calls}"
 
         gate_b.set()
-        await asyncio.gather(f1, f2, return_exceptions=True)
+        results = await asyncio.gather(f1, f2)
+        assert results == [None, None], "both concurrent flushes must complete successfully"
+        assert store.calls == ["A", "B", "C"], f"unexpected final submission order: {store.calls}"
 
     @pytest.mark.anyio
     async def test_concurrent_flushes_all_report_unknown(self):
@@ -1023,7 +1028,8 @@ class TestOperationOwnership:
         assert journal._operation_lock.locked() is True, "operation guard was released while another flush was active"
 
         gate_b.set()
-        await asyncio.gather(f1, f2, return_exceptions=True)
+        results = await asyncio.gather(f1, f2)
+        assert results == [None, None], "both concurrent flushes must succeed once the predecessor settles"
 
     @pytest.mark.anyio
     async def test_lease_loss_close_aborts_active_flush_without_success(self):
@@ -1078,10 +1084,14 @@ class TestOperationOwnership:
         await asyncio.gather(f1, f2, return_exceptions=True)
         await _pump_loop()
 
-        # Only the durable-safety invariant is asserted here; the exact number of
-        # definite retries under concurrency is a maintainer contract decision.
+        # Durable-safety invariants only. The exact number of definite retries
+        # (and which waiter owns them) under concurrency is still an open
+        # maintainer contract decision, so it is deliberately not asserted here.
+        assert store.calls.count("A") >= 1, "A was never attempted"
+        surfaced = [task for task in (f1, f2) if not task.cancelled() and task.exception() is not None]
+        assert surfaced, "the not-committed failure was not surfaced to any waiter"
         events = await store.list_events("t-cnc", "r-cnc")
-        assert sum(1 for event in events if event["event_type"] == "A") <= 1
+        assert sum(1 for event in events if event["event_type"] == "A") == 0, "A must not be persisted after a not-committed failure"
 
 
 class TestLlmCallbacks:
