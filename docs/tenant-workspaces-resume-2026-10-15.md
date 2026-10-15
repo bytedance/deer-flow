@@ -1,6 +1,6 @@
 # 2026-10-15 暂停与恢复检查点
 
-状态更新：用户已于 2026-10-15 明确要求继续，当前已恢复；最新验证见文末 #43。下面暂停段保留为历史记录。
+状态更新：用户已于 2026-10-15 明确要求继续，当前已恢复；最新验证见文末 #45。下面暂停段保留为历史记录。
 
 用户此前要求今天到这里，保存进度并允许本地提交。此检查点是 WIP，不能声称功能验收完成；不要自动继续开发、启动构建、部署或推送。用户再次要求继续后再恢复。
 
@@ -108,3 +108,21 @@ URLs cannot carry the workspace header. Reuse the existing allow_query_selector
 contract on artifact GET and project-document content GET: append workspace_id
 to those browser URLs, keep native authenticated/ACL/before-send checks, and
 reject selector conflicts. Other REST paths keep fixed header transport.
+
+
+M3 actual composer commands (2026-10-15): frontend #44 RED reproduced eight
+missing selectors across personal/team goal GET/DELETE/PUT and compact POST.
+#45 SUCCESS: 21 tests (13 actual InputBox cases, six native API and two scoped
+API), two-file formatting, target ESLint, early tsc and full pnpm check. The
+component captures the confirmed REST client, fences full native goal success/
+error decoding, passes the client to compact and checks preparation, response
+publication and follow-up run boundaries. Native request epochs, permission
+gating and prepare→goal-save→run ordering are preserved. Existing late-command
+thread cleanup remains effective. Fixture supplies an explicit empty skills
+catalog; no localhost server is required. The existing KaTeX happy-dom quirks
+warning remains. Exact source/archive receipts and cleanup for #44/#45 and the
+formatter are recorded in tenant-workspaces-progress.json. Real component/
+Context with HTTP doubles does not prove actual browser/backend authorization.
+ChatPage project/branch, sidecar, ancillary input tools, draft/attachment stores,
+activity/projects/artifacts and actual shell/browser integration remain. Parent
+M3 and all remaining M4-M11 gates stay open; activation stays closed.

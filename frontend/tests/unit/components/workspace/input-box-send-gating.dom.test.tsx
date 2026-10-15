@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, rs } from "@rstest/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -16,6 +17,12 @@ import { ThreadContext } from "@/components/workspace/messages/context";
 import { AuthProvider } from "@/core/auth/AuthProvider";
 import { DEFAULT_LOCALE } from "@/core/i18n";
 import { I18nProvider } from "@/core/i18n/context";
+import {
+  WorkspaceProvider,
+  WorkspaceReadyBoundary,
+  useWorkspaceContext,
+  type WorkspaceContextValue,
+} from "@/core/workspaces/context";
 
 rs.mock("next/navigation", () => ({
   useRouter: () => ({ push: rs.fn(), replace: rs.fn(), refresh: rs.fn() }),
@@ -58,16 +65,25 @@ function renderComposer({
   onPrepareThread,
   onGoalChange,
   isWelcomeMode = false,
+  workspace = false,
+  onWorkspaceContext,
 }: {
   canCreateRuns?: boolean;
   onSubmit: () => void;
   onPrepareThread?: () => void | Promise<void>;
   onGoalChange?: () => void;
   isWelcomeMode?: boolean;
+  workspace?: boolean;
+  onWorkspaceContext?: (value: WorkspaceContextValue) => void;
 }) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
+  function Controls() {
+    const value = useWorkspaceContext();
+    if (value) onWorkspaceContext?.(value);
+    return null;
+  }
   const tree = (onSubmitProp: () => void): ReactNode => (
     <I18nProvider initialLocale={DEFAULT_LOCALE}>
       <QueryClientProvider client={queryClient}>
@@ -80,22 +96,27 @@ function renderComposer({
             oauth_provider: null,
           }}
         >
-          <ThreadContext.Provider
-            value={{ thread: { messages: [] } as never, isMock: true }}
-          >
-            <PromptInputProvider>
-              <InputBox
-                threadId="thread-1"
-                status="ready"
-                context={{ mode: "flash" } as never}
-                onSubmit={onSubmitProp}
-                canCreateRuns={canCreateRuns}
-                onPrepareThread={onPrepareThread}
-                onGoalChange={onGoalChange}
-                isWelcomeMode={isWelcomeMode}
-              />
-            </PromptInputProvider>
-          </ThreadContext.Provider>
+          <WorkspaceProvider enabled={workspace}>
+            <Controls />
+            <WorkspaceReadyBoundary>
+              <ThreadContext.Provider
+                value={{ thread: { messages: [] } as never, isMock: true }}
+              >
+                <PromptInputProvider>
+                  <InputBox
+                    threadId="thread-1"
+                    status="ready"
+                    context={{ mode: "flash" } as never}
+                    onSubmit={onSubmitProp}
+                    canCreateRuns={canCreateRuns}
+                    onPrepareThread={onPrepareThread}
+                    onGoalChange={onGoalChange}
+                    isWelcomeMode={isWelcomeMode}
+                  />
+                </PromptInputProvider>
+              </ThreadContext.Provider>
+            </WorkspaceReadyBoundary>
+          </WorkspaceProvider>
         </AuthProvider>
       </QueryClientProvider>
     </I18nProvider>
@@ -105,6 +126,7 @@ function renderComposer({
 
 beforeEach(() => {
   window.sessionStorage.clear();
+  rs.stubGlobal("fetch", async () => Response.json({ skills: [] }));
 });
 
 afterEach(() => {
@@ -136,7 +158,9 @@ function mockCommandRequests(events: string[] = []) {
         events.push(init?.method ?? "GET");
       }
       return new Response(
-        JSON.stringify(isCommand ? { goal: null, compacted: true } : {}),
+        JSON.stringify(
+          isCommand ? { goal: null, compacted: true } : { skills: [] },
+        ),
         {
           status: 200,
           headers: { "Content-Type": "application/json" },
@@ -302,4 +326,166 @@ describe("InputBox send gating (runs:create)", () => {
     const submit = screen.getByRole("button", { name: "Submit" });
     expect(submit.tagName).toBe("BUTTON");
   });
+});
+
+const PERSONAL = "11111111-1111-1111-1111-111111111111";
+const TEAM = "22222222-2222-2222-2222-222222222222";
+function workspaceCommandRequests() {
+  const seen: { path: string; method: string; workspace: string | null }[] = [];
+  let hold = false;
+  let release: (() => void) | undefined;
+  rs.stubGlobal(
+    "fetch",
+    async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url,
+        window.location.href,
+      ).pathname;
+      const workspace = new Headers(init?.headers).get("X-Deerflow-Workspace");
+      if (path === "/api/workspaces")
+        return Response.json(
+          [PERSONAL, TEAM].map((id) => ({
+            id,
+            name: id,
+            kind: id === PERSONAL ? "personal" : "team",
+            personal_user_id: id === PERSONAL ? "user-1" : null,
+            status: "active",
+            role: "owner",
+            membership_version: 1,
+            policy_version: 1,
+          })),
+        );
+      if (path === "/api/workspaces/current")
+        return Response.json({
+          actor_user_id: "user-1",
+          workspace_id: workspace,
+          membership_version: 1,
+          policy_version: 1,
+        });
+      if (path.endsWith("/goal") || path.endsWith("/compact")) {
+        seen.push({ path, workspace, method: init?.method ?? "GET" });
+        const body = path.endsWith("/compact")
+          ? { compacted: true }
+          : { goal: { objective: "finish report" } };
+        const response = Response.json(body);
+        if (hold)
+          response.json = () =>
+            new Promise((resolve) => {
+              release = () => resolve(body);
+            });
+        return response;
+      }
+      return Response.json({ skills: [] });
+    },
+  );
+  return {
+    seen,
+    hold: () => {
+      hold = true;
+    },
+    getRelease: () => release,
+  };
+}
+
+it("uses the confirmed workspace for real composer goal/status/clear and compact commands", async () => {
+  const server = workspaceCommandRequests();
+  let control: WorkspaceContextValue | null = null;
+  const onSubmit = rs.fn();
+  const { container } = renderComposer({
+    workspace: true,
+    canCreateRuns: true,
+    onSubmit,
+    onWorkspaceContext: (value) => {
+      control = value;
+    },
+  });
+  await waitFor(() =>
+    expect(container.querySelector("textarea")).not.toBeNull(),
+  );
+  for (const workspace of [PERSONAL, TEAM]) {
+    if (workspace === TEAM)
+      await act(async () => {
+        expect(await control!.select(TEAM)).toBe(true);
+      });
+    await waitFor(() =>
+      expect(container.querySelector("textarea")).not.toBeNull(),
+    );
+    for (const command of [
+      "/goal",
+      "/goal clear",
+      "/goal finish report",
+      "/compact",
+    ]) {
+      const before = server.seen.length;
+      submitForm(container, command);
+      await waitFor(() => expect(server.seen).toHaveLength(before + 1));
+      await waitFor(() =>
+        expect(container.querySelector("textarea")?.value).toBe(""),
+      );
+    }
+  }
+  expect(server.seen.map((row) => row.workspace)).toEqual([
+    PERSONAL,
+    PERSONAL,
+    PERSONAL,
+    PERSONAL,
+    TEAM,
+    TEAM,
+    TEAM,
+    TEAM,
+  ]);
+  expect(server.seen.map((row) => row.method)).toEqual([
+    "GET",
+    "DELETE",
+    "PUT",
+    "POST",
+    "GET",
+    "DELETE",
+    "PUT",
+    "POST",
+  ]);
+  expect(onSubmit).toHaveBeenCalledTimes(2);
+});
+
+it("drops a real command's deferred decoder after switching without a toast or changing the new composer", async () => {
+  const server = workspaceCommandRequests();
+  let control: WorkspaceContextValue | null = null;
+  const onSubmit = rs.fn();
+  const onGoalChange = rs.fn();
+  const success = rs.spyOn(toast, "success");
+  const error = rs.spyOn(toast, "error");
+  const { container } = renderComposer({
+    workspace: true,
+    canCreateRuns: true,
+    onSubmit,
+    onGoalChange,
+    onWorkspaceContext: (value) => {
+      control = value;
+    },
+  });
+  await waitFor(() =>
+    expect(container.querySelector("textarea")).not.toBeNull(),
+  );
+  server.hold();
+  submitForm(container, "/goal finish report");
+  await waitFor(() => expect(server.getRelease()).toBeDefined());
+  await act(async () => {
+    expect(await control!.select(TEAM)).toBe(true);
+  });
+  await waitFor(() =>
+    expect(container.querySelector("textarea")).not.toBeNull(),
+  );
+  typeText(container, "Team draft");
+  await act(async () => {
+    server.getRelease()!();
+  });
+  expect(onSubmit).not.toHaveBeenCalled();
+  expect(onGoalChange).not.toHaveBeenCalled();
+  expect(success).not.toHaveBeenCalled();
+  expect(error).not.toHaveBeenCalled();
+  expect(container.querySelector("textarea")?.value).toBe("Team draft");
 });

@@ -145,6 +145,7 @@ import {
   type BrowserSpeechRecognition,
   type SpeechRecognitionErrorKind,
 } from "@/core/voice-input/speech-recognition";
+import { useWorkspaceLifetime } from "@/core/workspaces/context";
 import { isCompositionConfirmEnter, isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 
@@ -427,6 +428,7 @@ export function InputBox({
 }) {
   const { locale, t } = useI18n();
   const queryClient = useQueryClient();
+  const lifetime = useWorkspaceLifetime();
   const searchParams = useSearchParams();
   const mentionListId = useId();
   const mentionPickerRef = useRef<MentionPickerHandle>(null);
@@ -1216,24 +1218,35 @@ export function InputBox({
 
   const handleGoalCommand = useCallback(
     async (command: GoalCommand): Promise<boolean> => {
+      if (lifetime?.scope.signal.aborted) return false;
+      const readResponse = async (response: Response, includeGoal = true) => {
+        const decode = async (response: Response) => {
+          if (!response.ok) {
+            throw new Error(await readGoalResponseError(response));
+          }
+          return includeGoal
+            ? (((await response.json()) as { goal?: GoalState | null }).goal ??
+                null)
+            : null;
+        };
+        return lifetime
+          ? lifetime.rest.consume(response, decode)
+          : decode(response);
+      };
       const request = beginGoalRequest(goalRequestStateRef.current, threadId);
       const signal = request.controller.signal;
       try {
         let goal: GoalState | null = null;
         if (command.kind === "status") {
-          const response = await fetch(
+          const response = await (lifetime?.rest.fetch ?? fetch)(
             `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
               threadId,
             )}/goal`,
             { method: "GET", signal },
           );
-          if (!response.ok) {
-            throw new Error(await readGoalResponseError(response));
-          }
-          goal =
-            ((await response.json()) as { goal?: GoalState | null }).goal ??
-            null;
+          goal = await readResponse(response);
           if (
+            lifetime?.scope.signal.aborted ||
             !isCurrentGoalRequest(
               goalRequestStateRef.current,
               request,
@@ -1252,16 +1265,15 @@ export function InputBox({
           );
           onGoalChange?.(goal);
         } else if (command.kind === "clear") {
-          const response = await fetch(
+          const response = await (lifetime?.rest.fetch ?? fetch)(
             `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
               threadId,
             )}/goal`,
             { method: "DELETE", signal },
           );
-          if (!response.ok) {
-            throw new Error(await readGoalResponseError(response));
-          }
+          await readResponse(response, false);
           if (
+            lifetime?.scope.signal.aborted ||
             !isCurrentGoalRequest(
               goalRequestStateRef.current,
               request,
@@ -1273,7 +1285,7 @@ export function InputBox({
           toast.success(t.inputBox.goalCleared);
           onGoalChange?.(null);
         } else {
-          const response = await fetch(
+          const response = await (lifetime?.rest.fetch ?? fetch)(
             `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
               threadId,
             )}/goal`,
@@ -1284,13 +1296,9 @@ export function InputBox({
               signal,
             },
           );
-          if (!response.ok) {
-            throw new Error(await readGoalResponseError(response));
-          }
-          goal =
-            ((await response.json()) as { goal?: GoalState | null }).goal ??
-            null;
+          goal = await readResponse(response);
           if (
+            lifetime?.scope.signal.aborted ||
             !isCurrentGoalRequest(
               goalRequestStateRef.current,
               request,
@@ -1302,10 +1310,12 @@ export function InputBox({
           toast.success(t.inputBox.goalSet);
           onGoalChange?.(goal);
         }
+        if (lifetime?.scope.signal.aborted) return false;
         textInput.setInput("");
         return true;
       } catch (error) {
         if (
+          lifetime?.scope.signal.aborted ||
           isAbortError(error) ||
           !isCurrentGoalRequest(goalRequestStateRef.current, request, threadId)
         ) {
@@ -1320,6 +1330,7 @@ export function InputBox({
       }
     },
     [
+      lifetime,
       onGoalChange,
       t.inputBox.goalActive,
       t.inputBox.goalCleared,
@@ -1332,6 +1343,7 @@ export function InputBox({
   );
 
   const handleCompactCommand = useCallback(async (): Promise<void> => {
+    if (lifetime?.scope.signal.aborted) return;
     if (isWelcomeMode) {
       textInput.setInput("");
       toast.info(t.inputBox.compactSkipped);
@@ -1341,6 +1353,7 @@ export function InputBox({
     const signal = request.controller.signal;
     try {
       const result = await compactThreadContext(threadId, {
+        ...(lifetime ? { rest: lifetime.rest } : {}),
         signal,
         agentName:
           typeof context.agent_name === "string" ? context.agent_name : null,
@@ -1348,6 +1361,7 @@ export function InputBox({
           typeof context.model_name === "string" ? context.model_name : null,
       });
       if (
+        lifetime?.scope.signal.aborted ||
         !isCurrentGoalRequest(compactRequestStateRef.current, request, threadId)
       ) {
         return;
@@ -1371,6 +1385,7 @@ export function InputBox({
       }
     } catch (error) {
       if (
+        lifetime?.scope.signal.aborted ||
         isAbortError(error) ||
         !isCurrentGoalRequest(compactRequestStateRef.current, request, threadId)
       ) {
@@ -1385,6 +1400,7 @@ export function InputBox({
   }, [
     context.agent_name,
     context.model_name,
+    lifetime,
     queryClient,
     t.inputBox.compactFailed,
     t.inputBox.compactSkipped,
@@ -1628,6 +1644,7 @@ export function InputBox({
 
   const handleSubmit = useCallback(
     async (message: PromptInputMessage) => {
+      lifetime?.scope.signal.throwIfAborted();
       if (mentionInFlight.current)
         return Promise.reject(new Error("Reference is loading"));
       if (status === "streaming") {
@@ -1698,6 +1715,7 @@ export function InputBox({
                 : new Error("thread preparation failed"),
             );
           }
+          lifetime?.scope.signal.throwIfAborted();
           if (goalRequestStateRef.current.sequence !== requestEpoch) {
             // Reject (not resolve) so PromptInput keeps the current
             // conversation's composer text untouched.
@@ -1710,6 +1728,7 @@ export function InputBox({
         setFollowupsHidden(false);
         setFollowupsLoading(false);
         const saved = await handleGoalCommand(submitAction.command);
+        if (lifetime?.scope.signal.aborted) return;
         // Only start a run when a goal was actually saved; status/clear never run.
         if (saved && submitAction.command.kind === "set") {
           return submitThreadMessage({
@@ -1733,6 +1752,7 @@ export function InputBox({
       canCreateRuns,
       handleCompactCommand,
       handleGoalCommand,
+      lifetime,
       onPrepareThread,
       projectAttachments.length,
       conversationReferences.length,

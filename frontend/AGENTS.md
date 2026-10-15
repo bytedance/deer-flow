@@ -483,7 +483,15 @@ storage/shell integration still precede activation and actual browser acceptance
 
 createThread accepts optional third ThreadRequestOptions; compactThreadContext
 accepts options.rest. Both preserve native no-options requests/errors and fence
-full decoding through the fixed REST client (#43, 17 tests/full check). Actual
-ChatPage/InputBox callers still require integration before enabling workspaces.
+full decoding through the fixed REST client (#43, 17 tests/full check). ChatPage project creation/branch and ancillary InputBox paths still require
+integration before enabling workspaces.
 The actual delete dialog separately fences retained open/delete callbacks,
 reset/router, post-await publication, error feedback and focus by its lifetime.
+
+
+InputBox goal GET/PUT/DELETE and compact commands capture useWorkspaceLifetime
+(#45: 21 tests/full check). Preserve command AbortController/epoch checks and
+prepare→save→run ordering alongside scope fences. Goal decoders include native
+error reads; clear accepts an empty success body. Guard before publication and
+follow-up submit, not only fetch. Ancillary reference/input-polish/voice paths
+and draft/attachment stores still require integration before activation.

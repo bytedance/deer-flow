@@ -2115,7 +2115,7 @@
     "evidence_limits": "Only the external React SDK useStream adapter is doubled in new tests; real source hooks, Context, native REST/SDK clients and stream parser run with network doubles. Does not prove actual browser/SDK automatic reconnect or backend authorization.",
     "cleanup": "#28-#32 terminal; exact owned container/network, chat-format and SDK source probe inventories independently empty; private dependency cache retained",
     "remaining": [
-      "Sidebar/thread actions and replay hooks verified; compact/project creation and actual UI caller publication pending",
+      "Sidebar/actions/replay and actual InputBox goal/compact verified; ChatPage precreation/branch and other page callbacks pending",
       "project-thread creation and remaining project/artifact/resource clients and storage namespaces",
       "actual app capability bootstrap, native selector and browser/backend two-tab acceptance",
       "credential/principal consistency, active revocation, physical runtime and all M4-M11 gates; no tenant activation"
@@ -2285,7 +2285,7 @@
     "limits": "API contract network doubles only; ChatPage project precreation and InputBox compact callers are not wired yet; no real model/browser/backend/physical proof",
     "cleanup": "#40-#43 terminal and exact owned containers/networks empty; formatter empty; dependency cache retained",
     "remaining": [
-      "actual ChatPage/InputBox/create/compact and page callback integration",
+      "Actual InputBox goal/compact now verified in frontend_composer_commands; ChatPage project precreation/branch and other page callbacks pending",
       "sidecar scoped coalescing, resources/stores/shell and real two-tab acceptance",
       "principal/session/revocation and remaining M4-M11; activation closed"
     ]
@@ -2299,5 +2299,40 @@
     "green": 43,
     "scope": "dialog captures lifetime; entry/retained open callback, onDeleted reset/router, post-await close/error toast/log/focus all check expiry; native failure feedback/focus retained",
     "limits": "real dialog/Context; external delete operation doubled; real deletion hooks previously verified separately in #35; no actual browser/backend proof"
+  },
+  "frontend_composer_commands": {
+    "job": "deerflow-tenant-frontend",
+    "status": "actual InputBox goal/compact command integration verified; M3 incomplete",
+    "red": {
+      "build": 44,
+      "result": "FAILURE",
+      "reason": "all eight real composer goal/compact requests in personal/team spaces lacked selectors",
+      "archive_sha256": "b29395efba912e5f69f6e18f2bc03464e4f844061e6046df3e955fa0936fed45",
+      "fixture_notes": "old native tests had background localhost connection/catalog response noise; final fixture explicitly supplies an empty skills catalog rather than hiding errors"
+    },
+    "green": {
+      "build": 45,
+      "result": "SUCCESS",
+      "tests_passed": 21,
+      "tests_added": 2,
+      "test_seconds": [
+        12.7
+      ],
+      "build_seconds": 443.216,
+      "archive_sha256": "8837a01a977d26c5fdf2c8ab441193ac9aee83358238d8e3c463633e9a307e4a",
+      "checks": "13 real composer cases (11 existing +2 workspace mains), six native API and two scoped API cases; two-file formatting and target ESLint; early tsc then required full pnpm check"
+    },
+    "source_sha256": {
+      "frontend/src/components/workspace/input-box.tsx": "859747a70d6216845a99eee35d02504d510dd8340ba4cbf40c0ae3f994b707a3",
+      "frontend/tests/unit/components/workspace/input-box-send-gating.dom.test.tsx": "7e6bd87b915db0586aa771eda7d85572c63799d2c9c642f61476df2da5f00bb8"
+    },
+    "scope": "actual InputBox captures lifetime; goal GET/PUT/DELETE uses fixed REST and full native response/error decoding; compact passes fixed REST; entry, preparation await, response/publication, goal callback and follow-up run checks preserve native request epochs and prepare/save/run order",
+    "limits": "real InputBox/Context, HTTP doubles; catalog/model ancillary fixtures; not actual browser/backend/physical proof; existing KaTeX happy-dom quirks warning remains",
+    "cleanup": "#44/#45 terminal, exact owned containers/networks and formatter inventories empty; dependency cache retained",
+    "remaining": [
+      "ChatPage project precreation and branch callbacks, sidecar coalescing/restore/create/queued submit/delete",
+      "InputBox ancillary reference attachment/input-polish/voice paths and composer draft/attachment stores; other project/artifact/activity resources",
+      "shell/selector and actual two-tab backend/browser acceptance, principal/session/revocation and all remaining M4-M11 gates; activation closed"
+    ]
   }
 }

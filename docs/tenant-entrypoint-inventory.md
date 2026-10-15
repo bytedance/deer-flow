@@ -120,3 +120,8 @@ project creation, page callbacks and other resource/storage paths remain open.
 
 Create/compact frontend API (#43) accepts captured REST and fences native
 response decoding; actual ChatPage/InputBox callers remain unintegrated.
+
+
+Actual InputBox goal/compact (#45) now captures fixed REST and fences decoding
+and follow-up run publication while retaining native command epochs. Its other
+async input paths/stores and actual ChatPage/sidecar/resources remain pending.

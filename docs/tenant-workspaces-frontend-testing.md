@@ -374,3 +374,21 @@ post-await close and failure toast/log/focus; native failure feedback is kept.
 Its external deletion operation is doubled, while #35 covers real deletion hooks.
 Network doubles do not
 supply real browser/backend/physical acceptance. All parent gates remain open.
+
+
+M3 actual composer commands (2026-10-15): frontend #44 RED reproduced eight
+missing selectors across personal/team goal GET/DELETE/PUT and compact POST.
+#45 SUCCESS: 21 tests (13 actual InputBox cases, six native API and two scoped
+API), two-file formatting, target ESLint, early tsc and full pnpm check. The
+component captures the confirmed REST client, fences full native goal success/
+error decoding, passes the client to compact and checks preparation, response
+publication and follow-up run boundaries. Native request epochs, permission
+gating and prepare→goal-save→run ordering are preserved. Existing late-command
+thread cleanup remains effective. Fixture supplies an explicit empty skills
+catalog; no localhost server is required. The existing KaTeX happy-dom quirks
+warning remains. Exact source/archive receipts and cleanup for #44/#45 and the
+formatter are recorded in tenant-workspaces-progress.json. Real component/
+Context with HTTP doubles does not prove actual browser/backend authorization.
+ChatPage project/branch, sidecar, ancillary input tools, draft/attachment stores,
+activity/projects/artifacts and actual shell/browser integration remain. Parent
+M3 and all remaining M4-M11 gates stay open; activation stays closed.
