@@ -87,6 +87,11 @@ def test_annotations_do_not_bypass_evidence_admission(overrides):
     assert _verdict(_summary(2, " (skipped=1)"), **overrides)["leaves"][0]["checked"] is False
 
 
+def test_recorded_error_status_still_overrides_positive_counts():
+    verdict = _verdict(_summary(2, " (skipped=1)"), status="error")
+    assert (verdict["leaves"][0]["checked"], verdict["all_hold"]) == (True, False)
+
+
 @pytest.fixture
 def executor_module(monkeypatch):
     # conftest substitutes the executor; use its actual harvest implementation.
@@ -114,9 +119,10 @@ class SandboxMessages(MessagesState):
         (" @unittest.expectedFailure\n def test_xfail(self): self.fail()\n", (False, False)),
         (" def test_pass(self): pass\n @unittest.expectedFailure\n def test_xfail(self): self.fail()\n", (True, True)),
         (" def test_fail(self): self.fail()\n", (True, False)),
+        (' def test_error(self): raise RuntimeError("fixture")\n', (True, False)),
         (" @unittest.expectedFailure\n def test_xpass(self): pass\n", (True, False)),
     ],
-    ids=["pass", "pass-and-skip", "all-skipped", "empty", "all-expected-failure", "pass-and-expected-failure", "failure", "unexpected-success"],
+    ids=["pass", "pass-and-skip", "all-skipped", "empty", "all-expected-failure", "pass-and-expected-failure", "failure", "error", "unexpected-success"],
 )
 async def test_native_unittest_results_reach_parent_acceptance(tmp_path, monkeypatch, executor_module, methods, expected):
     (tmp_path / "test_sample.py").write_text("import unittest\nclass Sample(unittest.TestCase):\n" + methods, encoding="utf-8")
