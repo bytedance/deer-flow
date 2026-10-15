@@ -28,16 +28,8 @@ import deerflow.config as config_package
 # waiting on. Drop an entry once the guards land: from then on the module's
 # fields must carry a ``reject_boolean`` guard, or the parametrized case below
 # fails.
-#
-# ``mcp_tasks_config`` and ``subagent_batches_config`` have no fix in flight:
-# their point fixes (#6289, #6291) were closed unmerged, and both modules are
-# still fully unguarded on ``main``. This change is scoped to the modules the
-# in-flight PRs do not touch, so they stay listed here rather than being folded
-# in; the tracking issues (#6288, #6290) are still open.
 MODULES_AWAITING_GUARDS: dict[str, str] = {
     "auth_config": "PR #6295 (open)",
-    "mcp_tasks_config": "issue #6288; PR #6289 was closed unmerged",
-    "subagent_batches_config": "issue #6290; PR #6291 was closed unmerged",
     "token_budget_config": "PR #6300 (open)",
     "tool_progress_config": "PR #6035 (open)",
 }
