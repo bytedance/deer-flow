@@ -39,6 +39,7 @@ from langgraph.errors import GraphBubbleUp
 
 from deerflow.agents.middlewares.message_utils import requires_input_sanitization
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text
+from deerflow.utils.upload_context import UPLOAD_CONTEXT_KEY, project_upload_context, upload_context_text
 
 logger = logging.getLogger(__name__)
 
@@ -305,6 +306,10 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
         preserved while the tags lose their semantic significance. The original
         message is never mutated.
         """
+        if upload_context_text(msg) is not None and msg.additional_kwargs[UPLOAD_CONTEXT_KEY].get("projected") is True:
+            # This view was already sanitized before its server-owned context
+            # was projected. A nested retry must not frame/escape it again.
+            return None
         content = msg.content
         text_content, text_blocks = self._extract_text_from_content(content)
 
@@ -313,17 +318,16 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
             logger.debug("_sanitize_message: no text content in message — passing through")
             return None
 
-        # Sanitize only the user's original input when available (set by
-        # UploadsMiddleware before it prepends the <current_uploads> block),
-        # so server-injected trusted blocks are never scanned for blocked
-        # tags.  Fall back to full-content scanning only when the marker is
-        # absent — UploadsMiddleware sets it on upload turns, so plain text
-        # messages without uploads won't have it.  Full-content scanning is
-        # safe for those: no server-injected <current_uploads> block exists
-        # to accidentally escape.
+        # New upload turns keep user content pristine. Legacy inline turns
+        # still use their explicit original-user provenance to avoid escaping
+        # trusted file descriptions; never identify ownership by tag matching.
         preserved_kwargs = dict(msg.additional_kwargs or {})
         original_user_content = preserved_kwargs.get(ORIGINAL_USER_CONTENT_KEY)
-        if isinstance(original_user_content, str) and original_user_content:
+        if upload_context_text(msg) is not None:
+            # New captures keep every original block in content. Do not apply
+            # the legacy first-block-is-server-context fallback to user data.
+            processed = _check_user_content(text_content)
+        elif isinstance(original_user_content, str) and original_user_content:
             processed_user = _check_user_content(original_user_content)
             if processed_user != original_user_content:
                 # Replace only the user's text suffix within the full
@@ -465,10 +469,10 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
                     exc_info=True,
                 )
                 continue
-            if sanitized is None:
-                continue
-            messages[index] = sanitized
-            changed = True
+            projected = project_upload_context(sanitized if sanitized is not None else msg)
+            if projected is not msg:
+                messages[index] = projected
+                changed = True
         if not changed:
             return request
         return request.override(messages=messages)

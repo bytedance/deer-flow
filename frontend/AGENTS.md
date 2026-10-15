@@ -23,6 +23,12 @@ upstream dependency chain resolves a patched version without it; regenerate
 
 ## Commands
 
+New upload turns keep server descriptions in `additional_kwargs.deerflow_upload_context`
+version 1 and user prose in `content`. Use `hasStructuredUploadContext` before legacy
+inline cleanup in display/copy/export/outline paths; never parse file chips from
+literal user tags on those turns. Keep the old cleanup for unversioned history and
+assistant/hidden-context containment. See `docs/upload-context.md` at repository root.
+
 | Command          | Purpose                                       |
 | ---------------- | --------------------------------------------- |
 | `pnpm dev`       | Start the development server with Webpack     |

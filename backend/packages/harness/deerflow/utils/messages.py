@@ -6,6 +6,8 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage
 
+from deerflow.utils.upload_context import UPLOAD_CONTEXT_KEY
+
 ORIGINAL_USER_CONTENT_KEY = "original_user_content"
 SUMMARY_MESSAGE_NAME = "summary"
 
@@ -133,6 +135,9 @@ def restore_original_human_message(message: HumanMessage) -> HumanMessage:
 
     additional_kwargs = dict(message.additional_kwargs)
     additional_kwargs.pop(ORIGINAL_USER_CONTENT_KEY, None)
+    context = additional_kwargs.get(UPLOAD_CONTEXT_KEY)
+    if isinstance(context, dict) and context.get("projected") is True:
+        additional_kwargs[UPLOAD_CONTEXT_KEY] = {key: value for key, value in context.items() if key != "projected"}
 
     content = message.content
     if isinstance(content, str):

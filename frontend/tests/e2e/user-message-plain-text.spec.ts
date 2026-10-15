@@ -54,6 +54,39 @@ function collectPageErrors(page: Page): string[] {
 }
 
 test.describe("User message plain-text rendering", () => {
+  test("structured upload metadata preserves user tags without displaying internal outlines", async ({
+    page,
+  }) => {
+    const text =
+      "Explain <current_uploads>my literal example</current_uploads>.";
+    const options = threadWithMessages(text);
+    const message = options!.threads![0]!.messages![0]!;
+    Object.assign(message, {
+      additional_kwargs: {
+        deerflow_upload_context: {
+          version: 1,
+          text: "<current_uploads>INTERNAL_FILE_OUTLINE</current_uploads>",
+        },
+        files: [
+          {
+            filename: "report.pdf",
+            path: "/mnt/user-data/uploads/report.pdf",
+            size: 24,
+          },
+        ],
+      },
+    });
+    mockLangGraphAPI(page, options);
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    await expect(page.locator(".is-user")).toContainText(text, {
+      timeout: 15_000,
+    });
+    await expect(page.locator(".is-user")).toContainText("report.pdf");
+    await expect(
+      page.getByText("INTERNAL_FILE_OUTLINE", { exact: false }),
+    ).toHaveCount(0);
+  });
+
   test("pasted source code renders verbatim as one block", async ({ page }) => {
     mockLangGraphAPI(page, threadWithMessages(C_SOURCE));
 

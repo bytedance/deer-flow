@@ -31,6 +31,7 @@ from deerflow.extensions.notify import notify_context_compacted
 from deerflow.models import create_chat_model
 from deerflow.models.reasoning import resolve_reasoning_contract
 from deerflow.runtime.events.catalog import MIDDLEWARE_SUMMARIZE_TAG
+from deerflow.utils.upload_context import project_upload_contexts
 
 logger = logging.getLogger(__name__)
 _SUMMARY_TRIGGER_MESSAGE_NAME = "summary"
@@ -502,6 +503,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         return HumanMessage(content=summary_text, name=_SUMMARY_TRIGGER_MESSAGE_NAME)
 
     def _messages_for_trigger_count(self, messages: list[AnyMessage], summary_text: str | None) -> list[AnyMessage]:
+        messages = project_upload_contexts(messages)
         if not summary_text:
             return messages
         return [*messages, self._summary_count_message(summary_text)]
@@ -609,6 +611,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
 
     def _build_summary_prompt(self, messages_to_summarize: list[AnyMessage], previous_summary: str | None = None) -> str | None:
         """Build the summary prompt, returning ``None`` when trimming leaves nothing."""
+        messages_to_summarize = project_upload_contexts(messages_to_summarize)
         trimmed_messages = self._trim_messages_for_summary(messages_to_summarize)
         new_messages_strategy: Literal["first", "last"] = "first"
         if not trimmed_messages:

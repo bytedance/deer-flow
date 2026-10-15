@@ -1,3 +1,11 @@
+### Upload Context Projection
+
+`upload_context.py` validates versioned server-owned upload metadata and builds
+detached model-facing copies. Preserve message IDs and native media; do not infer
+ownership by matching tag strings. The `projected` marker is transient and removed
+by human-message restoration. Gateway admission strips this metadata from external
+callers. Never persist projections or send the envelope to memory extraction.
+
 ### Atomic Byte Publication
 
 `atomic_write.publish_bytes_atomically` owns browser screenshot and Browserless

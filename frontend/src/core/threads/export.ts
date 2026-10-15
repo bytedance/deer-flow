@@ -5,6 +5,7 @@ import {
   extractReasoningContentFromMessage,
   hasContent,
   hasToolCalls,
+  hasStructuredUploadContext,
   isHiddenFromUIMessage,
   stripInternalMarkers,
 } from "../messages/utils";
@@ -50,6 +51,9 @@ function visibleMessages(
 function formatMessageContent(message: Message): string {
   const text = extractContentFromMessage(message);
   if (!text) return "";
+  // Its internal payload is structurally separate and JSON export never
+  // copies metadata. Tag-like text here belongs to the user, including examples.
+  if (hasStructuredUploadContext(message)) return text;
   // Defence-in-depth: even if a middleware-injected marker slipped through
   // the `hide_from_ui` filter, scrub every known internal tag before the
   // content lands in a user-visible export file.
