@@ -15,8 +15,11 @@ The summarization feature uses LangChain's `SummarizationMiddleware` to monitor 
 5. Stores the summary in `ThreadState.summary_text` and projects it ephemerally through durable context data
 
 Selected history is processed from oldest to newest in bounded text chunks.
-Each call receives the complete preceding summary plus the next source fragment;
-unused summary capacity is available to new source text. A single oversized
+Each call receives the preceding summary plus the next source fragment. Already
+generated summaries, including legacy stored summaries and final model output,
+use at most half the raw-input budget. Oversized summaries retain their head and
+tail with an explicit `[summary shortened]` marker; selected raw history is never
+shortened this way. Unused carry capacity is available to source text. A single oversized
 message is split into contiguous fragments, including its middle. Input is
 PII-redacted before splitting, then escaped before insertion into prompt blocks.
 No human-anchor filter or successful "too long" placeholder can discard selected
@@ -24,10 +27,20 @@ source. Recent-message retention and AI/Tool partition boundaries stay unchanged
 
 Only after all chunks succeed are hooks, the compaction event, history capture
 and message replacement committed once. Any failed chunk leaves active history
-unchanged; manual `/compact` reports generation failure. A previous or generated
-summary that leaves no room for source text also fails without eviction. Larger
-partitions can require more model calls: the input cap bounds each call, not total
-cost or latency. This guarantees source input coverage, not lossless model output.
+unchanged; manual `/compact` reports generation failure. A pass processes at most
+64 chunks, including cached chunks; hitting the limit also keeps original history.
+Configured/run-model fallback may make two candidate attempts per chunk, and SDK
+retries are separate. This bounds middleware steps, not a monetary bill or deadline.
+For legitimate histories beyond this limit, increase the existing per-call budget
+within the model's capacity or compact earlier. There is no new configuration.
+Impossibly small budgets that cannot fit a nonempty marked carry or source fail
+without eviction. `null` uses one unbounded input step and does not shorten carry.
+This guarantees new source input coverage, not lossless summaries: bounding
+already-compressed carry can omit earlier summarized facts.
+
+Prefix selection expands a local window and then searches within it using the
+actual token counter, avoiding repeated processing of the entire remaining source.
+Warning diagnostics include numeric budget, carry and progress values, never text.
 
 ## Reuse and telemetry
 
@@ -204,7 +217,7 @@ keep:
 #### `trim_tokens_to_summarize`
 - **Type**: Integer or null
 - **Default**: `4000`
-- **Description**: Per-call raw-text budget shared by the complete previous summary and the next chronological source chunk. Escaping, wrapper tags, and the summary prompt add overhead; this is not a hard limit on the final model request or the total work of a compaction pass. Oversized messages are processed across calls without omitting source text. If the carry leaves no room for source, compaction fails without replacing history. Set to `null` for one unbounded call (not recommended for very long conversations).
+- **Description**: Per-step raw-text budget shared by generated carry (at most half) and the next chronological source chunk. Only generated or legacy summaries may be shortened, with a visible marker; raw source is covered without elision. A pass is limited to 64 chunks, retaining original history on failure or limit exhaustion. Escaping, wrapper tags, prompt overhead and SDK retries remain outside this budget. Set to `null` for one unbounded input step with no carry shortening (not recommended for very long conversations).
 
 #### `summary_prompt`
 - **Type**: String or null

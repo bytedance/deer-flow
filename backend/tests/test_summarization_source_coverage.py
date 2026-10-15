@@ -218,23 +218,87 @@ async def test_midway_provider_failure_cannot_commit_partial_compaction(monkeypa
 @pytest.mark.asyncio
 @pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
 @pytest.mark.parametrize("manual", [False, True], ids=["automatic", "manual"])
-@pytest.mark.parametrize("boundary", ["oversized-previous", "previous-fills-budget", "tiny-budget", "oversized-model-output"])
-async def test_unusable_carry_budget_cannot_commit_partial_compaction(monkeypatch, asynchronous, manual, boundary):
+async def test_tiny_carry_budget_cannot_commit_partial_compaction(monkeypatch, asynchronous, manual):
+    model = RecordingSummaryModel()
+    await _assert_failed_compaction_is_atomic(monkeypatch, model, asynchronous=asynchronous, manual=manual, previous_summary=None, raw_budget=1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("manual", [False, True], ids=["automatic", "manual"])
+@pytest.mark.parametrize("boundary", ["oversized-previous", "previous-fills-budget", "intermediate-model-output", "final-model-output"])
+async def test_generated_carry_is_bounded_without_clipping_selected_sources(asynchronous, manual, boundary):
+    state, selected, _ = _history("many-turns")
     model = RecordingSummaryModel()
     previous = _OLD_MEMORY
-    budget = _RAW_BUDGET
+    carry_begin, carry_end = "LEGACY_CARRY_BEGIN|", "|LEGACY_CARRY_END"
+    generated = "MODEL_OUTPUT_BEGIN|" + "expanded summary " * 150 + "|MODEL_OUTPUT_END"
     if boundary == "oversized-previous":
-        previous = "P" * (_RAW_BUDGET + 1)
+        previous = carry_begin + "P" * (_RAW_BUDGET + 1) + carry_end
     elif boundary == "previous-fills-budget":
-        previous = "P" * _RAW_BUDGET
-    elif boundary == "tiny-budget":
-        previous, budget = None, 1
+        previous = carry_begin + "P" * (_RAW_BUDGET - len(carry_begin) - len(carry_end)) + carry_end
     else:
-        model.output_text = "MODEL_OUTPUT_TOO_LARGE " + "X" * _RAW_BUDGET
+        model.output_text = generated
+        if boundary == "final-model-output":
+            selected = [HumanMessage(content="old question", id="old-user"), AIMessage(content="old answer", id="old-ai")]
+            state["messages"] = [*selected, HumanMessage(content="current request", id="current-user"), AIMessage(content="recent answer", id="recent-answer")]
+    state["summary_text"] = previous
+    original = copy.deepcopy(state)
+    hooks = []
+    middleware = _middleware(model, before_summarization=[hooks.append])
+    runtime = SimpleNamespace(context={"thread_id": "source-coverage"})
 
-    await _assert_failed_compaction_is_atomic(monkeypatch, model, asynchronous=asynchronous, manual=manual, previous_summary=previous, raw_budget=budget)
+    if manual:
+        result = await middleware.acompact_state(state, runtime, force=True, raise_on_failure=True) if asynchronous else middleware.compact_state(state, runtime, force=True, raise_on_failure=True)
+        assert result is not None
+        summary = result.summary_text
+    else:
+        update = await middleware.abefore_model(state, runtime) if asynchronous else middleware.before_model(state, runtime)
+        assert update is not None
+        summary = update["summary_text"]
 
+    assert state == original
+    assert len(hooks) == 1
+    assert list(hooks[0].messages_to_summarize) == selected
+    assert "current-user" in {message.id for message in hooks[0].preserved_messages}
+    sections = [_raw_sections(prompt) for prompt in model.prompts]
+    captured = "".join(body for step in sections for name, body in step if name == "new_messages")
+    assert captured == get_buffer_string(selected)
+    for step in sections:
+        assert sum(len(body) for _, body in step) <= _RAW_BUDGET
+        for name, body in step:
+            if name == "existing_summary":
+                assert _char_count([HumanMessage(content=body)]) <= _RAW_BUDGET // 2
+    assert _char_count([HumanMessage(content=summary)]) <= _RAW_BUDGET // 2
     if boundary in {"oversized-previous", "previous-fills-budget"}:
-        assert model.prompts == [], "a carry that cannot leave room for source must fail before invoking the provider"
+        first_carry = dict(sections[0])["existing_summary"]
+        assert first_carry.startswith(carry_begin) and first_carry.endswith(carry_end)
+        assert "[summary shortened]" in first_carry
+        assert summary == f"DIGEST_STEP_{len(model.prompts):03d}: remembered prior evidence."
     else:
-        assert model.prompts, "an unusable model-generated carry must fail after actual provider progress"
+        assert summary.startswith("MODEL_OUTPUT_BEGIN|") and summary.endswith("|MODEL_OUTPUT_END")
+        assert "[summary shortened]" in summary
+        if boundary == "intermediate-model-output":
+            assert any("[summary shortened]" in dict(step).get("existing_summary", "") for step in sections[1:])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("large_output", [False, True], ids=["normal-summary", "large-summary"])
+async def test_unbounded_budget_preserves_generated_summary_bytes(asynchronous, large_output):
+    state, selected, _ = _history("many-turns")
+    previous = "PREVIOUS_UNBOUNDED_BEGIN|" + "P" * 2000 + "|PREVIOUS_UNBOUNDED_END"
+    state["summary_text"] = previous
+    expected = "UNBOUNDED_OUTPUT_BEGIN|" + "V" * 2000 + "|UNBOUNDED_OUTPUT_END" if large_output else "normal generated summary"
+    model = RecordingSummaryModel(output_text=expected)
+    middleware = _middleware(model, raw_budget=None)
+    runtime = SimpleNamespace(context={})
+
+    result = await middleware.acompact_state(state, runtime, force=True, raise_on_failure=True) if asynchronous else middleware.compact_state(state, runtime, force=True, raise_on_failure=True)
+
+    assert result is not None
+    assert result.summary_text == expected
+    sections = [_raw_sections(prompt) for prompt in model.prompts]
+    assert dict(sections[0])["existing_summary"] == previous
+    captured = "".join(body for step in sections for name, body in step if name == "new_messages")
+    assert captured == get_buffer_string(selected)

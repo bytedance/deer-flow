@@ -38,6 +38,8 @@ _COMPACTION_TRANSFORM_KIND = "summarization"
 _COMPACTION_TRANSFORM_VERSION = "2"
 _UNSET = object()
 _NOOP_CACHE_MAX_ENTRIES = 128
+_MAX_SUMMARY_CHUNKS = 64
+_SHORTENED_SUMMARY_MARKER = "\n[summary shortened]\n"
 
 
 class _ReusedSummary(str):
@@ -192,6 +194,8 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             "keep": plain_size(self.keep),
             "trim_tokens_to_summarize": self.trim_tokens_to_summarize,
             "source_coverage": "chronological_chunks",
+            "max_summary_chunks": _MAX_SUMMARY_CHUNKS,
+            "summary_carry_budget_fraction": 0.5,
             "summary_prompt_hash": canonical_hash(self.summary_prompt),
             # Model objects are not JSON-serialisable. Keep generation and context
             # budget ownership distinct in the identity: changing either can alter
@@ -298,8 +302,13 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         if not messages_to_summarize:
             return "No previous conversation history."
         source = self._summary_source_text(messages_to_summarize)
-        cursor, summary, all_reused = 0, previous_summary, True
+        summary = self._bound_summary_carry(previous_summary) if previous_summary else None
+        if previous_summary and summary is None:
+            return None
+        cursor, chunks, all_reused = 0, 0, True
         while cursor < len(source):
+            if self._summary_chunk_limit_reached(chunks, cursor, len(source), summary):
+                return None
             step = self._next_summary_step(source, cursor, summary)
             if step is None:
                 return None
@@ -309,6 +318,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 return None
             all_reused = all_reused and isinstance(summary, _ReusedSummary)
             cursor = end
+            chunks += 1
         if summary is None:
             return None
         return _ReusedSummary(summary) if all_reused else str(summary)
@@ -318,8 +328,13 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         if not messages_to_summarize:
             return "No previous conversation history."
         source = self._summary_source_text(messages_to_summarize)
-        cursor, summary, all_reused = 0, previous_summary, True
+        summary = self._bound_summary_carry(previous_summary) if previous_summary else None
+        if previous_summary and summary is None:
+            return None
+        cursor, chunks, all_reused = 0, 0, True
         while cursor < len(source):
+            if self._summary_chunk_limit_reached(chunks, cursor, len(source), summary):
+                return None
             step = self._next_summary_step(source, cursor, summary)
             if step is None:
                 return None
@@ -329,6 +344,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 return None
             all_reused = all_reused and isinstance(summary, _ReusedSummary)
             cursor = end
+            chunks += 1
         if summary is None:
             return None
         return _ReusedSummary(summary) if all_reused else str(summary)
@@ -476,7 +492,10 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         summary = self._nonempty_summary(getattr(response, "text", None))
         if summary is None:
             self._log_summary_empty(last)
-        return summary
+            return None
+        # Bound every generated carry, including the final output, before it
+        # enters either the no-op cache or persisted summary_text.
+        return self._bound_summary_carry(summary)
 
     @staticmethod
     def _log_summary_error(last: bool) -> None:
@@ -510,29 +529,97 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             logger.debug("Failed to count summary input; using a character budget", exc_info=True)
             return len(text)
 
+    def _bound_summary_carry(self, summary: str) -> str | None:
+        """Reserve source capacity by bounding only already-generated summaries.
+
+        Never apply this to selected raw history. Redact before shortening so
+        slicing an identifier cannot bypass PII handling. Short summaries keep
+        their exact text; oversized ones retain both ends and a visible marker.
+        """
+        text = redact_text(summary, getattr(self._app_config, "pii_redaction", None))
+        if self.trim_tokens_to_summarize is None:
+            return text
+        budget = max(1, self.trim_tokens_to_summarize)
+        carry_budget = budget // 2
+        tokens = self._summary_text_tokens(text)
+        if tokens <= carry_budget:
+            return text
+
+        def shortened(keep: int) -> str:
+            head, tail = (keep + 1) // 2, keep // 2
+            return text[:head] + _SHORTENED_SUMMARY_MARKER + text[-tail:]
+
+        # The complete candidate (including its marker) is measured. An
+        # impossibly small budget fails instead of producing an empty carry.
+        low, high, bounded = 2, len(text) - 1, None
+        while low <= high:
+            middle = (low + high) // 2
+            candidate = shortened(middle)
+            if self._summary_text_tokens(candidate) <= carry_budget:
+                bounded, low = candidate, middle + 1
+            else:
+                high = middle - 1
+        if bounded is None:
+            logger.warning("Summary carry cannot fit: carry_tokens=%d carry_budget=%d input_budget=%d", tokens, carry_budget, budget)
+        else:
+            logger.debug("Summary carry shortened: carry_tokens=%d bounded_tokens=%d carry_budget=%d input_budget=%d", tokens, self._summary_text_tokens(bounded), carry_budget, budget)
+        return bounded
+
+    def _summary_chunk_limit_reached(self, chunks: int, cursor: int, source_chars: int, summary: str | None) -> bool:
+        if chunks < _MAX_SUMMARY_CHUNKS:
+            return False
+        logger.warning(
+            "Summary chunk limit reached; keeping history: chunks=%d limit=%d processed_chars=%d source_chars=%d carry_tokens=%d input_budget=%s",
+            chunks,
+            _MAX_SUMMARY_CHUNKS,
+            cursor,
+            source_chars,
+            self._summary_text_tokens(summary or ""),
+            self.trim_tokens_to_summarize,
+        )
+        return True
+
+    def _summary_prefix_length(self, source: str, cursor: int, available: int) -> int:
+        """Find a verified fitting prefix without repeatedly scanning the suffix.
+
+        Exponentially grow a local window, then bisect only its final interval.
+        Character lengths guide probing, never stand in for the token counter.
+        """
+        remaining = len(source) - cursor
+        low, high = 0, min(remaining, max(1, available))
+        while self._summary_text_tokens(source[cursor : cursor + high]) <= available:
+            low = high
+            if high == remaining:
+                return high
+            high = min(remaining, high * 2)
+        high -= 1
+        best = low
+        low += 1
+        while low <= high:
+            middle = (low + high) // 2
+            if self._summary_text_tokens(source[cursor : cursor + middle]) <= available:
+                best, low = middle, middle + 1
+            else:
+                high = middle - 1
+        return best
+
     def _next_summary_step(self, source: str, cursor: int, previous_summary: str | None) -> tuple[str, int] | None:
         previous = redact_text(previous_summary, getattr(self._app_config, "pii_redaction", None)) if previous_summary else None
         end = len(source)
         if self.trim_tokens_to_summarize is not None:
             available = max(1, self.trim_tokens_to_summarize) - self._summary_text_tokens(previous or "")
             if available <= 0:
-                logger.warning("Summary input budget cannot fit the previous summary; skipping compaction")
+                logger.warning("Summary input cannot fit carry: carry_tokens=%d input_budget=%d", self._summary_text_tokens(previous or ""), self.trim_tokens_to_summarize)
                 return None
-            if self._summary_text_tokens(source[cursor:]) > available:
-                low, high, end = cursor + 1, len(source), cursor
-                while low <= high:
-                    middle = (low + high) // 2
-                    if self._summary_text_tokens(source[cursor:middle]) <= available:
-                        end, low = middle, middle + 1
-                    else:
-                        high = middle - 1
+            end = cursor + self._summary_prefix_length(source, cursor, available)
+            if end < len(source):
                 # Prefer complete serialized lines when possible. Oversized
                 # individual messages still advance through contiguous slices.
                 boundary = source.rfind("\n", cursor, end) + 1
                 if boundary > cursor and self._summary_text_tokens(source[cursor:boundary]) <= available:
                     end = boundary
             if end <= cursor:
-                logger.warning("Summary input budget cannot fit any source text; skipping compaction")
+                logger.warning("Summary input cannot fit source: source_budget=%d carry_tokens=%d input_budget=%d", available, self._summary_text_tokens(previous or ""), self.trim_tokens_to_summarize)
                 return None
         body = self._build_summary_input_text(source[cursor:end], previous)
         if body is None:

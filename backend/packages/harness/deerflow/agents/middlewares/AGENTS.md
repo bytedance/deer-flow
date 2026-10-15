@@ -9,12 +9,12 @@ Preserve the recognition sample and 5,000,000 UTF-8-byte guard. Count incrementa
 on parsing or field-limit errors, report an undetermined count rather than a
 physical-line or sample total.
 
-Compaction keeps state `SystemMessage`s; transient instructions use request
-wrappers. Skip fully rescued partitions. Fold all source chronologically in
-bounded chunks; split oversized messages without elision or human anchoring.
-PII-redact before splitting; budget before escaping. Keep carry intact; commit
-hooks/history/removal only after all chunks succeed. Reject unfittable inputs;
-`trim_tokens_to_summarize=None` means one unbounded call.
+Keep state `SystemMessage`s; inject transient instructions via request wrappers.
+Skip fully rescued partitions. Fold all raw source in order without human
+anchoring. PII-redact before splitting; budget before escaping. Generated carry:
+marked head/tail within half the raw budget; at most 64 chunks/pass. Commit
+hooks/history/removal only on full success; reject unfittable inputs.
+`trim_tokens_to_summarize=None` uses one unbounded step.
 
 Todo compaction: [contract](../../../../../docs/summarization.md#todo-reminders).
 

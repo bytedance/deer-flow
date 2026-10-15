@@ -85,7 +85,7 @@ class SummarizationConfig(BaseModel):
     trim_tokens_to_summarize: int | None = Field(
         default=4000,
         ge=1,
-        description="Raw-text budget per summary call, shared by the previous summary and a chronological source chunk. Pass null to summarize in one unbounded call.",
+        description="Raw-text budget per summary step. Generated carry uses at most half, reserving the rest for source; a pass has at most 64 chunks. Pass null for one unbounded step.",
     )
 
     @field_validator("trim_tokens_to_summarize", mode="before")
