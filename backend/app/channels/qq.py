@@ -18,7 +18,8 @@ import httpx
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
-from app.channels.base import Channel
+from app.channels.allowed_users import parse_allowed_users
+from app.channels.base import Channel, ChannelUnavailable
 from app.channels.commands import extract_connect_code, is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage
@@ -44,6 +45,10 @@ class QQAPIError(RuntimeError):
     """A sanitized provider failure, safe for shared channel error logging."""
 
 
+class QQTransportError(QQAPIError):
+    """A transient connection failure, distinct from a provider rejection."""
+
+
 def validate_gateway_url(url: str) -> str:
     try:
         parsed = urlsplit(url)
@@ -56,6 +61,30 @@ def validate_gateway_url(url: str) -> str:
     if not valid:
         raise QQAPIError("QQ returned an untrusted gateway URL")
     return url
+
+
+def _parse_open_id(entry: Any) -> str | None:
+    """A QQ OpenID from a non-blank string, else ``None``.
+
+    OpenIDs are opaque strings. A YAML number is at best a QQ account number,
+    which never equals an OpenID, so it is rejected rather than stringified.
+    """
+    if isinstance(entry, str):
+        return entry.strip() or None
+    return None
+
+
+def _parse_allowed_users(allowed_users: Any) -> frozenset[str] | None:
+    """Parse OpenIDs without splitting a scalar string into its characters."""
+    return parse_allowed_users(
+        allowed_users,
+        parse_user_id=_parse_open_id,
+        logger=logger,
+        channel_name="qq",
+        expected_id="a QQ OpenID string, not a numeric QQ account number",
+        valid_id_name="OpenID",
+        warn_on_scalar_separators=True,
+    )
 
 
 class _GatewayConnect(connect):
@@ -78,7 +107,7 @@ class QQChannel(Channel):
         super().__init__("qq", bus, config)
         self._app_id = str(config.get("app_id") or "").strip()
         self._client_secret = str(config.get("client_secret") or "").strip()
-        self._allowed_users = set(config.get("allowed_users") or [])
+        self._allowed_users = _parse_allowed_users(config.get("allowed_users"))
         self._api_url = "https://sandbox.api.sgroup.qq.com" if config.get("sandbox", False) else API_URL
         self._http: httpx.AsyncClient | None = None
         self._ssl: ssl.SSLContext | None = None
@@ -153,8 +182,8 @@ class QQChannel(Channel):
         async with self._token_lock:
             if self._access_token and time.monotonic() < self._token_expires_at:
                 return self._access_token
-            if self._http is None:
-                raise QQAPIError("QQ HTTP transport is not available")
+            if self._http is None or self._http.is_closed:
+                raise QQTransportError("QQ HTTP transport is not available")
             try:
                 response = await self._http.post(
                     TOKEN_URL,
@@ -166,6 +195,8 @@ class QQChannel(Channel):
                 lifetime = float(payload["expires_in"])
                 if not isinstance(token, str) or not token or not math.isfinite(lifetime) or lifetime <= 0:
                     raise ValueError
+            except httpx.TransportError:
+                raise QQTransportError("QQ access token transport failed") from None
             except Exception:
                 raise QQAPIError("QQ access token request failed") from None
             self._access_token = token
@@ -185,9 +216,11 @@ class QQChannel(Channel):
                     },
                     **kwargs,
                 )
-            except Exception:
+            except httpx.TransportError:
                 # An ambiguous timeout must not trigger another passive reply.
-                raise QQAPIError("QQ API transport failed") from None
+                raise QQTransportError("QQ API transport failed") from None
+            except Exception:
+                raise QQAPIError("QQ API request failed") from None
             if response.status_code == 401 and attempt == 0:
                 if token == self._access_token:
                     self._token_expires_at = 0
@@ -392,7 +425,7 @@ class QQChannel(Channel):
         # Binding codes are always control traffic, even without a repository.
         if extract_connect_code(text) and code is None:
             return
-        if not code and self._allowed_users and sender not in self._allowed_users:
+        if not code and self._allowed_users is not None and sender not in self._allowed_users:
             return
         key = (chat_id, message_id)
         self._replies.setdefault(
@@ -455,6 +488,51 @@ class QQChannel(Channel):
             self._commit_reserved_inbound(reservation, inbound)
         finally:
             reservation.release()
+
+    async def send_notification_for_owner(self, *, owner_user_id: str | None, target: str, text_markdown: str) -> None:
+        """Only C2C bindings from this bot establish a private notification target."""
+        if not owner_user_id or self._connection_repo is None:
+            raise ChannelUnavailable("QQ notification binding lookup is unavailable")
+        try:
+            connections = await self._connection_repo.list_connections(owner_user_id)
+        except Exception:
+            raise ChannelUnavailable("QQ notification binding lookup is unavailable") from None
+        if not isinstance(connections, (list, tuple)):
+            raise ChannelUnavailable("QQ notification binding lookup is unavailable")
+        for connection in connections:
+            metadata = connection.get("metadata")
+            if (
+                connection.get("owner_user_id") == owner_user_id
+                and connection.get("provider") == self.name
+                and connection.get("status") == "connected"
+                and connection.get("external_account_id") == target
+                and connection.get("workspace_id") == f"{self._app_id}:c2c"
+                and isinstance(metadata, dict)
+                and metadata.get("chat_type") == "c2c"
+            ):
+                await self.send_notification(target=target, text_markdown=text_markdown)
+                return
+        raise QQAPIError("QQ private notification identity is no longer connected")
+
+    async def send_notification(self, *, target: str, text_markdown: str) -> None:
+        """Send one proactive C2C message; the outbox owns retries and delivery state."""
+        if not self.is_running or self._http is None or self._http.is_closed:
+            raise ChannelUnavailable("QQ notification transport is unavailable")
+        if not _parse_open_id(target):
+            raise QQAPIError("QQ notification target is empty")
+        try:
+            # No source ID or reply sequence: passive reply quotas are separate.
+            payload = await self._api_request("POST", f"/v2/users/{quote(target, safe='')}/messages", json={"msg_type": 0, "content": text_markdown})
+        except QQTransportError:
+            raise ChannelUnavailable("QQ notification transport is unavailable") from None
+        except QQAPIError:
+            if not self.is_running or self._http is None or self._http.is_closed:
+                raise ChannelUnavailable("QQ notification transport is unavailable") from None
+            raise
+        if payload.get("err_code", 0) not in (0, None):
+            raise QQAPIError("QQ notification was rejected")
+        if not isinstance(payload.get("id"), str) or not payload["id"].strip():
+            raise QQAPIError("QQ notification response has no message acknowledgement")
 
     async def send(self, msg: OutboundMessage) -> None:
         if not msg.is_final or not msg.text:

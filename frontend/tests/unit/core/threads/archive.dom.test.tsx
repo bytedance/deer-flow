@@ -32,7 +32,7 @@ function setup() {
   const key = ["thread", "metadata", "chat", false];
   client.setQueryData(key, original);
   client.setQueryData(["threads", "searchInfinite", { archived: false }], {
-    pages: [[original]],
+    pages: [{ threads: [original], hiddenCount: 0, hasMore: false }],
     pageParams: [0],
   });
   const wrapper = ({ children }: PropsWithChildren) => (
@@ -77,7 +77,10 @@ test("failed archive keeps the visible thread and metadata unchanged", async () 
   expect(client.getQueryData(key)).toEqual(original);
   expect(
     client.getQueryData(["threads", "searchInfinite", { archived: false }]),
-  ).toEqual({ pages: [[original]], pageParams: [0] });
+  ).toEqual({
+    pages: [{ threads: [original], hiddenCount: 0, hasMore: false }],
+    pageParams: [0],
+  });
   client.clear();
 });
 

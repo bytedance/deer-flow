@@ -73,7 +73,11 @@ class WechatQRLogin:
         try:
             if qrcode is None:
                 return await channel.request_login_qrcode()
-            return await channel.request_login_status(qrcode, timeout=35, verify_code=verify_code)
+            return await channel.request_login_status(
+                qrcode,
+                timeout=WechatChannel.DEFAULT_QRCODE_ADMIN_STATUS_TIMEOUT,
+                verify_code=verify_code,
+            )
         finally:
             await channel.stop()
 

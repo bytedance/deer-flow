@@ -53,6 +53,11 @@ async def restart_channel(name: str, request: Request) -> ChannelRestartResponse
     if success:
         logger.info("Channel %s restarted successfully", name)
         return ChannelRestartResponse(success=True, message=f"Channel {name} restarted successfully")
-    else:
-        logger.warning("Failed to restart channel %s", name)
-        return ChannelRestartResponse(success=False, message=f"Failed to restart channel {name}")
+    leader = service.leader_of(name) if hasattr(service, "leader_of") else None
+    if isinstance(leader, str) and leader != getattr(service, "lease_owner_id", None):
+        # channels.leader_lease: only the instance holding the provider's lease
+        # runs its transport, and this request reached a different instance.
+        logger.info("Channel %s restart declined: Gateway instance %s holds its leader lease", name, leader)
+        return ChannelRestartResponse(success=False, message=f"Channel {name} is connected by another Gateway instance ({leader}); it can only be restarted there")
+    logger.warning("Failed to restart channel %s", name)
+    return ChannelRestartResponse(success=False, message=f"Failed to restart channel {name}")

@@ -248,10 +248,31 @@ def _normalize_category(fact: dict[str, Any]) -> None:
     raw_category = fact.get("category", "context")
     if not isinstance(raw_category, str):
         raise ValueError("fact.category must be a string")
-    category = raw_category or "context"
-    if category not in CORE_CATEGORIES:
-        fact.setdefault("categoryExtension", category)
-        fact["category"] = "other"
+    fact["category"] = raw_category or "context"
+    # ``categoryExtension`` is only meaningful while ``category`` is "other"
+    # (pre-native-category builds parked non-core labels there).  Once a label
+    # is stored natively -- including a legacy "other"+extension fact updated
+    # to a real category -- the leftover field would contradict the Gateway's
+    # documented meaning, so drop it.
+    if fact["category"] != "other":
+        fact.pop("categoryExtension", None)
+
+
+def _category_comparison_key(fact: dict[str, Any]) -> tuple[Any, ...]:
+    """Category pair with the legacy ``other`` alias folded into the label.
+
+    Pre-native-category builds persisted a label outside CORE_CATEGORIES as
+    ``category="other"`` plus ``categoryExtension=<label>``; this build stores
+    the label natively.  A migration interrupted after its Markdown commit but
+    before the legacy JSON delete must still recognize its own result on retry,
+    so ``"other"``/<label> compares equal to <label>/no-extension here, while
+    genuinely different labels or extensions stay different.
+    """
+    category = fact.get("category")
+    extension = fact.get("categoryExtension")
+    if category == "other" and isinstance(extension, str) and extension:
+        return extension, None
+    return category, extension
 
 
 def _require_string_list(fact: dict[str, Any], field: str) -> None:
@@ -462,12 +483,17 @@ def _atomic_write(path: Path, raw: bytes) -> None:
 def _process_file_lock(lock_path: Path, timeout_seconds: float) -> Iterator[None]:
     """Cross-process advisory lock for one scope, using only the stdlib."""
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    handle = open(lock_path, "a+b")
     deadline = time.monotonic() + timeout_seconds
     acquired = False
+    handle: Any = None
     try:
         while not acquired:
             try:
+                # (Re)open inside the retry loop: on Windows two threads/processes
+                # racing to create a not-yet-existing lock file with an append
+                # open transiently raise PermissionError (EACCES) on ``open()``
+                # itself, before the byte-range lock below is ever attempted.
+                handle = open(lock_path, "a+b")
                 if os.name == "nt":
                     import msvcrt
 
@@ -483,6 +509,9 @@ def _process_file_lock(lock_path: Path, timeout_seconds: float) -> Iterator[None
                     fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 acquired = True
             except OSError:
+                if handle is not None:
+                    handle.close()
+                    handle = None
                 if time.monotonic() >= deadline:
                     raise TimeoutError(f"Timed out acquiring memory scope lock {lock_path}")
                 time.sleep(0.05)
@@ -501,7 +530,8 @@ def _process_file_lock(lock_path: Path, timeout_seconds: float) -> Iterator[None
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             except OSError:
                 logger.warning("Failed to release memory scope lock %s", lock_path)
-        handle.close()
+        if handle is not None:
+            handle.close()
 
 
 class MemoryStorage(abc.ABC):
@@ -1104,8 +1134,10 @@ class FileMemoryStorage(MemoryStorage):
 
     @staticmethod
     def _migration_equivalent(left: dict[str, Any], right: dict[str, Any]) -> bool:
-        ignored = {"revision", "createdAt", "updatedAt", "scope", "title", "schemaVersion"}
-        return {key: value for key, value in left.items() if key not in ignored} == {key: value for key, value in right.items() if key not in ignored}
+        ignored = {"revision", "createdAt", "updatedAt", "scope", "title", "schemaVersion", "category", "categoryExtension"}
+        left_material = {key: value for key, value in left.items() if key not in ignored}
+        right_material = {key: value for key, value in right.items() if key not in ignored}
+        return left_material == right_material and _category_comparison_key(left) == _category_comparison_key(right)
 
     def _load_memory_file(self, path: Path) -> dict[str, Any] | None:
         if not path.exists():
@@ -1951,8 +1983,11 @@ class FileMemoryStorage(MemoryStorage):
             return []
         results: list[dict[str, Any]] = []
         for scope in scopes:
-            facts = self.list_facts(filters=filters, **self._scope_kwargs(scope))
-            for fact in facts:
+            # The ranking covers the whole scope, so read the complete scope
+            # rather than a list_facts page.
+            for fact in self.load(**self._scope_kwargs(scope)).get("facts", []):
+                if filters and not all(key in fact and fact.get(key) == value for key, value in filters.items()):
+                    continue
                 content = fact.get("content")
                 if isinstance(content, str) and query_lower in content.lower():
                     # 0.0 is a persisted confidence _normalize_fact accepts; only unset/null defaults.
