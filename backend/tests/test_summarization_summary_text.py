@@ -148,9 +148,25 @@ class TestSummaryWritesChannel:
         else:
             result = middleware.compact_state(state, runtime, force=True)
 
+        if trim_limit is not None and previous_summary is not None:
+            # With an existing summary the new-messages raw budget halves to
+            # max(1, 120 // 2) = 60 chars, which cannot hold a complete AI/Tool
+            # exchange (an AI tool-call message formats to ~77 chars alone).
+            # Compaction declines rather than evict history the summary model
+            # never sees (#6889); state is left unchanged.
+            assert result is None
+            return
+
         assert result is not None
         assert user in result.preserved_messages
-        assert list(result.messages_to_summarize) == history[1:13]
+        if trim_limit is None:
+            assert list(result.messages_to_summarize) == history[1:13]
+        else:
+            # Bounded budget: only the recent AI/Tool pair that fits the raw-input
+            # budget is summarized; every earlier exchange survives in state.
+            assert list(result.messages_to_summarize) == [history[11], history[12]]
+            assert history[1] in result.preserved_messages
+            assert history[9] in result.preserved_messages
         assert len(model.prompts) == 1
         new_text = model.prompts[0].split("<new_messages>\n", 1)[1].split("\n</new_messages>", 1)[0]
         assert "RESULT_5" in new_text
@@ -197,8 +213,13 @@ class TestSummaryWritesChannel:
             result = middleware.compact_state({"messages": history}, runtime, force=True)
 
         assert result is not None
-        assert list(result.messages_to_summarize) == [history[0], *history[2:12]]
-        assert list(result.preserved_messages) == [user, *history[12:]]
+        # Only RESULT_4 reached the summarizer. The older source messages remain
+        # in the preserved state instead of being evicted without coverage (#6889).
+        assert list(result.messages_to_summarize) == [history[11]]
+        assert history[0] in result.preserved_messages
+        assert history[2] in result.preserved_messages
+        assert history[9] in result.preserved_messages
+        assert user in result.preserved_messages
         assert len(model.prompts) == 1
         new_text = model.prompts[0].split("<new_messages>\n", 1)[1].split("\n</new_messages>", 1)[0]
         assert new_text == "Tool: RESULT_4"

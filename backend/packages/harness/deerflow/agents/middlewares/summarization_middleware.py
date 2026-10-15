@@ -14,7 +14,7 @@ from typing import Any, Literal, Protocol, override, runtime_checkable
 from deerflow_extension_api import CompactionEvent, canonical_hash
 from langchain.agents import AgentState
 from langchain.agents.middleware import SummarizationMiddleware
-from langchain_core.messages import AnyMessage, HumanMessage, RemoveMessage, SystemMessage, get_buffer_string, trim_messages
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage, get_buffer_string, trim_messages
 from langgraph.config import get_config
 from langgraph.constants import TAG_NOSTREAM
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
@@ -607,21 +607,80 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             return None
         return "\n".join(parts)
 
+    def _summarization_window(
+        self,
+        messages_to_summarize: list[AnyMessage],
+        previous_summary: str | None = None,
+    ) -> list[AnyMessage]:
+        """Return the message window the summarizer will actually see.
+
+        The inherited ``_trim_messages_for_summary`` shrinks the partition to a
+        token-budgeted tail anchored on a human; the AI/Tool-only fallback below
+        keeps the whole window and lets ``_build_summary_input_text`` raw-text-trim
+        it. In both cases messages in ``messages_to_summarize`` that never reach
+        the summary model were still evicted from state on compaction (#6889).
+
+        This helper selects the same window at the *message* level so eviction can
+        be scoped to exactly the material the summary model sees. It mirrors the
+        ``strategy="last"`` raw-text trim in ``_build_summary_input_text`` (which
+        favors recent content), using the effective new-messages budget, then snaps
+        the window start to an ``AIMessage`` so a ``ToolMessage`` is never orphaned
+        at the head of the summarized material.
+        """
+        trimmed_messages = self._trim_messages_for_summary(messages_to_summarize)
+        if trimmed_messages:
+            return trimmed_messages
+        if any(isinstance(message, HumanMessage) for message in messages_to_summarize):
+            # The human anchor can fall outside the token-limited tail.
+            # Preserve the existing final-message fallback for this case.
+            return messages_to_summarize[-1:]
+        # Rescuing the current request can leave an AI/Tool-only window, which the
+        # inherited human-anchored trimmer rejects even below budget. Select the
+        # recent messages whose formatted text fits the new-messages budget, using
+        # the same ``get_buffer_string`` representation ``_build_summary_input_text``
+        # trims, so the message window exactly matches the material that survives
+        # the raw-text cap.
+        max_tokens = self.trim_tokens_to_summarize
+        if previous_summary and max_tokens is not None:
+            max_tokens = max(1, max_tokens // 2)
+        if max_tokens is None or max_tokens <= 0:
+            return list(messages_to_summarize)
+        window: list[AnyMessage] = []
+        used = 0
+        for message in reversed(messages_to_summarize):
+            formatted_len = len(get_buffer_string([message]))
+            if used + formatted_len > max_tokens:
+                if not window:
+                    # A single oversized message still summarizes its tail rather
+                    # than evicting it un-summarized.
+                    window.append(message)
+                break
+            window.append(message)
+            used += formatted_len
+        window = list(reversed(window))
+        if not window:
+            return []
+        # Never leave an orphaned tool response at the head of the window: a
+        # ToolMessage whose AIMessage (carrying the tool_calls) was trimmed out
+        # must stay preserved together with that AIMessage. Only snap the window
+        # forward when the ToolMessage has a matching AIMessage earlier in the
+        # partition; a ToolMessage without any matching AIMessage in the partition
+        # is standalone content, not an orphan, and must stay in the window.
+        partition_tool_aims = {tc.get("id") for m in messages_to_summarize if isinstance(m, AIMessage) for tc in m.tool_calls if tc.get("id")}
+        while window and isinstance(window[0], ToolMessage):
+            tool_call_id = window[0].tool_call_id
+            if tool_call_id not in partition_tool_aims:
+                break
+            window.pop(0)
+        return window
+
     def _build_summary_prompt(self, messages_to_summarize: list[AnyMessage], previous_summary: str | None = None) -> str | None:
         """Build the summary prompt, returning ``None`` when trimming leaves nothing."""
-        trimmed_messages = self._trim_messages_for_summary(messages_to_summarize)
+        trimmed_messages = self._summarization_window(messages_to_summarize, previous_summary=previous_summary)
         new_messages_strategy: Literal["first", "last"] = "first"
-        if not trimmed_messages:
-            if any(isinstance(message, HumanMessage) for message in messages_to_summarize):
-                # The human anchor can fall outside the token-limited tail.
-                # Preserve the existing final-message fallback for this case.
-                trimmed_messages = messages_to_summarize[-1:]
-            else:
-                # Rescuing the current request can leave an AI/Tool-only window,
-                # which the inherited human-anchored trimmer rejects even below
-                # budget. Bound its raw text while favoring recent content.
-                trimmed_messages = messages_to_summarize
-                new_messages_strategy = "last"
+        if trimmed_messages and not any(isinstance(message, HumanMessage) for message in trimmed_messages):
+            # The AI/Tool-only window favors recent content when raw-text trimming.
+            new_messages_strategy = "last"
         if not trimmed_messages:
             return None
         # Format messages to avoid token inflation from metadata when str() is called on
@@ -685,7 +744,19 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         messages_to_summarize, preserved_messages = self._preserve_required_context(messages_to_summarize, preserved_messages, latest_user_id=latest_user_id)
         if not messages_to_summarize:
             return None
-        return messages_to_summarize, preserved_messages, previous_summary, total_tokens
+        # Scope the eviction set to the window the summarizer will actually see.
+        # Messages in the partition that are trimmed away below the raw-input
+        # budget never reach the summary model, so they must survive in state
+        # rather than being silently discarded (#6889). Match survivors by the
+        # message id (unique per ``_ensure_message_ids``) because ``trim_messages``
+        # may return chunk copies of oversized messages, not the originals.
+        window = self._summarization_window(messages_to_summarize, previous_summary=previous_summary)
+        if not window:
+            return None
+        window_ids = {message.id for message in window}
+        survivors = [message for message in messages_to_summarize if message.id not in window_ids]
+        preserved_messages = survivors + preserved_messages
+        return window, preserved_messages, previous_summary, total_tokens
 
     def _freeze_compaction_sources(self, messages_to_summarize: list[AnyMessage]) -> tuple[str, ...]:
         """Hash each about-to-be-removed message's content before the summary call.

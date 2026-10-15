@@ -191,6 +191,8 @@ keep:
 - **Default**: `4000`
 - **Description**: Token budget used to trim the raw input sections for the summarization call. Escaping, wrapper tags, and the summary prompt add overhead beyond this budget; it is not a hard limit on the final model request. When preserving the current user request leaves an assistant/tool-only summary window, trimming favors the most recent content in that window. If a mixed window still contains a human message but the human-anchored trim is empty, the existing final-message fallback is preserved. Set to `null` to skip trimming (not recommended for very long conversations).
 
+Compaction removes only the messages that actually reached the summary model: source messages cut by the raw-input budget survive in state (added to the preserved tail) instead of being evicted without being summarized. If the budget is so small that no complete exchange fits, compaction declines for that turn rather than discarding uncovered history.
+
 #### `summary_prompt`
 - **Type**: String or null
 - **Default**: `null` (uses LangChain's default prompt)
