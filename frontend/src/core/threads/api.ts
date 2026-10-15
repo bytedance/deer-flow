@@ -23,6 +23,7 @@ export type ThreadCompactResponse = {
 };
 
 export type CompactThreadContextOptions = {
+  rest?: WorkspaceRESTClient;
   signal?: AbortSignal;
   agentName?: string | null;
   modelName?: string | null;
@@ -162,25 +163,28 @@ export async function patchThreadMetadata(
 export async function createThread(
   threadId: string,
   projectId?: string,
+  options?: ThreadRequestOptions,
 ): Promise<AgentThread> {
-  const response = await fetchWithAuth(`${getBackendBaseURL()}/api/threads`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
+  const response = await (options?.rest.fetch ?? fetchWithAuth)(
+    `${getBackendBaseURL()}/api/threads`,
+    {
+      method: "POST",
+      ...(options?.signal ? { signal: options.signal } : {}),
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        thread_id: threadId,
+        ...(projectId ? { project_id: projectId } : {}),
+      }),
     },
-    body: JSON.stringify({
-      thread_id: threadId,
-      ...(projectId ? { project_id: projectId } : {}),
-    }),
-  });
+  );
 
-  if (!response.ok) {
-    throw new Error(
-      await readThreadAPIError(response, "Failed to create conversation."),
-    );
-  }
-
-  return (await response.json()) as AgentThread;
+  return readThreadResponse<AgentThread>(
+    response,
+    "Failed to create conversation.",
+    options?.rest,
+  );
 }
 
 export async function moveThreadToProject(
@@ -211,7 +215,7 @@ export async function compactThreadContext(
   threadId: string,
   options: CompactThreadContextOptions = {},
 ): Promise<ThreadCompactResponse> {
-  const response = await fetchWithAuth(
+  const response = await (options.rest?.fetch ?? fetchWithAuth)(
     `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/compact`,
     {
       method: "POST",
@@ -227,13 +231,11 @@ export async function compactThreadContext(
     },
   );
 
-  if (!response.ok) {
-    throw new Error(
-      await readThreadAPIError(response, "Failed to compact context."),
-    );
-  }
-
-  return (await response.json()) as ThreadCompactResponse;
+  return readThreadResponse<ThreadCompactResponse>(
+    response,
+    "Failed to compact context.",
+    options.rest,
+  );
 }
 
 /** Gateway extension not forwarded by the LangGraph SDK's search method. */

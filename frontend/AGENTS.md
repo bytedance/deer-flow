@@ -479,3 +479,11 @@ Expired replay callbacks return false quietly; existing replay masks and native
 ordering remain intact. Shanghai frontend #39 verifies 20 hook/network tests and
 full pnpm check. Compact/project creation, page callbacks and remaining resource/
 storage/shell integration still precede activation and actual browser acceptance.
+
+
+createThread accepts optional third ThreadRequestOptions; compactThreadContext
+accepts options.rest. Both preserve native no-options requests/errors and fence
+full decoding through the fixed REST client (#43, 17 tests/full check). Actual
+ChatPage/InputBox callers still require integration before enabling workspaces.
+The actual delete dialog separately fences retained open/delete callbacks,
+reset/router, post-await publication, error feedback and focus by its lifetime.

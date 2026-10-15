@@ -348,3 +348,23 @@ are empty. These are real hooks with network doubles, not browser/backend proof.
 Next: compact/project creation and actual page callbacks, sidecar coalescing,
 remaining clients/stores/shell integration. M3 and M4-M11 remain incomplete;
 activation stays closed. No remote push, deployment or local runtime testing.
+
+
+M3 create/compact API checkpoint (2026-10-15): frontend #40 RED reproduced
+missing selectors and accepted late-decoded create results. #41 passed 13 tests
+but failed TS2322 because test afterEach returned RstestUtilities. Explicit
+void cleanup fixes the type without weakening assertions. #42 RED independently
+reproduced a real delete dialog callback navigating after a confirmed Context
+switch. #43 SUCCESS: two
+scoped mains + six native API + five chat hooks + four dialog tests (17 total), formatting,
+zero-warning target lint and full pnpm check. Optional fixed REST clients and
+whole native response decoding now cover createThread and compactThreadContext;
+no-options payload/CSRF/conflict compatibility remains. Exact source/archive
+receipts are in tenant-workspaces-progress.json; owned #40-#43 and formatter
+resources are empty. Actual ChatPage project creation and InputBox compact
+callers still need wiring and post-await UI checks. The actual deletion dialog
+now captures its lifetime before dispatch and checks before reset/router,
+post-await close and failure toast/log/focus; native failure feedback is kept.
+Its external deletion operation is doubled, while #35 covers real deletion hooks.
+Network doubles do not
+supply real browser/backend/physical acceptance. All parent gates remain open.

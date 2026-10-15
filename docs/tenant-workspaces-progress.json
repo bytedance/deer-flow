@@ -2248,5 +2248,56 @@
       "sidecar scoped coalescing, other clients/stores, actual shell/selector/browser two-tab acceptance",
       "principal/session/revocation and remaining M4-M11 gates"
     ]
+  },
+  "frontend_create_compact_api": {
+    "job": "deerflow-tenant-frontend",
+    "status": "optional scoped API contract verified; actual ChatPage/InputBox callers still pending; M3 incomplete",
+    "red": {
+      "build": 40,
+      "result": "FAILURE",
+      "reason": "four selectors null and late decoded create returned success after scope abort",
+      "archive_sha256": "746ad9ada0508e3d40a0535b22c81770905bb91780e0a3713bf784bc70976121"
+    },
+    "intermediate": {
+      "build": 41,
+      "result": "FAILURE",
+      "scope": "13 tests and lint passed, TypeScript TS2322 from test afterEach returning RstestUtilities; fixed explicit void body; original history retained"
+    },
+    "green": {
+      "build": 43,
+      "result": "SUCCESS",
+      "tests_passed": 17,
+      "tests_added": 3,
+      "test_seconds": [
+        13.1
+      ],
+      "build_seconds": 413.019,
+      "archive_sha256": "76de94de08e4a75e42be8f7514cf61147c1fca05019d17e3dd10595729105e9c",
+      "checks": "two scoped API mains, six native API tests, five chat hooks, one actual dialog/Context switch main plus three native deletion feedback tests; four-file Prettier; target ESLint max-warnings 0; full pnpm check"
+    },
+    "source_sha256": {
+      "frontend/src/core/threads/api.ts": "8a86ab512906d06e8d1f58462397a5c323ef08bc4f3cc077ab2f56a2c7bae831",
+      "frontend/tests/unit/core/threads/workspace-create-compact.test.ts": "51056643b6a7c74aa2390bf4c93e499cef495819fdd244c050a5978335c28de3",
+      "frontend/src/components/workspace/thread-delete-dialog.tsx": "2f8a55eafd45b1709268e97ddc37efa291557dd6b7f566774e22ef305d2ef87e",
+      "frontend/tests/unit/components/workspace/thread-delete-dialog.dom.test.tsx": "53925ec1b3a25155b3c87d55a8d7cd804c5a266a23485b639eca2e647150468b"
+    },
+    "scope": "createThread optional third ThreadRequestOptions and compact options.rest capture fixed client; full native success/error decoder inside rest.consume; no-options signatures and payload/CSRF/native conflict retained",
+    "limits": "API contract network doubles only; ChatPage project precreation and InputBox compact callers are not wired yet; no real model/browser/backend/physical proof",
+    "cleanup": "#40-#43 terminal and exact owned containers/networks empty; formatter empty; dependency cache retained",
+    "remaining": [
+      "actual ChatPage/InputBox/create/compact and page callback integration",
+      "sidecar scoped coalescing, resources/stores/shell and real two-tab acceptance",
+      "principal/session/revocation and remaining M4-M11; activation closed"
+    ]
+  },
+  "frontend_delete_dialog": {
+    "red": {
+      "build": 42,
+      "result": "FAILURE",
+      "reason": "actual dialog/confirmed Context switch still called old router.replace"
+    },
+    "green": 43,
+    "scope": "dialog captures lifetime; entry/retained open callback, onDeleted reset/router, post-await close/error toast/log/focus all check expiry; native failure feedback/focus retained",
+    "limits": "real dialog/Context; external delete operation doubled; real deletion hooks previously verified separately in #35; no actual browser/backend proof"
   }
 }

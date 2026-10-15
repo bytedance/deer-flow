@@ -1,6 +1,6 @@
 # 2026-10-15 暂停与恢复检查点
 
-状态更新：用户已于 2026-10-15 明确要求继续，当前已恢复；最新验证见文末 #35。下面暂停段保留为历史记录。
+状态更新：用户已于 2026-10-15 明确要求继续，当前已恢复；最新验证见文末 #43。下面暂停段保留为历史记录。
 
 用户此前要求今天到这里，保存进度并允许本地提交。此检查点是 WIP，不能声称功能验收完成；不要自动继续开发、启动构建、部署或推送。用户再次要求继续后再恢复。
 
@@ -77,3 +77,34 @@ are empty. These are real hooks with network doubles, not browser/backend proof.
 Next: compact/project creation and actual page callbacks, sidecar coalescing,
 remaining clients/stores/shell integration. M3 and M4-M11 remain incomplete;
 activation stays closed. No remote push, deployment or local runtime testing.
+
+
+M3 create/compact API checkpoint (2026-10-15): frontend #40 RED reproduced
+missing selectors and accepted late-decoded create results. #41 passed 13 tests
+but failed TS2322 because test afterEach returned RstestUtilities. Explicit
+void cleanup fixes the type without weakening assertions. #42 RED independently
+reproduced a real delete dialog callback navigating after a confirmed Context
+switch. #43 SUCCESS: two
+scoped mains + six native API + five chat hooks + four dialog tests (17 total), formatting,
+zero-warning target lint and full pnpm check. Optional fixed REST clients and
+whole native response decoding now cover createThread and compactThreadContext;
+no-options payload/CSRF/conflict compatibility remains. Exact source/archive
+receipts are in tenant-workspaces-progress.json; owned #40-#43 and formatter
+resources are empty. Actual ChatPage project creation and InputBox compact
+callers still need wiring and post-await UI checks. The actual deletion dialog
+now captures its lifetime before dispatch and checks before reset/router,
+post-await close and failure toast/log/focus; native failure feedback is kept.
+Its external deletion operation is doubled, while #35 covers real deletion hooks.
+Network doubles do not
+supply real browser/backend/physical acceptance. All parent gates remain open.
+
+
+Next concrete order: bind ChatPage.ensureProjectThread and handleBranchTurn;
+bind InputBox compact while retaining its native request epoch; scope sidecar
+find/create coalescing and guard restore→create/queued-send/delete publication.
+Then activity read clocks/timers, projects and artifacts: loader fencing must
+include arrayBuffer decoding and async SHA calculation; direct media/download
+URLs cannot carry the workspace header. Reuse the existing allow_query_selector
+contract on artifact GET and project-document content GET: append workspace_id
+to those browser URLs, keep native authenticated/ACL/before-send checks, and
+reject selector conflicts. Other REST paths keep fixed header transport.

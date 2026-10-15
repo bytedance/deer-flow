@@ -26,6 +26,7 @@ import { useI18n } from "@/core/i18n/hooks";
 import { useDeleteThread } from "@/core/threads/hooks";
 import type { AgentThread } from "@/core/threads/types";
 import { pathOfThread, titleOfThread } from "@/core/threads/utils";
+import { useWorkspaceLifetime } from "@/core/workspaces/context";
 
 type DeleteTarget = {
   thread: AgentThread;
@@ -47,6 +48,7 @@ export function ThreadDeleteDialogProvider({
   children: ReactNode;
 }) {
   const { t } = useI18n();
+  const lifetime = useWorkspaceLifetime();
   const router = useRouter();
   const pathname = usePathname();
   const { thread_id: threadIdFromPath, agent_name: agentNameFromPath } =
@@ -64,11 +66,18 @@ export function ThreadDeleteDialogProvider({
 
   useEffect(() => {
     // Wait for React to re-enable the button before restoring focus.
-    if (target && deleteFailed && !isDeleting) deleteCancelRef.current?.focus();
-  }, [target, deleteFailed, isDeleting]);
+    if (
+      !lifetime?.scope.signal.aborted &&
+      target &&
+      deleteFailed &&
+      !isDeleting
+    )
+      deleteCancelRef.current?.focus();
+  }, [target, deleteFailed, isDeleting, lifetime]);
 
   const handleDelete = useCallback(async () => {
-    if (!target || deleteInFlight.current) return;
+    if (lifetime?.scope.signal.aborted || !target || deleteInFlight.current)
+      return;
     const { thread, recentThreadId } = target;
     deleteInFlight.current = true;
     const currentPathname =
@@ -88,6 +97,7 @@ export function ThreadDeleteDialogProvider({
         threadId: thread.thread_id,
         onDeleted: isCurrentThread
           ? () => {
+              if (lifetime?.scope.signal.aborted) return;
               resetThreadChatAfterDelete({
                 deletedThreadId: thread.thread_id,
                 nextPath: nextThreadPath,
@@ -97,8 +107,10 @@ export function ThreadDeleteDialogProvider({
             }
           : undefined,
       });
+      if (lifetime?.scope.signal.aborted) return;
       setTarget(null);
     } catch (error) {
+      if (lifetime?.scope.signal.aborted) return;
       console.error("Failed to delete chat:", error);
       toast.error(
         error instanceof Error && error.message
@@ -111,6 +123,7 @@ export function ThreadDeleteDialogProvider({
   }, [
     agentNameFromPath,
     deleteThread,
+    lifetime,
     pathname,
     router,
     target,
@@ -118,9 +131,13 @@ export function ThreadDeleteDialogProvider({
     t.chats.deleteFailed,
   ]);
 
-  const requestDelete = useCallback((next: DeleteTarget) => {
-    if (!deleteInFlight.current) setTarget(next);
-  }, []);
+  const requestDelete = useCallback(
+    (next: DeleteTarget) => {
+      if (!lifetime?.scope.signal.aborted && !deleteInFlight.current)
+        setTarget(next);
+    },
+    [lifetime],
+  );
   return (
     <ThreadDeleteContext.Provider value={requestDelete}>
       {children}

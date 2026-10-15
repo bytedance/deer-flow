@@ -116,3 +116,7 @@ Replay frontend (#39): regenerate/edit prepare and submission use the fixed
 confirmed lifetime; decoded late responses and retained callbacks cannot dispatch
 or publish after switching. Native replay ordering regressions retained. Compact,
 project creation, page callbacks and other resource/storage paths remain open.
+
+
+Create/compact frontend API (#43) accepts captured REST and fences native
+response decoding; actual ChatPage/InputBox callers remain unintegrated.
