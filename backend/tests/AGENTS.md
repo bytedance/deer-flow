@@ -79,6 +79,10 @@ Browser-asset confinement tests use `support.symlinks.symlink_or_skip` for real
 file and directory symlinks. Keep missing-file, duplicate-key, and size-limit
 checks separate so they still run when the host cannot create symlinks.
 
+Browserless reservation cleanup tests require a warning with the leftover path
+and unlink error while preserving the original publication exception, including
+interruption. Successful cleanup stays quiet.
+
 `blocking_io/test_web_tool_url_validation.py` resolves a synthetic `.invalid`
 hostname to loopback by patching `_socket.getaddrinfo`, below the real
 `socket.getaddrinfo` wrapper. Do not replace that wrapper or the production URL

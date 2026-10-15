@@ -1247,6 +1247,20 @@ This release closes that milestone with **621 merged pull requests**.
 
 ### Fixed
 
+- **llm:** A provider error that arrives inside a streaming response that has
+  already returned `200` is now retried like the same error sent as an HTTP
+  status. An OpenAI-compatible gateway that answers `200` early, to keep slow
+  requests alive with SSE keepalives, reports a later 504 as an SSE `error`
+  event; the openai SDK raises that as an `APIError` with no status, so
+  `LLMErrorHandlingMiddleware` classified it as generic and the run failed on
+  the first attempt. Such a status-less error now takes a 4xx or 5xx status
+  from a numeric `code` or `status` field, an explicit `[504]`, `HTTP 502` or
+  `status 503` in its message (not an index such as `messages[502]`), or
+  `type: server_error` (500); only when none yields one does its busy check
+  also match spellings such as `rate-limit` and `RATE_LIMIT_…`. Retry budget,
+  backoff and circuit breaker treat it as the equivalent HTTP error; errors
+  that carry a status are classified as before. (issue #6896, [#6897])
+
 - **channels:** Runs started from an IM channel no longer die with the Gateway
   instance that received the message. The manager holds `runs.wait` /
   `runs.stream` open for the whole run, and the Gateway cancels a run whose
@@ -5937,6 +5951,14 @@ This release closes that milestone with **621 merged pull requests**.
   80 such requests failed. The same race in IM conversation binding, such as
   a first message arriving together with `/new`, no longer fails the message.
   The losing write now updates the row the other one created. ([#6852])
+- **mcp:** Cancelling a background MCP task on SQLite now reaches the remote
+  server on the next poll cycle instead of up to `mcp_tasks.lease_seconds`
+  (120 s by default) later. A cancel that committed while the poller was
+  claiming the task had its cleared poll lease written back, because
+  `FOR UPDATE` is a no-op on SQLite. The cancellation worker then waited for
+  that lease to expire, and the task was polled once more for a result that
+  was thrown away. Each claim now re-checks that the task is still claimable
+  when it writes the lease. Postgres was not affected. ([#6859])
 - **persistence:** Startup schema upgrades no longer log a false
   `safe_add_column ... drifts from the model definition` warning for columns
   that already match the model. The check compared the model's generic type
@@ -11730,5 +11752,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6843]: https://github.com/bytedance/deer-flow/pull/6843
 [#6844]: https://github.com/bytedance/deer-flow/pull/6844
 [#6852]: https://github.com/bytedance/deer-flow/pull/6852
+[#6859]: https://github.com/bytedance/deer-flow/pull/6859
 [#6865]: https://github.com/bytedance/deer-flow/pull/6865
 [#6876]: https://github.com/bytedance/deer-flow/pull/6876
+[#6897]: https://github.com/bytedance/deer-flow/pull/6897

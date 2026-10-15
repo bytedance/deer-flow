@@ -36,7 +36,7 @@ from app.channels.message_bus import (
     OutboundMessage,
     ResolvedAttachment,
 )
-from app.channels.notification_groups import is_feishu_notification_group
+from app.channels.notification_groups import is_feishu_notification_group, notification_group_display_name
 from app.channels.sandbox_files import sync_file_to_thread_sandbox
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
@@ -1833,7 +1833,7 @@ class FeishuChannel(Channel):
             provider="feishu",
             external_account_id=user_id,
             workspace_id=chat_id,
-            workspace_name=await self._get_group_name(chat_id) if chat_type == "group" else None,
+            workspace_name=(notification_group_display_name(state.get("metadata")) or await self._get_group_name(chat_id)) if chat_type == "group" else None,
             metadata={
                 "chat_id": chat_id,
                 "message_id": message_id,

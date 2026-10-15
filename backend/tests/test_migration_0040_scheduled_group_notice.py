@@ -16,7 +16,7 @@ from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 
 REVISION = "0040_scheduled_group_notice"
 PREVIOUS = "0039_user_disabled"
-CURRENT_HEAD = "0042_channel_leases"
+CURRENT_HEAD = "0043_runtime_im_notices"
 COLUMN = "notification_group_connection_id"
 
 

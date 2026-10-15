@@ -69,3 +69,35 @@ test("keeps an unavailable endpoint distinguishable from valid default values", 
     loadChannelNotificationPreferences("alice", new AbortController().signal),
   ).rejects.toBeInstanceOf(GatewayApiError);
 });
+
+test("updates a runtime notification event key and parses optional event fields", async () => {
+  rs.mocked(fetcher).mockResolvedValue(
+    new Response(
+      JSON.stringify({
+        ...defaults,
+        run_completed: true,
+        run_failed: false,
+        human_input_requested: true,
+      }),
+    ),
+  );
+  const signal = new AbortController().signal;
+  const updated = await updateChannelNotificationPreference(
+    "alice",
+    "human_input_requested",
+    true,
+    signal,
+  );
+  expect(updated.human_input_requested).toBe(true);
+  expect(updated.run_completed).toBe(true);
+  expect(updated.run_failed).toBe(false);
+  expect(rs.mocked(fetcher)).toHaveBeenCalledWith(
+    "/backend/api/channels/notification-preferences",
+    expect.objectContaining({
+      method: "PATCH",
+      signal,
+      body: '{"human_input_requested":true}',
+      headers: expect.objectContaining({ "X-Expected-User-Id": "alice" }),
+    }),
+  );
+});
