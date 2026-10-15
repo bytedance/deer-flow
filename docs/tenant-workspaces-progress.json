@@ -2434,5 +2434,47 @@
       "activity timers/read clocks, projects/artifacts/direct file links and all scoped UI stores",
       "actual shell/capability/selector and browser/backend two-tab proof; principal/session/revocation and all M4-M11 gates; activation remains closed"
     ]
+  },
+  "frontend_thread_activity": {
+    "job": "deerflow-tenant-frontend",
+    "status": "scoped polling/read clocks and late body publication verified; full M3 incomplete",
+    "history": {
+      "55": {
+        "result": "FAILURE",
+        "scope": "main RED: activity GET omitted the workspace selector and seeded null:cursor",
+        "archive_sha256": "eec05f0684d3b6c30a12679f5c6f0b225fecfdb6f98421bb7a88d9c6bc584dec"
+      },
+      "56": {
+        "result": "SUCCESS",
+        "scope": "main first: one P/T real hook/context/REST main and 20 existing native regressions, before adding lifecycle scenario",
+        "tests_passed": 21,
+        "archive_sha256": "d18757230a6483c547167206f428fab67df6241c81f099a63f7ec383d31ebfb8"
+      }
+    },
+    "green": {
+      "build": 57,
+      "result": "SUCCESS",
+      "tests_passed": 22,
+      "tests_added": 2,
+      "test_seconds": [
+        15.6
+      ],
+      "build_seconds": 427.926,
+      "archive_sha256": "3d8d8858d8fb8ceff7d50404944794e3c7dcd3f83d3f1424ca4c211b10cd8ace",
+      "image_id": "sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01",
+      "checks": "two real hook/context/REST scenarios plus 20 native polling/mark-read regressions; two-file Prettier, target ESLint, early tsc and full pnpm check"
+    },
+    "source_sha256": {
+      "frontend/src/core/threads/activity.ts": "6edcc68beba7dfbb534cf51845d627ec80b2534d75c55b43bc6083b126c7d247",
+      "frontend/tests/unit/core/threads/workspace-activity.dom.test.tsx": "fc9458b41d5d4fce7761aeacd9ddc1c15fd8d2effee1c1cc6994d6c4c2ba87fb"
+    },
+    "scope": "activity/read APIs accept an optional fixed REST client; native decoders and errors remain; polling combines Query cancellation and workspace signals, fences apply and invalid-cursor recovery; read publication and failure invalidations stop after expiry; hook callbacks/timers refuse expired scope. Existing debounce, monotonic read clock, optimistic cache updates and native unscoped behavior retained.",
+    "evidence": "real WorkspaceProvider/ReadyBoundary and activity/read hooks/REST with synthetic HTTP; personal/team cursors and read clocks independent; held personal GET/POST JSON bodies cannot repopulate reset old state or invalidate caches; retained old callback cannot POST. Feature availability and Next router are doubled. Not real browser/backend authorization, server scheduling, cross-tab principal, live model or physical isolation proof.",
+    "cleanup": "#55-#57 terminal; exact owned container/network and formatter inventories empty; dependency caches retained",
+    "remaining": [
+      "same-space sidecar parent navigation/unmount/quiet-stream audit",
+      "project/artifact clients, direct URLs and scoped UI stores",
+      "actual shell/capability/selector and browser/backend two-tab acceptance; principal/session/revocation and M4-M11; activation remains closed"
+    ]
   }
 }

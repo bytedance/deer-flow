@@ -515,3 +515,12 @@ typed AbortError on scope close and removes listeners after settling. Native
 unknown send failures retain their localized fallback. Actual same-space parent
 change/unmount/quiet-stream fault audit, other clients/stores and browser/backend
 acceptance still precede activation; do not infer them from these network doubles.
+
+
+Activity/read hooks bind the confirmed REST lifetime (#57: two scoped mains
+and 20 native regressions/full check). Polling combines Query/workspace abort
+signals and fences cursor/read clock updates and invalid-cursor recovery.
+Read callbacks/timers refuse expired scope; late decoded success/errors cannot
+update clocks or invalidate lists. Preserve native no-options clients, 15s
+polling, 1s debounce, optimistic unread patches and monotonic read versions.
+Real hooks/Context/REST with HTTP doubles are not browser/backend acceptance.

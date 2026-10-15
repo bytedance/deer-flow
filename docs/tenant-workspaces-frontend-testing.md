@@ -446,3 +446,26 @@ still need targeted UI/fault proof before activation. Continue with activity
 clocks/timers, project/artifact clients, direct links and UI stores; then actual
 shell/selector and browser/backend two-tab acceptance. Preserve all M4-M11
 gates; activation stays closed. No deployment, remote push or local runtime.
+
+
+M3 activity/read frontend checkpoint (2026-10-15): #55 RED reproduced an
+unscoped activity GET; #56 main GREEN (21 cases) preceded the additional
+lifecycle case. #57 SUCCESS: 22 cases (two new, 20 native regressions),
+two-file Prettier, target ESLint, early tsc and full pnpm check.
+
+Both hooks capture their confirmed REST lifetime. Polls combine Query/workspace
+cancellation, fence cursor/clock updates and invalid-cursor recovery. Read
+callbacks/timers refuse expired scope, and late read success/errors cannot
+update clocks or invalidate lists. Native 15s polling, 1s read debounce, cursor
+reseed and monotonic read versions remain. The P/T main uses real Context,
+hooks and REST with synthetic HTTP. A held old GET and POST JSON pair is
+released after selecting T: reset P state stays empty, old callbacks cannot
+POST, and T reads continue. Feature/router fixtures are doubled; this is not
+actual browser/backend/principal or physical isolation acceptance.
+
+Source hashes match the final archive, with exact build/formatter resource
+inventories empty. See frontend_thread_activity in the progress JSON. Next:
+same-space sidecar parent/unmount faults, project/artifact clients/direct URLs
+and UI stores, then shell/selector and browser/backend two tabs. M3 remains
+partial; all M0-M11 parent gates remain open and runtime activation stays closed.
+No deployment, remote push, model call or local runtime was performed.

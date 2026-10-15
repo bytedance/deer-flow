@@ -139,3 +139,10 @@ first-send queue abort settlement. P/T normal send/delete and pending create/
 delete races verified through real core hooks with HTTP/SDK React adapter
 doubles. Parent navigation/unmount/quiet-stream, other resources/stores and
 actual shell/browser/backend acceptance remain open.
+
+
+Scoped activity/read frontend (#57): fixed REST hooks with owned decoding,
+combined poll cancellation and pre-publication clock/cursor guards; retained
+callbacks and late JSON cannot act after workspace expiry. Two added P/T
+scenarios and 20 native regressions/full frontend checks passed in Shanghai.
+Actual shell/browser/backend/principal acceptance and other resources remain.
