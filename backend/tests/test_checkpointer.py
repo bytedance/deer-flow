@@ -939,6 +939,26 @@ class TestCheckpointerDatabaseConfig:
         assert resolved.type == "sqlite"
         assert resolved.connection_string == db_config.checkpointer_sqlite_path
 
+    def test_sync_checkpointer_strips_driver_suffix_without_schema(self):
+        """A SQLAlchemy ``+asyncpg`` URL must reach libpq as a bare DSN when no schema is set."""
+        from deerflow.runtime.checkpointer.provider import checkpointer_context
+
+        app_config = SimpleNamespace(
+            checkpointer=None,
+            database=DatabaseConfig(backend="postgres", postgres_url="postgresql+asyncpg://localhost/db"),
+        )
+        mock_saver_cls = MagicMock()
+        mock_saver_cls.from_conn_string.return_value = nullcontext(MagicMock())
+
+        with (
+            patch("deerflow.runtime.checkpointer.provider.get_app_config", return_value=app_config),
+            patch.dict(sys.modules, {"langgraph.checkpoint.postgres": MagicMock(PostgresSaver=mock_saver_cls)}),
+            checkpointer_context(),
+        ):
+            pass
+
+        mock_saver_cls.from_conn_string.assert_called_once_with("postgresql://localhost/db")
+
     def test_sync_checkpointer_singleton_uses_database_config(self):
         """The cached sync checkpointer factory must resolve database config before locking."""
         app_config = SimpleNamespace(
@@ -1046,6 +1066,27 @@ class TestStoreDatabaseConfig:
         assert "No 'checkpointer' section" not in caplog.text
 
     @pytest.mark.anyio
+    async def test_async_store_strips_driver_suffix_without_schema(self):
+        """A SQLAlchemy ``+asyncpg`` URL must reach libpq as a bare DSN when no schema is set."""
+        from deerflow.runtime.store.async_provider import make_store
+
+        app_config = SimpleNamespace(
+            checkpointer=None,
+            database=DatabaseConfig(backend="postgres", postgres_url="postgresql+asyncpg://localhost/db"),
+        )
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__.return_value = AsyncMock()
+        mock_cm.__aexit__.return_value = False
+        mock_store_cls = MagicMock()
+        mock_store_cls.from_conn_string.return_value = mock_cm
+
+        with patch.dict(sys.modules, {"langgraph.store.postgres.aio": MagicMock(AsyncPostgresStore=mock_store_cls)}):
+            async with make_store(app_config):
+                pass
+
+        mock_store_cls.from_conn_string.assert_called_once_with("postgresql://localhost/db")
+
+    @pytest.mark.anyio
     async def test_async_sqlite_store_uses_unified_database_path(self, tmp_path):
         """Unified database SQLite config must use the shared deerflow.db path."""
         from deerflow.runtime.store.async_provider import make_store
@@ -1099,6 +1140,26 @@ class TestStoreDatabaseConfig:
         resolved = factory.call_args.args[0]
         assert resolved.type == "postgres"
         assert resolved.connection_string == "postgresql://localhost/db"
+
+    def test_sync_store_strips_driver_suffix_without_schema(self):
+        """A SQLAlchemy ``+asyncpg`` URL must reach libpq as a bare DSN when no schema is set."""
+        from deerflow.runtime.store.provider import store_context
+
+        app_config = SimpleNamespace(
+            checkpointer=None,
+            database=DatabaseConfig(backend="postgres", postgres_url="postgresql+asyncpg://localhost/db"),
+        )
+        mock_store_cls = MagicMock()
+        mock_store_cls.from_conn_string.return_value = nullcontext(MagicMock())
+
+        with (
+            patch("deerflow.runtime.store.provider.get_app_config", return_value=app_config),
+            patch.dict(sys.modules, {"langgraph.store.postgres": MagicMock(PostgresStore=mock_store_cls)}),
+            store_context(),
+        ):
+            pass
+
+        mock_store_cls.from_conn_string.assert_called_once_with("postgresql://localhost/db")
 
     def test_sync_store_singleton_uses_database_config(self):
         """The cached sync Store factory must resolve database config before locking."""

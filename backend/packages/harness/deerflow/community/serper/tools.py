@@ -497,6 +497,7 @@ def image_search_tool(query: str, max_results: int = 5) -> str:
                 "title": r.get("title", ""),
                 "image_url": image_url,
                 "thumbnail_url": thumbnail_url,
+                "source_url": _safe_public_url(r.get("link")),
             }
         )
         if len(normalized_results) >= max_results:

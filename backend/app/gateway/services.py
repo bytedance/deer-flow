@@ -2071,6 +2071,7 @@ async def start_run(
             agent_config=agent_config,
             recovery_scope=recovery_scope,
             recovery=is_scope_recovery,
+            extensions=getattr(request.app.state, "extensions", None),
         )
         if admitted_knowledge_scope is not None:
             await _validate_scope_thread_binding(

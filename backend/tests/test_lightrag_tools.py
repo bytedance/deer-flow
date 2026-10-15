@@ -2,6 +2,7 @@ import logging
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -418,3 +419,30 @@ def test_lightrag_package_has_explicit_init_file() -> None:
     package_dir = Path(lightrag_tools.__file__).resolve().parent
 
     assert (package_dir / "__init__.py").is_file()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["selected", "disabled"])
+async def test_runtime_scope_never_falls_back_to_unconstrained_lightrag(monkeypatch, mode):
+    search = AsyncMock()
+    monkeypatch.setattr(lightrag_tools, "_search", search)
+    scope = {"version": 1, "mode": mode}
+    if mode == "selected":
+        scope["dataset_ids"] = ["private"]
+    runtime = SimpleNamespace(context={"__knowledge_scope_execution": scope})
+    content, artifact = await lightrag_tools._knowledge_search_entrypoint("q", runtime=runtime)
+    assert content.startswith("Error:")
+    assert artifact is None
+    search.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope", [None, {"version": 1, "mode": "all"}])
+async def test_runtime_unfiltered_scope_preserves_lightrag_search(monkeypatch, scope):
+    search = AsyncMock(return_value=("evidence", {"knowledge_sources": []}))
+    monkeypatch.setattr(lightrag_tools, "_search", search)
+    runtime = SimpleNamespace(context={"__knowledge_scope_execution": scope})
+    content, artifact = await lightrag_tools._knowledge_search_entrypoint("q", runtime=runtime)
+    assert content == "evidence"
+    assert artifact is not None
+    search.assert_awaited_once_with("q", with_sources=True)

@@ -129,3 +129,42 @@ async def test_no_matches_is_a_successful_empty_result(retrieval_plugin):
     assert message.status == "success"
     assert "No matching synthetic documents" in message.content
     assert message.artifact == {"schema": "example.retrieval.v1", "synthetic": True, "matches": []}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["full", "delta"])
+@pytest.mark.parametrize("limit", [120, 10000])
+async def test_shared_knowledge_sources_from_plugin_survive_budget_and_replay(tmp_path, retrieval_plugin, mode, limit):
+    from dataclasses import replace
+
+    from deerflow_extension_api import PluginToolResult
+
+    from deerflow.knowledge import KnowledgeSource, RetrievalHit, RetrievalResult, format_result, sources_from_messages
+
+    source = KnowledgeSource(provider="plugin-test", title="Synthetic captured guide", excerpt="Synthetic retrieved evidence from the provider.")
+    content, artifact = format_result(RetrievalResult(hits=[RetrievalHit(content=source.excerpt, source=source)]))
+
+    async def handler(payload, context):
+        return PluginToolResult(content, artifact)
+
+    loaded = retrieval_plugin({"enabled": True})
+    attribution, plugin = loaded.plugins[0]
+    plugin = replace(plugin, tools=(replace(plugin.tools[0], handler=handler),))
+    (tool,) = build_plugin_tools(replace(loaded, plugins=((attribution, plugin),)))
+    config = {"configurable": {"thread_id": "plugin-knowledge-replay"}}
+    inject_checkpoint_mode(config, mode)
+    database = str(tmp_path / "knowledge.db")
+    async with AsyncSqliteSaver.from_conn_string(database) as saver:
+        graph = _graph(tool, saver, mode=mode, limit=limit)
+        result = await graph.ainvoke({"messages": [_call(tool, {"query": "guide"})]}, config, context={"user_id": "alice"})
+        message = result["messages"][-1]
+        assert message.status == "success"
+        expected = [source] if limit == 10000 else []
+        assert sources_from_messages([message.model_dump()]) == expected
+
+    async with AsyncSqliteSaver.from_conn_string(database) as saver:
+        graph = _graph(tool, saver, mode=mode, limit=limit)
+        snapshot = await CheckpointStateAccessor.bind(graph, saver, mode=mode).aget(config)
+        restored = json.loads(json.dumps(serialize_channel_values_for_api(snapshot.values)))
+        assert sources_from_messages(restored["messages"]) == expected
+        assert restored["messages"][-1]["artifact"] == message.artifact
