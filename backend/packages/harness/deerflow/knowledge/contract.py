@@ -77,6 +77,9 @@ class KnowledgeRequestContext:
     Providers must enforce their own permissions on every operation. ``scope``
     is a fresh execution-only snapshot; display labels never reach providers.
     No tenant or credential is inferred from caller-supplied metadata.
+    ``agent_name`` identifies the current executor: the selected assistant
+    (``lead_agent`` by default), or the executing subagent's configured name.
+    It is not the parent assistant name. Direct provider callers may omit it.
     """
 
     user_id: str

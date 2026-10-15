@@ -173,6 +173,9 @@ Read the nearest scoped `AGENTS.md` for subsystem ownership.
 ## Architecture
 
 Read-only knowledge: [contract](docs/KNOWLEDGE.md).
+Knowledge context uses the current assistant name (`lead_agent` by default)
+or the executing subagent's `agent_id`; user/scope stay inherited. Opaque
+resource IDs are bounded to 256 code points and must never be truncated.
 
 ### Harness / App Split
 

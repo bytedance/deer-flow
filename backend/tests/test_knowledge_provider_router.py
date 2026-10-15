@@ -83,6 +83,19 @@ def test_provider_opaque_ids_are_not_constrained_to_ragflow_uuid_syntax():
     assert provider.documents.await_args.args == (dataset_id,)
 
 
+@pytest.mark.parametrize(("length", "status"), [(256, 200), (257, 422)])
+def test_document_route_preserves_bounded_opaque_id_or_rejects_it(length, status):
+    app, provider, _ = setup_provider({"search", "catalog", "documents", "dataset_filter", "document_filter"})
+    dataset_id = "😀" * length
+    with TestClient(app) as client:
+        response = client.get(f"/api/knowledge/retrieval-catalog/datasets/{quote(dataset_id, safe='')}/documents?agent_name=lead_agent")
+    assert response.status_code == status
+    if status == 200:
+        assert provider.documents.await_args.args == (dataset_id,)
+    else:
+        provider.documents.assert_not_awaited()
+
+
 @pytest.mark.parametrize(("error", "status"), [(PermissionError("credential=secret"), 403), (FileNotFoundError("private"), 404), (RuntimeError("credential=secret"), 502)])
 def test_catalog_errors_are_safe_and_do_not_retry(error, status):
     app, provider, _ = setup_provider({"search", "catalog", "dataset_filter"})

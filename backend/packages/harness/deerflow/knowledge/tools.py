@@ -10,11 +10,26 @@ from deerflow.config.app_config import AppConfig
 from deerflow.extensions import resolve_run_extensions
 from deerflow.knowledge.providers import resolve_knowledge_provider, search_provider
 from deerflow.knowledge.sources import format_result
-from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY
+from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY, execution_scope
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.types import Runtime
 
 logger = logging.getLogger(__name__)
+
+
+def _execution_agent_name(context: Mapping, config: object = None) -> str:
+    """Identify the current executor, rather than a delegated run's parent."""
+    if context.get("is_subagent") is True:
+        name = context.get("agent_id")
+    else:
+        configurable = config.get("configurable") if isinstance(config, Mapping) else None
+        legacy_name = configurable.get("agent_name") if isinstance(configurable, Mapping) else None
+        name = context.get("agent_name", legacy_name)
+    if name is None and context.get("is_subagent") is not True:
+        return "lead_agent"
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("Invalid knowledge execution agent identity")
+    return name
 
 
 async def _knowledge_search_entrypoint(query: str, runtime: Runtime) -> tuple[str, dict | None]:
@@ -27,6 +42,10 @@ async def _knowledge_search_entrypoint(query: str, runtime: Runtime) -> tuple[st
         return "Error: query must not be empty.", None
     context = runtime.context if isinstance(runtime.context, Mapping) else {}
     try:
+        raw_scope = context.get(KNOWLEDGE_SCOPE_RUNTIME_KEY)
+        scope = execution_scope(raw_scope) if raw_scope is not None else None
+        if scope is not None and scope["mode"] == "disabled":
+            return "Error: Knowledge search is disabled for this turn.", None
         app_config = context.get("app_config")
         if not isinstance(app_config, AppConfig):
             app_config = get_app_config()
@@ -34,9 +53,9 @@ async def _knowledge_search_entrypoint(query: str, runtime: Runtime) -> tuple[st
         result = await search_provider(
             provider,
             query.strip(),
-            scope=context.get(KNOWLEDGE_SCOPE_RUNTIME_KEY),
+            scope=scope,
             user_id=resolve_runtime_user_id(runtime),
-            agent_name=context.get("agent_name"),
+            agent_name=_execution_agent_name(context, getattr(runtime, "config", None)),
         )
         return format_result(result)
     except PermissionError:

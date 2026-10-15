@@ -217,6 +217,116 @@ async def test_generic_tool_keeps_run_config_and_authenticated_identity(monkeypa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("assistant_id", [None, "lead_agent", "researcher"])
+@pytest.mark.parametrize("request_config", [None, {"configurable": {"agent_name": "researcher"}}, {"context": {"agent_name": "writer"}}])
+async def test_generic_tool_identity_matches_real_gateway_run_config(monkeypatch, assistant_id, request_config):
+    from app.gateway.services import build_run_config
+    from deerflow.knowledge import tools
+
+    provider = install_provider({"search", "dataset_filter"})
+    monkeypatch.setattr(tools, "get_app_config", provider_config)
+    run_config = build_run_config("knowledge-thread", request_config, None, assistant_id=assistant_id)
+    runtime = SimpleNamespace(context=run_config.get("context", {}), config=run_config)
+    content, _ = await tools._knowledge_search_entrypoint("q", runtime)
+    assert not content.startswith("Error:")
+    merged = {**run_config.get("configurable", {}), **run_config.get("context", {})}
+    assert provider.search_scoped.await_args.kwargs["context"].agent_name == (merged.get("agent_name") or "lead_agent")
+
+
+@pytest.mark.asyncio
+async def test_subagent_identity_takes_precedence_over_inherited_parent_name(monkeypatch):
+    from deerflow.knowledge import tools
+
+    provider = install_provider({"search", "dataset_filter"})
+    monkeypatch.setattr(tools, "get_app_config", provider_config)
+    runtime = SimpleNamespace(context={"is_subagent": True, "agent_id": "child", "agent_name": "parent"})
+    content, _ = await tools._knowledge_search_entrypoint("q", runtime)
+    assert not content.startswith("Error:")
+    assert provider.search_scoped.await_args.kwargs["context"].agent_name == "child"
+
+
+@pytest.mark.asyncio
+async def test_missing_subagent_identity_does_not_fall_back_to_lead_agent(monkeypatch):
+    from deerflow.knowledge import tools
+
+    provider = install_provider({"search", "dataset_filter"})
+    monkeypatch.setattr(tools, "get_app_config", provider_config)
+    runtime = SimpleNamespace(context={"is_subagent": True, "agent_name": "parent"})
+    content, artifact = await tools._knowledge_search_entrypoint("q", runtime)
+    assert content.startswith("Error:")
+    assert artifact is None
+    provider.search_scoped.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_standalone_admission_cannot_forge_knowledge_subagent_identity(monkeypatch):
+    from app.gateway.langgraph_auth import _scrub_run_incarnation
+    from deerflow.knowledge import tools
+
+    provider = install_provider({"search", "dataset_filter"})
+    monkeypatch.setattr(tools, "get_app_config", provider_config)
+    request = {"kwargs": {"context": {"is_subagent": True, "agent_id": "privileged-child"}}}
+    _scrub_run_incarnation(request)
+    runtime = SimpleNamespace(context=request["kwargs"]["context"], config=request["kwargs"]["config"])
+    content, _ = await tools._knowledge_search_entrypoint("q", runtime)
+    assert not content.startswith("Error:")
+    assert provider.search_scoped.await_args.kwargs["context"].agent_name == "lead_agent"
+
+
+@pytest.mark.asyncio
+async def test_standalone_admission_overrides_persisted_assistant_child_identity(monkeypatch):
+    from langgraph_sdk import Auth
+
+    from app.gateway.langgraph_auth import add_owner_filter
+    from deerflow.knowledge import tools
+
+    provider = install_provider({"search", "dataset_filter"})
+    monkeypatch.setattr(tools, "get_app_config", provider_config)
+    defaults = {"is_subagent": True, "agent_id": "privileged-child"}
+    request = {"kwargs": {"context": {}}, "assistant_id": "lead_agent"}
+    auth_context = Auth.types.AuthContext(resource="threads", action="create_run", user=SimpleNamespace(identity="alice"), permissions=[])
+    await add_owner_filter(auth_context, request)
+    # The standalone runtime merges stored assistant defaults AFTER admission.
+    effective_context = {**defaults, **request["kwargs"]["context"]}
+    runtime = SimpleNamespace(context=effective_context, config=request["kwargs"]["config"])
+    content, _ = await tools._knowledge_search_entrypoint("q", runtime)
+    assert not content.startswith("Error:")
+    assert provider.search_scoped.await_args.kwargs["context"].agent_name == "lead_agent"
+    assert provider.search_scoped.await_args.kwargs["context"].user_id == "alice"
+
+
+@pytest.mark.asyncio
+async def test_disabled_scope_returns_specific_error_before_loading_provider(monkeypatch):
+    from deerflow.knowledge import tools
+
+    provider = install_provider({"search", "dataset_filter"})
+
+    def unavailable_config():
+        pytest.fail("disabled search must not load configuration or resolve a provider")
+
+    monkeypatch.setattr(tools, "get_app_config", unavailable_config)
+    runtime = SimpleNamespace(context={"__knowledge_scope_execution": {"version": 1, "mode": "disabled"}})
+    assert await tools._knowledge_search_entrypoint("q", runtime) == ("Error: Knowledge search is disabled for this turn.", None)
+    provider.search.assert_not_awaited()
+    provider.search_scoped.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope", [{"version": 2, "mode": "disabled"}, {"version": 1, "mode": "selected", "dataset_ids": []}])
+async def test_malformed_scope_is_rejected_before_loading_provider(monkeypatch, scope):
+    from deerflow.knowledge import tools
+
+    provider = install_provider({"search", "dataset_filter"})
+    monkeypatch.setattr(tools, "get_app_config", lambda: pytest.fail("invalid scope must fail before loading config"))
+    runtime = SimpleNamespace(context={"__knowledge_scope_execution": scope})
+    content, artifact = await tools._knowledge_search_entrypoint("q", runtime)
+    assert content == "Error: Knowledge retrieval failed; check the provider and selected scope."
+    assert artifact is None
+    provider.search.assert_not_awaited()
+    provider.search_scoped.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_generic_tool_node_injects_scope_and_emits_shared_evidence(monkeypatch):
     from langchain_core.messages import AIMessage, ToolMessage
     from langgraph.graph import END, START, MessagesState, StateGraph

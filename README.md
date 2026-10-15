@@ -1389,6 +1389,9 @@ extensions. The shared selector shows only the filters a Provider supports:
 knowledge-base selection requires a catalog and dataset filtering; file
 selection additionally requires document listing and document filtering.
 Unsupported or inaccessible filters fail without expanding the search scope.
+Choosing no knowledge search stops retrieval before loading the Provider.
+Provider resource IDs are preserved up to 256 Unicode code points; longer IDs
+are rejected without truncation.
 RAGFlow keeps its existing configuration and citations, and search-only
 Providers remain usable without a catalog or management page. See the
 [offline Provider example](examples/deerflow-extension-knowledge/README.md)

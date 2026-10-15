@@ -33,6 +33,13 @@ Both catalog methods receive `context`, `page`, `page_size` and `search`, and
 return `RetrievalCatalogPage` with `{id, name, selectable}` items. IDs are opaque
 provider identifiers, including non-UUID identifiers. Gateway validates this
 bounded public projection and never returns raw provider payloads.
+Dataset and document IDs are limited to **256 Unicode code points** throughout
+catalog output, URL parameters and scope snapshots. Overlong IDs are rejected,
+never truncated. A phase 3 WeKnora adapter must map space-qualified resources
+to stable, unambiguous IDs within this bound and resolve them inside the
+provider; the earlier `ks1_` encoding allowing 512 characters is not the public
+contract. Reuse provider API/mapping logic without adding a second discovery
+protocol or a DeerFlow ACL store.
 
 `KnowledgeRequestContext` supplies the host user ID, Agent name and optional
 execution-only scope. A provider implementing `search_scoped` receives context
@@ -41,6 +48,19 @@ may retain `search(query)` when it uses an operator-owned connection with a
 fixed resource visibility. User/tenant mappings and resource authorization
 remain provider responsibilities; DeerFlow does not infer tenants from client
 metadata or create a second ACL store.
+`agent_name` identifies the current executor: the selected assistant name,
+defaulting to `lead_agent`, or the executing subagent's configured name from
+its server runtime `agent_id`. It does not identify the parent assistant.
+Runtime context takes precedence over legacy `configurable.agent_name` for
+primary runs, matching Agent assembly. Public Gateway and standalone LangGraph
+run admission discard caller-supplied `is_subagent` and `agent_id`; only the
+internal executor can assign child identity.
+Standalone primary-run admission explicitly overrides persisted assistant
+child-identity defaults, and assistant writes discard these reserved fields.
+Catalog requests use the selected assistant name under the same convention;
+direct provider callers outside the host runtime may omit it. Delegation
+preserves the parent user identity and execution scope, while the provider
+must enforce access for the executing agent on every call.
 
 The Agent tool entry for registered providers is:
 
@@ -63,6 +83,10 @@ ordinary and batch subagents retain their inherited execution scope. Existing
 RAGFlow and LightRAG tool paths remain valid. RAGFlow's compatibility adapter
 owns its API calls, operator allowlist, searchable-document checks and catalog
 mapping; native citation writers and direct text APIs remain unchanged.
+Its HTTP client accepts only ASCII letters, digits, underscores and hyphens
+in dataset IDs used as path segments. Traversal and encoded URL delimiters
+are rejected before any document-list request, for both browsing and scope
+validation. Other providers retain their own opaque-ID syntax.
 
 See [the packaged synthetic Provider example](../../examples/deerflow-extension-knowledge/README.md)
 for an offline catalog → selected document → retrieval → captured source flow.
