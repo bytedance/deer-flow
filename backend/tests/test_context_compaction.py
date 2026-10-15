@@ -35,6 +35,11 @@ class _FakeAccessor:
     async def aget(self, _config):
         return self.snapshot
 
+    async def aget_tuple(self, _config):
+        # Mirror CheckpointStateAccessor.aget_tuple: raw checkpoint tuple with
+        # channel_values. The stub thread is idle, so no __pregel_tasks entry.
+        return SimpleNamespace(checkpoint={"channel_values": dict(self.snapshot.values)})
+
     async def aupdate(self, config, values, *, as_node=None):
         self.update_args = (config, values, as_node)
         return {
