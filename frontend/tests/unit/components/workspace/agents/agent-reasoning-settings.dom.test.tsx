@@ -112,8 +112,8 @@ function expectReasoningOmitted(request: Record<string, unknown>) {
   expect(request).not.toHaveProperty("reasoning_effort");
 }
 
-async function selectOption(index: number, name: string) {
-  fireEvent.keyDown(screen.getAllByRole("combobox")[index]!, {
+async function selectOption(label: string, name: string) {
+  fireEvent.keyDown(screen.getByRole("combobox", { name: label }), {
     key: "ArrowDown",
   });
   fireEvent.click(await screen.findByRole("option", { name }));
@@ -130,14 +130,7 @@ describe("custom agent reasoning update isolation", () => {
 
   it("preserves saved reasoning after the initial catalog request fails", async () => {
     loadModels.mockRejectedValue(new Error("Model catalog unavailable"));
-    const client = new QueryClient();
-    client.setQueryDefaults(["models"], { retryDelay: 0 });
-    clients.push(client);
-    render(
-      <QueryClientProvider client={client}>
-        <AgentSettingsDialog agent={agent} open onOpenChange={rs.fn()} />
-      </QueryClientProvider>,
-    );
+    const { client } = renderSettings();
     await waitFor(() =>
       expect(client.getQueryState(["models"])?.status).toBe("error"),
     );
@@ -153,14 +146,38 @@ describe("custom agent reasoning update isolation", () => {
     expectReasoningOmitted(await saveRequest());
   });
 
-  it("does not infer unsupported reasoning when switching to an unresolved global default", async () => {
-    loadModels.mockReturnValue(new Promise(() => undefined));
-    renderSettings();
-    await selectOption(0, "Use global default");
-    const request = await saveRequest();
-    expect(request.model).toBe(null);
-    expectReasoningOmitted(request);
-  });
+  it.each(["pending", "failed", "empty"] as const)(
+    "blocks a model switch with an unresolved %s catalog but allows reverting it",
+    async (state) => {
+      if (state === "pending") {
+        loadModels.mockReturnValue(new Promise(() => undefined));
+      } else if (state === "failed") {
+        loadModels.mockRejectedValue(new Error("Model catalog unavailable"));
+      } else {
+        loadModels.mockResolvedValue({ ...catalog, models: [] });
+      }
+      const { client } = renderSettings();
+      if (state !== "pending") {
+        await waitFor(() =>
+          expect(client.getQueryState(["models"])?.status).toBe(
+            state === "failed" ? "error" : "success",
+          ),
+        );
+      }
+      await selectOption("Default model", "Use global default");
+      const save = screen.getByRole("button", { name: "Save" });
+      expect((save as HTMLButtonElement).disabled).toBe(true);
+      expect(screen.getByRole("status").textContent).toContain(
+        "Load the selected model before saving",
+      );
+      fireEvent.click(save);
+      expect(mutateAsync).not.toHaveBeenCalled();
+
+      await selectOption("Default model", "reasoner");
+      expect((save as HTMLButtonElement).disabled).toBe(false);
+      expectReasoningOmitted(await saveRequest());
+    },
+  );
 
   it("normalizes a global-default switch when the pending catalog resolves before saving", async () => {
     let resolveCatalog!: (value: ModelsResponse) => void;
@@ -170,8 +187,11 @@ describe("custom agent reasoning update isolation", () => {
       }),
     );
     const { client } = renderSettings();
-    await selectOption(0, "Use global default");
+    await selectOption("Default model", "Use global default");
     expect(client.getQueryState(["models"])?.status).toBe("pending");
+    expect(
+      screen.getByRole<HTMLButtonElement>("button", { name: "Save" }).disabled,
+    ).toBe(true);
 
     await act(async () => {
       resolveCatalog({ ...catalog, models: [plainModel, reasoningModel] });
@@ -213,7 +233,7 @@ describe("custom agent reasoning update isolation", () => {
   it("clears incompatible reasoning after deliberately switching to a known unsupported model", async () => {
     renderSettings();
     await screen.findByText("Thinking mode");
-    await selectOption(0, "Plain model");
+    await selectOption("Default model", "Plain model");
     expect(await saveRequest()).toMatchObject({
       model: "plain",
       thinking_enabled: null,
@@ -235,7 +255,7 @@ describe("custom agent reasoning update isolation", () => {
     });
     renderSettings();
     await screen.findByText("Thinking mode");
-    await selectOption(0, "Other reasoner");
+    await selectOption("Default model", "Other reasoner");
     expect(await saveRequest()).toMatchObject({
       model: "other-reasoner",
       thinking_enabled: false,
@@ -246,7 +266,7 @@ describe("custom agent reasoning update isolation", () => {
   it("submits an explicit thinking edit without rewriting effort", async () => {
     renderSettings();
     await screen.findByText("Thinking mode");
-    await selectOption(1, "On");
+    await selectOption("Thinking mode", "On");
     const request = await saveRequest();
     expect(request.thinking_enabled).toBe(true);
     expect(request).not.toHaveProperty("reasoning_effort");
@@ -257,7 +277,7 @@ describe("custom agent reasoning update isolation", () => {
     async (state) => {
       const { client } = renderSettings();
       await screen.findByText("Thinking mode");
-      await selectOption(1, "On");
+      await selectOption("Thinking mode", "On");
 
       // The control is hidden without model data. Edit while available, then
       // clear the query so the draft survives a pending or failed reload.
@@ -286,7 +306,7 @@ describe("custom agent reasoning update isolation", () => {
   it("submits an explicit inherit effort without rewriting thinking", async () => {
     renderSettings();
     await screen.findByText("Thinking mode");
-    await selectOption(2, "Inherit");
+    await selectOption("Reasoning effort", "Inherit");
     const request = await saveRequest();
     expect(request.reasoning_effort).toBe(null);
     expect(request).not.toHaveProperty("thinking_enabled");
@@ -295,8 +315,8 @@ describe("custom agent reasoning update isolation", () => {
   it("omits model-dependent fields when a model switch is reverted", async () => {
     renderSettings();
     await screen.findByText("Thinking mode");
-    await selectOption(0, "Plain model");
-    await selectOption(0, "Reasoner");
+    await selectOption("Default model", "Plain model");
+    await selectOption("Default model", "Reasoner");
     const request = await saveRequest();
     expect(request).not.toHaveProperty("model");
     expectReasoningOmitted(request);
@@ -305,14 +325,14 @@ describe("custom agent reasoning update isolation", () => {
   it("omits thinking and effort edits that were restored before saving", async () => {
     renderSettings();
     await screen.findByText("Thinking mode");
-    await selectOption(1, "On");
-    await selectOption(1, "Off");
-    await selectOption(2, "low");
-    await selectOption(2, "high");
+    await selectOption("Thinking mode", "On");
+    await selectOption("Thinking mode", "Off");
+    await selectOption("Reasoning effort", "low");
+    await selectOption("Reasoning effort", "high");
     expectReasoningOmitted(await saveRequest());
   });
 
-  it("does not normalize an untouched off value when the catalog requires thinking", async () => {
+  it("shows a stale required-thinking off value and lets Inherit explicitly clear it", async () => {
     loadModels.mockResolvedValue({
       ...catalog,
       models: [
@@ -329,8 +349,54 @@ describe("custom agent reasoning update isolation", () => {
     });
     renderSettings();
     await screen.findByText("Thinking mode");
+    expect(
+      screen.getByRole("combobox", { name: "Thinking mode" }).textContent,
+    ).toContain("Off");
+    expect(
+      screen.getByText(enUS.agents.settingsThinkingRequiredHint),
+    ).toBeTruthy();
     expectReasoningOmitted(await saveRequest());
+    mutateAsync.mockClear();
+    await selectOption("Thinking mode", "Inherit");
+    const request = await saveRequest();
+    expect(request.thinking_enabled).toBe(null);
+    expect(request).not.toHaveProperty("reasoning_effort");
   });
+
+  it.each(["limited", "unsupported"] as const)(
+    "shows a saved effort outside a %s model's options and allows clearing it",
+    async (state) => {
+      loadModels.mockResolvedValue({
+        ...catalog,
+        models: [
+          {
+            ...reasoningModel,
+            reasoning: {
+              thinking: state === "limited" ? "optional" : "unsupported",
+              effort:
+                state === "limited"
+                  ? { values: ["low"], default: "low", aliases: {} }
+                  : null,
+              history: null,
+              source: "contract",
+            },
+          },
+        ],
+      });
+      renderSettings();
+      const effort = await screen.findByRole("combobox", {
+        name: "Reasoning effort",
+      });
+      expect(effort.textContent).toContain("high");
+      expect(effort.textContent).toContain("not supported");
+      expectReasoningOmitted(await saveRequest());
+      mutateAsync.mockClear();
+      await selectOption("Reasoning effort", "Inherit");
+      const request = await saveRequest();
+      expect(request.reasoning_effort).toBe(null);
+      expect(request).not.toHaveProperty("thinking_enabled");
+    },
+  );
 
   it("normalizes thinking and effort when deliberately switching to a required-thinking model", async () => {
     loadModels.mockResolvedValue({
@@ -352,7 +418,7 @@ describe("custom agent reasoning update isolation", () => {
     });
     renderSettings();
     await screen.findByText("Thinking mode");
-    await selectOption(0, "Required model");
+    await selectOption("Default model", "Required model");
     expect(await saveRequest()).toMatchObject({
       model: "required",
       thinking_enabled: null,
