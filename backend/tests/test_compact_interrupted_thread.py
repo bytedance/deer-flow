@@ -16,6 +16,7 @@ state accessor are all real; only the external model service is faked.
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from _router_auth_helpers import make_authed_test_app
@@ -34,8 +35,9 @@ from app.gateway.auth.models import User
 from app.gateway.routers import threads
 from deerflow.agents.thread_state import get_thread_state_schema
 from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
-from deerflow.runtime import RunManager
+from deerflow.runtime import RunManager, context_compaction
 from deerflow.runtime.checkpoint_mode import inject_checkpoint_mode
+from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 
 THREAD_ID = "thread-compact-interrupted"
 TOOL_CALL_ID = "call_probe_1"
@@ -155,6 +157,7 @@ def test_compact_rejects_thread_paused_before_tools(mode: str, _summarization_ap
     with TestClient(app) as client:
         response = client.post(f"/api/threads/{THREAD_ID}/compact", json={"force": True, "keep": {"type": "messages", "value": 1}})
     assert response.status_code == 409, response.text
+    assert response.json()["detail"] == "Thread has pending execution. Resume the interrupted run before compacting."
 
     # The rejected compaction wrote nothing: head checkpoint, pending position
     # and pending task identity are exactly as before the attempt.
@@ -170,6 +173,36 @@ def test_compact_rejects_thread_paused_before_tools(mode: str, _summarization_ap
     final_messages = graph.get_state(config).values["messages"]
     assert any(isinstance(m, ToolMessage) and m.tool_call_id == TOOL_CALL_ID for m in final_messages)
     assert any(isinstance(m, AIMessage) and m.content == FINAL_ANSWER for m in final_messages)
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_compact_rejects_unavailable_checkpoint(mode: str, monkeypatch, _summarization_app_config, _fake_summary_model):
+    """A valid snapshot alone cannot prove the raw checkpoint has no pending work."""
+    checkpointer = InMemorySaver()
+    graph = _build_agent_graph(mode, checkpointer, [])
+    config = _config(mode)
+    graph.invoke({"messages": [HumanMessage(content="hello", id="h1")]}, config)
+    graph.invoke({"messages": [HumanMessage(content="again", id="h2")]}, config)
+    before = graph.get_state(config)
+    checkpoint_ids = [item.config["configurable"]["checkpoint_id"] for item in checkpointer.list(config)]
+
+    missing_tuple = AsyncMock(return_value=None)
+    monkeypatch.setattr(CheckpointStateAccessor, "aget_tuple", missing_tuple)
+    create_middleware = MagicMock(wraps=context_compaction._create_compaction_middleware)
+    monkeypatch.setattr(context_compaction, "_create_compaction_middleware", create_middleware)
+    write_checkpoint = AsyncMock(wraps=checkpointer.aput)
+    monkeypatch.setattr(checkpointer, "aput", write_checkpoint)
+
+    app = _make_compact_app(mode, checkpointer)
+    with TestClient(app) as client:
+        response = client.post(f"/api/threads/{THREAD_ID}/compact", json={"force": True, "keep": {"type": "messages", "value": 1}})
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == "Thread checkpoint is unavailable. Cannot verify pending execution before compacting."
+    missing_tuple.assert_awaited_once()
+    create_middleware.assert_not_called()
+    write_checkpoint.assert_not_awaited()
+    assert graph.get_state(config) == before
+    assert [item.config["configurable"]["checkpoint_id"] for item in checkpointer.list(config)] == checkpoint_ids
 
 
 @pytest.mark.parametrize("mode", ["full", "delta"])
