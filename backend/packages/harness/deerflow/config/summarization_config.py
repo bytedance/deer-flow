@@ -85,7 +85,7 @@ class SummarizationConfig(BaseModel):
     trim_tokens_to_summarize: int | None = Field(
         default=4000,
         ge=1,
-        description="Maximum tokens to keep when preparing messages for summarization. Pass null to skip trimming.",
+        description="Raw-text budget per summary call, shared by the previous summary and a chronological source chunk. Pass null to summarize in one unbounded call.",
     )
 
     @field_validator("trim_tokens_to_summarize", mode="before")

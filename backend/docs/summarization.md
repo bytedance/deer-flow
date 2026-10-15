@@ -14,6 +14,21 @@ The summarization feature uses LangChain's `SummarizationMiddleware` to monitor 
 4. Maintains AI/Tool message pairs together for context continuity
 5. Stores the summary in `ThreadState.summary_text` and projects it ephemerally through durable context data
 
+Selected history is processed from oldest to newest in bounded text chunks.
+Each call receives the complete preceding summary plus the next source fragment;
+unused summary capacity is available to new source text. A single oversized
+message is split into contiguous fragments, including its middle. Input is
+PII-redacted before splitting, then escaped before insertion into prompt blocks.
+No human-anchor filter or successful "too long" placeholder can discard selected
+source. Recent-message retention and AI/Tool partition boundaries stay unchanged.
+
+Only after all chunks succeed are hooks, the compaction event, history capture
+and message replacement committed once. Any failed chunk leaves active history
+unchanged; manual `/compact` reports generation failure. A previous or generated
+summary that leaves no room for source text also fails without eviction. Larger
+partitions can require more model calls: the input cap bounds each call, not total
+cost or latency. This guarantees source input coverage, not lossless model output.
+
 ## Reuse and telemetry
 
 The middleware keeps a bounded cache of exact rendered summary prompts and ordered
@@ -29,11 +44,11 @@ Each successful summary result emits a `middleware:summarize` journal event with
 `action="summary_result"`. Its `changes` include:
 
 - `noop`: the result is byte-identical to the previous summary.
-- `llm_call_skipped`: this result came from the no-op cache.
+- `llm_call_skipped`: every chunk in this pass came from the no-op cache.
 - `summary_chars`: length of the new summary.
 - `previous_summary_chars`: length of the previous summary, or `null` when there was none.
 - `summarized_message_count`: messages folded into this summary.
-- `call_count`: completed summary results, including cache reuse and canned results.
+- `call_count`: completed compaction passes, including cache reuse.
 - `noop_count`: completed results identical to the previous summary.
 - `skip_count`: completed results reused from the no-op cache.
 
@@ -43,8 +58,8 @@ Event counter snapshots include their own result and remain consistent during
 concurrent compactions. Counters are cumulative across runs sharing that middleware
 instance; concurrent journal events may arrive in a different order.
 
-`call_count` is not an LLM request count: a compaction can try multiple candidates
-or produce a canned result without invoking a model. Use per-call LLM journal events
+`call_count` is not an LLM request count: a pass can process multiple chunks and
+try multiple candidates. Use per-call LLM journal events
 for model usage and cost, and `skip_count / call_count` for the cache reuse rate.
 
 ## Todo reminders
@@ -189,7 +204,7 @@ keep:
 #### `trim_tokens_to_summarize`
 - **Type**: Integer or null
 - **Default**: `4000`
-- **Description**: Token budget used to trim the raw input sections for the summarization call. Escaping, wrapper tags, and the summary prompt add overhead beyond this budget; it is not a hard limit on the final model request. When preserving the current user request leaves an assistant/tool-only summary window, trimming favors the most recent content in that window. If a mixed window still contains a human message but the human-anchored trim is empty, the existing final-message fallback is preserved. Set to `null` to skip trimming (not recommended for very long conversations).
+- **Description**: Per-call raw-text budget shared by the complete previous summary and the next chronological source chunk. Escaping, wrapper tags, and the summary prompt add overhead; this is not a hard limit on the final model request or the total work of a compaction pass. Oversized messages are processed across calls without omitting source text. If the carry leaves no room for source, compaction fails without replacing history. Set to `null` for one unbounded call (not recommended for very long conversations).
 
 #### `summary_prompt`
 - **Type**: String or null

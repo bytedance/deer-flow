@@ -10,11 +10,11 @@ on parsing or field-limit errors, report an undetermined count rather than a
 physical-line or sample total.
 
 Compaction keeps state `SystemMessage`s; transient instructions use request
-wrappers, and fully rescued partitions skip compaction. If latest-user rescue
-empties an AI/Tool-only window, use `_build_summary_input_text(strategy="last")`;
-mixed windows keep normal anchoring and final-message fallback. Budget raw text
-before escaping/wrapping; pass `trim_tokens_to_summarize=None` to avoid the
-LangChain default.
+wrappers. Skip fully rescued partitions. Fold all source chronologically in
+bounded chunks; split oversized messages without elision or human anchoring.
+PII-redact before splitting; budget before escaping. Keep carry intact; commit
+hooks/history/removal only after all chunks succeed. Reject unfittable inputs;
+`trim_tokens_to_summarize=None` means one unbounded call.
 
 Todo compaction: [contract](../../../../../docs/summarization.md#todo-reminders).
 

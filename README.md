@@ -2033,6 +2033,12 @@ When your role lacks `runs:create`, the Web UI rejects a new task or `/goal <com
 
 ### Manual Context Compaction
 
+Automatic and manual compaction process all selected history in chronological
+chunks before replacing it. `summarization.trim_tokens_to_summarize` bounds raw
+input per call; large histories can require multiple calls. A failed chunk or a
+summary that cannot fit the next call leaves active history unchanged. See the
+[summarization guide](backend/docs/summarization.md).
+
 With `task_continuity.enabled`, `history_search` searches the current task's active
 and compacted history. Its optional `role` accepts `user`, `assistant`, or `tool`
 and filters before the eight-result limit; omitting it or passing `null` preserves

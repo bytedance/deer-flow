@@ -9,12 +9,12 @@ import threading
 from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol, override, runtime_checkable
+from typing import Any, Protocol, override, runtime_checkable
 
 from deerflow_extension_api import CompactionEvent, canonical_hash
 from langchain.agents import AgentState
 from langchain.agents.middleware import SummarizationMiddleware
-from langchain_core.messages import AnyMessage, HumanMessage, RemoveMessage, SystemMessage, get_buffer_string, trim_messages
+from langchain_core.messages import AnyMessage, HumanMessage, RemoveMessage, SystemMessage, get_buffer_string
 from langgraph.config import get_config
 from langgraph.constants import TAG_NOSTREAM
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
@@ -35,23 +35,13 @@ from deerflow.runtime.events.catalog import MIDDLEWARE_SUMMARIZE_TAG
 logger = logging.getLogger(__name__)
 _SUMMARY_TRIGGER_MESSAGE_NAME = "summary"
 _COMPACTION_TRANSFORM_KIND = "summarization"
-_COMPACTION_TRANSFORM_VERSION = "1"
+_COMPACTION_TRANSFORM_VERSION = "2"
 _UNSET = object()
 _NOOP_CACHE_MAX_ENTRIES = 128
 
 
 class _ReusedSummary(str):
     """Marks a summary reused from an identical, previously no-op prompt (no LLM call)."""
-
-
-# Valid non-generated summaries for the empty / too-long-to-summarize edges; these
-# short-circuit model invocation (and must not be treated as generation failures).
-_CANNED_SUMMARIES = frozenset(
-    {
-        "No previous conversation history.",
-        "Previous conversation was too long to summarize.",
-    }
-)
 
 
 class SummaryGenerationError(RuntimeError):
@@ -201,6 +191,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             "trigger": plain_size(self.trigger),
             "keep": plain_size(self.keep),
             "trim_tokens_to_summarize": self.trim_tokens_to_summarize,
+            "source_coverage": "chronological_chunks",
             "summary_prompt_hash": canonical_hash(self.summary_prompt),
             # Model objects are not JSON-serialisable. Keep generation and context
             # budget ownership distinct in the identity: changing either can alter
@@ -285,50 +276,64 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
     async def _acreate_summary(self, messages_to_summarize: list[AnyMessage]) -> str | None:
         return await self._asummarize_with(messages_to_summarize)
 
-    def _prepare_summary_prompt(self, messages_to_summarize: list[AnyMessage], previous_summary: str | None) -> str | None:
-        """Return the formatted prompt, or a canned string for the empty/too-long edges.
-
-        A non-``None`` return that is not a real prompt (the two canned strings) is a
-        valid summary and short-circuits generation; ``None`` means "build a prompt".
-        """
-        if not messages_to_summarize:
-            return "No previous conversation history."
-        prompt = self._build_summary_prompt(messages_to_summarize, previous_summary=previous_summary)
-        if prompt is None:
-            return "Previous conversation was too long to summarize."
-        return prompt
-
     @staticmethod
     def _nonempty_summary(text: Any) -> str | None:
-        """Normalize a model response's text; a blank/whitespace-only body is a failure.
-
-        Committing ``""`` as a summary would fire the before_summarization hooks and
-        remove all prior history for an empty replacement, so an empty body is treated
-        as generation failure (try the fallback, or leave state unchanged) rather than
-        a valid summary.
-        """
+        """A blank model response is a generation failure, never a replacement."""
         stripped = text.strip() if isinstance(text, str) else ""
         return stripped or None
 
+    def _summary_source_text(self, messages: list[AnyMessage]) -> str:
+        # Redact the complete source before splitting: an identifier spanning a
+        # chunk boundary must not bypass PII screening. Input remains plain text,
+        # so the chat-message human-anchor filter is neither needed nor safe.
+        return redact_text(get_buffer_string(messages), getattr(self._app_config, "pii_redaction", None))
+
     def _summarize_with(self, messages_to_summarize: list[AnyMessage], previous_summary: str | None = None) -> str | None:
-        """Mirror the parent ``_create_summary`` but invoke the nostream-tagged model.
+        """Fold every selected source fragment before committing any removal.
 
-        We do not swap ``self.model`` at the instance level: the agent/middleware is
-        cached and reused across concurrent runs, so a temporary swap would leak the
-        ``RunnableBinding`` to other coroutines during ``await`` and break parent logic
-        that inspects the raw model (``profile`` / ``_get_ls_params``).
-
-        Generation uses the run's own model (``model_name: null``) or the explicitly
-        configured summary model, falling back to the run model on failure so a broken
-        summary provider cannot disable compaction while a working model is available.
+        Chunk progress and summaries are local to this call; cached middleware
+        instances can serve concurrent runs without sharing mutable cursors.
+        The existing generation fallback and no-op cache apply to each prompt.
         """
-        prompt = self._prepare_summary_prompt(messages_to_summarize, previous_summary)
-        if prompt is None or prompt in _CANNED_SUMMARIES:
-            return prompt
-        # Walk the ordered candidates; each attempt owns its full lifecycle (lazy
-        # guarded construction -> invoke -> text extraction -> non-empty validation),
-        # and any failure at any stage falls through to the next candidate. When all
-        # candidates fail the caller leaves compaction state unchanged.
+        if not messages_to_summarize:
+            return "No previous conversation history."
+        source = self._summary_source_text(messages_to_summarize)
+        cursor, summary, all_reused = 0, previous_summary, True
+        while cursor < len(source):
+            step = self._next_summary_step(source, cursor, summary)
+            if step is None:
+                return None
+            prompt, end = step
+            summary = self._summarize_prompt(prompt, summary)
+            if summary is None:
+                return None
+            all_reused = all_reused and isinstance(summary, _ReusedSummary)
+            cursor = end
+        if summary is None:
+            return None
+        return _ReusedSummary(summary) if all_reused else str(summary)
+
+    async def _asummarize_with(self, messages_to_summarize: list[AnyMessage], previous_summary: str | None = None, *, task_store=None) -> str | None:
+        """Async fold; hooks, state replacement and success telemetry stay atomic."""
+        if not messages_to_summarize:
+            return "No previous conversation history."
+        source = self._summary_source_text(messages_to_summarize)
+        cursor, summary, all_reused = 0, previous_summary, True
+        while cursor < len(source):
+            step = self._next_summary_step(source, cursor, summary)
+            if step is None:
+                return None
+            prompt, end = step
+            summary = await self._asummarize_prompt(prompt, summary, task_store=task_store)
+            if summary is None:
+                return None
+            all_reused = all_reused and isinstance(summary, _ReusedSummary)
+            cursor = end
+        if summary is None:
+            return None
+        return _ReusedSummary(summary) if all_reused else str(summary)
+
+    def _summarize_prompt(self, prompt: str, previous_summary: str | None) -> str | None:
         names = self._generation_candidate_names()
         noop_key = self._noop_cache_key(prompt, names)
         reused = self._reuse_noop_summary(noop_key, previous_summary)
@@ -337,23 +342,13 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         for index, name in enumerate(names):
             text = self._invoke_summary(self._model_for(name), prompt, last=index == len(names) - 1)
             if text is not None:
-                # A fallback no-op must not suppress retrying a failed earlier candidate.
+                # A fallback no-op must not suppress retrying a failed primary.
                 if index == 0:
                     self._remember_noop_summary(noop_key, text, previous_summary)
                 return text
         return None
 
-    async def _asummarize_with(
-        self,
-        messages_to_summarize: list[AnyMessage],
-        previous_summary: str | None = None,
-        *,
-        task_store=None,
-    ) -> str | None:
-        """Async counterpart of :meth:`_summarize_with` using the nostream model."""
-        prompt = self._prepare_summary_prompt(messages_to_summarize, previous_summary)
-        if prompt is None or prompt in _CANNED_SUMMARIES:
-            return prompt
+    async def _asummarize_prompt(self, prompt: str, previous_summary: str | None = None, *, task_store=None) -> str | None:
         names = self._generation_candidate_names()
         noop_key = self._noop_cache_key(prompt, names)
         reused = self._reuse_noop_summary(noop_key, previous_summary)
@@ -506,136 +501,66 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             return messages
         return [*messages, self._summary_count_message(summary_text)]
 
-    @staticmethod
-    def _bound_text(text: str, cap: int) -> str:
-        if len(text) <= cap:
-            return text
-        if cap <= 0:
-            return ""
-        head = cap * 2 // 3
-        omitted_marker = "\n...\n"
-        if cap <= len(omitted_marker):
-            return text[:cap]
-        tail = max(0, cap - head - len(omitted_marker))
-        if tail == 0:
-            return text[:cap]
-        return f"{text[:head]}{omitted_marker}{text[-tail:]}"
-
-    def _trim_summary_section_text(self, text: str, max_tokens: int, *, strategy: str) -> str:
-        if not text.strip():
-            return ""
-        max_tokens = max(1, max_tokens)
+    def _summary_text_tokens(self, text: str) -> int:
+        if not text:
+            return 0
         try:
-            trimmed = trim_messages(
-                [HumanMessage(content=text)],
-                max_tokens=max_tokens,
-                token_counter=self.token_counter,
-                strategy=strategy,
-                allow_partial=True,
-                text_splitter=list,
-            )
-            if trimmed:
-                content = trimmed[-1].content
-                if isinstance(content, str) and content.strip():
-                    return content
+            return max(0, int(self.token_counter([HumanMessage(content=text)])))
         except Exception:
-            logger.debug("Failed to trim summary prompt section with token counter; falling back to deterministic text cap", exc_info=True)
-        if strategy == "last":
-            omitted_marker = "\n...\n"
-            if len(text) > max_tokens and max_tokens > len(omitted_marker):
-                return omitted_marker + text[-(max_tokens - len(omitted_marker)) :]
-            return text[-max_tokens:]
-        return self._bound_text(text, max_tokens)
+            logger.debug("Failed to count summary input; using a character budget", exc_info=True)
+            return len(text)
 
-    def _build_summary_input_text(self, formatted_messages: str, previous_summary: str | None = None, *, new_messages_strategy: Literal["first", "last"] = "first") -> str | None:
-        """Trim raw input sections before adding escaping and prompt overhead."""
-        if self.trim_tokens_to_summarize is None:
-            trimmed_new_messages = formatted_messages
-            trimmed_previous_summary = previous_summary.strip() if previous_summary else ""
-        else:
-            max_tokens = max(1, self.trim_tokens_to_summarize)
-            if previous_summary:
-                new_message_tokens = max(1, max_tokens // 2)
-                previous_summary_tokens = max(1, max_tokens - new_message_tokens)
-                trimmed_previous_summary = self._trim_summary_section_text(
-                    previous_summary.strip(),
-                    previous_summary_tokens,
-                    strategy="last",
-                )
-                trimmed_new_messages = self._trim_summary_section_text(
-                    formatted_messages,
-                    new_message_tokens,
-                    strategy=new_messages_strategy,
-                )
-            else:
-                trimmed_previous_summary = ""
-                trimmed_new_messages = self._trim_summary_section_text(
-                    formatted_messages,
-                    max_tokens,
-                    strategy=new_messages_strategy,
-                )
-
-        # Escape < > & before embedding into the <existing_summary>/<new_messages>
-        # blocks. new_messages is get_buffer_string over the raw state["messages"]
-        # tail (InputSanitizationMiddleware only overrides the ModelRequest, never
-        # state, so the summarizer sees genuine user text); existing_summary is the
-        # prior turn's summary_text. An unescaped value like "</new_messages>..."
-        # would close the block and forge an authority section for the extraction
-        # LLM. Same block-breakout defense #4162 applied to the <conversation> block
-        # and #4097 to the <memory> block. Escape after trimming so a trailing "..."
-        # cannot split an entity; quote=False because content lands in element-text
-        # position (never an attribute value).
-        parts: list[str] = []
-        if trimmed_previous_summary:
-            parts.extend(
-                [
-                    "<existing_summary>",
-                    html.escape(trimmed_previous_summary, quote=False),
-                    "</existing_summary>",
-                    "",
-                ]
-            )
-        if trimmed_new_messages:
-            parts.extend(
-                [
-                    "<new_messages>",
-                    html.escape(trimmed_new_messages, quote=False),
-                    "</new_messages>",
-                ]
-            )
-        if not parts:
+    def _next_summary_step(self, source: str, cursor: int, previous_summary: str | None) -> tuple[str, int] | None:
+        previous = redact_text(previous_summary, getattr(self._app_config, "pii_redaction", None)) if previous_summary else None
+        end = len(source)
+        if self.trim_tokens_to_summarize is not None:
+            available = max(1, self.trim_tokens_to_summarize) - self._summary_text_tokens(previous or "")
+            if available <= 0:
+                logger.warning("Summary input budget cannot fit the previous summary; skipping compaction")
+                return None
+            if self._summary_text_tokens(source[cursor:]) > available:
+                low, high, end = cursor + 1, len(source), cursor
+                while low <= high:
+                    middle = (low + high) // 2
+                    if self._summary_text_tokens(source[cursor:middle]) <= available:
+                        end, low = middle, middle + 1
+                    else:
+                        high = middle - 1
+                # Prefer complete serialized lines when possible. Oversized
+                # individual messages still advance through contiguous slices.
+                boundary = source.rfind("\n", cursor, end) + 1
+                if boundary > cursor and self._summary_text_tokens(source[cursor:boundary]) <= available:
+                    end = boundary
+            if end <= cursor:
+                logger.warning("Summary input budget cannot fit any source text; skipping compaction")
+                return None
+        body = self._build_summary_input_text(source[cursor:end], previous)
+        if body is None:
             return None
-        return "\n".join(parts)
+        return self.summary_prompt.format(messages=body).rstrip(), end
+
+    def _build_summary_input_text(self, formatted_messages: str, previous_summary: str | None = None) -> str | None:
+        """Wrap complete raw sections; never trim material selected for removal.
+
+        The raw-text budget excludes escaping, wrapper tags and prompt overhead.
+        A large carry or an impossibly small budget fails rather than replacing
+        source history with a successful placeholder summary.
+        """
+        if self.trim_tokens_to_summarize is not None and self._summary_text_tokens(formatted_messages) + self._summary_text_tokens(previous_summary or "") > max(1, self.trim_tokens_to_summarize):
+            return None
+        parts: list[str] = []
+        if previous_summary:
+            parts.extend(["<existing_summary>", html.escape(previous_summary, quote=False), "</existing_summary>", ""])
+        if formatted_messages:
+            parts.extend(["<new_messages>", html.escape(formatted_messages, quote=False), "</new_messages>"])
+        return "\n".join(parts) if parts else None
 
     def _build_summary_prompt(self, messages_to_summarize: list[AnyMessage], previous_summary: str | None = None) -> str | None:
-        """Build the summary prompt, returning ``None`` when trimming leaves nothing."""
-        trimmed_messages = self._trim_messages_for_summary(messages_to_summarize)
-        new_messages_strategy: Literal["first", "last"] = "first"
-        if not trimmed_messages:
-            if any(isinstance(message, HumanMessage) for message in messages_to_summarize):
-                # The human anchor can fall outside the token-limited tail.
-                # Preserve the existing final-message fallback for this case.
-                trimmed_messages = messages_to_summarize[-1:]
-            else:
-                # Rescuing the current request can leave an AI/Tool-only window,
-                # which the inherited human-anchored trimmer rejects even below
-                # budget. Bound its raw text while favoring recent content.
-                trimmed_messages = messages_to_summarize
-                new_messages_strategy = "last"
-        if not trimmed_messages:
-            return None
-        # Format messages to avoid token inflation from metadata when str() is called on
-        # message objects.
-        formatted_messages = get_buffer_string(trimmed_messages)
-        formatted_messages = self._build_summary_input_text(formatted_messages, previous_summary=previous_summary, new_messages_strategy=new_messages_strategy)
-        if not formatted_messages:
-            return None
-        # The summary model is invoked directly from before_model, outside
-        # PiiRedactionMiddleware's wrap_model_call (#3190), so the compaction
-        # input is redacted here; summaries then carry placeholders and the
-        # summary_text DurableContextMiddleware reinjects stays clean.
-        formatted_messages = redact_text(formatted_messages, getattr(self._app_config, "pii_redaction", None))
-        return self.summary_prompt.format(messages=formatted_messages).rstrip()
+        """Build one complete prompt, or reject a window that needs chunking."""
+        source = self._summary_source_text(messages_to_summarize)
+        previous = redact_text(previous_summary, getattr(self._app_config, "pii_redaction", None)) if previous_summary else None
+        body = self._build_summary_input_text(source, previous)
+        return self.summary_prompt.format(messages=body).rstrip() if body else None
 
     def before_model(self, state: AgentState, runtime: Runtime) -> dict | None:
         return self._maybe_summarize(state, runtime)
@@ -736,8 +661,9 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
     def _record_summary_telemetry(self, runtime: Runtime, previous_summary: str | None, summary: str, summarized_count: int, *, llm_call_skipped: bool = False) -> None:
         """Count successful summary results, unchanged results, and no-op cache reuse.
 
-        ``call_count`` includes reuse and canned results, not individual LLM requests.
-        Counters and event snapshots update atomically; telemetry failures stay soft.
+        ``call_count`` includes completed passes and reuse, not individual LLM requests.
+        Counters and event snapshots update once per complete pass, regardless of
+        its chunk count; telemetry failures stay soft.
         """
         try:
             noop = previous_summary is not None and summary.encode("utf-8") == previous_summary.encode("utf-8")
