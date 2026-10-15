@@ -146,3 +146,11 @@ combined poll cancellation and pre-publication clock/cursor guards; retained
 callbacks and late JSON cannot act after workspace expiry. Two added P/T
 scenarios and 20 native regressions/full frontend checks passed in Shanghai.
 Actual shell/browser/backend/principal acceptance and other resources remain.
+
+
+Project/shelf clients (#61): 16 API functions accept fixed REST/signal options,
+15 hooks bind captured lifetimes and refuse stale cache settlement. P/T
+normal project/shelf/thread-file flow plus delayed decoding/retained mutation
+passes with 38 native regressions/full check in Shanghai. Actual UI callers
+and direct download/iframe/relative HTML URLs remain pending; these HTTP
+fixtures are not end-to-end or physical isolation acceptance.

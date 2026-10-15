@@ -7,6 +7,9 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
+import { useMemo } from "react";
+
+import { useWorkspaceLifetime } from "@/core/workspaces/context";
 
 import { isStaticWebsiteOnly } from "../static-mode";
 import { INFINITE_THREADS_QUERY_KEY_PREFIX } from "../threads/hooks";
@@ -28,6 +31,7 @@ import {
   promoteThreadFile,
   restoreProject,
   uploadProjectDocument,
+  type ProjectRequestOptions,
   type ProjectDocumentListResponse,
   type ProjectDocumentUploadResponse,
   type ProjectsConfig,
@@ -42,6 +46,23 @@ import type {
   ProjectThread,
   PromoteThreadFileInput,
 } from "./types";
+
+/** Bind requests once; native callers keep their original argument lists. */
+function useProjectRequest() {
+  const lifetime = useWorkspaceLifetime();
+  return useMemo(
+    () =>
+      lifetime
+        ? (signal?: AbortSignal): ProjectRequestOptions => ({
+            rest: lifetime.rest,
+            signal: signal
+              ? AbortSignal.any([lifetime.scope.signal, signal])
+              : lifetime.scope.signal,
+          })
+        : null,
+    [lifetime],
+  );
+}
 
 /**
  * Invalidate project queries. Archive/restore/delete change how member threads
@@ -64,9 +85,11 @@ export function useProjects(
   status?: ProjectStatus,
   { enabled = true }: { enabled?: boolean } = {},
 ) {
+  const request = useProjectRequest();
   return useQuery<Project[]>({
     queryKey: [...PROJECTS_QUERY_KEY, { status }],
-    queryFn: () => listProjects(status),
+    queryFn: ({ signal }) =>
+      request ? listProjects(status, request(signal)) : listProjects(status),
     // Static-demo mode has no Gateway; never fire project requests there.
     enabled: enabled && !isStaticWebsiteOnly(),
   });
@@ -81,9 +104,11 @@ export function useProjects(
 export function useProjectsConfig({
   enabled = true,
 }: { enabled?: boolean } = {}) {
+  const request = useProjectRequest();
   return useQuery<ProjectsConfig>({
     queryKey: [...PROJECTS_QUERY_KEY, "config"],
-    queryFn: getProjectsConfig,
+    queryFn: ({ signal }) =>
+      request ? getProjectsConfig(request(signal)) : getProjectsConfig(),
     retry: false,
     // Config changes only via server redeploy; a stale read is harmless next
     // to the 422 guard of last resort.
@@ -93,9 +118,11 @@ export function useProjectsConfig({
 }
 
 export function useProject(id: string) {
+  const request = useProjectRequest();
   return useQuery<Project>({
     queryKey: [...PROJECTS_QUERY_KEY, "detail", id],
-    queryFn: () => getProject(id),
+    queryFn: ({ signal }) =>
+      request ? getProject(id, request(signal)) : getProject(id),
     // A deleted or foreign project 404s deterministically and the page has a
     // dedicated not-found state for it; do not spend the default retry
     // backoff (~7s) in "loading" first. Matches useThreadMetadata /
@@ -117,6 +144,7 @@ export function useInfiniteProjectThreads(
   id: string,
   { enabled = true }: { enabled?: boolean } = {},
 ) {
+  const request = useProjectRequest();
   return useInfiniteQuery<
     ProjectThread[],
     Error,
@@ -126,11 +154,20 @@ export function useInfiniteProjectThreads(
   >({
     queryKey: [...PROJECTS_QUERY_KEY, "threads", id],
     initialPageParam: 0,
-    queryFn: ({ pageParam }) =>
-      listProjectThreads(id, {
-        limit: PROJECT_THREADS_PAGE_SIZE,
-        offset: pageParam,
-      }),
+    queryFn: ({ pageParam, signal }) =>
+      request
+        ? listProjectThreads(
+            id,
+            {
+              limit: PROJECT_THREADS_PAGE_SIZE,
+              offset: pageParam,
+            },
+            request(signal),
+          )
+        : listProjectThreads(id, {
+            limit: PROJECT_THREADS_PAGE_SIZE,
+            offset: pageParam,
+          }),
     getNextPageParam: (lastPage, allPages) =>
       lastPage.length === PROJECT_THREADS_PAGE_SIZE
         ? allPages.reduce((total, page) => total + page.length, 0)
@@ -145,16 +182,20 @@ export type ProjectThreadsQueryResult = UseInfiniteQueryResult<
 >;
 
 export function useCreateProject() {
+  const request = useProjectRequest();
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (input: ProjectCreateInput) => createProject(input),
+    mutationFn: (input: ProjectCreateInput) =>
+      request ? createProject(input, request()) : createProject(input),
     onSettled() {
+      if (request?.().signal?.aborted) return;
       invalidateProjectCaches(queryClient);
     },
   });
 }
 
 export function usePatchProject() {
+  const request = useProjectRequest();
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: ({
@@ -163,38 +204,55 @@ export function usePatchProject() {
     }: {
       projectId: string;
       input: ProjectPatchInput;
-    }) => patchProject(projectId, input),
+    }) =>
+      request
+        ? patchProject(projectId, input, request())
+        : patchProject(projectId, input),
     onSettled() {
+      if (request?.().signal?.aborted) return;
       invalidateProjectCaches(queryClient);
     },
   });
 }
 
 export function useArchiveProject() {
+  const request = useProjectRequest();
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (projectId: string) => archiveProject(projectId),
+    mutationFn: (projectId: string) =>
+      request
+        ? archiveProject(projectId, request())
+        : archiveProject(projectId),
     onSettled() {
+      if (request?.().signal?.aborted) return;
       invalidateProjectCaches(queryClient, { includeThreads: true });
     },
   });
 }
 
 export function useRestoreProject() {
+  const request = useProjectRequest();
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (projectId: string) => restoreProject(projectId),
+    mutationFn: (projectId: string) =>
+      request
+        ? restoreProject(projectId, request())
+        : restoreProject(projectId),
     onSettled() {
+      if (request?.().signal?.aborted) return;
       invalidateProjectCaches(queryClient, { includeThreads: true });
     },
   });
 }
 
 export function useDeleteProject() {
+  const request = useProjectRequest();
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (projectId: string) => deleteProject(projectId),
+    mutationFn: (projectId: string) =>
+      request ? deleteProject(projectId, request()) : deleteProject(projectId),
     onSettled() {
+      if (request?.().signal?.aborted) return;
       invalidateProjectCaches(queryClient, { includeThreads: true });
     },
   });
@@ -211,6 +269,7 @@ export function useInfiniteProjectDocuments(
   projectId: string,
   { enabled = true }: { enabled?: boolean } = {},
 ) {
+  const request = useProjectRequest();
   return useInfiniteQuery<
     ProjectDocumentListResponse,
     Error,
@@ -220,11 +279,20 @@ export function useInfiniteProjectDocuments(
   >({
     queryKey: [...PROJECTS_QUERY_KEY, "documents", projectId],
     initialPageParam: 0,
-    queryFn: ({ pageParam }) =>
-      listProjectDocuments(projectId, {
-        limit: PROJECT_DOCUMENTS_PAGE_SIZE,
-        offset: pageParam,
-      }),
+    queryFn: ({ pageParam, signal }) =>
+      request
+        ? listProjectDocuments(
+            projectId,
+            {
+              limit: PROJECT_DOCUMENTS_PAGE_SIZE,
+              offset: pageParam,
+            },
+            request(signal),
+          )
+        : listProjectDocuments(projectId, {
+            limit: PROJECT_DOCUMENTS_PAGE_SIZE,
+            offset: pageParam,
+          }),
     getNextPageParam: (lastPage) => {
       const loaded = lastPage.offset + lastPage.documents.length;
       return loaded < lastPage.total ? loaded : undefined;
@@ -251,6 +319,7 @@ export function useInfiniteProjectThreadFiles(
   }: { thread_limit?: number; file_limit?: number } = {},
   { enabled = true }: { enabled?: boolean } = {},
 ) {
+  const request = useProjectRequest();
   return useInfiniteQuery<
     ProjectThreadFilesResponse,
     Error,
@@ -265,12 +334,22 @@ export function useInfiniteProjectThreadFiles(
       { thread_limit, file_limit },
     ],
     initialPageParam: 0,
-    queryFn: ({ pageParam }) =>
-      listProjectThreadFiles(projectId, {
-        offset: pageParam,
-        thread_limit,
-        file_limit,
-      }),
+    queryFn: ({ pageParam, signal }) =>
+      request
+        ? listProjectThreadFiles(
+            projectId,
+            {
+              offset: pageParam,
+              thread_limit,
+              file_limit,
+            },
+            request(signal),
+          )
+        : listProjectThreadFiles(projectId, {
+            offset: pageParam,
+            thread_limit,
+            file_limit,
+          }),
     getNextPageParam: (lastPage) => lastPage.next_offset ?? undefined,
     // Static-demo mode has no Gateway; never fire project requests there.
     enabled: enabled && !isStaticWebsiteOnly(),
@@ -278,34 +357,45 @@ export function useInfiniteProjectThreadFiles(
 }
 
 export function useUploadProjectDocument(projectId: string) {
+  const request = useProjectRequest();
   const queryClient = useQueryClient();
   return useMutation<
     ProjectDocumentUploadResponse,
     Error,
     { file: File; name?: string }
   >({
-    mutationFn: (input) => uploadProjectDocument(projectId, input),
+    mutationFn: (input) =>
+      request
+        ? uploadProjectDocument(projectId, input, request())
+        : uploadProjectDocument(projectId, input),
     onSettled() {
+      if (request?.().signal?.aborted) return;
       invalidateProjectCaches(queryClient);
     },
   });
 }
 
 export function usePromoteThreadFile(projectId: string) {
+  const request = useProjectRequest();
   const queryClient = useQueryClient();
   return useMutation<
     ProjectDocumentUploadResponse,
     Error,
     PromoteThreadFileInput
   >({
-    mutationFn: (input) => promoteThreadFile(projectId, input),
+    mutationFn: (input) =>
+      request
+        ? promoteThreadFile(projectId, input, request())
+        : promoteThreadFile(projectId, input),
     onSettled() {
+      if (request?.().signal?.aborted) return;
       invalidateProjectCaches(queryClient);
     },
   });
 }
 
 export function useAttachProjectDocument(projectId: string) {
+  const request = useProjectRequest();
   const queryClient = useQueryClient();
   return useMutation<
     AttachProjectDocumentResult,
@@ -313,8 +403,11 @@ export function useAttachProjectDocument(projectId: string) {
     { documentId: string; threadId: string }
   >({
     mutationFn: ({ documentId, threadId }) =>
-      attachProjectDocument(projectId, documentId, threadId),
+      request
+        ? attachProjectDocument(projectId, documentId, threadId, request())
+        : attachProjectDocument(projectId, documentId, threadId),
     onSettled() {
+      if (request?.().signal?.aborted) return;
       // The shelf read does not change, but the target thread's uploads did.
       invalidateProjectCaches(queryClient);
       void queryClient.invalidateQueries({ queryKey: ["threads"] });
@@ -323,10 +416,15 @@ export function useAttachProjectDocument(projectId: string) {
 }
 
 export function useDeleteProjectDocument(projectId: string) {
+  const request = useProjectRequest();
   const queryClient = useQueryClient();
   return useMutation<void, Error, string>({
-    mutationFn: (documentId) => deleteProjectDocument(projectId, documentId),
+    mutationFn: (documentId) =>
+      request
+        ? deleteProjectDocument(projectId, documentId, request())
+        : deleteProjectDocument(projectId, documentId),
     onSettled() {
+      if (request?.().signal?.aborted) return;
       invalidateProjectCaches(queryClient);
     },
   });

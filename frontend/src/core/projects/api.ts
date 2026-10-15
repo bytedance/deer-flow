@@ -1,4 +1,7 @@
-import { fetch as fetchWithAuth } from "@/core/api/fetcher";
+import {
+  fetch as fetchWithAuth,
+  type WorkspaceRESTClient,
+} from "@/core/api/fetcher";
 import {
   ARTIFACT_PREVIEW_MAX_BYTES,
   parseContentRange,
@@ -16,6 +19,29 @@ import type {
   ProjectThreadFileGroup,
   PromoteThreadFileInput,
 } from "./types";
+
+export type ProjectRequestOptions = {
+  rest: WorkspaceRESTClient;
+  signal?: AbortSignal;
+};
+
+async function requestProject<T>(
+  input: RequestInfo | URL,
+  init: RequestInit,
+  decode: (response: Response) => Promise<T>,
+  options?: ProjectRequestOptions,
+): Promise<T> {
+  options?.signal?.throwIfAborted();
+  const response = await (options?.rest.fetch ?? fetchWithAuth)(
+    input,
+    options?.signal ? { ...init, signal: options.signal } : init,
+  );
+  const result = options
+    ? await options.rest.consume(response, decode)
+    : await decode(response);
+  options?.signal?.throwIfAborted();
+  return result;
+}
 
 export type ProjectListResponse = {
   projects: Project[];
@@ -64,21 +90,28 @@ export const PROJECTS_CONFIG_DEFAULT: ProjectsConfig = {
 };
 
 /** Server-configured projects limits; shared by the editor and trash. */
-export async function getProjectsConfig(): Promise<ProjectsConfig> {
-  const response = await fetchWithAuth(
+export async function getProjectsConfig(
+  options?: ProjectRequestOptions,
+): Promise<ProjectsConfig> {
+  return requestProject<ProjectsConfig>(
     `${getBackendBaseURL()}/api/projects/config`,
     {
       method: "GET",
     },
+    async (response) => {
+      if (!response.ok) {
+        throw new Error(
+          await readProjectAPIError(
+            response,
+            "Failed to load projects config.",
+          ),
+        );
+      }
+
+      return (await response.json()) as ProjectsConfig;
+    },
+    options,
   );
-
-  if (!response.ok) {
-    throw new Error(
-      await readProjectAPIError(response, "Failed to load projects config."),
-    );
-  }
-
-  return (await response.json()) as ProjectsConfig;
 }
 
 async function readProjectAPIError(
@@ -100,134 +133,184 @@ function projectUrl(projectId: string, suffix = ""): string {
   return `${getBackendBaseURL()}/api/projects/${encodeURIComponent(projectId)}${suffix}`;
 }
 
-export async function listProjects(status?: ProjectStatus): Promise<Project[]> {
-  const response = await fetchWithAuth(
+export async function listProjects(
+  status?: ProjectStatus,
+  options?: ProjectRequestOptions,
+): Promise<Project[]> {
+  return requestProject<Project[]>(
     `${getBackendBaseURL()}/api/projects${status ? `?status=${encodeURIComponent(status)}` : ""}`,
     {
       method: "GET",
     },
+    async (response) => {
+      if (!response.ok) {
+        throw new Error(
+          await readProjectAPIError(response, "Failed to load projects."),
+        );
+      }
+
+      const body = (await response.json()) as ProjectListResponse;
+      return body.projects;
+    },
+    options,
   );
-
-  if (!response.ok) {
-    throw new Error(
-      await readProjectAPIError(response, "Failed to load projects."),
-    );
-  }
-
-  const body = (await response.json()) as ProjectListResponse;
-  return body.projects;
 }
 
-export async function getProject(projectId: string): Promise<Project> {
-  const response = await fetchWithAuth(projectUrl(projectId), {
-    method: "GET",
-  });
+export async function getProject(
+  projectId: string,
+  options?: ProjectRequestOptions,
+): Promise<Project> {
+  return requestProject<Project>(
+    projectUrl(projectId),
+    {
+      method: "GET",
+    },
+    async (response) => {
+      if (!response.ok) {
+        throw new Error(
+          await readProjectAPIError(response, "Failed to load project."),
+        );
+      }
 
-  if (!response.ok) {
-    throw new Error(
-      await readProjectAPIError(response, "Failed to load project."),
-    );
-  }
-
-  return (await response.json()) as Project;
+      return (await response.json()) as Project;
+    },
+    options,
+  );
 }
 
 export async function createProject(
   input: ProjectCreateInput,
+  options?: ProjectRequestOptions,
 ): Promise<Project> {
-  const response = await fetchWithAuth(`${getBackendBaseURL()}/api/projects`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
+  return requestProject<Project>(
+    `${getBackendBaseURL()}/api/projects`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        name: input.name,
+        instructions: input.instructions ?? "",
+        presentation: input.presentation ?? {},
+      }),
     },
-    body: JSON.stringify({
-      name: input.name,
-      instructions: input.instructions ?? "",
-      presentation: input.presentation ?? {},
-    }),
-  });
+    async (response) => {
+      if (!response.ok) {
+        throw new Error(
+          await readProjectAPIError(response, "Failed to create project."),
+        );
+      }
 
-  if (!response.ok) {
-    throw new Error(
-      await readProjectAPIError(response, "Failed to create project."),
-    );
-  }
-
-  return (await response.json()) as Project;
+      return (await response.json()) as Project;
+    },
+    options,
+  );
 }
 
 export async function patchProject(
   projectId: string,
   input: ProjectPatchInput,
+  options?: ProjectRequestOptions,
 ): Promise<Project> {
-  const response = await fetchWithAuth(projectUrl(projectId), {
-    method: "PATCH",
-    headers: {
-      "Content-Type": "application/json",
+  return requestProject<Project>(
+    projectUrl(projectId),
+    {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        ...(input.name !== undefined ? { name: input.name } : {}),
+        ...(input.instructions !== undefined
+          ? { instructions: input.instructions }
+          : {}),
+        ...(input.presentation !== undefined
+          ? { presentation: input.presentation }
+          : {}),
+      }),
     },
-    body: JSON.stringify({
-      ...(input.name !== undefined ? { name: input.name } : {}),
-      ...(input.instructions !== undefined
-        ? { instructions: input.instructions }
-        : {}),
-      ...(input.presentation !== undefined
-        ? { presentation: input.presentation }
-        : {}),
-    }),
-  });
+    async (response) => {
+      if (!response.ok) {
+        throw new Error(
+          await readProjectAPIError(response, "Failed to update project."),
+        );
+      }
 
-  if (!response.ok) {
-    throw new Error(
-      await readProjectAPIError(response, "Failed to update project."),
-    );
-  }
-
-  return (await response.json()) as Project;
+      return (await response.json()) as Project;
+    },
+    options,
+  );
 }
 
-export async function archiveProject(projectId: string): Promise<Project> {
-  const response = await fetchWithAuth(projectUrl(projectId, "/archive"), {
-    method: "POST",
-  });
+export async function archiveProject(
+  projectId: string,
+  options?: ProjectRequestOptions,
+): Promise<Project> {
+  return requestProject<Project>(
+    projectUrl(projectId, "/archive"),
+    {
+      method: "POST",
+    },
+    async (response) => {
+      if (!response.ok) {
+        throw new Error(
+          await readProjectAPIError(response, "Failed to archive project."),
+        );
+      }
 
-  if (!response.ok) {
-    throw new Error(
-      await readProjectAPIError(response, "Failed to archive project."),
-    );
-  }
-
-  return (await response.json()) as Project;
+      return (await response.json()) as Project;
+    },
+    options,
+  );
 }
 
-export async function restoreProject(projectId: string): Promise<Project> {
-  const response = await fetchWithAuth(projectUrl(projectId, "/restore"), {
-    method: "POST",
-  });
+export async function restoreProject(
+  projectId: string,
+  options?: ProjectRequestOptions,
+): Promise<Project> {
+  return requestProject<Project>(
+    projectUrl(projectId, "/restore"),
+    {
+      method: "POST",
+    },
+    async (response) => {
+      if (!response.ok) {
+        throw new Error(
+          await readProjectAPIError(response, "Failed to restore project."),
+        );
+      }
 
-  if (!response.ok) {
-    throw new Error(
-      await readProjectAPIError(response, "Failed to restore project."),
-    );
-  }
-
-  return (await response.json()) as Project;
+      return (await response.json()) as Project;
+    },
+    options,
+  );
 }
 
-export async function deleteProject(projectId: string): Promise<void> {
-  const response = await fetchWithAuth(projectUrl(projectId), {
-    method: "DELETE",
-  });
-
-  if (!response.ok) {
-    throw new Error(
-      await readProjectAPIError(response, "Failed to delete project."),
-    );
-  }
+export async function deleteProject(
+  projectId: string,
+  options?: ProjectRequestOptions,
+): Promise<void> {
+  return requestProject<void>(
+    projectUrl(projectId),
+    {
+      method: "DELETE",
+    },
+    async (response) => {
+      if (!response.ok) {
+        throw new Error(
+          await readProjectAPIError(response, "Failed to delete project."),
+        );
+      }
+    },
+    options,
+  );
 }
 
 export async function listProjectThreads(
   projectId: string,
   params: { limit?: number; offset?: number } = {},
+  options?: ProjectRequestOptions,
 ): Promise<ProjectThread[]> {
   const search = new URLSearchParams();
   if (params.limit !== undefined) {
@@ -237,25 +320,31 @@ export async function listProjectThreads(
     search.set("offset", String(params.offset));
   }
   const query = search.size > 0 ? `?${search.toString()}` : "";
-  const response = await fetchWithAuth(
+  return requestProject<ProjectThread[]>(
     projectUrl(projectId, `/threads${query}`),
     {
       method: "GET",
     },
+    async (response) => {
+      if (!response.ok) {
+        throw new Error(
+          await readProjectAPIError(
+            response,
+            "Failed to load project threads.",
+          ),
+        );
+      }
+
+      return (await response.json()) as ProjectThread[];
+    },
+    options,
   );
-
-  if (!response.ok) {
-    throw new Error(
-      await readProjectAPIError(response, "Failed to load project threads."),
-    );
-  }
-
-  return (await response.json()) as ProjectThread[];
 }
 
 export async function listProjectDocuments(
   projectId: string,
   params: { limit?: number; offset?: number } = {},
+  options?: ProjectRequestOptions,
 ): Promise<ProjectDocumentListResponse> {
   const search = new URLSearchParams();
   if (params.limit !== undefined) {
@@ -265,20 +354,25 @@ export async function listProjectDocuments(
     search.set("offset", String(params.offset));
   }
   const query = search.size > 0 ? `?${search.toString()}` : "";
-  const response = await fetchWithAuth(
+  return requestProject<ProjectDocumentListResponse>(
     projectUrl(projectId, `/documents${query}`),
     {
       method: "GET",
     },
+    async (response) => {
+      if (!response.ok) {
+        throw new Error(
+          await readProjectAPIError(
+            response,
+            "Failed to load project documents.",
+          ),
+        );
+      }
+
+      return (await response.json()) as ProjectDocumentListResponse;
+    },
+    options,
   );
-
-  if (!response.ok) {
-    throw new Error(
-      await readProjectAPIError(response, "Failed to load project documents."),
-    );
-  }
-
-  return (await response.json()) as ProjectDocumentListResponse;
 }
 
 /**
@@ -288,32 +382,42 @@ export async function listProjectDocuments(
 export async function uploadProjectDocument(
   projectId: string,
   { file, name }: { file: File; name?: string },
+  options?: ProjectRequestOptions,
 ): Promise<ProjectDocumentUploadResponse> {
   const formData = new FormData();
   formData.append("file", file);
   if (name !== undefined) {
     formData.append("name", name);
   }
-  const response = await fetchWithAuth(projectUrl(projectId, "/documents"), {
-    method: "POST",
-    body: formData,
-  });
+  return requestProject<ProjectDocumentUploadResponse>(
+    projectUrl(projectId, "/documents"),
+    {
+      method: "POST",
+      body: formData,
+    },
+    async (response) => {
+      if (!response.ok) {
+        throw new Error(
+          await readProjectAPIError(
+            response,
+            "Failed to upload project document.",
+          ),
+        );
+      }
 
-  if (!response.ok) {
-    throw new Error(
-      await readProjectAPIError(response, "Failed to upload project document."),
-    );
-  }
-
-  return (await response.json()) as ProjectDocumentUploadResponse;
+      return (await response.json()) as ProjectDocumentUploadResponse;
+    },
+    options,
+  );
 }
 
 /** Save a thread file (upload or output) onto the project shelf (spec §7.4). */
 export async function promoteThreadFile(
   projectId: string,
   input: PromoteThreadFileInput,
+  options?: ProjectRequestOptions,
 ): Promise<ProjectDocumentUploadResponse> {
-  const response = await fetchWithAuth(
+  return requestProject<ProjectDocumentUploadResponse>(
     projectUrl(projectId, "/documents/from-thread"),
     {
       method: "POST",
@@ -329,15 +433,20 @@ export async function promoteThreadFile(
           : {}),
       }),
     },
+    async (response) => {
+      if (!response.ok) {
+        throw new Error(
+          await readProjectAPIError(
+            response,
+            "Failed to save file to project.",
+          ),
+        );
+      }
+
+      return (await response.json()) as ProjectDocumentUploadResponse;
+    },
+    options,
   );
-
-  if (!response.ok) {
-    throw new Error(
-      await readProjectAPIError(response, "Failed to save file to project."),
-    );
-  }
-
-  return (await response.json()) as ProjectDocumentUploadResponse;
 }
 
 /** Attach a shelf document into a thread through the uploads path (§7.3). */
@@ -345,8 +454,9 @@ export async function attachProjectDocument(
   projectId: string,
   documentId: string,
   threadId: string,
+  options?: ProjectRequestOptions,
 ): Promise<AttachProjectDocumentResult> {
-  const response = await fetchWithAuth(
+  return requestProject<AttachProjectDocumentResult>(
     projectUrl(
       projectId,
       `/documents/${encodeURIComponent(documentId)}/attach-to-thread/${encodeURIComponent(threadId)}`,
@@ -354,37 +464,45 @@ export async function attachProjectDocument(
     {
       method: "POST",
     },
+    async (response) => {
+      if (!response.ok) {
+        throw new Error(
+          await readProjectAPIError(
+            response,
+            "Failed to attach document to thread.",
+          ),
+        );
+      }
+
+      return (await response.json()) as AttachProjectDocumentResult;
+    },
+    options,
   );
-
-  if (!response.ok) {
-    throw new Error(
-      await readProjectAPIError(
-        response,
-        "Failed to attach document to thread.",
-      ),
-    );
-  }
-
-  return (await response.json()) as AttachProjectDocumentResult;
 }
 
 /** Move one shelf document to trash (204; restore/purge are the trash tier). */
 export async function deleteProjectDocument(
   projectId: string,
   documentId: string,
+  options?: ProjectRequestOptions,
 ): Promise<void> {
-  const response = await fetchWithAuth(
+  return requestProject<void>(
     projectUrl(projectId, `/documents/${encodeURIComponent(documentId)}`),
     {
       method: "DELETE",
     },
+    async (response) => {
+      if (!response.ok) {
+        throw new Error(
+          await readProjectAPIError(
+            response,
+            "Failed to delete project document.",
+          ),
+        );
+      }
+    },
+    options,
   );
-
-  if (!response.ok) {
-    throw new Error(
-      await readProjectAPIError(response, "Failed to delete project document."),
-    );
-  }
 }
 
 /**
@@ -495,82 +613,94 @@ export type ProjectDocumentPreview =
 export async function fetchProjectDocumentPreview(
   projectId: string,
   documentId: string,
+  options?: ProjectRequestOptions,
 ): Promise<ProjectDocumentPreview> {
-  const response = await fetchWithAuth(
+  return requestProject<ProjectDocumentPreview>(
     urlOfProjectDocumentContent(projectId, documentId),
     {
       headers: { Range: `bytes=0-${ARTIFACT_PREVIEW_MAX_BYTES - 1}` },
     },
-  );
-  if (response.status === 409) {
-    throw new ProjectDocumentContentMissingError();
-  }
-  const contentRange = parseContentRange(response.headers.get("Content-Range"));
-  if (response.status === 416 && contentRange?.total === 0) {
-    return {
-      kind: "text",
-      content: "",
-      truncated: false,
-      previewBytes: 0,
-      totalBytes: 0,
-    };
-  }
-  if (!response.ok) {
-    throw new Error(
-      await readProjectAPIError(response, "Failed to load document content."),
-    );
-  }
+    async (response) => {
+      if (response.status === 409) {
+        throw new ProjectDocumentContentMissingError();
+      }
+      const contentRange = parseContentRange(
+        response.headers.get("Content-Range"),
+      );
+      if (response.status === 416 && contentRange?.total === 0) {
+        return {
+          kind: "text",
+          content: "",
+          truncated: false,
+          previewBytes: 0,
+          totalBytes: 0,
+        };
+      }
+      if (!response.ok) {
+        throw new Error(
+          await readProjectAPIError(
+            response,
+            "Failed to load document content.",
+          ),
+        );
+      }
 
-  const contentType = (response.headers.get("Content-Type") ?? "")
-    .split(";")[0]!
-    .trim()
-    .toLowerCase();
-  if (contentType === "application/pdf") {
-    // PDFs get their own kind: the dialog renders them in an iframe WITHOUT
-    // the sandbox attribute (Chromium blocks its built-in viewer inside
-    // ``sandbox=""``), unlike other viewable binaries. The bounded prefix is
-    // useless either way — release the body instead of decoding it.
-    await response.body?.cancel();
-    return { kind: "pdf" };
-  }
-  if (isBrowserViewableMediaType(contentType)) {
-    // The bounded prefix is useless to the iframe, which loads the content
-    // URL itself; release the body instead of decoding it.
-    await response.body?.cancel();
-    return { kind: "binary" };
-  }
-  if (!isTextPreviewMediaType(contentType)) {
-    await response.body?.cancel();
-    return { kind: "unsupported" };
-  }
+      const contentType = (response.headers.get("Content-Type") ?? "")
+        .split(";")[0]!
+        .trim()
+        .toLowerCase();
+      if (contentType === "application/pdf") {
+        // PDFs get their own kind: the dialog renders them in an iframe WITHOUT
+        // the sandbox attribute (Chromium blocks its built-in viewer inside
+        // ``sandbox=""``), unlike other viewable binaries. The bounded prefix is
+        // useless either way — release the body instead of decoding it.
+        await response.body?.cancel();
+        return { kind: "pdf" };
+      }
+      if (isBrowserViewableMediaType(contentType)) {
+        // The bounded prefix is useless to the iframe, which loads the content
+        // URL itself; release the body instead of decoding it.
+        await response.body?.cancel();
+        return { kind: "binary" };
+      }
+      if (!isTextPreviewMediaType(contentType)) {
+        await response.body?.cancel();
+        return { kind: "unsupported" };
+      }
 
-  const bytes = await response.arrayBuffer();
-  const contentLengthHeader = response.headers.get("Content-Length");
-  const contentLength =
-    contentLengthHeader === null ? undefined : Number(contentLengthHeader);
-  const totalBytes =
-    contentRange?.total ??
-    (contentLength !== undefined && Number.isFinite(contentLength)
-      ? contentLength
-      : undefined);
-  const previewBytes = Math.min(bytes.byteLength, ARTIFACT_PREVIEW_MAX_BYTES);
-  const truncated =
-    (response.status === 206 &&
-      (contentRange?.end === undefined ||
-        contentRange.total > contentRange.end + 1)) ||
-    bytes.byteLength > ARTIFACT_PREVIEW_MAX_BYTES ||
-    (totalBytes !== undefined &&
-      totalBytes > ARTIFACT_PREVIEW_MAX_BYTES &&
-      totalBytes > bytes.byteLength);
-  // Streaming decode intentionally holds an incomplete trailing UTF-8 code
-  // point instead of fabricating U+FFFD at the range boundary.
-  const content = new TextDecoder().decode(
-    bytes.byteLength > ARTIFACT_PREVIEW_MAX_BYTES
-      ? bytes.slice(0, ARTIFACT_PREVIEW_MAX_BYTES)
-      : bytes,
-    { stream: truncated },
+      const bytes = await response.arrayBuffer();
+      const contentLengthHeader = response.headers.get("Content-Length");
+      const contentLength =
+        contentLengthHeader === null ? undefined : Number(contentLengthHeader);
+      const totalBytes =
+        contentRange?.total ??
+        (contentLength !== undefined && Number.isFinite(contentLength)
+          ? contentLength
+          : undefined);
+      const previewBytes = Math.min(
+        bytes.byteLength,
+        ARTIFACT_PREVIEW_MAX_BYTES,
+      );
+      const truncated =
+        (response.status === 206 &&
+          (contentRange?.end === undefined ||
+            contentRange.total > contentRange.end + 1)) ||
+        bytes.byteLength > ARTIFACT_PREVIEW_MAX_BYTES ||
+        (totalBytes !== undefined &&
+          totalBytes > ARTIFACT_PREVIEW_MAX_BYTES &&
+          totalBytes > bytes.byteLength);
+      // Streaming decode intentionally holds an incomplete trailing UTF-8 code
+      // point instead of fabricating U+FFFD at the range boundary.
+      const content = new TextDecoder().decode(
+        bytes.byteLength > ARTIFACT_PREVIEW_MAX_BYTES
+          ? bytes.slice(0, ARTIFACT_PREVIEW_MAX_BYTES)
+          : bytes,
+        { stream: truncated },
+      );
+      return { kind: "text", content, truncated, previewBytes, totalBytes };
+    },
+    options,
   );
-  return { kind: "text", content, truncated, previewBytes, totalBytes };
 }
 
 /** Read-only conversation-files view over member threads (spec §7.4). */
@@ -581,6 +711,7 @@ export async function listProjectThreadFiles(
     thread_limit?: number;
     file_limit?: number;
   } = {},
+  options?: ProjectRequestOptions,
 ): Promise<ProjectThreadFilesResponse> {
   const search = new URLSearchParams();
   if (params.offset !== undefined) {
@@ -593,18 +724,20 @@ export async function listProjectThreadFiles(
     search.set("file_limit", String(params.file_limit));
   }
   const query = search.size > 0 ? `?${search.toString()}` : "";
-  const response = await fetchWithAuth(
+  return requestProject<ProjectThreadFilesResponse>(
     projectUrl(projectId, `/thread-files${query}`),
     {
       method: "GET",
     },
+    async (response) => {
+      if (!response.ok) {
+        throw new Error(
+          await readProjectAPIError(response, "Failed to load thread files."),
+        );
+      }
+
+      return (await response.json()) as ProjectThreadFilesResponse;
+    },
+    options,
   );
-
-  if (!response.ok) {
-    throw new Error(
-      await readProjectAPIError(response, "Failed to load thread files."),
-    );
-  }
-
-  return (await response.json()) as ProjectThreadFilesResponse;
 }

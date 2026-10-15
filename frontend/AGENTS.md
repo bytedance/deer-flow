@@ -524,3 +524,13 @@ Read callbacks/timers refuse expired scope; late decoded success/errors cannot
 update clocks or invalidate lists. Preserve native no-options clients, 15s
 polling, 1s debounce, optimistic unread patches and monotonic read versions.
 Real hooks/Context/REST with HTTP doubles are not browser/backend acceptance.
+
+
+Project APIs accept optional ProjectRequestOptions (#61: two scoped mains,
+38 native regressions/full check). Keep native no-options argument lists and
+request/error/Range/PDF/binary behavior; the shared helper owns the whole
+decoder with fixed REST. All project hooks capture that lifetime, combine
+Query/scope cancellation, and guard onSettled invalidations. Actual page
+callbacks, upload loops, preview effects and direct URLs still require scope
+binding/publication guards. HTML preview base stripping of search means a
+top-level workspace query cannot scope relative resources by itself.

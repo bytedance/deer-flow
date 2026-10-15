@@ -2476,5 +2476,53 @@
       "project/artifact clients, direct URLs and scoped UI stores",
       "actual shell/capability/selector and browser/backend two-tab acceptance; principal/session/revocation and M4-M11; activation remains closed"
     ]
+  },
+  "frontend_project_clients": {
+    "job": "deerflow-tenant-frontend",
+    "status": "native project/shelf REST clients and hooks scoped; actual page callers/direct links and full M3 incomplete",
+    "history": {
+      "58": {
+        "result": "FAILURE",
+        "scope": "main RED: project reads omitted selector, returning null-project",
+        "archive_sha256": "2d441a2bddd3da9b0dc88d1f1b5eaa8b4cf01255575141ec971b3d8d3497ed39"
+      },
+      "59": {
+        "result": "SUCCESS",
+        "scope": "normal P/T project/shelf/conversation file workflow main passed before adding lifecycle scenario; 38 native regressions",
+        "tests_passed": 39,
+        "archive_sha256": "c9536bd36393f9bc4b0172f4bf3de82889d449acd8e485d5aac2412a3265e996"
+      },
+      "60": {
+        "result": "FAILURE",
+        "scope": "40 behaviors passed; formatter check caught two await method-chain layouts changed on second Prettier pass. Exact same-package diff identified; only test layout changed for retry, no behavior or production changes.",
+        "archive_sha256": "4c51c326395b071802a2106dc4f9e77fe109eae81f0466431d367e34cdd11ec3"
+      }
+    },
+    "green": {
+      "build": 61,
+      "result": "SUCCESS",
+      "tests_passed": 40,
+      "tests_added": 2,
+      "test_seconds": [
+        13.8
+      ],
+      "build_seconds": 443.226,
+      "archive_sha256": "198176861fd2444e050c365610fce9e5d29c5b1d4f335d4557a4092b079541a1",
+      "image_id": "sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01",
+      "checks": "two real Context/REST/project-hook scenarios; 24 native documents API, nine documents-hook and five composer-attach-hook regressions; three-file Prettier/target ESLint, early tsc, full pnpm check"
+    },
+    "source_sha256": {
+      "frontend/src/core/projects/api.ts": "a56a01f8efdaa102a87fa2001019ea626f49e44902ef508b48a0d6c551845274",
+      "frontend/src/core/projects/hooks.ts": "8e13246d27326c966352051c45bbfe9d3ecef6a6b9d77c702b1ada11f678cc87",
+      "frontend/tests/unit/core/projects/workspace-projects.dom.test.tsx": "d7e87e1deb73006f020ccb550390048a7e6f96e911d5348ec8d4d3849dcb8e1d"
+    },
+    "scope": "16 native API functions accept optional fixed REST/combined signals with whole native decoder ownership; 15 hooks capture the workspace client. Query cancellation and scope signals combine; stale mutation success/error settlement cannot invalidate old caches. Native URL/body/argument/default/error and preview Range/empty/PDF/binary/text behaviors retained. No second project service introduced.",
+    "evidence": "actual WorkspaceProvider/ReadyBoundary, native project/shelf hooks and REST, synthetic HTTP and peripheral router only doubled. P/T project create/read/patch, lists, upload, preview, attach, promote, archive/restore and delete paths use own selector; old upload JSON and preview arrayBuffer bodies reject after switch, retained delete mutation cannot dispatch, current T upload continues. Not actual page/browser/backend authorization, download/iframe URL, live model, NAS or physical acceptance.",
+    "cleanup": "#58-#61 terminal with exact owned containers/networks and formatter inventories empty; private dependency cache retained",
+    "remaining": [
+      "actual project/settings/shelf/sidebar/move-menu callbacks and upload-loop publication, including same-space project navigation (shelf currently unkeyed); composer attachment handoff/sessionStorage must be scoped; document preview effect must explicitly pass the captured client",
+      "direct document/artifact URLs and HTML relative asset routing; current preview base intentionally strips query, so top-level query selector alone is insufficient",
+      "same-space sidecar parent/unmount/quiet-stream gaps, other UI stores, actual shell/selector/browser/backend two-tab and principal consistency; all M4-M11 and activation gates remain"
+    ]
   }
 }

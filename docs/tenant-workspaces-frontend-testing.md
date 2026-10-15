@@ -469,3 +469,35 @@ same-space sidecar parent/unmount faults, project/artifact clients/direct URLs
 and UI stores, then shell/selector and browser/backend two tabs. M3 remains
 partial; all M0-M11 parent gates remain open and runtime activation stays closed.
 No deployment, remote push, model call or local runtime was performed.
+
+
+M3 project/shelf client checkpoint (2026-10-15): #58 RED reproduced project
+reads without a selector; #59 main GREEN (39 cases) came before adding one
+lifecycle scenario. #60 passed all 40 behaviors but Prettier caught two await
+method-chain layouts. Reformatting the same source package showed only those
+test-layout changes. #61 SUCCESS: 40 cases (two new, 38 native regressions),
+three-file Prettier/target lint, early tsc and full pnpm check.
+
+All 16 native project API functions accept optional fixed REST/signal options;
+15 native hooks bind the confirmed lifetime, combine Query cancellation and
+workspace abort, and suppress stale onSettled invalidations. Preserve native
+request bodies/arguments/errors and full preview Range/text/empty/PDF/binary
+decoding inside the response lifetime. No new project execution service exists.
+The real Context/hooks/REST main runs P/T project reads/writes, shelf upload,
+preview, thread attach/promotion, archive/restore and deletion. Delayed old
+upload JSON/preview byte decoding rejects after selection; a retained old
+delete cannot dispatch and T upload still works. HTTP replies/router are
+fixtures, not actual page/browser/backend or physical authorization proof.
+
+Final source hashes match the verified archive; exact #58-#61 and formatter
+resource inventories are empty. Detailed receipts: frontend_project_clients
+in progress JSON. Next bind actual project/shelf/settings/sidebar/move-menu
+callbacks and preview effects, including same-space project navigation
+(the shelf currently has no project key); then document/artifact URLs, relative HTML
+assets and remaining UI stores. htmlBaseHref currently strips search, so
+adding a workspace query only to a top-level HTML URL cannot scope relative
+assets. Preserve the native safe preview architecture and verify that chain.
+Same-space sidecar parent/unmount/quiet-stream, actual shell/selector/two-tab
+and principal acceptance remain; M3 is partial, all parent M0-M11 gates stay
+open and activation remains closed. No deployment, Git remote push, model
+call or local runtime was performed.
