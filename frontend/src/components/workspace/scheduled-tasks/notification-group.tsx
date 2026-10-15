@@ -12,8 +12,8 @@ import { useChannelConnections } from "@/core/channels/hooks";
 import { useScheduledTasksFeature } from "@/core/features/hooks";
 import { useI18n } from "@/core/i18n/hooks";
 import {
-  feishuNotificationGroups,
   notificationGroupName,
+  notificationGroups,
 } from "@/core/scheduled-tasks/notification-groups";
 
 import { BindFeishuGroup } from "./bind-feishu-group";
@@ -69,7 +69,7 @@ function EnabledNotificationGroupSelect({
   const { t } = useI18n();
   const labels = t.scheduledTasks.notificationGroup;
   const { connections, isLoading, error } = useChannelConnections();
-  const groups = feishuNotificationGroups(connections);
+  const groups = notificationGroups(connections);
   const selected = groups.find((group) => group.id === value);
   const selectedMissing = Boolean(value) && !selected;
   const unnamed = groups.some((group) => !notificationGroupName(group));
@@ -138,7 +138,7 @@ export function NotificationGroupSummary({
   const { t } = useI18n();
   const labels = t.scheduledTasks.notificationGroup;
   const { connections, isLoading, error } = useChannelConnections();
-  const group = feishuNotificationGroups(connections).find(
+  const group = notificationGroups(connections).find(
     (connection) => connection.id === connectionId,
   );
   const name = notificationGroupName(group);
