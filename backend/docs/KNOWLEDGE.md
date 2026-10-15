@@ -1,11 +1,13 @@
-# Read-only knowledge contract (#6269, phases 1–2)
+# Read-only knowledge contract (#6269, phases 1–3)
 
 `deerflow.knowledge` owns `RetrievalResult`, `RetrievalHit`, `KnowledgeSource`,
 `KnowledgeCapabilities`, and the search-only `RetrievalProvider` protocol.
 Search-only providers need no knowledge management service, resource store,
 catalog, or scope-filter implementation. Scope admission, the read-only catalog
 and selection UI consume the same operation-level capabilities. LightRAG still
-does not advertise dataset/document filters; WeKnora remains phase 3.
+does not advertise dataset/document filters. The phase 3
+[WeKnora extension](../../examples/deerflow-extension-weknora/README.md) implements
+all six read-only operations against the v0.8.3 API.
 
 ## Provider registration and optional operations
 
@@ -35,10 +37,10 @@ provider identifiers, including non-UUID identifiers. Gateway validates this
 bounded public projection and never returns raw provider payloads.
 Dataset and document IDs are limited to **256 Unicode code points** throughout
 catalog output, URL parameters and scope snapshots. Overlong IDs are rejected,
-never truncated. A phase 3 WeKnora adapter must map space-qualified resources
-to stable, unambiguous IDs within this bound and resolve them inside the
-provider; the earlier `ks1_` encoding allowing 512 characters is not the public
-contract. Reuse provider API/mapping logic without adding a second discovery
+never truncated. The WeKnora extension maps endpoint/tenant/base tuples to stable
+`wk1_` SHA-256 IDs (68 ASCII characters), resolving them from the authorized
+catalog on each request without a mapping store. The earlier `ks1_` encoding
+allowing 512 characters is not the public contract. Reuse provider API/mapping logic without adding a second discovery
 protocol or a DeerFlow ACL store.
 
 `KnowledgeRequestContext` supplies the host user ID, Agent name and optional
@@ -251,3 +253,29 @@ uv run pytest tests/test_knowledge_contract_live.py -m live -q
 Set `LIGHTRAG_API_KEY` in the environment if required. This test performs no
 upload or resource changes. It requires attributable hits and checks each
 citation against the real returned chunk evidence.
+
+## WeKnora read-only extension
+
+The independently packaged `examples/deerflow-extension-weknora` registers
+`weknora` through the existing registry. Its operator configuration binds exact
+host users (and optionally current executor names) to credential environment
+variables, endpoint, tenant and optional base allowlist. No automatic tenant
+inference, default user binding, resource ACL storage or new core API is added.
+All bound users share the configured credential's upstream visibility; the
+plugin does not impersonate a WeKnora human user.
+
+The adapter uses v0.8.3's KB-bound `hybrid-search` with `query_text` and optional
+`knowledge_ids`, disabling context enrichment. This supports KB-restricted
+read-only API keys; the global search endpoint rejects their document targets
+and unions base/document target lists. Raw recall needs no chat/rerank model.
+The adapter validates all selected resources, checks returned document
+membership/status, and fails the request on access errors without retrying an
+unrestricted search. A missing title remains unattributed; pages and URLs are
+omitted because the mapped response does not establish those locators.
+
+See the extension README for immutable API references, installation, limits and
+opt-in real-provider verification. Offline synthetic responses exercise the
+actual registry, Gateway catalog, ToolNode, shared evidence and replay path.
+Live validation needs an indexed instance and is not implied by offline passes.
+The extension's [validation record](../../examples/deerflow-extension-weknora/VALIDATION.md)
+documents the local v0.8.3 / Ollama bge-m3 run.
