@@ -350,9 +350,12 @@ class RunStore(abc.ABC):
         *,
         owner_worker_id: str,
         lease_expires_at: str,
+        allow_interrupted: bool = False,
     ) -> bool:
         """Renew only an active, owned, unexpired lease to a future deadline.
 
+        The explicit allow_interrupted option also permits an interrupted row
+        while its owning Worker finishes rollback. Never renew success/error.
         Return False when no row satisfies these atomic conditions.
         """
         pass
@@ -363,6 +366,7 @@ class RunStore(abc.ABC):
         *,
         owner_worker_id: str,
         lease_expires_at: str,
+        allow_interrupted: bool = False,
     ) -> LeaseRenewal:
         """Renew ownership and return any durable cancellation request.
 
@@ -370,12 +374,15 @@ class RunStore(abc.ABC):
         cancellation action, so third-party stores remain source-compatible
         without adding a background read. Stores that support multi-process
         cancellation must override this method to renew and observe the
-        request atomically, retaining the live-lease/owner conditions.
+        request atomically, retaining the live-lease/owner conditions. The
+        allow_interrupted option must retain those predicates; unsupported
+        implementations fail closed rather than silently relaxing status guards.
         """
         renewed = await self.update_lease(
             run_id,
             owner_worker_id=owner_worker_id,
             lease_expires_at=lease_expires_at,
+            **({"allow_interrupted": True} if allow_interrupted else {}),
         )
         return LeaseRenewal(renewed=renewed)
 

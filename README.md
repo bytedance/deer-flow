@@ -572,6 +572,12 @@ DeerFlow still uses `Forwarded` / `X-Forwarded-*` headers to recover the browser
 > not delay other runs. If acknowledgment remains unavailable when the last
 > confirmed lease expires, the worker stops conservatively even if its commit
 > actually reached the database. Expired leases cannot be renewed.
+> Interrupt-and-replace admission acknowledges only the old runs actually claimed
+> by its atomic transaction. Rollback keeps renewing its acknowledged interrupted
+> row until restoration and the separate final error commit finish. A failed
+> renewal leaves a local expiry guard armed. Shutdown bounds its wait for orphan
+> recovery, but cancellation-resistant storage may still be using its resources.
+
 >
 > The local two-Gateway harness disables IM providers under both `channels` and `channel_connections` by default. `DEERFLOW_MI_KEEP_CHANNELS=1` preserves them; `channels.leader_lease` stays as configured.
 >

@@ -988,14 +988,21 @@ async def run_agent(
         restore_checkpoint: bool = True,
     ) -> None:
         nonlocal checkpoint_rollback_completed
+        if record.ownership_lost:
+            return
         await run_manager.set_finalizing(run_id, True)
+        if record.ownership_lost:
+            return
         if action == "rollback":
+            record.rollback_finalization_pending = run_manager.heartbeat_enabled and run_manager._store is not None
             await run_manager.set_status(
                 run_id,
                 RunStatus.error,
                 error="Rolled back by user",
-                **terminal_status_kwargs,
+                **({"persist": False} if record.rollback_finalization_pending else terminal_status_kwargs),
             )
+            if record.ownership_lost:
+                return
             if not restore_checkpoint:
                 return
             try:
@@ -1778,7 +1785,7 @@ async def run_agent(
                     logger.warning("Could not remove scheduled goal for run %s", run_id, exc_info=True)
                     await run_manager.set_status(run_id, RunStatus.error, error="Scheduled goal cleanup failed", persist=False)
 
-            if not record.ownership_lost and (event_store is not None or scheduled_goal is not None):
+            if not record.ownership_lost and (event_store is not None or scheduled_goal is not None or record.rollback_finalization_pending):
                 try:
                     # Even after bounded receipt retries are exhausted, persist the
                     # real worker outcome. Leaving a successful row inflight would

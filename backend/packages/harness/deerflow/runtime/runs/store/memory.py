@@ -358,11 +358,12 @@ class MemoryRunStore(RunStore):
         *,
         owner_worker_id: str,
         lease_expires_at: str,
+        allow_interrupted: bool = False,
     ) -> bool:
         run = self._runs.get(run_id)
         if run is None:
             return False
-        if run["status"] not in ("pending", "running"):
+        if run["status"] not in (("pending", "running", "interrupted") if allow_interrupted else ("pending", "running")):
             return False
         if not self._live_owner(run, owner_worker_id):
             return False
@@ -379,6 +380,7 @@ class MemoryRunStore(RunStore):
         *,
         owner_worker_id: str,
         lease_expires_at: str,
+        allow_interrupted: bool = False,
     ) -> LeaseRenewal:
         # Delegate through ``update_lease`` so lightweight subclasses and tests
         # that override the legacy primitive keep the same behavior.
@@ -386,6 +388,7 @@ class MemoryRunStore(RunStore):
             run_id,
             owner_worker_id=owner_worker_id,
             lease_expires_at=lease_expires_at,
+            **({"allow_interrupted": True} if allow_interrupted else {}),
         )
         if not renewed:
             return LeaseRenewal(renewed=False)
@@ -626,4 +629,6 @@ class MemoryRunStore(RunStore):
         new_row["change_seq"] = change_seq
         self._runs[run_id] = new_row
         self._index_run(run_id, thread_id)
-        return new_row, claimed
+        # Commit acknowledgments must not change when a later writer mutates
+        # the in-memory row while the caller is waiting to receive this result.
+        return copy.deepcopy(new_row), copy.deepcopy(claimed)

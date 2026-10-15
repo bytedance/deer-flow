@@ -40,7 +40,13 @@ the existing clock/row lock order. PostgreSQL checks `clock_timestamp()` after
 `SELECT FOR UPDATE`, rather than transaction-start `now()`; SQLite evaluates its
 database clock in the conditional UPDATE after acquiring its writer lock.
 `renew_lease` and legacy `update_lease` also reject expired existing leases and
-already-expired target leases. Success returns only after transaction commit.
+already-expired target leases. `allow_interrupted=True` additionally permits
+interrupted rows for the owning Worker's unfinished rollback; Manager requires
+its own interrupted ACK and a rollback barrier before requesting it. Success/error
+remain ineligible, and owner/live-lease conditions are identical. Atomic admission
+returns immutable outcome snapshots of its committed claimed rows; a subsequent
+interrupted -> error write must not mutate an earlier ACK (including in Memory).
+Success returns only after transaction commit.
 `update_run_completion(require_terminal=True, owner_worker_id=...)` requires the
 exact terminal status/owner atomically and leaves outcome fields unchanged;
 it cannot transition an active row. Metadata may arrive after the terminal lease

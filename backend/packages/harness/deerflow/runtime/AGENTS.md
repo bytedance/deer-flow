@@ -85,7 +85,21 @@ writes. `RunRecord.terminal_commit_pending` keeps `_renew_leases()` renewing tha
 still-active row until its own terminal write is acknowledged or ownership is
 lost. Manager-owned attempts register separate futures before Store I/O and
 publish an immutable outcome proof only on explicit successful commit results;
-matching row fields and legacy `None` results cannot confirm a commit. A rejected
+matching row fields and legacy `None` results cannot confirm a commit. Atomic
+replacement registers attempts before admission I/O and acknowledges only the
+returned claimed rows, using their committed outcome fields. It does not repeat
+the interrupted update. An interrupted ACK is intermediate while a live Worker
+still owes rollback: keep a separate rollback barrier and explicitly renew that
+interrupted row under the same live-owner/lease predicates until the final error
+ACK. Even without an event store, defer rollback's error write until restoration
+has finished. A fenced Worker must not begin a rollback checkpoint restoration,
+including when fencing itself delivered cancellation. Admission compensation never retries an unowned write in heartbeat
+mode. A local deadline guard remains armed after fast renewal errors and after
+heartbeat stop; it rechecks the latest lease/proof and fences without waiting for
+the admission lock. Record removal and final ACK cancel its timer. Bounded orphan
+recovery drain requests cancellation, retains/observes unfinished I/O, and returns
+without joining a cancellation-resistant Store. Neither that return nor heartbeat
+stop authorizes closing still-in-use resources. A rejected
 CAS never falls back to another terminal writer. In heartbeat mode completion
 updates require that proof and an atomic matching terminal status/owner in Store;
 they only enrich metadata. Single-worker completion retains its recovery fallback.

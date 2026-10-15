@@ -693,6 +693,7 @@ class RunRepository(RunStore):
         *,
         owner_worker_id: str,
         lease_expires_at: str,
+        allow_interrupted: bool = False,
     ) -> bool:
         lease_dt = datetime.fromisoformat(lease_expires_at)
         values: dict[str, Any] = {
@@ -704,7 +705,13 @@ class RunRepository(RunStore):
             await self._lock_owned_row(session, run_id)
             result = await session.execute(
                 update(RunRow)
-                .where(RunRow.run_id == run_id, RunRow.owner_worker_id == owner_worker_id, RunRow.status.in_(("pending", "running")), self._live_lease_predicate(session), self._live_lease_predicate(session, literal(lease_dt)))
+                .where(
+                    RunRow.run_id == run_id,
+                    RunRow.owner_worker_id == owner_worker_id,
+                    RunRow.status.in_(("pending", "running", "interrupted") if allow_interrupted else ("pending", "running")),
+                    self._live_lease_predicate(session),
+                    self._live_lease_predicate(session, literal(lease_dt)),
+                )
                 .values(**values)
             )
             await session.commit()
@@ -716,6 +723,7 @@ class RunRepository(RunStore):
         *,
         owner_worker_id: str,
         lease_expires_at: str,
+        allow_interrupted: bool = False,
     ) -> LeaseRenewal:
         """Renew the owner lease and read cancellation intent atomically."""
         lease_dt = datetime.fromisoformat(lease_expires_at)
@@ -726,7 +734,7 @@ class RunRepository(RunStore):
                 .where(
                     RunRow.run_id == run_id,
                     RunRow.owner_worker_id == owner_worker_id,
-                    RunRow.status.in_(("pending", "running")),
+                    RunRow.status.in_(("pending", "running", "interrupted") if allow_interrupted else ("pending", "running")),
                     self._live_lease_predicate(session),
                     self._live_lease_predicate(session, literal(lease_dt)),
                 )
