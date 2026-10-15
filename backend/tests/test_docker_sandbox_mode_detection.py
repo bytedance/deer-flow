@@ -9,6 +9,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+import yaml
 from support.shell import find_script_bash
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -99,6 +100,14 @@ sandbox:
 """.strip()
 
     assert _detect_mode_with_config(config) == "local"
+
+
+def test_dev_compose_keeps_provisioner_behind_opt_in_profile():
+    """A direct `docker compose up` must not start the Kubernetes provisioner."""
+    compose_path = REPO_ROOT / "docker" / "docker-compose-dev.yaml"
+    compose = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
+
+    assert compose["services"]["provisioner"]["profiles"] == ["provisioner"]
 
 
 def _seed_compose_file(tmp_root: Path) -> None:
@@ -456,6 +465,60 @@ start
 
         assert result.returncode == 1, result.stdout + result.stderr
         assert "Docker socket not found" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("sandbox_provider", "expected_profile"),
+    [
+        ("deerflow.sandbox.local:LocalSandboxProvider", False),
+        (
+            "deerflow.community.aio_sandbox:AioSandboxProvider\n  provisioner_url: http://provisioner:8002",
+            True,
+        ),
+    ],
+)
+def test_start_toggles_provisioner_profile(sandbox_provider, expected_profile):
+    """make docker-start enables the profile only for provisioner mode."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_root = Path(tmpdir)
+        _seed_compose_file(tmp_root)
+        _seed_env_examples(tmp_root)
+        (tmp_root / "config.yaml").write_text(
+            f"sandbox:\n  use: {sandbox_provider}\n",
+            encoding="utf-8",
+        )
+        marker = tmp_root / "start_invoke.txt"
+
+        _run_docker_sh(
+            tmp_root,
+            f"""
+COMPOSE_CMD=capture_compose
+capture_compose() {{ printf '%s\\n' "$*" > '{marker}'; }}
+start
+""",
+        )
+
+        recorded = marker.read_text(encoding="utf-8")
+        assert ("--profile provisioner" in recorded) is expected_profile
+
+
+def test_stop_includes_profile_gated_provisioner():
+    """make docker-stop must remove a provisioner started with the profile."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_root = Path(tmpdir)
+        _seed_compose_file(tmp_root)
+        marker = tmp_root / "stop_invoke.txt"
+
+        _run_docker_sh(
+            tmp_root,
+            f"""
+COMPOSE_CMD=capture_compose
+capture_compose() {{ printf '%s\\n' "$*" > '{marker}'; }}
+stop
+""",
+        )
+
+        assert "--profile provisioner down" in marker.read_text(encoding="utf-8")
 
 
 def test_aio_dood_socket_preflight_rejects_missing_custom_socket_on_windows():
