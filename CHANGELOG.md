@@ -1256,7 +1256,7 @@ This release closes that milestone with **621 merged pull requests**.
   complete capture is hard-linked onto the name, so a name taken concurrently
   is skipped rather than replaced and the final name never shows a partial
   file. Like Gateway uploads, the outputs directory needs hard-link support;
-  without it the tool reports an error instead of overwriting.
+  without it the tool reports an error instead of overwriting. ([#6913])
 
 - **llm:** A provider error that arrives inside a streaming response that has
   already returned `200` is now retried like the same error sent as an HTTP
@@ -11767,3 +11767,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6865]: https://github.com/bytedance/deer-flow/pull/6865
 [#6876]: https://github.com/bytedance/deer-flow/pull/6876
 [#6897]: https://github.com/bytedance/deer-flow/pull/6897
+[#6913]: https://github.com/bytedance/deer-flow/pull/6913

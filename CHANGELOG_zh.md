@@ -1008,6 +1008,7 @@
   `report-2.png`……），工具结果会报告实际使用的名称。完整截图通过硬链接发布到目标名称，
   因此并发占用的名称会被跳过而不是被替换，最终名称也不会暴露写了一半的文件。与 Gateway
   上传相同，outputs 目录需要支持硬链接；不支持时工具会报错，而不会覆盖已有文件。
+  ([#6913])
 
 - **llm：** 流式响应已返回 `200` 之后才在流内报告的 provider 错误，现在会像以 HTTP
   状态码返回的同一错误一样重试。为了用 SSE keepalive 维持慢请求而提前返回 `200` 的
@@ -9382,3 +9383,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6865]: https://github.com/bytedance/deer-flow/pull/6865
 [#6876]: https://github.com/bytedance/deer-flow/pull/6876
 [#6897]: https://github.com/bytedance/deer-flow/pull/6897
+[#6913]: https://github.com/bytedance/deer-flow/pull/6913
