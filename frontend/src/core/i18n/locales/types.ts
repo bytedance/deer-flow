@@ -27,6 +27,7 @@ export interface Translations {
     catalogHint: string;
     installationGuide: string;
     catalog: Record<
+      | "workflows"
       | "agentTeams"
       | "bookmarks"
       | "context"
@@ -233,6 +234,8 @@ export interface Translations {
   };
 
   artifactPreview: {
+    loadingPreview: string;
+    resourcesUnavailable: string;
     limited: (previewSize: string, totalSize?: string) => string;
     loadFullFile: string;
     loadingFullFile: string;
@@ -840,6 +843,10 @@ export interface Translations {
       savedUnavailable: string;
       clearSaved: string;
       bind: string;
+      bindWecom: string;
+      bindQq: string;
+      name: string;
+      nameHint: string;
       refresh: string;
       bindInstructions: string;
       generating: string;
@@ -1944,6 +1951,14 @@ export interface Translations {
           qq: string;
         };
         toggleLabel: (provider: string) => string;
+        eventsTitle: string;
+        eventsDescription: string;
+        events: {
+          run_completed: string;
+          run_failed: string;
+          human_input_requested: string;
+        };
+        eventToggleLabel: (event: string) => string;
         loading: string;
         saving: string;
         loadFailed: string;

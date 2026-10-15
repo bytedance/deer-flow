@@ -442,7 +442,33 @@ for (const locale of ["en-US", "zh-CN"]) {
         exact: true,
       }),
     ).toBeVisible();
-    await expect(page.getByRole("article")).toHaveCount(7);
+    await expect(page.getByRole("article")).toHaveCount(8);
+    const workflow = page.getByRole("article").filter({
+      hasText: zh ? "脚本工作流" : "Script workflows",
+    });
+    await expect(workflow).toHaveCount(1);
+    await expect(workflow).toContainText(
+      zh
+        ? "不支持恢复、人工审批或硬金额预算"
+        : "no resume, human approval or hard monetary budget",
+    );
+    await workflow
+      .getByRole("button", {
+        name: zh ? "查看 脚本工作流" : "View Script workflows",
+        exact: true,
+      })
+      .click();
+    await expect(
+      page.getByRole("link", {
+        name: zh ? "查看安装说明" : "Installation guide",
+      }),
+    ).toHaveAttribute("href", /deerflow-extension-workflows#readme$/);
+    await page
+      .getByRole("button", {
+        name: zh ? "全部扩展" : "All extensions",
+        exact: true,
+      })
+      .click();
     await expect(
       page.getByRole("button", {
         name: zh ? "查看 会话书签" : "View Bookmarks",
@@ -576,8 +602,11 @@ test("catalog remains discoverable when runtime discovery fails", async ({
   await expect(
     page.getByRole("alert").filter({ hasText: "Extensions unavailable." }),
   ).toBeVisible();
-  await expect(page.getByRole("article")).toHaveCount(7);
+  await expect(page.getByRole("article")).toHaveCount(8);
   await expect(
     page.getByRole("article").filter({ hasText: "Catalog extension" }),
-  ).toHaveCount(7);
+  ).toHaveCount(8);
+  await expect(
+    page.getByRole("article").filter({ hasText: "Script workflows" }),
+  ).toHaveCount(1);
 });

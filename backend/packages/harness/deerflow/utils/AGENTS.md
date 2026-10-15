@@ -133,3 +133,13 @@ non-ASCII whitespace remain unchanged.
 Do not normalize arbitrary Unicode digits into device numbers: names such as
 `COM⁴.txt` and `COM¹notes.txt` are ordinary portable names. Read/removal callers
 retain their existing portability exemptions.
+
+### Advisory File Lock Retries
+
+`file_lock.retry_until_locked` owns contention-only acquisition retries for the
+Windows Lark and extension-manager locks and bounded skill-projection reads.
+Retry only EACCES/EAGAIN/EDEADLK; other errors propagate without sleeping.
+Keep per-caller policies: Lark has a 15-minute Windows file-lock deadline,
+extension management waits indefinitely, and skill export retains its existing
+deadline, 0.02-second cadence and cancellation check. Clocks and sleeps are
+injectable; tests must not patch the shared stdlib time module.

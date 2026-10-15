@@ -40,6 +40,11 @@ export const zhCN: Translations = {
       "此条目来自仓库扩展目录；实际安装和启用状态请由部署管理员确认。",
     installationGuide: "查看安装说明",
     catalog: {
+      workflows: {
+        title: "脚本工作流",
+        description:
+          "通过可检查的脚本编排 Agent，支持受限并发、进度与取消。第一阶段不支持恢复、人工审批或硬金额预算。",
+      },
       agentTeams: {
         title: "Agent 团队",
         description: "让完整 Custom Agent 通过 @成员、共享记录与任务交接协作。",
@@ -279,6 +284,9 @@ export const zhCN: Translations = {
   },
 
   artifactPreview: {
+    loadingPreview: "正在准备预览...",
+    resourcesUnavailable:
+      "部分预览资源无法加载。可查看源代码或下载文件以获取完整内容。",
     limited: (previewSize, totalSize) =>
       totalSize
         ? `当前显示 ${totalSize} 中的前 ${previewSize}。`
@@ -965,6 +973,11 @@ export const zhCN: Translations = {
       savedUnavailable: "已有群通知配置，当前服务未启用群通知。",
       clearSaved: "清除群通知",
       bind: "绑定飞书群",
+      bindWecom: "绑定企业微信群",
+      bindQq: "绑定 QQ 群",
+      name: "群名称",
+      nameHint:
+        "为这个群取一个容易识别的名称，便于选择通知目标。重新绑定可修改群名称。",
       refresh: "刷新群列表",
       bindInstructions:
         "先把机器人加入群聊，再在群里 @机器人 并发送这条命令。完成绑定后刷新群列表。",
@@ -977,16 +990,16 @@ export const zhCN: Translations = {
       copyFailed: "复制失败，请选中上方命令手动复制。",
       newCode: "生成新绑定码",
       close: "关闭绑定说明",
-      label: "额外通知到飞书群（可选）",
-      detailLabel: "额外通知到飞书群",
+      label: "额外通知到群聊（可选）",
+      detailLabel: "额外通知到群聊",
       none: "仅通知本人",
       personalHint: "你现有的个人通知保持不变，所选群也会收到任务更新。",
-      emptyHint: "先在下方绑定飞书群，再刷新群列表。",
+      emptyHint: "先在下方绑定群聊，再刷新群列表。",
       loading: "正在加载群列表…",
       unavailable: "已选群暂不可用",
       unavailableHint: "已选群当前不可用。可以保留、移除或选择其他群。",
       unnamed: "群名称不可用",
-      unnamedHint: "请检查应用的群信息读取权限，再重新绑定该群以获取群名称。",
+      unnamedHint: "请重新绑定该群并设置容易识别的名称，再选择通知目标。",
       loadFailed:
         "无法加载群列表，已保留当前选择。仍可保存其他修改或移除所选群。",
     },
@@ -2258,6 +2271,15 @@ export const zhCN: Translations = {
           qq: "QQ",
         },
         toggleLabel: (provider: string) => `${provider}定时任务通知`,
+        eventsTitle: "普通任务与目标提醒",
+        eventsDescription:
+          "可选：通过上方已开启的应用接收普通网页或后台任务、目标的运行提醒（默认关闭）。",
+        events: {
+          run_completed: "任务或目标已完成",
+          run_failed: "任务或目标运行失败",
+          human_input_requested: "需要你参与确认",
+        },
+        eventToggleLabel: (event: string) => `${event}通知`,
         loading: "正在加载通知偏好…",
         saving: "正在保存…",
         loadFailed: "无法加载通知偏好，请重试。",
