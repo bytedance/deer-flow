@@ -78,14 +78,17 @@ def test_host_output_capture_rejects_unsafe_files(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("admit", ["create", "create_or_reject"])
-async def test_client_cannot_supply_host_evidence(admit):
-    from deerflow.runtime import RunManager
-    from deerflow.runtime.assembly_evidence import EVIDENCE_KEY
+@pytest.mark.parametrize("evidence_key", [None, "renamed_host_evidence"])
+async def test_client_cannot_supply_host_evidence(admit, evidence_key, monkeypatch):
+    from deerflow.runtime import RunManager, assembly_evidence
 
+    if evidence_key is not None:
+        monkeypatch.setattr(assembly_evidence, "EVIDENCE_KEY", evidence_key)
+    key = assembly_evidence.EVIDENCE_KEY
     manager = RunManager()
     try:
-        record = await getattr(manager, admit)("thread", metadata={EVIDENCE_KEY: {"source": "forged"}, "safe": "value"})
-        assert EVIDENCE_KEY not in record.metadata
+        record = await getattr(manager, admit)("thread", metadata={key: {"source": "forged"}, "safe": "value"})
+        assert key not in record.metadata
         assert record.metadata["safe"] == "value"
     finally:
         await manager.shutdown()

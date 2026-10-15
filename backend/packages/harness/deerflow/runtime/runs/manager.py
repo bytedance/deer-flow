@@ -676,6 +676,8 @@ class RunManager:
         raw ``IntegrityError`` instead of a ``ConflictError``. Production
         callers should use :meth:`create_or_reject`.
         """
+        from deerflow.runtime.assembly_evidence import EVIDENCE_KEY
+
         run_id = str(uuid.uuid4())
         now = _now_iso()
         user_id = _resolve_record_user_id(user_id)
@@ -687,7 +689,7 @@ class RunManager:
             status=RunStatus.pending,
             on_disconnect=on_disconnect,
             multitask_strategy=multitask_strategy,
-            metadata={key: value for key, value in (metadata or {}).items() if key != "deerflow_assembly_evidence"},
+            metadata={key: value for key, value in (metadata or {}).items() if key != EVIDENCE_KEY},
             kwargs=kwargs or {},
             user_id=user_id,
             created_at=now,
@@ -1702,6 +1704,8 @@ class RunManager:
         partial unique index on ``(thread_id) WHERE status IN
         ('pending','running')``.
         """
+        from deerflow.runtime.assembly_evidence import EVIDENCE_KEY
+
         run_id = str(uuid.uuid4())
         now = _now_iso()
         # Resolve before the idempotency checks below compare it with stored rows.
@@ -1723,7 +1727,7 @@ class RunManager:
             on_disconnect=on_disconnect,
             operation_kind=operation_kind,
             multitask_strategy=multitask_strategy,
-            metadata={key: value for key, value in (metadata or {}).items() if key != "deerflow_assembly_evidence"},
+            metadata={key: value for key, value in (metadata or {}).items() if key != EVIDENCE_KEY},
             kwargs=kwargs or {},
             user_id=user_id,
             created_at=now,
