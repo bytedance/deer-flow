@@ -17,12 +17,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import logging
+import os
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
+from uuid import uuid4
 
 from langchain.tools import InjectedToolCallId, tool
 from langchain_core.messages import ToolMessage
@@ -48,6 +52,7 @@ _OUTPUTS_VIRTUAL_PREFIX = f"{VIRTUAL_PATH_PREFIX}/outputs"
 _BROWSER_FRAMES_DIRNAME = BROWSER_FRAMES_DIRNAME
 _FRAMES_VIRTUAL_PREFIX = f"{_OUTPUTS_VIRTUAL_PREFIX}/{_BROWSER_FRAMES_DIRNAME}"
 _SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+_MAX_FILENAME_COLLISION_PROBES = 1000
 
 
 @dataclass(frozen=True)
@@ -440,6 +445,45 @@ def _write_screenshot(outputs_path: Path, name: str, content: bytes) -> str:
     return name
 
 
+def _screenshot_name_candidates(name: str) -> Iterator[str]:
+    yield name
+    stem, suffix = Path(name).stem, Path(name).suffix
+    for index in range(1, _MAX_FILENAME_COLLISION_PROBES + 1):
+        yield f"{stem}-{index}{suffix}"
+    yield f"{stem}-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S-%f')}{suffix}"
+
+
+def _publish_screenshot_no_overwrite(outputs_path: Path, name: str, content: bytes) -> str:
+    """Publish *content* under *name*, or its first free ``-1``, ``-2``, ... variant.
+
+    The outputs directory also holds the user's own deliverables, so a
+    screenshot never replaces an existing file. The complete capture is staged
+    under a hidden sibling, then hard-linked onto each candidate name: the
+    ``os.link`` is the whole no-overwrite guard, failing with
+    :class:`FileExistsError` when the name exists as anything (a file, a
+    symlink, a concurrent capture), so no name is checked before it is claimed.
+    The final name never shows a partial capture. Staging shares the outputs
+    directory, so the link is same-filesystem; like Gateway uploads, outputs
+    need hard-link support and other link failures propagate.
+    """
+    outputs_path.mkdir(parents=True, exist_ok=True)
+    staged = outputs_path / f".{name}.{uuid4().hex}.tmp"
+    _publish_bytes_atomically(staged, content)
+    try:
+        for candidate in _screenshot_name_candidates(name):
+            try:
+                os.link(staged, outputs_path / candidate)
+            except FileExistsError:
+                continue
+            return candidate
+        raise FileExistsError(errno.EEXIST, "No free screenshot name", str(outputs_path / name))
+    finally:
+        try:
+            staged.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Failed to remove staged browser screenshot: %s", staged, exc_info=True)
+
+
 @tool("browser_screenshot", parse_docstring=True)
 async def browser_screenshot_tool(
     runtime: Runtime,
@@ -454,7 +498,7 @@ async def browser_screenshot_tool(
     stateless page load.
 
     Args:
-        filename: Optional output filename (extension is forced to .png).
+        filename: Optional output filename (extension is forced to .png). An existing file is never replaced; the screenshot takes the next free name such as report-1.png.
         full_page: Capture the full scrollable page instead of just the viewport.
     """
     try:
@@ -464,7 +508,7 @@ async def browser_screenshot_tool(
         with _resolve_session(runtime, "browser_screenshot") as session:
             content = await session.screenshot_bytes(full_page=full_page)
             name = _safe_screenshot_name(filename)
-            final_name = await asyncio.to_thread(_write_screenshot, outputs_path, name, content)
+            final_name = await asyncio.to_thread(_publish_screenshot_no_overwrite, outputs_path, name, content)
         virtual_path = f"{_OUTPUTS_VIRTUAL_PREFIX}/{final_name}"
         return Command(
             update={
