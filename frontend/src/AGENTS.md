@@ -244,8 +244,7 @@ missing labels. Catalog needs saved/draft access and exact-Agent capabilities.
 `catalog` + `dataset_filter` enable bases; `documents` + `document_filter` files.
 Pending/failed capabilities block queries and unsupported Apply; keep old file
 filters. Chats seed defaults; local overrides survive new-thread replacement and
-reset per conversation. Gateway supplies selector-less defaults and enforces
-scope independently of UI.
+reset per conversation. Gateway supplies defaults and enforces scope.
 
 MCP hooks and the editor default to personal scope. Mutation-option builders require an explicit scope. MCP control accessible names include the localized ownership section, so same-named shared and personal connections remain distinct without region context. Query keys include scope and authenticated user ID; remount each editor when that ID changes. Platform provided uses the deployment editor only for administrators outside static mode, restoring add, edit, toggle and delete through the existing admin-only MCP API. Ordinary users see shared entries read-only. My plugins contains personal configuration templates, Lark account authorization and the personal MCP editor; a deployment installation must not mark a personal template configured.
 
