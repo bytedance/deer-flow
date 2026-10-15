@@ -1,4 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type QueryClient,
+} from "@tanstack/react-query";
 
 import {
   clearMemory,
@@ -14,6 +19,20 @@ import type {
   UserMemory,
 } from "./types";
 
+/**
+ * Install a confirmed memory write in the shared `["memory"]` cache.
+ *
+ * Every memory operation shares one query key, so a `loadMemory` that started
+ * before the write can still land afterwards and put the old document back:
+ * deleted facts reappear and imported facts disappear. Cancelling the in-flight
+ * query first is what makes the mutation response the last writer; reads
+ * started after this point still refresh normally.
+ */
+async function commitMemory(queryClient: QueryClient, memory: UserMemory) {
+  await queryClient.cancelQueries({ queryKey: ["memory"] });
+  queryClient.setQueryData<UserMemory>(["memory"], memory);
+}
+
 export function useMemory() {
   const { data, isLoading, error } = useQuery({
     queryKey: ["memory"],
@@ -27,8 +46,8 @@ export function useClearMemory() {
 
   return useMutation({
     mutationFn: () => clearMemory(),
-    onSuccess: (memory) => {
-      queryClient.setQueryData<UserMemory>(["memory"], memory);
+    async onSuccess(memory) {
+      await commitMemory(queryClient, memory);
     },
   });
 }
@@ -38,8 +57,8 @@ export function useDeleteMemoryFact() {
 
   return useMutation({
     mutationFn: (factId: string) => deleteMemoryFact(factId),
-    onSuccess: (memory) => {
-      queryClient.setQueryData<UserMemory>(["memory"], memory);
+    async onSuccess(memory) {
+      await commitMemory(queryClient, memory);
     },
   });
 }
@@ -49,8 +68,8 @@ export function useImportMemory() {
 
   return useMutation({
     mutationFn: (memory: UserMemory) => importMemory(memory),
-    onSuccess: (memory) => {
-      queryClient.setQueryData<UserMemory>(["memory"], memory);
+    async onSuccess(memory) {
+      await commitMemory(queryClient, memory);
     },
   });
 }
@@ -60,8 +79,8 @@ export function useCreateMemoryFact() {
 
   return useMutation({
     mutationFn: (input: MemoryFactInput) => createMemoryFact(input),
-    onSuccess: (memory) => {
-      queryClient.setQueryData<UserMemory>(["memory"], memory);
+    async onSuccess(memory) {
+      await commitMemory(queryClient, memory);
     },
   });
 }
@@ -77,8 +96,8 @@ export function useUpdateMemoryFact() {
       factId: string;
       input: MemoryFactPatchInput;
     }) => updateMemoryFact(factId, input),
-    onSuccess: (memory) => {
-      queryClient.setQueryData<UserMemory>(["memory"], memory);
+    async onSuccess(memory) {
+      await commitMemory(queryClient, memory);
     },
   });
 }
