@@ -1377,6 +1377,8 @@ numbers use the selected interface language. New providers use the shared
 envelope; existing RAGFlow citation histories remain supported.
 Expand a completed subtask card to inspect its report's forwarded knowledge
 sources, including when reopening a saved conversation.
+Shortened mixed-provider task reports remove dangling citation fragments
+without flattening retained shared-source links.
 Existing web citations and the text-only Python `knowledge_search(query)` APIs
 remain supported. No knowledge management service or page is required.
 See [the knowledge contract guide](backend/docs/KNOWLEDGE.md).
