@@ -5951,6 +5951,14 @@ This release closes that milestone with **621 merged pull requests**.
   80 such requests failed. The same race in IM conversation binding, such as
   a first message arriving together with `/new`, no longer fails the message.
   The losing write now updates the row the other one created. ([#6852])
+- **mcp:** Cancelling a background MCP task on SQLite now reaches the remote
+  server on the next poll cycle instead of up to `mcp_tasks.lease_seconds`
+  (120 s by default) later. A cancel that committed while the poller was
+  claiming the task had its cleared poll lease written back, because
+  `FOR UPDATE` is a no-op on SQLite. The cancellation worker then waited for
+  that lease to expire, and the task was polled once more for a result that
+  was thrown away. Each claim now re-checks that the task is still claimable
+  when it writes the lease. Postgres was not affected. ([#6859])
 - **persistence:** Startup schema upgrades no longer log a false
   `safe_add_column ... drifts from the model definition` warning for columns
   that already match the model. The check compared the model's generic type
@@ -11744,6 +11752,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6843]: https://github.com/bytedance/deer-flow/pull/6843
 [#6844]: https://github.com/bytedance/deer-flow/pull/6844
 [#6852]: https://github.com/bytedance/deer-flow/pull/6852
+[#6859]: https://github.com/bytedance/deer-flow/pull/6859
 [#6865]: https://github.com/bytedance/deer-flow/pull/6865
 [#6876]: https://github.com/bytedance/deer-flow/pull/6876
 [#6897]: https://github.com/bytedance/deer-flow/pull/6897

@@ -4516,6 +4516,11 @@
   `(thread, run, user)` 唯一约束；在 Postgres 上，80 个这样的请求中有 26 个失败。
   IM 会话绑定中的同类竞争（例如首条消息与 `/new` 同时到达）也不再导致消息处理失败。
   落后的写入现在会更新另一方创建的记录。([#6852])
+- **MCP：** 在 SQLite 上取消后台 MCP 任务时，取消请求现在会在下一个轮询周期发往远程服务器，
+  而不是最多延迟 `mcp_tasks.lease_seconds`（默认 120 秒）。由于 SQLite 上 `FOR UPDATE`
+  不起作用，在轮询器认领任务期间提交的取消请求所清除的轮询租约会被写回；取消工作器
+  随后要等该租约过期，任务还会被多轮询一次，而结果会被丢弃。现在每次认领在写入租约时
+  都会重新确认任务仍可认领。Postgres 不受影响。([#6859])
 - **持久化：** 启动时的 schema 升级不再为已与模型一致的列记录虚假的
   `safe_add_column ... drifts from the model definition` 警告。该检查拿模型的通用类型名
   和默认值写法（`STRING`、`BIGINTEGER`、`DefaultClause('0')`）去比较数据库自己的写法
@@ -9366,6 +9371,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6843]: https://github.com/bytedance/deer-flow/pull/6843
 [#6844]: https://github.com/bytedance/deer-flow/pull/6844
 [#6852]: https://github.com/bytedance/deer-flow/pull/6852
+[#6859]: https://github.com/bytedance/deer-flow/pull/6859
 [#6865]: https://github.com/bytedance/deer-flow/pull/6865
 [#6876]: https://github.com/bytedance/deer-flow/pull/6876
 [#6897]: https://github.com/bytedance/deer-flow/pull/6897
