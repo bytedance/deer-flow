@@ -17,6 +17,8 @@ import { writeTextToClipboard } from "@/core/clipboard";
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
+import { KnowledgeEvidence } from "./knowledge-citation";
+
 export function CitationSourcesPanel({
   className,
   sources,
@@ -44,33 +46,47 @@ export function CitationSourcesPanel({
         </span>
       </summary>
       <ol className="border-border/60 divide-border/60 max-h-80 divide-y overflow-y-auto overscroll-contain border-t">
-        {sources.map((source, index) => (
-          <li key={source.id} className="flex min-w-0 items-center gap-2 p-2">
-            <span className="text-muted-foreground w-5 shrink-0 text-right tabular-nums">
-              {index + 1}
-            </span>
-            <a
-              href={source.url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="hover:bg-muted flex min-w-0 flex-1 items-center gap-2 rounded px-2 py-1 transition-colors"
-            >
-              <span className="min-w-0 flex-1">
-                <span className="text-foreground block truncate font-medium">
-                  {source.title}
-                </span>
-                <span className="text-muted-foreground block truncate">
-                  {source.domain}
-                </span>
+        {sources.map((source, index) =>
+          source.knowledge ? (
+            <li key={source.id} id={source.id.slice(1)} className="p-3">
+              <details>
+                <summary className="cursor-pointer">
+                  {index + 1}. {source.title} · {source.domain} ·{" "}
+                  {t.citations.citeCount(source.count)}
+                </summary>
+                <div className="mt-2">
+                  <KnowledgeEvidence source={source.knowledge} />
+                </div>
+              </details>
+            </li>
+          ) : (
+            <li key={source.id} className="flex min-w-0 items-center gap-2 p-2">
+              <span className="text-muted-foreground w-5 shrink-0 text-right tabular-nums">
+                {index + 1}
               </span>
-              <span className="text-muted-foreground shrink-0">
-                {t.citations.citeCount(source.count)}
-              </span>
-              <ExternalLinkIcon className="text-muted-foreground size-3.5 shrink-0" />
-            </a>
-            <CitationSourceCopyButton source={source} />
-          </li>
-        ))}
+              <a
+                href={source.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="hover:bg-muted flex min-w-0 flex-1 items-center gap-2 rounded px-2 py-1 transition-colors"
+              >
+                <span className="min-w-0 flex-1">
+                  <span className="text-foreground block truncate font-medium">
+                    {source.title}
+                  </span>
+                  <span className="text-muted-foreground block truncate">
+                    {source.domain}
+                  </span>
+                </span>
+                <span className="text-muted-foreground shrink-0">
+                  {t.citations.citeCount(source.count)}
+                </span>
+                <ExternalLinkIcon className="text-muted-foreground size-3.5 shrink-0" />
+              </a>
+              <CitationSourceCopyButton source={source} />
+            </li>
+          ),
+        )}
       </ol>
     </details>
   );

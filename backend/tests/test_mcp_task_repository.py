@@ -172,6 +172,74 @@ async def test_interleaved_reclaim_fences_inflight_poll_and_cancel_mutations(tmp
 
 
 @pytest.mark.asyncio
+async def test_cancel_request_between_poll_claim_select_and_write_is_not_re_leased(tmp_path, monkeypatch):
+    """A cancel that commits inside a poll claim keeps its cleared lease, so the cancel worker claims at once."""
+    repo = await _make_repo(tmp_path)
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    await _create_working_task(repo, task_id="task-cancelled", now=now)
+    await _create_working_task(repo, task_id="task-polled", now=now)
+
+    async with _pause_claim_mutation(monkeypatch, repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=120, limit=2)) as (pending, resume):
+        requested = await repo.request_cancel("task-cancelled", user_id="user-1", thread_id="thread-1", thread_incarnation=None, requested_at=now)
+        assert requested is not None
+        assert requested["lease_owner"] is None
+        resume.set()
+        claimed = await asyncio.wait_for(pending, timeout=5)
+
+    # The other candidate is still claimed; only the cancelled row is skipped.
+    assert [(row["id"], row["lease_owner"], row["poll_attempt_count"]) for row in claimed] == [("task-polled", "poller", 1)]
+    assert claimed[0]["lease_token"]
+    cancelled = await repo.get("task-cancelled", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+    assert cancelled is not None
+    assert cancelled["lease_owner"] is None
+    assert cancelled["poll_attempt_count"] == 0
+    cancel_claims = await repo.claim_cancel_requests(now=now + timedelta(seconds=1), lease_owner="canceller", lease_seconds=60, limit=1)
+    assert [row["id"] for row in cancel_claims] == ["task-cancelled"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interleaving", ["claimed_by_peer", "completed_by_previous_lease"])
+async def test_poll_claim_skips_a_row_that_stops_being_claimable_after_its_select(tmp_path, monkeypatch, interleaving):
+    """The claim write re-checks the lease, status and schedule its SELECT saw, not just the row id."""
+    repo = await _make_repo(tmp_path)
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    task_id = "claim-interleaved"
+    await _create_working_task(repo, task_id=task_id, now=now)
+    claim_at = now
+    if interleaving == "completed_by_previous_lease":
+        previous = await repo.claim_due_tasks(now=now, lease_owner="previous", lease_seconds=60, limit=1)
+        # The previous lease has expired for the new claim, but its holder
+        # still finishes the poll it started inside the lease.
+        claim_at = now + timedelta(seconds=61)
+
+    async with _pause_claim_mutation(monkeypatch, repo.claim_due_tasks(now=claim_at, lease_owner="poller", lease_seconds=120, limit=1)) as (pending, resume):
+        if interleaving == "claimed_by_peer":
+            peer = await repo.claim_due_tasks(now=claim_at, lease_owner="peer", lease_seconds=120, limit=1)
+            assert [row["id"] for row in peer] == [task_id]
+        else:
+            assert await repo.apply_snapshot(
+                task_id,
+                lease_owner="previous",
+                lease_token=previous[0]["lease_token"],
+                status="completed",
+                result={"done": True},
+                result_preview=None,
+                result_truncated=False,
+                result_artifact=None,
+                error=None,
+                input_required=None,
+                next_poll_at=None,
+                polled_at=now + timedelta(seconds=30),
+            )
+        before = await repo.get(task_id, user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+        resume.set()
+        claimed = await asyncio.wait_for(pending, timeout=5)
+
+    assert claimed == []
+    assert await repo.get(task_id, user_id="user-1", thread_id="thread-1", thread_incarnation=None) == before
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("delivered", [True, False], ids=["success", "failure"])
 async def test_interleaved_reclaim_fences_inflight_notification_completion(tmp_path, monkeypatch, delivered):
     repo = await _make_repo(tmp_path)
@@ -1269,7 +1337,10 @@ async def test_recovered_launching_at_retry_budget_reconciles_successful_run(tmp
         now=now,
     )
 
-    reconcile_at = now + timedelta(seconds=1)
+    # Dispatch stores the completion time, which can be later than the scan time.
+    launched = await repo.get("task-launching-success", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+    assert launched is not None
+    reconcile_at = datetime.fromisoformat(launched["next_notification_at"])
     dispatched = await repo.claim_notification_work(
         now=reconcile_at,
         lease_owner="notifier-b",

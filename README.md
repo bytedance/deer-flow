@@ -180,6 +180,10 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
 
    Sofya web search and fetch contain malformed HTTP-success payloads the same way: a non-object payload, a `results` container that is not a list, or a non-empty list with no object entries returns the provider's format error, while non-object entries in an otherwise valid list are skipped in order. Missing, null, or empty results keep the existing "No results found" response.
 
+   Tencent Cloud WSA web search contains malformed HTTP-success payloads the same way: a `Pages` container that is not a list, or a non-empty container holding no usable page, returns the provider's format error, while malformed page entries in an otherwise valid container are skipped so the valid rows survive. Missing, null, or empty `Pages` keep the existing "No results found" response.
+
+   Serply web search contains malformed HTTP-success payloads the same way in every vertical: a `results`/`entries`/`articles` container that is not a list, or a non-empty list with no object entries, returns the provider's format error, while non-object entries in an otherwise valid list are skipped in order. Missing, null, or empty containers keep the existing "No results found" response.
+
    Jina, Browserless, and InfoQuest web fetches resolve relative links and image sources using the requested page URL (or a usable HTML base URL), so returned Markdown includes complete destinations. Link resolution preserves the surrounding HTML source, including malformed-page formatting.
 
    Self-hosted Browserless, Crawl4AI, Firecrawl, and fastCRW fetch backends require outbound isolation from private, loopback, link-local, and cloud-metadata networks before setting `network_isolation_confirmed: true` on each tool. DeerFlow rejects private or unverifiable backends by default because those services handle redirects, DNS resolution, and subresources themselves. `allow_private_addresses` permits intentional internal target URLs and does not bypass the backend check. See [delegated fetch deployment](backend/docs/CONFIGURATION.md#delegated-fetch-backend-isolation); `make doctor` reports backend configurations that would be refused.
@@ -343,6 +347,8 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
 
    To route OpenAI models through `/v1/responses`, keep using `langchain_openai:ChatOpenAI` and set `use_responses_api: true` with `output_version: responses/v1`.
 
+   When thinking is disabled on a legacy profile, blank `extra_body`, `thinking`, and nested `extra_body.thinking` keys in a `when_thinking_enabled` template are treated as absent during dialect inference. When thinking is enabled, template values are forwarded as configured.
+
    Models whose provider contract differs from DeerFlow's generic thinking/effort assumptions can declare a per-model mapping-valued `reasoning:` block (thinking `unsupported`/`optional`/`required`, the accepted effort values with aliases and a default, the payload dialect, and the reasoning-history requirement). The setup wizard's Z.AI GLM-5.3-Flash profile uses it: thinking stays on for every foreground and background call, and the effort selector offers the model's own `low`/`high`/`max` levels. Ollama's existing boolean `reasoning: true` remains a native provider setting and is forwarded to ChatOllama. When migrating a profile to a custom effort `path`, remove any old `reasoning_effort` setting from the profile and thinking templates; configuration validation rejects the leftover key. The chat UI drops a remembered provider-specific effort when switching to a legacy model that does not advertise it. Profiles without the block keep their existing provider behavior. See `config.example.yaml` for the shape and the equivalent manual configuration.
 
    For vLLM 0.19.0, use `deerflow.models.vllm_provider:VllmChatModel`. For Qwen-style reasoning models, DeerFlow toggles reasoning with `extra_body.chat_template_kwargs.enable_thinking` and preserves vLLM's non-standard `reasoning` field across multi-turn tool-call conversations. Legacy `thinking` configs are normalized automatically for backward compatibility, without modifying model defaults or caller-owned `extra_body` dictionaries; a reused dictionary can change the legacy switch between requests. If the endpoint reports a cumulative usage snapshot on every streaming chunk, set `cumulative_stream_usage: true` so DeerFlow converts those snapshots into per-chunk deltas; the option is disabled by default and leaves usage unchanged when a stable completion id is unavailable. Reasoning models may also require the server to be started with `--reasoning-parser ...`. If your local vLLM deployment accepts any non-empty API key, you can still set `VLLM_API_KEY` to a placeholder value.
@@ -492,7 +498,9 @@ caches materialized checkpoint histories: `type` is `memory` (default) or
 Gateway/async-only; the sync TUI/embedded path supports `memory` only. The
 cache is performance-only — results are identical with it disabled — so it is
 never frozen and workers sharing one checkpoint database may safely run
-different cache settings.
+different cache settings. Redis thread cleanup treats a configured `key_prefix`
+as literal text, including glob metacharacters, so deletion stays within that
+namespace and thread.
 
 > [!TIP]
 > On Linux, if Docker-based commands fail with `permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock`, add your user to the `docker` group and re-login before retrying. See [CONTRIBUTING.md](CONTRIBUTING.md#linux-docker-daemon-permission-denied) for the full fix.
@@ -543,12 +551,14 @@ When fine-grained authorization is enabled, Live Browser connections require `th
 
 Browser login uses `HttpOnly` session cookies. The login page offers a "keep me signed in" option that extends the browser session when the request is HTTPS (including trusted `X-Forwarded-Proto: https`) or localhost HTTP. The localhost exception uses the direct request `Host` and ignores forwarded host headers. Public HTTP deployments, including many temporary sandbox URLs, fall back to session cookies by default. DeerFlow never stores the password in browser storage; the UI may remember only the email address.
 
+OIDC/SSO authorization endpoints may include provider query parameters such as `?prompt=login`. DeerFlow preserves those parameters when adding the login request, including for configured `authorization_endpoint` overrides.
+
 Administrators can suspend and restore accounts from **Settings → Users** (admin-only; the section is hidden for ordinary users). The page lists each account's email, role, and status and exposes the same enable/disable operation as `PATCH /api/v1/admin/users/{id}`; the last remaining active admin cannot be disabled, and the Gateway's rejection detail is shown verbatim. A disabled account is rejected by every authentication surface, and its live sessions end on the next request with a login page that states the account has been disabled. Password login for a disabled account deliberately still answers "incorrect email or password" so the state is not disclosed to whoever holds the credentials.
 
 DeerFlow still uses `Forwarded` / `X-Forwarded-*` headers to recover the browser-facing scheme and origin behind a proxy. The bundled nginx sets `X-Forwarded-Proto`, but preserves an upstream HTTPS value and does not overwrite every forwarded header. Configure the outer trusted proxy to replace or strip client-supplied forwarding headers before traffic reaches DeerFlow.
 
 > [!IMPORTANT]
-> The Gateway still owns active run tasks in process, so production defaults to a single Gateway worker (`GATEWAY_WORKERS=1`). Multi-worker deployments require Postgres, the Redis stream bridge (`stream_bridge.type: redis`), `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`; process-local memory/JSONL event stores cannot enforce singleton delivery receipts across workers. Kubernetes replicas run one worker per Pod, which the worker count cannot see: declare them with `deployment.multi_instance: true` (or `DEER_FLOW_MULTI_INSTANCE=1`, which deploy tooling such as a Helm chart can set from its replica count) so the startup gate enforces the same prerequisites instead of staying inert. Declared instances that store credentials (`channel_connections`) must also share one at-rest `DEER_FLOW_CREDENTIALS_KEY` (the Helm chart and `make up` generate it; back it up, see [backend/docs/CONFIGURATION.md](backend/docs/CONFIGURATION.md#credentials-encryption-key-deer_flow_credentials_key)). The bridge shares SSE delivery and bounded `Last-Event-ID` replay across workers. When a valid reconnect cursor has been trimmed, or a subscriber that already established an empty-stream wait falls behind before its first delivery, Memory and Redis emit a machine-readable SSE `gap` event instead of silently returning a partial replay; the Web UI reloads durable thread/event state and resumes from the retained tail. Lease reconciliation marks runs from dead workers as errors, persists their delivery receipts, publishes the terminal stream marker, schedules retained-stream cleanup, and updates the affected thread status. SSE, `/wait`, and internal stream consumers use `stream_bridge.heartbeat_interval_seconds` (default `15`) for idle liveness checks; changing it requires a Gateway restart. Malformed Redis reconnect IDs live-tail new events instead of replaying the retained buffer, and the rolling retained-buffer TTL (`stream_ttl_seconds`) remains a cleanup safety net rather than a run timeout. Failed-login counters and lockouts for `POST /api/v1/auth/login/local` (`auth.local.max_login_attempts` / `lockout_seconds`) are kept in the shared `login_throttle` table whenever the application database is SQLite or Postgres (`auth.local.throttle_storage: auto`, the default), so every replica enforces one lockout per client IP; `memory` keeps the historical per-process counter, which under N replicas hands an attacker N × `max_login_attempts` guesses and logs a startup warning. IM chat-to-thread bindings live in the shared `channel_thread_bindings` table whenever the application database is SQLite or Postgres (an existing `channels/store.json` is imported once at startup and renamed `store.json.migrated`); each instance's platform connections still need one owner per provider — `channels.leader_lease` (default `auto`) is reserved for that per-provider leader lease, and until it ships the setting only drives the startup gate, which refuses `enabled: false` while an IM channel other than GitHub is enabled; keep one instance while channels are enabled (see [IM channel leader lease](backend/docs/CONFIGURATION.md#im-channel-leader-lease-channelsleader_lease)); follow-up buffers still need their own multi-worker coordination. To try this topology on one machine, `make dev-multi` starts two Gateways on shared Postgres, Redis and `DEER_FLOW_HOME`, and `make dev-multi-check` runs the cross-instance checks; see the local two-Gateway harness in [backend/docs/CONFIGURATION.md](backend/docs/CONFIGURATION.md#local-two-gateway-harness).
+> The Gateway still owns active run tasks in process, so production defaults to a single Gateway worker (`GATEWAY_WORKERS=1`). Multi-worker deployments require Postgres, the Redis stream bridge (`stream_bridge.type: redis`), `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`; process-local memory/JSONL event stores cannot enforce singleton delivery receipts across workers. Kubernetes replicas run one worker per Pod, which the worker count cannot see: declare them with `deployment.multi_instance: true` (or `DEER_FLOW_MULTI_INSTANCE=1`, which deploy tooling such as a Helm chart can set from its replica count) so the startup gate enforces the same prerequisites instead of staying inert. Declared instances that store credentials (`channel_connections`) must also share one at-rest `DEER_FLOW_CREDENTIALS_KEY` (the Helm chart and `make up` generate it; back it up, see [backend/docs/CONFIGURATION.md](backend/docs/CONFIGURATION.md#credentials-encryption-key-deer_flow_credentials_key)). The bridge shares SSE delivery and bounded `Last-Event-ID` replay across workers. When a valid reconnect cursor has been trimmed, or a subscriber that already established an empty-stream wait falls behind before its first delivery, Memory and Redis emit a machine-readable SSE `gap` event instead of silently returning a partial replay; the Web UI reloads durable thread/event state and resumes from the retained tail. Lease reconciliation marks runs from dead workers as errors, persists their delivery receipts, publishes the terminal stream marker, schedules retained-stream cleanup, and updates the affected thread status. SSE, `/wait`, and internal stream consumers use `stream_bridge.heartbeat_interval_seconds` (default `15`) for idle liveness checks; changing it requires a Gateway restart. Malformed Redis reconnect IDs live-tail new events instead of replaying the retained buffer, and the rolling retained-buffer TTL (`stream_ttl_seconds`) remains a cleanup safety net rather than a run timeout. Failed-login counters and lockouts for `POST /api/v1/auth/login/local` (`auth.local.max_login_attempts` / `lockout_seconds`) are kept in the shared `login_throttle` table whenever the application database is SQLite or Postgres (`auth.local.throttle_storage: auto`, the default), so every replica enforces one lockout per client IP; `memory` keeps the historical per-process counter, which under N replicas hands an attacker N × `max_login_attempts` guesses and logs a startup warning. IM chat-to-thread bindings live in the shared `channel_thread_bindings` table whenever the application database is SQLite or Postgres (an existing `channels/store.json` is imported once at startup and renamed `store.json.migrated`); each provider's platform connection is held by one instance through the shared `channel_leases` table — `channels.leader_lease` (default `auto`, on wherever the multi-process signal is) hands it to another instance when the holder dies, and the startup gate refuses `enabled: false` while an IM channel other than GitHub is enabled (see [IM channel leader lease](backend/docs/CONFIGURATION.md#im-channel-leader-lease-channelsleader_lease)); follow-up buffers still need their own multi-worker coordination. To try this topology on one machine, `make dev-multi` starts two Gateways on shared Postgres, Redis and `DEER_FLOW_HOME`, and `make dev-multi-check` runs the cross-instance checks; see the local two-Gateway harness in [backend/docs/CONFIGURATION.md](backend/docs/CONFIGURATION.md#local-two-gateway-harness).
 >
 > The local two-Gateway harness disables IM providers under both `channels` and `channel_connections` by default. `DEERFLOW_MI_KEEP_CHANNELS=1` preserves them; `channels.leader_lease` stays as configured.
 >
@@ -829,7 +839,7 @@ already received by the browser, without an additional secret-redaction layer.
 
 In plan mode, malformed TODO statuses return normal tool-validation errors without aborting token attribution, so the agent can correct the call.
 
-Tool-produced paths and URLs can be retained as short artifact handles across context compaction (`tool_artifacts` in `config.yaml`). Handles distinguish separate tool-result occurrences, even when a provider reuses call IDs. Detected file URLs preserve their query strings and fragments. When PII redaction is enabled, model-visible artifact labels follow that policy; internal references stay intact for tool argument resolution. The configured registry limit retains the newest artifacts, while checkpointed processing identities prevent evicted results from being recaptured after restart. Resolution runs before authorization and write-safety checks; unknown or expired handles return an error without executing the tool. Small unknown structured results may be retained as complete JSON up to 4096 UTF-8 bytes; empty or oversized payloads are skipped. Handles are agent-local: task arguments resolve parent handles to concrete references, and delegated reports must return concrete references rather than child-local handles. A truncated model projection reports how many handles are omitted.
+Tool-produced paths and URLs can be retained as short artifact handles across context compaction (`tool_artifacts` in `config.yaml`). Handles distinguish separate tool-result occurrences, even when a provider reuses call IDs. Standard MCP image URLs are captured alongside file references, including results from stdio and HTTP servers. Detected file URLs preserve their query strings and fragments. When PII redaction is enabled, model-visible artifact labels follow that policy; internal references stay intact for tool argument resolution. The configured registry limit retains the newest artifacts, while checkpointed processing identities prevent evicted results from being recaptured after restart. Resolution runs before authorization and write-safety checks; unknown or expired handles return an error without executing the tool. Small unknown structured results may be retained as complete JSON up to 4096 UTF-8 bytes; empty or oversized payloads are skipped. Handles are agent-local: task arguments resolve parent handles to concrete references, and delegated reports must return concrete references rather than child-local handles. A truncated model projection reports how many handles are omitted.
 
 DeerFlow supports configurable MCP servers and skills to extend its capabilities.
 When durable MCP background tasks are enabled, agents can use `list_background_tasks(status="failed")` or `status="input_required"` to find failed tasks or tasks awaiting input in the current chat. Other supported statuses are `submitted`, `working`, `completed`, and `cancelled`; omitting the status preserves existing behavior. The database applies the filter before limiting results to the 20 most recent matching tasks. When combined with `active_only=true`, both filters apply: active statuses are `submitted`, `working`, and `input_required`, so terminal statuses return an empty list. `GET /api/threads/{thread_id}/mcp-tasks` supports the same `status` and `active_only` filters before its `limit` (default 50, range 1–100); for example, `?status=failed&limit=20`. Unknown statuses return 422, and omitting the filters preserves the existing response.
@@ -837,6 +847,7 @@ For HTTP/SSE MCP servers, OAuth token flows are supported (`client_credentials`,
 Missing, malformed, or out-of-range token response `expires_in` values use a one-hour default lifetime. This includes lifetimes that cannot be added to the current time without overflowing the expiry timestamp.
 Durable HTTP/SSE task status and cancellation calls select configured `user_auth` credentials using the persisted task owner, including after restart; per-request secrets are not retained for background calls. If a request-scoped credential overrides submit authentication, both credentials must authorize access to the same remote task.
 For stdio MCP servers, per-tool call timeouts can be configured with `tool_call_timeout`; durable background-task calls honor the same setting for HTTP/SSE servers as well.
+The persistent stdio session pool evicts only idle sessions at capacity. If every pooled session is executing a tool, a new session request fails with a capacity error and can be retried after a call finishes.
 For stdio file outputs, a bare filename is linked to a uniquely matching file created or changed by that call. Filenames embedded in unrelated paths, including Windows backslash paths, are left intact. Explicit remote URLs (`scheme://...`) retain their original query parameters and fragments even when these contain a generated file's name or path; local references outside the URL still translate normally.
 For HTTP/SSE background-task calls, `session_init_timeout` separately bounds connection setup (including the SSE endpoint event) and MCP initialization together; it stops applying once the tool call begins. Initialization deadline errors identify the server and configured time limit.
 Ordinary `task` subagents retain the parent run's captured thread incarnation for MCP calls, including legacy threads, so delegation preserves the same lifecycle scope.
@@ -873,6 +884,8 @@ Targeted updates accept both DeerFlow's `type` field and the MCP-spec `transport
 Runtime MCP and skill updates replace `extensions_config.json` atomically, so an interrupted write cannot leave the shared configuration truncated or partially written. Every Gateway worker or instance that reads the same file picks up a new revision on its next read (the cache checks the file's content signature), so MCP and skill changes made through one replica apply to the others without a restart; a missing, truncated, or invalid revision keeps the previous configuration until a complete one lands, including when the file disappears during a reload.
 The admin MCP cache reset advances a durable generation marker in the writable config directory. Every Gateway worker mounting that same directory retires its own cached tools and pooled sessions before the next lookup; replicas with independent filesystems are not implicitly covered. If no config path is available, the API reports a process-local reset instead.
 The parsed extensions configuration and its recorded content digest come from the same read, so a racing edit followed by a timestamp-preserving backup restore cannot leave a different revision cached indefinitely.
+Changes to the global `mcpInterceptors` chain rebuild every server's tool wrappers,
+including when a server configuration is edited at the same time.
 
 `extensions_config.json` accepts UTF-8 with or without a leading byte-order mark (BOM), including files saved as UTF-8 with BOM by an editor.
 
@@ -915,7 +928,7 @@ DeerFlow supports receiving tasks from messaging apps. Channels auto-start when 
 
 Cancelling a channel restart discards its pending configuration reload, preserving newer runtime settings applied afterward.
 
-DeerFlow can also expose user-owned IM channel connections in the workspace UI. When `channel_connections` is enabled, logged-in users can bind Telegram, Slack, Discord, Feishu/Lark, DingTalk, WeChat, WeCom, QQ, or Buzz from the sidebar / Settings > Channels. It reuses the existing outbound `channels.*` transports, so no public IP or provider callback URL is required. Incoming IM messages then run under the connected DeerFlow user account. See [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md) for setup and security notes.
+DeerFlow can also expose user-owned IM channel connections in the workspace UI. When `channel_connections` is enabled, logged-in users can bind Telegram, Slack, Discord, Feishu/Lark, DingTalk, WeChat, WeCom, QQ, or Buzz from the sidebar / Settings > Channels. It reuses the existing outbound `channels.*` transports, so no public IP or provider callback URL is required. Incoming IM messages then run under the connected DeerFlow user account. See [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md) for setup and security notes. Buzz backlog paging stops with a warning if timestamp-based queries cannot advance, and channel removal closes both live and backlog subscriptions.
 
 | Channel | Transport | Difficulty |
 |---------|-----------|------------|
@@ -942,6 +955,9 @@ configured value yielding no valid ID denies every guild and logs an error.
 `allowed_channels` accepts one channel ID (quoted or unquoted) or a YAML list
 of IDs exempt from `mention_only`, within allowed guilds. An empty value gives
 no exemptions, so `mention_only` applies everywhere when enabled.
+
+Discord inbound attachments have a 25 MiB download limit. Oversized-file notices
+show the enforced limit so senders can resize or compress the attachment.
 
 ```yaml
 channels:
@@ -1049,7 +1065,9 @@ Notes:
 - If `assistant_id` is set to a custom agent name, DeerFlow still routes through `lead_agent` and injects that value as `agent_name`, so the custom agent's SOUL/config takes effect for IM channels.
 - IM channel workers call Gateway's LangGraph-compatible API internally and automatically attach process-local internal auth plus the CSRF cookie/header pair required for thread and run creation.
 - Inbound work is bounded to `inbound_queue_maxsize` pending messages plus `max_concurrency` active workers. When capacity is exhausted, socket/polling providers drop new messages before sending DeerFlow's working acknowledgment and emit a rate-limited warning. Buzz leaves its replay cursor unchanged and reconnects for relay replay; GitHub webhooks return `503`, marking the delivery failed for manual/API redelivery. Shutdown closes admission immediately, keeps channel transports available while accepted messages drain for up to `shutdown_grace_period_seconds`, then cancels and awaits active handlers before closing provider resources; the Gateway's outer timeout can cancel an incomplete shutdown without detaching those resources.
-- Telegram shutdown retains ongoing cleanup across a timeout or cancellation so a retry can finish it. If the Telegram loop has already stopped, shutdown warns that download clients may remain open and releases the abandoned cleanup state; later stops do not repeat that warning.
+- Telegram shutdown retains ongoing cleanup across a timeout or cancellation so a retry can finish it. Stopping during startup also cancels initialization and closes the partially initialized bot's HTTP clients before retiring its worker loop. If the Telegram loop has already stopped, shutdown warns that download clients may remain open and releases the abandoned cleanup state; later stops do not repeat that warning.
+- Slack stop waits up to five seconds for an in-flight Socket Mode connection and its cleanup. If cleanup is still pending, the previous instance stays tracked and a restart can be retried after it finishes. SDK cleanup failures report their original error and remain retryable.
+- In Telegram private chats, text, attachment and streaming replies (including "Working on it...") can still be delivered if their referenced user or bot message was deleted, such as after clearing chat history during a run. Group reply-target requirements remain unchanged to preserve forum routing.
 - Feishu/Lark now queues rapid follow-up messages per mapped DeerFlow `thread_id` instead of immediately surfacing the generic busy reply, and topic replies keep a per-message card with a compact source-message preview across queued/running/final patches.
 - Streaming IM channels treat backend `error` events like transport failures and follow the same reply and retry path. The channel logs the error type and message for diagnosis.
 
@@ -1342,6 +1360,29 @@ establish that a package is valid or readable. The scope note remains visible
 even when there are no YAML warnings; check Gateway logs for other load failures.
 Parsing remains strict and invalid skills stay unavailable to agents.
 
+#### Read-only knowledge sources
+
+Configure `knowledge_search` with either
+`deerflow.community.ragflow.tools:knowledge_search_tool` or
+`deerflow.community.lightrag.tools:knowledge_search_tool` in `config.yaml`.
+Both support attributable retrieval evidence. LightRAG and RAGFlow responses
+without complete provider locators use the shared DeerFlow source contract;
+complete RAGFlow responses retain their existing citation snapshots and scope
+controls. Knowledge citations show the
+provider, document title, and retrieved excerpt in chat, including after reload
+and when a subagent performed the retrieval. Missing page numbers and public
+URLs remain absent; sources without a URL are readable as local evidence.
+Inline citations remain readable after Markdown sanitization, and supplied page
+numbers use the selected interface language. New providers use the shared
+envelope; existing RAGFlow citation histories remain supported.
+Expand a completed subtask card to inspect its report's forwarded knowledge
+sources, including when reopening a saved conversation.
+Shortened mixed-provider task reports remove dangling citation fragments
+without flattening retained shared-source links.
+Existing web citations and the text-only Python `knowledge_search(query)` APIs
+remain supported. No knowledge management service or page is required.
+See [the knowledge contract guide](backend/docs/KNOWLEDGE.md).
+
 Skills are what make DeerFlow do *almost anything*.
 
 A standard Agent Skill is a structured capability module — a Markdown file that defines a workflow, best practices, and references to supporting resources. DeerFlow ships with built-in skills for research, report generation, slide creation, web pages, image and video generation, and more. But the real power is extensibility: add your own skills, replace the built-in ones, or combine them into compound workflows.
@@ -1355,6 +1396,8 @@ A skill directory is a package boundary: once DeerFlow finds its `SKILL.md`, nes
 Discovery follows operator-managed directory symlinks, but skips links back to an ancestor directory so a cyclic namespace does not repeatedly rescan the same tree. Independent links to the same external skill tree remain supported.
 
 Skill Markdown and bundled text resources use UTF-8. Skill-creator CLI and review utilities read and write text explicitly as UTF-8 so localized skills behave consistently across operating systems.
+
+`SKILL.md` YAML frontmatter must open and close with `---` on its own line (trailing spaces or tabs are allowed). A line such as `---suffix` is not a closing delimiter.
 
 Custom skill history preserves Unicode line separators inside saved content and metadata, keeping those revisions readable for history inspection and rollback. Malformed JSON history records are still rejected.
 
@@ -1418,6 +1461,8 @@ OAuth data remain isolated under
 `{DEER_FLOW_HOME}/users/{user_id}/integrations/lark-cli/{config,data}`. These
 secret directories are restricted to `0700`, regular credential files to
 `0600`, and symlinks are rejected.
+On Windows, waiting for another process's integration file lock retries for up
+to 15 minutes; other file-lock errors are reported immediately.
 
 After installation, users can click **Connect Lark** to open a browser
 authorization link; no terminal authorization is required. The same UI can
@@ -1527,6 +1572,10 @@ Public-skill CI waivers are exact, expiring exceptions in `.github/skill-review-
 Tools follow the same philosophy. DeerFlow comes with a core toolset — web search, web fetch, rendered web capture, file operations, bash execution — and supports custom tools via MCP servers and Python functions. The bundled DDG, Brave, Tavily, SearXNG, and Serper search providers accept an optional `time_range` of `day`, `week`, `month`, or `year`; omitting it preserves existing search behavior. For DDG recency searches, DeerFlow excludes DDGS backends that ignore time limits. Swap anything. Add anything.
 
 For DDG web search and DDG image search, `max_results` in `config.yaml` can be a positive integer or an environment-variable reference such as `max_results: $DDG_MAX_RESULTS` with `DDG_MAX_RESULTS=5`. The configured value takes precedence over the tool call's `max_results` argument. Invalid values (for example, `abc`, an empty string, or `3.5`), zero, and negative counts produce a warning and fall back to the default of 5 results. DDG, Brave, and Serper image search share one result-URL screen that omits non-HTTP(S), localhost, cloud-metadata hostnames, and non-public address literals, including multicast and IPv6 spellings embedding private IPv4 addresses. The screen does not resolve DNS; downloaders must validate the resolved address when connecting. A result with neither a safe full image URL nor a safe thumbnail is omitted.
+
+Image result screening also recognizes Unicode hostname separators (`。`, `．`,
+`｡`) as dots, matching IDNA client normalization before classifying local/private
+hosts. Accepted result URLs retain their original spelling.
 
 Stdio MCP servers can set `cwd` in `extensions_config.json` when their entrypoint
 or data files depend on a specific working directory. The setting applies to
@@ -1722,6 +1771,7 @@ Advanced deployments can enable pluggable authorization with `authorization.enab
 Follow-up suggestions also check `model:use` before calling the selected model, including the default model when no name is supplied. A denied model returns HTTP 403 without an LLM call; authorization-provider failures follow the configured `fail_closed` policy.
 
 For vision-capable agents, `view_image` and the subsequent model-context image read also require `sandbox:execute`. Allowing the tool name alone does not grant image-file access; a role denied sandbox execution cannot reread previously recorded image metadata after its permissions change. External run input and thread-state updates cannot set `viewed_images` or `thread_data`; when a saved image is read from a host copy, its path must resolve to the current user's thread and the recorded virtual image path.
+Each model request includes at most four recently viewed images and 28 MiB of base64 image data. Images excluded by these limits are reported as omitted; the agent can call `view_image` again to bring one back into context.
 
 Advanced deployments can also extend the agent runtime itself by declaring `AgentMiddleware` classes under `extensions.middlewares` in `config.yaml` or `extensions_config.json`. Each entry is a `module.path:ClassName` string (zero-argument constructor) or an object `{class, kwargs}` whose `kwargs` are passed to the constructor. `kwargs` values must be JSON types (object, array, string, number, boolean, or null); YAML dates and timestamps are coerced to ISO strings so they match JSON. DeerFlow loads the same configured list into the lead-agent and subagent pipelines after their built-in runtime middlewares and loop/token guards, but before the terminal-response/safety/clarification tail, so enterprise forks can add domain guardrails, tool-call governance, or observability hooks without patching the built-in middleware builders. Missing packages, invalid classes, broken modules, and constructor errors fail loudly at agent creation. Treat `config.yaml` and `extensions_config.json` as trusted operator-controlled files: middleware paths are code execution, just like custom tool, model, sandbox, guardrail, MCP server, and MCP interceptor declarations. Gateway skill/MCP toggle endpoints preserve this field but do not expose an API write path for `extensions.middlewares`. Separate lead-only/subagent-only middleware lists are not supported yet.
 
@@ -1788,6 +1838,14 @@ authenticated backend operations and model tools through the
 [plugin APIs](docs/full-stack-plugins.md). The independent
 [bookmarks example](examples/deerflow-extension-bookmarks/README.md) demonstrates
 one package with persistent user data, its own sidebar page and a read-only search tool.
+Model tools can opt into separate structured artifacts with
+`response_format="content_and_artifact"` and `PluginToolResult` (extension-api
+0.2.6). Artifact object keys must be strings at every depth. Existing tools keep
+their JSON text output. The
+[local retrieval example](examples/deerflow-extension-retrieval/README.md)
+demonstrates bounded, read-only results and checkpoint replay without an external
+knowledge service; artifacts do not automatically enable citations. It also appears
+in the extension catalog with localized installation-guide metadata.
 Reopening a bookmark resolves the conversation's current agent through the host, so
 custom-agent conversations retain their original chat entry point, including older bookmarks.
 The independent [Agent teams example](examples/deerflow-extension-agent-teams/README.md)
@@ -2094,7 +2152,40 @@ Cancelled or timed-out background sub-agent executions retain provider-reported 
 
 For `tests_passed:go test ./...`, packages marked `[no test files]` or `[no tests to run]` do not veto a passing summary from another package. Runs with only zero-test package summaries remain `UNVERIFIED`; failures still take precedence. This checks recorded execution evidence, not claim correctness.
 
+For `tests_passed:cargo test`, a complete passing target summary can coexist with
+empty unit, integration or documentation targets. Complete zero-pass successful
+summaries do not veto that sibling evidence. All-empty or all-ignored runs and
+bare `test result: ok` banners remain `UNVERIFIED`; incomplete zero-test summaries
+are kept as vetoes, and failures still take precedence.
+
+For Maven and Gradle test acceptance, a `BUILD SUCCESS` / `BUILD SUCCESSFUL`
+banner alone remains `UNVERIFIED`: builds can succeed without running tests.
+Complete `Tests run: N, Failures: F, Errors: E, Skipped: S` or `N tests completed`
+summaries establish a hold only when at least one test ran without a reported
+failure. Zero-test or all-skipped modules do not supply positive evidence;
+failures in any module take precedence over passing counts.
+
 For file acceptance criteria, an empty regular file in the shared workspace can satisfy `file:<path> exists` and `file_written:<path>`, including on remote sandboxes. It fails `file:<path> non-empty` with a deterministic empty-file result.
+
+To require CSV header columns, set a `task` or `batch_task` item's criterion to
+`file:../outputs/report.csv csv-columns:["id","name"]`. The JSON array must contain
+unique, nonempty, UTF-8-encodable column names. Names match exactly (case and
+whitespace included), in any order; extra columns are allowed. Checks read only a bounded prefix and parse
+the first comma-separated logical record, supporting double-quoted fields, doubled
+quotes, embedded newlines, and an optional UTF-8 BOM. Data rows are not validated.
+Empty files, missing required columns, malformed or invalid UTF-8 headers, and
+empty or duplicate header names return `does not hold`. Headers over **50,000 bytes**, incomplete reads,
+invalid criteria, unavailable workspace access, or exhausted read budgets return
+`UNVERIFIED`. A large file can satisfy the check when its complete header fits the
+budget. A definite syntax error within that header remains a checked negative
+regardless of later data rows; truncated quoting remains `UNVERIFIED`.
+Reads use the same authorized, scoped transport as JSON checks below:
+50,001 bytes maximum; remote reads have a 5-second command timeout (10 seconds for
+the provider call). Local reads and parsing share a cooperative 5-second deadline;
+remote parsing has its own 5-second deadline starting after the read returns.
+These checks do not interrupt an in-progress filesystem or parser call. Concurrent
+writes are not an atomic snapshot. This does not validate data types, row counts,
+or business meaning.
 
 To request JSON syntax validation, explicitly set a `task` or `batch_task` item's
 `acceptance_criteria` to `["file:../outputs/report.json json-valid"]`. Checks cover only
@@ -2268,11 +2359,29 @@ changing the root.
 E2B acquisition uses a bounded executor. Waiting acquisitions do not use the
 default asyncio executor.
 
+When an E2B sandbox expires between conversation turns, its replacement restores
+the same user's saved thread files from `workspace`, `uploads`, `outputs`, and
+the ACP workspace before tools can use it. Live sandbox reuse does not overwrite
+remote files with older saved copies. Restoration failure or an exceeded upload
+limit rejects the new sandbox. Transient failures may succeed on a later attempt.
+Capacity breaches report the resource tree and exceeded cap: 100 MiB per file,
+2,000 files / 512 MiB per tree, and 2,000 files / 512 MiB across the creation pass.
+An operator must archive or remove unneeded files from the Gateway's persisted
+thread directories to fit those limits before retrying; retrying unchanged data
+cannot resolve a capacity breach. Deleting only the remote copies is insufficient.
+Other restoration errors identify the resource tree and cause category; Gateway
+logs retain the underlying exception for diagnosis.
+Recovery requires the Gateway's persisted thread directories to remain available;
+files that never synchronized before the VM disappeared cannot be recovered.
+The existing release sync saves workspace/output files but does not mirror file
+deletions, so saved copies of remotely deleted files can reappear on recreation.
+
 Each E2B mount upload pass accepts at most 512 MiB and 2,000 files. The pass
-also has a cooperative 120-second deadline. Skill projections and configured
-mounts share these limits. The provider checks the deadline before each mount
-and during directory preflight. The deadline stops new file uploads after it
-expires. It does not interrupt active filesystem or E2B SDK calls.
+also has a cooperative 120-second deadline. Thread restoration runs first and
+shares these limits with skill projections and configured mounts. The provider
+checks the deadline before each mount and during directory preflight. The deadline
+stops new file uploads after it expires. It does not interrupt active filesystem
+or E2B SDK calls.
 
 An E2B VM keeps its slot until E2B confirms destruction. This rule covers
 create and reclaim operations. Discovery can find a VM from another Gateway.
@@ -2287,6 +2396,8 @@ DeerFlow doesn't just *talk* about doing things. It has its own computer.
 Each task gets its own execution environment with a full filesystem view — skills, workspace, uploads, outputs. The agent reads, writes, and edits files. It can view images and, when configured safely, execute shell commands.
 
 The read-before-write gate ties each read mark to that `read_file` call's result, including custom tools returning multi-message `Command` updates. An unrelated result cannot authorize a write after a failed read or hide a successful read.
+
+Loop warnings let agents save collected results before their final answer. If the save is blocked by the read-before-write gate, the agent may read the target file and retry the save once. A looping or stopped tool must be replaced by an available alternative; if no permitted save path exists or the retry fails, the final answer includes the collected results and reports that the file was not saved. Recovery calls still count toward the loop limits, and a hard stop prevents further tool execution.
 
 Ranged `read_file` calls count lines the same way on every sandbox provider: a line ends only at a newline. On E2B, BoxLite, Tenki, and OpenSandbox, a file with bare carriage returns (such as a saved progress log), form feeds, or Unicode line separators therefore returns the same lines as on the local sandbox, and the `start_line` a truncated read suggests points at the next unread line.
 
@@ -2355,6 +2466,11 @@ CSV and TSV artifacts open as tables in the artifact panel and in a separate win
 
 HTML artifact previews resolve relative assets from the artifact directory unless the document contains a real `<base>` element. Base-tag examples in comments or script text do not change that resolution.
 
+Markdown report previews in the artifact panel and separate window resolve local
+images from the report's own directory and conversation. Both relative paths
+such as `./charts/summary.png` and absolute `/mnt/...` paths are supported;
+external image URLs keep their existing behavior.
+
 If the sample cuts a CRLF line ending in half, the preview keeps the earlier complete rows and omits the incomplete final record, including when its last field is quoted.
 
 Text artifacts are streamed with HTTP byte-range support. The Web UI initially
@@ -2404,6 +2520,9 @@ Failed upload commits report the original error even if temporary-file cleanup
 also fails, for example because of a Windows sharing violation.
 Once the file is published, a temporary-file cleanup failure is logged without
 failing the upload; hidden staging files are left for the startup sweep.
+If that sweep cannot scan an uploads directory, it logs a warning and preserves
+its files while continuing cleanup elsewhere. A directory that disappears
+during cleanup is skipped quietly.
 
 Uploads, new skill support files, and new local sandbox paths reject Windows
 reserved device names on every platform, including `COM¹`, `LPT²`, the console
@@ -2645,7 +2764,10 @@ DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-
 MindIE XML tool-call arguments support signed, fractional, and exponent JSON
 numbers. If a number overflows, underflows to zero, or exceeds Python's integer
 digit limit, the complete argument stays a string, including nested JSON lists
-and objects, so parsing does not silently change its value.
+and objects, so parsing does not silently change its value. Python-literal sets
+and tuples containing non-finite floats also retain the complete argument as
+text, including when nested in other containers. Dictionary keys and values
+are checked recursively as well.
 
 ## Embedded Python Client
 
@@ -2825,6 +2947,7 @@ Current MVP capabilities:
 
 - Manage tasks at `/workspace/scheduled-tasks`
 - One-time task forms reject local times skipped by daylight-saving transitions; select another time before creating or saving the task.
+- Existing one-time tasks display the scheduler's execution time even when a conversation or API saved a local time skipped by daylight saving. Local times without an explicit offset use the first occurrence of a repeated hour.
 - Choose whether each scheduled task reuses a thread and its conversation history or creates a fresh thread per run
 - Pin each task to `lead_agent` (default) or a custom agent the owner already has; unknown names are rejected
 - Sending `assistant_id: null` in a scheduled-task PATCH resets the task to `lead_agent`; omitting `assistant_id` preserves the current agent, including when that custom agent has since been deleted
@@ -2838,7 +2961,7 @@ Current MVP capabilities:
 - Pause, resume, trigger, inspect history, and delete tasks
 - Search task titles or prompts, combined with status/type filters and the current thread scope.
 - Execute scheduled work through the normal DeerFlow run lifecycle
-- When `channel_connections.enabled: true`, send scheduled task updates to the task owner's connected IM identities (outbox + delivery worker) on apps that support proactive push, which today is WeCom and Feishu/Lark; Settings shows for each app whether updates are sent there, and other apps get none. Each occurrence queues at most one message per target: a finished, failed or goal-missed run, the automatic pause after three missed goals, a pause by the agent (its stop condition was met) or the task finishing (all `max_runs` done, `end_at` reached); when several apply, the pause or finish wins and still says how the last run went. A one-time task sends only its run's outcome. The message is queued in the same database transaction that records the outcome, so runs finalized after a crash or a lost lease do not enqueue a duplicate notice for the same target. It reads on its own, in your web UI language (else `channel_connections.notification_locale`): the task title, what happened, a one-line result when the agent replied, and "Open DeerFlow → Scheduled tasks for details.", with no IDs and no links. Plain manual "run now" trials and interrupted runs stay silent, and so do occurrences that end without a finished run (launch error, queue timeout, interrupted by a restart). Channel/transport outages park deliveries without exhausting retries, for up to about a day; platform rejections retry for roughly 15 minutes before settling as `failed`. An identity you disconnect while a delivery is waiting is never pushed to: the row is dropped as `failed`.
+- When `channel_connections.enabled: true`, send scheduled task updates to the task owner's connected IM identities (outbox + delivery worker) on apps that support proactive push, which today is WeCom, Feishu/Lark, WeChat and QQ private chat; Settings → Notifications controls proactive updates per connected app, independently of browser notifications and ordinary chat replies. Each occurrence queues at most one message per target: a finished, failed or goal-missed run, the automatic pause after three missed goals, a pause by the agent (its stop condition was met) or the task finishing (all `max_runs` done, `end_at` reached); when several apply, the pause or finish wins and still says how the last run went. A one-time task sends only its run's outcome. The message is queued in the same database transaction that records the outcome, so runs finalized after a crash or a lost lease do not enqueue a duplicate notice for the same target. It reads on its own, in your web UI language (else `channel_connections.notification_locale`): the task title, what happened, a one-line result when the agent replied, and "Open DeerFlow → Scheduled tasks for details.", with no IDs and no links. Plain manual "run now" trials and interrupted runs stay silent, and so do occurrences that end without a finished run (launch error, queue timeout, interrupted by a restart). Channel/transport outages park deliveries without exhausting retries, for up to about a day; platform rejections retry for roughly 15 minutes before settling as `failed`. An identity you disconnect while a delivery is waiting is never pushed to: the row is dropped as `failed`.
 - Browse execution history in pages of 50; older pages pause automatic refresh, with an explicit return to the latest runs. Counts appear only after a successful read; loading and failed reads are not reported as zero runs.
 
 Derived run summaries omit leading inline `<think>` reasoning before limiting the text, so a long thought does not replace the actual answer in previews or scheduled notices. Original response history and literal tags in the answer are unchanged; previously stored run summaries are not rewritten.
@@ -2857,6 +2980,23 @@ Current MVP limits:
 Enable background polling with `config.yaml -> scheduler.enabled`. Manual trigger uses the same scheduled-task resource and execution path.
 
 In the task form, switching an hourly, daily, weekly, or monthly schedule to **Custom cron** starts from its current timing, including selected weekdays or day of the month. Switching back to Custom cron after preset edits uses those edits rather than an older expression.
+
+### Control proactive IM notifications
+
+Open **Settings → Notifications → IM notifications** to turn scheduled-task
+updates on or off for each connected, push-capable app. Existing connections
+keep receiving updates until you opt out. Turning a channel off cancels its
+pending and retrying notices, including an explicitly selected Feishu group;
+turning it on again does not resend the old backlog. Notifications whose
+platform delivery already started may still arrive. Chat replies and scheduled
+execution are unaffected. All Gateway workers must run the upgraded version
+for the preference to be enforced.
+
+WeChat needs a private message after binding to save its current conversation
+context securely; an old binding or changed bot token also needs a fresh private
+message. QQ requires a C2C/private binding and platform permission to send
+proactively. This version does not add WeChat or QQ group destinations.
+See [setup and delivery limits](backend/docs/IM_CHANNEL_CONNECTIONS.md#proactive-notification-settings).
 
 ### Optional Feishu group notifications
 
@@ -3154,6 +3294,18 @@ perf:check`. The command measures `/login` from a normal production build, then
 performs a production static-demo build for the fixture-backed workspace routes.
 It measures the unique JavaScript and CSS referenced by representative routes
 and writes the detailed result to `.next/performance-results.json`.
+
+### Script workflows (optional extension)
+
+The [script workflows extension](examples/deerflow-extension-workflows/README.md)
+adds inspectable JavaScript orchestration through full AgentRuns, background launch,
+bounded parallel execution, progress, retained results and cancellation. It is
+disabled by default and requires a POSIX Gateway and operator-authorized Agent
+references. Phase 1 does not support resume, human output approval, restart replay
+or a hard monetary budget. Workflow deadlines and child-observation timeouts are
+reported separately from uncertain admission. Accepted launches retain their request
+identity across inspection refresh failures, with a separate inspection retry action. A runnable example, installation steps
+and QuickJS source-build prerequisites for other Python/CPU combinations are included.
 
 ## License
 

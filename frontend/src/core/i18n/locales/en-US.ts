@@ -40,6 +40,11 @@ export const enUS: Translations = {
       "This entry comes from the repository extension catalog. Ask your deployment administrator to confirm its installation and activation status.",
     installationGuide: "Installation guide",
     catalog: {
+      workflows: {
+        title: "Script workflows",
+        description:
+          "Run inspectable Agent workflows with bounded parallel steps, progress and cancellation. Phase 1 has no resume, human approval or hard monetary budget.",
+      },
       agentTeams: {
         title: "Agent teams",
         description:
@@ -69,6 +74,11 @@ export const enUS: Translations = {
         title: "Extension development example",
         description:
           "Explore middleware, task lifecycle, model observers, services and HTTP route contributions.",
+      },
+      retrieval: {
+        title: "Local retrieval example",
+        description:
+          "Demonstrate read-only retrieval and structured tool results using fixed sample documents, without an external knowledge service.",
       },
     },
     pageUnavailable: "Extension page unavailable",
@@ -1644,9 +1654,10 @@ export const enUS: Translations = {
     },
     connectedAs: (name: string) => `Connected as ${name}.`,
     scheduledUpdates: {
-      supported: "Scheduled task updates: sent here",
+      supported:
+        "Scheduled task updates: supported; manage in Notification settings",
       supportedAfterConnect:
-        "Scheduled task updates: available after you connect",
+        "Scheduled task updates: supported; connect to manage notifications",
       unsupported: "Scheduled task updates: not available for this app yet",
     },
   },
@@ -2388,6 +2399,30 @@ export const enUS: Translations = {
       testBody: "This is a test notification.",
       notSupported: "Your browser does not support notifications.",
       disableNotification: "Disable notification",
+      channels: {
+        title: "Scheduled task notifications",
+        description:
+          "Choose which connected apps receive scheduled task updates. Turning these off does not affect chatting. Pending notifications and retries are cancelled, and turning them back on does not resend old updates. Notifications already being delivered may still arrive.",
+        providers: {
+          feishu: "Feishu / Lark",
+          wecom: "WeCom",
+          wechat: "WeChat",
+          qq: "QQ",
+        },
+        toggleLabel: (provider: string) =>
+          `${provider} scheduled task notifications`,
+        loading: "Loading notification preferences…",
+        saving: "Saving…",
+        loadFailed:
+          "Could not load notification preferences. Please try again.",
+        saveFailed:
+          "Could not save this change. The previous setting is still shown; please try again.",
+        unavailable:
+          "This service does not support notification preferences yet.",
+        empty:
+          "Connect an app that supports scheduled task notifications in Settings → Channels.",
+        retry: "Retry",
+      },
     },
     account: {
       profileTitle: "Profile",

@@ -27,11 +27,13 @@ export interface Translations {
     catalogHint: string;
     installationGuide: string;
     catalog: Record<
+      | "workflows"
       | "agentTeams"
       | "bookmarks"
       | "context"
       | "classify"
       | "screening"
+      | "retrieval"
       | "example",
       { title: string; description: string }
     >;
@@ -1933,6 +1935,24 @@ export interface Translations {
       testBody: string;
       notSupported: string;
       disableNotification: string;
+      channels: {
+        title: string;
+        description: string;
+        providers: {
+          feishu: string;
+          wecom: string;
+          wechat: string;
+          qq: string;
+        };
+        toggleLabel: (provider: string) => string;
+        loading: string;
+        saving: string;
+        loadFailed: string;
+        saveFailed: string;
+        unavailable: string;
+        empty: string;
+        retry: string;
+      };
     };
     account: {
       profileTitle: string;

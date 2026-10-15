@@ -1922,3 +1922,87 @@ async def test_history_result_pages_and_reads_bound_the_complete_escaped_json(pl
     assert first_cursor
     with pytest.raises(ValueError, match="cursor|Cursor"):
         await service.read_history({"team_id": team["id"], "cursor": first_cursor}, caller)
+
+
+@pytest.mark.asyncio
+async def test_history_result_cursors_support_non_hex_job_ids_and_expiry(plugin, monkeypatch):
+    from deerflow_extension_agent_teams import service as module
+
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    member = team["members"][0]
+    caller = context(runs, thread=member["thread_id"])
+    identity = module.identity
+    monkeypatch.setattr(module, "identity", lambda *parts: "request-" + identity(*parts))
+    jobs = []
+    for index in range(2):
+        sent = await scheduling_send(actions, runs, "alice", team, member, str(index))
+        stored = await service.db("get", "alice", team["id"])
+        await service.finish("alice", stored, stored["jobs"][-1], "completed", "Retained evidence")
+        jobs.append(sent)
+    payload = {"team_id": team["id"], "limit": 1}
+    first = await service.search_results(payload, caller)
+    assert first["items"][0]["job_id"] == jobs[1]["id"]
+    await scheduling_send(actions, runs, "alice", team, member, "later")
+    stored = await service.db("get", "alice", team["id"])
+    await service.finish("alice", stored, stored["jobs"][-1], "completed", "New evidence")
+    continuation = {**payload, "cursor": first["next_cursor"]}
+    second = await service.search_results(continuation, caller)
+    assert [item["job_id"] for item in second["items"]] == [jobs[0]["id"]]
+    assert second["next_cursor"] is None and not second["cursor_expired"]
+    await service.db("change", "alice", team["id"], lambda t: t.update(jobs=[job for job in t["jobs"] if job["id"] != jobs[1]["id"]]))
+    expired = await service.search_results(continuation, caller)
+    assert expired["cursor_expired"] and expired["items"] == [] and expired["next_cursor"] is None
+
+
+@pytest.mark.asyncio
+async def test_history_result_cursors_issued_before_anchor_hashing_expire(plugin):
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    member = team["members"][0]
+    caller = context(runs, thread=member["thread_id"])
+    for index in range(2):
+        await scheduling_send(actions, runs, "alice", team, member, str(index))
+        stored = await service.db("get", "alice", team["id"])
+        await service.finish("alice", stored, stored["jobs"][-1], "completed", "Retained evidence")
+    payload = {"team_id": team["id"], "limit": 1}
+    first = await service.search_results(payload, caller)
+    fingerprint = first["next_cursor"].split(":")[0]
+    legacy_cursor = f"{fingerprint}:{first['items'][0]['job_id']}"
+    expired = await service.search_results({**payload, "cursor": legacy_cursor}, caller)
+    assert expired["cursor_expired"] and expired["items"] == [] and expired["next_cursor"] is None
+
+
+@pytest.mark.asyncio
+async def test_history_cancelled_results_are_unavailable_before_and_after_admission(plugin):
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    member = team["members"][0]
+    caller = context(runs, thread=member["thread_id"])
+    unavailable = {"available": False, "text": None, "truncated": None, "reason": "cancelled"}
+    for admitted in (False, True):
+        sent = await scheduling_send(actions, runs, "alice", team, member, str(admitted))
+        if admitted:
+            await service.tick()
+            assert sent["id"] in runs.runs
+        await actions["cancel"]({"team_id": team["id"], "job_id": sent["id"]}, context(runs))
+        if admitted:
+            await service.tick()
+            await service.tick()
+        result = await service.read_result({"team_id": team["id"], "job_id": sent["id"]}, caller)
+        assert result["status"] == "cancelled" and result["result"] == unavailable
+    found = await service.search_results({"team_id": team["id"]}, caller)
+    assert len(found["items"]) == 2 and all(item["result"] == unavailable for item in found["items"])
+    notice = "Request cancelled; checkpoint retained"
+    history = await service.read_history({"team_id": team["id"], "job_id": sent["id"]}, caller)
+    assert any(item["kind"] == "cancelled" and item["text"] == notice for item in history["items"])
+    stored = await service.db("get", "alice", team["id"])
+    assert stored["jobs"][-1]["result"] == notice
+    await service.db("change", "alice", team["id"], lambda t: t["jobs"][-1].pop("result"))
+    legacy = await service.read_result({"team_id": team["id"], "job_id": sent["id"]}, caller)
+    assert legacy["result"] == unavailable
+    filtered = await service.search_results({"team_id": team["id"], "query": notice}, caller)
+    assert filtered["items"] == []

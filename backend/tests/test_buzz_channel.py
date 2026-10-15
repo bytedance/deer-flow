@@ -98,6 +98,43 @@ def test_config_mention_free_channel_scalar_with_separators_warns(caplog):
     assert "treating it as one literal channel id" in caplog.text
 
 
+def test_config_allowed_users_accepts_a_single_scalar_pubkey():
+    """One pubkey scalar is one member entry -- not the characters of it.
+
+    An ``allowed_users: $BUZZ_OWNER_PUBKEY`` style reference resolves to a
+    scalar string. Iterating it character by character fed each character to
+    ``parse_pubkey``, whose first non-hex character raised and aborted channel
+    construction. Sibling channels (QQ #6730, Discord) already treat a scalar
+    as a single entry.
+    """
+    assert _channel(allowed_users=OWNER)._allowed_users == frozenset({OWNER})
+    assert _channel(allowed_users=f"  {OWNER}  ")._allowed_users == frozenset({OWNER})
+
+
+def test_config_allowed_users_accepts_a_non_string_scalar_without_crashing():
+    """An unquoted scalar YAML typed as a number must not abort channel setup.
+
+    An int is not iterable, so constructing the channel raised
+    ``TypeError: 'int' object is not iterable``; the value is not a usable
+    pubkey, so the deny-by-default allowlist stays empty.
+    """
+    assert _channel(allowed_users=123)._allowed_users == frozenset()
+
+
+def test_config_allowed_users_drops_invalid_entries_with_a_warning(caplog):
+    """A mix of valid and unusable entries keeps the valid ones, fail-closed."""
+    with caplog.at_level(logging.WARNING, logger="app.channels.buzz"):
+        ch = _channel(allowed_users=[OWNER, "not-a-pubkey", 42])
+    assert ch._allowed_users == frozenset({OWNER})
+    assert "Ignoring allowed_users entry" in caplog.text
+
+
+def test_config_allowed_users_empty_shapes_still_deny_by_default():
+    """Unset, blank and empty shapes keep the empty allowlist (deny all)."""
+    for value in (None, "", "   ", [], frozenset()):
+        assert _channel(allowed_users=value)._allowed_users == frozenset()
+
+
 def test_config_rejects_non_websocket_relay_url():
     with pytest.raises(ValueError):
         _channel(relay_url="https://buzz.example.com")
@@ -1542,6 +1579,10 @@ def test_session_end_drops_chat_subscription_bookkeeping():
     asyncio.run(ch._session(ws))
     assert ch._chat_subscriptions == set()
     assert ch._transport is None
+    # Backlog page cursors are per-socket too: a new socket must not think an
+    # unfinished walk from a dead one is still in flight.
+    assert ch._backlog_pages == {} and ch._backlog_floor == {}
+    assert ch._page_seen == {} and ch._page_oldest == {}
 
 
 # -- RESILIENCE REVIEW: a CLOSED subscription must not deafen the connector --------
@@ -2144,3 +2185,295 @@ def test_ordinary_replies_that_merely_mention_the_words_are_still_published():
     ch._transport = transport
     asyncio.run(ch.send(_outbound(ch, "I stored that in memory and in the durable context data.", is_final=True)))
     assert len(_events_of(transport)) == 1
+
+
+# -- BACKLOG PAGING: a saturated history page must not skip the OLDEST messages ----
+#
+# buzz-relay serves stored events NEWEST-FIRST and caps a single subscription at
+# RELAY_HISTORY_LIMIT (2000). A channel that banked more than the cap across one
+# disconnect therefore had its OLDEST unread events neither sent nor marked: the
+# live page delivered the newest 2000, the watermark advanced past them, and the
+# rest were silently lost. The fix is additive -- the saturated live page's EOSE
+# drives a descending `until` walk on SEPARATE `buzz-backlog-<channel>` sub ids
+# until a page comes back under the cap or reaches the `since` the live REQ was
+# sent with. The live subscription, its filter, and the watermark are never
+# touched, so a failed walk can only ever leave the pre-existing behaviour.
+
+
+def test_saturated_live_page_walks_back_and_delivers_the_previously_skipped_event(monkeypatch):
+    """A page at the cap pages back, and the older message it fetches is delivered.
+
+    Both halves of the fix in one shot: the saturated live page issues a
+    descending `until` backlog query on its own sub id (windowed to the boundary
+    second, floored at the live REQ's `since`), and the event that query returns
+    -- older than anything the live page carried -- reaches publish instead of
+    being skipped. The live REQ itself is never re-issued or altered.
+    """
+    monkeypatch.setattr("app.channels.buzz.RELAY_HISTORY_LIMIT", 2, raising=False)
+    ch, captured = _started()
+    transport = FakeTransport()
+    ch._transport = transport
+    ch._seen_created_at[CHANNEL] = 1700000000  # an established cursor: the walk's `since` floor
+
+    asyncio.run(ch._ensure_chat_subscription(CHANNEL))
+    live_sub = f"buzz-chat-{CHANNEL}"
+    assert _reqs_by_sub(transport)[live_sub] == [{"kinds": [9], "#h": [CHANNEL], "since": 1700000000}]
+
+    # The live page comes back at exactly the cap, newest-first.
+    newest = _event(created_at=1700000300)
+    boundary = _event(created_at=1700000200)
+    asyncio.run(ch.handle_relay_frame(json.dumps(["EVENT", live_sub, newest])))
+    asyncio.run(ch.handle_relay_frame(json.dumps(["EVENT", live_sub, boundary])))
+    asyncio.run(ch.handle_relay_frame(json.dumps(["EOSE", live_sub])))
+
+    # Saturated -> one descending backlog REQ on a SEPARATE sub id, `until`
+    # INCLUSIVE on the boundary second and floored at the live REQ's `since`.
+    backlog_sub = f"buzz-backlog-{CHANNEL}"
+    assert _reqs_by_sub(transport)[backlog_sub] == [{"kinds": [9], "#h": [CHANNEL], "until": 1700000200, "since": 1700000000}]
+    # ... and the live REQ was neither re-issued nor rewritten: the walk is additive.
+    assert len(_reqs_by_sub(transport)[live_sub]) == 1
+
+    # The previously-skipped older message arrives on the backlog page.
+    skipped = _event(created_at=1700000100)
+    asyncio.run(ch.handle_relay_frame(json.dumps(["EVENT", backlog_sub, skipped])))
+    assert [m.metadata["event_id"] for m in captured] == [newest["id"], boundary["id"], skipped["id"]]
+
+    # A page under the cap ends the walk: state cleared, bounded sub closed.
+    asyncio.run(ch.handle_relay_frame(json.dumps(["EOSE", backlog_sub])))
+    assert CHANNEL not in ch._backlog_pages and CHANNEL not in ch._backlog_floor
+    assert backlog_sub in _closed_subs(transport)
+
+
+def test_a_live_page_under_the_cap_ends_the_walk_with_no_extra_traffic(monkeypatch):
+    """A page below the cap proves the history is exhausted: no backlog query at all."""
+    monkeypatch.setattr("app.channels.buzz.RELAY_HISTORY_LIMIT", 2, raising=False)
+    ch, _ = _started()
+    transport = FakeTransport()
+    ch._transport = transport
+    ch._seen_created_at[CHANNEL] = 1700000000
+
+    asyncio.run(ch._ensure_chat_subscription(CHANNEL))
+    live_sub = f"buzz-chat-{CHANNEL}"
+    asyncio.run(ch.handle_relay_frame(json.dumps(["EVENT", live_sub, _event(created_at=1700000200)])))
+    asyncio.run(ch.handle_relay_frame(json.dumps(["EOSE", live_sub])))
+
+    assert not [f for f in transport.sent if f[0] == "REQ" and str(f[1]).startswith("buzz-backlog-")]
+    assert CHANNEL not in ch._backlog_pages
+
+
+def test_backlog_walk_stops_when_the_page_reaches_the_live_since_floor(monkeypatch):
+    """A saturated backlog page that touches the floor ends the walk -- nothing older exists."""
+    monkeypatch.setattr("app.channels.buzz.RELAY_HISTORY_LIMIT", 2, raising=False)
+    ch, _ = _started()
+    transport = FakeTransport()
+    ch._transport = transport
+    ch._seen_created_at[CHANNEL] = 1700000200  # the floor the walk must stop at
+
+    asyncio.run(ch._ensure_chat_subscription(CHANNEL))
+    live_sub = f"buzz-chat-{CHANNEL}"
+    asyncio.run(ch.handle_relay_frame(json.dumps(["EVENT", live_sub, _event(created_at=1700000400)])))
+    asyncio.run(ch.handle_relay_frame(json.dumps(["EVENT", live_sub, _event(created_at=1700000300)])))
+    asyncio.run(ch.handle_relay_frame(json.dumps(["EOSE", live_sub])))
+    backlog_sub = f"buzz-backlog-{CHANNEL}"
+    assert len(_reqs_for(transport, backlog_sub)) == 1
+
+    # The backlog page is saturated too, but its oldest lands ON the floor.
+    asyncio.run(ch.handle_relay_frame(json.dumps(["EVENT", backlog_sub, _event(created_at=1700000300)])))
+    asyncio.run(ch.handle_relay_frame(json.dumps(["EVENT", backlog_sub, _event(created_at=1700000200)])))
+    asyncio.run(ch.handle_relay_frame(json.dumps(["EOSE", backlog_sub])))
+
+    # Reached the floor: no further page, state cleared, bounded sub closed.
+    assert len(_reqs_for(transport, backlog_sub)) == 1
+    assert CHANNEL not in ch._backlog_pages and CHANNEL not in ch._backlog_floor
+    assert backlog_sub in _closed_subs(transport)
+
+
+def test_backlog_walk_is_bounded_by_max_pages_and_says_what_it_dropped(monkeypatch, caplog):
+    """A real walk that never reaches its floor is bounded; the bound is logged, not silent.
+
+    A relay that keeps answering "saturated" while the walk advances towards an
+    ever-lower ``until`` could otherwise be paged forever. With a floor present the
+    walk still needs a hard cap; hitting it ends the walk and names the oldest
+    ``created_at`` that was not fetched, so a truncated walk never reads as a
+    complete one.
+    """
+    monkeypatch.setattr("app.channels.buzz.RELAY_HISTORY_LIMIT", 1, raising=False)
+    monkeypatch.setattr("app.channels.buzz.MAX_BACKLOG_PAGES", 2, raising=False)
+    caplog.set_level(logging.WARNING)
+    ch, _ = _started()
+    transport = FakeTransport()
+    ch._transport = transport
+    # A floor exists, but every page stays above it: only MAX_BACKLOG_PAGES stops the walk.
+    ch._seen_created_at[CHANNEL] = 1700000000
+
+    asyncio.run(ch._ensure_chat_subscription(CHANNEL))
+    live_sub = f"buzz-chat-{CHANNEL}"
+    asyncio.run(ch.handle_relay_frame(json.dumps(["EVENT", live_sub, _event(created_at=1700000500)])))
+    asyncio.run(ch.handle_relay_frame(json.dumps(["EOSE", live_sub])))
+
+    backlog_sub = f"buzz-backlog-{CHANNEL}"
+    for created_at in (1700000400, 1700000300):  # pages 1 and 2, each saturated, never reaching the floor
+        asyncio.run(ch.handle_relay_frame(json.dumps(["EVENT", backlog_sub, _event(created_at=created_at)])))
+        asyncio.run(ch.handle_relay_frame(json.dumps(["EOSE", backlog_sub])))
+
+    # Exactly two pages were issued; the bound stopped a third.
+    assert len(_reqs_for(transport, backlog_sub)) == 2
+    assert any("stopped paging" in r.getMessage() for r in caplog.records)
+    assert CHANNEL not in ch._backlog_pages and CHANNEL not in ch._backlog_floor
+    assert backlog_sub in _closed_subs(transport)
+
+
+def test_no_floor_first_connect_never_walks_the_backlog(monkeypatch):
+    """A saturated page with NO floor is left alone: first connect keeps its old shape.
+
+    Without a stored watermark there is nothing for the walk to stop at, so paging
+    would fetch up to MAX_BACKLOG_PAGES * RELAY_HISTORY_LIMIT events on a channel's
+    FIRST connect -- a large multiple of the newest-2000 replay the relay already
+    sends. The walk is skipped instead, and the saturated page's own events are still
+    delivered exactly as before.
+    """
+    monkeypatch.setattr("app.channels.buzz.RELAY_HISTORY_LIMIT", 1, raising=False)
+    ch, captured = _started()
+    transport = FakeTransport()
+    ch._transport = transport
+    # No watermark -> floor is None -> no walk.
+
+    asyncio.run(ch._ensure_chat_subscription(CHANNEL))
+    live_sub = f"buzz-chat-{CHANNEL}"
+    only = _event(created_at=1700000500)
+    asyncio.run(ch.handle_relay_frame(json.dumps(["EVENT", live_sub, only])))
+    asyncio.run(ch.handle_relay_frame(json.dumps(["EOSE", live_sub])))
+
+    # The live page was saturated (it hit the cap), but no backlog page was opened ...
+    assert not [f for f in transport.sent if f[0] == "REQ" and str(f[1]).startswith("buzz-backlog-")]
+    assert CHANNEL not in ch._backlog_pages and CHANNEL not in ch._backlog_floor
+    # ... and its own events still reached publish, so first-connect delivery is unchanged.
+    assert [m.metadata["event_id"] for m in captured] == [only["id"]]
+
+
+@pytest.mark.parametrize("reason", ["error: gone", "auth-required: authenticate first"])
+def test_a_closed_backlog_page_only_drops_the_walk_and_never_touches_the_live_subscription(monkeypatch, reason):
+    """A relay CLOSED for a backlog page is best effort: the live subscription survives."""
+    monkeypatch.setattr("app.channels.buzz.RELAY_HISTORY_LIMIT", 1, raising=False)
+    ch, _ = _started()
+    transport = FakeTransport()
+    ch._transport = transport
+    ch._seen_created_at[CHANNEL] = 1700000000  # a floor, so the saturated live page does open a walk
+
+    asyncio.run(ch._ensure_chat_subscription(CHANNEL))
+    live_sub = f"buzz-chat-{CHANNEL}"
+    asyncio.run(ch.handle_relay_frame(json.dumps(["EVENT", live_sub, _event(created_at=1700000500)])))
+    asyncio.run(ch.handle_relay_frame(json.dumps(["EOSE", live_sub])))
+    backlog_sub = f"buzz-backlog-{CHANNEL}"
+    assert len(_reqs_for(transport, backlog_sub)) == 1
+
+    asyncio.run(ch.handle_relay_frame(json.dumps(["CLOSED", backlog_sub, reason])))
+
+    # The walk state is dropped, but the channel stays subscribed and is NOT
+    # re-subscribed (a backlog close is not a chat-subscription outage).
+    assert CHANNEL not in ch._backlog_pages and CHANNEL not in ch._backlog_floor
+    assert CHANNEL not in ch._backlog_until
+    assert CHANNEL in ch._chat_subscriptions
+    assert len(_reqs_by_sub(transport)[live_sub]) == 1
+
+
+def test_reopening_the_live_subscription_closes_an_in_flight_backlog_page(monkeypatch):
+    """A transient close mid-walk re-opens the live sub and must not orphan the page.
+
+    The live REQ's window is what the walk pages against; when the relay closes the
+    live subscription the walk is superseded, so re-opening it closes the bounded
+    backlog page instead of leaving an orphaned subscription on the relay.
+    """
+    monkeypatch.setattr("app.channels.buzz.RELAY_HISTORY_LIMIT", 1, raising=False)
+    ch, _ = _started()
+    transport = FakeTransport()
+    ch._transport = transport
+    ch._seen_created_at[CHANNEL] = 1700000000  # a floor, so the saturated live page does open a walk
+
+    asyncio.run(ch._ensure_chat_subscription(CHANNEL))
+    live_sub = f"buzz-chat-{CHANNEL}"
+    asyncio.run(ch.handle_relay_frame(json.dumps(["EVENT", live_sub, _event(created_at=1700000500)])))
+    asyncio.run(ch.handle_relay_frame(json.dumps(["EOSE", live_sub])))
+    backlog_sub = f"buzz-backlog-{CHANNEL}"
+    assert len(_reqs_for(transport, backlog_sub)) == 1
+    assert CHANNEL in ch._backlog_pages
+
+    # The relay transiently closes the live subscription while that page is open.
+    asyncio.run(ch.handle_relay_frame(json.dumps(["CLOSED", live_sub, "error: hiccup"])))
+
+    # The live REQ is re-issued, and the superseded backlog page is closed, not left open.
+    assert len(_reqs_for(transport, live_sub)) == 2
+    assert backlog_sub in _closed_subs(transport)
+    assert CHANNEL not in ch._backlog_pages
+    # ... and the new live REQ starts a fresh window, keyed to the current cursor.
+    assert ch._backlog_floor[CHANNEL] == 1700000500
+
+
+async def _open_backlog_walk(monkeypatch):
+    monkeypatch.setattr("app.channels.buzz.RELAY_HISTORY_LIMIT", 2)
+    ch, captured = _started()
+    transport = FakeTransport()
+    ch._transport = transport
+    ch._seen_created_at[CHANNEL] = 1700000000
+    await ch._ensure_chat_subscription(CHANNEL)
+    live_sub = ch._chat_sub_id(CHANNEL)
+    for created_at in (1700000500, 1700000400):
+        await ch.handle_relay_frame(json.dumps(["EVENT", live_sub, _event(created_at=created_at)]))
+    await ch.handle_relay_frame(json.dumps(["EOSE", live_sub]))
+    return ch, transport, captured
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["membership", "restricted", "pre-auth"])
+async def test_channel_access_ending_closes_backlog_and_ignores_stale_frames(monkeypatch, ending):
+    ch, transport, captured = await _open_backlog_walk(monkeypatch)
+    await ch._ensure_chat_subscription(CHANNEL_B)
+    other_live_sub = ch._chat_sub_id(CHANNEL_B)
+    backlog_sub = ch._backlog_sub_id(CHANNEL)
+    live_sub = ch._chat_sub_id(CHANNEL)
+    if ending == "membership":
+        await ch.handle_relay_frame(json.dumps(["EVENT", "buzz-membership", _membership_event(buzz_nostr.KIND_MEMBER_REMOVED)]))
+        assert live_sub in _closed_subs(transport)
+    else:
+        reason = "restricted: not a member" if ending == "restricted" else "auth-required: authenticate first"
+        await ch.handle_relay_frame(json.dumps(["CLOSED", live_sub, reason]))
+    assert backlog_sub in _closed_subs(transport)
+    assert CHANNEL not in ch._chat_subscriptions
+    assert CHANNEL_B in ch._chat_subscriptions
+    assert other_live_sub not in _closed_subs(transport)
+    assert other_live_sub in ch._page_seen
+    assert CHANNEL not in ch._backlog_pages and CHANNEL not in ch._backlog_floor
+    assert live_sub not in ch._page_seen and backlog_sub not in ch._page_seen
+    assert live_sub not in ch._page_oldest and backlog_sub not in ch._page_oldest
+    assert CHANNEL not in ch._backlog_until
+    before = len(captured)
+    for created_at in (1700000300, 1700000200):
+        await ch.handle_relay_frame(json.dumps(["EVENT", backlog_sub, _event(created_at=created_at)]))
+    for sub_id in (backlog_sub, live_sub):
+        await ch.handle_relay_frame(json.dumps(["EOSE", sub_id]))
+    assert len(captured) == before
+    assert len(_reqs_for(transport, backlog_sub)) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("created_at", [1700000400, 1700000450])
+async def test_backlog_without_timestamp_progress_stops_and_warns(monkeypatch, caplog, created_at):
+    ch, transport, _ = await _open_backlog_walk(monkeypatch)
+    backlog_sub = ch._backlog_sub_id(CHANNEL)
+    caplog.set_level(logging.WARNING, logger="app.channels.buzz")
+    # Equal timestamps saturate the inclusive boundary; newer timestamps violate
+    # the requested window. Neither response can advance a descending walk.
+    for i in range(2):
+        event = _event(created_at=created_at, content=f"@DeerFlow tied {i}")
+        await ch.handle_relay_frame(json.dumps(["EVENT", backlog_sub, event]))
+    await ch.handle_relay_frame(json.dumps(["EOSE", backlog_sub]))
+    assert len(_reqs_for(transport, backlog_sub)) == 1
+    assert backlog_sub in _closed_subs(transport)
+    assert CHANNEL in ch._chat_subscriptions
+    assert CHANNEL not in ch._backlog_pages and CHANNEL not in ch._backlog_until
+    assert "no timestamp progress" in caplog.text
+    assert "1700000400" in caplog.text
+    # Late EOSE/events must not restart a finished walk.
+    await ch.handle_relay_frame(json.dumps(["EVENT", backlog_sub, _event(created_at=1700000300)]))
+    await ch.handle_relay_frame(json.dumps(["EOSE", backlog_sub]))
+    assert len(_reqs_for(transport, backlog_sub)) == 1
