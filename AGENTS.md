@@ -222,8 +222,8 @@ Repo-wide conventions:
 - **Test-driven development** — features and bug fixes ship with tests. Backend tests live
   in `backend/tests/` (TDD is mandatory there; see [backend/AGENTS.md](backend/AGENTS.md));
   frontend tests live in `frontend/tests/`.
-  Public skill script regressions live in `tests/skills/`; exercise dependency fallbacks
-  with the optional import unavailable and mock HTTP transport to keep tests offline.
+  Public skill tests (`tests/skills/`): mock HTTP, cover missing optional imports, and
+  reject blank metadata in validation and CLI exit status. Keep tests offline.
 - **Before pushing** — backend `make format`, frontend `pnpm check`.
   Backend CI enforces `ruff format --check`.
 - **Skill text encoding** — treat `SKILL.md` and other textual skill resources as UTF-8;

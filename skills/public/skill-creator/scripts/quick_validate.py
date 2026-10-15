@@ -71,6 +71,8 @@ def validate_skill(skill_path):
         # Check name length (max 64 characters per spec)
         if len(name) > 64:
             return False, f"Name is too long ({len(name)} characters). Maximum is 64 characters."
+    else:
+        return False, "Name cannot be empty"
 
     # Extract and validate description
     description = frontmatter.get('description', '')
@@ -84,6 +86,8 @@ def validate_skill(skill_path):
         # Check description length (max 1024 characters per spec)
         if len(description) > 1024:
             return False, f"Description is too long ({len(description)} characters). Maximum is 1024 characters."
+    else:
+        return False, "Description cannot be empty"
 
     # Validate compatibility field if present (optional)
     compatibility = frontmatter.get('compatibility', '')
