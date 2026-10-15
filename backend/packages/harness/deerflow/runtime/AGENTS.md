@@ -124,6 +124,8 @@ prompts, and derived hashes do not enter the event. Ordinary task-tool subagents
 recorder proxy, never the journal itself; durable batch runs have no parent
 journal and emit no such event. Recorder failures are fail-open.
 
+**RunJournal write ownership** (`runtime/journal.py`): a batch handed to `store.put_batch()` is owned by a journal task until its outcome settles, so a cancelled `flush()`/`close()` caller detaches the waiter and re-raises `CancelledError` only after the owned write is drained — never abandon or replay the in-flight batch. A generic `put_batch` exception is an ambiguous outcome: it is quarantined, blocks every successor write, and makes `flush()`/`close()` report non-success instead of replaying the batch. Only `RunEventStoreNotCommittedError` means the store proved none of the batch committed and may be deliberately retried; stores must raise it instead of a bare exception for that case. Explicit `flush()` and `close(flush=True)` share one per-journal operation lock, so a successor batch can never overtake an unsettled predecessor, every waiter observes the same settlement, and a normal close detaches only after the whole buffer has settled. `close(flush=False)` is a separate abort path that never queues on that lock: it revokes write ownership before its first await and makes any in-flight flush report non-success rather than a late success. A cancelled write waits a bounded time for the store call to end; `Task.cancelled()`/a clean return does not prove an uncooperative backend's I/O actually stopped, so this is a bound on waiting, not a termination guarantee. An inner store task that outlives that bound stays supervised until it settles, so its late result is retrieved and logged rather than dropped. Two adjacent limits are known and tracked separately, not fixed here: the bounded wait covers the store write, not a `progress_reporter` that ignores cancellation (a pre-existing hazard on the force-close path); and background-write warnings log the exception type and message, whose text is backend-controlled and may echo driver-level parameters, so log consumers must not treat it as payload-free.
+
 **JSONL record boundaries** (`runtime/events/store/jsonl.py`): thread reads,
 run reads, and sequence recovery split on physical newlines. Do not use
 `str.splitlines()`: U+0085/U+2028/U+2029 inside valid JSON strings must remain
@@ -299,3 +301,9 @@ JSONL's single-process deployment constraint. Regression coverage is in
 Gateway admission and RunManager validate host-owned evidence origin against the shared `EVIDENCE_ORIGINS` in `runtime/runs/schemas.py`. Preserve the string values and reject client metadata as provenance; only trusted Python entry points set the admission argument.
 
 Idempotent resume reuse preserves both the private request identity and the original evidence origin/agent across worker and store boundaries. A retry must not relabel existing evidence. Memory/SQLite parity is covered in `tests/test_completed_evidence_admission.py`.
+
+Completed-evidence finalization obeys the journal write-ownership contract:
+unknown or cancelled write outcomes cannot yield a receipt or be replayed. Only
+proven-not-committed batches may be retried. Normal close stops new evidence
+producers and drains already admitted cross-thread callbacks inside its operation
+lock before flushing and detaching; do not reacquire that lock through `flush()`.

@@ -217,3 +217,8 @@ This host slice follows up the
 and the bilingual
 [Plugin Host APIs RFC](https://github.com/bytedance/deer-flow/issues/5539).
 Neither RFC implies that this PR ships a learning plugin.
+
+Journal writes with unknown outcomes (including lost acknowledgements or cancelled
+owned writes) prevent evidence sealing and are not replayed. Only a store-proven
+not-committed batch can be retried; a cancelled waiter does not cancel the owned
+write. Normal close stops evidence producers before draining accepted callbacks.

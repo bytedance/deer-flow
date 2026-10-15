@@ -381,13 +381,15 @@ async def test_seal_requires_drain_and_current_owner(evidence):
 
 
 @pytest.mark.asyncio
-async def test_failed_flush_never_issues_seal_and_close_can_retry():
+async def test_proven_not_committed_flush_never_issues_seal_and_close_can_retry():
+    from deerflow.runtime.events.store.base import RunEventStoreNotCommittedError
+
     class FailingStore(MemoryRunEventStore):
         fail = True
 
         async def put_batch(self, events):
             if self.fail:
-                raise RuntimeError("write failed")
+                raise RunEventStoreNotCommittedError("write failed")
             return await super().put_batch(events)
 
     store = FailingStore()
@@ -651,31 +653,35 @@ async def test_cancelled_background_flush_cannot_silently_seal_an_empty_tail(evi
     journal = RunJournal("r", "t-r", events, user_id="alice", flush_threshold=1)
     journal.record_middleware("test", name="test", hook="test", action="test", changes={})
     await entered.wait()
-    pending = tuple(journal._pending_flush_tasks)
+    pending = tuple(journal._owned_writes)
     for task in pending:
         task.cancel()
     await asyncio.gather(*pending, return_exceptions=True)
     events.put_batch = original
-    receipt = await journal.finish_evidence()
-    assert receipt.event_count == 1
-    await journal.close()
+    with pytest.raises(RuntimeError, match="unknown durable outcome"):
+        await journal.finish_evidence()
+    assert (await reader.get_snapshot(thread_id="t-r", run_id="r")).seal_state != "sealed"
+    assert not await events.list_events("t-r", "r", user_id="alice")
+    await journal.close(flush=False)
 
 
 @pytest.mark.asyncio
-async def test_cancelled_flush_before_first_execution_keeps_batch(evidence):
+async def test_cancelled_flush_before_first_execution_cannot_seal_an_empty_tail(evidence):
     import asyncio
 
     sf, events, runs, reader = evidence
     await put_run(runs)
     journal = RunJournal("r", "t-r", events, user_id="alice", flush_threshold=1)
     journal.record_middleware("test", name="test", hook="test", action="test", changes={})
-    pending = tuple(journal._pending_flush_tasks)
+    pending = tuple(journal._owned_writes)
     for task in pending:
         task.cancel()
     await asyncio.gather(*pending, return_exceptions=True)
-    receipt = await journal.finish_evidence()
-    assert receipt.event_count == 1
-    await journal.close()
+    with pytest.raises(RuntimeError, match="unknown durable outcome"):
+        await journal.finish_evidence()
+    assert (await reader.get_snapshot(thread_id="t-r", run_id="r")).seal_state != "sealed"
+    assert not await events.list_events("t-r", "r", user_id="alice")
+    await journal.close(flush=False)
 
 
 @pytest.mark.asyncio
@@ -766,3 +772,60 @@ async def test_changed_run_page_uses_validated_limit(evidence, monkeypatch):
     assert first.has_more
     second = await reader.list_changed_runs(cursor=first.next_cursor, limit=100)
     assert [row.run_id for row in second.items] == ["b"]
+
+
+@pytest.mark.asyncio
+async def test_normal_close_stops_evidence_producers_before_draining(evidence):
+    import asyncio
+
+    sf, events, runs, reader = evidence
+    await put_run(runs)
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = events.put_batch
+
+    async def blocked(batch):
+        entered.set()
+        await release.wait()
+        return await original(batch)
+
+    events.put_batch = blocked
+    journal = RunJournal("r", "t-r", events, user_id="alice")
+    journal.record_middleware("accepted", name="accepted", hook="test", action="test", changes={})
+    closing = asyncio.create_task(journal.close())
+    try:
+        await entered.wait()
+        journal.record_middleware("late", name="late", hook="test", action="test", changes={})
+    finally:
+        release.set()
+        await closing
+    rows = await events.list_events("t-r", "r", user_id="alice")
+    assert len(rows) == 1
+    assert rows[0]["event_type"] == "middleware:accepted"
+
+
+@pytest.mark.asyncio
+async def test_commit_then_error_never_replays_or_issues_evidence_receipt(evidence):
+    sf, events, runs, reader = evidence
+    await put_run(runs)
+    original = events.put_batch
+    calls = 0
+
+    async def commit_then_error(batch):
+        nonlocal calls
+        calls += 1
+        await original(batch)
+        raise OSError("acknowledgement lost")
+
+    events.put_batch = commit_then_error
+    journal = RunJournal("r", "t-r", events, user_id="alice")
+    journal.record_middleware("accepted", name="accepted", hook="test", action="test", changes={})
+    try:
+        with pytest.raises(OSError, match="acknowledgement lost"):
+            await journal.finish_evidence()
+        with pytest.raises(RuntimeError, match="unknown durable outcome"):
+            await journal.finish_evidence()
+        assert calls == 1
+        assert len(await events.list_events("t-r", "r", user_id="alice")) == 1
+        assert (await reader.get_snapshot(thread_id="t-r", run_id="r")).seal_state != "sealed"
+    finally:
+        await journal.close(flush=False)
