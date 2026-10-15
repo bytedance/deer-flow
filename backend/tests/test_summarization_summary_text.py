@@ -121,7 +121,7 @@ class TestSummaryWritesChannel:
 
     @pytest.mark.parametrize("async_mode", [False, True])
     @pytest.mark.parametrize("previous_summary", [None, "O" * 1000 + " OLD_END"], ids=["without-summary", "with-summary"])
-    @pytest.mark.parametrize("trim_limit", [120, None], ids=["bounded", "untrimmed"])
+    @pytest.mark.parametrize("trim_limit", [16, None], ids=["bounded", "untrimmed"])
     @pytest.mark.asyncio
     async def test_oversized_rescued_user_window_keeps_recent_exchanges(self, async_mode, previous_summary, trim_limit):
         model = _RecordingSummaryModel()
@@ -150,10 +150,11 @@ class TestSummaryWritesChannel:
 
         if trim_limit is not None and previous_summary is not None:
             # With an existing summary the new-messages raw budget halves to
-            # max(1, 120 // 2) = 60 chars, which cannot hold a complete AI/Tool
-            # exchange (an AI tool-call message formats to ~77 chars alone).
-            # Compaction declines rather than evict history the summary model
-            # never sees (#6889); state is left unchanged.
+            # max(1, 16 // 2) = 8 tokens: the window holds the trailing
+            # ToolMessage but cannot afford its owning AIMessage, so the head
+            # snap empties the window. Compaction declines rather than evict
+            # history the summary model never sees (#6889); state is left
+            # unchanged.
             assert result is None
             return
 
@@ -183,7 +184,7 @@ class TestSummaryWritesChannel:
         assert "RESULT_6" not in new_text
         if previous_summary:
             assert "OLD_END" in model.prompts[0]
-        else:
+        elif trim_limit is None:
             assert "PLAN_5" in new_text
 
     @pytest.mark.parametrize("async_mode", [False, True])
@@ -213,18 +214,106 @@ class TestSummaryWritesChannel:
             result = middleware.compact_state({"messages": history}, runtime, force=True)
 
         assert result is not None
-        # Only RESULT_4 reached the summarizer. The older source messages remain
-        # in the preserved state instead of being evicted without coverage (#6889).
-        assert list(result.messages_to_summarize) == [history[11]]
+        # The recent AI/Tool exchange reached the summarizer as a unit: the
+        # final-message fallback walks back to the owning AIMessage, so evicting
+        # the trailing ToolMessage can never strand an unpaired tool_use in
+        # state. The older source messages remain in the preserved state instead
+        # of being evicted without coverage (#6889).
+        assert list(result.messages_to_summarize) == [history[10], history[11]]
         assert history[0] in result.preserved_messages
         assert history[2] in result.preserved_messages
         assert history[9] in result.preserved_messages
+        assert history[10] not in result.preserved_messages
         assert user in result.preserved_messages
         assert len(model.prompts) == 1
         new_text = model.prompts[0].split("<new_messages>\n", 1)[1].split("\n</new_messages>", 1)[0]
-        assert new_text == "Tool: RESULT_4"
+        assert "PLAN_4" in new_text
+        assert new_text.endswith("Tool: RESULT_4")
         assert "CURRENT_REQUEST" not in model.prompts[0]
         assert "RESULT_5" not in model.prompts[0]
+
+    @pytest.mark.parametrize("async_mode", [False, True])
+    @pytest.mark.asyncio
+    async def test_bounded_window_keeps_rescued_system_message_leading(self, async_mode):
+        model = _RecordingSummaryModel()
+        middleware = DeerFlowSummarizationMiddleware(
+            model=model,
+            trigger=("messages", 4),
+            keep=("messages", 2),
+            token_counter=_char_count,
+            trim_tokens_to_summarize=16,
+        )
+        # Subagent shape: the whole system prompt lives as the leading state
+        # SystemMessage; only the recent exchange fits the bounded raw-input
+        # budget, so earlier exchanges become partition survivors.
+        system = SystemMessage(content="SUBAGENT_SYSTEM_PROMPT", id="sys")
+        user = HumanMessage(content="CURRENT_REQUEST", id="user")
+        history = [system, user]
+        for i in range(7):
+            history.extend(
+                [
+                    AIMessage(content=f"PLAN_{i}", id=f"ai-{i}", tool_calls=[{"name": "bash", "args": {}, "id": f"call-{i}"}]),
+                    ToolMessage(content=f"RESULT_{i}", id=f"tool-{i}", tool_call_id=f"call-{i}"),
+                ]
+            )
+        runtime = SimpleNamespace(context={})
+        if async_mode:
+            result = await middleware.acompact_state({"messages": history}, runtime, force=True)
+        else:
+            result = middleware.compact_state({"messages": history}, runtime, force=True)
+
+        assert result is not None
+        # The bounded window covers only the recent AI/Tool exchange.
+        assert list(result.messages_to_summarize) == [history[12], history[13]]
+        # Survivors are re-inserted after the leading system run —
+        # [systems, *survivors, *rest] — so the rescued system prompt keeps
+        # anchoring the post-compaction state. Prepending the survivors wholesale
+        # would demote it below stale history, and providers that require a
+        # leading system message (Anthropic) reject that state.
+        assert list(result.preserved_messages) == [system] + history[2:12] + [user] + history[14:]
+        assert result.preserved_messages[0] is system
+        assert len(model.prompts) == 1
+        assert "RESULT_5" in model.prompts[0]
+        assert "RESULT_0" not in model.prompts[0]
+
+    @pytest.mark.parametrize("async_mode", [False, True])
+    @pytest.mark.asyncio
+    async def test_final_message_fallback_includes_owning_exchange_for_trailing_tool(self, async_mode):
+        model = _RecordingSummaryModel()
+        middleware = DeerFlowSummarizationMiddleware(
+            model=model,
+            trigger=("messages", 4),
+            keep=("messages", 1),
+            token_counter=_char_count,
+            trim_tokens_to_summarize=120,
+        )
+        # The oversized old user message cannot anchor the human-anchored trim,
+        # so the final-message fallback picks the window; the partition ends on
+        # a ToolMessage whose AIMessage also sits in the partition.
+        old_user = HumanMessage(content="OLD_REQUEST " + "x" * 1000, id="old-user")
+        trailing_ai = AIMessage(content="PLAN_0", id="ai-0", tool_calls=[{"name": "bash", "args": {}, "id": "call-0"}])
+        trailing_tool = ToolMessage(content="RESULT_0", id="tool-0", tool_call_id="call-0")
+        user = HumanMessage(content="CURRENT_REQUEST", id="user")
+        history = [old_user, trailing_ai, trailing_tool, user]
+        runtime = SimpleNamespace(context={})
+        if async_mode:
+            result = await middleware.acompact_state({"messages": history}, runtime, force=True)
+        else:
+            result = middleware.compact_state({"messages": history}, runtime, force=True)
+
+        assert result is not None
+        # The fallback walks back to the owning AIMessage: the trailing exchange
+        # evicts as a unit, so state never keeps an AIMessage whose tool result
+        # was compacted away (an unpaired tool_use that tool-pairing-enforcing
+        # providers reject on the next call).
+        assert list(result.messages_to_summarize) == [trailing_ai, trailing_tool]
+        assert list(result.preserved_messages) == [old_user, user]
+        assert len(model.prompts) == 1
+        new_text = model.prompts[0].split("<new_messages>\n", 1)[1].split("\n</new_messages>", 1)[0]
+        assert "PLAN_0" in new_text
+        assert new_text.endswith("Tool: RESULT_0")
+        assert "OLD_REQUEST" not in new_text
+        assert "CURRENT_REQUEST" not in model.prompts[0]
 
     def test_tool_only_fallback_applies_budget_before_escaping(self):
         middleware = DeerFlowSummarizationMiddleware(

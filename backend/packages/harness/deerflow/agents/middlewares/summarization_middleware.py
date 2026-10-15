@@ -630,33 +630,59 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         trimmed_messages = self._trim_messages_for_summary(messages_to_summarize)
         if trimmed_messages:
             return trimmed_messages
+        # Tool-call ids present in the partition, used to tell an orphaned
+        # ToolMessage (its AIMessage was cut from the window) apart from
+        # standalone tool content, which must stay in the window.
+        partition_tool_aims = {tc.get("id") for m in messages_to_summarize if isinstance(m, AIMessage) for tc in m.tool_calls if tc.get("id")}
         if any(isinstance(message, HumanMessage) for message in messages_to_summarize):
-            # The human anchor can fall outside the token-limited tail.
-            # Preserve the existing final-message fallback for this case.
-            return messages_to_summarize[-1:]
+            # The human anchor can fall outside the token-limited tail (an
+            # oversized or non-text-partial human). Preserve the existing
+            # final-message fallback for this case.
+            tail = list(messages_to_summarize[-1:])
+            if tail and isinstance(tail[0], ToolMessage) and tail[0].tool_call_id in partition_tool_aims:
+                # This fallback now defines the eviction set, so evicting a lone
+                # trailing ToolMessage while its AIMessage survives in state would
+                # leave an unpaired tool_use that tool-pairing-enforcing providers
+                # reject on the next call. Walk back to the owning AIMessage so
+                # the trailing exchange evicts as a unit, mirroring the head snap
+                # of the AI/Tool-only branch below.
+                tool_call_id = tail[0].tool_call_id
+                start = len(messages_to_summarize) - 1
+                for index in range(len(messages_to_summarize) - 1, -1, -1):
+                    candidate = messages_to_summarize[index]
+                    if isinstance(candidate, AIMessage) and any(tc.get("id") == tool_call_id for tc in candidate.tool_calls):
+                        start = index
+                        break
+                tail = list(messages_to_summarize[start:])
+            return tail
         # Rescuing the current request can leave an AI/Tool-only window, which the
         # inherited human-anchored trimmer rejects even below budget. Select the
-        # recent messages whose formatted text fits the new-messages budget, using
-        # the same ``get_buffer_string`` representation ``_build_summary_input_text``
-        # trims, so the message window exactly matches the material that survives
-        # the raw-text cap.
+        # recent messages that fit the new-messages budget, measured in the same
+        # token currency ``_build_summary_input_text`` raw-text trims with — a
+        # character budget diverges both ways: under-filling the token budget for
+        # English (so compaction re-fires every turn) and overflowing it for CJK,
+        # where chars and tokens are near 1:1 and the joined text plus
+        # ``get_buffer_string`` separators can exceed the cap — and including the
+        # newline join so the window matches the joined text the raw trim
+        # measures.
         max_tokens = self.trim_tokens_to_summarize
         if previous_summary and max_tokens is not None:
             max_tokens = max(1, max_tokens // 2)
         if max_tokens is None or max_tokens <= 0:
             return list(messages_to_summarize)
+        join_cost = self._window_join_cost()
         window: list[AnyMessage] = []
         used = 0
         for message in reversed(messages_to_summarize):
-            formatted_len = len(get_buffer_string([message]))
-            if used + formatted_len > max_tokens:
+            cost = self._window_message_cost(message) + (join_cost if window else 0)
+            if used + cost > max_tokens:
                 if not window:
                     # A single oversized message still summarizes its tail rather
                     # than evicting it un-summarized.
                     window.append(message)
                 break
             window.append(message)
-            used += formatted_len
+            used += cost
         window = list(reversed(window))
         if not window:
             return []
@@ -666,13 +692,39 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         # forward when the ToolMessage has a matching AIMessage earlier in the
         # partition; a ToolMessage without any matching AIMessage in the partition
         # is standalone content, not an orphan, and must stay in the window.
-        partition_tool_aims = {tc.get("id") for m in messages_to_summarize if isinstance(m, AIMessage) for tc in m.tool_calls if tc.get("id")}
         while window and isinstance(window[0], ToolMessage):
             tool_call_id = window[0].tool_call_id
             if tool_call_id not in partition_tool_aims:
                 break
             window.pop(0)
         return window
+
+    def _window_message_cost(self, message: AnyMessage) -> int:
+        """Token cost of one message in the raw-text trim's currency.
+
+        Falls back to the character length of the message's ``get_buffer_string``
+        form when the counter raises or returns a non-integer, matching the
+        deterministic-cap fallback of ``_trim_summary_section_text``: a broken
+        counter must degrade the window approximation, not fail compaction.
+        """
+        try:
+            cost = self.token_counter([message])
+        except Exception:
+            logger.debug("Per-message token count failed; falling back to the character length of the message's buffer-string form", exc_info=True)
+            cost = len(get_buffer_string([message]))
+        if not isinstance(cost, int) or cost < 0:
+            cost = len(get_buffer_string([message]))
+        return cost
+
+    def _window_join_cost(self) -> int:
+        """Token cost of the newline ``get_buffer_string`` joins messages with."""
+        try:
+            cost = self.token_counter([HumanMessage(content="\n")])
+        except Exception:
+            cost = len("\n")
+        if not isinstance(cost, int) or cost < 0:
+            cost = len("\n")
+        return cost
 
     def _build_summary_prompt(self, messages_to_summarize: list[AnyMessage], previous_summary: str | None = None) -> str | None:
         """Build the summary prompt, returning ``None`` when trimming leaves nothing."""
@@ -755,7 +807,19 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             return None
         window_ids = {message.id for message in window}
         survivors = [message for message in messages_to_summarize if message.id not in window_ids]
-        preserved_messages = survivors + preserved_messages
+        # Prepending the survivors wholesale would demote the rescued state-level
+        # SystemMessage (e.g. a subagent's system prompt, kept at the head of
+        # ``preserved_messages`` by ``_preserve_required_context``) below stale
+        # survivor history, and providers that require a leading system message
+        # (Anthropic) reject that post-compaction state. Survivors are partition
+        # history: insert them after the leading system run instead —
+        # ``[systems, *survivors, *rest]``.
+        leading_systems = 0
+        for message in preserved_messages:
+            if not isinstance(message, SystemMessage):
+                break
+            leading_systems += 1
+        preserved_messages = preserved_messages[:leading_systems] + survivors + preserved_messages[leading_systems:]
         return window, preserved_messages, previous_summary, total_tokens
 
     def _freeze_compaction_sources(self, messages_to_summarize: list[AnyMessage]) -> tuple[str, ...]:
