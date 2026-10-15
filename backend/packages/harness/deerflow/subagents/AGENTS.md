@@ -91,6 +91,9 @@ These summaries also participate in the command/output attribution guard.
 
 Cargo: complete positive siblings permit empty targets. All-empty/ignored or bare banners stay UNVERIFIED; failures win.
 Unittest needs complete counts with ordinary passes; uppercase OK is not Go output. Failures win.
+Node TAP/spec acceptance uses complete, consistent tests/suites/pass/fail/cancelled/skipped/todo counters.
+TAP `ok N` points are not Go package passes; skip/todo-only runs supply no proof.
+Failures/cancellations win, and the normal command/output admission guards still apply.
 
 **Events**: `task_started`, `task_running`, `task_completed`/`task_failed`/`task_timed_out`
 **Handled LLM failures**: `LLMErrorHandlingMiddleware` deliberately converts provider/model exceptions into an `AIMessage` so the graph can end cleanly, stamping `additional_kwargs.deerflow_error_fallback=true` plus error metadata. Clean graph termination does not imply subagent success: `SubagentExecutor` inspects the last assistant message at terminalization and maps a marked fallback to `SubagentStatus.FAILED`, which then emits `task_failed` and the existing structured `subagent_error`. Only the marker is authoritative — error-looking assistant prose without it remains a normal completed result, so neither the executor nor frontend parses display text as a status protocol.
