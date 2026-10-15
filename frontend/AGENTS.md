@@ -534,3 +534,15 @@ Query/scope cancellation, and guard onSettled invalidations. Actual page
 callbacks, upload loops, preview effects and direct URLs still require scope
 binding/publication guards. HTML preview base stripping of search means a
 top-level workspace query cannot scope relative resources by itself.
+
+
+Shelf handoff uses useProjectAttachmentStore (#65: three real shelf/InputBox
+scenarios + 105 native regressions/full check). Captured actor/workspace/thread
+keys preserve remount/reload; legacy keys are never adopted. Old handles are
+inert and hook setters fence mounted thread/store identity. Keep retire-only-
+sent semantics; InputBox onSent uses its captured store and checks scope.
+Shelf preview owns full REST decoding plus effect/scope abort; content/download
+URLs carry the existing workspace_id selector, which never grants access.
+Distinct shelf/files project keys and current-view guards stop stale file-loop
+continuations and publication. Other project callers, composer text/reference
+stores, artifact URLs/HTML relatives and real browser/backend acceptance remain.

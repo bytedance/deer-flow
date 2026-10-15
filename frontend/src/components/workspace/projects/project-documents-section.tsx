@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -60,7 +60,7 @@ import {
   type ProjectThreadFile,
   type ProjectThreadFileGroup,
 } from "@/core/projects";
-import { stageProjectAttachment } from "@/core/projects/composer-attach";
+import { useProjectAttachmentStore } from "@/core/projects/composer-attach";
 import { useInfiniteThreads } from "@/core/threads/hooks";
 import type { AgentThread } from "@/core/threads/types";
 import {
@@ -70,6 +70,7 @@ import {
 } from "@/core/threads/utils";
 import { formatTimeAgo } from "@/core/utils/datetime";
 import { getFileIcon } from "@/core/utils/files";
+import { useWorkspaceLifetime } from "@/core/workspaces/context";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
@@ -83,6 +84,30 @@ function threadTitle(
 
 function errorToastMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
+}
+
+/** A cached route change can reuse this component before effect cleanup. */
+function useCurrentProjectView(projectId: string) {
+  const lifetime = useWorkspaceLifetime();
+  const identity = useMemo(
+    () => ({ projectId, lifetime, active: true }),
+    [projectId, lifetime],
+  );
+  const current = useRef(identity);
+  current.current = identity;
+  useEffect(() => {
+    identity.active = true;
+    return () => {
+      identity.active = false;
+    };
+  }, [identity]);
+  return useCallback(
+    () =>
+      identity.active &&
+      current.current === identity &&
+      !identity.lifetime?.scope.signal.aborted,
+    [identity],
+  );
 }
 
 /**
@@ -112,9 +137,13 @@ export function ProjectDocumentsSection({
           {t.projects.archivedDocumentsBanner}
         </div>
       )}
-      <ProjectDocumentShelf project={project} threads={threads} />
+      <ProjectDocumentShelf
+        key={`shelf-${project.id}`}
+        project={project}
+        threads={threads}
+      />
       <Separator />
-      <ProjectConversationFiles project={project} />
+      <ProjectConversationFiles key={`files-${project.id}`} project={project} />
     </section>
   );
 }
@@ -128,6 +157,8 @@ function ProjectDocumentShelf({
 }) {
   const { t } = useI18n();
   const router = useRouter();
+  const isCurrent = useCurrentProjectView(project.id);
+  const attachmentStore = useProjectAttachmentStore();
   const isArchived = project.status === "archived";
   const documentsQuery = useInfiniteProjectDocuments(project.id);
   const projectsConfigQuery = useProjectsConfig();
@@ -157,32 +188,37 @@ function ProjectDocumentShelf({
 
   // One file per request (§17.2); the loop serializes multi-file drops.
   const uploadFiles = async (files: File[]) => {
-    if (files.length === 0 || isArchived) {
+    if (!isCurrent() || files.length === 0 || isArchived) {
       return;
     }
     setIsUploading(true);
     try {
       for (const file of files) {
+        if (!isCurrent()) return;
         try {
           await uploadDocument.mutateAsync({ file });
         } catch (error) {
+          if (!isCurrent()) return;
           toast.error(
             errorToastMessage(error, t.projects.uploadDocumentFailed),
           );
         }
       }
     } finally {
-      setIsUploading(false);
+      if (isCurrent()) setIsUploading(false);
     }
   };
 
   const handleConfirmTrash = () => {
-    if (!trashDoc) {
+    if (!isCurrent() || !trashDoc) {
       return;
     }
     deleteDocument.mutate(trashDoc.id, {
-      onSuccess: () => setTrashDoc(null),
+      onSuccess: () => {
+        if (isCurrent()) setTrashDoc(null);
+      },
       onError: (error) => {
+        if (!isCurrent()) return;
         toast.error(errorToastMessage(error, t.projects.deleteDocumentFailed));
       },
     });
@@ -309,9 +345,15 @@ function ProjectDocumentShelf({
                     )
                   : null
               }
-              onPreview={() => setPreviewDoc(document)}
-              onAttach={() => setAttachDoc(document)}
-              onTrash={() => setTrashDoc(document)}
+              onPreview={() => {
+                if (isCurrent()) setPreviewDoc(document);
+              }}
+              onAttach={() => {
+                if (isCurrent()) setAttachDoc(document);
+              }}
+              onTrash={() => {
+                if (isCurrent()) setTrashDoc(document);
+              }}
             />
           ))}
         </ul>
@@ -348,21 +390,23 @@ function ProjectDocumentShelf({
         isPending={attachDocument.isPending}
         onClose={() => setAttachDoc(null)}
         onAttach={(thread) => {
-          if (!attachDoc) {
+          if (!isCurrent() || !attachDoc) {
             return;
           }
           attachDocument.mutate(
             { documentId: attachDoc.id, threadId: thread.thread_id },
             {
               onSuccess: (result) => {
+                if (!isCurrent()) return;
                 // The server-side ingestion completed, so the composer of
                 // the target thread receives a *completed* attachment (§9).
-                stageProjectAttachment(thread.thread_id, result);
+                attachmentStore.stage(thread.thread_id, result);
                 toast.success(t.projects.attachedToThread(result.filename));
                 setAttachDoc(null);
                 router.push(pathOfThread(thread));
               },
               onError: (error) => {
+                if (!isCurrent()) return;
                 toast.error(errorToastMessage(error, t.projects.attachFailed));
               },
             },
@@ -420,6 +464,7 @@ function ProjectDocumentRow({
   onTrash: () => void;
 }) {
   const { t } = useI18n();
+  const lifetime = useWorkspaceLifetime();
   if (document.content_missing) {
     // §11: the list response's server-side integrity flag is authoritative —
     // a row whose bytes are gone renders as content missing at list render,
@@ -468,7 +513,11 @@ function ProjectDocumentRow({
           <a
             href={urlOfProjectDocumentContent(project.id, document.id, {
               download: true,
+              ...(lifetime ? { workspaceId: lifetime.scope.workspaceId } : {}),
             })}
+            onClick={(event) => {
+              if (lifetime?.scope.signal.aborted) event.preventDefault();
+            }}
             target="_blank"
             rel="noopener noreferrer"
           >
@@ -500,6 +549,7 @@ function DocumentPreviewDialog({
   onClose: () => void;
 }) {
   const { t } = useI18n();
+  const lifetime = useWorkspaceLifetime();
   const [preview, setPreview] = useState<ProjectDocumentPreview | null>(null);
   const [failed, setFailed] = useState(false);
 
@@ -508,11 +558,18 @@ function DocumentPreviewDialog({
       return;
     }
     let cancelled = false;
+    const controller = new AbortController();
     setPreview(null);
     setFailed(false);
-    fetchProjectDocumentPreview(project.id, document.id)
+    const request = lifetime
+      ? fetchProjectDocumentPreview(project.id, document.id, {
+          rest: lifetime.rest,
+          signal: AbortSignal.any([lifetime.scope.signal, controller.signal]),
+        })
+      : fetchProjectDocumentPreview(project.id, document.id);
+    request
       .then((result) => {
-        if (!cancelled) {
+        if (!cancelled && !lifetime?.scope.signal.aborted) {
           setPreview(result);
         }
       })
@@ -521,14 +578,15 @@ function DocumentPreviewDialog({
         // the in-dialog error. The row's missing badge comes from the list
         // response's server-side ``content_missing`` flag, not from a
         // preview probe.
-        if (!cancelled) {
+        if (!cancelled && !lifetime?.scope.signal.aborted) {
           setFailed(true);
         }
       });
     return () => {
       cancelled = true;
+      controller.abort();
     };
-  }, [project.id, document]);
+  }, [project.id, document, lifetime]);
 
   const language = document
     ? (resolveStoredArtifactLanguage(document.name) ?? "text")
@@ -538,10 +596,17 @@ function DocumentPreviewDialog({
     language === "html" ||
     getTabularDelimiter(language) !== null;
   const contentUrl = document
-    ? urlOfProjectDocumentContent(project.id, document.id)
+    ? urlOfProjectDocumentContent(
+        project.id,
+        document.id,
+        lifetime ? { workspaceId: lifetime.scope.workspaceId } : undefined,
+      )
     : "";
   const downloadUrl = document
-    ? urlOfProjectDocumentContent(project.id, document.id, { download: true })
+    ? urlOfProjectDocumentContent(project.id, document.id, {
+        download: true,
+        ...(lifetime ? { workspaceId: lifetime.scope.workspaceId } : {}),
+      })
     : "";
 
   return (
@@ -827,17 +892,19 @@ function ConversationFileGroup({
   isArchived: boolean;
 }) {
   const { t } = useI18n();
+  const isCurrent = useCurrentProjectView(project.id);
   const promoteFile = usePromoteThreadFile(project.id);
   const [saveTarget, setSaveTarget] = useState<ProjectThreadFile | null>(null);
   const [shelfName, setShelfName] = useState("");
 
   const openSaveDialog = (file: ProjectThreadFile) => {
+    if (!isCurrent()) return;
     setSaveTarget(file);
     setShelfName(file.name);
   };
 
   const handleSave = () => {
-    if (!saveTarget) {
+    if (!isCurrent() || !saveTarget) {
       return;
     }
     const trimmed = shelfName.trim();
@@ -852,10 +919,12 @@ function ConversationFileGroup({
       },
       {
         onSuccess: (result) => {
+          if (!isCurrent()) return;
           toast.success(t.projects.savedToProject(result.document.name));
           setSaveTarget(null);
         },
         onError: (error) => {
+          if (!isCurrent()) return;
           toast.error(errorToastMessage(error, t.projects.saveToProjectFailed));
         },
       },

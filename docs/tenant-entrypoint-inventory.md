@@ -154,3 +154,11 @@ normal project/shelf/thread-file flow plus delayed decoding/retained mutation
 passes with 38 native regressions/full check in Shanghai. Actual UI callers
 and direct download/iframe/relative HTML URLs remain pending; these HTTP
 fixtures are not end-to-end or physical isolation acceptance.
+
+
+Shelf/InputBox handoff (#65): actor/workspace/thread sessionStorage partition
+and expired handle fences, real shelf staging and captured onSent retirement;
+scoped preview effect and direct document URL selector. P/T/P persistence and
+legacy isolation, late attach/send and same-space project multi-file navigation
+passed with 105 native regressions/full check. Other page/store/artifact and
+actual browser/backend/Run/physical boundaries remain pending.

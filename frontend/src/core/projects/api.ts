@@ -512,9 +512,15 @@ export async function deleteProjectDocument(
 export function urlOfProjectDocumentContent(
   projectId: string,
   documentId: string,
-  { download = false }: { download?: boolean } = {},
+  {
+    download = false,
+    workspaceId,
+  }: { download?: boolean; workspaceId?: string } = {},
 ): string {
-  const suffix = `/documents/${encodeURIComponent(documentId)}/content${download ? "?download=true" : ""}`;
+  const params = new URLSearchParams();
+  if (download) params.set("download", "true");
+  if (workspaceId) params.set("workspace_id", workspaceId);
+  const suffix = `/documents/${encodeURIComponent(documentId)}/content${params.size ? `?${params}` : ""}`;
   return projectUrl(projectId, suffix);
 }
 

@@ -2524,5 +2524,62 @@
       "direct document/artifact URLs and HTML relative asset routing; current preview base intentionally strips query, so top-level query selector alone is insufficient",
       "same-space sidecar parent/unmount/quiet-stream gaps, other UI stores, actual shell/selector/browser/backend two-tab and principal consistency; all M4-M11 and activation gates remain"
     ]
+  },
+  "frontend_shelf_handoff": {
+    "job": "deerflow-tenant-frontend",
+    "status": "real shelf/composer handoff, preview client and scoped document URLs verified through UI/HTTP fixtures; full M3 incomplete",
+    "history": {
+      "62": {
+        "result": "FAILURE",
+        "scope": "main RED: actual preview dialog displayed preview-null, missing captured REST client",
+        "archive_sha256": "0489a57f2c62064a51719655f1a5d1d7b5f8bc3b9da6270886ff3e457b89387a"
+      },
+      "63": {
+        "result": "SUCCESS",
+        "scope": "normal real shelf/composer P/T/P main first, before adding two lifecycle scenarios; 41 native regressions passed. Newly introduced duplicate sibling project keys surfaced in console and were corrected before final checks.",
+        "tests_passed": 42,
+        "duplicate_key_warning": true,
+        "archive_sha256": "1fab0984b59e5d2072a3507beffcf4e83a70613e65f95e076a2cbcbbadd99d16"
+      },
+      "64": {
+        "result": "FAILURE",
+        "scope": "108 behaviors and five-file formatting passed; duplicate key warning gone. Target lint caught match() used only as a boolean in the new HTTP fixture. Fixed to test(); production bytes unchanged.",
+        "tests_passed": 108,
+        "duplicate_key_warning": false,
+        "archive_sha256": "aba6055950f04550d4215d4eb04cddd226bcacbb4997ba976f5729f085cdcce0"
+      }
+    },
+    "green": {
+      "build": 65,
+      "result": "SUCCESS",
+      "tests_passed": 108,
+      "tests_added": 3,
+      "native_regressions": 105,
+      "test_seconds": [
+        67.0
+      ],
+      "build_seconds": 503.155,
+      "archive_sha256": "2b7e01decf1ac97bc0d56d3aa335772d9058d12072ecd04fca987a7eff3a276c",
+      "image_id": "sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01",
+      "duplicate_key_warning": false,
+      "production_bytes_identical_to_behavior_green_64": true,
+      "checks": "three real shelf/InputBox/Context/project and thread hook mains; existing attachment store/hook, real input-box attachment/mention, shelf UI and document API regressions; five-file Prettier/target ESLint, early tsc and full pnpm check"
+    },
+    "source_sha256": {
+      "frontend/src/core/projects/composer-attach.ts": "06f466fa3f9b1ced181dc791bebed36fea760e22e5e809938ac0f7f7d998abf4",
+      "frontend/src/core/projects/api.ts": "24e5017d41ffc3ad8f78bbc50a47184208a156046906e75dcea63c17dfd43db4",
+      "frontend/src/components/workspace/input-box.tsx": "7d698b65d737a6ed7dda39d100c042134aec55d86c867ec7169d71570f7c9ecd",
+      "frontend/src/components/workspace/projects/project-documents-section.tsx": "1206b438791488fd688d036d471d9263f8203aab16bdcc1948105df2bf56d97f",
+      "frontend/tests/unit/components/workspace/projects/workspace-shelf.dom.test.tsx": "e02ab7608706fdb2dd9fe94ec684187d2ebf4446ae503f5c150339bbf7965a32"
+    },
+    "scope": "confirmed actor/workspace/thread attachment storage with immutable scoped handles, no legacy adoption, native reload/remount and retire-only-sent behavior retained; expired handles are inert, mounted setter additionally fences thread/store identity. Actual shelf uses this store, fixed REST preview with effect cancellation, and direct content/download URLs carrying the existing workspace_id selector. Keyed project shelf/files views and current-view guards stop stale loop continuation, state/toast/router/save/attach publication. InputBox onSent/retirement and file-mention prepare/attach continuations capture the lifetime.",
+    "evidence": "real ProjectDocumentsSection, InputBox, PromptInputProvider, Context and project/thread hooks with native REST/SDK search and synthetic HTTP; preview rendering leaf, router, models, toast and final onSubmit boundary doubled. P/T/P flow proves preview selector, download URL selector, attachment-only submission, persistent own pending lists, no cross-space same-thread reuse and no legacy adoption. Actual old attach Mutation state observed through abort; old onSent cannot clear current or later P drafts. Same-space cached project navigation stops subsequent files after first request finishes, and current project upload still works. Does not prove actual backend/browser downloads or Run submission; first old upload may finish against its original project, not a remote STOP claim.",
+    "cleanup": "#62-#65 terminal; exact owned containers/networks and formatter inventories empty; dependency caches retained",
+    "warnings": "New duplicate-key warning fixed and absent from #64/#65. Existing Radix Description and KaTeX happy-dom warnings, and native iframe fixture localhost/cleanup network errors remain; these are not real browser preview acceptance.",
+    "remaining": [
+      "actual project settings/sidebar/create/move-menu callbacks; scope composer text/reference draft keys and other UI stores; file-mention focus scheduling and explicit scoped picker race acceptance",
+      "artifact direct URLs and HTML relative resources, standalone views/download/iframe in actual browser, other resource clients",
+      "same-space sidecar parent/unmount/quiet-stream faults; actual shell/capability/selector and browser/backend two tabs; principal/session/revocation and all M4-M11; activation closed"
+    ]
   }
 }

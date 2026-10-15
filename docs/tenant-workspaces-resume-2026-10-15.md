@@ -1,6 +1,6 @@
 # 2026-10-15 暂停与恢复检查点
 
-状态更新：用户已于 2026-10-15 明确要求继续，当前已恢复；最新验证见文末 #61。下面暂停段保留为历史记录。
+状态更新：用户已于 2026-10-15 明确要求继续，当前已恢复；最新验证见文末 #65。下面暂停段保留为历史记录。
 
 用户此前要求今天到这里，保存进度并允许本地提交。此检查点是 WIP，不能声称功能验收完成；不要自动继续开发、启动构建、部署或推送。用户再次要求继续后再恢复。
 
@@ -235,3 +235,45 @@ Same-space sidecar parent/unmount/quiet-stream, actual shell/selector/two-tab
 and principal acceptance remain; M3 is partial, all parent M0-M11 gates stay
 open and activation remains closed. No deployment, Git remote push, model
 call or local runtime was performed.
+
+
+M3 shelf/composer handoff checkpoint (2026-10-15): #62 main RED showed
+preview-null in the actual preview dialog. #63 main GREEN (42 cases) came
+before two lifecycle scenarios; its new duplicate sibling keys were spotted
+in console and corrected to distinct shelf/files keys. #64 passed 108
+behaviors/format, without the key warning, then target lint rejected a test
+fixture match() boolean. Replacing it with test() changes no production bytes.
+#65 SUCCESS: 108 cases (three new, 105 existing), five-file Prettier/target
+lint, early tsc and required full pnpm check. Source hashes match the final
+archive; #62-#65 exact owned resources and formatter inventories are empty.
+
+The native attachment list persists per actor/workspace/thread and captures
+an immutable lifetime; expired handles cannot read/write/retire it. Native
+unscoped keys stay unchanged and are never adopted. Mounted setters also
+fence thread/store identity. The real shelf stages into this store; InputBox
+reads it and retires sent files using the captured store, with onSent scope
+fencing. File-mention prepare/attach awaits use captured REST and guard stale
+continuations while native mention behavior stays covered by its regressions.
+
+The actual preview effect uses fixed REST plus scope/effect cancellation.
+Document row download and preview iframe/full-file URLs carry the existing
+workspace_id selector; it is not a credential. Cached project navigation
+remounts distinct shelf/files views; current-view guards stop later files in
+an old multi-file loop and stale state/toast/router/save/attach publication.
+P/T/P main proves own draft persistence, actual attachment-only composer
+submission, legacy isolation and scoped preview/link selection. The two
+additional scenarios observe actual old mutation state and old onSent, and
+stop an old file loop after navigation while current project upload works.
+The first old upload may finish in its original project; no remote STOP or
+rollback is claimed. HTTP/router/model/toast/preview-leaf and final onSubmit
+are doubled; no real backend/browser download, iframe or Run proof implied.
+Existing Radix/KaTeX and native iframe fixture network/cleanup warnings remain;
+the newly introduced duplicate-key warning is fixed.
+
+Next: actual settings/sidebar/create/move-menu callbacks, composer text/
+reference drafts and other UI stores; explicit scoped file-picker/focus race
+proof; artifact/direct/relative HTML and standalone views, then actual shell/
+selector/browser/backend two-tab acceptance. Same-space sidecar faults and
+principal/session/revocation remain. M3 is partial, every M0-M11 parent gate
+remains open and activation stays closed. No deployment, Git remote push,
+model call or local application runtime was performed.

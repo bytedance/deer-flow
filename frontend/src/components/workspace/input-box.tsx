@@ -102,7 +102,7 @@ import {
 } from "@/core/models/reasoning";
 import { attachProjectDocument } from "@/core/projects/api";
 import {
-  retireProjectAttachments,
+  useProjectAttachmentStore,
   useStagedProjectAttachments,
 } from "@/core/projects/composer-attach";
 import {
@@ -477,6 +477,7 @@ export function InputBox({
   // and includes them in the next send without a re-upload. Staged only on
   // attach success; the hook consumes the staged entry once per thread and
   // keeps it across a Strict-Mode effect replay.
+  const projectAttachmentStore = useProjectAttachmentStore();
   const [projectAttachments, setProjectAttachments] =
     useStagedProjectAttachments(threadId);
   const {
@@ -1412,6 +1413,7 @@ export function InputBox({
 
   const submitThreadMessage = useCallback(
     (message: PromptInputMessage) => {
+      lifetime?.scope.signal.throwIfAborted();
       const files = message.files.flatMap((file) =>
         file.file instanceof File ? [file.file] : [],
       );
@@ -1544,6 +1546,7 @@ export function InputBox({
         // `onSent` never fires for a dropped send or a failed attachment
         // upload, so a retry keeps its quotes, references and staged files.
         onSent: () => {
+          if (lifetime?.scope.signal.aborted) return;
           if (composerLifetimeRef.current !== sendingLifetime) {
             // The upload finished after the composer moved to another
             // conversation or unmounted. Leave live state alone and retire
@@ -1554,7 +1557,7 @@ export function InputBox({
               draftKey,
               sentDraftTexts,
             );
-            retireProjectAttachments(threadId, projectAttachments);
+            projectAttachmentStore.retire(threadId, projectAttachments);
             return;
           }
           setMentionQuery(null);
@@ -1610,6 +1613,8 @@ export function InputBox({
       onContextChange,
       onSubmit,
       projectAttachments,
+      projectAttachmentStore,
+      lifetime,
       setProjectAttachments,
       reportUploadLimitViolations,
       resolvedModelName,
@@ -1905,6 +1910,7 @@ export function InputBox({
   }, []);
   const selectMention = useCallback(
     async (selection: MentionSelection) => {
+      if (lifetime?.scope.signal.aborted) return;
       if (mentionInFlight.current || disabled || polishingInput) return;
       const epoch = mentionEpoch.current;
       const originalText = textInput.value;
@@ -2007,13 +2013,28 @@ export function InputBox({
           setMentionError(null);
           try {
             await onPrepareThread?.();
-            if (epoch !== mentionEpoch.current) return;
-            const attached = await attachProjectDocument(
-              projectId,
-              selection.document.id,
-              threadId,
-            );
-            if (epoch !== mentionEpoch.current) return;
+            if (
+              lifetime?.scope.signal.aborted ||
+              epoch !== mentionEpoch.current
+            )
+              return;
+            const attached = lifetime
+              ? await attachProjectDocument(
+                  projectId,
+                  selection.document.id,
+                  threadId,
+                  { rest: lifetime.rest, signal: lifetime.scope.signal },
+                )
+              : await attachProjectDocument(
+                  projectId,
+                  selection.document.id,
+                  threadId,
+                );
+            if (
+              lifetime?.scope.signal.aborted ||
+              epoch !== mentionEpoch.current
+            )
+              return;
             setProjectAttachments((previous) => [
               ...previous.filter(
                 (file) => file.virtual_path !== attached.virtual_path,
@@ -2025,11 +2046,17 @@ export function InputBox({
               },
             ]);
           } catch {
-            if (epoch === mentionEpoch.current)
+            if (
+              !lifetime?.scope.signal.aborted &&
+              epoch === mentionEpoch.current
+            )
               setMentionError(t.inputBox.mentionAttachFailed);
             return;
           } finally {
-            if (epoch === mentionEpoch.current) {
+            if (
+              !lifetime?.scope.signal.aborted &&
+              epoch === mentionEpoch.current
+            ) {
               mentionInFlight.current = false;
               setMentionBusy(false);
             }
@@ -2096,6 +2123,7 @@ export function InputBox({
       onPrepareThread,
       polishingInput,
       projectAttachments,
+      lifetime,
       projectId,
       setProjectAttachments,
       t,

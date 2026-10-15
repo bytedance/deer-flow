@@ -1,5 +1,11 @@
 import type { SetStateAction } from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+
+import { useWorkspaceLifetime } from "@/core/workspaces/context";
+import {
+  captureWorkspaceRequestScope,
+  type WorkspaceRequestScope,
+} from "@/core/workspaces/request-scope";
 
 import type { AttachProjectDocumentResult } from "./types";
 
@@ -29,10 +35,6 @@ import type { AttachProjectDocumentResult } from "./types";
  */
 const STORAGE_KEY_PREFIX = "deerflow.project-attachment.";
 
-function storageKey(threadId: string): string {
-  return `${STORAGE_KEY_PREFIX}${threadId}`;
-}
-
 function safeSessionStorage(): Storage | null {
   try {
     return typeof window === "undefined" ? null : window.sessionStorage;
@@ -54,125 +56,153 @@ function isAttachment(value: unknown): value is AttachProjectDocumentResult {
   );
 }
 
-/**
- * Stage one thread-confirmed attachment, appending it to that thread's
- * pending list. Re-staging the same document (same ``virtual_path``)
- * refreshes its entry instead of duplicating it.
- */
+export interface ProjectAttachmentStore {
+  isActive(): boolean;
+  read(threadId: string): AttachProjectDocumentResult[];
+  write(threadId: string, attachments: AttachProjectDocumentResult[]): void;
+  stage(threadId: string, attachment: AttachProjectDocumentResult): void;
+  retire(threadId: string, sent: readonly AttachProjectDocumentResult[]): void;
+}
+
+function attachmentStore(
+  scope?: WorkspaceRequestScope,
+): ProjectAttachmentStore {
+  const captured = scope ? captureWorkspaceRequestScope(scope) : undefined;
+  const isActive = () => !captured?.signal.aborted;
+  const keyFor = (threadId: string) =>
+    captured
+      ? `${STORAGE_KEY_PREFIX}v1.${JSON.stringify([captured.actorUserId, captured.workspaceId, threadId])}`
+      : `${STORAGE_KEY_PREFIX}${threadId}`;
+  const read = (threadId: string): AttachProjectDocumentResult[] => {
+    if (!isActive()) return [];
+    const storage = safeSessionStorage();
+    if (!storage) return [];
+    const key = keyFor(threadId);
+    const raw = storage.getItem(key);
+    if (raw === null) return [];
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed.filter(isAttachment);
+      if (isAttachment(parsed)) return [parsed];
+    } catch {
+      /* Corrupt records are dropped within this namespace only. */
+    }
+    storage.removeItem(key);
+    return [];
+  };
+  const write = (
+    threadId: string,
+    attachments: AttachProjectDocumentResult[],
+  ) => {
+    if (!isActive()) return;
+    const storage = safeSessionStorage();
+    if (!storage) return;
+    const key = keyFor(threadId);
+    if (attachments.length === 0) storage.removeItem(key);
+    else storage.setItem(key, JSON.stringify(attachments));
+  };
+  return Object.freeze({
+    isActive,
+    read,
+    write,
+    stage(threadId: string, attachment: AttachProjectDocumentResult) {
+      if (!isActive()) return;
+      const pending = read(threadId).filter(
+        (item) => item.virtual_path !== attachment.virtual_path,
+      );
+      write(threadId, [...pending, attachment]);
+    },
+    retire(threadId: string, sent: readonly AttachProjectDocumentResult[]) {
+      if (!isActive()) return;
+      const sentPaths = new Set(sent.map((item) => item.virtual_path));
+      write(
+        threadId,
+        read(threadId).filter((item) => !sentPaths.has(item.virtual_path)),
+      );
+    },
+  });
+}
+const legacyAttachments = attachmentStore();
+
+/** Legacy unscoped drafts retain their existing keys and are never adopted. */
 export function stageProjectAttachment(
   threadId: string,
   attachment: AttachProjectDocumentResult,
 ): void {
-  const storage = safeSessionStorage();
-  if (!storage) {
-    return;
-  }
-  const pending = readProjectAttachments(threadId).filter(
-    (candidate) => candidate.virtual_path !== attachment.virtual_path,
-  );
-  storage.setItem(
-    storageKey(threadId),
-    JSON.stringify([...pending, attachment]),
-  );
+  legacyAttachments.stage(threadId, attachment);
 }
-
-/**
- * Read a thread's pending attachments **without consuming them**. Corrupt
- * payloads are dropped; the pre-list single-object payload shape is read as a
- * one-element list so a mid-session upgrade keeps the staged chip.
- */
 export function readProjectAttachments(
   threadId: string,
 ): AttachProjectDocumentResult[] {
-  const storage = safeSessionStorage();
-  if (!storage) {
-    return [];
-  }
-  const raw = storage.getItem(storageKey(threadId));
-  if (raw === null) {
-    return [];
-  }
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (Array.isArray(parsed)) {
-      return parsed.filter(isAttachment);
-    }
-    if (isAttachment(parsed)) {
-      return [parsed];
-    }
-  } catch {
-    // Corrupt payload: drop it.
-  }
-  storage.removeItem(storageKey(threadId));
-  return [];
+  return legacyAttachments.read(threadId);
 }
-
-/**
- * Drop the given attachments from a thread's pending list, keeping any staged
- * since. For a send dispatched after its composer has unmounted or moved on to
- * another thread: that send carries only what it captured, so documents
- * attached to the thread meanwhile must stay for the next message.
- */
 export function retireProjectAttachments(
   threadId: string,
   sent: readonly AttachProjectDocumentResult[],
 ): void {
-  const storage = safeSessionStorage();
-  if (!storage) {
-    return;
-  }
-  const sentPaths = new Set(sent.map((attachment) => attachment.virtual_path));
-  const remaining = readProjectAttachments(threadId).filter(
-    (attachment) => !sentPaths.has(attachment.virtual_path),
-  );
-  if (remaining.length === 0) {
-    storage.removeItem(storageKey(threadId));
-  } else {
-    storage.setItem(storageKey(threadId), JSON.stringify(remaining));
-  }
+  legacyAttachments.retire(threadId, sent);
 }
 
-/**
- * The current thread's pending attachments, held by the mounted composer.
- *
- * The list is loaded from storage on mount and on every thread change, and
- * every mutation is written back immediately, so unmounting (navigating to
- * the project page, reloading) never loses a pending chip. A Strict-Mode
- * effect replay re-reads the same list and re-applies the same state — there
- * is no consume step left to replay wrongly.
- *
- * The returned setter accepts the same value-or-updater shapes as
- * ``useState`` and is stable per thread.
- */
+/** Persistent per actor/workspace; expired handles cannot read or modify it. */
+export function createWorkspaceProjectAttachmentStore(
+  scope: WorkspaceRequestScope,
+): ProjectAttachmentStore {
+  return attachmentStore(scope);
+}
+export function useProjectAttachmentStore(): ProjectAttachmentStore {
+  const lifetime = useWorkspaceLifetime();
+  return useMemo(
+    () =>
+      lifetime
+        ? createWorkspaceProjectAttachmentStore(lifetime.scope)
+        : legacyAttachments,
+    [lifetime],
+  );
+}
+
+/** Read without consuming; a successful send retires only the files it sent. */
 export function useStagedProjectAttachments(threadId: string) {
+  const store = useProjectAttachmentStore();
   const [attachments, setAttachmentsState] = useState<
     AttachProjectDocumentResult[]
   >([]);
   const pendingRef = useRef<AttachProjectDocumentResult[]>([]);
-
+  const identity = useMemo(
+    () => ({ threadId, store, mounted: true }),
+    [threadId, store],
+  );
+  const current = useRef(identity);
+  current.current = identity;
   useEffect(() => {
-    const pending = readProjectAttachments(threadId);
+    identity.mounted = true;
+    const pending = store.read(threadId);
     pendingRef.current = pending;
     setAttachmentsState(pending);
-  }, [threadId]);
-
+    return () => {
+      identity.mounted = false;
+    };
+  }, [identity, store, threadId]);
   const setAttachments = useCallback(
     (value: SetStateAction<AttachProjectDocumentResult[]>) => {
+      if (
+        !identity.mounted ||
+        current.current !== identity ||
+        !store.isActive()
+      )
+        return;
       const next =
         typeof value === "function" ? value(pendingRef.current) : value;
+      if (
+        !identity.mounted ||
+        current.current !== identity ||
+        !store.isActive()
+      )
+        return;
       pendingRef.current = next;
-      const storage = safeSessionStorage();
-      if (storage) {
-        if (next.length === 0) {
-          storage.removeItem(storageKey(threadId));
-        } else {
-          storage.setItem(storageKey(threadId), JSON.stringify(next));
-        }
-      }
+      store.write(threadId, next);
       setAttachmentsState(next);
     },
-    [threadId],
+    [identity, store, threadId],
   );
-
   return [attachments, setAttachments] as const;
 }
