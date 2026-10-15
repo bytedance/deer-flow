@@ -10,25 +10,27 @@ failure/replay-gap paths. Draft and confirmation regressions live in
 Answer details use `workspace/message-details` descriptors; skill run scoping
 is documented in `docs/skill-usage-ui.md`.
 
-Artifact URLs encode raw filesystem paths, preserving literal percent sequences.
-Only Markdown destinations decode once; relative images match decoded names
-against raw artifact paths before encoding.
-File-type detection uses the basename so extensionless `Dockerfile` and
-`Makefile` artifacts remain recognizable under nested or dotted directories.
-HTML preview base detection skips DOM construction without case-insensitive `base`
-text; otherwise an inert template distinguishes real tags from comments, scripts
-and nested templates without rewriting source. Tests: `preview-base.dom.test.ts`
-(happy-dom); textarea/title RCDATA needs real-browser checks due to parser gaps.
-Other preview helpers retain the node test environment.
-Language-map membership checks only own properties; inherited names such as
-`constructor` and `__proto__` must keep the unknown-file download fallback.
+Encode raw paths preserving literal percent escapes. Decode Markdown once;
+match image names to raw paths.
+Sanitize URLs; key Streamdown by file/thread/mock context and scroll key.
+Detect file types by basename, including Dockerfile/Makefile.
+Language maps use own properties; `constructor`/`__proto__` keep fallback.
+HTML bases skip DOM without base text; inert templates ignore comments/scripts
+and templates. `preview-base.dom.test.ts` (happy-dom); RCDATA needs
+browser checks; other helpers use node.
+HTML assets: credential GET, no 401 navigation; current-thread only, no redirects,
+bound bytes/count/CSS depth/time/expansion; keep doctype, rewrite SVG style.
+Keep opaque sandbox/data URLs; external refs stay browser-loaded.
+Abort stale work; revoke URLs; gate content/URL/scroll.
+Tests: `html-assets.dom.test.ts`, `artifact-file-preview.dom.test.tsx`,
+`tests/e2e/artifact-preview.spec.ts`.
 
 1. Optional composer helpers such as `core/input-polish` can rewrite the local draft before submission, and `core/voice-input` can transcribe browser microphone input into that same local draft; confirmed user input then flows to thread hooks (`core/threads/hooks.ts`) → LangGraph SDK streaming. Voice transcript joining separates every adjacent pair of trimmed word segments, preserves CJK joins and provider whitespace, and attaches leading punctuation/percent signs while retaining spaces after sentence punctuation. Regression cases live in `tests/unit/core/voice-input/speech-recognition.test.ts`.
 2. Stream events update thread state (messages, artifacts, todos, goal). The main thread stream uses the LangGraph SDK's `throttle: true` mode so updates received in the same macrotask coalesce before React is notified; do not replace it with a numeric delay without validating the SDK's trailing-debounce behavior on a continuous stream.
    File-tool artifact auto-open work must run in an effect with timer cleanup; never schedule timers while rendering streamed `write_file` or `str_replace` updates.
    `ThreadState.artifacts` remains the authoritative artifact list. The artifacts provider persists only thread-scoped panel UI state (`open`, selected path, and a refresh bootstrap cache) in session storage; an initial empty stream value must not overwrite that restored state before history finishes loading.
    Formal artifact content is refreshed once when the run finishes; transient `write-file:` previews remain message-driven.
-   The detail view exposes explicit editing only for an already-opened formal UTF-8 text artifact under `/mnt/user-data/outputs`. Drafts stay in provider memory until Save so switching right-side panels cannot discard them, render in Markdown/HTML preview, and are protected from remote refreshes by the loaded SHA-256 revision. Saving is disabled during an active run; a changed revision preserves the draft and surfaces a conflict instead of overwriting agent output.
+   UTF-8 outputs under `/mnt/user-data/outputs` are editable while idle. Root drafts survive SPA/home/showcase routes and unknown auth; confirmed account change/logout clears them. Owner/generation fences reject stale updates. Auth binds through a stable setter context, outside the typing state subscription. Drafts preview in Markdown/HTML and warn on unload off-route. SHA-256 conflicts preserve edits. Layout, draft-context and editor DOM tests cover this.
    Regular artifact text loads request at most the first 1 MiB through an HTTP
    byte range. A truncated preview must stay lightweight and expose an explicit
    full-file action; do not mount CodeMirror for that artifact until the user

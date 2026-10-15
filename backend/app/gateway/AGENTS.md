@@ -60,7 +60,16 @@ Durable MCP notifications use internal Agent runs. Keep their trusted delivery i
 
 CORS is same-origin by default when requests enter through nginx on port 2026. Split-origin or port-forwarded browser clients must opt in with `GATEWAY_CORS_ORIGINS` (exact origins); Gateway `CORSMiddleware` and `CSRFMiddleware` both read that variable so browser CORS and auth-origin checks stay aligned. Those clients also need `CORS_EXPOSED_HEADERS` (`csrf_middleware.py`): run-creating routes return the run's id in `Content-Location`, which is not CORS-safelisted, so JS cannot read it unless it is exposed — and the LangGraph SDK resolves run metadata from that header alone, so withholding it breaks `useStream`'s `onCreated` and thread-gated actions.
 
-Browser auth sessions are owned by `app.gateway.auth.session_cookie`. Login accepts a `remember_me` form flag, but the Gateway never stores passwords. `SessionCookiePolicy` persists the `HttpOnly access_token` cookie only for HTTPS/trusted-forwarded HTTPS, direct-host localhost HTTP, or explicit operator opt-in for insecure persistence; public HTTP sandbox URLs degrade to session cookies. Session-creating handlers stamp the final `max_age` on `request.state`; CSRF cookie creation mirrors it so the double-submit pair expires together, including re-issue after password changes and OIDC callbacks. A small `HttpOnly` preference cookie preserves the remember choice across re-issues. Logout clears all auth cookies and suppresses CSRF re-issue on the logout response.
+Browser sessions belong to `app.gateway.auth.session_cookie`. Login's `remember_me`
+flag never stores passwords. `SessionCookiePolicy` persists `HttpOnly access_token`
+only for HTTPS/trusted-forwarded HTTPS, direct-host localhost HTTP, or explicit
+operator opt-in; public HTTP otherwise uses session cookies. Session creators set
+final `max_age` on `request.state`; CSRF mirrors it across login, password changes
+and OIDC callbacks. A small `HttpOnly` preference cookie preserves the choice.
+Logout clears auth cookies and suppresses CSRF re-issue.
+
+OIDC redirects retain existing endpoint query bytes (RFC 6749 section 3.1).
+`tests/test_oidc_auth.py` pins query, state-cookie, nonce and PKCE agreement.
 
 Personal Access Tokens (`app.gateway.auth.pat`, `Authorization: Bearer dfp_...`) run as their owning user: an invalid Bearer is a hard 401 with no cookie fallback, which keeps `CSRFMiddleware`'s Bearer skip safe (origin checks still run). Scopes narrow within the allowlisted threads/runs/projects routes (including `POST /api/threads/{id}/move`); every other authenticated route 403s PAT callers (admin included). PAT management and `/change-password` require session auth; only SHA-256 digests are stored (`0017`).
 

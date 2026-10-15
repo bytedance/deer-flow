@@ -1,5 +1,7 @@
 ### Skills System (`packages/harness/deerflow/skills/`)
 
+- **Frontmatter boundaries**: `frontmatter.py` owns standalone `---` delimiter lines for runtime parsing, installation validation, and review. Accept trailing spaces/tabs, LF/CRLF, a leading UTF-8 BOM, and a closing delimiter at EOF. Preserve body whitespace; prefix-only lines such as `---suffix` cannot close frontmatter. Regression coverage lives in `tests/test_skill_frontmatter_boundaries.py`.
+
 - **Management YAML diagnostics**: `parse_skill_file(..., diagnostics=...)` optionally collects `SkillLoadDiagnostic` values separately from valid `Skill` entries. Only `UserScopedSkillStorage.load_custom_skill_diagnostics()` supplies that sink, after validating root ancestors and each resolved file against the caller's custom root. Exclude legacy/shared locations and external symlinks; do not weaken runtime discovery's separate compatibility policy. `GET /api/skills/diagnostics/custom` is admin-only and returns stable codes plus package-relative identifiers and 1-based file positions. Never return `_format_yaml_error`, exceptions or source excerpts. The management UI posts the existing admin-only reload before refetching diagnostics and normal skills; active Agent snapshots are unchanged.
 - **Diagnostic scope**: only `yaml.YAMLError` produces a management diagnostic. Missing frontmatter, non-mapping or invalid metadata, non-UTF-8 files and read errors (including permission denied) remain excluded; the UI and README state those limits. An empty diagnostic list is not a package-validity check. `tests/test_skill_load_diagnostics.py` pins these exclusions and permission-error redaction without changing runtime parsing.
 - **History JSONL**: split records on LF, not Unicode text separators; preserve U+0085/U+2028/U+2029 in saved fields. Keep malformed JSON rejected. Tests: `tests/test_skill_history_jsonl.py`.
@@ -71,3 +73,7 @@ Standalone SDK/storage processes have no publication runtime. `mutations/enrollm
 Owned custom-skill YAML diagnostics use the same managed-read guard as catalog
 reads: recover pending publications before scanning, and refuse standalone reads
 for enrolled owners without a mutation runtime. Keep the scan off the event loop.
+
+Projection readers and mutation writers share the reentrant owner lock. Both use
+`utils.file_lock.retry_until_locked` for contention-only OS lock retries; preserve
+deadlines, cancellation checks and the shared descriptor for nested reads.

@@ -6,7 +6,7 @@ and product UI belong to the extension and are not included in this feature.
 
 ## Enable deliberately
 
-Use `deerflow-extension-api==0.2.6`. Existing extensions need no changes: both
+Use `deerflow-extension-api==0.2.7`. Existing extensions need no changes: both
 `ExtensionRuntimeDeps.completed_run_evidence` and `.skill_mutations` default to
 `None`. The older cross-user `run_evidence_reader` is unchanged.
 
@@ -190,7 +190,7 @@ results alone do not establish PostgreSQL lock behavior.
 
 Back up the application database and user skill directories together. Stop all
 writers, upgrade all Gateway/embedded writer processes and migrate through
-`0042_skill_mutations`, then restart before enabling mutation grants. Do not mix
+`0045_skill_mutations`, then restart before enabling mutation grants. Do not mix
 old and new writers on enrolled assets.
 
 Standalone SDK processes without a Gateway mutation runtime check persisted

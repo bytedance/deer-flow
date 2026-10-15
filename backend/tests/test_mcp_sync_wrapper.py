@@ -130,7 +130,11 @@ def test_mcp_tool_loading_skips_failed_server():
     assert [tool.name for tool in tools] == ["good-server_search"]
     assert tools[0].func is not None
     mock_warning.assert_called_once()
-    assert "bad-server" in mock_warning.call_args[0][0]
+    args, kwargs = mock_warning.call_args
+    assert args[1] == "bad-server"
+    assert args[2] == "RuntimeError"
+    assert "server 'bad-server'" in args[0] % args[1:]
+    assert kwargs.get("exc_info") is None
 
 
 def test_mcp_tool_sync_wrapper_in_running_loop():

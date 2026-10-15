@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from app.channels.allowed_users import parse_allowed_users
+from app.channels.allowed_users import parse_allowed_users, parse_channel_ids
 
 logger = logging.getLogger(__name__)
 
@@ -81,3 +81,48 @@ def test_opted_in_warning_only_checks_scalar_separators(allowed_users, expected,
 
     assert result == expected
     assert caplog.records == []
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (None, frozenset()),
+        (" \t\n ", frozenset()),
+        ([], frozenset()),
+        ((), frozenset()),
+        (set(), frozenset()),
+        (frozenset(), frozenset()),
+        (" 123 ", frozenset({"123"})),
+        (123, frozenset({"123"})),
+        (["123", " 456 ", "", "123"], frozenset({"123", "456"})),
+        (("123", "456"), frozenset({"123", "456"})),
+        ({"123", "456"}, frozenset({"123", "456"})),
+        (frozenset({"123", "456"}), frozenset({"123", "456"})),
+        ({"123": True}, frozenset({"{'123': True}"})),
+        ([None, True], frozenset({"None", "True"})),
+        (["123,456", "789 012"], frozenset({"123,456", "789 012"})),
+    ],
+)
+def test_channel_ids_preserve_literal_entries_and_empty_policy(value, expected, caplog):
+    result = parse_channel_ids(value, logger=logger, channel_name="buzz", key_name="mention_free_channels", warn_on_scalar_separators=True)
+
+    assert result == expected
+    assert caplog.records == []
+
+
+@pytest.mark.parametrize("separator", [",", ", ", " ", "\t", "\n", "\u2003"])
+@pytest.mark.parametrize("channel_name, key_name, warn", [("buzz", "mention_free_channels", True), ("Discord", "allowed_channels", False)])
+def test_channel_id_warning_names_config_key_and_preserves_scalar(channel_name, key_name, warn, separator, caplog):
+    literal_id = f"123{separator}456"
+    with caplog.at_level(logging.WARNING, logger=logger.name):
+        result = parse_channel_ids(literal_id, logger=logger, channel_name=channel_name, key_name=key_name, warn_on_scalar_separators=warn)
+
+    assert result == frozenset({literal_id})
+    assert len(caplog.records) == int(warn)
+    if warn:
+        warning = caplog.records[0]
+        assert warning.levelno == logging.WARNING
+        assert f"[{channel_name}] {key_name}" in warning.message
+        assert "one literal channel id" in warning.message
+        assert "YAML list" in warning.message
+        assert "123" not in warning.message and "456" not in warning.message

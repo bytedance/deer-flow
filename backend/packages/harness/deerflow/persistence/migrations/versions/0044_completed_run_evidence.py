@@ -3,8 +3,8 @@
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0041_completed_run_evidence"
-down_revision = "0040_scheduled_group_notice"
+revision = "0044_completed_run_evidence"
+down_revision = "0043_runtime_im_notices"
 branch_labels = None
 depends_on = None
 

@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 from deerflow.skills.parser import parse_skill_file
 from deerflow.skills.types import SKILL_MD_FILE, Skill, SkillCategory
+from deerflow.utils.file_lock import retry_until_locked
 
 if TYPE_CHECKING:
     from deerflow.skills.storage.skill_storage import SkillStorage
@@ -122,22 +123,23 @@ def _projection_lock(root: Path, *, timeout: float | None = None, check=None) ->
             yield
             return
         with lock_path.open("a", encoding="utf-8") as lock_file:
-            while True:
-                if check:
-                    check()
-                try:
-                    if fcntl is not None:
-                        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    else:  # pragma: no cover - Windows
-                        lock_file.seek(0)
-                        msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
-                    break
-                except OSError as error:
-                    if error.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
-                        raise
-                    if deadline is not None and time.monotonic() >= deadline:
-                        raise TimeoutError("Skill projection lock timeout") from None
-                    time.sleep(0.02)
+
+            def acquire_region() -> None:
+                if fcntl is not None:
+                    fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                else:  # pragma: no cover - Windows
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+
+            retry_until_locked(
+                acquire_region,
+                interval=0.02,
+                deadline=deadline,
+                sleep=time.sleep,
+                monotonic=time.monotonic,
+                check=check,
+                timeout_message="Skill projection lock timeout",
+            )
             held.add(key)
             try:
                 yield

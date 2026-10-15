@@ -27,11 +27,13 @@ export interface Translations {
     catalogHint: string;
     installationGuide: string;
     catalog: Record<
+      | "workflows"
       | "agentTeams"
       | "bookmarks"
       | "context"
       | "classify"
       | "screening"
+      | "retrieval"
       | "example",
       { title: string; description: string }
     >;
@@ -232,6 +234,8 @@ export interface Translations {
   };
 
   artifactPreview: {
+    loadingPreview: string;
+    resourcesUnavailable: string;
     limited: (previewSize: string, totalSize?: string) => string;
     loadFullFile: string;
     loadingFullFile: string;
@@ -839,6 +843,10 @@ export interface Translations {
       savedUnavailable: string;
       clearSaved: string;
       bind: string;
+      bindWecom: string;
+      bindQq: string;
+      name: string;
+      nameHint: string;
       refresh: string;
       bindInstructions: string;
       generating: string;
@@ -1933,6 +1941,32 @@ export interface Translations {
       testBody: string;
       notSupported: string;
       disableNotification: string;
+      channels: {
+        title: string;
+        description: string;
+        providers: {
+          feishu: string;
+          wecom: string;
+          wechat: string;
+          qq: string;
+        };
+        toggleLabel: (provider: string) => string;
+        eventsTitle: string;
+        eventsDescription: string;
+        events: {
+          run_completed: string;
+          run_failed: string;
+          human_input_requested: string;
+        };
+        eventToggleLabel: (event: string) => string;
+        loading: string;
+        saving: string;
+        loadFailed: string;
+        saveFailed: string;
+        unavailable: string;
+        empty: string;
+        retry: string;
+      };
     };
     account: {
       profileTitle: string;

@@ -5,8 +5,8 @@ compatibility fixes to the remaining prose. Parse JSON and Python-literal argume
 from their original escapes. For non-JSON raw-string parameters, decode literal
 `\n` outside fenced code and trim surrounding whitespace, retaining the gateway's
 existing multiline-file/command behavior. Raw strings cannot distinguish intended
-literal escapes from over-escaped newlines. Numeric conversion failures and unsafe
-Python-literal containers still retain the entire original argument. Keep the
+literal escapes from over-escaped newlines. Numeric failures and non-finite floats
+in list/tuple/set items or dict keys/values preserve the entire argument. Keep the
 existing content path when no tool calls can be parsed and preserve native tool
 calls. This contract is shared by sync/async generation and tool-enabled simulated
 streaming; no-tool native streaming has its own chunk handling. Coverage:
@@ -33,6 +33,7 @@ fast-path permit check from queue insertion, or an older caller can be overtaken
 while handing off to the wait queue.
 
 - `create_chat_model(name, thinking_enabled)` instantiates LLM from config via reflection
+- Legacy disable-path heuristics treat null `extra_body`, `thinking`, and nested `extra_body.thinking` template values as absent, allowing native/vLLM fallbacks. The enable path still forwards configured values. Regression cases live in `tests/test_model_factory.py`.
 - Supports `thinking_enabled` flag with per-model `when_thinking_enabled` / `when_thinking_disabled` overrides; on both the legacy and the contract path every template and every synthesized `extra_body` payload goes through `_merge_thinking_payload` (the native-Anthropic disable assigns the top-level `thinking` mapping outright — a tagged union keyed by `type`): keys are never removed (a template can only add or override; nested mappings inherit the profile's other keys), template wins on conflicts, so a template's `extra_body` never clobbers sibling keys such as `extra_body.tool_stream`. Corollary: a disable template cannot clear a key the profile sets, so enable-only keys such as `extra_body.thinking.budget_tokens` belong in `when_thinking_enabled`, never in the base `extra_body`. Templates are deep-copied as they are merged, so constructor kwargs never alias the cached `ModelConfig`. The vLLM switch has two spellings (`_VLLM_THINKING_SWITCHES`: legacy `thinking` alias, `enable_thinking`); when a profile spells it differently from the payload, the payload's value is mirrored onto the profile's spelling rather than deleting or canonicalizing it — `VllmChatModel` collapses the pair to `enable_thinking`, other OpenAI-compatible classes send both, and either way the server reads the template's intent. Do not canonicalize `thinking` → `enable_thinking` in the factory: chat templates differ on which key they honor, and only `VllmChatModel` opts into that remap
 - Supports vLLM-style thinking toggles via `when_thinking_enabled.extra_body.chat_template_kwargs.enable_thinking` for Qwen reasoning models, while normalizing legacy `thinking` configs for backward compatibility
 - A per-request `reasoning_effort` kwarg (the regular, non-bootstrap lead-agent build passes it even when `None`) is popped from `kwargs` and layered like `model_overrides`: a non-`None` value replaces the profile's, and the thinking transforms applied afterwards (`when_thinking_enabled`, `when_thinking_disabled`, the `extra_body.thinking` disable path) still decide the final value. Never let a key reach the constructor through both `kwargs` and the profile settings — Python raises `got multiple values for keyword argument` and the lead agent cannot be built for that model. Codex checks the requested level itself. Pinned by `tests/test_model_factory.py` and `tests/test_lead_agent_model_resolution.py`
@@ -40,6 +41,7 @@ while handing off to the wait queue.
 - Config values starting with `$` resolved as environment variables
 - Missing provider modules surface actionable install hints from reflection resolvers (for example `uv add langchain-google-genai`)
 - Optional `models[].request_admission` attaches a process-shared `BaseRateLimiter` at the model factory. Identical explicit groups share one FIFO across model instances, threads and event loops; implicit groups use the configured model name. Policies are immutable once registered and conflicting settings fail construction. A monotonic minimum interval spaces requests without idle-time burst credit; bounded waiters poll without occupying executor threads and unregister in `finally`. The factory strips the policy from provider kwargs and sets exposed SDK `max_retries=0` so middleware retries re-enter admission. This limits model invocations, not tokens or a distributed provider account; custom providers bypassing BaseChatModel hooks are outside the contract. Tests: `test_model_request_admission.py` and `test_model_request_admission_fifo_atomic.py`.
+- `_apply_openai_responses_api_default` routes the gpt-6 family through the OpenAI Responses API by default (`use_responses_api: true` + `output_version: responses/v1`), because the locked `langchain-openai==1.2.1` lacks a gpt-6 routing branch and OpenAI rejects function tools for gpt-6 on `/v1/chat/completions`. Gated on `issubclass(model_class, BaseChatOpenAI)` and a `gpt-6`-prefixed `model`. An explicit `use_responses_api` always wins; custom endpoints (`base_url`/`openai_api_base` or a set `OPENAI_BASE_URL`/`OPENAI_API_BASE` environment variable) and `AzureChatOpenAI` are skipped (they may lack `/responses`); an explicit `output_version` alone is preserved while `use_responses_api: true` is still injected; injection is logged. Regression cases live in `tests/test_model_factory.py` (issue #6841).
 
 ### Reasoning Capability Contract (`packages/harness/deerflow/models/reasoning.py`)
 
@@ -106,6 +108,16 @@ the provider default. Wrapped dictionaries and converted `BaseTool` schemas
 share `_convert_tools` so binding cannot discard the setting. Keep caller
 schemas and definitions unchanged. Offline sync/async request and tool-followup
 coverage: `tests/test_codex_tool_strict.py`.
+
+Codex forwards `tool_choice` from `bind_tools` and direct sync/async calls.
+Normalize `any`/`True` to `required`, named or wrapped function selections to
+Responses' flat `{type: function, name: ...}` shape, and omit `None`/`False`.
+Validate bound selections at `bind_tools`; validate invocation overrides again
+before HTTP. `required` needs at least one converted function tool, and a named
+selection must match a converted function. `auto` and `none` remain valid without
+tools. Per-call choices override bound choices without mutating caller definitions
+or history. Offline HTTP serialization and tool-followup coverage:
+`tests/test_codex_tool_choice.py`.
 
 ### Codex SSE termination (`packages/harness/deerflow/models/openai_codex_provider.py`)
 

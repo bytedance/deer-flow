@@ -21,6 +21,7 @@ from deerflow.persistence.channel_connections.model import (
     ChannelCredentialRow,
     ChannelOAuthStateRow,
 )
+from deerflow.persistence.channel_leases.model import ChannelLeaseRow
 from deerflow.persistence.channel_thread_bindings.model import ChannelThreadBindingRow
 from deerflow.persistence.feedback.model import FeedbackRow
 from deerflow.persistence.login_throttle.model import LoginThrottleRow
@@ -38,6 +39,7 @@ from deerflow.persistence.skill_mutations.model import SkillAssetRow, SkillOpera
 from deerflow.persistence.subagent_batches.model import SubagentBatchItemRow, SubagentBatchRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.thread_reads.model import ThreadReadMarkerRow, ThreadReadVersionRow
+from deerflow.persistence.user.im_notifications import ImNotificationPreferenceRow
 from deerflow.persistence.user.model import UserPreferenceRow, UserRow
 from deerflow.persistence.webhook_delivery.model import WebhookDeliveryRow
 
@@ -46,6 +48,7 @@ __all__ = [
     "ChannelConnectionRow",
     "ChannelConversationRow",
     "ChannelCredentialRow",
+    "ChannelLeaseRow",
     "ChannelOAuthStateRow",
     "ChannelThreadBindingRow",
     "FeedbackRow",
@@ -73,6 +76,7 @@ __all__ = [
     "ThreadReadMarkerRow",
     "ThreadReadVersionRow",
     "UserPreferenceRow",
+    "ImNotificationPreferenceRow",
     "UserRow",
     "WebhookDeliveryRow",
 ]

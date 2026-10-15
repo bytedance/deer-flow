@@ -254,6 +254,8 @@ class RunRecord:
     ownership_lost: bool = False
     stop_reason: str | None = None
     goal_verdict: dict[str, Any] | None = None
+    human_input_request: dict[str, Any] | None = None
+    terminal_status_persisted: bool = True
     # Process-local finalization barrier for a worker-installed scheduled goal.
     scheduled_goal_cleanup_pending: bool = False
     # Process-local renewal barrier: the worker stages its terminal status in
@@ -589,6 +591,9 @@ class RunManager:
             if updated is False:
                 existing = await self._store.get(run_id)
                 requested_status = kwargs.get("status")
+                if existing is not None and existing.get("status") == requested_status:
+                    if record is not None and requested_status == record.status.value:
+                        record.terminal_status_persisted = True
                 if existing is not None and existing.get("status") != requested_status:
                     existing_status = existing.get("status")
                     logger.warning(
@@ -615,6 +620,9 @@ class RunManager:
                 )
                 if recovered is False:
                     logger.warning("Run completion update for %s affected no rows after row recreation", run_id)
+                    return
+            if record is not None and kwargs.get("status") in (None, record.status.value):
+                record.terminal_status_persisted = True
         except Exception:
             logger.warning("Failed to persist run completion for %s", run_id, exc_info=True)
 
@@ -1100,6 +1108,8 @@ class RunManager:
                 return
             record.status = status
             record.updated_at = _now_iso()
+            if status not in (RunStatus.pending, RunStatus.running):
+                record.terminal_status_persisted = self._store is None
             if error is not None:
                 record.error = error
             if stop_reason is not None:
@@ -1108,6 +1118,9 @@ class RunManager:
                 record.goal_verdict = copy.deepcopy(goal_verdict)
         if persist:
             persisted = await self._persist_status(record, status, error=error, stop_reason=stop_reason)
+            if status not in (RunStatus.pending, RunStatus.running):
+                async with self._lock:
+                    record.terminal_status_persisted = persisted
             if not persisted and self.heartbeat_enabled and status == RunStatus.success and not record.ownership_lost:
                 await self._mark_ownership_lost(
                     record,
@@ -1129,6 +1142,9 @@ class RunManager:
             error = record.error
             stop_reason = record.stop_reason
         persisted = await self._persist_status(record, status, error=error, stop_reason=stop_reason)
+        if status not in (RunStatus.pending, RunStatus.running):
+            async with self._lock:
+                record.terminal_status_persisted = persisted
         if not persisted and self.heartbeat_enabled and status == RunStatus.success and not record.ownership_lost:
             await self._mark_ownership_lost(
                 record,
@@ -1174,6 +1190,8 @@ class RunManager:
         except Exception:
             async with self._lock:
                 record = self._runs.get(run_id)
+                if record is not None:
+                    record.terminal_status_persisted = False
             if record is not None:
                 await self._mark_ownership_lost(
                     record,
@@ -1198,6 +1216,11 @@ class RunManager:
             goal_verdict=goal_verdict,
             persist=not result.finalized,
         )
+        if result.finalized:
+            async with self._lock:
+                record = self._runs.get(run_id)
+                if record is not None:
+                    record.terminal_status_persisted = True
         return None
 
     async def _ensure_delivery_receipt(self, record: RunRecord) -> bool:

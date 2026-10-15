@@ -74,6 +74,8 @@ from typing import Any
 from uuid import uuid4
 from weakref import WeakValueDictionary
 
+from deerflow.utils.file_lock import retry_until_locked
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows fallback
@@ -182,6 +184,8 @@ LARK_SKILL_NAMES: tuple[str, ...] = (
     "lark-workflow-standup-report",
 )
 LARK_SKILL_NAME_SET = frozenset(LARK_SKILL_NAMES)
+# Allow long installs to finish without waiting indefinitely on a stuck holder.
+_INSTALL_LOCK_TIMEOUT_SECONDS = 15 * 60
 _LARK_INSTALL_THREAD_LOCK = threading.Lock()
 _LARK_RUNTIME_INSTALL_THREAD_LOCK = threading.Lock()
 _LARK_CREDENTIAL_LOCKS_GUARD = threading.Lock()
@@ -1335,7 +1339,18 @@ def _exclusive_install_lock(lock_path: Path, thread_lock):
         if fcntl is not None:
             fcntl.flock(lock_file, fcntl.LOCK_EX)
         else:  # pragma: no cover - Windows fallback
-            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+
+            def acquire_region() -> None:
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+
+            retry_until_locked(
+                acquire_region,
+                deadline=time.monotonic() + _INSTALL_LOCK_TIMEOUT_SECONDS,
+                sleep=time.sleep,
+                monotonic=time.monotonic,
+                timeout_message="Lark install lock timed out",
+            )
         try:
             yield
         finally:

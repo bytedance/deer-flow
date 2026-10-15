@@ -1719,7 +1719,7 @@ stripped from client-supplied messages and state updates.
 **IM notices ("scheduled task updates").** With `channel_connections.enabled`,
 each item of `GET /api/channels/providers` carries
 `proactive_notifications` (bool): whether scheduled-task updates are pushed to
-that app. Only providers with proactive push (WeCom and Feishu/Lark today) get notices; the
+that app. Only providers with proactive push (WeCom, Feishu/Lark, WeChat and QQ private chat today) get notices; the
 others get none, and Settings says so. An occurrence sends at most one message,
 in the owner's `locale` preference (see Account Preferences), else
 `channel_connections.notification_locale`. Notices carry no IDs and no links;
@@ -2091,3 +2091,25 @@ a JSON boolean. Writes containing only boolean pin/archive flags preserve
 `updated_at` and all other metadata. The owner-checked endpoint returns the normal
 thread metadata response; original thread and artifact URLs remain available.
 Archiving does not cancel runs, pause schedules, or change retention.
+
+### Proactive IM notification preferences
+
+`GET/PATCH /api/channels/notification-preferences` is authenticated and owner-scoped.
+Both require `X-Expected-User-Id` matching the authenticated viewer; a stale
+account returns 409. Session mutations retain normal CSRF protection. The local
+auth-disabled default identity is supported without creating an auth account.
+
+GET and PATCH return `{ "feishu": true, "wecom": true, "wechat": true, "qq": true }`
+with the owner's effective booleans. PATCH accepts only supplied provider fields,
+strict booleans or `null` (reset to enabled); other fields are rejected. Missing
+preferences preserve the existing connected-channel default. Browser notification
+preferences and chat connection state remain independent.
+
+Opt-out and cancellation of that owner's pending/sending outbox rows for the
+provider commit together; the internal terminal reason is `disabled_by_owner`.
+Retries consume no additional attempts, and opting back in cannot reopen the
+old rows. The worker rechecks preferences and claim ownership before starting a
+provider send. A provider call already started may still complete; it cannot be
+retracted. All Gateway workers must be upgraded to honor the shared preference.
+Migration `0041_im_notice_preferences` adds only a small owner/provider preference
+table; downgrade removes these choices, so subsequent upgrades use defaults.
