@@ -238,13 +238,13 @@ Markdown. Source records retain retrieval-time evidence, not live documents.
 Resolve knowledge destinations before testing the label in message and artifact
 link renderers: Sources lists use ordinary titles without a `citation:` prefix.
 
-Custom-agent settings store an optional `knowledge_scope` retrieval default.
-`knowledgeScopeToSelection` restores all execution IDs; missing display names
-fall back to IDs. Save only edited scopes, except removing knowledge tool access
-must atomically clear the default. Catalog selection needs saved and draft access.
-Chats initialize from saved bindings; explicit page-local overrides survive
-new-thread route replacement and reset on conversation changes. Gateway supplies
-defaults for clients without a selector; UI visibility is not runtime enforcement.
+Custom Agents save edited `knowledge_scope` defaults; removing knowledge access
+clears them atomically. `knowledgeScopeToSelection` keeps IDs, using IDs for
+missing labels. Catalog needs saved/draft access and exact-Agent capabilities.
+`catalog` + `dataset_filter` enable bases; `documents` + `document_filter` files.
+Pending/failed capabilities block queries and unsupported Apply; keep old file
+filters. Chats seed defaults; local overrides survive new-thread replacement and
+reset per conversation. Gateway supplies defaults and enforces scope.
 
 MCP hooks and the editor default to personal scope. Mutation-option builders require an explicit scope. MCP control accessible names include the localized ownership section, so same-named shared and personal connections remain distinct without region context. Query keys include scope and authenticated user ID; remount each editor when that ID changes. Platform provided uses the deployment editor only for administrators outside static mode, restoring add, edit, toggle and delete through the existing admin-only MCP API. Ordinary users see shared entries read-only. My plugins contains personal configuration templates, Lark account authorization and the personal MCP editor; a deployment installation must not mark a personal template configured.
 
