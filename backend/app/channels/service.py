@@ -6,16 +6,19 @@ import asyncio
 import logging
 import math
 import os
-from collections.abc import Callable, Mapping
+import socket
+import uuid
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from app.channels.base import Channel, ChannelStopTimeout
+from app.channels.leadership import ChannelLeadership, RenewOutcome
 from app.channels.manager import DEFAULT_CHANNEL_MAX_CONCURRENCY, DEFAULT_CHANNEL_SHUTDOWN_GRACE_PERIOD_SECONDS, DEFAULT_GATEWAY_URL, DEFAULT_LANGGRAPH_URL, ChannelManager
 from app.channels.message_bus import DEFAULT_INBOUND_QUEUE_MAXSIZE, MessageBus
 from app.channels.runtime_config_store import merge_runtime_channel_configs
 from app.channels.store import ChannelStore, SqlChannelStore, resolve_channel_store
-from deerflow.config.channel_leader_lease_config import CHANNEL_LEADER_LEASE_KEY, ChannelLeaderLeaseConfig, channel_leader_lease_config
+from deerflow.config.channel_leader_lease_config import CHANNEL_LEADER_LEASE_FIELD, CHANNEL_LEADER_LEASE_KEY, ChannelLeaderLeaseConfig, channel_leader_lease_config
 from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
@@ -52,6 +55,15 @@ _CHANNEL_CREDENTIAL_KEYS: dict[str, list[str]] = {
     "wechat": ["bot_token"],
 }
 
+# Providers the leader lease never arbitrates: GitHub receives webhooks pushed
+# to whichever instance the load balancer picks and opens no platform
+# connection of its own, so every instance keeps it.
+_UNARBITRATED_PROVIDERS = frozenset({"github"})
+
+# Ceiling for the supervisor's retry backoff when a leader cannot start its
+# transport (bad credentials, platform outage).
+_LEASE_START_BACKOFF_MAX_SECONDS = 300.0
+
 _CHANNELS_LANGGRAPH_URL_ENV = "DEER_FLOW_CHANNELS_LANGGRAPH_URL"
 _CHANNELS_GATEWAY_URL_ENV = "DEER_FLOW_CHANNELS_GATEWAY_URL"
 
@@ -86,7 +98,7 @@ def enabled_transport_providers(app_config: Any) -> list[str]:
             provider = getattr(connections, name, None)
             if provider is not None and getattr(provider, "enabled", False):
                 names.add(name)
-    names.discard("github")
+    names.difference_update(_UNARBITRATED_PROVIDERS)
     return sorted(names)
 
 
@@ -144,6 +156,32 @@ def _make_connection_repo(connection_config: ChannelConnectionsConfig | None, *,
     return ChannelConnectionRepository(session_factory, cipher=credentials_cipher)
 
 
+def _default_lease_owner_id() -> str:
+    """Same shape as the RunManager worker id the Gateway passes in (``hostname:uuid``)."""
+    return f"{socket.gethostname()}:{uuid.uuid4().hex}"
+
+
+def _make_leadership(lease_config: ChannelLeaderLeaseConfig, *, owner_id: str | None) -> ChannelLeadership:
+    """Build the lease bookkeeping over the shared application database.
+
+    The lease needs the shared table; an active lease without a SQL database
+    is a configuration the startup gate refuses, so reaching it here is an
+    error rather than a silent fallback to every instance connecting.
+    """
+    from deerflow.persistence.channel_leases import SqlChannelLeaseRepository
+    from deerflow.persistence.engine import get_session_factory
+
+    session_factory = get_session_factory()
+    if session_factory is None:
+        raise RuntimeError(f"{CHANNEL_LEADER_LEASE_FIELD} is active but the application database is not available; set database.backend to sqlite or postgres")
+    return ChannelLeadership(
+        SqlChannelLeaseRepository(session_factory),
+        owner_id=owner_id or _default_lease_owner_id(),
+        lease_seconds=lease_config.lease_seconds,
+        grace_seconds=lease_config.grace_seconds,
+    )
+
+
 class ChannelService:
     """Manages the lifecycle of all configured IM channels.
 
@@ -160,6 +198,7 @@ class ChannelService:
         app_config: AppConfig | None = None,
         get_stream_bridge: Callable[[], StreamBridge | None] | None = None,
         store: ChannelStore | None = None,
+        leadership: ChannelLeadership | None = None,
     ) -> None:
         config = dict(channels_config or {})
         # ``channels.leader_lease`` is a settings block, not a provider: take it
@@ -206,6 +245,15 @@ class ChannelService:
         self._manager_start_lock = asyncio.Lock()
         self._readiness_locks: dict[str, asyncio.Lock] = {}
         self._config_epochs: dict[str, int] = {}
+        # ``None`` unless ``channels.leader_lease`` is active for this process:
+        # then only the lease holder of a provider may start its transport.
+        self._leadership = leadership
+        self._supervisor_task: asyncio.Task | None = None
+        # One transport action (start / stop) in flight per provider, so a
+        # slow platform never delays another provider's renewal.
+        self._lease_actions: dict[str, asyncio.Task] = {}
+        # provider -> (consecutive failed starts, monotonic time of next retry)
+        self._lease_start_backoff: dict[str, tuple[int, float]] = {}
 
     @classmethod
     def from_app_config(
@@ -214,6 +262,8 @@ class ChannelService:
         *,
         get_stream_bridge: Callable[[], StreamBridge | None] | None = None,
         credentials_cipher: Any | None = None,
+        multi_process: bool = False,
+        lease_owner_id: str | None = None,
     ) -> ChannelService:
         """Create a ChannelService from the application config.
 
@@ -222,7 +272,10 @@ class ChannelService:
         callers (including most tests) that don't need follow-up-buffer
         auto-draining can omit it. ``credentials_cipher`` is the Gateway's
         ``DEER_FLOW_CREDENTIALS_KEY`` cipher for per-connection credentials;
-        without it stored credentials stay unavailable.
+        without it stored credentials stay unavailable. ``multi_process`` is
+        the Gateway's multi-process signal, which ``channels.leader_lease:
+        auto`` follows; ``lease_owner_id`` names this instance in the lease
+        table (the Gateway passes its RunManager worker id).
         """
         if app_config is None:
             from deerflow.config.app_config import get_app_config
@@ -237,12 +290,15 @@ class ChannelService:
         connection_config = getattr(app_config, "channel_connections", None)
         connections_enabled = connection_config is not None and getattr(connection_config, "enabled", False)
         require_bound_identity = bool(connections_enabled and getattr(connection_config, "require_bound_identity", True))
+        lease_config = channel_leader_lease_config(channels_config)
+        leadership = _make_leadership(lease_config, owner_id=lease_owner_id) if lease_config.resolve(multi_process=multi_process) else None
         return cls(
             channels_config=channels_config,
             connection_repo=_make_connection_repo(connection_config, credentials_cipher=credentials_cipher),
             require_bound_identity=require_bound_identity,
             app_config=app_config,
             get_stream_bridge=get_stream_bridge,
+            leadership=leadership,
         )
 
     async def start(self) -> None:
@@ -277,7 +333,24 @@ class ChannelService:
 
         ready_status = await self.ensure_ready_channels(attempts=2)
         ready_count = sum(1 for ready in ready_status.values() if ready)
-        logger.info("ChannelService started with %d/%d ready channels", ready_count, len(ready_status))
+        if self._leadership is None:
+            logger.info("ChannelService started with %d/%d ready channels", ready_count, len(ready_status))
+            return
+        led_elsewhere = sorted(name for name in ready_status if self._arbitrated(name) and not self._leadership.has_record(name))
+        logger.info(
+            "ChannelService started with %d/%d ready channels; leader lease active as %s (led by another instance: %s)",
+            ready_count,
+            len(ready_status),
+            self._leadership.owner_id,
+            ", ".join(led_elsewhere) or "none",
+        )
+        if self._running and generation == self._shutdown_generation:
+            # Learn peers' leases before the first tick, so status and
+            # notification claims are right from the start.
+            await self._leadership.observe_all()
+        # Re-check after the read: a stop() during it must not be followed by a supervisor.
+        if self._running and generation == self._shutdown_generation:
+            self._start_supervisor()
 
     async def ensure_ready_channels(self, *, attempts: int = 1) -> dict[str, bool]:
         """Start or restart enabled configured channels that are not ready."""
@@ -351,6 +424,11 @@ class ChannelService:
                     logger.warning("Readiness retry deferred: previous %s channel failed to stop and remains tracked", name)
                     return False
 
+            if not await self._claim_transport(name):
+                # Another instance holds the lease: its transport is the one
+                # that serves this provider, so there is nothing to start here.
+                return False
+
             max_attempts = max(1, attempts)
             for attempt in range(max_attempts):
                 if not self._running:
@@ -373,6 +451,9 @@ class ChannelService:
         self._shutdown_generation += 1
         self._stopping = True
         self._running = False
+        # The supervisor starts and stops transports on its own; it must be
+        # gone before shutdown snapshots the transports it is about to stop.
+        await self._stop_supervisor()
         # Reject new provider work first. Existing workers keep draining during
         # manager.stop(), and channel transports remain alive until that drain
         # completes so an already-sent "Working on it..." can still receive its
@@ -397,6 +478,13 @@ class ChannelService:
                 if self._channels.get(name) is channel:
                     self._channels.pop(name, None)
                 logger.info("Channel stopped")
+
+        # Hand back the leases of providers whose transport is gone, so a peer
+        # connects on its next tick instead of after lease + grace. A retained
+        # transport (bounded stop timed out) may still hold its socket: keep
+        # its lease to expire on its own rather than invite a second connection.
+        if self._leadership is not None:
+            await asyncio.gather(*(self._leadership.release(name) for name in self._leadership.held_providers() if name not in self._channels))
 
         if stop_errors:
             raise ExceptionGroup("one or more channels failed to stop", stop_errors)
@@ -443,12 +531,33 @@ class ChannelService:
         return self._config_epochs[name]
 
     async def restart_channel(self, name: str, *, reload_config: bool = True) -> bool:
-        """Restart a specific channel. Returns True if successful."""
+        """Restart a specific channel. Returns True if successful.
+
+        Under the leader lease a restart on an instance that does not hold the
+        provider's lease returns False; :meth:`leader_of` names the holder.
+        """
         async with self._channel_lock(name):
             return await self._restart_channel_locked(name, reload_config=reload_config)
 
-    async def _restart_channel_locked(self, name: str, *, reload_config: bool = True) -> bool:
-        """Restart a specific channel. The caller must already hold ``_channel_lock(name)``."""
+    async def _take_over_channel(self, name: str) -> bool:
+        """Start a provider whose lease this instance just took, from its freshly loaded config.
+
+        Unlike :meth:`restart_channel` it leaves a transport that is already
+        running alone: a readiness request may have started it between the
+        acquisition and this call.
+        """
+        async with self._channel_lock(name):
+            if self._transport_running(name):
+                return True
+            return await self._restart_channel_locked(name, reload_config=True)
+
+    async def _restart_channel_locked(self, name: str, *, reload_config: bool = True, accept_peer_leader: bool = False) -> bool:
+        """Restart a specific channel. The caller must already hold ``_channel_lock(name)``.
+
+        ``accept_peer_leader`` reports success when another instance holds the
+        provider's lease: :meth:`configure_channel` accepted the config, and
+        the transport serving the provider is the holder's.
+        """
         if name in self._channels:
             channel = self._channels[name]
             # Same ownership rule as readiness retries: retain an instance
@@ -476,7 +585,17 @@ class ChannelService:
 
         if not config.get("enabled", False):
             logger.info("Channel %s is disabled, skipping restart", name)
+            await self._release_idle_lease(name)
             return True
+
+        if not await self._claim_transport(name):
+            leader = self.leader_of(name)
+            if accept_peer_leader and leader is not None:
+                # Runtime config does not reach the holder yet: it keeps the
+                # config it started with until it starts the channel again.
+                logger.warning("Channel %s is connected by Gateway instance %s, which keeps its current configuration until it next starts the channel", name, leader)
+                return True
+            return False
 
         return await self._start_channel(name, config)
 
@@ -491,7 +610,7 @@ class ChannelService:
                 # The caller just supplied the authoritative config (e.g. credentials
                 # entered in the browser that are never written to config.yaml) — a
                 # file reload here would clobber it with the stale on-disk entry.
-                return await self._restart_channel_locked(name, reload_config=False)
+                return await self._restart_channel_locked(name, reload_config=False, accept_peer_leader=True)
             finally:
                 self._bump_config_epoch(name)
 
@@ -503,6 +622,7 @@ class ChannelService:
                 self._config.pop(name, None)
                 channel = self._channels.get(name)
                 if channel is None:
+                    await self._release_idle_lease(name)
                     return True
                 # Stop-then-drop with the shared ownership rule: a channel whose
                 # stop() fails stays tracked (and returns False) instead of being
@@ -511,6 +631,7 @@ class ChannelService:
                 if self._channels.get(name) is channel:
                     logger.warning("Removal incomplete: %s channel failed to stop and remains tracked", name)
                     return False
+                await self._release_idle_lease(name)
                 logger.info("Channel stopped and removed")
                 return True
             finally:
@@ -583,6 +704,15 @@ class ChannelService:
             logger.warning("Refusing to start %s: another channel instance is still tracked under this name (previous cleanup incomplete, or the instance is still running)", name)
             return False
 
+        # The lease fence at the mechanism itself: every start path (startup,
+        # readiness, restart, runtime config, supervisor) ends here, and only
+        # the holder of a provider's leader lease may open its platform
+        # connection. Callers acquire first (_claim_transport); this check
+        # makes no database call.
+        if self._arbitrated(name) and not self._leadership.holds(name):
+            logger.warning("Refusing to start %s: this Gateway instance does not hold its leader lease", name)
+            return False
+
         try:
             from deerflow.reflection import resolve_class
 
@@ -640,8 +770,219 @@ class ChannelService:
                 self._channels.pop(name, None)
             return False
 
+    # -- leader lease ---------------------------------------------------------
+    #
+    # With ``channels.leader_lease`` active, every arbitrated provider (all but
+    # GitHub) has one transport across the deployment: the instance holding
+    # its ``channel_leases`` row. The manager, bus and GitHub webhooks keep
+    # running on every instance. ``_supervise`` renews held leases every
+    # ``renew_interval`` seconds, takes free ones, and stops a transport
+    # *before* giving its lease up for lost (see ``app.channels.leadership``).
+
+    def _arbitrated(self, name: str) -> bool:
+        """Whether ``name``'s transport is subject to the leader lease in this process."""
+        return self._leadership is not None and name in _CHANNEL_REGISTRY and name not in _UNARBITRATED_PROVIDERS
+
+    def _wants_transport(self, name: str) -> bool:
+        config = self._config.get(name)
+        return isinstance(config, dict) and bool(config.get("enabled", False))
+
+    def _transport_running(self, name: str) -> bool:
+        channel = self._channels.get(name)
+        return channel is not None and bool(channel.is_running)
+
+    async def _claim_transport(self, name: str) -> bool:
+        """True when this instance may start ``name``'s transport, taking its lease if it is free."""
+        if not self._arbitrated(name):
+            return True
+        return await self._leadership.acquire(name)
+
+    async def _release_idle_lease(self, name: str) -> None:
+        """Hand back a held lease once the provider is disabled here and its transport is gone."""
+        if self._arbitrated(name) and self._leadership.has_record(name) and name not in self._channels and not self._wants_transport(name):
+            await self._leadership.release(name)
+
+    @property
+    def lease_owner_id(self) -> str | None:
+        """This instance's name in the lease table, or ``None`` without the leader lease."""
+        return self._leadership.owner_id if self._leadership is not None else None
+
+    def leader_of(self, name: str) -> str | None:
+        """The instance holding ``name``'s lease as last seen here (``None`` without the lease or a holder)."""
+        if not self._arbitrated(name):
+            return None
+        return self._leadership.leader_of(name)
+
+    def notification_excluded_providers(self) -> frozenset[str] | None:
+        """Providers whose scheduled-run notifications this instance must not claim.
+
+        ``None`` without the leader lease. Otherwise the arbitrated providers
+        whose lease this instance does not hold and that either are enabled
+        here or were last seen held by a live peer: their holder delivers over
+        its own transport, and a claim here would only park the row for the
+        channel-down interval. The peer check covers a provider connected from
+        the web UI on another instance, which never enters this instance's
+        config. Providers no instance runs stay claimable, so their rows still
+        settle.
+        """
+        if self._leadership is None:
+            return None
+        lead = self._leadership
+        return frozenset(name for name in _CHANNEL_REGISTRY if self._arbitrated(name) and not lead.has_record(name) and (self._wants_transport(name) or lead.peer_leads(name)))
+
+    def _start_supervisor(self) -> None:
+        if self._leadership is None or self._supervisor_task is not None:
+            return
+        self._supervisor_task = asyncio.create_task(self._supervise(), name="channel-leader-lease")
+
+    async def _stop_supervisor(self) -> None:
+        tasks = [task for task in (self._supervisor_task, *self._lease_actions.values()) if task is not None]
+        self._supervisor_task = None
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _supervise(self) -> None:
+        lead = self._leadership
+        loop = asyncio.get_running_loop()
+        next_tick = loop.time()
+        while self._running:
+            # Fixed rate rather than sleep-after-round: a slow round must not
+            # stretch the gap between renewals the deadline is computed from.
+            # Missed ticks are skipped, not replayed as a burst.
+            now = loop.time()
+            next_tick = max(next_tick + lead.renew_interval, now)
+            await asyncio.sleep(next_tick - now)
+            if not self._running:
+                return
+            try:
+                await self._supervise_once()
+            except Exception:
+                logger.exception("Channel leader lease round failed; retrying on the next tick")
+
+    async def _supervise_once(self) -> None:
+        names = set(self._leadership.held_providers())
+        names.update(name for name in self._config if self._arbitrated(name) and self._wants_transport(name))
+        names.update(name for name in self._channels if self._arbitrated(name))
+        ordered = sorted(names)
+        # Lease calls are bounded and run concurrently; transport work is
+        # handed to per-provider tasks so it never delays a renewal. The
+        # whole-table read keeps status and notification claims aware of
+        # leases this instance has no config for.
+        observed, *decisions = await asyncio.gather(self._leadership.observe_all(), *(self._lease_round(name) for name in ordered), return_exceptions=True)
+        if isinstance(observed, BaseException):
+            logger.error("Channel leader lease table read failed", exc_info=observed)
+        for name, decision in zip(ordered, decisions):
+            if isinstance(decision, BaseException):
+                logger.error("Channel %s leader lease round failed", name, exc_info=decision)
+            elif decision is not None and self._running:
+                action, preempt = decision
+                self._schedule_lease_action(name, action, preempt=preempt)
+
+    async def _lease_round(self, name: str) -> tuple[Callable[[], Awaitable[None]], bool] | None:
+        """Renew or acquire ``name``'s lease and return the transport action it calls for.
+
+        The second element is ``preempt``: a fail-closed stop cancels a start
+        still in flight instead of waiting behind it.
+        """
+        lead = self._leadership
+        if lead.has_record(name):
+            outcome = await lead.renew(name, transport_running=self._transport_running(name))
+            if outcome is RenewOutcome.LOST:
+                return (lambda: self._stop_transport(name, release=False)), True
+            if outcome is RenewOutcome.UNCONFIRMED:
+                if lead.holds(name):
+                    return None
+                # Fail closed: a peer may take the lease once it has been
+                # expired for grace_seconds, so the transport stops now, while
+                # that is still at least grace_seconds away.
+                logger.error("Stopping the %s transport: its leader lease renewal could not be confirmed before the local deadline", name)
+                lead.forget(name)
+                return (lambda: self._stop_transport(name, release=False)), True
+            if not self._wants_transport(name):
+                return (lambda: self._stop_transport(name, release=True)), False
+            if not self._transport_running(name) and self._lease_start_due(name):
+                return (lambda: self._start_led_transport(name, reload_config=False)), False
+            return None
+        if name in self._channels:
+            # A transport left without a lease (its stop failed after the lease
+            # ended): keep trying to stop it.
+            return (lambda: self._stop_transport(name, release=False)), False
+        if self._wants_transport(name) and await lead.acquire(name):
+            # Taking over from another instance: reload the provider's config
+            # so credentials saved since this instance started are used.
+            return (lambda: self._start_led_transport(name, reload_config=True)), False
+        return None
+
+    def _schedule_lease_action(self, name: str, action: Callable[[], Awaitable[None]], *, preempt: bool) -> None:
+        current = self._lease_actions.get(name)
+        if current is not None and not current.done():
+            if not preempt:
+                return
+            current.cancel()
+
+        async def run() -> None:
+            if current is not None:
+                await asyncio.gather(current, return_exceptions=True)
+            await action()
+
+        task = asyncio.create_task(run(), name=f"channel-leader-lease-{name}")
+        self._lease_actions[name] = task
+        task.add_done_callback(lambda done, name=name: self._lease_action_done(name, done))
+
+    def _lease_action_done(self, name: str, task: asyncio.Task) -> None:
+        if self._lease_actions.get(name) is task:
+            self._lease_actions.pop(name, None)
+        if not task.cancelled() and task.exception() is not None:
+            logger.error("Channel %s leader lease action failed", name, exc_info=task.exception())
+
+    async def _stop_transport(self, name: str, *, release: bool) -> None:
+        """Stop ``name``'s transport; with ``release``, then hand its (still held) lease back."""
+        async with self._channel_lock(name):
+            channel = self._channels.get(name)
+            if channel is not None:
+                await self._stop_and_discard_channel(name, channel)
+                if self._channels.get(name) is channel:
+                    if release:
+                        logger.warning("Keeping the %s leader lease: its transport failed to stop and may still be connected", name)
+                    else:
+                        logger.error("The %s transport failed to stop after its leader lease ended; another instance may connect concurrently until it stops", name)
+                    return
+                logger.info("Stopped the %s transport (%s)", name, "provider disabled here" if release else "leader lease ended")
+            if release:
+                await self._release_idle_lease(name)
+
+    async def _start_led_transport(self, name: str, *, reload_config: bool) -> None:
+        if not self._running:
+            return
+        if reload_config:
+            await self._take_over_channel(name)
+        else:
+            await self.ensure_channel_ready(name)
+        self._record_lease_start(name, ok=self._transport_running(name) or not self._wants_transport(name))
+
+    def _lease_start_due(self, name: str) -> bool:
+        backoff = self._lease_start_backoff.get(name)
+        return backoff is None or self._leadership.now() >= backoff[1]
+
+    def _record_lease_start(self, name: str, *, ok: bool) -> None:
+        if ok:
+            self._lease_start_backoff.pop(name, None)
+            return
+        failures = self._lease_start_backoff.get(name, (0, 0.0))[0] + 1
+        delay = min(_LEASE_START_BACKOFF_MAX_SECONDS, self._leadership.renew_interval * 2 ** (failures - 1))
+        self._lease_start_backoff[name] = (failures, self._leadership.now() + delay)
+        logger.warning("The %s transport did not start on its leader; retrying in %.0fs (attempt %d)", name, delay, failures)
+
     def get_status(self) -> dict[str, Any]:
-        """Return status information for all channels."""
+        """Return status information for all channels.
+
+        Under the leader lease each arbitrated provider also reports
+        ``leader`` (the holder's instance id, or ``None``) and ``leader_here``,
+        and ``running`` covers a peer holder whose transport was running at its
+        last renewal, so every instance answers the same way.
+        """
         channels_status = {}
         for name in _CHANNEL_REGISTRY:
             config = self._config.get(name, {})
@@ -651,6 +992,10 @@ class ChannelService:
                 "enabled": enabled,
                 "running": running,
             }
+            if self._arbitrated(name):
+                channels_status[name]["running"] = running or self._leadership.peer_transport_running(name)
+                channels_status[name]["leader"] = self._leadership.leader_of(name)
+                channels_status[name]["leader_here"] = self._leadership.has_record(name)
         return {
             "service_running": self._running,
             "channels": channels_status,
@@ -710,6 +1055,8 @@ async def start_channel_service(
     *,
     get_stream_bridge: Callable[[], StreamBridge | None] | None = None,
     credentials_cipher: Any | None = None,
+    multi_process: bool = False,
+    lease_owner_id: str | None = None,
 ) -> ChannelService:
     """Create and start the global ChannelService from app config.
 
@@ -719,6 +1066,8 @@ async def start_channel_service(
     a run's completion and auto-drain buffered follow-ups. ``app.py``'s
     lifespan passes a closure over ``app.state.stream_bridge`` here, the same
     pattern it already uses for ``ScheduledTaskService``'s ``launch_run``.
+    ``multi_process`` and ``lease_owner_id`` select and name this instance's
+    ``channels.leader_lease`` participation (see ``from_app_config``).
     """
     global _channel_service
     if _channel_service is not None:
@@ -726,7 +1075,14 @@ async def start_channel_service(
     # from_app_config resolves the channel store path (realpath) and reads the
     # runtime config files; keep that disk IO off the event loop.
     # asyncio.to_thread forwards both args and kwargs to the target callable.
-    service = await asyncio.to_thread(ChannelService.from_app_config, app_config, get_stream_bridge=get_stream_bridge, credentials_cipher=credentials_cipher)
+    service = await asyncio.to_thread(
+        ChannelService.from_app_config,
+        app_config,
+        get_stream_bridge=get_stream_bridge,
+        credentials_cipher=credentials_cipher,
+        multi_process=multi_process,
+        lease_owner_id=lease_owner_id,
+    )
     _channel_service = service
 
     async def rollback_failed_start() -> None:

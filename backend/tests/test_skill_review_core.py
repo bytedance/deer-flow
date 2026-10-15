@@ -1,6 +1,7 @@
 import io
 import json
 import stat
+import subprocess
 import tempfile
 import time
 import zipfile
@@ -19,8 +20,31 @@ from deerflow.skills.review.resource_graph import _extract_references
 CONTRACTS_DIR = Path(__file__).resolve().parents[2] / "contracts" / "skill_review"
 
 
-def test_video_generation_runtime_credentials_pass_skill_review():
-    skill_dir = Path(__file__).resolve().parents[2] / "skills" / "public" / "video-generation"
+def test_video_generation_runtime_credentials_pass_skill_review(tmp_path):
+    """The committed video-generation skill passes the package review.
+
+    The review materializes the tracked skill tree instead of scanning the
+    live directory: local build residue (e.g. a scripts/__pycache__ directory
+    left behind when a test imports the skill script) is not part of the
+    committed package and must not fail the review.
+    """
+    repo_skill_dir = Path(__file__).resolve().parents[2] / "skills" / "public" / "video-generation"
+    tracked = subprocess.run(
+        ["git", "ls-files", "--", "."],
+        cwd=repo_skill_dir,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+    assert tracked, "git ls-files returned no tracked files"
+
+    skill_dir = tmp_path / "video-generation"
+    for rel in tracked:
+        source = repo_skill_dir / rel
+        target = skill_dir / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(source.read_bytes())
+
     facts = analyze_skill_package(LocalDirectoryReader(skill_dir).read())
 
     assert facts["summary"]["blockers"] == 0

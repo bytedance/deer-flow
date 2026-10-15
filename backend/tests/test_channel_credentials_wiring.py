@@ -170,7 +170,7 @@ def test_start_channel_service_threads_the_cipher_through(monkeypatch: pytest.Mo
         async def start(self):
             return None
 
-    def fake_from_app_config(app_config=None, *, get_stream_bridge=None, credentials_cipher=None):
+    def fake_from_app_config(app_config=None, *, get_stream_bridge=None, credentials_cipher=None, **_lease):
         captured["credentials_cipher"] = credentials_cipher
         return _FakeService()
 
