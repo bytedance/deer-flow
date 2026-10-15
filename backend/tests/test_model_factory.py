@@ -2568,6 +2568,9 @@ def test_gpt6_model_routes_through_responses_api_by_default(monkeypatch):
     """
     from langchain_openai import ChatOpenAI
 
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_BASE", raising=False)
+
     model = _make_model("gpt-6.1-sol", use="langchain_openai:ChatOpenAI")
     cfg = _make_app_config([model])
 
@@ -2705,6 +2708,9 @@ def test_gpt6_output_version_only_still_routes(monkeypatch):
     """
     from langchain_openai import ChatOpenAI
 
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_BASE", raising=False)
+
     model = ModelConfig(
         name="gpt-6-output-version",
         display_name="GPT-6 pinned output version",
@@ -2723,17 +2729,20 @@ def test_gpt6_output_version_only_still_routes(monkeypatch):
     assert captured.get("output_version") == "responses/v1"
 
 
-def test_gpt6_env_var_base_url_not_rerouted(monkeypatch):
+@pytest.mark.parametrize("endpoint_env", ["OPENAI_BASE_URL", "OPENAI_API_BASE"])
+def test_gpt6_env_var_base_url_not_rerouted(monkeypatch, endpoint_env):
     """A gpt-6 model with no ``base_url`` in settings but a gateway wired purely
-    via the ``OPENAI_BASE_URL`` env var must not be re-pointed at ``/responses``:
-    the openai SDK falls back to that env var when no ``base_url`` is passed.
+    via either supported endpoint env var must not be re-pointed at ``/responses``.
+    Clear both variables first so each case exercises its own gate.
     """
     from langchain_openai import ChatOpenAI
 
     model = _make_model("gpt-6.1-sol", use="langchain_openai:ChatOpenAI")
     cfg = _make_app_config([model])
 
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://env-gateway.example.com/v1")
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_BASE", raising=False)
+    monkeypatch.setenv(endpoint_env, "https://env-gateway.example.com/v1")
 
     captured: dict = {}
     _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
