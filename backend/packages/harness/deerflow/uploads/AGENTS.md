@@ -9,6 +9,9 @@ entry count at debug level. Permission and other operational errors propagate.
 Keep both entry and directory race coverage in
 `backend/tests/test_uploads_manager.py`.
 
+Staging cleanup is best-effort: warn with the directory and exception on scan
+errors, keep its files and continue elsewhere. A vanished directory stays quiet.
+
 Embedded first-time uploads use `publish_upload_copy` for suffix retries from the
 normalized original name, for originals and companions. With `snapshot_path`,
 capture the opened source once before retries and retain its original `fstat`

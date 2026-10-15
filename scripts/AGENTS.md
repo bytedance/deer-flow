@@ -26,6 +26,7 @@ path variables and compare storage defaults with the launcher's actual shell blo
 ## Dependency Check Diagnostics
 
 `check_extension.py` checks wheels with Gateway's asset validator.
+CI builds and checks all bundled examples in `extension-package-check.yml`.
 Tests: `backend/tests/test_extension_check_script.py`.
 
 `check.py` decodes captured output as UTF-8 with replacement and runs pnpm with
@@ -175,8 +176,8 @@ Only "no config anywhere" creates `<checkout>/config.yaml` from the example.
 multi-instance gate and every endpoint/data root inside its state dir
 (`backend/tests/test_dev_multi_instance_script.py`).
 Unless `keep_channels` is requested, disable provider flags in both `channels`
-and `channel_connections`; UI credentials can otherwise start a duplicate
-transport later. Preserve `channels.leader_lease` and connection metadata.
+and `channel_connections`; UI credentials can otherwise connect a bot
+later. Preserve `channels.leader_lease` and connection metadata.
 
 ## Shell Script Invocation Contract
 

@@ -435,6 +435,46 @@ def test_legacy_non_mapping_template_values_are_forwarded_not_rejected(monkeypat
     assert captured["extra_body"] == expected_extra_body
 
 
+@pytest.mark.parametrize(
+    ("thinking_enabled", "when_thinking_enabled", "expected"),
+    [
+        (False, {"extra_body": None, "thinking": {"type": "enabled"}}, {"thinking": {"type": "disabled"}}),
+        (True, {"extra_body": None, "thinking": {"type": "enabled"}}, {"extra_body": None, "thinking": {"type": "enabled"}}),
+        (False, {"extra_body": None}, {}),
+        (False, {"thinking": None}, {}),
+        (False, {"extra_body": {"thinking": None}}, {}),
+        (True, {"extra_body": {"thinking": None}}, {"extra_body": {"thinking": None}}),
+        (False, {"extra_body": {"thinking": None}, "thinking": {"type": "enabled"}}, {"thinking": {"type": "disabled"}}),
+        (
+            False,
+            {"extra_body": {"thinking": None, "chat_template_kwargs": {"enable_thinking": True}}},
+            {"extra_body": {"chat_template_kwargs": {"enable_thinking": False}}},
+        ),
+    ],
+    ids=["thinking-off", "thinking-on", "extra-body-null", "thinking-null", "nested-null-off", "nested-null-on", "nested-null-native-fallback", "nested-null-vllm-fallback"],
+)
+def test_legacy_null_template_values_build_on_both_thinking_paths(monkeypatch, thinking_enabled, when_thinking_enabled, expected):
+    """A template key left blank in ``config.yaml`` (``extra_body:``, ``thinking:``) loads as an
+    explicit ``None`` — and ``dict.get(key, {})`` only defaults an *absent* key. The legacy
+    disable path therefore called ``.get`` on ``None`` and every ``create_chat_model`` for the
+    profile crashed with ``AttributeError`` — on the default ``thinking_enabled=False`` path,
+    i.e. title generation, summarization, subagent and lead-agent builds. A null template
+    value must fall through the disable-path dialect heuristics like an absent one, as the
+    guarded sibling accesses (``_infer_dialect``, the contract path) already do, while the
+    enable path keeps forwarding the template unchanged."""
+    model = _make_model("legacy-null", supports_thinking=True, when_thinking_enabled=when_thinking_enabled)
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="legacy-null", thinking_enabled=thinking_enabled)
+
+    for key in ("extra_body", "thinking"):
+        if key in expected:
+            assert captured[key] == expected[key]
+        else:
+            assert key not in captured
+
+
 @pytest.mark.parametrize("thinking_enabled", [True, False], ids=["thinking-on", "thinking-off"])
 def test_legacy_when_thinking_enabled_deep_merges_into_the_base_extra_body(monkeypatch, thinking_enabled):
     """The legacy enable path used ``dict.update``, so ``when_thinking_enabled.extra_body``

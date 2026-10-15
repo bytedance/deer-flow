@@ -1,3 +1,4 @@
+import ctypes
 import errno
 import locale
 import logging
@@ -568,6 +569,24 @@ class LocalSandbox(Sandbox):
         return pattern.sub(replace_match, content)
 
     @staticmethod
+    def _get_cmd_output_encoding() -> str:
+        """Select cmd builtins' console page, or the OEM default without a console."""
+        try:
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            for name in ("GetConsoleOutputCP", "GetOEMCP"):
+                get_code_page = getattr(kernel32, name)
+                get_code_page.argtypes = []
+                get_code_page.restype = ctypes.c_uint
+                code_page = get_code_page()
+                if code_page:
+                    return f"cp{code_page}"
+        except (AttributeError, OSError):
+            pass
+        # Last resort when the Windows APIs are unavailable. Unlike
+        # getpreferredencoding(), this remains independent of Python UTF-8 mode.
+        return locale.getencoding()
+
+    @staticmethod
     def _get_shell() -> str:
         """Detect available shell executable with fallback."""
         shell = LocalSandbox._find_first_available_shell(("/bin/zsh", "/bin/bash", "/bin/sh", "sh"))
@@ -678,6 +697,19 @@ class LocalSandbox(Sandbox):
                     # would report ``"utf-8"`` on hosts running under
                     # ``PYTHONUTF8=1``, silently making this fallback a no-op.
                     fallback_encoding=locale.getencoding(),
+                )
+            elif self._is_cmd_shell(shell):
+                # cmd builtins use the console output page, which can differ
+                # from ANSI (e.g. cp437 vs cp1252) or be UTF-8 after chcp 65001.
+                # Native children can choose their own encoding; configure
+                # those tools explicitly when it differs from the console.
+                # Keep the encoding=None default's Python text-mode contract
+                # unchanged and override it only for this shell.
+                stdout, stderr, returncode, timed_out = self._run_windows_command(
+                    args,
+                    timeout,
+                    sandbox_env,
+                    encoding=self._get_cmd_output_encoding(),
                 )
             else:
                 stdout, stderr, returncode, timed_out = self._run_windows_command(args, timeout, sandbox_env)

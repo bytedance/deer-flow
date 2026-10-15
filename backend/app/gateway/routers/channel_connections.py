@@ -578,7 +578,14 @@ async def get_channel_connections(request: Request) -> ChannelConnectionsRespons
         return ChannelConnectionsResponse(connections=[])
     repo = _get_repository(request, config)
     rows = await repo.list_connections(_get_user_id(request))
-    return ChannelConnectionsResponse(connections=[ChannelConnectionResponse(**row) for row in rows])
+    connections = []
+    for row in rows:
+        if row.get("provider") == "wechat":
+            # Old bindings stored this private routing token in metadata. New
+            # workers keep it encrypted; never return legacy tokens to browsers.
+            row = {**row, "metadata": {key: value for key, value in (row.get("metadata") or {}).items() if key != "context_token"}}
+        connections.append(ChannelConnectionResponse(**row))
+    return ChannelConnectionsResponse(connections=connections)
 
 
 @router.delete("/connections/{connection_id}", status_code=204)

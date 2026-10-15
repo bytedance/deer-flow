@@ -282,6 +282,167 @@ models:
           type: enabled
 ```
 
+#### Models registered through the Web
+
+An administrator can open **Settings → Models → Add model**, select a provider,
+and enter its **API Key** and **model ID**. No endpoint, protocol, Python import
+path or thinking template is needed. The model ID is not an enum: any nonempty
+ID of up to 200 Unicode characters, without control characters, is accepted.
+The provider still decides whether that ID exists and is available to the key.
+No model discovery or external model directory is queried.
+
+New entries are enabled by default. The server generates an ASCII internal name
+(up to 100 characters) from a bounded slug and a random suffix, checking for
+collisions while holding the existing catalog lock. Slashes, spaces, Unicode,
+long IDs and identical model IDs do not collide or become filesystem paths.
+The default display name combines the provider and model ID. The internal name
+is immutable in the Web editor; changing a model ID keeps Agent/thread references
+stable. Display name, enabled state, context window, output token cap and vision
+support remain available under **Advanced settings**. Vision supports an explicit
+on/off override or the provider rule; unknown models default to no advertised
+vision/thinking/effort and no assumed context window. This conservative metadata
+is not a claim that an unknown model lacks those features. A verified `reasoning`
+contract can also be supplied by administrator API clients; it is validated by
+`ModelConfig` and interpreted by the existing model factory. Managed effort paths
+are restricted to request effort parameters (`reasoning_effort`,
+`extra_body.reasoning_effort`, `output_config.effort`, `effort`); they cannot address
+SDK credentials, endpoints or adapter fields. Operator YAML contracts are unchanged.
+
+Provider routing has one backend owner,
+`packages/harness/deerflow/config/managed_model_providers.py`. The admin-only
+`GET /api/managed-models/providers` returns IDs, labels and form requirements,
+without maintaining another endpoint map in the frontend. The initial presets
+are:
+
+| Provider ID | Service / credential scope | Endpoint | Protocol / authentication |
+| --- | --- | --- | --- |
+| `openai` | OpenAI API | `https://api.openai.com/v1` | Chat Completions / Bearer |
+| `anthropic` | Anthropic API | `https://api.anthropic.com` | Native Messages `/v1/messages` / `x-api-key` |
+| `deepseek` | DeepSeek API | `https://api.deepseek.com` | Chat Completions / Bearer |
+| `qwen-cn` | Alibaba Cloud Bailian / Qwen, China | `https://dashscope.aliyuncs.com/compatible-mode/v1` | Chat Completions / Bearer |
+| `doubao` | Volcengine Beijing, ordinary API | `https://ark.cn-beijing.volces.com/api/v3` | Chat Completions / Bearer |
+| `doubao-coding` | Volcengine Coding Plan, separate key/plan | `https://ark.cn-beijing.volces.com/api/coding/v3` | Chat Completions / Bearer |
+| `moonshot-cn` | Moonshot / Kimi, China API | `https://api.moonshot.cn/v1` | Chat Completions / Bearer |
+| `zhipu-cn` | Zhipu, China ordinary API | `https://open.bigmodel.cn/api/paas/v4` | Chat Completions / Bearer |
+| `zai` | Z.AI, international ordinary API | `https://api.z.ai/api/paas/v4` | Chat Completions / Bearer |
+| `minimax` | MiniMax, international API | `https://api.minimax.io/v1` | Chat Completions / Bearer |
+| `minimax-cn` | MiniMax, China API | `https://api.minimaxi.com/v1` | Chat Completions / Bearer |
+| `openai-compatible` | Custom OpenAI-compatible, including unauthenticated local endpoints | Administrator-supplied HTTP(S) base URL | Chat Completions / optional key |
+
+Keys for different regions and Coding Plans are not interchangeable. These
+presets do not route China keys to international endpoints or infer a Coding
+Plan from the model name. Plans/regions without a preset can use the custom
+OpenAI-compatible option if their documented protocol is compatible; native
+protocols need a verified backend preset or operator YAML configuration.
+
+Endpoint/auth sources used for these presets include the official
+[OpenAI SDK](https://github.com/openai/openai-python/blob/main/src/openai/_client.py),
+[Anthropic SDK](https://github.com/anthropics/anthropic-sdk-python/blob/main/src/anthropic/_client.py),
+[DeepSeek API docs](https://api-docs.deepseek.com/),
+[Alibaba Model Studio OpenAI compatibility docs](https://www.alibabacloud.com/help/en/model-studio/compatibility-of-openai-with-dashscope)
+and official [DashScope SDK](https://pypi.org/project/dashscope/),
+[Volcengine Ark SDK](https://github.com/volcengine/volcengine-python-sdk/tree/master/volcenginesdkarkruntime),
+[Moonshot API docs](https://platform.moonshot.cn/docs/guide/start-using-kimi-api),
+[Z.AI SDK](https://pypi.org/project/zai-sdk/) (`zai/_client.py` distinguishes the
+China and international endpoints), and
+[MiniMax OpenAI API docs](https://platform.minimax.io/docs/api-reference/text-openai-api)
+with the official [MiniMax MCP region settings](https://github.com/MiniMax-AI/MiniMax-MCP).
+The existing `config.example.yaml` documents Ark Coding Plan and the model-specific
+DeepSeek, Kimi, GLM, Anthropic, Doubao and MiniMax parameters. During implementation,
+restricted documentation hosts were not reachable; accessible official SDK
+source/package metadata and repository examples were checked instead. Vendor
+availability and live credentials must be verified separately.
+
+All selected adapters and SDK dependencies are already installed by the locked
+harness dependency set (`langchain-openai`, `langchain-anthropic`,
+`langchain-deepseek`). Anthropic uses its native SDK. The existing patched
+DeepSeek adapter is also used as a Chat Completions adapter where reasoning
+history and `max_tokens` must be preserved; this does not select a DeepSeek
+endpoint or infer DeepSeek capabilities for those vendors. MiniMax keeps its
+existing adapter for reasoning fields and user-message name normalization and
+uses its documented `max_tokens` wire parameter. MiniMax defaults to temperature
+1.0; Anthropic has a default output budget of 4096 because Messages requires an
+output cap. These request defaults are separate from model capability rules.
+
+To add a preset, append a stable ID and verified endpoint, adapter, protocol,
+authentication/SDK parameter mapping and required request defaults to `PROVIDERS`.
+Add model capability rules only for explicit verified IDs in `_capabilities`;
+never use a substring match or enable vision/thinking for an entire vendor.
+Keep unknown models conservative. Add an offline real-SDK transport regression
+for routing, authentication, streaming, tool choice and token limits, plus
+positive and negative capability-rule cases. The frontend discovers the new
+entry from `/providers`; it should not gain a routing map.
+
+`PUT /api/managed-models` and `POST /api/managed-models/test` keep their existing
+`{config, expected_revision}` envelope. A preset create needs only
+`config.provider`, `config.model` and `config.api_key`; omitted `name` and
+`display_name` are generated. User capability overrides are optional. Preset
+requests reject endpoint fields (even `base_url: null`), `use`, protocol and
+other routing overrides. Updates carry the unchanged internal name and current
+revision; stale updates return 409. Validation responses do not echo input
+objects, keys, headers or provider response bodies.
+
+An omitted API key on edit retains the existing key only for the same provider
+and custom endpoint. An empty string explicitly clears it; password masks are
+rejected. Preset models require a key to be enabled, so disable the model before
+clearing its key. A provider/custom endpoint switch clears the test result in the
+Web editor and requires a new key for authenticated presets. The server also
+refuses to inherit the old connection's credentials. Unauthenticated custom
+endpoints can continue to use no key. Do not send catalog responses back as PUT
+payloads: use the editable fields and `expected_revision`, omitting secret status,
+source metadata and preset endpoints.
+
+Old `provider: openai-compatible` records retain their names, revisions, encrypted
+keys and endpoint semantics. Official HTTPS DeepSeek endpoints (root or `/v1`,
+default port) continue to use the legacy DeepSeek adapter. A proxy with a
+DeepSeek-like model ID remains a generic custom OpenAI-compatible endpoint.
+Reads and startup do not rewrite or migrate the encrypted catalog.
+
+Managed entries are merged after YAML models. YAML names win and conflicts are
+shown by the management list; YAML and `$ENV_VAR` references are unchanged.
+Disabled entries are omitted from future model lists. Saving changes the catalog
+signature, so subsequent requests get a fresh `AppConfig` without a Gateway
+restart. Already-returned snapshots, active runs and explicitly injected configs
+remain authoritative. The Web editor invalidates both the management query and
+`MODELS_QUERY_KEY`, refreshing the existing chat and Agent pickers. Ordinary
+users retain the existing model-use authorization; only administrators can
+manage the shared catalog. Static/demo mode disables management.
+
+Testing never saves the draft. It constructs the same resolved `ModelConfig`
+through `create_chat_model` as chat, with tracing disabled, no SDK retries, a
+15-second SDK timeout and a 20-second overall deadline. Optional thinking is
+disabled for the short probe. Required-thinking models use automatic tool
+selection and a bounded 2048-token budget; ordinary probes use 32 output tokens.
+For an unknown third-party preset, automatic selection avoids assuming forced
+tool support. Responses are limited to 256 chunks and 16384 accumulated content
+and tool-argument characters. The result distinguishes missing keys,
+authentication failure, connection failure, absent tool calls and output limits.
+An edit can use its saved key only with the current revision and same connection.
+A passing probe establishes streaming/tool connectivity, not every agent or
+vision/reasoning workflow. Missing preset credentials stop before network access.
+
+Offline tests replace only HTTP transport, using actual LangChain/vendor SDK
+serialization. Live tests are opt-in, skipped without credentials and disabled
+in CI. To test a preset manually, securely export `MANAGED_MODEL_TEST_API_KEY`,
+`MANAGED_MODEL_TEST_PROVIDER` and `MANAGED_MODEL_TEST_MODEL`, then run in `backend/`:
+
+```bash
+DEER_FLOW_RUN_LIVE_TESTS=1 uv run --no-sync pytest tests/test_managed_presets_live.py -q
+```
+
+These requests may incur provider charges and do not save credentials. Keep the
+existing DeepSeek live suite for the legacy custom endpoint and tool-history path.
+
+**Backup and recovery:** keep the entire `$DEER_FLOW_HOME/managed-models/`
+directory on persistent storage, including the matched `catalog.enc` and `key`.
+Take a consistent backup while writes are paused (or through a filesystem
+snapshot); restore the pair together with restrictive filesystem permissions.
+Share the same directory across workers/replicas that need the same catalog.
+The existing thread/process locks, atomic writes and Fernet encryption remain;
+SQL does not replicate these files. Anyone able to read both files can decrypt
+the credentials. A missing/wrong key or corrupt catalog fails closed; restore a
+matched backup instead of generating a new key or deleting the encrypted file.
+
 #### MindIE XML tool arguments
 
 The MindIE adapter (`deerflow.models.mindie_provider:MindIEChatModel`) parses XML
@@ -567,6 +728,7 @@ Notes:
 - Scheduled task definitions and task-run history are persisted in the application database.
 - With `channel_connections.enabled: true`, the scheduler sends IM notices ("scheduled task updates") to the task owner's connected identities. A delivery worker (same poll cadence as the scheduler) pushes them.
   - **Which apps:** only providers whose channel implements proactive push get notices; today those are WeCom and Feishu/Lark (`proactive_notifications` in `app/channels/capabilities.py`, also returned by `GET /api/channels/providers`, where Settings shows "sent here" or "not available for this app yet"). Other providers get no outbox rows at all, and rows queued for them before the upgrade end once as `failed` without retries.
+  - **Optional Feishu group:** each task may select one additional owner-bound group through the task form or `notification_group_connection_id` in REST. No group is selected automatically; personal delivery is retained. The app needs `im:chat:read` for names, and a private binding never becomes a group destination. [Group setup and delivery](IM_CHANNEL_CONNECTIONS.md#feishu-group-notifications).
   - **Events:** `run_completed`, `run_failed`, `run_unmet` (goal missed), `task_paused` (automatic pause after three missed goals), `task_stopped` (paused by the agent because its stop condition was met) and `task_finished` (all `max_runs` done or `end_at` reached).
   - **One message per occurrence:** when one occurrence produces several events, only the first of `task_stopped` > `task_paused` > `task_finished` > `run_failed` > `run_unmet` > `run_completed` is sent, and that message still says how the last run went ("The last run failed." / "didn't meet the goal"). A one-time task sends only its run's outcome, never a separate `task_finished`.
   - **Transactional:** notices are queued by the finalization observer in the same database transaction that records the outcome and are deduplicated per occurrence (or per end time for a task that ends between runs), so an occurrence finalized by crash or lease recovery notifies exactly once. Plain manual "run now" trials and interrupted runs stay silent; a trial that pauses or finishes the task still sends that notice. Occurrences that end without a finished run (launch error, queue timeout, interrupted by a restart) stay silent.
@@ -593,7 +755,7 @@ Notes:
 - The declaration also drives the `agent_storage.backend: file` divergence warning, the inbound webhook dedupe warning, and the WeChat QR-login guard, which otherwise only look at the worker count.
 - With the default DeerMem backend, the declaration also warns when the derived SQLite retrieval index sits inside the shared `storage_path` (the default `{storage_path}/.retrieval`). Set `memory.backend_config.retrieval_index_path` to an instance-local directory (relative values resolve against `storage_path`): SQLite WAL is unsupported on network filesystems, and the index is rebuilt from the Markdown facts at startup and re-synced per user scope after a peer writes.
 - A declared multi-instance deployment that enables a feature storing credentials (today `channel_connections.enabled: true`) also needs one shared `DEER_FLOW_CREDENTIALS_KEY`; see [Credentials encryption key](#credentials-encryption-key-deer_flow_credentials_key).
-- IM channels: the gate refuses `channels.leader_lease.enabled: false` while a provider other than GitHub is enabled (under `channels.*`, or connectable from the web UI through `channel_connections.<provider>.enabled`), because every instance would otherwise open the platform connection with the same bot credentials. `auto`/`true` pass the clause but are reserved for the lease-backed transport ownership that ships separately, so keep one instance while channels are enabled; see [IM channel leader lease](#im-channel-leader-lease-channelsleader_lease).
+- IM channels: the gate refuses `channels.leader_lease.enabled: false` while a provider other than GitHub is enabled (under `channels.*`, or connectable from the web UI through `channel_connections.<provider>.enabled`), because every instance would otherwise open the platform connection with the same bot credentials. With `auto` (the default) or `true` the instances share each provider's connection through the `channel_leases` table; see [IM channel leader lease](#im-channel-leader-lease-channelsleader_lease).
 - Restart-required: the gate runs once at startup. Restart all Gateway instances together after changing it.
 
 #### Local two-Gateway harness
@@ -601,7 +763,7 @@ Notes:
 `scripts/dev_multi_instance.sh` (also `make dev-multi`, `make dev-multi-check`, `make dev-multi-down`) runs this topology on one machine, so cross-instance behavior can be checked without a cluster:
 
 - Throwaway `postgres:17-alpine` and `redis:7-alpine` containers (`deerflow-mi-postgres`, `deerflow-mi-redis`) on `127.0.0.1:55432` and `127.0.0.1:56379`, Gateway A on `127.0.0.1:8001` and Gateway B on `127.0.0.1:8011` (8002 stays free for the provisioner). When nginx is installed, `http://localhost:2027` round-robins `/api` over both Gateways, names the Gateway that answered in an `X-DeerFlow-Upstream` response header, and forwards `/` to a frontend on port 3000 if you start one. Ports, container names and images are overridable; see `--help`.
-- The generated `config.yaml` is your own `config.yaml` (otherwise `config.example.yaml`; `DEERFLOW_MI_BASE_CONFIG` picks another file) plus `deployment.multi_instance: true`, `database.backend: postgres`, `run_events.backend: db`, `run_ownership.heartbeat_enabled: true` and `stream_bridge.type: redis`. Settings the startup gate refuses are changed and reported: process-local browser tools are removed and an enabled scheduler gets `scheduler.multi_instance: true`. Enabled IM providers under both `channels.*` and the UI-connectable `channel_connections.*` are disabled because both Gateways would connect the same bot; `DEERFLOW_MI_KEEP_CHANNELS=1` keeps them. The `channels.leader_lease` block and connection metadata stay unchanged.
+- The generated `config.yaml` is your own `config.yaml` (otherwise `config.example.yaml`; `DEERFLOW_MI_BASE_CONFIG` picks another file) plus `deployment.multi_instance: true`, `database.backend: postgres`, `run_events.backend: db`, `run_ownership.heartbeat_enabled: true` and `stream_bridge.type: redis`. Settings the startup gate refuses are changed and reported: process-local browser tools are removed and an enabled scheduler gets `scheduler.multi_instance: true`. Enabled IM providers under both `channels.*` and the UI-connectable `channel_connections.*` are disabled so the harness never connects your bots unasked; `DEERFLOW_MI_KEEP_CHANNELS=1` keeps them, and the leader lease then gives each platform connection to one Gateway. The `channels.leader_lease` block and connection metadata stay unchanged.
 - Everything the pair writes stays in the harness, never in your own deployment: any `checkpointer` section is removed (it would win over `database` for checkpoints and the Store), an explicit `sandbox.ownership` and a Redis `database.checkpoint_cache` point at the harness Redis (ownership timing settings are kept), a DeerMem `storage_path` (either spelling) and `blob_storage.backend_config.root` are dropped so their data lands in the harness home, and a local AIO sandbox gets a `container_prefix` derived from the state dir, so the harness never adopts or reaps sandbox containers it did not start. A non-DeerMem memory backend is used as configured, and the harness says so.
 - Both processes share one `DEER_FLOW_HOME`, one copy of `extensions_config.json` (MCP and skill edits never reach your own file), and generated `AUTH_JWT_SECRET`, `DEER_FLOW_INTERNAL_AUTH_TOKEN` and `DEER_FLOW_CREDENTIALS_KEY` values. Each process keeps its own DeerMem `retrieval_index_path`, which the shared config reads from `$DEERFLOW_MI_RETRIEVAL_INDEX_PATH`.
 - Gateway B starts only after A answers `/health`. Alembic migrations are serialized by an advisory lock, but the LangGraph checkpointer and store `setup()` that runs next is not, so two cold starts against an empty database could race.
@@ -630,7 +792,7 @@ These still need a manual pass:
 - cancel a run on B from A: it takes effect within about one heartbeat (~10 s; a lower `run_ownership.lease_seconds` makes the boundary easier to observe);
 - change an MCP filesystem server's args on A: B's local-bash allowlist follows;
 - edit a skill on A: B's system-prompt skills section changes within 30 s;
-- the IM channel gates (one leader per platform, failover after killing the leader, runtime-config changes), once channel leader election lands; run them with `DEERFLOW_MI_KEEP_CHANNELS=1`.
+- with `DEERFLOW_MI_KEEP_CHANNELS=1` and test bots configured: only one Gateway connects each platform (`GET /api/channels/` reports the same `leader` on both, Telegram logs no `409`, Discord answers once), `stop <leader> --kill` hands each provider to the other Gateway within `lease_seconds + grace_seconds`, and a plain `stop <leader>` hands them over on the other Gateway's next tick.
 
 ### IM channel leader lease (`channels.leader_lease`)
 
@@ -642,13 +804,17 @@ channels:
     grace_seconds: 10
 ```
 
-Every IM channel except GitHub connects outbound to its platform (Telegram long polling, Discord / Slack / Feishu / DingTalk WebSockets). With more than one Gateway instance each one would open that connection with the same bot credentials: Telegram rejects the second poller with `409 Conflict`, Discord delivers every message to every session so the user is answered twice, and the per-process `ChannelManager` state (the `/model` cache, GitHub follow-up buffers) diverges. The leader lease will arbitrate this: one row per provider in the shared database, held by one instance and renewed on a heartbeat, so only the holder starts that provider's transport. GitHub is webhook-driven and needs no lease. **In this version the section only drives the startup gate**: the transport ownership ships separately, so `auto`/`true` are reserved settings, not an ownership guarantee, and a deployment with channels enabled must still run one instance.
+Every IM channel except GitHub connects outbound to its platform (Telegram long polling, Discord / Slack / Feishu / DingTalk WebSockets). With more than one Gateway instance each one would open that connection with the same bot credentials: Telegram rejects the second poller with `409 Conflict`, Discord delivers every message to every session so the user is answered twice, and the per-process `ChannelManager` state (the `/model` cache, GitHub follow-up buffers) diverges. The leader lease arbitrates this: the `channel_leases` table (migration `0042_channel_leases`) holds one row per provider, and only the instance holding a provider's row opens that provider's platform connection. The `ChannelManager`, the message bus and GitHub webhooks keep running on every instance.
 
-- `enabled: auto` (default) follows the multi-process signal: on with `GATEWAY_WORKERS` / `WEB_CONCURRENCY > 1`, `deployment.multi_instance: true` or `DEER_FLOW_MULTI_INSTANCE=1`, off on a single instance, which then never writes lease rows and behaves as before. `true` always turns it on; `false` never does, and the multi-process startup gate refuses `false` while an IM channel other than GitHub is enabled. The refusal names the providers and offers only the remedies that work today (a single instance, or disabling those channels); it does not recommend `auto`/`true`, which would merely bypass the clause until the lease ships.
-- `lease_seconds` (≥ 3, default 30) is how long a held lease stays valid without renewal; the holder renews every `lease_seconds // 3` seconds. `grace_seconds` (≥ 0, default 10) is the extra time after expiry before a peer may take the lease, absorbing a slow renewal. Worst-case failover after a crash is `lease_seconds + grace_seconds`; a cleanly stopped holder releases immediately, so a peer takes over within one heartbeat.
+- `enabled: auto` (default) follows the multi-process signal: on with `GATEWAY_WORKERS` / `WEB_CONCURRENCY > 1`, `deployment.multi_instance: true` or `DEER_FLOW_MULTI_INSTANCE=1`, off on a single instance, which then never writes lease rows and behaves as before. `true` always turns it on and needs `database.backend: sqlite` or `postgres` (a single instance with `memory` and an arbitrated channel enabled refuses to start); `false` never does, and the multi-process startup gate refuses `false` while an IM channel other than GitHub is enabled.
+- `lease_seconds` (≥ 3, default 30) is how long a held lease stays valid without renewal; the holder renews every `lease_seconds // 3` seconds. `grace_seconds` (≥ 0, default 10) is the extra time after expiry before a peer may take the lease, absorbing a slow renewal. Worst-case failover after a crash is `lease_seconds + grace_seconds` plus one renewal interval; a cleanly stopped holder releases its leases, so a peer takes over on its next tick.
+- Ownership is decided against the **database clock** inside each SQL statement (an expired lease changes hands only once it has been expired for `grace_seconds`, and every acquisition bumps a fencing `epoch`), so clock skew between hosts cannot hand a provider to two instances. The holder fails closed on its own monotonic clock: when a renewal is rejected, or cannot be confirmed for long enough that the next renewal would come too late, it stops the transport first — at least `grace_seconds` before a peer is allowed to connect.
+- Every instance tries to take every free lease of a provider it has enabled, so providers spread across instances by whoever starts first. A holder whose transport fails to start keeps the lease and retries with backoff (up to 5 minutes); a transport that cannot be stopped within its bounded teardown keeps its lease until it expires rather than invite a second connection.
+- `GET /api/channels/` reports, per arbitrated provider, `leader` (the holder's instance id, the RunManager worker id `hostname:uuid`) and `leader_here`, and `running` reflects the holder's transport on every instance, so `GET /api/channels/providers` and `POST /api/channels/{provider}/connect` behave the same wherever the load balancer sends them. `POST /api/channels/{name}/restart` on a non-holder answers `success: false` and names the holder. Scheduled-task IM notifications are claimed only by the holder of their provider.
+- Runtime channel configuration does not cross instances yet: `POST /api/channels/{provider}/runtime-config` saves the values (in the shared `runtime-config.json`) and applies them only where the provider's transport runs — a non-holder accepts them without restarting the holder, which keeps its current credentials until it next starts the channel (an instance taking a lease over reloads the provider's saved config first). Make credential changes on a single instance or restart the holder afterwards.
 - The block is validated on every topology: an unknown key, a non-mapping value, `enabled` outside `auto | true | false`, `lease_seconds < 3` or `grace_seconds < 0` stop startup with the dotted path in the message.
 - Restart-required (`channels.leader_lease` in the reload-boundary registry): the gate evaluates it once and `ChannelService` captures it at construction. Change it on every instance and restart them together.
-- The lease-backed transport ownership itself (the `channel_leases` table, the supervising loop and the leader reported by `GET /api/channels/providers`) ships separately; until it lands, `auto`/`true` do not stop every instance from connecting, so keep one instance while channels are enabled. This section fixes the configuration contract and the gate so that rollout needs no further config change.
+- Known limits: a leader change loses the IM replies in flight on the old holder. The runs themselves continue on the Gateway executing them (channel runs are created with `on_disconnect: continue`) and their thread state is persisted, so the answer stays readable in the web UI, but the transport-local state that would deliver it (a Telegram placeholder message, a Feishu running card, a DingTalk replier) is gone with the old holder; a run executing on the instance that died is recovered as an error like any run of a dead worker.
 
 ### Credentials encryption key (`DEER_FLOW_CREDENTIALS_KEY`)
 

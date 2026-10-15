@@ -115,6 +115,12 @@ def merge_viewed_images(existing: dict[str, ViewedImageData] | None, new: dict[s
 
     Special case: If new is an empty dict {}, it clears the existing images.
     This allows middlewares to clear the viewed_images state after processing.
+
+    Dict order tracks recency: a key updated by ``new`` is re-inserted at the
+    end, so a re-viewed image becomes the newest entry. The image injection
+    middleware admits entries newest-first and tells the model to re-view an
+    omitted image, so the recovery only works if the re-viewed entry actually
+    moves to the newest position (#6825, review on #6829).
     """
     if existing is None:
         return new or {}
@@ -123,8 +129,11 @@ def merge_viewed_images(existing: dict[str, ViewedImageData] | None, new: dict[s
     # Special case: empty dict means clear all viewed images
     if len(new) == 0:
         return {}
-    # Merge dictionaries, new values override existing ones for same keys
-    return {**existing, **new}
+    # Merge dictionaries; new values override existing ones for same keys, and
+    # updated keys move to the end so insertion order reflects recency.
+    merged = {key: value for key, value in existing.items() if key not in new}
+    merged.update(new)
+    return merged
 
 
 def merge_todos(existing: list | None, new: list | None) -> list | None:

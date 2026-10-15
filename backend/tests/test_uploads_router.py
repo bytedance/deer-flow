@@ -833,9 +833,13 @@ def test_startup_cleanup_reclaims_a_published_staging_alias_immediately(tmp_path
     assert result.success is True
     names = sorted(p.name for p in thread_uploads_dir.iterdir())
     assert names[-1] == "notes.txt" and len(names) == 2 and names[0].startswith(".upload-") and names[0].endswith(".part")
-    assert os.lstat(thread_uploads_dir / "notes.txt").st_nlink == 2
-    with pytest.raises(ValueError, match="multiple links"):
-        validate_upload_destination(thread_uploads_dir, "notes.txt")
+    if os.name != "nt":
+        # ``st_nlink`` is authoritative only where the OS decrements it; Windows
+        # keeps a published-then-unlinked upload at 2, so the multi-link rejection
+        # is asserted on POSIX and the sweep below covers the Windows path.
+        assert os.lstat(thread_uploads_dir / "notes.txt").st_nlink == 2
+        with pytest.raises(ValueError, match="multiple links"):
+            validate_upload_destination(thread_uploads_dir, "notes.txt")
 
     assert cleanup_stale_upload_staging_files(tmp_path) == 1
 

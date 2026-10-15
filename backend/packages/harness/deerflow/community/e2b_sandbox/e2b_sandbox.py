@@ -7,7 +7,7 @@ import shlex
 import threading
 from typing import TYPE_CHECKING
 
-from e2b import CommandExitException, FileNotFoundException
+from e2b import CommandExitException, FileNotFoundException, TimeoutException
 from e2b_code_interpreter import Sandbox as E2BClientSandbox
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
@@ -188,6 +188,11 @@ class E2BSandbox(Sandbox):
                     # actual shell status.
                     output = f"{output}\nExit Code: {exit_code}" if output else f"Command exited with code {exit_code}"
                 return output if output else "(no output)"
+            except TimeoutException:
+                # A command deadline is a shell outcome, not a provider hiccup:
+                # end with the same Exit Code: 124 marker Local/AIO/Tenki emit
+                # on timeout so evidence consumers recover the real status.
+                return "Error: command timed out\nExit Code: 124"
             except Exception as e:
                 if _is_sandbox_gone_error(e):
                     self._dead = True

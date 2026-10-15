@@ -165,11 +165,13 @@ def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
        channel other than GitHub is enabled: every instance would open the
        platform connection with the same bot credentials (Telegram rejects
        the second poller with 409, Discord answers every message twice).
-       ``auto`` (the default) and ``true`` pass the clause, but they are reserved
-       configuration for the lease-backed transport ownership that ships
-       separately: in this version they do not stop the duplicate connections,
-       so the refusal offers only the single-instance and channel-disable
-       remedies.
+       ``auto`` (the default) and ``true`` hand each provider's connection to
+       the one instance holding its ``channel_leases`` row.
+
+    On a single instance only one lease rule applies: an explicit
+    ``channels.leader_lease.enabled: true`` needs a SQL database for its lease
+    table, so ``database.backend: memory`` is refused while a channel the lease
+    arbitrates is enabled.
 
     This gate runs once at startup before any persistence engine is
     initialised so the error message is clear and the process exits
@@ -197,6 +199,13 @@ def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
 
     signal = _multi_process_signal(config)
     if signal is None:
+        if leader_lease.enabled is True and backend not in ("sqlite", "postgres"):
+            providers = _enabled_channel_transport_providers(config)
+            if providers:
+                raise SystemExit(
+                    f"{CHANNEL_LEADER_LEASE_FIELD}.enabled=true needs the shared application database for its lease table, but database.backend is '{backend}' "
+                    f"while IM channels {', '.join(providers)} are enabled. Set database.backend to sqlite or postgres, or set {CHANNEL_LEADER_LEASE_FIELD}.enabled to auto."
+                )
         return
     reason, rollback = signal
 
@@ -250,10 +259,18 @@ def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
                 f"{reason} cannot run with {CHANNEL_LEADER_LEASE_FIELD}.enabled=false while IM channels {', '.join(providers)} are enabled: "
                 "every instance would open the platform connection with the same bot credentials (Telegram rejects the second poller "
                 "with 409 Conflict, Discord answers every message twice, and per-process channel state diverges). "
-                f"{rollback}, or disable those channels (channels.<provider>.enabled=false and channel_connections.<provider>.enabled=false). "
-                f"{CHANNEL_LEADER_LEASE_FIELD}.enabled=auto|true is reserved for the per-provider leader lease that ships separately and does not "
-                "yet stop these duplicate connections, so it is not a remedy here."
+                f"Set {CHANNEL_LEADER_LEASE_FIELD}.enabled to auto (the default) or true so one instance holds each provider's connection; "
+                f"alternatively {rollback[0].lower()}{rollback[1:]}, or disable those channels (channels.<provider>.enabled=false and channel_connections.<provider>.enabled=false)."
             )
+
+
+def multi_process_deployment(config: AppConfig) -> bool:
+    """Whether this process must assume peer Gateway processes (the gate's multi-process signal).
+
+    ``channels.leader_lease: auto`` follows exactly this signal, so the lease
+    turns on wherever the gate enforced the multi-process prerequisites.
+    """
+    return _multi_process_signal(config) is not None
 
 
 def _channel_leader_lease(config: AppConfig) -> ChannelLeaderLeaseConfig:

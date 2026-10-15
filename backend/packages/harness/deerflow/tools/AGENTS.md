@@ -1,5 +1,10 @@
 ### Tool System (`packages/harness/deerflow/tools/`)
 
+Artifact capture accepts standard top-level `url`/`mime_type` content blocks and
+legacy `source.url`/`source.mime_type`. A present top-level `url` selects that
+shape, even when invalid; never mix its MIME metadata with a conflicting legacy
+source. Both shapes use the existing referenceability gate and per-result deduplication.
+
 `artifact_registry.py` checks remote file suffixes against the complete parsed
 URL path without case sensitivity. Free-text URL and sandbox-path extraction
 strips common trailing ASCII/CJK prose punctuation while preserving CJK
