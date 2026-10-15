@@ -1390,6 +1390,20 @@ Existing web citations and the text-only Python `knowledge_search(query)` APIs
 remain supported. No knowledge management service or page is required.
 See [the knowledge contract guide](backend/docs/KNOWLEDGE.md).
 
+Knowledge scope selection also works with operator-installed read-only Provider
+extensions. The shared selector shows only the filters a Provider supports:
+knowledge-base selection requires a catalog and dataset filtering; file
+selection additionally requires document listing and document filtering.
+Unsupported or inaccessible filters fail without expanding the search scope.
+Choosing no knowledge search stops retrieval before loading the Provider.
+Provider resource IDs are preserved up to 256 Unicode code points; longer IDs
+are rejected without truncation.
+RAGFlow keeps its existing configuration and citations, and search-only
+Providers remain usable without a catalog or management page. See the
+[offline Provider example](examples/deerflow-extension-knowledge/README.md)
+for extension registration and configuration. WeKnora's adapter is planned for
+the next phase.
+
 Skills are what make DeerFlow do *almost anything*.
 
 A standard Agent Skill is a structured capability module — a Markdown file that defines a workflow, best practices, and references to supporting resources. DeerFlow ships with built-in skills for research, report generation, slide creation, web pages, image and video generation, and more. But the real power is extensibility: add your own skills, replace the built-in ones, or combine them into compound workflows.
