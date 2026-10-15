@@ -100,29 +100,80 @@ export function extractArtifactsFromThread(thread: {
   return thread.values.artifacts ?? EMPTY_ARTIFACT_PATHS;
 }
 
-export function resolveArtifactURL(absolutePath: string, threadId: string) {
-  if (isStaticWebsiteOnly()) {
-    return staticDemoArtifactURL({ filepath: absolutePath, threadId });
-  }
-  return `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/artifacts${encodeArtifactPath(absolutePath)}`;
+function withWorkspaceSelector(url: string, workspaceId?: string) {
+  if (workspaceId === undefined) return url;
+  if (!isWorkspaceId(workspaceId) || isStaticWebsiteOnly())
+    throw new Error("Invalid scoped artifact target");
+  const hashAt = url.indexOf("#");
+  const hash = hashAt < 0 ? "" : url.slice(hashAt);
+  const address = hashAt < 0 ? url : url.slice(0, hashAt);
+  const queryAt = address.indexOf("?");
+  const path = queryAt < 0 ? address : address.slice(0, queryAt);
+  const query = new URLSearchParams(
+    queryAt < 0 ? "" : address.slice(queryAt + 1),
+  );
+  // Content-authored selectors are data, never a reason to leave this scope.
+  query.set("workspace_id", workspaceId);
+  return `${path}?${query}${hash}`;
 }
 
-export function resolveMarkdownArtifactURL(src: string, threadId: string) {
+function nativeArtifactTarget(src: string) {
+  try {
+    const origin = globalThis.location?.href ?? "http://localhost:2026/";
+    const root = new URL(`${getBackendBaseURL()}/api/threads/`, origin);
+    const url = new URL(src, origin);
+    if (url.origin !== root.origin || !url.pathname.startsWith(root.pathname))
+      return null;
+    const match = /^([^/]+)\/artifacts(\/.*)$/.exec(
+      url.pathname.slice(root.pathname.length),
+    );
+    return match ? { url, threadId: decodePathSegment(match[1]!) } : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Bind only native Gateway file URLs; web references stay untouched. */
+export function bindArtifactURL(
+  src: string,
+  workspaceId?: string,
+): string | undefined {
+  if (workspaceId === undefined) return src;
+  const target = nativeArtifactTarget(src);
+  if (!target) return src;
+  if (target.url.username || target.url.password) return undefined;
+  return withWorkspaceSelector(src, workspaceId);
+}
+
+export function resolveArtifactURL(
+  absolutePath: string,
+  threadId: string,
+  workspaceId?: string,
+) {
+  return urlOfArtifact({ filepath: absolutePath, threadId, workspaceId });
+}
+
+export function resolveMarkdownArtifactURL(
+  src: string,
+  threadId: string,
+  workspaceId?: string,
+) {
   const { path, suffix } = splitPathSuffix(src);
-  // Markdown destinations already carry URL escapes; decode only at this
-  // boundary before handing the raw path to the artifact URL builder.
-  return `${resolveArtifactURL(decodeRelativeArtifactPath(path), threadId)}${suffix}`;
+  // Decode URL-authored paths once; raw filesystem percent characters remain encoded.
+  return withWorkspaceSelector(
+    `${resolveArtifactURL(decodeRelativeArtifactPath(path), threadId)}${suffix}`,
+    workspaceId,
+  );
 }
 
 export function resolveMessageImageURL(
   src: string,
   threadId: string,
   artifactPaths: readonly string[],
+  workspaceId?: string,
 ) {
-  if (src.startsWith("/mnt/")) {
-    return resolveMarkdownArtifactURL(src, threadId);
-  }
-
+  if (src.startsWith("/mnt/"))
+    return resolveMarkdownArtifactURL(src, threadId, workspaceId);
   const { path: relativePath, suffix } = splitPathSuffix(src);
   const normalizedPath = relativePath.replace(/^(?:\.\/)+/, "");
   const decodedNormalizedPath = decodeRelativeArtifactPath(normalizedPath);
@@ -132,18 +183,42 @@ export function resolveMessageImageURL(
     /^[a-z][a-z\d+.-]*:/i.test(normalizedPath) ||
     normalizedPath.startsWith("//") ||
     normalizedPath.split("/").includes("..")
-  ) {
-    return src;
-  }
-
+  )
+    return bindArtifactURL(src, workspaceId);
   const matches = artifactPaths.filter((path) =>
     path.endsWith(`/${decodedNormalizedPath}`),
   );
-  if (matches.length !== 1) {
-    return src;
-  }
+  if (matches.length !== 1) return bindArtifactURL(src, workspaceId);
+  return withWorkspaceSelector(
+    `${resolveArtifactURL(matches[0]!, threadId)}${suffix}`,
+    workspaceId,
+  );
+}
 
-  return `${resolveArtifactURL(matches[0]!, threadId)}${suffix}`;
+/** Relative report resources resolve only inside the source thread's file route. */
+export function resolveScopedArtifactResource(
+  src: string,
+  baseURL: string | undefined,
+  workspaceId?: string,
+): string | undefined {
+  if (workspaceId === undefined || src.startsWith("#")) return src;
+  const direct = nativeArtifactTarget(src);
+  if (direct) return bindArtifactURL(src, workspaceId);
+  const base = baseURL ? nativeArtifactTarget(baseURL) : null;
+  if (src.startsWith("/mnt/"))
+    return base
+      ? resolveMarkdownArtifactURL(src, base.threadId, workspaceId)
+      : undefined;
+  if (src.startsWith("/") || /^[a-z][a-z\d+.-]*:/i.test(src)) return src;
+  if (!base) return undefined;
+  try {
+    const destination = new URL(src, base.url);
+    const target = nativeArtifactTarget(destination.href);
+    if (target?.threadId !== base.threadId) return undefined;
+    return bindArtifactURL(destination.href, workspaceId);
+  } catch {
+    return undefined;
+  }
 }
 
 function staticDemoArtifactURL({

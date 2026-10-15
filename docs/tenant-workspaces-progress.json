@@ -3086,5 +3086,991 @@
       "real Next/browser/backend two-tab/standalone/download/cookie acceptance and capability/selector integration of the main workspace shell",
       "remaining UI stores/title, scoped file-picker focus and same-space sidecar parent/unmount/quiet-stream audit; M4-M11 and physical isolation/principal/revocation; activation remains closed"
     ]
+  },
+  "frontend_resource_surfaces": {
+    "status": "partial M3; captured message/report resource selectors and REST consumers; HTML transport diagnostic only",
+    "job": "deerflow-tenant-frontend",
+    "base_commit": "7ebcde16",
+    "red": {
+      "build": 79,
+      "result": "FAILURE",
+      "archive_sha256": "3b8067321e0686f63f4ad7cb73e41913b8d2d5c2ddb75fd7607218b4c9dc04c6",
+      "reason": "real message main lacked workspace_id; HTML diagnostic compiler also lacked the native dependency symlink and exited before browser launch"
+    },
+    "main_green": {
+      "build": 80,
+      "result": "SUCCESS",
+      "tests_passed": 28,
+      "new_tests": 1,
+      "existing_tests": 27,
+      "files": 5,
+      "archive_sha256": "9bbdbc1b7da47ffbd9b5ab17f7ea7ca194acda708db8f1c050427ed818831640",
+      "html_diagnostic": "parent positive authorization control succeeded; native query and fixture-only path-prefix candidates failed inside opaque sandbox"
+    },
+    "boundary_green": {
+      "build": 81,
+      "result": "SUCCESS",
+      "tests_passed": 6,
+      "new_tests": 3,
+      "existing_tests": 3,
+      "files": 2,
+      "archive_sha256": "67c9f4e4a69058a97a56712e54ed292ba44dd5b073f32a1dc1dbfcf7beb6e683"
+    },
+    "native_renderer_check": {
+      "build": 82,
+      "result": "FAILURE",
+      "tests_passed": 53,
+      "tests_failed": 1,
+      "archive_sha256": "434238fe89dd64d609ca3283d9bc9da071f0f1bc23d8ea68cec02a85ab6097b9",
+      "reason": "native Streamdown renderer omits an image with rejected src; old test incorrectly required an empty-src img. Kept the native renderer, changed the same boundary to require no escaped image or src, and strengthened the existing positive main with native image/image-wrapper assertions."
+    },
+    "aborted_check": {
+      "build": 83,
+      "result": "ABORTED",
+      "tests_passed": 54,
+      "archive_sha256": "21aea9ada946d3dee2838982615fd9a8c17d095dab81ce334afe5cb68a6c8106",
+      "reason": "Review discovered citation early returns bypassing file scope. Stop was actually requested while this build ran; preserve the partial behavior/format evidence, do not claim full check."
+    },
+    "citation_red": {
+      "build": 84,
+      "result": "FAILURE",
+      "tests_passed": 2,
+      "tests_failed": 1,
+      "archive_sha256": "4c097c277f66f51e4bcb44bbc5ad0b6a744ad9e9ef5dbed3d651ca38a989aac4",
+      "reason": "Existing main extended with native /mnt and raw-file citation links reproduced missing locator before the citation branch; no extra test cases added."
+    },
+    "green": {
+      "build": 85,
+      "result": "SUCCESS",
+      "tests_passed": 54,
+      "new_tests": 3,
+      "existing_tests": 51,
+      "files": 11,
+      "archive_sha256": "c35c69bcb11b2357236e6880e16e6aa2fff1e1a2bb1634fc8754f3528125e688",
+      "checks": [
+        "behavior tests",
+        "15-file Prettier",
+        "target ESLint --max-warnings 0",
+        "early full tsc --noEmit",
+        "required full pnpm check",
+        "native-helper HTML transport diagnostic (not product HTML acceptance)"
+      ]
+    },
+    "evidence": {
+      "frontend": [
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 27858,
+          "number": 79,
+          "result": "FAILURE",
+          "owned_containers": [],
+          "owned_networks": [],
+          "file_counts": [],
+          "passed_counts": [],
+          "test_seconds": [
+            7.72
+          ],
+          "format_passed": false,
+          "full_check_invoked": false,
+          "type_errors": [],
+          "html_exit": "1",
+          "html_diagnostic": null
+        },
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 39835,
+          "number": 80,
+          "result": "SUCCESS",
+          "owned_containers": [],
+          "owned_networks": [],
+          "file_counts": [
+            "5"
+          ],
+          "passed_counts": [
+            "28"
+          ],
+          "test_seconds": [
+            12.7
+          ],
+          "format_passed": false,
+          "full_check_invoked": false,
+          "type_errors": [],
+          "html_exit": "0",
+          "html_diagnostic": {
+            "status": "diagnostic_complete",
+            "browser_version": "149.0.7827.55",
+            "parent_image_width": 1,
+            "frames": [
+              {
+                "imageWidth": 0,
+                "css": "error",
+                "fetch": "error",
+                "base": "http://127.0.0.1:35981/api/threads/thread-1/artifacts/mnt/user-data/outputs/",
+                "name": "query"
+              },
+              {
+                "imageWidth": 0,
+                "css": "error",
+                "fetch": "error",
+                "base": "http://127.0.0.1:35981/api/workspaces/22222222-2222-2222-2222-222222222222/threads/thread-1/artifacts/mnt/user-data/outputs/",
+                "name": "namespace"
+              }
+            ],
+            "requests": [
+              {
+                "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/chart.png",
+                "query_selector": "22222222-2222-2222-2222-222222222222",
+                "resolved_scope": "22222222-2222-2222-2222-222222222222",
+                "cookie_present": true,
+                "origin": null,
+                "allowed": true
+              },
+              {
+                "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/style.css",
+                "query_selector": null,
+                "resolved_scope": null,
+                "cookie_present": false,
+                "origin": null,
+                "allowed": false
+              },
+              {
+                "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/chart.png",
+                "query_selector": null,
+                "resolved_scope": null,
+                "cookie_present": false,
+                "origin": null,
+                "allowed": false
+              },
+              {
+                "path": "/api/workspaces/22222222-2222-2222-2222-222222222222/threads/thread-1/artifacts/mnt/user-data/outputs/chart.png",
+                "query_selector": null,
+                "resolved_scope": "22222222-2222-2222-2222-222222222222",
+                "cookie_present": false,
+                "origin": null,
+                "allowed": false
+              },
+              {
+                "path": "/api/workspaces/22222222-2222-2222-2222-222222222222/threads/thread-1/artifacts/mnt/user-data/outputs/style.css",
+                "query_selector": null,
+                "resolved_scope": "22222222-2222-2222-2222-222222222222",
+                "cookie_present": false,
+                "origin": null,
+                "allowed": false
+              },
+              {
+                "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/data.json",
+                "query_selector": null,
+                "resolved_scope": null,
+                "cookie_present": false,
+                "origin": "null",
+                "allowed": false
+              },
+              {
+                "path": "/api/workspaces/22222222-2222-2222-2222-222222222222/threads/thread-1/artifacts/mnt/user-data/outputs/data.json",
+                "query_selector": null,
+                "resolved_scope": "22222222-2222-2222-2222-222222222222",
+                "cookie_present": false,
+                "origin": "null",
+                "allowed": false
+              }
+            ],
+            "scope": "actual native helper/Blob/sandbox behavior against strict local cookie/scope fixture; not Gateway or full React acceptance",
+            "network": "none",
+            "models_called": false,
+            "native_source_sha256": "3bd1e5c30775734fbb1e0281047633c39852919bbfbc1d322da54d9715023ff2",
+            "module_sha256": "724413b4b27a7a60c109ccc2d39edbd3740eba6acfdeb51e8a634429cde6fb8c",
+            "images": {
+              "compiler": "sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01",
+              "browser": "sha256:52ce23272ed5c945389367eb92f97fdd6754aa93d1c369bb01d7a44d45c5f47e"
+            }
+          }
+        },
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 47847,
+          "number": 81,
+          "result": "SUCCESS",
+          "owned_containers": [],
+          "owned_networks": [],
+          "file_counts": [
+            "2"
+          ],
+          "passed_counts": [
+            "6"
+          ],
+          "test_seconds": [
+            19.4
+          ],
+          "format_passed": false,
+          "full_check_invoked": false,
+          "type_errors": [],
+          "html_exit": "0",
+          "html_diagnostic": {
+            "status": "diagnostic_complete",
+            "browser_version": "149.0.7827.55",
+            "parent_image_width": 1,
+            "frames": [
+              {
+                "imageWidth": 0,
+                "css": "error",
+                "fetch": "error",
+                "base": "http://127.0.0.1:38595/api/threads/thread-1/artifacts/mnt/user-data/outputs/",
+                "name": "query"
+              },
+              {
+                "imageWidth": 0,
+                "css": "error",
+                "fetch": "error",
+                "base": "http://127.0.0.1:38595/api/workspaces/22222222-2222-2222-2222-222222222222/threads/thread-1/artifacts/mnt/user-data/outputs/",
+                "name": "namespace"
+              },
+              {
+                "imageWidth": 0,
+                "css": "error",
+                "fetch": "error",
+                "base": "http://127.0.0.1:38595/api/threads/thread-1/artifacts/mnt/user-data/outputs/",
+                "name": "parent_blob"
+              },
+              {
+                "imageWidth": 1,
+                "css": "load",
+                "fetch": "load",
+                "base": "blob:http://127.0.0.1:38595/e4e11261-477d-4e69-afeb-36a32bf16344",
+                "name": "child_bytes"
+              }
+            ],
+            "requests": [
+              {
+                "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/chart.png",
+                "query_selector": "22222222-2222-2222-2222-222222222222",
+                "resolved_scope": "22222222-2222-2222-2222-222222222222",
+                "cookie_present": true,
+                "origin": null,
+                "allowed": true
+              },
+              {
+                "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/data.json",
+                "query_selector": "22222222-2222-2222-2222-222222222222",
+                "resolved_scope": "22222222-2222-2222-2222-222222222222",
+                "cookie_present": true,
+                "origin": null,
+                "allowed": true
+              },
+              {
+                "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/chart.png",
+                "query_selector": "22222222-2222-2222-2222-222222222222",
+                "resolved_scope": "22222222-2222-2222-2222-222222222222",
+                "cookie_present": true,
+                "origin": null,
+                "allowed": true
+              },
+              {
+                "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/style.css",
+                "query_selector": "22222222-2222-2222-2222-222222222222",
+                "resolved_scope": "22222222-2222-2222-2222-222222222222",
+                "cookie_present": true,
+                "origin": null,
+                "allowed": true
+              },
+              {
+                "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/style.css",
+                "query_selector": null,
+                "resolved_scope": null,
+                "cookie_present": false,
+                "origin": null,
+                "allowed": false
+              },
+              {
+                "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/chart.png",
+                "query_selector": null,
+                "resolved_scope": null,
+                "cookie_present": false,
+                "origin": null,
+                "allowed": false
+              },
+              {
+                "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/data.json",
+                "query_selector": null,
+                "resolved_scope": null,
+                "cookie_present": false,
+                "origin": "null",
+                "allowed": false
+              },
+              {
+                "path": "/api/workspaces/22222222-2222-2222-2222-222222222222/threads/thread-1/artifacts/mnt/user-data/outputs/style.css",
+                "query_selector": null,
+                "resolved_scope": "22222222-2222-2222-2222-222222222222",
+                "cookie_present": false,
+                "origin": null,
+                "allowed": false
+              },
+              {
+                "path": "/api/workspaces/22222222-2222-2222-2222-222222222222/threads/thread-1/artifacts/mnt/user-data/outputs/chart.png",
+                "query_selector": null,
+                "resolved_scope": "22222222-2222-2222-2222-222222222222",
+                "cookie_present": false,
+                "origin": null,
+                "allowed": false
+              },
+              {
+                "path": "/api/workspaces/22222222-2222-2222-2222-222222222222/threads/thread-1/artifacts/mnt/user-data/outputs/data.json",
+                "query_selector": null,
+                "resolved_scope": "22222222-2222-2222-2222-222222222222",
+                "cookie_present": false,
+                "origin": "null",
+                "allowed": false
+              }
+            ],
+            "scope": "actual native helper/Blob/sandbox behavior against strict local cookie/scope fixture; not Gateway or full React acceptance",
+            "network": "none",
+            "models_called": false,
+            "native_source_sha256": "3bd1e5c30775734fbb1e0281047633c39852919bbfbc1d322da54d9715023ff2",
+            "module_sha256": "724413b4b27a7a60c109ccc2d39edbd3740eba6acfdeb51e8a634429cde6fb8c",
+            "images": {
+              "compiler": "sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01",
+              "browser": "sha256:52ce23272ed5c945389367eb92f97fdd6754aa93d1c369bb01d7a44d45c5f47e"
+            }
+          }
+        },
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 82899,
+          "number": 82,
+          "result": "FAILURE",
+          "owned_containers": [],
+          "owned_networks": [],
+          "file_counts": [
+            "10"
+          ],
+          "passed_counts": [
+            "53"
+          ],
+          "test_seconds": [
+            46.9
+          ],
+          "format_passed": false,
+          "full_check_invoked": false,
+          "type_errors": [],
+          "html_exit": "0",
+          "html_diagnostic": {
+            "status": "diagnostic_complete",
+            "browser_version": "149.0.7827.55",
+            "parent_image_width": 1,
+            "frames": [
+              {
+                "imageWidth": 0,
+                "css": "error",
+                "fetch": "error",
+                "base": "http://127.0.0.1:39407/api/threads/thread-1/artifacts/mnt/user-data/outputs/",
+                "name": "query"
+              },
+              {
+                "imageWidth": 0,
+                "css": "error",
+                "fetch": "error",
+                "base": "http://127.0.0.1:39407/api/workspaces/22222222-2222-2222-2222-222222222222/threads/thread-1/artifacts/mnt/user-data/outputs/",
+                "name": "namespace"
+              },
+              {
+                "imageWidth": 0,
+                "css": "error",
+                "fetch": "error",
+                "base": "http://127.0.0.1:39407/api/threads/thread-1/artifacts/mnt/user-data/outputs/",
+                "name": "parent_blob"
+              },
+              {
+                "imageWidth": 1,
+                "css": "load",
+                "fetch": "load",
+                "base": "blob:http://127.0.0.1:39407/dff08796-9dfc-4c3f-872a-9dc2a696e3ad",
+                "name": "child_bytes"
+              }
+            ],
+            "requests": [
+              {
+                "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/chart.png",
+                "query_selector": "22222222-2222-2222-2222-222222222222",
+                "resolved_scope": "22222222-2222-2222-2222-222222222222",
+                "cookie_present": true,
+                "origin": null,
+                "allowed": true
+              },
+              {
+                "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/style.css",
+                "query_selector": "22222222-2222-2222-2222-222222222222",
+                "resolved_scope": "22222222-2222-2222-2222-222222222222",
+                "cookie_present": true,
+                "origin": null,
+                "allowed": true
+              },
+              {
+                "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/data.json",
+                "query_selector": "22222222-2222-2222-2222-222222222222",
+                "resolved_scope": "22222222-2222-2222-2222-222222222222",
+                "cookie_present": true,
+                "origin": null,
+                "allowed": true
+              },
+              {
+                "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/chart.png",
+                "query_selector": "22222222-2222-2222-2222-222222222222",
+                "resolved_scope": "22222222-2222-2222-2222-222222222222",
+                "cookie_present": true,
+                "origin": null,
+                "allowed": true
+              },
+              {
+                "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/style.css",
+                "query_selector": null,
+                "resolved_scope": null,
+                "cookie_present": false,
+                "origin": null,
+                "allowed": false
+              },
+              {
+                "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/chart.png",
+                "query_selector": null,
+                "resolved_scope": null,
+                "cookie_present": false,
+                "origin": null,
+                "allowed": false
+              },
+              {
+                "path": "/api/workspaces/22222222-2222-2222-2222-222222222222/threads/thread-1/artifacts/mnt/user-data/outputs/style.css",
+                "query_selector": null,
+                "resolved_scope": "22222222-2222-2222-2222-222222222222",
+                "cookie_present": false,
+                "origin": null,
+                "allowed": false
+              },
+              {
+                "path": "/api/workspaces/22222222-2222-2222-2222-222222222222/threads/thread-1/artifacts/mnt/user-data/outputs/chart.png",
+                "query_selector": null,
+                "resolved_scope": "22222222-2222-2222-2222-222222222222",
+                "cookie_present": false,
+                "origin": null,
+                "allowed": false
+              },
+              {
+                "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/data.json",
+                "query_selector": null,
+                "resolved_scope": null,
+                "cookie_present": false,
+                "origin": "null",
+                "allowed": false
+              },
+              {
+                "path": "/api/workspaces/22222222-2222-2222-2222-222222222222/threads/thread-1/artifacts/mnt/user-data/outputs/data.json",
+                "query_selector": null,
+                "resolved_scope": "22222222-2222-2222-2222-222222222222",
+                "cookie_present": false,
+                "origin": "null",
+                "allowed": false
+              }
+            ],
+            "scope": "actual native helper/Blob/sandbox behavior against strict local cookie/scope fixture; not Gateway or full React acceptance",
+            "network": "none",
+            "models_called": false,
+            "native_source_sha256": "3bd1e5c30775734fbb1e0281047633c39852919bbfbc1d322da54d9715023ff2",
+            "module_sha256": "724413b4b27a7a60c109ccc2d39edbd3740eba6acfdeb51e8a634429cde6fb8c",
+            "images": {
+              "compiler": "sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01",
+              "browser": "sha256:52ce23272ed5c945389367eb92f97fdd6754aa93d1c369bb01d7a44d45c5f47e"
+            }
+          }
+        },
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 280602,
+          "number": 83,
+          "result": "ABORTED",
+          "owned_containers": [],
+          "owned_networks": [],
+          "file_counts": [
+            "11"
+          ],
+          "passed_counts": [
+            "54"
+          ],
+          "test_seconds": [
+            45.7
+          ],
+          "format_passed": true,
+          "full_check_invoked": true,
+          "type_errors": [],
+          "html_exit": "0",
+          "html_diagnostic": {
+            "status": "diagnostic_complete",
+            "browser_version": "149.0.7827.55",
+            "parent_image_width": 1,
+            "frames": [
+              {
+                "imageWidth": 0,
+                "css": "error",
+                "fetch": "error",
+                "base": "http://127.0.0.1:37687/api/threads/thread-1/artifacts/mnt/user-data/outputs/",
+                "name": "query"
+              },
+              {
+                "imageWidth": 0,
+                "css": "error",
+                "fetch": "error",
+                "base": "http://127.0.0.1:37687/api/workspaces/22222222-2222-2222-2222-222222222222/threads/thread-1/artifacts/mnt/user-data/outputs/",
+                "name": "namespace"
+              },
+              {
+                "imageWidth": 0,
+                "css": "error",
+                "fetch": "error",
+                "base": "http://127.0.0.1:37687/api/threads/thread-1/artifacts/mnt/user-data/outputs/",
+                "name": "parent_blob"
+              },
+              {
+                "imageWidth": 1,
+                "css": "load",
+                "fetch": "load",
+                "base": "blob:http://127.0.0.1:37687/424a0f1b-d2f0-405a-9122-e4cdc4de7d79",
+                "name": "child_bytes"
+              }
+            ],
+            "requests": [
+              {
+                "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/chart.png",
+                "query_selector": "22222222-2222-2222-2222-222222222222",
+                "resolved_scope": "22222222-2222-2222-2222-222222222222",
+                "cookie_present": true,
+                "origin": null,
+                "allowed": true
+              },
+              {
+                "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/style.css",
+                "query_selector": "22222222-2222-2222-2222-222222222222",
+                "resolved_scope": "22222222-2222-2222-2222-222222222222",
+                "cookie_present": true,
+                "origin": null,
+                "allowed": true
+              },
+              {
+                "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/data.json",
+                "query_selector": "22222222-2222-2222-2222-222222222222",
+                "resolved_scope": "22222222-2222-2222-2222-222222222222",
+                "cookie_present": true,
+                "origin": null,
+                "allowed": true
+              },
+              {
+                "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/chart.png",
+                "query_selector": "22222222-2222-2222-2222-222222222222",
+                "resolved_scope": "22222222-2222-2222-2222-222222222222",
+                "cookie_present": true,
+                "origin": null,
+                "allowed": true
+              },
+              {
+                "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/style.css",
+                "query_selector": null,
+                "resolved_scope": null,
+                "cookie_present": false,
+                "origin": null,
+                "allowed": false
+              },
+              {
+                "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/chart.png",
+                "query_selector": null,
+                "resolved_scope": null,
+                "cookie_present": false,
+                "origin": null,
+                "allowed": false
+              },
+              {
+                "path": "/api/workspaces/22222222-2222-2222-2222-222222222222/threads/thread-1/artifacts/mnt/user-data/outputs/style.css",
+                "query_selector": null,
+                "resolved_scope": "22222222-2222-2222-2222-222222222222",
+                "cookie_present": false,
+                "origin": null,
+                "allowed": false
+              },
+              {
+                "path": "/api/workspaces/22222222-2222-2222-2222-222222222222/threads/thread-1/artifacts/mnt/user-data/outputs/chart.png",
+                "query_selector": null,
+                "resolved_scope": "22222222-2222-2222-2222-222222222222",
+                "cookie_present": false,
+                "origin": null,
+                "allowed": false
+              },
+              {
+                "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/data.json",
+                "query_selector": null,
+                "resolved_scope": null,
+                "cookie_present": false,
+                "origin": "null",
+                "allowed": false
+              },
+              {
+                "path": "/api/workspaces/22222222-2222-2222-2222-222222222222/threads/thread-1/artifacts/mnt/user-data/outputs/data.json",
+                "query_selector": null,
+                "resolved_scope": "22222222-2222-2222-2222-222222222222",
+                "cookie_present": false,
+                "origin": "null",
+                "allowed": false
+              }
+            ],
+            "scope": "actual native helper/Blob/sandbox behavior against strict local cookie/scope fixture; not Gateway or full React acceptance",
+            "network": "none",
+            "models_called": false,
+            "native_source_sha256": "3bd1e5c30775734fbb1e0281047633c39852919bbfbc1d322da54d9715023ff2",
+            "module_sha256": "724413b4b27a7a60c109ccc2d39edbd3740eba6acfdeb51e8a634429cde6fb8c",
+            "images": {
+              "compiler": "sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01",
+              "browser": "sha256:52ce23272ed5c945389367eb92f97fdd6754aa93d1c369bb01d7a44d45c5f47e"
+            }
+          }
+        },
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 23192,
+          "number": 84,
+          "result": "FAILURE",
+          "owned_containers": [],
+          "owned_networks": [],
+          "file_counts": [],
+          "passed_counts": [
+            "2"
+          ],
+          "test_seconds": [
+            9.29
+          ],
+          "format_passed": false,
+          "full_check_invoked": false,
+          "type_errors": [],
+          "html_exit": null,
+          "html_diagnostic": null
+        },
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 518603,
+          "number": 85,
+          "result": "SUCCESS",
+          "owned_containers": [],
+          "owned_networks": [],
+          "file_counts": [
+            "11"
+          ],
+          "passed_counts": [
+            "54"
+          ],
+          "test_seconds": [
+            46.4
+          ],
+          "format_passed": true,
+          "full_check_invoked": true,
+          "type_errors": [],
+          "html_exit": "0",
+          "html_diagnostic": {
+            "status": "diagnostic_complete",
+            "browser_version": "149.0.7827.55",
+            "parent_image_width": 1,
+            "frames": [
+              {
+                "imageWidth": 0,
+                "css": "error",
+                "fetch": "error",
+                "base": "http://127.0.0.1:33285/api/threads/thread-1/artifacts/mnt/user-data/outputs/",
+                "name": "query"
+              },
+              {
+                "imageWidth": 0,
+                "css": "error",
+                "fetch": "error",
+                "base": "http://127.0.0.1:33285/api/workspaces/22222222-2222-2222-2222-222222222222/threads/thread-1/artifacts/mnt/user-data/outputs/",
+                "name": "namespace"
+              },
+              {
+                "imageWidth": 0,
+                "css": "error",
+                "fetch": "error",
+                "base": "http://127.0.0.1:33285/api/threads/thread-1/artifacts/mnt/user-data/outputs/",
+                "name": "parent_blob"
+              },
+              {
+                "imageWidth": 1,
+                "css": "load",
+                "fetch": "load",
+                "base": "blob:http://127.0.0.1:33285/f8d7f7c2-6e74-41e5-8b59-2aa95f5377df",
+                "name": "child_bytes"
+              }
+            ],
+            "requests": [
+              {
+                "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/chart.png",
+                "query_selector": "22222222-2222-2222-2222-222222222222",
+                "resolved_scope": "22222222-2222-2222-2222-222222222222",
+                "cookie_present": true,
+                "origin": null,
+                "allowed": true
+              },
+              {
+                "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/style.css",
+                "query_selector": "22222222-2222-2222-2222-222222222222",
+                "resolved_scope": "22222222-2222-2222-2222-222222222222",
+                "cookie_present": true,
+                "origin": null,
+                "allowed": true
+              },
+              {
+                "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/data.json",
+                "query_selector": "22222222-2222-2222-2222-222222222222",
+                "resolved_scope": "22222222-2222-2222-2222-222222222222",
+                "cookie_present": true,
+                "origin": null,
+                "allowed": true
+              },
+              {
+                "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/chart.png",
+                "query_selector": "22222222-2222-2222-2222-222222222222",
+                "resolved_scope": "22222222-2222-2222-2222-222222222222",
+                "cookie_present": true,
+                "origin": null,
+                "allowed": true
+              },
+              {
+                "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/style.css",
+                "query_selector": null,
+                "resolved_scope": null,
+                "cookie_present": false,
+                "origin": null,
+                "allowed": false
+              },
+              {
+                "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/chart.png",
+                "query_selector": null,
+                "resolved_scope": null,
+                "cookie_present": false,
+                "origin": null,
+                "allowed": false
+              },
+              {
+                "path": "/api/workspaces/22222222-2222-2222-2222-222222222222/threads/thread-1/artifacts/mnt/user-data/outputs/style.css",
+                "query_selector": null,
+                "resolved_scope": "22222222-2222-2222-2222-222222222222",
+                "cookie_present": false,
+                "origin": null,
+                "allowed": false
+              },
+              {
+                "path": "/api/workspaces/22222222-2222-2222-2222-222222222222/threads/thread-1/artifacts/mnt/user-data/outputs/chart.png",
+                "query_selector": null,
+                "resolved_scope": "22222222-2222-2222-2222-222222222222",
+                "cookie_present": false,
+                "origin": null,
+                "allowed": false
+              },
+              {
+                "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/data.json",
+                "query_selector": null,
+                "resolved_scope": null,
+                "cookie_present": false,
+                "origin": "null",
+                "allowed": false
+              },
+              {
+                "path": "/api/workspaces/22222222-2222-2222-2222-222222222222/threads/thread-1/artifacts/mnt/user-data/outputs/data.json",
+                "query_selector": null,
+                "resolved_scope": "22222222-2222-2222-2222-222222222222",
+                "cookie_present": false,
+                "origin": "null",
+                "allowed": false
+              }
+            ],
+            "scope": "actual native helper/Blob/sandbox behavior against strict local cookie/scope fixture; not Gateway or full React acceptance",
+            "network": "none",
+            "models_called": false,
+            "native_source_sha256": "3bd1e5c30775734fbb1e0281047633c39852919bbfbc1d322da54d9715023ff2",
+            "module_sha256": "724413b4b27a7a60c109ccc2d39edbd3740eba6acfdeb51e8a634429cde6fb8c",
+            "images": {
+              "compiler": "sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01",
+              "browser": "sha256:52ce23272ed5c945389367eb92f97fdd6754aa93d1c369bb01d7a44d45c5f47e"
+            }
+          }
+        }
+      ],
+      "formatter_probe": {
+        "containers": [],
+        "networks": []
+      },
+      "images": {
+        "deerflow-native:final-ci-tools-52ce": "sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01",
+        "sha256:52ce23272ed5c945389367eb92f97fdd6754aa93d1c369bb01d7a44d45c5f47e": "sha256:52ce23272ed5c945389367eb92f97fdd6754aa93d1c369bb01d7a44d45c5f47e"
+      }
+    },
+    "source_sha256": {
+      "frontend/src/components/workspace/artifacts/artifact-file-detail.tsx": "7e3047fb3c8a7a27ac07ab03cf897271aa1c21f3115a05c7fac0a666aec23b4a",
+      "frontend/src/components/workspace/artifacts/artifact-file-preview.tsx": "926be043c329cc1b3a0963a5e7eb4752e979332fdecdbd2819274848656997b8",
+      "frontend/src/components/workspace/browser-view/browser-view-panel.tsx": "4910245582700ab2e2ca2620e297444b05b3822d75f7cb223666d086a2947625",
+      "frontend/src/components/workspace/changes/workspace-change-panel.tsx": "d5a9ea12326ea585134b4621d62bae3593f476db6965f8652905ff8e1cec0f58",
+      "frontend/src/components/workspace/citations/artifact-link.tsx": "1722d4a1d8a93acf2dcf48851abe769b824c6080c30483283dc79712e589b039",
+      "frontend/src/components/workspace/messages/markdown-link.tsx": "4af6d5f42bb9eb416d5688564a002e2a85886fd6d337fd795c718613854e2437",
+      "frontend/src/components/workspace/messages/message-group.tsx": "4815a1968ea38b8e48488c1bde3182bd97c1b96678257824f85d2ba5bb7e3fd9",
+      "frontend/src/components/workspace/messages/message-list-item.tsx": "7278b8939353499fa997443745439b96fd24dc40bdc04d88f4253cca5174f5b2",
+      "frontend/src/core/api/feedback.ts": "44aefb8e8db96d429d3a61bbf4e9796dc01edfd38486b0beab5ff08c92886a7c",
+      "frontend/src/core/api/request.ts": "0897450dba2ee94940bfbd4133999d028cc8888f664d216f0803af62f9c41ce1",
+      "frontend/src/core/artifacts/request.ts": "b1ca1d6a42db62b51cb917bcba7d7fe4736cef1ca20260c5394d64f83c9424a2",
+      "frontend/src/core/artifacts/utils.ts": "288287c253200b15b0eb184f7cf301bb0ed55ebb8ccb387338aa11a15b117e71",
+      "frontend/src/core/workspace-changes/api.ts": "141ec4105951a378d202465cff555c0ea874b5cee0ef4c03c10d9443a15516cc",
+      "frontend/src/core/workspace-changes/hooks.ts": "7c5a534f2ac4449b3c0534192dc36e9824d8b27ffba45a6091a6882b944c57aa",
+      "frontend/tests/unit/components/workspace/artifacts/workspace-resource-surfaces.dom.test.tsx": "1b80315cd06e7467856236e81489db46e998122b898d230d33d6e99dccf4eff3",
+      "scripts/tenant_artifact_html_probe.py": "bf85cb507297c85c4886c9de4e804200911ca2325961c667afe076e3aa6914d3"
+    },
+    "contract": "Messages and reports, including native citation badges, bind native /mnt links, raw configured-Gateway artifact URLs, uniquely matched message images, uploads, static/tool screenshots and file-change links to the confirmed workspace. Preserve query/fragment/literal-percent semantics; replace every content-authored workspace selector with the captured one. Web/contact and fragment references keep native handling. Scoped report relative resources stay within the source thread artifact route; escaping paths are omitted. Successful scoped write_file previews derive a trusted source URL too. Streamdown defaultUrlTransform runs before scoped image resolution, and the default image renderer/controls are retained; unscoped default behavior remains. Whole-decoder requestWithWorkspace is shared by artifact aliases, feedback and changes; native no-options payload/status/call shape remains. Feedback pending/publication belongs to the resource view incarnation, including same-space A/B/A, and Query cancellation reaches old changes reads. DELETE404 remains a successful native clear.",
+    "warnings": "Native Streamdown image-wrapper div nested in paragraph, happy-dom iframe teardown and KaTeX quirks warnings remain in passing tests; no compiled browser hydration acceptance implied.",
+    "proof_limits": "Real React providers/session/fixed REST, message/report/BrowserViewPanel/file-change/feedback consumers execute with HTTP/catalog/router doubles; live browser stream is doubled. Native screenshot links are verified, not live WSS/navigation. HTML uses actual Chromium/native helpers with a synthetic HttpOnly SameSite=Lax cookie and strict localhost authorization fixture; the path-prefix route exists only in that fixture. Parent-created Blob resource failure and child-created Blob byte-transfer success are diagnostic transport evidence, not production protocol/Gateway/JWT/tenant authorization or full HTML resource graph acceptance. No actual Next browser/two-tab/principal/NAS/model proof.",
+    "remaining": [
+      "CitationSourcesPanel still renders/copies its source.url directly; bind native file source links and copied references with per-view publication guards before M3 acceptance.",
+      "Implement native HTML relative resource delivery through captured parent REST and iframe-owned bytes; nested CSS/dynamic requests, cancellation, source validation and cleanup still need production code and browser acceptance. Preserve sandbox and Cookie policies.",
+      "Main shell capability/selector and actual Next/Gateway/browser two-tab, standalone/download/cookie/principal tests; live browser WSS/navigation and remaining stores/title/focus/sidecar faults.",
+      "M4-M11 and physical isolation, revocation, migration/restore and business acceptance remain; every parent gate open, activation false."
+    ],
+    "post_gate_probe": {
+      "reason": "Staged diff check caught four blank-line trailing spaces inside the diagnostic script strings. Only those four spaces were removed; all 15 frontend source/test files still exactly match #85. The cleaned script was rerun in the same pinned isolated Shanghai containers; no new Jenkins build or full frontend rerun.",
+      "evidence": {
+        "status": "diagnostic_complete",
+        "browser_version": "149.0.7827.55",
+        "parent_image_width": 1,
+        "frames": [
+          {
+            "imageWidth": 0,
+            "css": "error",
+            "fetch": "error",
+            "base": "http://127.0.0.1:32947/api/threads/thread-1/artifacts/mnt/user-data/outputs/",
+            "name": "query"
+          },
+          {
+            "imageWidth": 0,
+            "css": "error",
+            "fetch": "error",
+            "base": "http://127.0.0.1:32947/api/workspaces/22222222-2222-2222-2222-222222222222/threads/thread-1/artifacts/mnt/user-data/outputs/",
+            "name": "namespace"
+          },
+          {
+            "imageWidth": 0,
+            "css": "error",
+            "fetch": "error",
+            "base": "http://127.0.0.1:32947/api/threads/thread-1/artifacts/mnt/user-data/outputs/",
+            "name": "parent_blob"
+          },
+          {
+            "imageWidth": 1,
+            "css": "load",
+            "fetch": "load",
+            "base": "blob:http://127.0.0.1:32947/07ab1fbc-7f2b-4555-af57-a42cc013489d",
+            "name": "child_bytes"
+          }
+        ],
+        "requests": [
+          {
+            "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/chart.png",
+            "query_selector": "22222222-2222-2222-2222-222222222222",
+            "resolved_scope": "22222222-2222-2222-2222-222222222222",
+            "cookie_present": true,
+            "origin": null,
+            "allowed": true
+          },
+          {
+            "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/style.css",
+            "query_selector": "22222222-2222-2222-2222-222222222222",
+            "resolved_scope": "22222222-2222-2222-2222-222222222222",
+            "cookie_present": true,
+            "origin": null,
+            "allowed": true
+          },
+          {
+            "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/data.json",
+            "query_selector": "22222222-2222-2222-2222-222222222222",
+            "resolved_scope": "22222222-2222-2222-2222-222222222222",
+            "cookie_present": true,
+            "origin": null,
+            "allowed": true
+          },
+          {
+            "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/chart.png",
+            "query_selector": "22222222-2222-2222-2222-222222222222",
+            "resolved_scope": "22222222-2222-2222-2222-222222222222",
+            "cookie_present": true,
+            "origin": null,
+            "allowed": true
+          },
+          {
+            "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/chart.png",
+            "query_selector": null,
+            "resolved_scope": null,
+            "cookie_present": false,
+            "origin": null,
+            "allowed": false
+          },
+          {
+            "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/style.css",
+            "query_selector": null,
+            "resolved_scope": null,
+            "cookie_present": false,
+            "origin": null,
+            "allowed": false
+          },
+          {
+            "path": "/api/workspaces/22222222-2222-2222-2222-222222222222/threads/thread-1/artifacts/mnt/user-data/outputs/style.css",
+            "query_selector": null,
+            "resolved_scope": "22222222-2222-2222-2222-222222222222",
+            "cookie_present": false,
+            "origin": null,
+            "allowed": false
+          },
+          {
+            "path": "/api/workspaces/22222222-2222-2222-2222-222222222222/threads/thread-1/artifacts/mnt/user-data/outputs/chart.png",
+            "query_selector": null,
+            "resolved_scope": "22222222-2222-2222-2222-222222222222",
+            "cookie_present": false,
+            "origin": null,
+            "allowed": false
+          },
+          {
+            "path": "/api/threads/thread-1/artifacts/mnt/user-data/outputs/data.json",
+            "query_selector": null,
+            "resolved_scope": null,
+            "cookie_present": false,
+            "origin": "null",
+            "allowed": false
+          },
+          {
+            "path": "/api/workspaces/22222222-2222-2222-2222-222222222222/threads/thread-1/artifacts/mnt/user-data/outputs/data.json",
+            "query_selector": null,
+            "resolved_scope": "22222222-2222-2222-2222-222222222222",
+            "cookie_present": false,
+            "origin": "null",
+            "allowed": false
+          }
+        ],
+        "scope": "actual native helper/Blob/sandbox behavior against strict local cookie/scope fixture; not Gateway or full React acceptance",
+        "network": "none",
+        "models_called": false,
+        "native_source_sha256": "3bd1e5c30775734fbb1e0281047633c39852919bbfbc1d322da54d9715023ff2",
+        "module_sha256": "724413b4b27a7a60c109ccc2d39edbd3740eba6acfdeb51e8a634429cde6fb8c",
+        "images": {
+          "compiler": "sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01",
+          "browser": "sha256:52ce23272ed5c945389367eb92f97fdd6754aa93d1c369bb01d7a44d45c5f47e"
+        },
+        "script_sha256": "bf85cb507297c85c4886c9de4e804200911ca2325961c667afe076e3aa6914d3",
+        "archive_sha256": "1a53eeee7e6a5d766498ab23d38e21c2a26c4c68a414520d4418578cd5fbdf36",
+        "execution": "post-gate whitespace-only script verification directly on Shanghai Jenkins host; not a new Jenkins build",
+        "owned_containers": [],
+        "owned_networks": []
+      }
+    },
+    "source_identity": "15 frontend files exactly match the #85 archive; diagnostic script matches the post_gate_probe archive. Its only change from #85 is four removed blank-line spaces."
   }
 }

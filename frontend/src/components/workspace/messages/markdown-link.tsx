@@ -1,7 +1,11 @@
 import type { AnchorHTMLAttributes, ComponentProps } from "react";
 
-import { resolveMarkdownArtifactURL } from "@/core/artifacts/utils";
+import {
+  bindArtifactURL,
+  resolveMarkdownArtifactURL,
+} from "@/core/artifacts/utils";
 import { knowledgeSourceId } from "@/core/knowledge/sources";
+import { useWorkspaceLifetime } from "@/core/workspaces/context";
 import { cn } from "@/lib/utils";
 
 import { CitationLink, extractReactNodeText } from "../citations/citation-link";
@@ -91,6 +95,7 @@ export function createMarkdownLinkComponent(threadId?: string) {
     href,
     ...props
   }: AnchorHTMLAttributes<HTMLAnchorElement>) {
+    const lifetime = useWorkspaceLifetime();
     // Reject unsafe schemes up front so a prompt-injected / pasted href can
     // never reach the rendered anchor — including through the citation
     // branch (which renders <a href={href}> directly). Check before the
@@ -108,9 +113,25 @@ export function createMarkdownLinkComponent(threadId?: string) {
         </UnsafeLink>
       );
     }
+    const resolvedHref =
+      href === undefined
+        ? undefined
+        : lifetime && threadId && href.startsWith("/mnt/")
+          ? resolveMarkdownArtifactURL(
+              href,
+              threadId,
+              lifetime.scope.workspaceId,
+            )
+          : bindArtifactURL(href, lifetime?.scope.workspaceId);
+    if (href !== undefined && resolvedHref === undefined)
+      return (
+        <UnsafeLink href={href} className={props.className}>
+          {props.children}
+        </UnsafeLink>
+      );
     // Knowledge destinations also appear as ordinary [Title](URL) Sources links.
     if (knowledgeSourceId(href)) {
-      return <CitationLink {...props} href={href} />;
+      return <CitationLink {...props} href={resolvedHref} />;
     }
     // Safe-href check passed — citation links now route through CitationLink.
     const childrenText = extractReactNodeText(props.children);
@@ -119,7 +140,7 @@ export function createMarkdownLinkComponent(threadId?: string) {
       if (match) {
         const [, text] = match;
         return (
-          <CitationLink {...props} href={href}>
+          <CitationLink {...props} href={resolvedHref}>
             {text}
           </CitationLink>
         );
@@ -129,7 +150,11 @@ export function createMarkdownLinkComponent(threadId?: string) {
       return (
         <a
           {...props}
-          href={resolveMarkdownArtifactURL(href, threadId)}
+          href={resolveMarkdownArtifactURL(
+            href,
+            threadId,
+            lifetime?.scope.workspaceId,
+          )}
           target="_blank"
           rel="noopener noreferrer"
         />
@@ -140,7 +165,7 @@ export function createMarkdownLinkComponent(threadId?: string) {
     return (
       <a
         {...rest}
-        href={href}
+        href={resolvedHref}
         className={cn(
           "text-primary decoration-primary/30 hover:decoration-primary/60 underline underline-offset-2 transition-colors",
           className,

@@ -1,6 +1,6 @@
 import { getBackendBaseURL } from "../config";
 
-import { fetch } from "./fetcher";
+import { requestWithWorkspace, type WorkspaceRequestOptions } from "./request";
 
 export interface FeedbackData {
   feedback_id: string;
@@ -13,30 +13,38 @@ export async function upsertFeedback(
   runId: string,
   rating: number,
   comment?: string,
+  options?: WorkspaceRequestOptions,
 ): Promise<FeedbackData> {
-  const res = await fetch(
+  return requestWithWorkspace(
     `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/feedback`,
     {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ rating, comment: comment ?? null }),
     },
+    async (res) => {
+      if (!res.ok) {
+        throw new Error(`Failed to submit feedback: ${res.status}`);
+      }
+      return res.json() as Promise<FeedbackData>;
+    },
+    options,
   );
-  if (!res.ok) {
-    throw new Error(`Failed to submit feedback: ${res.status}`);
-  }
-  return res.json();
 }
 
 export async function deleteFeedback(
   threadId: string,
   runId: string,
+  options?: WorkspaceRequestOptions,
 ): Promise<void> {
-  const res = await fetch(
+  return requestWithWorkspace(
     `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/feedback`,
     { method: "DELETE" },
+    async (res) => {
+      if (!res.ok && res.status !== 404) {
+        throw new Error(`Failed to delete feedback: ${res.status}`);
+      }
+    },
+    options,
   );
-  if (!res.ok && res.status !== 404) {
-    throw new Error(`Failed to delete feedback: ${res.status}`);
-  }
 }

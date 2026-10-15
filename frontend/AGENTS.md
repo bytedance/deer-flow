@@ -589,3 +589,36 @@ content styles and the public allowlisted showcase bypass. Direct source,
 download, fallback and PDF URLs carry only the confirmed workspace locator;
 backend membership checks remain the authority. Nested HTML/CSS and remaining
 Markdown/message/media URL paths still require their own integration/proof.
+
+
+Message/report resources bind file locators to the confirmed workspace: native
+/mnt links, uniquely matched artifact images, uploaded images, tool/browser
+screenshots and file-change links all use that captured selector. Preserve
+query/fragment and literal percent semantics; content-authored workspace_id
+values cannot override it. Only configured-Gateway artifact URLs are rebound;
+web/contact references and fragment links retain native handling. Scoped report
+relative resources resolve within their source thread's artifact route; omit
+paths that escape it rather than fetching the app/default workspace. Use the
+source file base for scoped successful write_file previews too; native unscoped
+preview behavior remains unchanged. Original citation/safe-href guards stay. Resolve file locators
+before message citation early returns. Use Streamdown defaultUrlTransform before
+scoped image resolution, keeping its default image renderer and controls. The
+separate CitationSourcesPanel raw source links/copy still require binding and
+per-view publication fences before M3 acceptance.
+
+core/api/request.ts owns optional WorkspaceRequestOptions and the whole-decoder
+requestWithWorkspace boundary. Artifact request exports remain aliases; feedback
+and file-change APIs use the same captured REST/consume/signal contract while
+preserving no-options payloads, status handling and native calls. Query cancellation
+reaches file-change reads. Feedback publication/pending state belongs to one
+resource view incarnation, so old same-space completion/finally cannot alter a
+replacement view. DELETE 404 remains a successful local feedback clear.
+
+HTML remains a distinct open gate. scripts/tenant_artifact_html_probe.py uses
+archived native preview helpers, pinned existing images and a strict localhost
+cookie/scope fixture: query/path locators and parent-created Blob resources
+failed in the opaque iframe; transferred bytes made into child-owned Blobs
+loaded image/CSS/JSON without changing sandbox flags. This is a transport
+prototype, not production HTML integration or Gateway authorization proof.
+Keep allow-same-origin absent, preserve native Cookie policy, and implement
+remaining HTML resource delivery through the captured parent REST client.

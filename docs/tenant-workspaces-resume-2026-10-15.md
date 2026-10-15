@@ -1,6 +1,6 @@
 # 2026-10-15 暂停与恢复检查点
 
-状态更新：用户已于 2026-10-15 明确要求继续，当前已恢复；最新验证见文末 #78。下面暂停段保留为历史记录。
+状态更新：用户已于 2026-10-15 明确要求继续，当前已恢复；最新验证见文末 #85。下面暂停段保留为历史记录。
 
 用户此前要求今天到这里，保存进度并允许本地提交。此检查点是 WIP，不能声称功能验收完成；不要自动继续开发、启动构建、部署或推送。用户再次要求继续后再恢复。
 
@@ -426,3 +426,71 @@ acceptance. Main shell capability/selector, remaining UI-store/title/focus/
 sidecar faults and all M4-M11 remain. Every parent gate is unchecked, M3 partial
 and startup activation false. No deployment, Git remote push, model call, local
 application runtime or new image download occurred.
+
+
+M3 message/report resource checkpoint: frontend #79 RED reproduced the real
+message link's missing workspace locator. Its HTML compiler diagnostic also
+failed before browser launch because it lacked the existing pnpm symlink; fix
+that fixture prerequisite. #80 main GREEN first: 28 tests (one new, 27 native).
+Then add only two boundary scenarios; #81 GREEN: six tests (three new and the
+three existing artifact lifetime cases). #82 kept Streamdown's default image
+renderer via its native defaultUrlTransform interface: 53 passed, one boundary
+failed because native Streamdown omits a rejected image instead of emitting an
+empty-src img. Preserve that native behavior and correct the same assertion;
+the positive main now requires native image/image-wrapper markup as well.
+#83 passed 54 behaviors/format but was actively stopped (ABORTED) after review
+found file citation links bypassing scope. #84 RED reproduced this by extending
+the same main with /mnt and raw native file citations (two boundaries passed).
+Resolve scoped file locators before native citation early returns, retaining
+unscoped behavior. #85 SUCCESS: 54 tests (three new, 51 existing), 11 files, 15-file format/
+target ESLint, early full tsc and required full pnpm check. Exact source/archive/image/
+terminal/empty-resource receipts: frontend_resource_surfaces in progress JSON.
+
+Native /mnt and configured-Gateway raw artifact links, message/upload/report
+images, tool/static browser screenshots and file-change links use captured
+workspace locators. Preserve query/hash/literal percent names and native safe
+link/citation guards. Content-authored duplicate/foreign selectors are replaced,
+web references remain unchanged, and scoped relative report paths cannot escape
+the source thread file route. Scoped successful write_file preview derives its
+source base too. Streamdown's default URL safety and original image renderer/
+controls remain, without overriding img. Feedback and file changes share the
+whole-decoder fixed REST helper (artifact API aliases preserved). No-options
+legacy API calls retain native payload/error semantics; DELETE404 clears local
+feedback as before. Same-space route changes cannot publish old feedback or
+reset a new pending indicator; obsolete change reads are cancelled and cannot
+publish into their old query. Real providers/REST/components use HTTP/router
+fixtures; live browser stream is doubled. Native Streamdown paragraph/image
+nesting, happy-dom teardown and KaTeX warnings remain; actual browser hydration
+is not accepted. These are not actual Gateway/Next/
+browser/principal/physical authorization proofs. Live WSS/navigation is open.
+
+The new repeatable scripts/tenant_artifact_html_probe.py transpiles archived
+unchanged native preview helpers in the pinned CI image and runs Python
+Playwright in the pinned Chromium149 image, network none. Synthetic HttpOnly
+SameSite=Lax cookie and strict container-local file/scope fixture only. The
+parent image positive control succeeds. Native query-base and fixture-only
+path-prefix candidates fail image/CSS/fetch; cookie is absent in the opaque
+iframe (query selector is also dropped by native base handling). Parent-made
+Blob assets fail too. Parent authorized byte reads transferred into iframe-made
+Blobs load image, stylesheet and JSON. #81/#82/#83/#85 retain all four observations;
+#80 had the first two candidates. This is a transport experiment, not implemented
+product HTML/Gateway acceptance. Keep sandbox allow-scripts allow-forms with
+allow-same-origin absent and native Cookie policy unchanged. Production source
+validation, nested CSS/dynamic requests, lifecycle cancellation and Blob cleanup
+still need implementation and real-browser verification. No production alias
+route was added.
+
+Next: bind CitationSourcesPanel native file source links/copied references and
+its pending clipboard publication, then implement scoped HTML resource delivery
+through captured parent REST and actual shell/selector/browser/backend acceptance.
+Remaining UI stores/title/focus, sidecar faults, browser live transport, M4-M11
+and physical/principal/revocation gates remain. M3 partial, every parent gate
+unchecked, runtime activation false; no deployment, remote push, model call,
+local application runtime or new image download.
+
+Staged whitespace check then caught four blank-line spaces inside the diagnostic
+script strings. Remove only those spaces; all 15 frontend files still exactly
+match #85. The cleaned script's four browser observations were reverified in
+pinned Shanghai containers with empty owned resources, directly on Jenkins host
+(not a new Jenkins build). Full frontend checks were not repeated. Exact script/
+archive hashes and results: frontend_resource_surfaces.post_gate_probe.

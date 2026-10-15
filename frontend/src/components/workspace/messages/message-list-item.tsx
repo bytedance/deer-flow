@@ -53,6 +53,8 @@ import {
 } from "@/core/skills";
 import { useSkills } from "@/core/skills/hooks";
 import { pathOfThread } from "@/core/threads/utils";
+import { useWorkspaceLifetime } from "@/core/workspaces/context";
+import { useCurrentWorkspaceView } from "@/core/workspaces/view-lifetime";
 import { cn } from "@/lib/utils";
 
 import { WorkspaceChangeBadge } from "../changes";
@@ -78,30 +80,48 @@ function FeedbackButtons({
   runId: string;
   initialFeedback: FeedbackData | null;
 }) {
-  const [feedback, setFeedback] = useState<FeedbackData | null>(
-    initialFeedback,
-  );
-  const [isSubmitting, setIsSubmitting] = useState(false);
-
+  const lifetime = useWorkspaceLifetime();
+  const isCurrent = useCurrentWorkspaceView(JSON.stringify([threadId, runId]));
+  const [ownedFeedback, setOwnedFeedback] = useState({
+    owner: isCurrent,
+    value: initialFeedback,
+  });
+  const feedback =
+    ownedFeedback.owner === isCurrent ? ownedFeedback.value : initialFeedback;
+  const [submittingOwner, setSubmittingOwner] = useState<
+    (() => boolean) | null
+  >(null);
+  const isSubmitting = submittingOwner === isCurrent;
   const handleClick = useCallback(
     async (rating: number) => {
-      if (isSubmitting) return;
-      setIsSubmitting(true);
+      if (!isCurrent() || isSubmitting) return;
+      setSubmittingOwner(() => isCurrent);
       try {
         if (feedback?.rating === rating) {
-          await deleteFeedback(threadId, runId);
-          setFeedback(null);
+          if (lifetime)
+            await deleteFeedback(threadId, runId, {
+              rest: lifetime.rest,
+              signal: lifetime.scope.signal,
+            });
+          else await deleteFeedback(threadId, runId);
+          if (isCurrent()) setOwnedFeedback({ owner: isCurrent, value: null });
         } else {
-          const result = await upsertFeedback(threadId, runId, rating);
-          setFeedback(result);
+          const result = lifetime
+            ? await upsertFeedback(threadId, runId, rating, undefined, {
+                rest: lifetime.rest,
+                signal: lifetime.scope.signal,
+              })
+            : await upsertFeedback(threadId, runId, rating);
+          if (isCurrent())
+            setOwnedFeedback({ owner: isCurrent, value: result });
         }
       } catch {
-        // Revert on error — feedback state unchanged on catch
+        // Native feedback remains unchanged on failure or a detached view.
       } finally {
-        setIsSubmitting(false);
+        if (isCurrent()) setSubmittingOwner(null);
       }
     },
-    [threadId, runId, feedback, isSubmitting],
+    [threadId, runId, feedback, isSubmitting, lifetime, isCurrent],
   );
 
   return (
@@ -295,6 +315,7 @@ function MessageImage({
   artifactPaths: readonly string[];
   maxWidth?: string;
 }) {
+  const lifetime = useWorkspaceLifetime();
   if (!src) return null;
 
   // `maxWidth` is applied inline rather than through a `max-w-[${maxWidth}]`
@@ -317,7 +338,12 @@ function MessageImage({
     );
   }
 
-  const url = resolveMessageImageURL(src, threadId, artifactPaths);
+  const url = resolveMessageImageURL(
+    src,
+    threadId,
+    artifactPaths,
+    lifetime?.scope.workspaceId,
+  );
 
   return (
     <a href={url} target="_blank" rel="noopener noreferrer">
@@ -714,6 +740,7 @@ function RichFileCard({
   threadId: string;
 }) {
   const { t } = useI18n();
+  const lifetime = useWorkspaceLifetime();
   const isUploading = file.status === "uploading";
   const isImage = isImageFile(file.filename);
 
@@ -746,7 +773,11 @@ function RichFileCard({
 
   if (!file.path) return null;
 
-  const fileUrl = resolveArtifactURL(file.path, threadId);
+  const fileUrl = resolveArtifactURL(
+    file.path,
+    threadId,
+    lifetime?.scope.workspaceId,
+  );
 
   if (isImage) {
     return (

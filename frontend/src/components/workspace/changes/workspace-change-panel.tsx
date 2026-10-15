@@ -33,6 +33,7 @@ import type {
   WorkspaceChangeSummary,
   WorkspaceFileChange,
 } from "@/core/workspace-changes/types";
+import { useWorkspaceLifetime } from "@/core/workspaces/context";
 import { cn } from "@/lib/utils";
 
 export function WorkspaceChangePanel({
@@ -114,9 +115,14 @@ function WorkspaceChangeFile({
   file: WorkspaceFileChange;
   threadId: string;
 }) {
+  const lifetime = useWorkspaceLifetime();
   const { t } = useI18n();
   const hasDiff = file.diff.length > 0;
-  const openUrl = resolveArtifactURL(file.path, threadId);
+  const openUrl = resolveArtifactURL(
+    file.path,
+    threadId,
+    lifetime?.scope.workspaceId,
+  );
   const canOpenFile = file.status !== "deleted" && !file.sensitive;
 
   return (

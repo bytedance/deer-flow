@@ -667,3 +667,26 @@ test bytes match archive, exact resources empty; existing Node22 CI image and
 frozen pnpm10 cache reused. This preserves explicit Request scope/method/body/
 signal only: automatic scope, SDK/reconnect, per-space cache/provider/UI and real
 two-tab backend acceptance remain mandatory. M3 unchecked, activation closed.
+
+
+## M3 HTML implementation evidence (2026-10-15, frontend #81–#85)
+
+Actual Chromium149/native preview helpers show that adding query locators or a
+workspace path prefix cannot solve opaque-iframe file authentication: native
+SameSite=Lax cookies do not accompany those subrequests. The path prefix is
+only a diagnostic fixture route, not an implementation recommendation. Parent
+Blob URLs also fail from the opaque frame. Parent authorized bytes made into
+iframe-owned Blob URLs load image/CSS/JSON with unchanged sandbox flags.
+
+Continue the approved native artifact preview, retaining the opaque sandbox and
+Cookie policy. Fetch permitted report resources through the captured parent REST
+client/whole decoder; deliver bytes to the owning iframe document. Never pass
+cookies, bearer credentials or arbitrary external/API proxy authority to it.
+Validate the frame/source document and original source thread/file before each
+read and publication. Fence content revision/draft, workspace/principal and
+unmount transitions; cancel pending reads, retire old channels and revoke owned
+URLs. Cover initial relative resources, nested CSS and local dynamic requests
+with one positive report main before necessary stale/escape boundaries. Preserve
+external reference behavior and original rich report UI. The diagnostic prototype
+is not the production implementation, and full HTML/browser/Gateway acceptance
+remains unchecked together with the main M3 shell/two-tab/physical gates.

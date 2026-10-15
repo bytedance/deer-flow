@@ -724,7 +724,16 @@ export function ArtifactFileDetail({
                 content={editorContent}
                 language={language ?? "text"}
                 scrollKey={`${threadId}:${filepathFromProps}`}
-                url={url}
+                url={
+                  isWriteFile && lifetime
+                    ? urlOfArtifact({
+                        filepath,
+                        threadId,
+                        isMock,
+                        workspaceId: lifetime?.scope.workspaceId,
+                      })
+                    : url
+                }
                 truncated={truncated}
                 active={effectiveViewMode === "preview" && !isLoading}
               />

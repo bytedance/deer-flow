@@ -2,7 +2,14 @@
 
 import { DownloadIcon } from "lucide-react";
 import dynamic from "next/dynamic";
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  type ComponentProps,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { defaultUrlTransform, type UrlTransform } from "streamdown";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -12,7 +19,10 @@ import {
   createHtmlPreviewScrollKey,
   HTML_PREVIEW_SCROLL_MESSAGE_SOURCE,
 } from "@/core/artifacts/preview";
-import { urlOfArtifact } from "@/core/artifacts/utils";
+import {
+  resolveScopedArtifactResource,
+  urlOfArtifact,
+} from "@/core/artifacts/utils";
 import { extractCitationSources } from "@/core/citations/sources";
 import {
   SafeStreamdown,
@@ -144,6 +154,28 @@ export function ArtifactFilePreview({
   truncated?: boolean;
   active?: boolean;
 }) {
+  const lifetime = useWorkspaceLifetime();
+  const components = useMemo(
+    () =>
+      toStreamdownComponents({
+        a: (props: ComponentProps<"a">) => (
+          <ArtifactLink {...props} resourceBaseURL={url} />
+        ),
+      }),
+    [url],
+  );
+  const urlTransform = useMemo<UrlTransform>(() => {
+    if (!lifetime) return defaultUrlTransform;
+    return (src, key, node) => {
+      const safe = defaultUrlTransform(src, key, node);
+      if (!safe || key !== "src" || node.tagName !== "img") return safe;
+      return resolveScopedArtifactResource(
+        safe,
+        url,
+        lifetime.scope.workspaceId,
+      );
+    };
+  }, [url, lifetime]);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const scrollPositionRef = useRef({ x: 0, y: 0 });
   const scrollMessageKey = useMemo(
@@ -239,7 +271,8 @@ export function ArtifactFilePreview({
         <SafeStreamdown
           className="min-w-0"
           {...artifactMarkdownPlugins}
-          components={toStreamdownComponents({ a: ArtifactLink })}
+          components={components}
+          urlTransform={urlTransform}
         >
           {content ?? ""}
         </SafeStreamdown>

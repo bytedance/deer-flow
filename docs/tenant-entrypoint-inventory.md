@@ -191,3 +191,15 @@ frontend behaviors/full check plus 23 feature-projection tests; HTTP/auth/
 cookie/router fixtures are not real Next/browser/backend permission proof.
 Markdown/message/media, browser/change-panel and nested HTML relatives remain
 open, as do shell/two-tab/principal/physical gates; activation closed.
+
+
+Message/report resource URLs and feedback/change REST (#85 frontend): confirmed
+locators bind file references, images/uploads/static screenshots and file-change
+links; original Streamdown renderer/controls remain. Shared whole-decoder fixed
+REST and per-view pending/publication fences preserve native compatibility.
+54 behaviors/full check with HTTP/router doubles; not live WSS/Next/backend
+authorization proof. Native HTML Chromium diagnostic proves query/path aliases
+and parent Blob URLs insufficient in the opaque sandbox; child-made Blob bytes
+load fixture image/CSS/JSON. CitationSourcesPanel raw source links/copy remain a separate unbound consumer.
+Actual product HTML protocol/resources, main shell,
+two-tab/principal/physical and other M3/M4-M11 gates remain, activation closed.
