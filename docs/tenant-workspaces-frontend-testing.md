@@ -834,3 +834,42 @@ fault boundaries. Keep sandbox and Cookie policy unchanged. Main shell, actual
 backend/two-tab/principal, remaining UI/live-browser and all M4-M11 gates remain.
 M3 partial, parent boxes unchecked, activation false. No deployment, remote push,
 local application runtime, model call or new image download.
+
+
+M3 native HTML byte bridge checkpoint (2026-10-16): #96 compiled/mounted the
+native React fixture, but a Playwright variable error prevented full assertions;
+it is not a clean domain RED. Correct only that predicate: #97 RED shows both
+P/T parent controls render while private iframe image/CSS/script/data fail.
+#98 GREEN first: actual production preview/parent reader/private channel/child
+Blob integration renders both rich-report mains and refreshes local GET data;
+16 existing regressions pass. Only then extend the browser fixture with held
+read hide/reopen and read-only API/foreign-thread/fetch-POST refusal. #99 SUCCESS:
+all browser observations pass, forbidden network hits empty, and 40 existing
+Rstest cases/five files pass. Zero new Rstest cases. #100 SUCCESS on formatted
+sources: same browser main/boundaries and 40 regressions, seven-file formatting/
+target lint, early full tsc and required full pnpm check. A separate temporary
+formatter's default 1GiB typecheck exhausted heap; final gate uses the established
+1536MiB setting. Exact archive/source/images/terminal/empty-resource receipts:
+frontend_html_resource_bridge in progress JSON.
+
+Native scoped ArtifactFilePreview now uses one document/view/lifetime-bound
+MessageChannel. Parent captured REST grants only the existing same-thread native
+file GET boundary; child gets bytes/MIME/status/locator, never credentials or
+raw response headers. parse5 prepares inert HTML; PostCSS/value-parser prepare
+nested stylesheet references. Child-owned Blobs keep opaque sandbox isolation
+while supporting the tested image/nested CSS/classic script/local fetch main.
+Reinstall runtime after document.open clears listeners, before author scripts.
+Close/abort/revoke on retirement; hidden/replaced documents cannot own the shown
+URL. Scoped scroll keys use a document nonce; legacy behavior stays on its path.
+Keep allow-scripts/allow-forms without allow-same-origin, Cookie policy unchanged.
+
+Limits: actual Chromium bundles native React/Auth/Workspace/REST with env/router
+build doubles and an HttpOnly Cookie/scope HTTP fixture, not Next/Gateway/SQL/NAS
+or live JWT/principal/two-tab/revocation proof. Native Streamdown paragraph/div
+and KaTeX DOM warnings remain. General HTML support is unaccepted: next complete
+local ESM/import graphs, dynamic elements/srcset/XHR and CSS/media/error fidelity,
+including known external-base/fragment, CSS-cycle and malformed-style handling.
+Then compiled Next/actual backend acceptance and shell/selector/remaining UI/live
+browser gates. All M0-M11 parent gates remain unchecked, M3 partial, activation
+false. No deployment, remote push, local application runtime, model call or new
+image download.

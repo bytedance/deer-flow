@@ -280,12 +280,13 @@ function htmlScrollRestorationScript(messageKey: string) {
 export function appendHtmlPreviewScrollRestoration(
   content: string,
   scrollKey = "default",
+  documentMessageKey?: string,
 ) {
   if (content.includes("data-deerflow-artifact-scroll-restoration")) {
     return content;
   }
   const script = htmlScrollRestorationScript(
-    createHtmlPreviewScrollKey(scrollKey),
+    documentMessageKey ?? createHtmlPreviewScrollKey(scrollKey),
   );
   if (/<head(?:\s[^>]*)?>/i.test(content)) {
     return content.replace(

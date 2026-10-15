@@ -640,8 +640,25 @@ response headers or credentials. Inspect structural path normalization without
 rewriting the actual encoded filename. A read signal cancels only that read;
 dispose cancels the report reader, not other reports or background agent work.
 Scope retirement rejects held decoders before byte publication. This is source
-identity binding, not an atomic multi-file snapshot. It is not yet connected to
-the iframe renderer: child-owned byte delivery, document/channel validation,
-nested CSS/local scripts/modules/dynamic requests and disposal still require
-implementation and actual browser acceptance. Keep the sandbox/Cookie policy
-and runtime activation gate unchanged.
+identity binding, not an atomic multi-file snapshot.
+
+Scoped ArtifactFilePreview now connects that reader through html-resource-session
+and a one-document MessageChannel. Bind the initial handshake to the iframe's
+WindowProxy and a random document nonce; connect once, fence every read/publication
+by the captured view/lifetime, and retire its ports, reads and bootstrap Blob on
+cleanup. The opaque child owns resource Blobs and its private port; it receives
+bytes/MIME/status/locator only. parse5 prepares inert HTML and PostCSS/value-parser
+prepare nested stylesheet references; parser-executed classic scripts and local
+read-only fetch use the captured file boundary. document.open clears listeners:
+reinstall the private child runtime before author scripts. Scoped scroll messages
+use a document nonce; legacy preview keeps its existing key. Keep the sandbox
+allow-scripts/allow-forms without allow-same-origin and keep Cookie policy unchanged.
+
+scripts/tenant_artifact_html_bridge_probe.py bundles the actual React preview,
+Auth/Workspace providers and REST client into the pinned Shanghai browser image.
+The HTTP cookie/scope server and navigation/env modules are fixtures, not Next or
+Gateway acceptance. The rich-report P/T main precedes retirement/read-only route
+boundaries. Local ESM graphs, XHR/dynamically-created elements, srcset, external
+base/fragment handling, broader CSS/media/error fidelity and actual backend/
+principal/two-tab acceptance remain open. M3 is partial; runtime activation stays
+closed. Do not advertise general HTML resource support from this checkpoint.

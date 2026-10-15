@@ -222,3 +222,13 @@ HTTP doubles, not actual browser/proxy/backend or physical proof. The native
 iframe renderer does not yet invoke it. Document-bound channel integration,
 child-owned Blob/CSS/script/module/data delivery and actual browser/fault
 acceptance remain required before M3; runtime activation stays closed.
+
+
+Native scoped HTML renderer (#100 frontend): same-thread parent byte reads are
+connected through a one-document port to child-owned Blobs, retaining opaque
+sandbox and Cookie policy. Actual Chromium proves P/T image/nested CSS/classic
+script/local GET refresh, read-only route refusal and held-read hide/reopen.
+40 existing Rstest cases/full check. HTTP auth/scope and navigation/env are
+fixtures: no Next/Gateway/principal/physical acceptance implied. General HTML
+module/dynamic/CSS fidelity and backend two-tab gates remain open; M3 partial,
+all parent gates unchecked and activation closed. Exact evidence in progress JSON.

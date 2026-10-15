@@ -200,6 +200,15 @@ importers:
       papaparse:
         specifier: 5.7.0
         version: 5.7.0
+      parse5:
+        specifier: 7.3.0
+        version: 7.3.0
+      postcss:
+        specifier: ^8.5.18
+        version: 8.5.25
+      postcss-value-parser:
+        specifier: 4.2.0
+        version: 4.2.0
       qrcode.react:
         specifier: 4.2.0
         version: 4.2.0(react@19.2.4)
@@ -303,9 +312,6 @@ importers:
       happy-dom:
         specifier: ^20.11.1
         version: 20.11.1
-      postcss:
-        specifier: ^8.5.18
-        version: 8.5.25
       prettier:
         specifier: ^3.5.3
         version: 3.8.1

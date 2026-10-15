@@ -12,6 +12,7 @@ import {
 import { defaultUrlTransform, type UrlTransform } from "streamdown";
 
 import { Button } from "@/components/ui/button";
+import { createHTMLArtifactResourceSession } from "@/core/artifacts/html-resource-session";
 import {
   getTabularDelimiter,
   appendHtmlPreviewBaseHref,
@@ -34,6 +35,7 @@ import {
   getFileName,
 } from "@/core/utils/files";
 import { useWorkspaceLifetime } from "@/core/workspaces/context";
+import { useCurrentWorkspaceView } from "@/core/workspaces/view-lifetime";
 
 import { ArtifactLink } from "../citations/artifact-link";
 import { CitationSourcesPanel } from "../citations/citation-sources-panel";
@@ -176,13 +178,21 @@ export function ArtifactFilePreview({
       );
     };
   }, [url, lifetime]);
+  const documentIdentity = useMemo(
+    () => ({ content, language, scrollKey, url, active, lifetime }),
+    [content, language, scrollKey, url, active, lifetime],
+  );
+  const isCurrentDocument = useCurrentWorkspaceView(documentIdentity);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const scrollPositionRef = useRef({ x: 0, y: 0 });
   const scrollMessageKey = useMemo(
     () => createHtmlPreviewScrollKey(scrollKey),
     [scrollKey],
   );
-  const [htmlPreviewUrl, setHtmlPreviewUrl] = useState<string>();
+  const [htmlPreviewUrl, setHtmlPreviewUrl] = useState<{
+    url: string;
+    owner: object;
+  }>();
   const citationSources = useMemo(
     () =>
       language === "markdown" ? extractCitationSources(content ?? "") : [],
@@ -194,7 +204,7 @@ export function ArtifactFilePreview({
   }, [scrollMessageKey]);
 
   useEffect(() => {
-    if (language !== "html") {
+    if (language !== "html" || lifetime) {
       return;
     }
 
@@ -230,12 +240,27 @@ export function ArtifactFilePreview({
     return () => {
       window.removeEventListener("message", handleMessage);
     };
-  }, [language, scrollMessageKey]);
+  }, [language, scrollMessageKey, lifetime]);
 
   useEffect(() => {
-    if (language !== "html") {
+    if (language !== "html" || !active) {
       setHtmlPreviewUrl(undefined);
       return;
+    }
+
+    if (lifetime) {
+      setHtmlPreviewUrl(undefined);
+      if (!url) return;
+      const session = createHTMLArtifactResourceSession({
+        content: content ?? "",
+        sourceURL: url,
+        lifetime,
+        iframe: () => iframeRef.current,
+        isCurrent: isCurrentDocument,
+        position: scrollPositionRef,
+      });
+      setHtmlPreviewUrl({ url: session.url, owner: documentIdentity });
+      return session.dispose;
     }
 
     const previewContent = appendHtmlPreviewScrollRestoration(
@@ -246,12 +271,21 @@ export function ArtifactFilePreview({
       type: "text/html;charset=utf-8",
     });
     const objectUrl = URL.createObjectURL(blob);
-    setHtmlPreviewUrl(objectUrl);
+    setHtmlPreviewUrl({ url: objectUrl, owner: documentIdentity });
 
     return () => {
       URL.revokeObjectURL(objectUrl);
     };
-  }, [content, language, scrollKey, url]);
+  }, [
+    content,
+    language,
+    scrollKey,
+    url,
+    active,
+    lifetime,
+    isCurrentDocument,
+    documentIdentity,
+  ]);
 
   const delimiter = getTabularDelimiter(language);
   if (delimiter !== null) {
@@ -296,7 +330,11 @@ export function ArtifactFilePreview({
         // opaque origin prevents access to parent.document and cookies,
         // and postMessage(..., "*") works fine from it.
         sandbox="allow-scripts allow-forms"
-        src={htmlPreviewUrl}
+        src={
+          htmlPreviewUrl?.owner === documentIdentity
+            ? htmlPreviewUrl.url
+            : undefined
+        }
       />
     );
   }
