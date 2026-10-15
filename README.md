@@ -630,6 +630,8 @@ Configuration checks and agent-storage migrations use the installed backend envi
 
 On Windows, run the local development flow from Git Bash. Native `cmd.exe` and PowerShell shells are not supported for the bash-based service scripts, and WSL is not guaranteed because some scripts rely on Git for Windows utilities such as `cygpath`.
 
+On Windows, concurrent Custom Skill edits and synchronous AIO sandbox creation wait for the peer process's lock to be released; lock errors unrelated to contention are still reported.
+
 The documented root `make` commands invoke repository `.sh` files through Bash
 explicitly. They therefore continue to work from source archives or filesystems
 that do not preserve POSIX executable bits. When calling a script directly from
