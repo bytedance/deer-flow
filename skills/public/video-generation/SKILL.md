@@ -39,7 +39,7 @@ Generate reference image for the video generation.
 
 ### Step 3: Execute Generation
 
-Call the Python script:
+Call the Python script `scripts/generate.py`:
 ```bash
 python /mnt/skills/public/video-generation/scripts/generate.py \
   --prompt-file /mnt/user-data/workspace/prompt-file.json \
