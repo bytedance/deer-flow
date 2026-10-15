@@ -91,7 +91,16 @@ def test_go_package_and_pytest_controls_still_pass():
 
 
 @pytest.mark.parametrize(
-    "point", ["ok 1 - all tests passed # SKIP", "ok 12 # all tests passed", "✔ all tests passed (1ms)", "﹣ all tests passed (1ms)", "    ok 1 - all tests passed # SKIP", "# Subtest: all tests passed\nok 1 - all tests passed # SKIP"]
+    "point",
+    [
+        "ok 1 - all tests passed # SKIP",
+        "ok 12 # all tests passed",
+        "✔ all tests passed (1ms)",
+        "﹣ all tests passed (1ms)",
+        "▶ all tests passed",
+        "    ok 1 - all tests passed # SKIP",
+        "# Subtest: all tests passed\nok 1 - all tests passed # SKIP",
+    ],
 )
 @pytest.mark.parametrize("tail", ["", _summary(passed=0, skipped=1).split("# todo")[0]])
 def test_point_labels_cannot_supply_pass_evidence(point, tail):
@@ -149,10 +158,13 @@ class SandboxMessages(MessagesState):
         ("test.skip('all tests passed', () => {});", (False, False)),
         ("test.todo('pending');", (False, False)),
         ("describe('empty suite', () => {});", (False, False)),
+        ("describe('all tests passed', () => { test.skip('optional', () => {}); });", (False, False)),
+        ("describe('all tests passed', () => { test.todo('pending'); });", (False, False)),
+        ("describe('1 failed', () => { test('sample', () => {}); });", (True, True)),
         ("test('sample', () => { throw Error('fixture'); });", (True, False)),
         ("test('pending', { timeout: 20 }, () => new Promise(() => {}));", (True, False)),
     ],
-    ids=["pass", "summary-like-names", "pass-and-skip", "all-skipped", "all-todo", "empty-suite", "failure", "cancelled"],
+    ids=["pass", "summary-like-names", "pass-and-skip", "all-skipped", "all-todo", "empty-suite", "skipped-suite", "todo-suite", "summary-like-suite", "failure", "cancelled"],
 )
 async def test_real_node_results_reach_parent_acceptance(tmp_path, monkeypatch, executor_module, reporter, body, expected):
     (tmp_path / "sample.test.cjs").write_text("const { test, describe } = require('node:test');\n" + body, encoding="utf-8")

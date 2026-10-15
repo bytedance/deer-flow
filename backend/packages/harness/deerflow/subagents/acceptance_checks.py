@@ -149,7 +149,7 @@ def _unittest_test_summary_holds(text: str) -> bool:
 # Node's TAP/spec reporters share the same ordered counters. Individual TAP
 # points (including skipped/todo tests) are not a complete run summary and
 # must not be mistaken for Go's package-level `ok` record above.
-_NODE_TEST_POINT_RE = re.compile(r"^[ \t]*(?:\#[ \t]+Subtest:[^\r\n]*|(?:not )?ok[ \t]+[0-9]+(?:[ \t]+[-#][^\r\n]*|[ \t]*)|[✔✖﹣][ \t]+[^\r\n]*)\r?$", re.MULTILINE)
+_NODE_TEST_POINT_RE = re.compile(r"^[ \t]*(?:\#[ \t]+Subtest:[^\r\n]*|(?:not )?ok[ \t]+[0-9]+(?:[ \t]+[-#][^\r\n]*|[ \t]*)|[✔✖﹣▶][ \t]+[^\r\n]*)\r?$", re.MULTILINE)
 _NODE_TEST_SUMMARY_RE = re.compile(
     r"^(?P<prefix>\#|ℹ)[ \t]+tests (?P<total>[0-9]{1,9})\r?\n"
     r"(?P=prefix)[ \t]+suites [0-9]{1,9}\r?\n"
