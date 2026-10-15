@@ -8,9 +8,22 @@ import httpx
 import pytest
 
 from deerflow.community.infoquest import infoquest_client, tools
+from deerflow.logging_config import UrlRedactionFilter
 
 _URL = "https://example.com/article"
+_LOG_URL = "https://example.com/<redacted>"
 _HTML = "<html><head><title>Example</title></head><body><p>Example article content.</p></body></html>"
+
+
+@pytest.fixture(autouse=True)
+def redact_captured_urls(caplog):
+    # Exercise the production log policy even when this module runs in isolation.
+    redaction_filter = UrlRedactionFilter()
+    caplog.handler.addFilter(redaction_filter)
+    try:
+        yield
+    finally:
+        caplog.handler.removeFilter(redaction_filter)
 
 
 @pytest.fixture
@@ -48,7 +61,8 @@ async def test_fetch_tool_contains_non_text_content(responses, caplog, field, va
     assert result == "Error: InfoQuest returned an unexpected response format"
     assert len(requests) == 1
     assert json.loads(requests[0].content) == {"url": _URL, "format": "HTML"}
-    assert f"InfoQuest returned unexpected {field} type: {type(value).__name__} for URL: {_URL}" in caplog.text
+    assert f"InfoQuest returned unexpected {field} type: {type(value).__name__} for URL: {_LOG_URL}" in caplog.text
+    assert _URL not in caplog.text
     assert "provider-payload" not in caplog.text
     assert "synthetic-test-key" not in caplog.text
 
@@ -62,7 +76,8 @@ async def test_fetch_tool_reports_empty_extracted_content(responses, caplog, fie
     queued.append(httpx.Response(200, json={field: value}))
 
     assert await tools.web_fetch_tool.ainvoke({"url": _URL}) == "Error: no result found"
-    assert f"InfoQuest returned empty {field} for URL: {_URL}" in caplog.text
+    assert f"InfoQuest returned empty {field} for URL: {_LOG_URL}" in caplog.text
+    assert _URL not in caplog.text
 
 
 @pytest.mark.anyio
@@ -74,7 +89,8 @@ async def test_fetch_tool_rejects_non_object_json(responses, caplog, payload):
 
     assert await tools.web_fetch_tool.ainvoke({"url": _URL}) == "Error: InfoQuest returned an unexpected response format"
     assert len(requests) == 1
-    assert f"InfoQuest returned unexpected response type: {type(payload).__name__} for URL: {_URL}" in caplog.text
+    assert f"InfoQuest returned unexpected response type: {type(payload).__name__} for URL: {_LOG_URL}" in caplog.text
+    assert _URL not in caplog.text
     assert "provider-payload" not in caplog.text
     assert "synthetic-test-key" not in caplog.text
 
