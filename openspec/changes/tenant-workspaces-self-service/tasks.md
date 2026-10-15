@@ -386,3 +386,25 @@ Context with HTTP doubles does not prove actual browser/backend authorization.
 ChatPage project/branch, sidecar, ancillary input tools, draft/attachment stores,
 activity/projects/artifacts and actual shell/browser integration remain. Parent
 M3 and all remaining M4-M11 gates stay open; activation stays closed.
+
+
+M3 actual ChatPage (2026-10-15): frontend #46 RED reproduced missing P/T
+precreation selectors, accepted late prepared metadata and retained branch
+dispatch. #47 SUCCESS: three real-page/Context mains, formatting, target ESLint,
+early tsc and full pnpm check. Native single-user and P/T project creation keep
+the same payload. Scoped precreation captures REST and fences entry/decoder/
+cache publication; its expired errors do not toast. Send preparation retains
+the native conversation epoch and also checks scope. Branch entry/return/error
+and reference-attachment URL callbacks refuse expired scopes; the new space's
+normal branch still toasts/routes. The page comment now accurately describes
+precreation as the membership channel; run requests do not seed projects.
+
+The page and create API are real; leaf UI/stream/branch/catalog operations are
+doubled to isolate page callback effects. Native branch hooks and stream/replay
+were verified separately in #35/#39, and actual InputBox commands in #45. This
+does not supply actual browser/backend/physical acceptance. Exact source/
+archive receipts and empty #46/#47/formatter inventories are recorded in
+tenant-workspaces-progress.json. Next: sidecar as one bundle (fixed SDK lookup,
+REST-client-keyed in-flight creates, guarded restore→create→queued-send and
+delete/trigger publication), then activity/resources/stores/shell/browser.
+All parent gates remain open; activation remains closed.

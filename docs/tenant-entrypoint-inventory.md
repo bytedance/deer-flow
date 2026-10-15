@@ -125,3 +125,9 @@ response decoding; actual ChatPage/InputBox callers remain unintegrated.
 Actual InputBox goal/compact (#45) now captures fixed REST and fences decoding
 and follow-up run publication while retaining native command epochs. Its other
 async input paths/stores and actual ChatPage/sidecar/resources remain pending.
+
+
+Actual ChatPage (#47) binds project precreation and fences cache/send preparation,
+branch toast/router and reference-attachment URL callbacks. Native and P/T
+creation remain; new-space normal branch still routes. Sidecar and remaining
+resources/stores/shell/browser integration precede activation.

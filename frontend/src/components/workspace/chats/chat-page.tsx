@@ -78,6 +78,7 @@ import {
   threadTokenUsageToTokenUsage,
 } from "@/core/threads/token-usage";
 import { projectIdOfThread, textOfMessage } from "@/core/threads/utils";
+import { useWorkspaceLifetime } from "@/core/workspaces/context";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
@@ -89,20 +90,18 @@ import { useThreadChat } from "./use-thread-chat";
 export default function ChatPage() {
   const { t } = useI18n();
   const { user } = useAuth();
+  const lifetime = useWorkspaceLifetime();
   const canStopStreaming = hasPermission(user, PERMISSIONS.RUNS_CANCEL);
   const canCreateRuns = hasPermission(user, PERMISSIONS.RUNS_CREATE);
   const router = useRouter();
   const searchParams = useSearchParams();
   const { threadId, setThreadId, isNewThread, setIsNewThread, isMock } =
     useThreadChat();
-  // Project-scoped new chat: `/workspace/chats/new?project={id}` assigns the
-  // thread to the project on the FIRST submit — primarily via an explicit
-  // `POST /api/threads` pre-create with `project_id`, with the run-request
-  // metadata seed as the fallback channel (the SDK's own threads.create
-  // strips the reserved key, so the seed alone races the sidebar). Only
-  // meaningful while the thread is still lazy (`isNewThread`); once
-  // materialized the URL is replaced with the thread route and the param is
-  // gone. Invalid ids are dropped by backend admission.
+  // Project-scoped new chats assign membership with POST /api/threads before
+  // the first send or goal write. Run requests do not assign membership.
+  // The parameter applies only while the thread is lazy; confirming it replaces
+  // the URL with its durable thread route. An inaccessible or missing project
+  // rejects preparation before a run can start.
   const projectParam = isNewThread ? searchParams.get("project") : null;
   // `isNewThread` tracks whether the backend has the thread yet — gates the
   // SDK's history fetch (see issue #2746).  `isWelcomeMode` is the visual
@@ -278,11 +277,15 @@ export default function ChatPage() {
   // itself, and an unassigned row would make this later idempotent create a
   // membership no-op.
   const ensureProjectThread = useCallback(async () => {
+    lifetime?.scope.signal.throwIfAborted();
     if (!projectParam) {
       return;
     }
     try {
-      const created = await createThread(threadId, projectParam);
+      const created = lifetime
+        ? await createThread(threadId, projectParam, { rest: lifetime.rest })
+        : await createThread(threadId, projectParam);
+      lifetime?.scope.signal.throwIfAborted();
       // Keep confirmed membership available while the first metadata read is pending
       // or fails after the composer materializes this new project thread.
       queryClient.setQueryData(
@@ -297,10 +300,11 @@ export default function ChatPage() {
       // and submit): do NOT submit unassigned. Reject so PromptInput keeps
       // the composer's text for a retry; the send in-flight guard is never
       // engaged on this path, so retrying works immediately.
-      toast.error(t.projects.projectUnavailable);
+      if (!lifetime?.scope.signal.aborted)
+        toast.error(t.projects.projectUnavailable);
       throw error;
     }
-  }, [threadId, projectParam, queryClient, t]);
+  }, [threadId, projectParam, queryClient, t, lifetime]);
 
   // Submission fence. The cleanup runs when `threadId` changes (conversation
   // switch on a persisted page — sidebar navigation keeps this component
@@ -320,8 +324,10 @@ export default function ChatPage() {
 
   const handleSubmit = useCallback(
     async (message: PromptInputMessage, options?: InputBoxSubmitOptions) => {
+      lifetime?.scope.signal.throwIfAborted();
       const submissionEpoch = submissionEpochRef.current;
       await ensureProjectThread();
+      lifetime?.scope.signal.throwIfAborted();
       // Conversation switched (or the page unmounted) while the project
       // pre-create was pending: drop the submission. Reject silently — the
       // user has already moved on, so a toast would land on the new
@@ -349,7 +355,13 @@ export default function ChatPage() {
       }
       void sendPromise;
     },
-    [currentKnowledgeScopeSnapshot, sendMessage, threadId, ensureProjectThread],
+    [
+      currentKnowledgeScopeSnapshot,
+      sendMessage,
+      threadId,
+      ensureProjectThread,
+      lifetime,
+    ],
   );
   const handleSubmitHumanInput = useCallback(
     async (request: HumanInputRequest, response: HumanInputResponse) => {
@@ -401,6 +413,7 @@ export default function ChatPage() {
   const handleBranchTurn = useCallback(
     async (messageId: string, messageIds: string[]) => {
       if (
+        lifetime?.scope.signal.aborted ||
         isNewThread ||
         isMock ||
         env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"
@@ -414,15 +427,17 @@ export default function ChatPage() {
           messageId,
           messageIds,
         });
+        if (lifetime?.scope.signal.aborted) return;
         toast.success(t.conversation.branchCreated);
         router.push(`/workspace/chats/${response.thread_id}`);
       } catch (error) {
+        if (lifetime?.scope.signal.aborted) return;
         toast.error(
           error instanceof Error ? error.message : t.conversation.branchFailed,
         );
       }
     },
-    [branchThread, isMock, isNewThread, router, t, threadId],
+    [branchThread, isMock, isNewThread, lifetime, router, t, threadId],
   );
 
   const tokenUsageInlineMode = tokenUsageEnabled
@@ -664,7 +679,8 @@ export default function ChatPage() {
                       onGoalChange={setLocalGoal}
                       onPrepareThread={ensureProjectThread}
                       onReferenceFileAttached={() => {
-                        if (!isNewThread) return;
+                        if (lifetime?.scope.signal.aborted || !isNewThread)
+                          return;
                         history.replaceState(
                           null,
                           "",

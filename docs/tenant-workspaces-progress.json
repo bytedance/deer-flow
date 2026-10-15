@@ -2115,7 +2115,7 @@
     "evidence_limits": "Only the external React SDK useStream adapter is doubled in new tests; real source hooks, Context, native REST/SDK clients and stream parser run with network doubles. Does not prove actual browser/SDK automatic reconnect or backend authorization.",
     "cleanup": "#28-#32 terminal; exact owned container/network, chat-format and SDK source probe inventories independently empty; private dependency cache retained",
     "remaining": [
-      "Sidebar/actions/replay and actual InputBox goal/compact verified; ChatPage precreation/branch and other page callbacks pending",
+      "Sidebar/actions/replay, InputBox commands, ChatPage precreation/branch and delete dialog verified; sidecar and remaining resource/UI storage paths pending",
       "project-thread creation and remaining project/artifact/resource clients and storage namespaces",
       "actual app capability bootstrap, native selector and browser/backend two-tab acceptance",
       "credential/principal consistency, active revocation, physical runtime and all M4-M11 gates; no tenant activation"
@@ -2285,7 +2285,7 @@
     "limits": "API contract network doubles only; ChatPage project precreation and InputBox compact callers are not wired yet; no real model/browser/backend/physical proof",
     "cleanup": "#40-#43 terminal and exact owned containers/networks empty; formatter empty; dependency cache retained",
     "remaining": [
-      "Actual InputBox goal/compact now verified in frontend_composer_commands; ChatPage project precreation/branch and other page callbacks pending",
+      "Actual InputBox commands and ChatPage precreation/branch now verified; sidecar and remaining UI/resource paths pending",
       "sidecar scoped coalescing, resources/stores/shell and real two-tab acceptance",
       "principal/session/revocation and remaining M4-M11; activation closed"
     ]
@@ -2330,9 +2330,43 @@
     "limits": "real InputBox/Context, HTTP doubles; catalog/model ancillary fixtures; not actual browser/backend/physical proof; existing KaTeX happy-dom quirks warning remains",
     "cleanup": "#44/#45 terminal, exact owned containers/networks and formatter inventories empty; dependency cache retained",
     "remaining": [
-      "ChatPage project precreation and branch callbacks, sidecar coalescing/restore/create/queued submit/delete",
+      "ChatPage project/branch/reference-route callbacks now verified in frontend_actual_chat_page; sidecar coalescing/restore/create/queued submit/delete remain",
       "InputBox ancillary reference attachment/input-polish/voice paths and composer draft/attachment stores; other project/artifact/activity resources",
       "shell/selector and actual two-tab backend/browser acceptance, principal/session/revocation and all remaining M4-M11 gates; activation closed"
+    ]
+  },
+  "frontend_actual_chat_page": {
+    "job": "deerflow-tenant-frontend",
+    "status": "actual ChatPage project precreation and page callback integration verified; M3 incomplete",
+    "red": {
+      "build": 46,
+      "result": "FAILURE",
+      "reason": "P/T precreate selectors null, late prepared metadata accepted and old branch callback dispatched again",
+      "archive_sha256": "7bf7b0fbbe934fcafc63ab3b1371d59e30a6494dff3dce4bc172983f6b0f071b"
+    },
+    "green": {
+      "build": 47,
+      "result": "SUCCESS",
+      "tests_passed": 3,
+      "tests_added": 3,
+      "test_seconds": [
+        12.7
+      ],
+      "build_seconds": 428.592,
+      "archive_sha256": "eea174b4dab753888802c31e27f57fee268f79914f3c7d074cf40bcd8b92fb58",
+      "checks": "three actual page/Context mains, native/P/T create behavior, late decoder/retained callbacks and positive new-space branch; formatting, zero-warning target ESLint, early tsc and required full pnpm check"
+    },
+    "source_sha256": {
+      "frontend/src/components/workspace/chats/chat-page.tsx": "780cfe1ccb5c09305b60527424effa94896680c19371f23fceef64bc58ab106c",
+      "frontend/tests/unit/components/workspace/chats/workspace-page-actions.dom.test.tsx": "522b9e493d3cac96875f673787f351724fcf4c8a2e1bb2a86424467e6bf06fa4"
+    },
+    "scope": "ChatPage captures lifetime for precreation REST, before/after preparation and before metadata/cache publication; expired preparation errors do not toast; retained prepare/send/branch/reference-attachment route callbacks refuse expired scope; late branch success/error cannot toast or route; native conversation epoch and confirmed-history routing retained",
+    "limits": "actual page/Context and create REST with HTTP doubles; leaf UI, stream/branch operations and peripheral catalog hooks doubled; native branch hooks verified separately in #35 and sends/replay in #39; not rendered layout/actual browser/backend/physical proof",
+    "cleanup": "#46/#47 terminal and exact owned containers/networks empty; formatter empty; private dependency cache retained",
+    "remaining": [
+      "sidecar scoped coalescing plus restore→create→queued first send and deletion/trigger publication",
+      "activity timers/read clocks, project/artifact clients and direct file links, composer/artifact/thread UI stores",
+      "actual shell/capability/selector and two-tab browser/backend acceptance; principal/session/revocation and all remaining M4-M11; activation closed"
     ]
   }
 }
