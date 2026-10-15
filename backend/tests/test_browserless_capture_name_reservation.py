@@ -13,6 +13,7 @@ generated stem's timestamp has second resolution.
 """
 
 import importlib
+import logging
 import stat
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -101,7 +102,7 @@ def test_single_writer_still_uses_the_documented_suffix(outputs):
     assert (outputs / "report-1.png").read_bytes() == b"new"
 
 
-def test_publication_failure_does_not_leave_the_reserved_name(outputs, monkeypatch):
+def test_publication_failure_does_not_leave_the_reserved_name(outputs, monkeypatch, caplog):
     def failing_publish(path: object, content: bytes) -> None:
         raise OSError("disk full")
 
@@ -111,11 +112,13 @@ def test_publication_failure_does_not_leave_the_reserved_name(outputs, monkeypat
         tools._write_capture_output(outputs, "report.png", b"payload")
 
     assert not (outputs / "report.png").exists()
+    assert not any(record.name == tools.__name__ and record.levelno >= logging.WARNING for record in caplog.records)
 
 
-def test_unlink_failure_does_not_mask_the_publication_error(outputs, monkeypatch):
+@pytest.mark.parametrize("publication_error", [OSError("disk full"), KeyboardInterrupt("interrupted")], ids=["publication-error", "interruption"])
+def test_unlink_failure_warns_without_masking_the_publication_error(outputs, monkeypatch, caplog, publication_error):
     def failing_publish(path: object, content: bytes) -> None:
-        raise OSError("disk full")
+        raise publication_error
 
     def failing_unlink(*args: object, **kwargs: object) -> None:
         raise OSError("busy")
@@ -123,8 +126,16 @@ def test_unlink_failure_does_not_mask_the_publication_error(outputs, monkeypatch
     monkeypatch.setattr(tools, "_publish_bytes_atomically", failing_publish)
     monkeypatch.setattr(tools.os, "unlink", failing_unlink)
 
-    with pytest.raises(OSError, match="disk full"):
+    with caplog.at_level(logging.WARNING, logger=tools.__name__), pytest.raises(type(publication_error)) as raised:
         tools._write_capture_output(outputs, "report.png", b"payload")
+    assert raised.value is publication_error
+    destination = outputs / "report.png"
+    assert destination.is_file() and destination.stat().st_size == 0
+    warnings = [record for record in caplog.records if record.name == tools.__name__ and record.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert str(destination) in warnings[0].getMessage()
+    assert isinstance(warnings[0].exc_info[1], OSError)
+    assert str(warnings[0].exc_info[1]) == "busy"
 
 
 def test_interruption_propagates_and_frees_the_name(outputs, monkeypatch):

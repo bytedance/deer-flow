@@ -287,7 +287,7 @@ def _write_capture_output(outputs_path: Path, output_name: str, content: bytes) 
         try:
             destination.unlink(missing_ok=True)
         except OSError:
-            logger.debug("Could not release the reserved capture name %s", destination, exc_info=True)
+            logger.warning("Could not release the reserved capture name %s", destination, exc_info=True)
         raise
     return final_name
 
