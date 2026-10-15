@@ -80,6 +80,7 @@ def test_failure_records_still_win_over_a_passing_summary(failure, reverse):
         {"command_truncated": True},
         {"command": "python -m unittest sample.OneTest"},
         {"command": "echo 'other'; python -m unittest"},
+        {"command": 'cd "OK (skipped=1)" && python -m unittest'},
     ],
 )
 def test_annotations_do_not_bypass_evidence_admission(overrides):
