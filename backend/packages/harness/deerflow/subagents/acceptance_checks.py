@@ -8,6 +8,9 @@ requirement.
 
 Leaf families:
 
+- ``file:<path> csv-columns:["id","name"]`` — UTF-8 CSV header only, optional BOM,
+  exact required columns. Bounded prefix; no data-row or schema validation.
+
 - ``file:<path> json-valid`` — explicit UTF-8 JSON syntax check, capped at 50,000 bytes.
   Read up to the cap plus one byte and verify completeness; oversize, truncated reads
   and parser resource limits remain UNVERIFIED. Reject NaN/Infinity; no schema or semantic validation.
@@ -60,6 +63,8 @@ from __future__ import annotations
 
 import base64
 import binascii
+import csv
+import io
 import json
 import ntpath
 import os
@@ -67,6 +72,7 @@ import posixpath
 import re
 import shlex
 import stat
+import time
 import unicodedata
 from collections.abc import Callable, Mapping
 from typing import Any, TypedDict
@@ -93,6 +99,7 @@ _PROVIDER_ERROR_PREFIX = "Error:"
 
 _FILE_LEAF_RE = re.compile(r"^file:(?P<path>.+?)\s+(?P<mode>exists|non-empty)$", re.IGNORECASE)
 _JSON_FILE_LEAF_RE = re.compile(r"^file:(?P<path>.+?)\s+json-valid$", re.IGNORECASE)
+_CSV_FILE_LEAF_RE = re.compile(r"^file:(?P<path>.+?)\s+csv-columns:(?P<columns>.+)$", re.IGNORECASE)
 _FILE_WRITTEN_RE = re.compile(r"^file_written:(?P<path>.+)$", re.IGNORECASE)
 _TESTS_PASSED_RE = re.compile(r"^tests_passed:(?P<command>.+)$", re.IGNORECASE)
 
@@ -110,9 +117,7 @@ _FILE_CONTENT_READ_CAP_BYTES = 50_000
 _TEST_PASS_SHAPE_RE = re.compile(
     r"\b[1-9]\d*\s+passed\b"  # pytest / jest: "5 passed" (zero is not a pass)
     r"|^OK$"  # unittest: bare OK line
-    r"|test result: ok"  # cargo test
     r"|^ok\s+\S"  # go test: "ok  \tpkg/path"
-    r"|\bBUILD SUCCESS(?:FUL)?\b"  # maven / gradle
     r"|\ball tests passed\b",
     re.IGNORECASE | re.MULTILINE,
 )
@@ -122,6 +127,70 @@ _TEST_PASS_SHAPE_RE = re.compile(
 _TEST_ZERO_SHAPE_RE = re.compile(r"\b0\s+passed\b|\[no test files\]|\[no tests to run\]|\bRan 0 tests\b", re.IGNORECASE)
 
 _GO_ZERO_TEST_LINE_RE = re.compile(r"^(?:ok|\?)[ \t]+\S+[^\r\n]*\[(?:no test files|no tests to run)\][ \t]*\r?$", re.MULTILINE)
+
+# Cargo emits separate summaries for unit, integration and documentation
+# targets. Only complete successful records may qualify an empty sibling;
+# a bare success banner or clipped counters cannot erase zero-test evidence.
+_CARGO_SUCCESS_SUMMARY_RE = re.compile(
+    r"^[ \t]*test result: ok\.[ \t]+(?P<passed>0|[1-9][0-9]{0,8}) passed;[ \t]+0 failed;"
+    r"[ \t]+[0-9]{1,9} ignored;[ \t]+[0-9]{1,9} measured;[ \t]+[0-9]{1,9} filtered out;"
+    r"[ \t]+finished in [0-9]+(?:\.[0-9]+)?s[ \t]*\r?$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _without_empty_cargo_targets(text: str) -> str:
+    """Keep zero records unless a complete sibling proves tests executed."""
+    if not any(match["passed"] != "0" for match in _CARGO_SUCCESS_SUMMARY_RE.finditer(text)):
+        return text
+    return _CARGO_SUCCESS_SUMMARY_RE.sub(lambda match: "" if match["passed"] == "0" else match[0], text)
+
+
+# A successful build can skip every test. Require runner counts instead of
+# accepting Maven/Gradle's build banner as positive test evidence.
+_MAVEN_TEST_SUMMARY_RE = re.compile(
+    r"^[ \t]*(?:\[(?:INFO|WARNING|ERROR)\][ \t]*)?Tests run:[ \t]*(?P<total>[0-9]+),[ \t]*"
+    r"Failures:[ \t]*(?P<failed>[0-9]+),[ \t]*Errors:[ \t]*(?P<errors>[0-9]+),[ \t]*"
+    r"Skipped:[ \t]*(?P<skipped>[0-9]+)(?:,[ \t]*Time elapsed:[^\r\n]*)?[ \t]*\r?$",
+    re.MULTILINE,
+)
+_GRADLE_TEST_SUMMARY_RE = re.compile(
+    r"^[ \t]*(?P<total>[0-9]+) tests? completed(?:,[ \t]*(?P<failed>[0-9]+) failed)?"
+    r"(?:,[ \t]*(?P<skipped>[0-9]+) skipped)?[ \t]*\r?$",
+    re.MULTILINE,
+)
+# Preserve the command-attribution guard for build strings, even though these
+# strings no longer suffice as positive test evidence.
+_BUILD_SUCCESS_RE = re.compile(r"\bBUILD SUCCESS(?:FUL)?\b", re.IGNORECASE)
+
+
+def _build_test_summary_holds(text: str) -> bool | None:
+    """Return count-based JVM evidence; ``None`` means no executed-test proof.
+
+    Empty/all-skipped modules cannot supply positive evidence, but do not
+    veto other tested modules. Failures in any complete summary take priority.
+    Inconsistent counters are not evidence, and build banners never fill in
+    fields missing from a truncated summary.
+    """
+    positive = False
+    for pattern in (_MAVEN_TEST_SUMMARY_RE, _GRADLE_TEST_SUMMARY_RE):
+        for match in pattern.finditer(text):
+            # Bounded tool tails may still contain enormous decimal strings;
+            # leave these unverified instead of hitting Python's int limit.
+            fields = match.groupdict()
+            if any(len(value) > 9 for value in fields.values() if value is not None):
+                continue
+            total = int(fields["total"])
+            failed = int(fields.get("failed") or 0)
+            errors = int(fields.get("errors") or 0)
+            skipped = int(fields.get("skipped") or 0)
+            if failed + errors + skipped > total:
+                continue
+            if failed or errors:
+                return False
+            positive = positive or total > skipped
+    return True if positive else None
+
 
 _TEST_FAIL_SHAPE_RE = re.compile(
     r"\b[1-9]\d*\s+failed\b"  # pytest / jest: "1 failed"
@@ -137,7 +206,7 @@ _TEST_FAIL_SHAPE_RE = re.compile(
 
 class AcceptanceLeaf(TypedDict):
     criterion: str  # original criterion text (bounded)
-    family: str  # file_exists | file_non_empty | file_json_valid | file_written | tests_passed | undecidable
+    family: str  # file_exists | file_non_empty | file_json_valid | file_csv_columns | file_written | tests_passed | undecidable
     checked: bool  # a deterministic check ran
     holds: bool  # checked AND the condition holds; always False when unchecked
     detail: str  # short evidence note (bounded)
@@ -164,6 +233,9 @@ def parse_file_criterion(criterion: str) -> tuple[str, str] | None:
     json_match = _JSON_FILE_LEAF_RE.match(criterion)
     if json_match is not None:
         return "file_json_valid", json_match.group("path")
+    csv_match = _CSV_FILE_LEAF_RE.match(criterion)
+    if csv_match is not None:
+        return "file_csv_columns", csv_match.group("path")
     written_match = _FILE_WRITTEN_RE.match(criterion)
     if written_match is not None:
         return "file_written", written_match.group("path")
@@ -420,7 +492,7 @@ _JSON_READ_INNER_SCRIPT = (
 )
 
 
-def _read_bounded_json_content(runtime: Any, resolved: str, thread_data: Mapping[str, Any] | None) -> bytes | None:
+def _read_bounded_file_content(runtime: Any, resolved: str, thread_data: Mapping[str, Any] | None, *, deadline: float | None = None) -> bytes | None:
     """Read up to the cap plus one byte to detect growth; return None if completeness is uncertain."""
     from deerflow.authz.sandbox_authz import authorize_sandbox_execution, safe_app_config
     from deerflow.sandbox.tools import _resolve_local_read_path, ensure_sandbox_initialized, is_local_sandbox
@@ -460,10 +532,14 @@ def _read_bounded_json_content(runtime: Any, resolved: str, thread_data: Mapping
         content = bytearray()
         # Disable buffered read-ahead; continue short reads to EOF or cap plus one to distinguish complete from truncated content.
         while len(content) <= _FILE_CONTENT_READ_CAP_BYTES:
+            if deadline is not None and time.monotonic() >= deadline:
+                return None
             chunk = handle.read(_FILE_CONTENT_READ_CAP_BYTES + 1 - len(content))
             if not chunk:
                 break
             content.extend(chunk)
+        if deadline is not None and time.monotonic() >= deadline:
+            return None
         return bytes(content)
 
 
@@ -483,7 +559,7 @@ def _check_json_file(base: AcceptanceLeaf, runtime: Any, resolved: str, thread_d
         base["detail"] = f"JSON file exceeds {_FILE_CONTENT_READ_CAP_BYTES}-byte read cap; content not read"
         return base
     try:
-        content = _read_bounded_json_content(runtime, resolved, thread_data)
+        content = _read_bounded_file_content(runtime, resolved, thread_data)
     except (FileNotFoundError, SandboxFileNotFoundError):
         base["checked"] = True
         base["detail"] = "file does not exist"
@@ -510,6 +586,103 @@ def _check_json_file(base: AcceptanceLeaf, runtime: Any, resolved: str, thread_d
     return base
 
 
+def _parse_csv_columns(criterion: str) -> list[str] | None:
+    """Require an explicit JSON array of unique, nonempty, exact column names."""
+    match = _CSV_FILE_LEAF_RE.match(criterion)
+    if match is None:
+        return None
+    try:
+        columns = json.loads(match.group("columns"))
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(columns, list) or not columns or any(not isinstance(column, str) or not column for column in columns):
+        return None
+    try:
+        for column in columns:
+            column.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    return columns if len(set(columns)) == len(columns) else None
+
+
+def _check_csv_header(base: AcceptanceLeaf, runtime: Any, resolved: str, thread_data: Mapping[str, Any] | None, probed_size: int, columns: list[str]) -> AcceptanceLeaf:
+    """Check only the first CSV record from a bounded prefix, never the data rows."""
+    from deerflow.sandbox.exceptions import SandboxError, SandboxFileNotFoundError
+    from deerflow.sandbox.tools import is_local_sandbox
+
+    deadline = time.monotonic() + 5 if is_local_sandbox(runtime) else None
+    try:
+        content = _read_bounded_file_content(runtime, resolved, thread_data, deadline=deadline)
+    except (FileNotFoundError, SandboxFileNotFoundError):
+        base["checked"] = True
+        base["detail"] = "file does not exist"
+        return base
+    except (OSError, SandboxError):
+        base["detail"] = "bounded CSV read failed"
+        return base
+    # Remote transport owns its timeouts; start the parser budget after it returns.
+    if deadline is None:
+        deadline = time.monotonic() + 5
+    if time.monotonic() >= deadline:
+        base["detail"] = "CSV header deadline exceeded"
+        return base
+    if content is None or len(content) != min(probed_size, _FILE_CONTENT_READ_CAP_BYTES + 1):
+        base["detail"] = "complete CSV prefix unavailable within the read cap"
+        return base
+    # Surrogate escape lets an invalid or split UTF-8 sequence in a data row
+    # remain irrelevant. Validate UTF-8 only in the consumed header below.
+    text = content.decode("utf-8-sig", errors="surrogateescape")
+    stream = io.StringIO(text, newline="")
+    complete = len(content) == probed_size
+    malformed = False
+    try:
+        header = next(csv.reader(stream, strict=True), [])
+    except csv.Error as exc:
+        if "field larger than field limit" in str(exc):
+            base["detail"] = "CSV parser resource limit; header unverified"
+            return base
+        if str(exc) == "unexpected end of data" and not complete:
+            base["detail"] = "CSV header incomplete within the read cap"
+            return base
+        # A syntax error already observed in the header cannot be repaired by later data rows.
+        malformed = True
+        header = []
+    except MemoryError:
+        base["detail"] = "CSV parser resource limit; header unverified"
+        return base
+    consumed = text[: stream.tell()]
+    header_bytes = len(consumed.encode("utf-8", errors="surrogateescape")) + (3 if content.startswith(b"\xef\xbb\xbf") else 0)
+    if not malformed and not complete and not consumed.endswith(("\r", "\n")):
+        base["detail"] = "CSV header incomplete within the read cap"
+        return base
+    if header_bytes > _FILE_CONTENT_READ_CAP_BYTES:
+        base["detail"] = f"CSV header exceeds the {_FILE_CONTENT_READ_CAP_BYTES}-byte read budget"
+        return base
+    if time.monotonic() >= deadline:
+        base["detail"] = "CSV header deadline exceeded"
+        return base
+    if malformed:
+        base["checked"] = True
+        base["detail"] = "invalid CSV header"
+        return base
+    try:
+        consumed.encode("utf-8")
+    except UnicodeEncodeError:
+        base["checked"] = True
+        base["detail"] = "CSV header is not UTF-8"
+        return base
+    base["checked"] = True
+    if not header or any(not column for column in header) or len(set(header)) != len(header):
+        base["detail"] = "CSV header is empty or contains empty or duplicate column names"
+    elif not set(columns).issubset(header):
+        missing = sorted(set(columns) - set(header))
+        base["detail"] = f"CSV header is missing required columns: {json.dumps(missing, ensure_ascii=False)}"
+    else:
+        base["holds"] = True
+        base["detail"] = "CSV header contains required columns; data rows not validated"
+    return base
+
+
 def _check_file_leaf(
     family: str,
     path: str,
@@ -519,6 +692,7 @@ def _check_file_leaf(
     content_reader: Callable[[Any, str], str],
     size_prober: Callable[[Any, str, Mapping[str, Any] | None], int | None],
     readable_prober: Callable[[Any, str, Mapping[str, Any] | None], bool | None],
+    csv_columns: list[str] | None = None,
 ) -> AcceptanceLeaf:
     criterion_path = path.strip()
     # Lazy imports: the sandbox helpers pull the provider stack, and this
@@ -528,14 +702,17 @@ def _check_file_leaf(
     from deerflow.sandbox.tools import is_local_sandbox
 
     base: AcceptanceLeaf = {"criterion": "", "family": family, "checked": False, "holds": False, "detail": ""}
-    if family == "file_json_valid" and is_local_sandbox(runtime):
+    if family == "file_csv_columns" and csv_columns is None:
+        base["detail"] = "csv-columns requires a nonempty JSON array of unique nonempty strings"
+        return base
+    if family in ("file_json_valid", "file_csv_columns") and is_local_sandbox(runtime):
         from deerflow.authz.sandbox_authz import authorize_sandbox_execution, safe_app_config
 
         # Authorize before canonicalization or metadata probes can disclose file existence.
         try:
             authorize_sandbox_execution(context=getattr(runtime, "context", None) or {}, app_config=safe_app_config())
         except SandboxError:
-            base["detail"] = "sandbox access denied; JSON file unverified"
+            base["detail"] = "sandbox access denied; file unverified"
             return base
 
     # Symlink escapes are a local-sandbox concern (host-visible links); remote
@@ -558,6 +735,8 @@ def _check_file_leaf(
         # worker — degrade to UNVERIFIED instead.
         base["detail"] = "file size could not be established by a bounded probe; content not read"
         return base
+    if family == "file_csv_columns" and csv_columns is not None:
+        return _check_csv_header(base, runtime, resolved, thread_data, probed_size, csv_columns)
     if family == "file_json_valid":
         return _check_json_file(base, runtime, resolved, thread_data, probed_size)
     if probed_size > _FILE_CONTENT_READ_CAP_BYTES:
@@ -667,7 +846,7 @@ def _carries_summary_shape(text: str) -> bool:
     or zero-test veto). The pass shapes match as substrings, so
     subagent-chosen strings — a ``cd`` argument, a ``CDPATH`` value — must
     not be allowed to lend the recorded tail a summary shape."""
-    return bool(_TEST_PASS_SHAPE_RE.search(text) or _TEST_FAIL_SHAPE_RE.search(text) or _TEST_ZERO_SHAPE_RE.search(text))
+    return bool(_TEST_PASS_SHAPE_RE.search(text) or _TEST_FAIL_SHAPE_RE.search(text) or _TEST_ZERO_SHAPE_RE.search(text) or _MAVEN_TEST_SUMMARY_RE.search(text) or _GRADLE_TEST_SUMMARY_RE.search(text) or _BUILD_SUCCESS_RE.search(text))
 
 
 def _normalize_cd_scope_path(path: str) -> tuple[str, bool] | None:
@@ -1824,13 +2003,14 @@ def _check_tests_passed_leaf(command: str, bash_executions: list[dict[str, Any]]
         # Neither a pass nor a fail shape here can be trusted either way.
         base["detail"] = unattributable
         return base
-    if _TEST_FAIL_SHAPE_RE.search(output_tail):
+    build_summary = _build_test_summary_holds(output_tail)
+    if _TEST_FAIL_SHAPE_RE.search(output_tail) or build_summary is False:
         base["checked"] = True
         base["detail"] = "recorded output carries a failing test summary"
         return base
-    # Go zero-test markers describe one package; exclude the whole line from pass evidence.
-    summary_tail = _GO_ZERO_TEST_LINE_RE.sub("", output_tail)
-    if _TEST_PASS_SHAPE_RE.search(summary_tail) and not _TEST_ZERO_SHAPE_RE.search(summary_tail):
+    # Empty packages/targets cannot veto complete positive sibling evidence.
+    summary_tail = _without_empty_cargo_targets(_GO_ZERO_TEST_LINE_RE.sub("", output_tail))
+    if (_TEST_PASS_SHAPE_RE.search(summary_tail) or build_summary is True) and not _TEST_ZERO_SHAPE_RE.search(summary_tail):
         base["checked"] = True
         base["holds"] = True
         base["detail"] = "recorded output carries a passing test summary"
@@ -1876,7 +2056,16 @@ def check_acceptance_criteria(
         tests_match = _TESTS_PASSED_RE.match(criterion)
         if file_criterion is not None:
             family, path = file_criterion
-            leaf = _check_file_leaf(family, path, runtime=runtime, thread_data=thread_data, content_reader=content_reader, size_prober=size_prober, readable_prober=readable_prober)
+            leaf = _check_file_leaf(
+                family,
+                path,
+                runtime=runtime,
+                thread_data=thread_data,
+                content_reader=content_reader,
+                size_prober=size_prober,
+                readable_prober=readable_prober,
+                csv_columns=_parse_csv_columns(criterion) if family == "file_csv_columns" else None,
+            )
         elif tests_match is not None:
             leaf = _check_tests_passed_leaf(tests_match.group("command"), bash_executions, thread_data)
         else:

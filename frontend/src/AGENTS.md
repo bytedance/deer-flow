@@ -10,9 +10,9 @@ failure/replay-gap paths. Draft and confirmation regressions live in
 Answer details use `workspace/message-details` descriptors; skill run scoping
 is documented in `docs/skill-usage-ui.md`.
 
-Artifact URLs encode raw filesystem paths, preserving literal percent sequences.
-Only Markdown destinations decode once; relative images match decoded names
-against raw artifact paths before encoding.
+Encode raw paths preserving literal percent escapes. Decode Markdown destinations
+once; match image names to raw paths. Preserve sanitization; key Streamdown by
+file/thread/mock context plus scroll key.
 File-type detection uses the basename so extensionless `Dockerfile` and
 `Makefile` artifacts remain recognizable under nested or dotted directories.
 HTML preview base detection skips DOM construction without case-insensitive `base`
@@ -28,7 +28,7 @@ Language-map membership checks only own properties; inherited names such as
    File-tool artifact auto-open work must run in an effect with timer cleanup; never schedule timers while rendering streamed `write_file` or `str_replace` updates.
    `ThreadState.artifacts` remains the authoritative artifact list. The artifacts provider persists only thread-scoped panel UI state (`open`, selected path, and a refresh bootstrap cache) in session storage; an initial empty stream value must not overwrite that restored state before history finishes loading.
    Formal artifact content is refreshed once when the run finishes; transient `write-file:` previews remain message-driven.
-   The detail view exposes explicit editing only for an already-opened formal UTF-8 text artifact under `/mnt/user-data/outputs`. Drafts stay in provider memory until Save so switching right-side panels cannot discard them, render in Markdown/HTML preview, and are protected from remote refreshes by the loaded SHA-256 revision. Saving is disabled during an active run; a changed revision preserves the draft and surfaces a conflict instead of overwriting agent output.
+   UTF-8 outputs under `/mnt/user-data/outputs` are editable while idle. Root drafts survive SPA/home/showcase routes and unknown auth; confirmed account change/logout clears them. Owner/generation fences reject stale updates. Auth binds through a stable setter context, outside the typing state subscription. Drafts preview in Markdown/HTML and warn on unload off-route. SHA-256 conflicts preserve edits. Layout, draft-context and editor DOM tests cover this.
    Regular artifact text loads request at most the first 1 MiB through an HTTP
    byte range. A truncated preview must stay lightweight and expose an explicit
    full-file action; do not mount CodeMirror for that artifact until the user

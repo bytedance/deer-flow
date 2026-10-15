@@ -172,6 +172,41 @@ async def test_json_criterion_survives_batch_execution_and_storage(env):
 
 
 @pytest.mark.asyncio
+async def test_csv_header_criterion_survives_batch_execution_and_storage(env):
+    """CSV criteria use the same authorized batch lease and persisted verdict."""
+    output = env.paths.sandbox_outputs_dir("thread-1", user_id="user-1") / "report.csv"
+    output.write_bytes(b"id,other\n")
+    batch = await _submit(env, ['file:../outputs/report.csv csv-columns:["id","name"]'])
+    await _execute(env)
+    item = (await env.repo.list_items(batch["id"], user_id="user-1"))[0]
+    assert item["status"] == "succeeded"
+    leaf = item["acceptance_verdict"]["leaves"][0]
+    assert (leaf["family"], leaf["checked"], leaf["holds"]) == ("file_csv_columns", True, False)
+    assert item["attempt"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("column", [r"\ud800", r"\udfff", r"id\ud800"])
+async def test_surrogate_csv_criterion_preserves_completed_execution_after_reopen(env, column):
+    output = env.paths.sandbox_outputs_dir("thread-1", user_id="user-1") / "report.csv"
+    output.write_bytes(b"id,name\n")
+    criterion = f'file:../outputs/report.csv csv-columns:["{column}"]'
+    batch = await _submit(env, [criterion])
+    await _execute(env)
+    repo = SubagentBatchRepository(get_session_factory())
+    item = (await repo.list_items(batch["id"], user_id="user-1"))[0]
+    assert item["status"] == "succeeded"
+    assert item["attempt"] == 1
+    assert item["acceptance_criteria"] == [criterion]
+    assert item["result_preview"] == env.result.result
+    leaf = item["acceptance_verdict"]["leaves"][0]
+    assert (leaf["checked"], leaf["holds"]) == (False, False)
+    json.dumps(item["acceptance_verdict"], ensure_ascii=False).encode("utf-8")
+    assert (await repo.get_batch(batch["id"], user_id="user-1"))["status"] == "completed"
+    assert await repo.claim_items(now=datetime.now(UTC) + timedelta(minutes=5), lease_owner="other", lease_seconds=60, limit=1) == []
+
+
+@pytest.mark.asyncio
 async def test_no_criteria_skips_checker_and_preserves_success(env, monkeypatch):
     checker = AsyncMock(side_effect=AssertionError("no checklist"))
     monkeypatch.setattr(batch_service, "check_batch_acceptance", checker)

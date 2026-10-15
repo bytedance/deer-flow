@@ -34,14 +34,14 @@ describe("ChannelScheduledUpdates", () => {
   for (const [locale, supported, afterConnect, unsupported] of [
     [
       "en-US",
-      "Scheduled task updates: sent here",
-      "Scheduled task updates: available after you connect",
+      "Scheduled task updates: supported; manage in Notification settings",
+      "Scheduled task updates: supported; connect to manage notifications",
       "Scheduled task updates: not available for this app yet",
     ],
     [
       "zh-CN",
-      "定时任务通知：会发送到这里",
-      "定时任务通知：连接后可发送到这里",
+      "定时任务通知：已支持，可在通知设置中管理",
+      "定时任务通知：已支持，连接后可管理通知",
       "定时任务通知：此应用暂不支持",
     ],
   ] as const) {
@@ -59,7 +59,7 @@ describe("ChannelScheduledUpdates", () => {
       );
     });
 
-    test(`an app with proactive push says updates are sent here (${locale})`, () => {
+    test(`an app with proactive push shows capability rather than promising delivery (${locale})`, () => {
       renderIn(locale, true);
       const line = screen.getByTestId("channel-scheduled-updates");
       expect(line.textContent).toBe(supported);

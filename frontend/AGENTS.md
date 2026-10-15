@@ -72,8 +72,26 @@ In chat, a `schedule_task` result becomes an `assistant:scheduled-task` group (`
 Server-created threads: `core/threads/origin.ts` reads `metadata.deerflow_origin` (`contracts/thread_origin_contract.json`), then `channel_source`, then a legacy `scheduled_task_id`; provider names come from `threads.origin.providers`. `core/threads/activity.ts` polls `/api/thread-activity` (mount `useThreadActivity` once; unmounting resets its cursor; first poll only seeds; invalidate lists only on server-origin threads, truncation or a higher `read_version`) and `useMarkThreadRead` posts reads. `core/scheduled-tasks/events.ts` loads a chat's lifecycle events, not gated on its task list; `placeTaskEvents` puts each at the end of its `after_run_id` turn. The UI language is saved as the `locale` preference once per session and on each switch, only when the Gateway's preferences include `locale`.
 Thread rows (sidebar, `/workspace/chats`) show `ThreadOriginIcon` and, if `unread === true` and not the open thread, `ThreadUnreadDot` with `threads.unreadLabel` as row label. `WorkspaceSidebar` mounts `useThreadActivity`. Chat pages call `useMarkOpenThreadRead` once metadata loads (marks read on load, on an unread flip, on tab visible, and via its callback from `onFinish`).
 Chat pages pass `useThreadScheduledTaskEvents` data to `MessageList` (`scheduledTaskEvents`; the custom-agent page also passes its agent for the run link), which renders `ScheduledTaskEventLine` through `VirtualMessageList.renderAfterGroup` at the `placeTaskEvents` position, inside the group's measured row. Lines are history: never gated on the task list. Channel provider cards (Settings and the sidebar list) render `ChannelScheduledUpdates` from `proactive_notifications`, and nothing when the field is absent.
+Keep IM notification preferences viewer-fenced and separate from browser alerts; only confirmed server writes change switches.
 
 ## Architecture
+
+Knowledge evidence is parsed in `core/citations/sources.ts` from version-1
+ToolMessage artifacts. Message rows receive sources from preceding loaded tool
+messages. `#knowledge-source-ID` links resolve to `KnowledgeCitation` and an
+expandable source panel with actual excerpts. Missing URLs/pages remain absent.
+Web citations and old history remain compatible. Never infer evidence from
+assistant labels or numbered legacy text.
+Shared records use the `RetrievalSource` type (native RAGFlow retains
+`KnowledgeSource`). Accept raw and `#user-content-knowledge-source-ID`
+fragments without disabling sanitizer clobber protection. Validate immutable
+tool messages through `createKnowledgeSourceReader` to reuse per-object parses.
+Cross-component field bounds live in `contracts/knowledge_sources.v1.json`.
+Completed `SubtaskCard` reports read shared evidence only from the matching
+`task` ToolMessage after its invocation in the current subagent group, selected
+by `findSubtaskResultMessage`. Prompts/earlier steps do not borrow final evidence.
+Remount report Markdown when validated source IDs change: Streamdown caches
+unchanged text blocks independently of renderer components.
 
 ```
 Frontend (Next.js) ──▶ LangGraph SDK ──▶ LangGraph Backend (lead_agent)
@@ -85,22 +103,16 @@ Users create **threads** (conversations), send messages, set thread-scoped `/goa
 
 ### Source Layout (`src/`)
 
-- **`app/`** — Next.js App Router. Routes include `/` (landing), `/showcase/[thread_id]` (allowlisted public read-only demos), `/workspace/chats/[thread_id]` (authenticated chat), `/workspace/agents/[agent_name]` and `/workspace/agents/new` (custom agents), `/artifacts/view` (chrome-free window that renders Markdown or CSV/TSV artifacts with the panel's own renderer), `/blog/…`, the `(auth)/{login,setup,auth/callback}` flow, `/[lang]/docs/…`, and `/api/…` route handlers (e.g. `/api/memory`).
-- **`components/`** — React components:
-  - `ui/` — Shadcn UI primitives (auto-generated, ESLint-ignored)
-  - `ai-elements/` — Vercel AI SDK elements (auto-generated, ESLint-ignored)
-  - `workspace/` — Chat page components (messages, artifacts, settings)
-  - `landing/` — Landing page sections
-  - `docs/` — Docs / MDX rendering components
-- **`core/`** — Business logic, the heart of the app. Domains include `threads/` (creation, streaming, state), `api/` (LangGraph client singleton), `agents/` (custom agents), `subagents/` (runtime worker catalog and administrator mutations), `auth/` (authentication), `artifacts/`, `channels/` (IM connections), `integrations/` (managed third-party integration status/install clients such as Lark CLI), `i18n/` (en-US, zh-CN), `settings/`, `memory/`, `skills/`, `messages/`, `mcp/`, `models/`, `input-polish/` (pre-send draft rewrite API), `voice-input/` (browser speech-recognition helpers), `suggestions/`, `tasks/`, `todos/`, `tools/`, `workspace-changes/` (run-scoped changed-file summaries and diff fetching), `config/`, `notification/`, `blog/`, plus rendering helpers (`rehype/`, `streamdown/`) and `utils/`.
-- **`hooks/`** — Shared React hooks
-- **`lib/`** — Utilities (`cn()` from clsx + tailwind-merge)
-- **`content/`** — MDX content (blog posts, docs) rendered by the app
-- **`styles/`** — Global CSS with Tailwind v4 `@import` syntax and CSS variables for theming
-- **`typings/`** — Ambient TypeScript declarations
-- Root files: `env.js` (env validation), `mdx-components.ts` (MDX component map)
+- `app/` — Next.js routes: chat/workspace, agents, auth, showcase, artifact views,
+  localized docs/blog, and API handlers.
+- `components/` — generated `ui/` and `ai-elements/`; application components under
+  `workspace/`, `landing/`, and `docs/`.
+- `core/` — domain logic, API clients, state/hooks, i18n, and Markdown renderers.
+- `hooks/`, `lib/`, `typings/` — shared hooks, utilities, and ambient types.
+- `content/`, `styles/` — MDX content and Tailwind styles.
+- `env.js`, `mdx-components.ts` — environment validation and MDX component map.
 
-More specific `AGENTS.md` files under `src/` contain the frontend sections split from this file.
+Read [src/AGENTS.md](src/AGENTS.md) for component and domain ownership.
 
 ## Code Style
 
@@ -194,6 +206,11 @@ localized inline feedback; both create and edit must block submission. Keep this
 UI validation separate from the API payload. Preserve the original instant when
 wall time and timezone match the mounted snapshot; validate changed inputs, and
 restore the exact original timestamp when those edits are reverted.
+
+Wall-time conversion matches the scheduler's `ZoneInfo(fold=0)` policy: choose
+the first occurrence of a repeated time and the pre-transition offset for a
+skipped time. Stored one-time schedules use that instant for display; the form's
+round-trip validation must still reject newly entered skipped times.
 
 ## Resources
 
@@ -374,10 +391,11 @@ a model switch without changing the backend's direct legacy-request behavior.
 
 ## Full-stack plugin UI
 
-Before changing plugin loaders, pages or conversation actions, read the mandatory
-[Frontend implementation invariants](../docs/full-stack-plugins.md#frontend-implementation-invariants).
-Preserve authenticated, viewer-bound loading, native actions, localization and
-mount/dispose plus abort fencing; Shadow DOM is not a security sandbox.
+Follow [invariants](../docs/full-stack-plugins.md#frontend-implementation-invariants) for
+plugin loaders/pages/actions: viewer-bound auth, native actions, i18n and
+mount/dispose/abort fencing. Shadow DOM is not a sandbox. Bundled extensions need
+typed en/zh `core/extensions/catalog.ts` entries with their namespace.
+Catalog entries are not proof of installation or activation.
 
 ### Composer references
 

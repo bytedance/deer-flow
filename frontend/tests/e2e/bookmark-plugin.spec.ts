@@ -442,7 +442,33 @@ for (const locale of ["en-US", "zh-CN"]) {
         exact: true,
       }),
     ).toBeVisible();
-    await expect(page.getByRole("article")).toHaveCount(6);
+    await expect(page.getByRole("article")).toHaveCount(8);
+    const workflow = page.getByRole("article").filter({
+      hasText: zh ? "脚本工作流" : "Script workflows",
+    });
+    await expect(workflow).toHaveCount(1);
+    await expect(workflow).toContainText(
+      zh
+        ? "不支持恢复、人工审批或硬金额预算"
+        : "no resume, human approval or hard monetary budget",
+    );
+    await workflow
+      .getByRole("button", {
+        name: zh ? "查看 脚本工作流" : "View Script workflows",
+        exact: true,
+      })
+      .click();
+    await expect(
+      page.getByRole("link", {
+        name: zh ? "查看安装说明" : "Installation guide",
+      }),
+    ).toHaveAttribute("href", /deerflow-extension-workflows#readme$/);
+    await page
+      .getByRole("button", {
+        name: zh ? "全部扩展" : "All extensions",
+        exact: true,
+      })
+      .click();
     await expect(
       page.getByRole("button", {
         name: zh ? "查看 会话书签" : "View Bookmarks",
@@ -474,6 +500,35 @@ for (const locale of ["en-US", "zh-CN"]) {
         name: zh ? "查看安装说明" : "Installation guide",
       }),
     ).toHaveAttribute("href", /deerflow-extension-agent-teams#readme$/);
+    await page
+      .getByRole("button", {
+        name: zh ? "全部扩展" : "All extensions",
+        exact: true,
+      })
+      .click();
+    await page
+      .getByPlaceholder(
+        zh ? "按名称或用途搜索扩展" : "Search extensions by name or purpose",
+      )
+      .fill("deerflow-extension-retrieval");
+    await expect(page.getByRole("article")).toHaveCount(1);
+    await page
+      .getByRole("button", {
+        name: zh ? "查看 本地检索示例" : "View Local retrieval example",
+        exact: true,
+      })
+      .click();
+    await expect(
+      page.getByRole("heading", {
+        name: zh ? "本地检索示例" : "Local retrieval example",
+        exact: true,
+      }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("link", {
+        name: zh ? "查看安装说明" : "Installation guide",
+      }),
+    ).toHaveAttribute("href", /deerflow-extension-retrieval#readme$/);
     await page
       .getByRole("button", {
         name: zh ? "全部扩展" : "All extensions",
@@ -547,8 +602,11 @@ test("catalog remains discoverable when runtime discovery fails", async ({
   await expect(
     page.getByRole("alert").filter({ hasText: "Extensions unavailable." }),
   ).toBeVisible();
-  await expect(page.getByRole("article")).toHaveCount(6);
+  await expect(page.getByRole("article")).toHaveCount(8);
   await expect(
     page.getByRole("article").filter({ hasText: "Catalog extension" }),
-  ).toHaveCount(6);
+  ).toHaveCount(8);
+  await expect(
+    page.getByRole("article").filter({ hasText: "Script workflows" }),
+  ).toHaveCount(1);
 });

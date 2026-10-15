@@ -9,6 +9,7 @@ import logging
 from langchain.tools import tool
 
 from deerflow.community.search_max_results import DEFAULT_MAX_RESULTS, coerce_max_results
+from deerflow.community.url_safety import safe_public_result_url
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -132,14 +133,25 @@ async def image_search_tool(
     if not results:
         return json.dumps({"error": "No images found", "query": query}, ensure_ascii=False)
 
-    normalized_results = [
-        {
-            "title": r.get("title", ""),
-            "image_url": r.get("image", ""),
-            "thumbnail_url": r.get("thumbnail", ""),
-        }
-        for r in results
-    ]
+    normalized_results = []
+    for row in results:
+        if not isinstance(row, dict):
+            continue
+        image_url = safe_public_result_url(row.get("image"))
+        thumbnail_url = safe_public_result_url(row.get("thumbnail"))
+        if not image_url and not thumbnail_url:
+            continue
+        title = row.get("title")
+        normalized_results.append(
+            {
+                "title": title if isinstance(title, str) else "",
+                "image_url": image_url,
+                "thumbnail_url": thumbnail_url,
+            }
+        )
+
+    if not normalized_results:
+        return json.dumps({"error": "No safe image URLs found", "query": query}, ensure_ascii=False)
 
     output = {
         "query": query,

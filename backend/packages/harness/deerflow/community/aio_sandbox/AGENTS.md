@@ -93,3 +93,13 @@ cleanup. Failed discovery registration closes only its own HTTP client.
 
 Regressions: `test_aio_sandbox_provider.py`, `test_sandbox_quarantine.py`,
 `test_remote_sandbox_backend.py`, `test_provisioner_request_threading.py`.
+
+## Read failure contract
+
+`read_file` returns content or an ``Error: ...`` string, never raises. The
+server reports missing files as an error envelope with ``data: {}``, which the
+SDK cannot parse into ``FileReadResult``; the resulting ``ValidationError``
+becomes ``Error: file not found or unreadable: <path>`` logged at debug
+(missing files are expected on ReadBeforeWrite probes of new files), never the
+raw pydantic text. Other exceptions keep the error log.
+Regressions: `test_aio_sandbox.py`.
