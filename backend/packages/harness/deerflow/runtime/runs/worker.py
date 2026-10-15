@@ -988,14 +988,21 @@ async def run_agent(
         restore_checkpoint: bool = True,
     ) -> None:
         nonlocal checkpoint_rollback_completed
+        if record.ownership_lost:
+            return
         await run_manager.set_finalizing(run_id, True)
+        if record.ownership_lost:
+            return
         if action == "rollback":
+            record.rollback_finalization_pending = run_manager.heartbeat_enabled and run_manager._store is not None
             await run_manager.set_status(
                 run_id,
                 RunStatus.error,
                 error="Rolled back by user",
-                **terminal_status_kwargs,
+                **({"persist": False} if record.rollback_finalization_pending else terminal_status_kwargs),
             )
+            if record.ownership_lost:
+                return
             if not restore_checkpoint:
                 return
             try:
@@ -1778,17 +1785,17 @@ async def run_agent(
                     logger.warning("Could not remove scheduled goal for run %s", run_id, exc_info=True)
                     await run_manager.set_status(run_id, RunStatus.error, error="Scheduled goal cleanup failed", persist=False)
 
-            if not record.ownership_lost and (event_store is not None or scheduled_goal is not None):
+            if not record.ownership_lost and (event_store is not None or scheduled_goal is not None or record.rollback_finalization_pending):
                 try:
                     # Even after bounded receipt retries are exhausted, persist the
                     # real worker outcome. Leaving a successful row inflight would
                     # let lease recovery rewrite it as an error with a synthetic
                     # zero receipt.
                     if record.abort_event.is_set():
-                        if scheduled_goal is not None:
-                            # A cancel may arrive while scheduled cleanup was
-                            # awaiting its saver. The local status may still be
-                            # staged success; apply the accepted action, including
+                        if scheduled_goal is not None or record.status == RunStatus.success:
+                            # A cancel may arrive while receipt or scheduled
+                            # cleanup is awaiting I/O. Apply the accepted action
+                            # to a still-staged success, including
                             # rollback, before committing any terminal outcome.
                             await _finish_cancellation(record.abort_action, restore_checkpoint=not checkpoint_rollback_completed)
                         await run_manager.persist_current_status(run_id)
@@ -1805,9 +1812,11 @@ async def run_agent(
                             await run_manager.persist_current_status(run_id)
                 except Exception:
                     logger.warning("Failed to persist terminal status for run %s after delivery receipt attempts", run_id, exc_info=True)
-            # The deferred commit has been attempted. A failed write is left to
-            # completion fallback or lease recovery, as before.
-            record.terminal_commit_pending = False
+            # Only a confirmed terminal write or ownership loss releases the
+            # renewal barrier in multi-worker mode. A returned/aborted call is
+            # not evidence that this worker committed its terminal outcome.
+            if record.terminal_commit_pending and run_manager.can_release_terminal_barrier(record):
+                record.terminal_commit_pending = False
 
             if not record.ownership_lost and journal is not None and persist_completion:
                 try:

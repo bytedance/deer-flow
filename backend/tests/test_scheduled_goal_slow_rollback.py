@@ -1,9 +1,8 @@
 """Scheduled rollback keeps ownership until its saver and terminal CAS settle."""
 
 import asyncio
-import copy
 import os
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -212,10 +211,10 @@ async def test_terminal_commit_heartbeat_distinguishes_owner_outcome_from_takeov
     error = "Rolled back by user" if status == "error" else None
     await manager.set_status(record.run_id, RunStatus(status), error=error, goal_verdict=verdict, persist=False)
     if writer == "owner":
-        outcome = await store.finalize_if_not_cancelled(record.run_id, status=status, error=error, goal_verdict=verdict)
-        assert outcome.finalized
+        await manager.set_status_if_not_cancelled(record.run_id, RunStatus(status), error=error, goal_verdict=verdict)
     else:
-        assert await store.update_status(record.run_id, "error", error="Peer reclaimed this run", stop_reason="orphan_recovered")
+        # Identical fields and preserved owner still cannot prove attribution.
+        assert (await store.finalize_if_not_cancelled(record.run_id, status=status, error=error, goal_verdict=verdict)).finalized
     # The durable terminal write has completed while the worker is still
     # receiving its acknowledgement; the local finalization barrier is held.
     await manager._renew_leases()
@@ -224,77 +223,77 @@ async def test_terminal_commit_heartbeat_distinguishes_owner_outcome_from_takeov
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["success", "error"])
-@pytest.mark.parametrize("path", ["renew_rejected", "expired_after_read"])
-async def test_terminal_commit_after_detached_precheck_is_reconfirmed_before_fencing(database_runtime, monkeypatch, status, path):
+@pytest.mark.parametrize("path", ["ack_before_renewal", "ack_during_renewal"])
+async def test_terminal_attempt_ack_arbitrates_rejected_renewal(database_runtime, monkeypatch, status, path):
     store, _ = database_runtime
     manager = RunManager(store=store, worker_id="owner", run_ownership_config=RunOwnershipConfig(heartbeat_enabled=True))
     record = await manager.create_or_reject("result", user_id="alice")
-    await manager.set_status(record.run_id, RunStatus.running)
     record.scheduled_goal_cleanup_pending = True
     verdict = {"satisfied": status == "success", "relied_on_assumption": False}
     error = "Rolled back by user" if status == "error" else None
     await manager.set_status(record.run_id, RunStatus(status), error=error, goal_verdict=verdict, persist=False)
-    get = store.get
-    intercepted = []
-    deadline = datetime.fromisoformat(record.lease_expires_at)
-    clock_advanced = False
+    committed, release, rejected = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    finalize, renew = store.finalize_if_not_cancelled, store.renew_lease
 
-    if path == "expired_after_read":
-        from deerflow.runtime.runs import manager as manager_module
+    async def hold_ack(*args, **kwargs):
+        result = await finalize(*args, **kwargs)
+        committed.set()
+        await release.wait()
+        return result
 
-        class Clock(datetime):
-            @classmethod
-            def now(cls, tz=None):
-                return deadline + timedelta(seconds=1) if clock_advanced else datetime.now(tz)
+    async def observe_rejection(*args, **kwargs):
+        result = await renew(*args, **kwargs)
+        assert not result.renewed
+        rejected.set()
+        return result
 
-        monkeypatch.setattr(manager_module, "datetime", Clock)
-
-    async def commit_after_read(run_id, **kwargs):
-        nonlocal clock_advanced
-        snapshot = copy.deepcopy(await get(run_id, **kwargs))
-        if run_id == record.run_id and not intercepted:
-            intercepted.append(snapshot["status"])
-            result = await store.finalize_if_not_cancelled(run_id, status=status, error=error, goal_verdict=verdict)
-            assert result.finalized
-            clock_advanced = True
-        return snapshot
-
-    monkeypatch.setattr(store, "get", commit_after_read)
-    await manager._renew_leases()
-    assert intercepted == ["running"]
-    assert not record.ownership_lost
-    assert record.status.value == status
-    assert not record.scheduled_goal_cleanup_pending
+    monkeypatch.setattr(store, "finalize_if_not_cancelled", hold_ack)
+    monkeypatch.setattr(store, "renew_lease", observe_rejection)
+    commit = asyncio.create_task(manager.set_status_if_not_cancelled(record.run_id, RunStatus(status), error=error, goal_verdict=verdict))
+    renewal = None
+    try:
+        await asyncio.wait_for(committed.wait(), 2)
+        if path == "ack_before_renewal":
+            release.set()
+            await asyncio.wait_for(commit, 2)
+        renewal = asyncio.create_task(manager._renew_leases())
+        if path == "ack_during_renewal":
+            await asyncio.wait_for(rejected.wait(), 2)
+            assert record.scheduled_goal_cleanup_pending
+            assert not record.terminal_status_persisted
+            release.set()
+        await asyncio.wait_for(asyncio.gather(commit, renewal), 2)
+        assert not record.ownership_lost
+        assert record.status.value == status
+        assert not record.scheduled_goal_cleanup_pending
+    finally:
+        release.set()
+        await asyncio.wait_for(asyncio.gather(commit, *([renewal] if renewal else []), return_exceptions=True), 2)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["success", "error"])
-async def test_detached_precheck_commit_race_preserves_worker_hook_and_stream_end(database_runtime, monkeypatch, status):
+async def test_delayed_terminal_ack_preserves_worker_hook_and_stream_end(database_runtime, monkeypatch, status):
     store, checkpointer = database_runtime
     manager = RunManager(store=store, worker_id="owner", run_ownership_config=RunOwnershipConfig(heartbeat_enabled=True))
     metadata = {"scheduled_task_id": "task", "scheduled_task_run_id": "occurrence", "scheduled_goal_objective": "Report"}
     record = await manager.create_or_reject("result", user_id="alice", metadata=metadata)
-    read_done, committed = asyncio.Event(), asyncio.Event()
-    get, finalize, update_status, write_goal = store.get, store.finalize_if_not_cancelled, store.update_status, worker.write_thread_goal
-    renewal_tasks = []
+    committed, release, rejected = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    finalize, update_status, renew, write_goal = store.finalize_if_not_cancelled, store.update_status, store.renew_lease, worker.write_thread_goal
     intercepted, cancelled = [], []
 
-    async def detached_precheck(run_id, **kwargs):
-        snapshot = copy.deepcopy(await get(run_id, **kwargs))
-        if renewal_tasks and asyncio.current_task() is renewal_tasks[0] and not intercepted:
-            intercepted.append(snapshot["status"])
-            read_done.set()
-            await committed.wait()
-        return snapshot
+    async def observe_rejection(*args, **kwargs):
+        result = await renew(*args, **kwargs)
+        if not result.renewed:
+            rejected.set()
+        return result
 
     async def commit_with_delayed_ack(operation, run_id, **kwargs):
-        if run_id != record.run_id or kwargs["status"] != status or renewal_tasks:
-            return await operation(run_id, **kwargs)
-        renewal_tasks.append(asyncio.create_task(manager._renew_leases()))
-        await read_done.wait()
         result = await operation(run_id, **kwargs)
-        committed.set()
-        await asyncio.shield(renewal_tasks[0])
+        if run_id == record.run_id and kwargs["status"] == status and not intercepted:
+            intercepted.append(status)
+            committed.set()
+            await release.wait()
         return result
 
     async def finalize_with_ack(run_id, **kwargs):
@@ -315,7 +314,7 @@ async def test_detached_precheck_commit_race_preserves_worker_hook_and_stream_en
     async def evaluate(*args, **kwargs):
         return {"satisfied": True, "blocker": "none", "reason": "Verified", "relied_on_assumption": False}
 
-    monkeypatch.setattr(store, "get", detached_precheck)
+    monkeypatch.setattr(store, "renew_lease", observe_rejection)
     monkeypatch.setattr(store, "finalize_if_not_cancelled", finalize_with_ack)
     monkeypatch.setattr(store, "update_status", update_with_ack)
     monkeypatch.setattr(worker, "write_thread_goal", cancel_for_error)
@@ -334,12 +333,22 @@ async def test_detached_precheck_commit_race_preserves_worker_hook_and_stream_en
             config={"configurable": {"thread_id": "result"}, "context": {"non_interactive": True}},
         )
     )
-    async with asyncio.timeout(10):
-        await asyncio.gather(record.task, return_exceptions=True)
-    if renewal_tasks:
-        await asyncio.gather(*renewal_tasks, return_exceptions=True)
-    assert intercepted == ["running"]
-    assert not record.ownership_lost
-    assert record.status.value == status
-    completed.assert_awaited_once_with(record)
-    bridge.publish_end.assert_awaited_once_with(record.run_id)
+    renewal = None
+    try:
+        await asyncio.wait_for(committed.wait(), 5)
+        renewal = asyncio.create_task(manager._renew_leases())
+        await asyncio.wait_for(rejected.wait(), 2)
+        assert not record.terminal_status_persisted
+        assert record.terminal_commit_pending
+        release.set()
+        await asyncio.wait_for(asyncio.gather(record.task, renewal), 5)
+        assert intercepted == [status]
+        assert not record.ownership_lost
+        assert record.status.value == status
+        completed.assert_awaited_once_with(record)
+        bridge.publish_end.assert_awaited_once_with(record.run_id)
+    finally:
+        release.set()
+        if not record.task.done():
+            record.task.cancel()
+        await asyncio.wait_for(asyncio.gather(record.task, *([renewal] if renewal else []), return_exceptions=True), 2)
