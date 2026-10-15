@@ -101,3 +101,12 @@ storage adapter; stale lifetime operations are inert. This tests actual source
 hooks with a doubled external React SDK adapter, not real browser reconnect.
 Thread search/CRUD/replay/compact, remaining resources/stores and shell activation
 are still open entries. Scoped markers never replace server ownership checks.
+
+
+Frontend thread actions (#35): sidebar SDK/archived REST search and Run detail,
+branch/pin/archive/move/rename/delete hooks capture confirmed clients, fence
+materialized values and async cache publication, and refuse stale lookups or
+callbacks. Scoped canonical deletion avoids a second SDK+REST delete. Native
+compatibility regressions pass. Page callers, replay/compact/create, sidecar's
+global parent-keyed in-flight map and other resources/stores still require
+integration; actual browser/backend/physical acceptance is not supplied here.

@@ -273,7 +273,7 @@ it("keeps real sidebar search and thread actions in each confirmed space, with o
     await waitFor(() =>
       expect(
         view.result.current.archived.data?.pages[0]?.[0]?.metadata
-          .deerflow_archived,
+          ?.deerflow_archived,
       ).toBe(true),
     );
     await act(async () => {

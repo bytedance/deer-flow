@@ -2115,7 +2115,7 @@
     "evidence_limits": "Only the external React SDK useStream adapter is doubled in new tests; real source hooks, Context, native REST/SDK clients and stream parser run with network doubles. Does not prove actual browser/SDK automatic reconnect or backend authorization.",
     "cleanup": "#28-#32 terminal; exact owned container/network, chat-format and SDK source probe inventories independently empty; private dependency cache retained",
     "remaining": [
-      "thread search/archive/branch/move/delete/rename, replay prepare and compact REST/domain consumers",
+      "Sidebar/thread-action hooks now covered by frontend_thread_actions; replay prepare/compact and actual UI caller publication remain pending",
       "project-thread creation and remaining project/artifact/resource clients and storage namespaces",
       "actual app capability bootstrap, native selector and browser/backend two-tab acceptance",
       "credential/principal consistency, active revocation, physical runtime and all M4-M11 gates; no tenant activation"
@@ -2125,7 +2125,8 @@
     "date": "2026-10-15",
     "document": "docs/tenant-workspaces-resume-2026-10-15.md",
     "reason": "User requested stop for today, save progress and local commit only; do not automatically continue",
-    "work_package": "M3 partial; all M0-M11 parent gates remain open"
+    "work_package": "M3 partial; all M0-M11 parent gates remain open",
+    "state": "resumed by explicit user instruction on 2026-10-15"
   },
   "frontend_thread_actions_wip": {
     "job": "deerflow-tenant-frontend",
@@ -2162,6 +2163,57 @@
       "replay/compact/createThread and UI caller await/toast/router fences",
       "other resource clients, artifact/thread storage and app-shell/native selector integration",
       "actual browser/backend two-tab, session/principal/revocation, physical isolation and remaining M4-M11 acceptance; activation closed"
+    ],
+    "resolved_by": "deerflow-tenant-frontend #35; historical #34 failure retained"
+  },
+  "frontend_thread_actions": {
+    "job": "deerflow-tenant-frontend",
+    "status": "native sidebar and thread-action hook integration verified under opt-in Context; full M3 incomplete",
+    "red": {
+      "build": 33,
+      "result": "FAILURE",
+      "tests_failed": 3,
+      "test_seconds": 7.97,
+      "archive_sha256": "31da46f958a9534af910768ecf6020c820fa1fbb5bcbe8460ababa3b4b885a6f"
+    },
+    "intermediate": {
+      "build": 34,
+      "result": "FAILURE",
+      "tests_passed": 50,
+      "tests_added": 3,
+      "main_test_seconds": 5.75,
+      "regression_test_seconds": 30.4,
+      "build_seconds": 443.119,
+      "archive_sha256": "08dd1dd952819db1669ee1501bc28984200b1920a74d789618041d0c962a69b6",
+      "passed": "3 main + 47 existing tests, Prettier, targeted ESLint, full ESLint",
+      "failed": "TypeScript TS2533: workspace-actions.dom.test.tsx(275,9), nullable metadata access"
+    },
+    "green": {
+      "build": 35,
+      "result": "SUCCESS",
+      "tests_passed": 50,
+      "tests_added": 3,
+      "main_test_seconds": 7.32,
+      "regression_test_seconds": 31.4,
+      "build_seconds": 443.058,
+      "archive_sha256": "45ee351abb36dadb3aabf6dee4227fddeb4d02e85419cc44d5e3c7cb29e1cb74",
+      "checks": "3 real React/StrictMode actions mains +47 native/chat regressions, four-file Prettier, targeted ESLint max-warnings 0 and full pnpm check"
+    },
+    "source_sha256": {
+      "frontend/src/core/threads/api.ts": "2504f1d6ef3caa498e94ef0e5a8df1f81f89437ef7ec77c4745d67cba052c003",
+      "frontend/src/core/threads/hooks.ts": "aca8abf4b6a662d3c95e67b54657f3ed5b0b3afb46639652251b2eb94945ebd1",
+      "frontend/src/core/threads/archive.ts": "56f15b8ff853ceaeb392cb3c4f35d950719cb6858de871e1a926f644d2bfc9c5",
+      "frontend/tests/unit/core/threads/workspace-actions.dom.test.tsx": "6ec0aa3ed26f17baa2477372c6db1b5f81938c10d6f7280f84702c12f1b67508"
+    },
+    "scope": "captured native SDK for search/Run detail/rename and REST for archived search/branch/pin/archive/move/delete; query/decoder/cache-await/publication fences; no stale sidecar lookup deletion or retained mutation dispatch; scoped canonical Gateway DELETE once per normally enumerated thread while unscoped native compatibility remains",
+    "type_fix": "Nullable archived row metadata uses optional chaining while the assertion still requires deerflow_archived=true; no cast or typecheck bypass",
+    "evidence_limits": "real source hooks/Context/SDK/REST with network doubles, not browser/backend authorization or physical filesystem evidence",
+    "cleanup": "#33-#35 terminal and exact owned container/network inventories empty; formatter probe empty; private dependency cache retained",
+    "remaining": [
+      "replay prepare/compact/project-thread creation and UI caller after-await toast/router/callback fences",
+      "sidecar creation global in-flight map must be scoped by lifetime; other resource clients and stored UI state",
+      "app capability bootstrap/native selector plus actual backend/browser two-tab acceptance",
+      "principal/session/revocation and physical isolation; all remaining M4-M11 gates, activation closed"
     ]
   }
 }

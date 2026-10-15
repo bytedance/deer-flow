@@ -1,6 +1,8 @@
-# 2026-10-15 用户暂停检查点
+# 2026-10-15 暂停与恢复检查点
 
-用户要求今天到这里，保存进度并允许本地提交。此检查点是 WIP，不能声称功能验收完成；不要自动继续开发、启动构建、部署或推送。用户再次要求继续后再恢复。
+状态更新：用户已于 2026-10-15 明确要求继续，当前已恢复；最新验证见文末 #35。下面暂停段保留为历史记录。
+
+用户此前要求今天到这里，保存进度并允许本地提交。此检查点是 WIP，不能声称功能验收完成；不要自动继续开发、启动构建、部署或推送。用户再次要求继续后再恢复。
 
 ## 代码与已验证范围
 
@@ -31,3 +33,31 @@
 M0–M11 原计划全部保留；当前仍 partial M3，各父验收未完成。M4–M11 的后台执行协议、工具/存储隔离、自助开户团队、配额审计、资料研究报告跟进、迁移恢复和最终验收均不能省略。`_WORKSPACE_RUNTIME_INTEGRATED=False` 保持关闭。此次仅本地 WIP 保存，没有推送、部署或模型调用。
 
 更早的连续记录见 `docs/tenant-workspaces-resume-2026-10-14.md`，详细证据见 `docs/tenant-workspaces-progress.json` 的 `frontend_thread_actions_wip`。
+
+
+2026-10-15 resumed at explicit user request. M3 thread-action checkpoint:
+frontend #33 RED reproduced missing Run selector, old sidecar lookup continuing
+to delete, and archive publication after a delayed cache cancellation. #34 passed
+50 tests but full check failed on nullable test metadata (TS2533). #35 SUCCESS
+reruns the same three mains and 47 native/chat regressions, four-file formatting,
+zero-warning target lint and full pnpm check. Optional metadata access still
+requires the archive flag to be true; no type assertion bypass. Runtime/test
+bytes match its archive; exact #33-#35 and formatter resources independently empty.
+
+Actual SDK/REST sidebar search, Run detail and branch/pin/archive/move/rename/
+delete hooks capture the confirmed clients. Post-decode and post-cache-await
+checks stop stale mutation publication and callbacks; lookup cancellation cannot
+fall through to best-effort deletion. Scoped deletes use the native canonical
+Gateway endpoint, avoiding the previous SDK-plus-fresh-REST double request for
+each normally enumerated thread. Native unscoped compatibility and its cleanup
+retry regressions remain. These are real hooks with network doubles, not actual
+browser/backend or physical STOP proof.
+
+Continue with replay prepare, compact and project-thread creation, then UI
+callers' await/toast/router fences (ChatPage branch, delete dialog and sidecar).
+The native sidecar API's global inFlightCreates map currently keys only parent
+thread ID; scope this by confirmed client/lifetime before activation. Other
+resource clients, artifact/thread UI storage, actual shell/selector and backend
+browser two-tab acceptance still remain. M3 and all M4-M11 gates remain open;
+activation stays closed, no deployment/push/local application runtime/model calls.
+The earlier user-pause section is historical; the user has explicitly resumed.

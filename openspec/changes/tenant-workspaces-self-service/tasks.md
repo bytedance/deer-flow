@@ -304,3 +304,31 @@ application runtime/model calls. Continue reusing native DeerFlow styling.
 
 
 2026-10-15 用户暂停：保存本地 WIP，详见 `docs/tenant-workspaces-resume-2026-10-15.md`。前端 #33 三条 RED；#34 的 50 项行为测试、格式和 ESLint 通过，但完整 pnpm check 在 workspace-actions.dom.test.tsx:275 的 nullable metadata 访问报 TS2533，构建 FAILURE。未补跑、未宣称完成。#33/#34 专属容器和网络、actions-format 探针资源均为空。下次先修复该测试类型并完成上海完整检查，然后继续其余客户端/页面调用方/存储/空间入口；全部父验收仍未完成，activation 关闭。用户恢复前不要继续构建、部署或推送。
+
+
+2026-10-15 resumed at explicit user request. M3 thread-action checkpoint:
+frontend #33 RED reproduced missing Run selector, old sidecar lookup continuing
+to delete, and archive publication after a delayed cache cancellation. #34 passed
+50 tests but full check failed on nullable test metadata (TS2533). #35 SUCCESS
+reruns the same three mains and 47 native/chat regressions, four-file formatting,
+zero-warning target lint and full pnpm check. Optional metadata access still
+requires the archive flag to be true; no type assertion bypass. Runtime/test
+bytes match its archive; exact #33-#35 and formatter resources independently empty.
+
+Actual SDK/REST sidebar search, Run detail and branch/pin/archive/move/rename/
+delete hooks capture the confirmed clients. Post-decode and post-cache-await
+checks stop stale mutation publication and callbacks; lookup cancellation cannot
+fall through to best-effort deletion. Scoped deletes use the native canonical
+Gateway endpoint, avoiding the previous SDK-plus-fresh-REST double request for
+each normally enumerated thread. Native unscoped compatibility and its cleanup
+retry regressions remain. These are real hooks with network doubles, not actual
+browser/backend or physical STOP proof.
+
+Continue with replay prepare, compact and project-thread creation, then UI
+callers' await/toast/router fences (ChatPage branch, delete dialog and sidecar).
+The native sidecar API's global inFlightCreates map currently keys only parent
+thread ID; scope this by confirmed client/lifetime before activation. Other
+resource clients, artifact/thread UI storage, actual shell/selector and backend
+browser two-tab acceptance still remain. M3 and all M4-M11 gates remain open;
+activation stays closed, no deployment/push/local application runtime/model calls.
+The earlier user-pause section is historical; the user has explicitly resumed.
