@@ -27,6 +27,8 @@ import {
   getFileIcon,
   getFileName,
 } from "@/core/utils/files";
+import { useWorkspaceLifetime } from "@/core/workspaces/context";
+import { useCurrentWorkspaceView } from "@/core/workspaces/view-lifetime";
 import { cn } from "@/lib/utils";
 
 import { useArtifacts } from "./context";
@@ -48,12 +50,22 @@ export function ArtifactFileList({
   const { user } = useAuth();
   const isAdmin = user?.system_role === "admin";
   const { select: selectArtifact, setOpen } = useArtifacts();
-  const [downloadingArchive, setDownloadingArchive] = useState(false);
+  const lifetime = useWorkspaceLifetime();
+  const isCurrent = useCurrentWorkspaceView(JSON.stringify([threadId, runId]));
+  const [downloadOwner, setDownloadOwner] = useState<(() => boolean) | null>(
+    null,
+  );
+  const downloadingArchive = downloadOwner === isCurrent;
   const [installingFile, setInstallingFile] = useState<string | null>(null);
   const staticWebsiteOnly = isStaticWebsiteOnly();
   const { data: archiveManifest } = useQuery({
     queryKey: ["artifact-archive-manifest", threadId, runId],
-    queryFn: () => getArtifactArchiveManifest({ threadId, runId: runId! }),
+    queryFn: ({ signal }) => {
+      const input = { threadId, runId: runId! };
+      return lifetime
+        ? getArtifactArchiveManifest(input, { rest: lifetime.rest, signal })
+        : getArtifactArchiveManifest(input);
+    },
     enabled:
       archiveDownloadsEnabled && runId !== undefined && !staticWebsiteOnly,
     retry: false,
@@ -63,10 +75,11 @@ export function ArtifactFileList({
 
   const handleClick = useCallback(
     (filepath: string) => {
+      if (!isCurrent()) return;
       selectArtifact(filepath);
       setOpen(true);
     },
-    [selectArtifact, setOpen],
+    [selectArtifact, setOpen, isCurrent],
   );
 
   const handleInstallSkill = useCallback(
@@ -102,15 +115,19 @@ export function ArtifactFileList({
   );
 
   const handleDownloadArchive = useCallback(async () => {
-    if (!runId || downloadingArchive) return;
+    if (!isCurrent() || !runId || downloadingArchive) return;
 
-    setDownloadingArchive(true);
+    setDownloadOwner(() => isCurrent);
     let objectUrl: string | undefined;
     try {
-      const { blob, filename } = await downloadArtifactArchive({
-        threadId,
-        runId,
-      });
+      const input = { threadId, runId };
+      const { blob, filename } = lifetime
+        ? await downloadArtifactArchive(input, {
+            rest: lifetime.rest,
+            signal: lifetime.scope.signal,
+          })
+        : await downloadArtifactArchive(input);
+      if (!isCurrent()) return;
       objectUrl = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = objectUrl;
@@ -119,6 +136,7 @@ export function ArtifactFileList({
       link.click();
       link.remove();
     } catch (error) {
+      if (!isCurrent()) return;
       console.error("Failed to download artifact archive:", error);
       toast.error(
         error instanceof ArtifactRequestError
@@ -127,9 +145,9 @@ export function ArtifactFileList({
       );
     } finally {
       if (objectUrl) URL.revokeObjectURL(objectUrl);
-      setDownloadingArchive(false);
+      if (isCurrent()) setDownloadOwner(null);
     }
-  }, [downloadingArchive, runId, t, threadId]);
+  }, [downloadingArchive, runId, t, threadId, lifetime, isCurrent]);
 
   const canDownloadArchive =
     archiveDownloadsEnabled &&

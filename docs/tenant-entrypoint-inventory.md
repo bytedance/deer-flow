@@ -171,3 +171,12 @@ onSent proof plus positive native project/settings/sidebar/create-then-move/
 delete navigation pass, with those page implementations unchanged. HTTP/
 catalog/router/submit and leaf fixtures do not prove real browser/backend/
 principal, every callback fault, or remaining artifact/store boundaries.
+
+
+Artifact panel REST/state checkpoint (#73): native preview/range/hash, revision
+save, manifest and ZIP Blob clients bind the captured workspace and decoder
+lifetime. Native detail/list/hooks plus scoped panel storage/setters fence
+late same-space callbacks and byte/JSON/Blob completion after scope expiry.
+50 tests/full frontend check; HTTP/preview/editor fixtures do not prove live
+Run/backend/browser/ZIP extraction. Direct/standalone/HTML/media/Markdown
+links and operator skill installation are still open; activation closed.

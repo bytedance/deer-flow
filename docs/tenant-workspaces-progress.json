@@ -2650,5 +2650,214 @@
       "owned_networks": [],
       "next": "inspect reusable authorized browser tooling/cache before preparing remote real-browser gates; no image downloaded"
     }
+  },
+  "frontend_artifacts": {
+    "status": "partial M3; artifact panel REST/edit/archive/state checkpoint only",
+    "job": "deerflow-tenant-frontend",
+    "red": {
+      "build": 70,
+      "result": "FAILURE",
+      "archive_sha256": "fc885bc4aef50c71811a32761a359ae03491047005befb09f911f1e50db0e1e4",
+      "reason": "real artifact detail loaded Report-null-thread-1 instead of the selected workspace; existing legacy panel storage also unpartitioned"
+    },
+    "main_green": {
+      "build": 71,
+      "result": "SUCCESS",
+      "archive_sha256": "553d9d02db9a57e45661bba6f520c21dc91f46bfd13d9444ba190c0e7e9fd95e",
+      "tests_passed": 35,
+      "new_tests": 1,
+      "existing_tests": 34
+    },
+    "intermediate": {
+      "build": 72,
+      "result": "FAILURE",
+      "archive_sha256": "f89a989dada087ca71b886e80a6c16a366dc3feb6d732a3513cca14c906643b0",
+      "tests_passed": 50,
+      "reason": "behavior and formatting passed; target ESLint found four import-order issues and one redundant test assertion"
+    },
+    "green": {
+      "build": 73,
+      "result": "SUCCESS",
+      "archive_sha256": "a4d7f80ea55432489744489a9177c84534f98ce5b03b55b2e43159ec6aa91a82",
+      "tests_passed": 50,
+      "new_tests": 3,
+      "existing_tests": 47,
+      "files": 8,
+      "checks": [
+        "behavior tests",
+        "nine-file Prettier",
+        "target ESLint --max-warnings 0",
+        "early full tsc --noEmit",
+        "required full pnpm check"
+      ]
+    },
+    "evidence": {
+      "image_id": "sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01",
+      "builds": [
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 23219,
+          "number": 70,
+          "result": "FAILURE",
+          "owned_containers": [],
+          "owned_networks": [],
+          "file_counts": [],
+          "passed_counts": [],
+          "test_seconds": [
+            8.96
+          ],
+          "scope_read_red": true
+        },
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 47852,
+          "number": 71,
+          "result": "SUCCESS",
+          "owned_containers": [],
+          "owned_networks": [],
+          "file_counts": [
+            "6"
+          ],
+          "passed_counts": [
+            "35"
+          ],
+          "test_seconds": [
+            28.7
+          ],
+          "scope_read_red": false
+        },
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 112753,
+          "number": 72,
+          "result": "FAILURE",
+          "owned_containers": [],
+          "owned_networks": [],
+          "file_counts": [
+            "8"
+          ],
+          "passed_counts": [
+            "50"
+          ],
+          "test_seconds": [
+            42.6
+          ],
+          "scope_read_red": false
+        },
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 473105,
+          "number": 73,
+          "result": "SUCCESS",
+          "owned_containers": [],
+          "owned_networks": [],
+          "file_counts": [
+            "8"
+          ],
+          "passed_counts": [
+            "50"
+          ],
+          "test_seconds": [
+            38.6
+          ],
+          "scope_read_red": false
+        }
+      ],
+      "formatter_probe": {
+        "containers": [],
+        "networks": []
+      }
+    },
+    "source_sha256": {
+      "frontend/src/core/artifacts/request.ts": "06e26957e7832b4c9feb4ebfa0adad94d5ce8fd356f17ba5ed72c40e7cfea165",
+      "frontend/src/core/artifacts/api.ts": "d4bd2c3cbb038440669dada2a018b816f0912a91bc8bdc69cc63fd046d16eb84",
+      "frontend/src/core/artifacts/loader.ts": "3faa090793f1f889607afce4bdcf33b2de65d9e71895cf26b139bb8420ccbe77",
+      "frontend/src/core/artifacts/hooks.ts": "89004f83f086b3a621454b3ba7ab5a9d928d9c8c02d6d27d508fedd1e6e1be40",
+      "frontend/src/core/workspaces/view-lifetime.ts": "9fadc5da574754cc9305435bf8389e1406cb5d2ebd651b9676e08a7835146339",
+      "frontend/src/components/workspace/artifacts/context.tsx": "27d51e19cea0233edbd2cc226c3636711b29f2a27ce9480766c601157c34dce8",
+      "frontend/src/components/workspace/artifacts/artifact-file-list.tsx": "0af07bb8b74af5fab23e8f5f90e913eba7d8264f17b0073a2edbeb086cc7106c",
+      "frontend/src/components/workspace/artifacts/artifact-file-detail.tsx": "55e9705b0a5ad25f65d116e9b8b1891a46e77186967fde230fbbd158d778d51d",
+      "frontend/tests/unit/components/workspace/artifacts/workspace-artifacts.dom.test.tsx": "14ecee6ef22c21d3938cb3c8d02d7e8af10cc8f6c1f2c6ebb5eb29d7b51b8150"
+    },
+    "contract": "Native artifact byte/range/hash decoder, revision PUT JSON and archive manifest/Blob clients accept optional captured REST/signal; original no-options API/error/method/payload/Range/ETag/416 behavior retained. Whole decoder passes through fixed client consume. Query signals bound to lifetime. Save/download publication and pending state owned by actor/workspace/resource incarnation, including same-space A/B/A. Panel uses disjoint actor/workspace/path sessionStorage; no legacy adoption. Context setters and beforeunload/persistence reject expired view; route changes reset provider state without remounting its chat subtree. Draft buffers remain memory-only.",
+    "proof_limits": "Three HTTP-fixture DOM/client scenarios use real Auth/Workspace/Query/Artifacts providers, native detail/list/hooks/API/loader; CodeEditor/preview rendering leaves and catalog/router/toasts/HTTP are doubled. This does not prove actual backend authorization, real ZIP contents, real browser/download/HTML or a live ChatPage/Run. Late same-space saves may reach the server; only local publication is suppressed.",
+    "remaining": [
+      "scoped direct download/new-window/standalone viewer, image/PDF/media/Markdown links and nested relative HTML/CSS resource handling",
+      "operator skill installation from artifacts is still a separate M5 boundary; scoped bootstrap/capability/selector plus actual browser/backend/two-tab verification",
+      "remaining UI-store/global-title, scoped file-picker focus, same-space sidecar parent/unmount/quiet-stream fault audit; all M4-M11, physical NAS and principal/revocation acceptance; activation remains closed"
+    ],
+    "warnings": "Passing native iframe tests log happy-dom fetch/abort during teardown; archive error tests intentionally log rejection, and KaTeX quirks warning remains. No claim of clean browser/backend acceptance.",
+    "browser_reuse_inventory": {
+      "candidate_images": [
+        "deerflow-native:native-20261013-5f45039e-locked",
+        "deerflow-native:production-final-contract-c6af94a95ae7",
+        "deerflow-native:final-ci-tools-52ce",
+        "deerflow-native:final-test-tools-52ce",
+        "deerflow-native:browser-mcr-1.61.0-1228-a216",
+        "deerflow-native:publication-bdd2931a1a6f-core",
+        "deerflow-native:05e260329244-core",
+        "deerflow-test/worker:e8caa9911975191b2ff9aeb1b7a1f5ecab1d0446793c7621b9e2cce8a835bcc5"
+      ],
+      "host_browser_paths": {
+        "chromium": null,
+        "chromium-browser": null,
+        "google-chrome": null,
+        "playwright": null
+      },
+      "owned_cache_candidates": {
+        "/data/jenkins-agent/deerflow/tenant-frontend/cache": [],
+        "/data/jenkins-agent/deerflow": []
+      }
+    },
+    "browser_image_probe": {
+      "image": "deerflow-native:browser-mcr-1.61.0-1228-a216",
+      "image_id": "sha256:52ce23272ed5c945389367eb92f97fdd6754aa93d1c369bb01d7a44d45c5f47e",
+      "returncode": 0,
+      "paths": [
+        "/usr/bin/node",
+        "/app/backend/.venv/bin/python3"
+      ],
+      "stderr": "",
+      "cleanup": {
+        "containers": [],
+        "networks": []
+      }
+    },
+    "browser_existing_distribution": {
+      "image_id": "sha256:52ce23272ed5c945389367eb92f97fdd6754aa93d1c369bb01d7a44d45c5f47e",
+      "exit_code": 0,
+      "script_sha256": "b618cdaf34c19a4cf82263110ce21cc8dbb6708da8a935ac7bd80d3fdbb8d91e",
+      "verification": {
+        "browser_distribution": "PASS",
+        "uid": 1000,
+        "gid": 1000,
+        "playwright_version": "1.61.0",
+        "browser_version": "149.0.7827.55",
+        "revision": "1228",
+        "binary_path": "/opt/deerflow-browsers/chromium_headless_shell-1228/chrome-headless-shell-linux64/chrome-headless-shell",
+        "binary_sha256": "670ba079b75107746ba41abad131180a31a7c7219aa1bd4061fb471f4535d541",
+        "headless": true,
+        "channel": null,
+        "launch_options": {
+          "headless": true
+        },
+        "page_title": "Native headless distribution",
+        "input_verified": true,
+        "screenshot_sha256": "e257bc5326b45b1738bb6dc901548a72bad83aefb6efccee5ac77b0b1b794367",
+        "screenshot_bytes": 7829,
+        "models_called": false,
+        "network": "none",
+        "scope": "headless_no_channel_distribution_only"
+      },
+      "cleanup": {
+        "containers": [],
+        "networks": []
+      }
+    },
+    "browser_probe_note": "The existing custom /opt/deerflow-browsers distribution passed the native verify script freshly on exact image ID, nonroot 1000:1000, network none. Chromium launch/input/PNG only, not DeerFlow browser/backend acceptance. No new image/download."
   }
 }

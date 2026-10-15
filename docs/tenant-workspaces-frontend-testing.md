@@ -592,3 +592,54 @@ two-tab acceptance. Positive project UI workflow is not every publication
 fault. Principal/session/revocation and all M4-M11 gates remain. M3 is partial,
 every parent M0-M11 gate stays open and activation remains closed. No
 deployment, Git remote push, model call or local application runtime ran.
+
+
+M3 artifact panel checkpoint (2026-10-15): frontend #70 RED reproduced an
+unscoped native artifact read (Report-null-thread-1). #71 main GREEN first:
+35 tests (one new, 34 existing), real P/T native detail read/revision save and
+archive download plus legacy panel-state non-adoption. Native archive UI
+appears only above one file, so the manifest fixture correctly lists two.
+Only then add two lifecycle scenarios. #72 passed 50 tests/format; target
+lint found four import-order issues and one redundant assertion. #73 SUCCESS
+passes the same 50 tests (three new, 47 existing), eight files, nine-file
+Prettier/target lint, early tsc and required full pnpm check. Exact archive/
+source/image IDs, terminal timings and empty #70-#73/formatter inventories
+are recorded in frontend_artifacts in progress JSON.
+
+Native byte/range/ETag/hash/416 preview, revision PUT/error handling, archive
+manifest and Blob decoding now accept the captured workspace REST client.
+The whole native decoder, including awaited bodies/hashing/errors, is inside
+consume; queries retain cancellation. Native unscoped argument counts,
+payloads/methods/decoder semantics and styles remain. Save/ZIP completion,
+toasts/cache/draft writes and pending flags belong to one mounted resource
+incarnation; same-space navigation and A/B/A cannot revive an old callback.
+Panel storage is a disjoint actor/workspace/path namespace, never adopting
+legacy data. Retained context setters and beforeunload/persistence callbacks
+are fenced. Route transitions reset this provider's state without keying/
+remounting its chat subtree; draft buffers stay in memory.
+
+The two added scenarios verify delayed same-space save/ZIP decoders and
+retained panel callbacks do not touch a replacement view; its new save/ZIP
+still work. A separate deterministic client check releases byte/JSON/Blob
+decoders after workspace switch and observes AbortError. Real components/
+providers/hooks/REST execute against HTTP/catalog/router/toast fixtures and
+editor/preview leaves. This is not live ChatPage/Run, backend authorization,
+actual ZIP extraction, browser-download or HTML resource proof. Native iframe
+cases log happy-dom fetch/abort teardown output; archive rejection logs and
+KaTeX warning remain. A detached save may already have reached the server;
+no remote cancellation is claimed.
+
+A read-only inventory found the existing DeerFlow browser-mcr image; its
+custom /opt/deerflow-browsers installation is documented in native scripts
+and historical #41. Prior PATH/standard-directory absence was only a bounded
+probe. Fresh exact-image native distribution verification passed as uid/gid
+1000:1000, network none: Chromium 149.0.7827.55 launch/input/PNG, owned
+resources empty. This proves browser tooling only, not DeerFlow page/backend
+acceptance. No image download.
+
+Next: direct/standalone/new-window/media/Markdown and nested HTML/CSS URLs,
+remaining UI stores/title/focus/sidecar faults, then real shell/capability/
+selector and browser/backend two-tab proof. Artifact skill installation is
+a separate operator/M5 authority boundary. All M0-M11 parent gates remain
+unchecked; M3 is partial and startup activation remains false. No deployment,
+Git remote push, model call or local application runtime occurred.

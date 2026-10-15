@@ -64,6 +64,8 @@ import {
   getFileExtension,
   getFileName,
 } from "@/core/utils/files";
+import { useWorkspaceLifetime } from "@/core/workspaces/context";
+import { useCurrentWorkspaceView } from "@/core/workspaces/view-lifetime";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
@@ -91,6 +93,10 @@ export function ArtifactFileDetail({
 }) {
   const { t } = useI18n();
   const queryClient = useQueryClient();
+  const lifetime = useWorkspaceLifetime();
+  const isCurrent = useCurrentWorkspaceView(
+    JSON.stringify([threadId, filepathFromProps]),
+  );
   const { user } = useAuth();
   const isAdmin = user?.system_role === "admin";
   const {
@@ -220,7 +226,8 @@ export function ArtifactFileDetail({
     filepathFromProps,
   );
 
-  const [isSaving, setIsSaving] = useState(false);
+  const [savingOwner, setSavingOwner] = useState<(() => boolean) | null>(null);
+  const isSaving = savingOwner === isCurrent;
   const activeDraft = drafts[filepath] ?? createArtifactDraft(filepath);
   const isDirty = activeDraft.draftContent !== activeDraft.baselineContent;
   const hasUnsavedDrafts = Object.values(drafts).some(
@@ -311,6 +318,7 @@ export function ArtifactFileDetail({
 
   const handleSave = useCallback(async () => {
     if (
+      !isCurrent() ||
       !canEdit ||
       !isDirty ||
       isSaving ||
@@ -321,14 +329,21 @@ export function ArtifactFileDetail({
       return;
     }
 
-    setIsSaving(true);
+    setSavingOwner(() => isCurrent);
     try {
-      const result = await updateArtifactContent({
+      const input = {
         threadId,
         filepath,
         content: activeDraft.draftContent,
         expectedSha256: activeDraft.baselineSha256,
-      });
+      };
+      const result = lifetime
+        ? await updateArtifactContent(input, {
+            rest: lifetime.rest,
+            signal: lifetime.scope.signal,
+          })
+        : await updateArtifactContent(input);
+      if (!isCurrent()) return;
       const savedContent = activeDraft.draftContent;
       setDrafts((current) => ({
         ...current,
@@ -354,6 +369,7 @@ export function ArtifactFileDetail({
       );
       toast.success(t.artifactEditing.saved);
     } catch (error) {
+      if (!isCurrent()) return;
       if (error instanceof ArtifactRequestError && error.status === 412) {
         setDrafts((current) => ({
           ...current,
@@ -374,9 +390,11 @@ export function ArtifactFileDetail({
         );
       }
     } finally {
-      setIsSaving(false);
+      if (isCurrent()) setSavingOwner(null);
     }
   }, [
+    isCurrent,
+    lifetime,
     activeDraft,
     canEdit,
     filepath,

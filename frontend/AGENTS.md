@@ -557,3 +557,17 @@ unmount cleanup; unscoped mode keeps native keys/300ms debounce. Do not adopt
 legacy drafts. Original project/settings/sidebar/NewProjectDialog positive
 P/T workflows pass with their source unchanged. Real browser/backend/Run/
 principal and remaining artifact/store/publication fault acceptance stay open.
+
+
+Artifact panel requests (#73: three workspace scenarios + 47 native regressions/
+full check) accept optional ArtifactRequestOptions with captured REST/signal.
+Keep the complete native byte/hash/error/JSON/Blob decoder inside consume,
+not just fetch; preserve no-options calls and Range/ETag/416/409/412 behavior.
+Queries combine request/lifetime cancellation. Save and ZIP publication/
+pending flags use useCurrentWorkspaceView resource incarnations; expired
+callbacks, including same-space A/B/A, are inert. ArtifactsProvider uses
+disjoint actor/workspace/path storage and guarded setters; reset owned state
+in place instead of remounting live chat on route navigation. Draft buffers
+remain memory-only; never adopt legacy panel keys. Direct URLs, standalone/
+new-window, nested HTML resources, operator skill installation and actual
+browser/backend/two-tab acceptance remain distinct open gates.

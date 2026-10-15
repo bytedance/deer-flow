@@ -5,6 +5,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
@@ -13,6 +14,8 @@ import {
 
 import { useSidebar } from "@/components/ui/sidebar";
 import type { ArtifactDraftState } from "@/core/artifacts/editing";
+import { useWorkspaceLifetime } from "@/core/workspaces/context";
+import { useCurrentWorkspaceView } from "@/core/workspaces/view-lifetime";
 import { env } from "@/env";
 
 export interface ArtifactsContextType {
@@ -50,9 +53,9 @@ function storageKey(pathname: string) {
   return `${ARTIFACTS_STORAGE_PREFIX}:${encodeURIComponent(pathname)}`;
 }
 
-function readPersistedState(pathname: string): PersistedArtifactsState | null {
+function readPersistedState(key: string): PersistedArtifactsState | null {
   try {
-    const raw = window.sessionStorage.getItem(storageKey(pathname));
+    const raw = window.sessionStorage.getItem(key);
     if (!raw) {
       return null;
     }
@@ -82,26 +85,84 @@ interface ArtifactsProviderProps {
   children: ReactNode;
 }
 
+function useGuardedSetter<T>(
+  setter: Dispatch<SetStateAction<T>>,
+  isCurrent: () => boolean,
+): Dispatch<SetStateAction<T>> {
+  return useCallback(
+    (value: SetStateAction<T>) => {
+      if (!isCurrent()) return;
+      setter((current) => {
+        if (!isCurrent()) return current;
+        const next =
+          typeof value === "function"
+            ? (value as (previous: T) => T)(current)
+            : value;
+        return isCurrent() ? next : current;
+      });
+    },
+    [setter, isCurrent],
+  );
+}
+
 export function ArtifactsProvider({ children }: ArtifactsProviderProps) {
-  const [artifacts, setArtifacts] = useState<string[]>([]);
-  const [selectedArtifact, setSelectedArtifact] = useState<string | null>(null);
-  const [autoSelect, setAutoSelect] = useState(true);
-  const [open, setOpen] = useState(
-    env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true",
+  const lifetime = useWorkspaceLifetime();
+  const pathname = usePathname();
+  const isCurrent = useCurrentWorkspaceView(pathname ?? "");
+  const key = lifetime
+    ? `deerflow:workspace-artifacts:v1:${encodeURIComponent(lifetime.scope.actorUserId)}:${encodeURIComponent(lifetime.scope.workspaceId)}:${encodeURIComponent(pathname ?? "")}`
+    : storageKey(pathname ?? "");
+  const [owner, setOwner] = useState(() => isCurrent);
+  const initial = useMemo(
+    () => (lifetime ? readPersistedState(key) : null),
+    [key, lifetime],
+  );
+  const [artifacts, setArtifactsRaw] = useState<string[]>(
+    initial?.artifacts ?? [],
+  );
+  const [selectedArtifact, setSelectedArtifactRaw] = useState<string | null>(
+    initial?.selectedArtifact ?? null,
+  );
+  const [autoSelect, setAutoSelect] = useState(!initial?.selectedArtifact);
+  const [open, setOpenRaw] = useState(
+    initial?.open ?? env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true",
   );
   const [autoOpen, setAutoOpen] = useState(true);
-  const [drafts, setDrafts] = useState<Record<string, ArtifactDraftState>>({});
-  const [editingPath, setEditingPath] = useState<string | null>(null);
+  const [drafts, setDraftsRaw] = useState<Record<string, ArtifactDraftState>>(
+    {},
+  );
+  const [editingPath, setEditingPathRaw] = useState<string | null>(null);
   const { setOpen: setSidebarOpen } = useSidebar();
-  const pathname = usePathname();
+  const setArtifacts = useGuardedSetter(setArtifactsRaw, isCurrent);
+  const setSelectedArtifact = useGuardedSetter(
+    setSelectedArtifactRaw,
+    isCurrent,
+  );
+  const setOpen = useGuardedSetter(setOpenRaw, isCurrent);
+  const setDrafts = useGuardedSetter(setDraftsRaw, isCurrent);
+  const setEditingPath = useGuardedSetter(setEditingPathRaw, isCurrent);
+  // Reset this provider's state without remounting the live chat/stream subtree.
+  if (owner !== isCurrent) {
+    setOwner(() => isCurrent);
+    const persisted = lifetime ? readPersistedState(key) : null;
+    setArtifactsRaw(persisted?.artifacts ?? []);
+    setSelectedArtifactRaw(persisted?.selectedArtifact ?? null);
+    setOpenRaw(
+      persisted?.open ?? env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true",
+    );
+    setAutoOpen(true);
+    setAutoSelect(!persisted?.selectedArtifact);
+    setDraftsRaw({});
+    setEditingPathRaw(null);
+  }
   const hydratedPathRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!pathname) {
+    if (lifetime || !pathname || !isCurrent()) {
       return;
     }
 
-    const persisted = readPersistedState(pathname);
+    const persisted = readPersistedState(key);
     setArtifacts(persisted?.artifacts ?? []);
     setSelectedArtifact(persisted?.selectedArtifact ?? null);
     setOpen(persisted?.open ?? env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true");
@@ -110,7 +171,17 @@ export function ArtifactsProvider({ children }: ArtifactsProviderProps) {
     setDrafts({});
     setEditingPath(null);
     hydratedPathRef.current = pathname;
-  }, [pathname]);
+  }, [
+    pathname,
+    key,
+    lifetime,
+    isCurrent,
+    setArtifacts,
+    setSelectedArtifact,
+    setOpen,
+    setDrafts,
+    setEditingPath,
+  ]);
 
   useEffect(() => {
     const hasUnsavedDrafts = Object.values(drafts).some(
@@ -120,28 +191,33 @@ export function ArtifactsProvider({ children }: ArtifactsProviderProps) {
       return;
     }
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
-      event.preventDefault();
+      if (isCurrent()) event.preventDefault();
     };
     window.addEventListener("beforeunload", handleBeforeUnload);
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
-  }, [drafts]);
+  }, [drafts, isCurrent]);
 
   useEffect(() => {
-    if (!pathname || hydratedPathRef.current !== pathname) {
+    if (
+      !isCurrent() ||
+      !pathname ||
+      (!lifetime && hydratedPathRef.current !== pathname)
+    ) {
       return;
     }
     try {
       window.sessionStorage.setItem(
-        storageKey(pathname),
+        key,
         JSON.stringify({ artifacts, selectedArtifact, open }),
       );
     } catch {
       // Browser storage can be disabled or full; panel state must keep working.
     }
-  }, [artifacts, open, pathname, selectedArtifact]);
+  }, [artifacts, open, pathname, selectedArtifact, key, lifetime, isCurrent]);
 
   const select = useCallback(
     (artifact: string, autoSelect = false) => {
+      if (!isCurrent()) return;
       setSelectedArtifact(artifact);
       if (env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true") {
         setSidebarOpen(false);
@@ -150,14 +226,15 @@ export function ArtifactsProvider({ children }: ArtifactsProviderProps) {
         setAutoSelect(false);
       }
     },
-    [setSidebarOpen, setSelectedArtifact, setAutoSelect],
+    [setSidebarOpen, setSelectedArtifact, setAutoSelect, isCurrent],
   );
 
   const deselect = useCallback(() => {
+    if (!isCurrent()) return;
     setSelectedArtifact(null);
     setAutoSelect(true);
     setOpen(false);
-  }, []);
+  }, [isCurrent, setSelectedArtifact, setOpen]);
 
   const value: ArtifactsContextType = {
     artifacts,
@@ -167,6 +244,7 @@ export function ArtifactsProvider({ children }: ArtifactsProviderProps) {
     autoOpen,
     autoSelect,
     setOpen: (isOpen: boolean) => {
+      if (!isCurrent()) return;
       if (!isOpen && autoOpen) {
         setAutoOpen(false);
         setAutoSelect(false);
