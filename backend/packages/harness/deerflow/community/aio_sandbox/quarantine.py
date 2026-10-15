@@ -100,10 +100,21 @@ class SandboxQuarantine:
         The provider must hold its local reservation and the cross-worker
         teardown lease throughout that proof and this removal. A successful
         delete request or failed health check alone does not prove absence.
+
+        A peer may fence the same logical ID between the listing below and the
+        ``rmdir`` — this caller's lease fences only its own logical ID, so a
+        concurrent teardown of a replacement is not excluded by it. That fresh
+        record proves the directory is live, so it is kept (exactly as
+        :meth:`retire_replaced_generations` keeps it) and the ``rmdir`` failure
+        is swallowed: teardown must not abort on a fence a peer just wrote.
         """
         directory = self._directory(info)
         if not self._exists(directory):
             return
         for record in directory.iterdir():
             record.unlink()
-        directory.rmdir()
+        try:
+            directory.rmdir()
+        except OSError:
+            # A live or freshly fenced generation still has its record.
+            pass
