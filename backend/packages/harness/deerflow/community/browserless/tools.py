@@ -34,6 +34,9 @@ _OUTPUT_FORMAT_TO_EXTENSION = {
 _SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 # Cap collision-suffix probing so a saturated outputs directory cannot spin forever.
 _MAX_FILENAME_COLLISION_PROBES = 1000
+# Retry bound for the timestamped fallback: the microseconds stamp can only repeat
+# when another writer claimed that exact name within the same microsecond.
+_MAX_TIMESTAMP_CLAIM_ATTEMPTS = 5
 DEFAULT_BASE_URL = "http://localhost:3032"
 _UNSET = object()
 
@@ -221,34 +224,71 @@ def _tool_message(content: str, tool_call_id: str) -> Command:
     return Command(update={"messages": [ToolMessage(content, tool_call_id=tool_call_id)]})
 
 
-def _dedupe_output_name(outputs_path: Path, output_name: str) -> str:
-    """Return a non-colliding filename under ``outputs_path``.
+def _reserve_output_name(outputs_path: Path, name: str) -> bool:
+    """Claim ``name`` for this capture, returning False when it is already held.
 
-    Keeps the original name when free, otherwise appends ``-1``, ``-2``, ...
-    before the extension so an explicit filename never silently overwrites an
-    earlier capture. Falls back to a timestamp suffix if the directory is
-    saturated with the bounded probe range.
+    The claim is an ``O_CREAT | O_EXCL`` open that leaves an empty placeholder
+    behind, not an existence check: two writers that merely *observe* a free name
+    would both go on to publish to it, and the second ``os.replace`` would
+    silently replace the first capture (#6883). ``0o666`` is passed explicitly
+    because ``publish_bytes_atomically`` preserves an existing file's mode, and
+    ``os.open`` would otherwise default the placeholder to ``0o777 & ~umask`` and
+    make every capture executable instead of the ``0o666 & ~umask`` a new file
+    gets from ``Path.write_bytes``.
     """
-    candidate = outputs_path / output_name
-    if not candidate.exists():
-        return output_name
+    try:
+        descriptor = os.open(outputs_path / name, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+    except FileExistsError:
+        return False
+    os.close(descriptor)
+    return True
 
+
+def _dedupe_output_name(outputs_path: Path, output_name: str) -> str:
+    """Reserve and return a non-colliding filename under ``outputs_path``.
+
+    Keeps the original name when it can be claimed, otherwise appends ``-1``,
+    ``-2``, ... before the extension so an explicit filename never silently
+    overwrites an earlier capture. Falls back to a timestamp suffix if the
+    directory is saturated with the bounded probe range.
+
+    Raises:
+        RuntimeError: when even the timestamped names cannot be claimed, which
+            means another writer is holding them; returning a name anyway would
+            reintroduce the silent overwrite this function exists to prevent.
+    """
     stem = Path(output_name).stem
     suffix = Path(output_name).suffix
+    if _reserve_output_name(outputs_path, output_name):
+        return output_name
+
     for index in range(1, _MAX_FILENAME_COLLISION_PROBES + 1):
         probe = f"{stem}-{index}{suffix}"
-        if not (outputs_path / probe).exists():
+        if _reserve_output_name(outputs_path, probe):
             return probe
 
-    timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S-%f")
-    return f"{stem}-{timestamp}{suffix}"
+    for _ in range(_MAX_TIMESTAMP_CLAIM_ATTEMPTS):
+        timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S-%f")
+        fallback = f"{stem}-{timestamp}{suffix}"
+        if _reserve_output_name(outputs_path, fallback):
+            return fallback
+
+    raise RuntimeError(f"could not reserve an output filename for {output_name!r} in {outputs_path}")
 
 
 def _write_capture_output(outputs_path: Path, output_name: str, content: bytes) -> str:
     """Write ``content`` into ``outputs_path`` and return the actual filename used."""
     outputs_path.mkdir(parents=True, exist_ok=True)
     final_name = _dedupe_output_name(outputs_path, output_name)
-    _publish_bytes_atomically(outputs_path / final_name, content)
+    destination = outputs_path / final_name
+    try:
+        _publish_bytes_atomically(destination, content)
+    except BaseException:
+        try:
+            destination.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Could not release the reserved capture name %s", destination, exc_info=True)
+        raise
     return final_name
 
 
