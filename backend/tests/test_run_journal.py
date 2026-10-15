@@ -1067,6 +1067,127 @@ class TestOperationOwnership:
         await asyncio.gather(normal_close, return_exceptions=True)
 
     @pytest.mark.anyio
+    async def test_queued_normal_close_after_force_close_does_not_report_success(self):
+        """A normal close already queueing on the lock must not succeed after abort."""
+        gate_a = asyncio.Event()
+        store = _GatedRunEventStore({"A": gate_a})
+        journal = RunJournal("r-queued-close", "t-queued-close", store, flush_threshold=1)
+
+        journal._put(event_type="A", category="trace", content="a")
+        await _pump_loop()
+        assert store.calls == ["A"]
+
+        normal_close = asyncio.create_task(journal.close())
+        await _pump_loop()
+        assert journal._operation_lock.locked(), "first close did not acquire the operation lock"
+
+        queued_close = asyncio.create_task(journal.close())
+        await _pump_loop()
+        assert not queued_close.done(), "second close did not queue behind the lock"
+
+        # Force close preempts without taking the lock (sets _closed + _abandoned).
+        await journal.close(flush=False)
+
+        gate_a.set()
+        await _pump_loop()
+
+        assert not _returned_normally(queued_close), "queued normal close reported success after a force close"
+        await asyncio.gather(normal_close, queued_close, return_exceptions=True)
+
+    @pytest.mark.anyio
+    async def test_force_close_after_durable_close_does_not_re_mark_abandoned(self):
+        """Terminal state is monotonic: DURABLY_CLOSED must not become ABANDONED."""
+        store = MemoryRunEventStore()
+        journal = RunJournal("r-mono", "t-mono", store, flush_threshold=100)
+        journal._put(event_type="A", category="trace", content="a")
+        await journal.close()
+
+        assert journal._closed is True
+        assert journal._abandoned is False
+
+        await journal.close(flush=False)
+
+        assert journal._abandoned is False, "a durably closed journal must not be re-marked ABORT"
+        await journal.flush()  # stays a silent no-op, does not raise
+        events = await store.list_events("t-mono", "r-mono")
+        assert [event["event_type"] for event in events] == ["A"]
+
+    @pytest.mark.anyio
+    async def test_double_force_close_is_characterised(self, monkeypatch):
+        """Characterisation: the 2nd force close returns while the 1st still cleans.
+
+        Force close makes no durability promise, so "returned" means the abort was
+        issued, not that local cleanup finished. This is documented rather than
+        changed here; whether callers should join one cleanup is a contract call.
+        """
+        import deerflow.runtime.journal as journal_module
+
+        monkeypatch.setattr(journal_module, "_WRITE_SETTLE_TIMEOUT_SECONDS", 0.05, raising=False)
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        class UncooperativeStore(MemoryRunEventStore):
+            async def put_batch(self, events):
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    await release.wait()
+                return await super().put_batch(events)
+
+        journal = RunJournal("r-2force", "t-2force", UncooperativeStore(), flush_threshold=1)
+        journal._put(event_type="A", category="trace", content="a")
+        await _pump_loop()
+        await started.wait()
+
+        first = asyncio.create_task(journal.close(flush=False))
+        await _pump_loop()
+        second = asyncio.create_task(journal.close(flush=False))
+        await _pump_loop()
+
+        assert second.done(), "second force close did not return promptly"
+        assert not first.done(), "first force close already finished its bounded settle"
+
+        release.set()
+        await asyncio.gather(first, second, return_exceptions=True)
+
+    @pytest.mark.anyio
+    async def test_force_close_progress_reporter_unbounded_is_characterised(self):
+        """Characterisation of a pre-existing limitation, tracked separately.
+
+        close(flush=False) bounds the store write (see the abandoned-store tests)
+        but still awaits the pending progress task without a deadline, so a
+        progress reporter that swallows cancellation can block a force close.
+        This reproduces identically on the pre-PR base, so it is documented here
+        rather than fixed inside the write-ownership PR.
+        """
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def reporter(snapshot):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await release.wait()
+
+        journal = RunJournal("r-prog", "t-prog", MemoryRunEventStore(), flush_threshold=100, progress_reporter=reporter)
+        journal._schedule_progress_flush()
+        await started.wait()
+        assert journal._pending_progress_task is not None
+
+        bounded = True
+        try:
+            await asyncio.wait_for(journal.close(flush=False), timeout=0.25)
+        except TimeoutError:
+            bounded = False
+        finally:
+            release.set()
+            await _pump_loop()
+
+        assert bounded is False, "force close became bounded; please update this characterisation"
+
+    @pytest.mark.anyio
     async def test_concurrent_flush_not_committed_retry_is_characterised(self):
         """Contract characterisation: a concurrent flush must not duplicate A."""
         gate_a = asyncio.Event()

@@ -1684,10 +1684,13 @@ class RunJournal(BaseCallbackHandler):
             if self._abandoned:
                 raise RuntimeError(f"RunJournal for run {self.run_id} was force-closed; close cannot report success")
             async with self._operation_lock:
-                if self._closed:
-                    return
+                # ABORT is checked before the closed flag: a force close sets
+                # both, so a normal close that queued behind the lock must fail
+                # rather than observe `_closed` and report a false success.
                 if self._abandoned:
                     raise RuntimeError(f"RunJournal for run {self.run_id} was force-closed; close cannot report success")
+                if self._closed:
+                    return
                 await self._flush_locked()
                 self._detach_runtime_dependencies()
             return
@@ -1696,7 +1699,11 @@ class RunJournal(BaseCallbackHandler):
         # normal operation, so it does not take the operation lock. It marks
         # ABORT before its first await, then cancels and reaps every owned write
         # (bounded, with late-result supervision) before detaching.
-        if self._abandoned:
+        # Terminal-state monotonicity: a journal that already closed durably must
+        # not be re-marked ABORT (which would flip flush() from a no-op to an
+        # error). A force close still preempts an in-flight normal close, where
+        # `_closed` is not yet set.
+        if self._closed:
             return
         self._abandoned = True
         self._closed = True
