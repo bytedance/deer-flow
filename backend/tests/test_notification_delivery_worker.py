@@ -28,14 +28,18 @@ class FakeDeliveryRepo:
         self.terminal_failures = []
         self.resets = []
         self.events = []
+        self.exclusions = []
 
     async def reset_stale_sending_rows(self, *, now, timeout):
         self.resets.append((now, timeout))
         self.events.append("reset")
         return 0
 
-    async def claim_due_deliveries(self, *, now, limit):
-        claimed, self.rows = self.rows[:limit], self.rows[limit:]
+    async def claim_due_deliveries(self, *, now, limit, **kwargs):
+        excluded = kwargs.get("exclude_providers") or frozenset()
+        self.exclusions.append(kwargs.get("exclude_providers"))
+        claimed = [row for row in self.rows if row["provider"] not in excluded][:limit]
+        self.rows = [row for row in self.rows if row not in claimed]
         self.claims.append((now, limit))
         self.events.append("claim")
         return claimed
@@ -1022,3 +1026,34 @@ async def test_binding_check_reads_the_real_connection_repository_shape(tmp_path
         assert await worker._target_still_connected(_delivery_row()) is False
     finally:
         await close_engine()
+
+
+@pytest.mark.asyncio
+async def test_worker_leaves_rows_of_providers_another_instance_leads():
+    """``excluded_providers`` is read on every poll; ``None`` or an empty set claims everything."""
+    repo = FakeDeliveryRepo([_delivery_row(delivery_id="d-wecom"), _delivery_row(delivery_id="d-feishu", provider="feishu")])
+    channel = FakeChannel()
+    led_elsewhere = {"value": frozenset({"feishu"})}
+    worker = NotificationDeliveryWorker(delivery_repo=repo, resolve_channel=lambda provider: channel if provider == "wecom" else None, excluded_providers=lambda: led_elsewhere["value"])
+
+    await worker.run_once(now=datetime.now(UTC))
+    assert repo.exclusions == [frozenset({"feishu"})]
+    assert repo.sent == ["d-wecom"]
+    assert [row["id"] for row in repo.rows] == ["d-feishu"]  # left pending, not parked
+
+    led_elsewhere["value"] = frozenset()
+    await worker.run_once(now=datetime.now(UTC))
+    assert repo.exclusions[-1] is None  # no restriction: the plain claim
+    assert repo.rows == []
+
+
+@pytest.mark.asyncio
+async def test_worker_ignores_a_non_collection_exclusion_result():
+    """A test double or a misbehaving resolver must not narrow the claim to nothing."""
+    from unittest.mock import MagicMock
+
+    repo = FakeDeliveryRepo([_delivery_row()])
+    worker = NotificationDeliveryWorker(delivery_repo=repo, resolve_channel=lambda provider: FakeChannel(), excluded_providers=MagicMock())
+    await worker.run_once(now=datetime.now(UTC))
+    assert repo.exclusions == [None]
+    assert repo.sent == ["delivery-1"]

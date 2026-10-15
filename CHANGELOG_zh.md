@@ -729,6 +729,21 @@
 
 #### 渠道
 
+- **channels:** IM 通道可以在多个 Gateway 实例上运行。`channels.leader_lease`
+  生效时（默认 `auto` 跟随多进程信号），每个 provider 的平台连接只属于在新表
+  `channel_leases`（迁移 `0042_channel_leases`）中持有该行的那个实例：归属由一条
+  upsert 依据数据库时钟判定，续约携带防护 epoch，持有者按自己的单调时钟在对端
+  可以连接之前先停传输，因此数据库卡住也不会出现两个 Telegram 轮询者或两个
+  Discord 会话。持有者崩溃后，对端在 `lease_seconds + grace_seconds` 再加一个续约
+  周期内接管；正常停止的持有者会释放租约，对端在下一次心跳接手；停止超时的传输保留
+  租约直到过期。GitHub webhook、消息总线和 manager 仍在每个实例上运行。
+  `GET /api/channels/` 会报告每个 provider 的 `leader`，`running` 在每个实例上都反映
+  持有者的传输状态，所以无论负载均衡把请求发到哪个实例，Web UI 的 provider 列表和
+  连接流程都能正常工作；定时任务的 IM 通知只由该 provider 的持有者认领。启动门禁在
+  拒绝 `enabled: false` 时改为推荐 `auto`/`true`，并拒绝没有 SQL 数据库的显式
+  `enabled: true`。从 Web UI 保存的凭据仍要等持有者下次启动该通道才生效，故障切换会
+  取消进行中的 IM 回复。 ([#6843])
+
 - **channels:** 新增 `channels.leader_lease` 配置段（`enabled: auto|true|false`、
   `lease_seconds`、`grace_seconds`；仅启动时读取），为按 provider 的 leader 租约预留，
   落地后每个 IM 平台连接只由一个 Gateway 实例持有（传输归属本身另行提交，在此之前
@@ -986,6 +1001,18 @@
   原因。([#6556])
 
 ### 修复
+
+- **渠道：** 从 IM 渠道发起的运行不再随接收消息的 Gateway 实例一起消亡。manager 在整个
+  运行期间保持 `runs.wait` / `runs.stream` 请求打开，而 Gateway 会在创建请求断开时取消
+  运行，除非该请求声明了 `on_disconnect: continue`；因此 leader 切换、滚动重启或接收
+  实例崩溃都会取消所有进行中的 IM 运行。渠道运行现在声明 `continue`，运行会在执行它的
+  Gateway 上完成并持久化对话线程状态——即使 IM 回复随旧传输丢失，答案仍可在 Web UI
+  中查看。同一策略也覆盖 Slack/Discord `runs.wait` 遇到 SDK 300 秒读超时的情况：聊天里
+  仍会收到错误回复，但运行会在后台完成而不再被取消。由于运行会继续，manager 现在在运行
+  请求发出之后保留入站去重键（worker 被取消、读超时、连接断开）：provider 在新持有者上的
+  重投递会被丢弃，而不是把这一轮再执行一遍；Gateway 拒绝的请求或发送前的失败仍会释放该键
+  以便重试。即发即弃渠道（GitHub）不受影响：`runs.create` 在运行进入 pending 后即返回。
+  ([#6876])
 
 - **前端：** 用户管理设置页不再在静态网站演示中发出注定失败的查询，非管理员的
   `?settings=users` 深链接也不再打开仅管理员可见的面板。该页面此前只以
@@ -4484,6 +4511,13 @@
   不起作用，在轮询器认领任务期间提交的取消请求所清除的轮询租约会被写回；取消工作器
   随后要等该租约过期，任务还会被多轮询一次，而结果会被丢弃。现在每次认领在写入租约时
   都会重新确认任务仍可认领。Postgres 不受影响。([#6859])
+- **持久化：** 启动时的 schema 升级不再为已与模型一致的列记录虚假的
+  `safe_add_column ... drifts from the model definition` 警告。该检查拿模型的通用类型名
+  和默认值写法（`STRING`、`BIGINTEGER`、`DefaultClause('0')`）去比较数据库自己的写法
+  （`VARCHAR`、`BIGINT`、`'0'`），因此 revision 0023 之前创建的 Postgres 或 SQLite
+  数据库升级时都会记录一条，丢失 head stamp 的 schema 会记录 29 条（SQLite）或
+  36 条（Postgres），淹没了这个警告本应发现的真实类型不一致。现在两侧都按所连接
+  数据库的写法进行比较。([#6865])
 
 ### 安全
 
@@ -9324,6 +9358,9 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6746]: https://github.com/bytedance/deer-flow/pull/6746
 [#6781]: https://github.com/bytedance/deer-flow/pull/6781
 [#6785]: https://github.com/bytedance/deer-flow/pull/6785
+[#6843]: https://github.com/bytedance/deer-flow/pull/6843
 [#6844]: https://github.com/bytedance/deer-flow/pull/6844
 [#6852]: https://github.com/bytedance/deer-flow/pull/6852
 [#6859]: https://github.com/bytedance/deer-flow/pull/6859
+[#6865]: https://github.com/bytedance/deer-flow/pull/6865
+[#6876]: https://github.com/bytedance/deer-flow/pull/6876

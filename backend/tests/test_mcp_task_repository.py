@@ -1337,7 +1337,10 @@ async def test_recovered_launching_at_retry_budget_reconciles_successful_run(tmp
         now=now,
     )
 
-    reconcile_at = now + timedelta(seconds=1)
+    # Dispatch stores the completion time, which can be later than the scan time.
+    launched = await repo.get("task-launching-success", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+    assert launched is not None
+    reconcile_at = datetime.fromisoformat(launched["next_notification_at"])
     dispatched = await repo.claim_notification_work(
         now=reconcile_at,
         lease_owner="notifier-b",
