@@ -1002,6 +1002,16 @@
 
 ### 修复
 
+- **llm：** 流式响应已返回 `200` 之后才在流内报告的 provider 错误，现在会像以 HTTP
+  状态码返回的同一错误一样重试。为了用 SSE keepalive 维持慢请求而提前返回 `200` 的
+  OpenAI 兼容网关，会把之后发生的 504 作为 SSE `error` 事件发出；openai SDK 将其抛出为
+  不带状态码的 `APIError`，因此 `LLMErrorHandlingMiddleware` 此前把它归为普通错误，
+  运行在第一次尝试后即失败。现在这类不带状态码的错误会依次从数字型 `code` 或 `status`
+  字段、消息中明确写出的 `[504]`、`HTTP 502` 或 `status 503`（`messages[502]` 这类
+  数组下标不算）、以及 `type: server_error`（视为 500）中取得 4xx 或 5xx 状态码；都
+  取不到时，繁忙判断才会额外匹配 `rate-limit`、`RATE_LIMIT_…` 等写法。重试预算、退避
+  和熔断器按对应的 HTTP 错误处理；带状态码的错误分类不变。 (issue #6896, [#6897])
+
 - **渠道：** 从 IM 渠道发起的运行不再随接收消息的 Gateway 实例一起消亡。manager 在整个
   运行期间保持 `runs.wait` / `runs.stream` 请求打开，而 Gateway 会在创建请求断开时取消
   运行，除非该请求声明了 `on_disconnect: continue`；因此 leader 切换、滚动重启或接收
@@ -9358,3 +9368,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6852]: https://github.com/bytedance/deer-flow/pull/6852
 [#6865]: https://github.com/bytedance/deer-flow/pull/6865
 [#6876]: https://github.com/bytedance/deer-flow/pull/6876
+[#6897]: https://github.com/bytedance/deer-flow/pull/6897

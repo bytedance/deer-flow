@@ -1247,6 +1247,20 @@ This release closes that milestone with **621 merged pull requests**.
 
 ### Fixed
 
+- **llm:** A provider error that arrives inside a streaming response that has
+  already returned `200` is now retried like the same error sent as an HTTP
+  status. An OpenAI-compatible gateway that answers `200` early, to keep slow
+  requests alive with SSE keepalives, reports a later 504 as an SSE `error`
+  event; the openai SDK raises that as an `APIError` with no status, so
+  `LLMErrorHandlingMiddleware` classified it as generic and the run failed on
+  the first attempt. Such a status-less error now takes a 4xx or 5xx status
+  from a numeric `code` or `status` field, an explicit `[504]`, `HTTP 502` or
+  `status 503` in its message (not an index such as `messages[502]`), or
+  `type: server_error` (500); only when none yields one does its busy check
+  also match spellings such as `rate-limit` and `RATE_LIMIT_…`. Retry budget,
+  backoff and circuit breaker treat it as the equivalent HTTP error; errors
+  that carry a status are classified as before. (issue #6896, [#6897])
+
 - **channels:** Runs started from an IM channel no longer die with the Gateway
   instance that received the message. The manager holds `runs.wait` /
   `runs.stream` open for the whole run, and the Gateway cancels a run whose
@@ -11732,3 +11746,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6852]: https://github.com/bytedance/deer-flow/pull/6852
 [#6865]: https://github.com/bytedance/deer-flow/pull/6865
 [#6876]: https://github.com/bytedance/deer-flow/pull/6876
+[#6897]: https://github.com/bytedance/deer-flow/pull/6897
