@@ -131,3 +131,11 @@ Actual ChatPage (#47) binds project precreation and fences cache/send preparatio
 branch toast/router and reference-attachment URL callbacks. Native and P/T
 creation remain; new-space normal branch still routes. Sidecar and remaining
 resources/stores/shell/browser integration precede activation.
+
+
+Scoped sidecar (#54): fixed SDK restoration, REST creation/decoding and
+per-client pending-create coalescing; guarded panel/trigger publication with
+first-send queue abort settlement. P/T normal send/delete and pending create/
+delete races verified through real core hooks with HTTP/SDK React adapter
+doubles. Parent navigation/unmount/quiet-stream, other resources/stores and
+actual shell/browser/backend acceptance remain open.

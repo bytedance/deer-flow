@@ -5,6 +5,7 @@ import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/core/i18n/hooks";
+import { useWorkspaceLifetime } from "@/core/workspaces/context";
 
 import { Tooltip } from "../tooltip";
 
@@ -12,6 +13,7 @@ import { useMaybeSidecar } from "./context";
 
 export function SidecarTrigger() {
   const { t } = useI18n();
+  const lifetime = useWorkspaceLifetime();
   const sidecar = useMaybeSidecar();
   const [isReconciling, setIsReconciling] = useState(false);
 
@@ -22,6 +24,7 @@ export function SidecarTrigger() {
   const label = sidecar.open ? t.sidecar.close : t.sidecar.open;
 
   const handleClick = async () => {
+    if (lifetime?.scope.signal.aborted) return;
     if (sidecar.open) {
       sidecar.close();
       return;
@@ -35,11 +38,11 @@ export function SidecarTrigger() {
       const restoredThreadId = await sidecar.restoreSidecarThread({
         force: true,
       });
-      if (restoredThreadId) {
+      if (restoredThreadId && !lifetime?.scope.signal.aborted) {
         sidecar.openSidecar();
       }
     } finally {
-      setIsReconciling(false);
+      if (!lifetime?.scope.signal.aborted) setIsReconciling(false);
     }
   };
 

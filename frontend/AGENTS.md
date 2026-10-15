@@ -503,3 +503,15 @@ stale preparation/cache writes. Keep the native conversation epoch alongside
 scope guards. Branch callbacks guard entry, after await and errors; reference
 attachment routing checks expiry. Leaf UI/stream/branch operations are doubled
 in the page fixture; this is not actual browser/backend authorization proof.
+
+
+Sidecar scoped main/create/delete publication is verified in Shanghai #54
+(three real panel/context/SDK/REST mains + ten native regressions/full check).
+Provider restore uses the fixed SDK and checks the decoded result. Optional
+ThreadRequestOptions binds create; namespace pending creates by REST client
+(WeakMap), not a global parent ID. Keep legacy no-options coalescing and native
+errors. Panel/trigger await continuations check expiry; first-send queue rejects
+typed AbortError on scope close and removes listeners after settling. Native
+unknown send failures retain their localized fallback. Actual same-space parent
+change/unmount/quiet-stream fault audit, other clients/stores and browser/backend
+acceptance still precede activation; do not infer them from these network doubles.

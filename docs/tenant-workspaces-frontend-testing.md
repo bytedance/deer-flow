@@ -414,3 +414,35 @@ tenant-workspaces-progress.json. Next: sidecar as one bundle (fixed SDK lookup,
 REST-client-keyed in-flight creates, guarded restore→create→queued-send and
 delete/trigger publication), then activity/resources/stores/shell/browser.
 All parent gates remain open; activation remains closed.
+
+
+M3 sidecar scoped lifecycle checkpoint (2026-10-15): #48 main RED reproduced
+unscoped restore lookup; #49 main GREEN (seven cases) came before lifecycle
+expansion. #50 was an observer-fixture failure, not behavior evidence. Removing
+module wrapping and observing actual API coalescing/MutationCache yielded #51:
+main passed, but pending P creation blocked T and late P delete toasted in T.
+#52 passed 13 behaviors/format, then failed import/rejection lint; #53 passed
+behaviors/target lint, then early typecheck rejected a bound-query generic.
+A real textarea check fixes the type without a cast. #54 SUCCESS: same 13
+cases, six-file formatting, target lint, early tsc and full pnpm check.
+
+The actual provider uses fixed SDK lookup with post-JSON fences. Creation uses
+fixed REST/owned decoding, and per-client WeakMap namespaces retain same-life
+coalescing without blocking another actor/workspace/reset lifetime. The panel
+checks restore→create→queued first-send and send/delete publication. Scope
+expiry rejects queued submit with typed AbortError and removes its listener;
+stale errors do not toast. Trigger opening checks lifetime after restoration.
+The main preserves P/T reference contents and normal T deletion; native API
+and four draft/send regressions remain. HTTP replies/React SDK adapter and
+peripheral catalog/router/toast are doubled, while core hooks, composer, SDK
+SSE parser/transport and REST remain real. Existing KaTeX warning is retained.
+No real browser/backend/model/physical acceptance is implied. Exact receipts
+and empty #48-#54/formatter inventories are in tenant-workspaces-progress.json.
+
+Remaining M3 audit includes same-space parent navigation/unmount: native
+ChatBox remounts panels through MessageDetailsProvider keyed by threadId, but
+SidecarProvider is outside it. Late callbacks and queued/quiet stream gaps
+still need targeted UI/fault proof before activation. Continue with activity
+clocks/timers, project/artifact clients, direct links and UI stores; then actual
+shell/selector and browser/backend two-tab acceptance. Preserve all M4-M11
+gates; activation stays closed. No deployment, remote push or local runtime.

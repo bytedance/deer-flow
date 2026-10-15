@@ -84,6 +84,7 @@ import {
   type UploadLimits,
   type UploadLimitViolation,
 } from "@/core/uploads";
+import { useWorkspaceLifetime } from "@/core/workspaces/context";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
@@ -129,6 +130,7 @@ function promptMessageFiles(message: PromptInputMessage) {
 export function SidecarPanel({ className }: { className?: string }) {
   const { t } = useI18n();
   const { user } = useAuth();
+  const lifetime = useWorkspaceLifetime();
   const canDeleteThreads = hasPermission(user, PERMISSIONS.THREADS_DELETE);
   const sidecar = useSidecar();
   const { thread: parentThread } = useParentThread();
@@ -299,10 +301,12 @@ export function SidecarPanel({ className }: { className?: string }) {
 
   const ensureSidecarThread = useCallback(
     async (references: SidecarReference[]) => {
+      lifetime?.scope.signal.throwIfAborted();
       if (sidecar.sidecarThreadId) {
         return sidecar.sidecarThreadId;
       }
       const restoredThreadId = await sidecar.restoreSidecarThread();
+      lifetime?.scope.signal.throwIfAborted();
       if (restoredThreadId) {
         return restoredThreadId;
       }
@@ -311,17 +315,24 @@ export function SidecarPanel({ className }: { className?: string }) {
       }
       setCreatingThread(true);
       try {
-        const created = await createSidecarThread({
+        const input = {
           parentThreadId: sidecar.parentThreadId,
           context: references.map((reference) => reference.context),
-        });
+        };
+        const created = lifetime
+          ? await createSidecarThread(input, {
+              rest: lifetime.rest,
+              signal: lifetime.scope.signal,
+            })
+          : await createSidecarThread(input);
+        lifetime?.scope.signal.throwIfAborted();
         sidecar.setSidecarThreadId(created.thread_id);
         return created.thread_id;
       } finally {
-        setCreatingThread(false);
+        if (!lifetime?.scope.signal.aborted) setCreatingThread(false);
       }
     },
-    [sidecar, t.sidecar.noContext],
+    [sidecar, t.sidecar.noContext, lifetime],
   );
 
   const submitToSidecarThread = useCallback(
@@ -332,6 +343,7 @@ export function SidecarPanel({ className }: { className?: string }) {
       onSent?: () => void,
       additionalKwargs?: Record<string, unknown>,
     ) => {
+      lifetime?.scope.signal.throwIfAborted();
       const contexts = references.map((reference) => reference.context);
       const parentConversation = buildParentConversationContext(
         parentThread.messages,
@@ -358,8 +370,9 @@ export function SidecarPanel({ className }: { className?: string }) {
         },
         onSent,
       });
+      lifetime?.scope.signal.throwIfAborted();
     },
-    [parentThread.messages, sendMessage, sidecar.parentThreadId],
+    [parentThread.messages, sendMessage, sidecar.parentThreadId, lifetime],
   );
 
   const handleSubmitHumanInput = useCallback(
@@ -394,6 +407,7 @@ export function SidecarPanel({ className }: { className?: string }) {
   );
 
   useEffect(() => {
+    if (lifetime?.scope.signal.aborted) return;
     if (!queuedSubmit || !sidecar.sidecarThreadId || thread.isLoading) {
       return;
     }
@@ -413,6 +427,7 @@ export function SidecarPanel({ className }: { className?: string }) {
       },
     ).then(nextSubmit.resolve, nextSubmit.reject);
   }, [
+    lifetime,
     queuedSubmit,
     sidecar,
     sidecar.sidecarThreadId,
@@ -422,6 +437,7 @@ export function SidecarPanel({ className }: { className?: string }) {
 
   const handleSubmit = useCallback(
     async (message: PromptInputMessage) => {
+      lifetime?.scope.signal.throwIfAborted();
       const text = message.text.trim();
       const files = promptMessageFiles(message);
       if ((!text && message.files.length === 0) || disabled) {
@@ -437,14 +453,43 @@ export function SidecarPanel({ className }: { className?: string }) {
       try {
         if (!sidecar.sidecarThreadId) {
           await ensureSidecarThread(pendingReferences);
+          lifetime?.scope.signal.throwIfAborted();
           // The first send waits for the new thread to reach the stream hook.
           // Settle with that send so the composer clears only once it is sent.
+          const signal = lifetime?.scope.signal;
           await new Promise<void>((resolve, reject) => {
+            const onAbort = () => {
+              signal?.removeEventListener("abort", onAbort);
+              const error = new Error("AbortError: sidecar submission ended", {
+                cause: signal?.reason,
+              });
+              error.name = "AbortError";
+              reject(error);
+            };
+            if (signal?.aborted) {
+              onAbort();
+              return;
+            }
+            signal?.addEventListener("abort", onAbort, { once: true });
             setQueuedSubmit({
               message,
               references: pendingReferences,
-              resolve,
-              reject,
+              resolve: () => {
+                signal?.removeEventListener("abort", onAbort);
+                resolve();
+              },
+              reject: (error: unknown) => {
+                signal?.removeEventListener("abort", onAbort);
+                if (signal?.aborted) {
+                  onAbort();
+                  return;
+                }
+                reject(
+                  error instanceof Error
+                    ? error
+                    : new Error(t.sidecar.sendFailed, { cause: error }),
+                );
+              },
             });
           });
           return;
@@ -461,9 +506,10 @@ export function SidecarPanel({ className }: { className?: string }) {
           },
         );
       } catch (error) {
-        toast.error(
-          error instanceof Error ? error.message : t.sidecar.sendFailed,
-        );
+        if (!lifetime?.scope.signal.aborted)
+          toast.error(
+            error instanceof Error ? error.message : t.sidecar.sendFailed,
+          );
         // Reject so PromptInput keeps the draft and attachments for a retry.
         throw error;
       }
@@ -471,6 +517,7 @@ export function SidecarPanel({ className }: { className?: string }) {
     [
       disabled,
       ensureSidecarThread,
+      lifetime,
       reportUploadLimitViolations,
       sidecar,
       submitToSidecarThread,
@@ -486,6 +533,7 @@ export function SidecarPanel({ className }: { className?: string }) {
   }, [sidecar]);
 
   const handleDelete = useCallback(async () => {
+    if (lifetime?.scope.signal.aborted) return;
     const threadId = sidecar.sidecarThreadId;
     // Guard: the trash button only opens this dialog once a thread exists, so a
     // missing id here means the draft was cleared underneath us — just close.
@@ -496,10 +544,12 @@ export function SidecarPanel({ className }: { className?: string }) {
     }
     try {
       await deleteThread({ threadId });
+      if (lifetime?.scope.signal.aborted) return;
       discardDraftAndClose();
       setDeleteDialogOpen(false);
       toast.success(t.sidecar.deleteSuccess);
     } catch (error) {
+      if (lifetime?.scope.signal.aborted) return;
       toast.error(
         error instanceof Error ? error.message : t.sidecar.deleteFailed,
       );
@@ -507,6 +557,7 @@ export function SidecarPanel({ className }: { className?: string }) {
   }, [
     deleteThread,
     discardDraftAndClose,
+    lifetime,
     sidecar.sidecarThreadId,
     t.sidecar.deleteFailed,
     t.sidecar.deleteSuccess,

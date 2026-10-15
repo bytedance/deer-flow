@@ -2330,7 +2330,7 @@
     "limits": "real InputBox/Context, HTTP doubles; catalog/model ancillary fixtures; not actual browser/backend/physical proof; existing KaTeX happy-dom quirks warning remains",
     "cleanup": "#44/#45 terminal, exact owned containers/networks and formatter inventories empty; dependency cache retained",
     "remaining": [
-      "ChatPage project/branch/reference-route callbacks now verified in frontend_actual_chat_page; sidecar coalescing/restore/create/queued submit/delete remain",
+      "ChatPage and scoped sidecar main integrated; same-space parent/unmount, queued fault audit and remaining resources/stores still pending",
       "InputBox ancillary reference attachment/input-polish/voice paths and composer draft/attachment stores; other project/artifact/activity resources",
       "shell/selector and actual two-tab backend/browser acceptance, principal/session/revocation and all remaining M4-M11 gates; activation closed"
     ]
@@ -2364,9 +2364,75 @@
     "limits": "actual page/Context and create REST with HTTP doubles; leaf UI, stream/branch operations and peripheral catalog hooks doubled; native branch hooks verified separately in #35 and sends/replay in #39; not rendered layout/actual browser/backend/physical proof",
     "cleanup": "#46/#47 terminal and exact owned containers/networks empty; formatter empty; private dependency cache retained",
     "remaining": [
-      "sidecar scoped coalescing plus restore→create→queued first send and deletion/trigger publication",
+      "Scoped sidecar main and pending-create/delete publication now verified by frontend_sidecar; same-space parent/unmount and queued fault audit remain",
       "activity timers/read clocks, project/artifact clients and direct file links, composer/artifact/thread UI stores",
       "actual shell/capability/selector and two-tab browser/backend acceptance; principal/session/revocation and all remaining M4-M11; activation closed"
+    ]
+  },
+  "frontend_sidecar": {
+    "job": "deerflow-tenant-frontend",
+    "status": "normal scoped sidecar main plus pending-create/deletion publication verified; full M3 incomplete",
+    "history": {
+      "48": {
+        "result": "FAILURE",
+        "scope": "main RED: native restore searches lacked selectors",
+        "archive_sha256": "d04d8c7f2d9587892148400f60dcdf32fa5ee10e30beea66494917e6699488b1"
+      },
+      "49": {
+        "result": "SUCCESS",
+        "scope": "main first: one real panel/Context/SDK/REST P/T main + six native API cases before adding lifecycle scenarios",
+        "tests_passed": 7,
+        "archive_sha256": "384290f282bd60dbe4dfdd16c00fc85b6c4273471e2414f85dc0efc1be18e9e9"
+      },
+      "50": {
+        "result": "FAILURE",
+        "scope": "fixture only: async pass-through module wrapper exposed no useDeleteThread; no behavior proof",
+        "archive_sha256": "aac742c5520d2abc57ec4d3fcf872b1811dce335cf1f3427e68ba2c9b4e64f88"
+      },
+      "51": {
+        "result": "FAILURE",
+        "scope": "after removing wrapper, main passed; real pending P create blocked T (one POST instead of two), and native late delete toasted into T",
+        "archive_sha256": "147ea3c20967c7edcbec9000ecae528f311a9dfefcc97253aa4973ba87c6e954"
+      },
+      "52": {
+        "result": "FAILURE",
+        "scope": "13 behavior tests/formatting passed; target lint failed on two import positions and two unknown Promise rejection reasons",
+        "archive_sha256": "bc4d9e8e89a49af4c5b0d9d478002e5c2953ff51b6f4fb5a71bf847719ed8447"
+      },
+      "53": {
+        "result": "FAILURE",
+        "scope": "13 tests/format/target lint passed; early tsc caught unsupported generic in a bound DOM query; runtime element check fixes type without cast or weakened assertions",
+        "archive_sha256": "bb76d7202b3f9b93f5eec24871d8b6e013f358b03befb71163a82c5e2e29da72"
+      }
+    },
+    "green": {
+      "build": 54,
+      "result": "SUCCESS",
+      "tests_passed": 13,
+      "tests_added": 3,
+      "test_seconds": [
+        20.3
+      ],
+      "build_seconds": 443.021,
+      "archive_sha256": "d67d870a9b8040b9b19ae04952f1a3ff2f5392bff0f7cd91106889b41bf9a0a8",
+      "image_id": "sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01",
+      "checks": "three real panel/context/scoped SDK/REST mains, six native API and four native panel draft/send regressions; six-file formatting/target lint, early tsc and required full pnpm check"
+    },
+    "source_sha256": {
+      "frontend/src/core/sidecar/api.ts": "ede2e1602ae6636ab1510bc28c03df2af394126342bf23e6a464d76fbb2e2111",
+      "frontend/src/components/workspace/sidecar/context.tsx": "7dc03893f3437dc51a2787103571675a0d515df8d4dfa5eab56eff3d4e698df5",
+      "frontend/src/components/workspace/sidecar/sidecar-panel.tsx": "83f851236cefa81dddcd12ac32c6dc22e4af86c8c29496774ffb8359a8a8009c",
+      "frontend/src/components/workspace/sidecar/sidecar-trigger.tsx": "4aef027dc922e9bf3e390a0caab1c8241f487709654f3bf5339d289b9438f136",
+      "frontend/tests/unit/components/workspace/workspace-sidecar.dom.test.tsx": "bf134465200788dc8685d6bd0b1a5bc8ede2df2fa080c176fe99d9ead9553dc9",
+      "frontend/tests/unit/components/workspace/sidecar-submit-failure.dom.test.tsx": "7168c401ed533937b24374cc88123ad8a46c17fd290f24c1a7ea935c7fa50e5b"
+    },
+    "scope": "provider captures SDK search and checks post-JSON lifetime; creation captures REST and full response decode; WeakMap keyed by fixed REST client preserves same-lifetime parent coalescing and separates actor/workspace/reset lifetimes; panel guards restore/create/first-queue/send/delete boundaries and suppresses stale toasts; queued first-send rejects typed AbortError on scope expiry with listeners removed on settlement; trigger guards opening after restore",
+    "evidence": "real provider/panel/composer/thread hooks, native SDK transport/SSE parser and REST; only React SDK adapter and peripheral model/router/toast fixtures doubled, HTTP responses synthetic. Same-lifetime pending create joined through the actual API, and actual old MutationCache state observed; no operation replacement remains. Positive T deletion retained. Not actual browser/backend authorization, live model or physical STOP proof. Existing KaTeX happy-dom warning remains.",
+    "cleanup": "#48-#54 terminal with exact owned containers/networks and formatter inventories empty; private dependency cache retained",
+    "remaining": [
+      "same-space parent navigation/unmount and quiet queued/stream fault gaps require actual UI/fault audit; SidecarProvider is outside ChatBox whose MessageDetailsProvider is keyed by threadId",
+      "activity timers/read clocks, projects/artifacts/direct file links and all scoped UI stores",
+      "actual shell/capability/selector and browser/backend two-tab proof; principal/session/revocation and all M4-M11 gates; activation remains closed"
     ]
   }
 }
