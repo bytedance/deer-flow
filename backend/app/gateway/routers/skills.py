@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import tempfile
 import threading
 from collections.abc import AsyncGenerator, Callable, Coroutine, Iterator
@@ -54,6 +55,7 @@ from deerflow.skills.security_static_scanner import (
 from deerflow.skills.storage import SkillStorage, get_or_new_user_skill_storage
 from deerflow.skills.types import SKILL_MD_FILE, SkillCategory
 from deerflow.utils.file_io import await_drained
+from deerflow.utils.file_lock import retry_until_locked
 from deerflow.utils.thread_id import ThreadId
 
 logger = logging.getLogger(__name__)
@@ -233,8 +235,16 @@ def _custom_skill_mutation(storage: SkillStorage) -> Iterator[None]:
             if fcntl is not None:
                 fcntl.flock(lock_file, fcntl.LOCK_EX)
             else:  # pragma: no cover - Windows
-                lock_file.seek(0)
-                msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+                lock_file.seek(0, os.SEEK_END)
+                if lock_file.tell() == 0:
+                    lock_file.write("\0")
+                    lock_file.flush()
+
+                def acquire_region() -> None:
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+
+                retry_until_locked(acquire_region)
             try:
                 yield
             finally:

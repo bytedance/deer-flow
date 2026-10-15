@@ -18,6 +18,7 @@ import errno
 import hashlib
 import logging
 import math
+import os
 import signal
 import threading
 import time
@@ -62,6 +63,7 @@ from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
 from deerflow.skills.types import SkillCategory
 from deerflow.utils.file_io import await_drained
+from deerflow.utils.file_lock import retry_until_locked
 
 from .aio_sandbox import AioSandbox
 from .backend import SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT, SandboxBackend, SandboxCreationError, wait_for_sandbox_ready, wait_for_sandbox_ready_async
@@ -178,8 +180,16 @@ def _lock_file_exclusive(lock_file) -> None:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
         return
 
-    lock_file.seek(0)
-    msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+    lock_file.seek(0, os.SEEK_END)
+    if lock_file.tell() == 0:
+        lock_file.write("\0")
+        lock_file.flush()
+
+    def acquire_region() -> None:
+        lock_file.seek(0)
+        msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+
+    retry_until_locked(acquire_region)
 
 
 def _try_lock_file_exclusive(lock_file) -> bool:

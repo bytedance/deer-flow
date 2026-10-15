@@ -38,3 +38,4 @@ critical section to preserve history ordering. Keep the sidecar distinct from
 the nested projection lock, retain it across requests, and acquire/release both
 off-loop inside the drained worker. Unrelated users retain independent locks;
 external filesystem writers do not participate in this history guarantee.
+The Windows sidecar acquisition retries only contention through `file_lock.retry_until_locked`; permanent errors propagate.
