@@ -309,7 +309,8 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   next heartbeat. The startup gate refuses `enabled: false` while channels are
   enabled. Credentials saved from the web UI reach the holding Pod only when it
   next starts the channel, so restart it after changing them, and a failover
-  cancels the IM replies in flight on the old holder. `gateway.replicas: 1`
+  loses the IM replies in flight on the old holder, though the runs themselves
+  finish and their threads stay readable in the web UI. `gateway.replicas: 1`
   stays the default because the WeChat QR login and browser tools are still
   single-instance. Before raising replicas, also set
   `persistence.home.accessMode: ReadWriteMany` on multi-node clusters (thread
