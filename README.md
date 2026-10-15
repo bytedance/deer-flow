@@ -182,6 +182,8 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
 
    Sofya web search and fetch contain malformed HTTP-success payloads the same way: a non-object payload, a `results` container that is not a list, or a non-empty list with no object entries returns the provider's format error, while non-object entries in an otherwise valid list are skipped in order. Missing, null, or empty results keep the existing "No results found" response.
 
+   Serper web and image search preserve valid entries in mixed result lists. A malformed `organic`/`images` container, or a non-empty list holding no object entries, returns Serper's format error; missing, null, or empty containers keep the existing "No results found" / "No images found" response. Format errors log the container field name only, without queries, credentials, or payload values.
+
    Tencent Cloud WSA web search contains malformed HTTP-success payloads the same way: a `Pages` container that is not a list, or a non-empty container holding no usable page, returns the provider's format error, while malformed page entries in an otherwise valid container are skipped so the valid rows survive. Missing, null, or empty `Pages` keep the existing "No results found" response.
 
    Serply web search contains malformed HTTP-success payloads the same way in every vertical: a `results`/`entries`/`articles` container that is not a list, or a non-empty list with no object entries, returns the provider's format error, while non-object entries in an otherwise valid list are skipped in order. Missing, null, or empty containers keep the existing "No results found" response.
