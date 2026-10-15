@@ -23,6 +23,7 @@ import {
   getFileIcon,
   getFileName,
 } from "@/core/utils/files";
+import { useWorkspaceLifetime } from "@/core/workspaces/context";
 
 import { ArtifactLink } from "../citations/artifact-link";
 import { CitationSourcesPanel } from "../citations/citation-sources-panel";
@@ -42,6 +43,7 @@ export function ArtifactPreviewError({
   message: string;
   downloadLabel: string;
 }) {
+  const lifetime = useWorkspaceLifetime();
   return (
     <div className="flex size-full items-center justify-center p-6">
       <div className="flex max-w-sm flex-col items-center gap-4 text-center">
@@ -53,6 +55,7 @@ export function ArtifactPreviewError({
               threadId,
               download: true,
               isMock,
+              workspaceId: lifetime?.scope.workspaceId,
             })}
             target="_blank"
             rel="noopener noreferrer"
@@ -82,6 +85,7 @@ export function ArtifactDownloadFallback({
   threadId: string;
   isMock?: boolean;
 }) {
+  const lifetime = useWorkspaceLifetime();
   const filename = getFileName(filepath);
   const fileType = getFileExtensionDisplayName(filepath);
 
@@ -105,6 +109,7 @@ export function ArtifactDownloadFallback({
               threadId,
               download: true,
               isMock,
+              workspaceId: lifetime?.scope.workspaceId,
             })}
             target="_blank"
             rel="noopener noreferrer"

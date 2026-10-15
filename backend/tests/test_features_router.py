@@ -88,6 +88,7 @@ def test_features_reports_agents_api_enabled() -> None:
         },
         "scheduled_tasks": {"available": False, "running": False, "tool_enabled": False, "min_interval_seconds": 60},
         "thread_activity": {"available": False},
+        "workspaces": {"enabled": False, "available": False},
     }
 
 
@@ -111,6 +112,7 @@ def test_features_reports_agents_api_disabled() -> None:
         },
         "scheduled_tasks": {"available": False, "running": False, "tool_enabled": False, "min_interval_seconds": 60},
         "thread_activity": {"available": False},
+        "workspaces": {"enabled": False, "available": False},
     }
 
 
@@ -284,3 +286,15 @@ def test_features_reports_thread_activity_only_with_sql_persistence(run_store, r
         response = client.get("/api/features")
     assert response.status_code == 200
     assert response.json()["thread_activity"] == {"available": available}
+
+
+def test_workspace_feature_reports_startup_requirement_without_enabling_a_missing_service():
+    app = _app_with_config(agents_api_enabled=False)
+    with TestClient(app) as client:
+        assert client.get("/api/features").json()["workspaces"] == {"enabled": False, "available": False}
+        app.state.workspace_mode_enabled = True
+        assert client.get("/api/features").json()["workspaces"] == {"enabled": True, "available": False}
+        app.state.workspace_service = object()
+        assert client.get("/api/features").json()["workspaces"] == {"enabled": True, "available": True}
+        app.state.workspace_mode_enabled = False
+        assert client.get("/api/features").json()["workspaces"] == {"enabled": True, "available": True}

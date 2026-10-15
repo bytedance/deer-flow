@@ -507,3 +507,11 @@ providers currently fail 503 and require M4/M5 protocol before full acceptance.
 Unknown filesystem outcomes require later persistent reconciliation/admission
 proof; a 503 is not evidence of rollback. #89 verifies controlled two-dialect
 HTTP/SQL/byte cases, not production OS/NAS or full fault isolation.
+
+
+/api/features reports startup-scoped workspaces.enabled (isolation required)
+and workspaces.available (the resource authorization service exists). A present
+service also requires mode, even if a partial state omitted the flag; missing
+service never becomes available from config/query input. This capability is
+read-only and does not bypass _WORKSPACE_RUNTIME_INTEGRATED. Clients must not
+interpret enabled=true/available=false as legacy single-user mode.

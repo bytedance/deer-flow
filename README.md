@@ -1989,6 +1989,8 @@ For example, independent read-only research can run concurrently when the wall-c
 
 ### Sandbox & File System
 
+Standalone artifact previews retain their file link through sign-in. They show a loading state while confirming access, and an unavailable message with a refresh hint when access cannot be confirmed.
+
 Host-externalized tool outputs use the Gateway's normal file-creation umask.
 Host and sandbox outputs use deterministic filenames hashed from the raw tool
 call ID and output content. Missing, colliding, or oversized IDs cannot overwrite

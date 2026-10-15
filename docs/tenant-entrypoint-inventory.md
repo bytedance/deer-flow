@@ -180,3 +180,14 @@ late same-space callbacks and byte/JSON/Blob completion after scope expiry.
 50 tests/full frontend check; HTTP/preview/editor fixtures do not prove live
 Run/backend/browser/ZIP extraction. Direct/standalone/HTML/media/Markdown
 links and operator skill installation are still open; activation closed.
+
+
+Standalone artifact/top-level locators (#78 frontend, #91 backend): read-only
+startup capability, server cookie bootstrap and actor/target-bound initial
+selection precede content. Native viewer/raw URLs and login next retain the
+canonical locator; disabled/malformed/denied scopes cannot fall back. Native
+legacy/public/development compatibility and original renderer retained. 75
+frontend behaviors/full check plus 23 feature-projection tests; HTTP/auth/
+cookie/router fixtures are not real Next/browser/backend permission proof.
+Markdown/message/media, browser/change-panel and nested HTML relatives remain
+open, as do shell/two-tab/principal/physical gates; activation closed.

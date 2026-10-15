@@ -287,6 +287,8 @@ export const enUS: Translations = {
   },
 
   artifactPreview: {
+    loading: "Loading file...",
+    unavailable: "This file is unavailable. Reload the page to try again.",
     limited: (previewSize, totalSize) =>
       totalSize
         ? `Showing the first ${previewSize} of ${totalSize}.`

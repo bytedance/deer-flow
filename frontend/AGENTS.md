@@ -571,3 +571,21 @@ in place instead of remounting live chat on route navigation. Draft buffers
 remain memory-only; never adopt legacy panel keys. Direct URLs, standalone/
 new-window, nested HTML resources, operator skill installation and actual
 browser/backend/two-tab acceptance remain distinct open gates.
+
+
+Standalone artifact workspace bootstrap uses a server-read /api/features
+capability, followed by the existing tab-local WorkspaceSession catalog/current
+handshake. URL workspace_id is only a locator; it cannot enable mode. Missing
+legacy capability keeps native unscoped links working; supported auth-disabled
+development and static mode skip capability HTTP because they cannot activate
+tenant mode. Scoped locators still fail closed in those modes. Malformed/unavailable
+capability or a scoped target on a legacy server cannot fall back. Preserve
+workspace_id through viewer URL parsing/building and login next, rejecting
+malformed/repeated selectors and mock+workspace combinations. Initial workspace
+selection is immutable per provider actor/target key and precedes all content
+reads. Key the standalone AuthProvider by actor so a new SSR principal replaces
+the old display identity; ReadyBoundary owns the scoped query cache. Keep rich
+content styles and the public allowlisted showcase bypass. Direct source,
+download, fallback and PDF URLs carry only the confirmed workspace locator;
+backend membership checks remain the authority. Nested HTML/CSS and remaining
+Markdown/message/media URL paths still require their own integration/proof.

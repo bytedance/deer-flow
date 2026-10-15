@@ -55,7 +55,12 @@ export class WorkspaceSession {
   private requestedSelector: string | undefined;
   private leases = 0;
   private releaseEpoch = 0;
-  constructor(private readonly actorUserId: string) {}
+  constructor(
+    private readonly actorUserId: string,
+    initialSelector?: string,
+  ) {
+    this.requestedSelector = initialSelector;
+  }
 
   getSnapshot = () => this.state;
   getServerSnapshot = () => INITIAL;
@@ -76,7 +81,7 @@ export class WorkspaceSession {
     this.releaseEpoch += 1;
     if (!this.started) {
       this.started = true;
-      void this.select();
+      void this.select(this.requestedSelector);
     }
     let released = false;
     return () => {

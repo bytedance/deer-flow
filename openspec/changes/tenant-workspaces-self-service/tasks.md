@@ -637,3 +637,52 @@ selector and browser/backend two-tab proof. Artifact skill installation is
 a separate operator/M5 authority boundary. All M0-M11 parent gates remain
 unchecked; M3 is partial and startup activation remains false. No deployment,
 Git remote push, model call or local application runtime occurred.
+
+
+M3 standalone artifact/locator checkpoint (2026-10-15): backend #90 RED
+missing workspaces capability; #91 GREEN 23 feature API tests (one new), actual
+FastAPI startup-state projection, no database gate needed. Frontend #74 RED
+reproduced the unbound original standalone renderer; #75 main GREEN first
+(47 tests: one new, 46 existing). Only then add two boundary scenarios. #76
+passed 75 behaviors/format/target lint but early tsc rejected an unsupported
+fixture ByRoleOptions.exact. It was already FAILURE when the stop helper
+inspected it; no stop request was sent and it was not aborted. #77 RED in the
+same three-case suite proved auth-disabled development incorrectly entered
+workspace mode (two passed, one failed). Reuse the native operator predicate
+to retain that supported non-tenant path, and fix the test query option.
+#78 SUCCESS: 75 tests (three new, 72 existing), nine files, 19-file format/
+target lint, early tsc and required full pnpm check. Backend source still
+exactly matches #91. Exact source/archive/image/terminal/empty resource
+receipts are in frontend_artifact_windows in progress JSON.
+
+The read-only /api/features workspaces block reports isolation requirement
+separately from service presence. It cannot activate the runtime. A standalone
+page reads server capability with the native cookie, no-store, refused redirects
+and a body-spanning timeout. A URL selector is only a locator. Its requested
+workspace is pinned before content through the existing catalog/current
+handshake, actor/target-keyed provider and per-lifetime ReadyBoundary cache.
+The original renderer and styles remain; the scoped AuthProvider is actor-keyed.
+Malformed/duplicate selectors, mock+workspace, missing required service, failed
+capability or denied current membership cannot fall back to an unscoped read.
+Legacy JSON without the optional block remains native, while a scoped locator
+on a legacy server is refused. Public allowlisted showcase and supported
+auth-disabled/static flows retain native behavior. Workspace locators survive
+viewer build/parse and login next; panel/source/download/list/fallback/PDF
+top-level URLs now include only the confirmed locator. Entry-stale panel
+open/download actions are inert. Existing panel main checks both actual window
+open calls and their selectors. No second file/auth service was added.
+
+Positive P/T real renderer/route-function/Context/REST and body-held old actor
+replacement, login target preservation, refusal paths and native developer/
+legacy compatibility execute against HTTP fixtures. SSR auth/cookies/router/
+locale are mocked. This is not compiled Next RSC, actual JWT/session/principal
+revocation, real browser/window/download HTTP, physical NAS or model proof.
+Native iframe teardown abort/fetch output, expected archive rejection logs and
+KaTeX warning remain. Previous actual backend file receipts are independent.
+
+Next: Markdown/message image resolvers, browser/change-panel artifact links,
+then nested HTML/CSS relative resources and real browser/cookie/backend
+acceptance. Main shell capability/selector, remaining UI-store/title/focus/
+sidecar faults and all M4-M11 remain. Every parent gate is unchecked, M3 partial
+and startup activation false. No deployment, Git remote push, model call, local
+application runtime or new image download occurred.

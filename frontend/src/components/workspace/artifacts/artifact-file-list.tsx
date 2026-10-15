@@ -215,6 +215,7 @@ export function ArtifactFileList({
                       filepath: file,
                       threadId: threadId,
                       download: true,
+                      workspaceId: lifetime?.scope.workspaceId,
                     })}
                     target="_blank"
                     rel="noopener noreferrer"

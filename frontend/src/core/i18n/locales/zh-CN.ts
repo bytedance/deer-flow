@@ -274,6 +274,8 @@ export const zhCN: Translations = {
   },
 
   artifactPreview: {
+    loading: "正在加载文件...",
+    unavailable: "该文件暂时不可用，请刷新页面重试。",
     limited: (previewSize, totalSize) =>
       totalSize
         ? `当前显示 ${totalSize} 中的前 ${previewSize}。`

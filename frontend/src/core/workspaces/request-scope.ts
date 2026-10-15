@@ -8,11 +8,15 @@ export interface WorkspaceRequestScope {
 const WORKSPACE_UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
+export function isWorkspaceId(value: string): boolean {
+  return WORKSPACE_UUID.test(value);
+}
+
 export function captureWorkspaceRequestScope(
   scope: WorkspaceRequestScope,
 ): WorkspaceRequestScope {
   if (
-    !WORKSPACE_UUID.test(scope.workspaceId) ||
+    !isWorkspaceId(scope.workspaceId) ||
     !scope.actorUserId ||
     scope.actorUserId.length > 64 ||
     scope.actorUserId.trim() !== scope.actorUserId ||

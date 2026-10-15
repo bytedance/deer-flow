@@ -602,8 +602,14 @@ export function ArtifactFileDetail({
                     : t.common.openInNewWindow
                 }
                 onClick={() => {
+                  if (!isCurrent()) return;
                   const w = window.open(
-                    resolveArtifactOpenURL({ filepath, threadId, isMock }),
+                    resolveArtifactOpenURL({
+                      filepath,
+                      threadId,
+                      isMock,
+                      workspaceId: lifetime?.scope.workspaceId,
+                    }),
                     "_blank",
                     "noopener,noreferrer",
                   );
@@ -644,12 +650,14 @@ export function ArtifactFileDetail({
                     : t.common.download
                 }
                 onClick={() => {
+                  if (!isCurrent()) return;
                   const w = window.open(
                     urlOfArtifact({
                       filepath,
                       threadId,
                       download: true,
                       isMock,
+                      workspaceId: lifetime?.scope.workspaceId,
                     }),
                     "_blank",
                     "noopener,noreferrer",
@@ -765,7 +773,12 @@ export function ArtifactFileDetail({
               // (HTML/XML family) never reaches this branch — the backend
               // serves it as an attachment.
               sandbox={getFileExtension(filepath) === "pdf" ? undefined : ""}
-              src={urlOfArtifact({ filepath, threadId, isMock })}
+              src={urlOfArtifact({
+                filepath,
+                threadId,
+                isMock,
+                workspaceId: lifetime?.scope.workspaceId,
+              })}
               // Accessible name for the frame (WCAG frame titles); the PDF
               // branch must not be located by a bare ``iframe:not([title])``.
               title={getFileName(filepath)}

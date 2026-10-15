@@ -1,5 +1,6 @@
 import { resolveStaticDemoArtifact } from "@/core/threads/static-demo";
 import { checkCodeFile, getFileName } from "@/core/utils/files";
+import { isWorkspaceId } from "@/core/workspaces/request-scope";
 
 import { getTabularDelimiter } from "./preview";
 import { urlOfArtifact } from "./utils";
@@ -11,6 +12,7 @@ export type ArtifactViewerTarget = {
   filepath: string;
   threadId: string;
   isMock: boolean;
+  workspaceId?: string;
 };
 
 /**
@@ -42,16 +44,18 @@ export function resolveArtifactOpenURL({
   filepath,
   threadId,
   isMock = false,
+  workspaceId,
 }: {
   filepath: string;
   threadId: string;
   isMock?: boolean;
+  workspaceId?: string;
 }) {
   const language = resolveStoredArtifactLanguage(filepath);
   if (language !== "markdown" && getTabularDelimiter(language) === null) {
-    return urlOfArtifact({ filepath, threadId, isMock });
+    return urlOfArtifact({ filepath, threadId, isMock, workspaceId });
   }
-  return buildArtifactViewerURL({ filepath, threadId, isMock });
+  return buildArtifactViewerURL({ filepath, threadId, isMock, workspaceId });
 }
 
 /**
@@ -65,8 +69,12 @@ export function buildArtifactViewerURL({
   filepath,
   threadId,
   isMock,
+  workspaceId,
 }: ArtifactViewerTarget) {
+  if (workspaceId !== undefined && (!isWorkspaceId(workspaceId) || isMock))
+    throw new Error("Invalid scoped artifact target");
   const params = new URLSearchParams({ path: filepath, thread_id: threadId });
+  if (workspaceId !== undefined) params.set("workspace_id", workspaceId);
   if (isMock) {
     params.set("mock", "true");
   }
@@ -77,12 +85,25 @@ export function buildArtifactViewerURL({
 export function parseArtifactViewerParams(
   params: URLSearchParams,
 ): ArtifactViewerTarget | null {
+  const workspaceSelectors = params.getAll("workspace_id");
+  const workspaceId = workspaceSelectors[0];
+  if (
+    workspaceSelectors.length > 1 ||
+    (workspaceId !== undefined &&
+      (!isWorkspaceId(workspaceId) || params.get("mock") === "true"))
+  )
+    return null;
   const filepath = params.get("path")?.trim();
   const threadId = params.get("thread_id")?.trim();
   if (!filepath || !threadId) {
     return null;
   }
-  return { filepath, threadId, isMock: params.get("mock") === "true" };
+  return {
+    filepath,
+    threadId,
+    isMock: params.get("mock") === "true",
+    ...(workspaceId === undefined ? {} : { workspaceId }),
+  };
 }
 
 /**
@@ -100,6 +121,8 @@ export function parseArtifactViewerQuery(
   }
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(query)) {
+    if (key === "workspace_id" && Array.isArray(value) && value.length !== 1)
+      return null;
     const first = Array.isArray(value) ? value[0] : value;
     if (first !== undefined) {
       params.set(key, first);
@@ -133,7 +156,7 @@ export function artifactViewerTitle(filepath: string | undefined) {
  * with 404 still needs a session.
  */
 export function requiresAuthenticatedViewer(target: ArtifactViewerTarget) {
-  if (!target.isMock) {
+  if (target.workspaceId !== undefined || !target.isMock) {
     return true;
   }
   const segments = target.filepath

@@ -2859,5 +2859,232 @@
       }
     },
     "browser_probe_note": "The existing custom /opt/deerflow-browsers distribution passed the native verify script freshly on exact image ID, nonroot 1000:1000, network none. Chromium launch/input/PNG only, not DeerFlow browser/backend acceptance. No new image/download."
+  },
+  "frontend_artifact_windows": {
+    "status": "partial M3; standalone route bootstrap and top-level native artifact links only",
+    "frontend_job": "deerflow-tenant-frontend",
+    "backend_job": "deerflow-tenant-m1-postgres",
+    "main_red": {
+      "frontend_build": 74,
+      "backend_build": 90,
+      "archive_sha256": "dfb1e7be740206c7210b8ff548372540f30199a457270ede31e3c5043659abdd",
+      "reason": "actual native standalone render read Report-null; backend feature response lacked workspaces metadata"
+    },
+    "main_green": {
+      "frontend_build": 75,
+      "frontend_tests_passed": 47,
+      "backend_build": 91,
+      "backend_tests_passed": 23,
+      "archive_sha256": "b6c3433501974fb72dbad4cac704a329b115436cac35b6ab9e173ac939fc6683"
+    },
+    "intermediate": {
+      "build": 76,
+      "result": "FAILURE",
+      "tests_passed": 75,
+      "archive_sha256": "d3768cc6536bb8eb3fa23e7d06bb1b84b4cc9feaf73a2ce785a18c4b3c2f1005",
+      "reason": "behavior/format/target lint passed; early tsc rejected unsupported ByRoleOptions.exact in the existing panel fixture. A stop helper later inspected the already-terminal FAILURE and sent no stop request; this build was not aborted."
+    },
+    "native_compat_red": {
+      "build": 77,
+      "result": "FAILURE",
+      "archive_sha256": "8c45d23866520f842100436915de3ff927f8d61d4f9c6b37c4ddc98842c10093",
+      "reason": "an auth-disabled development window incorrectly entered workspace confirmation instead of retaining its native renderer; 2 passed, 1 failed in the same three-case suite"
+    },
+    "green": {
+      "build": 78,
+      "result": "SUCCESS",
+      "tests_passed": 75,
+      "new_tests": 3,
+      "existing_tests": 72,
+      "files": 9,
+      "archive_sha256": "bdae78f7e4a6d07e7a94a187fe28605249c3872cac3e66660261620bcf9a3023",
+      "checks": [
+        "behavior tests",
+        "19-file Prettier",
+        "target ESLint --max-warnings 0",
+        "early full tsc --noEmit",
+        "required full pnpm check"
+      ]
+    },
+    "evidence": {
+      "frontend": [
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 34079,
+          "number": 74,
+          "result": "FAILURE",
+          "owned_containers": [],
+          "owned_networks": [],
+          "file_counts": [],
+          "passed_counts": [],
+          "test_seconds": [
+            13.0
+          ],
+          "missing_workspace_capability": false,
+          "unbound_artifact_read": true,
+          "query_option_type_failure": false
+        },
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 48506,
+          "number": 75,
+          "result": "SUCCESS",
+          "owned_containers": [],
+          "owned_networks": [],
+          "file_counts": [
+            "5"
+          ],
+          "passed_counts": [
+            "47"
+          ],
+          "test_seconds": [
+            27.3
+          ],
+          "missing_workspace_capability": false,
+          "unbound_artifact_read": false,
+          "query_option_type_failure": false
+        },
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 232953,
+          "number": 76,
+          "result": "FAILURE",
+          "owned_containers": [],
+          "owned_networks": [],
+          "file_counts": [
+            "9"
+          ],
+          "passed_counts": [
+            "75"
+          ],
+          "test_seconds": [
+            43.5
+          ],
+          "missing_workspace_capability": false,
+          "unbound_artifact_read": false,
+          "query_option_type_failure": true
+        },
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 23038,
+          "number": 77,
+          "result": "FAILURE",
+          "owned_containers": [],
+          "owned_networks": [],
+          "file_counts": [],
+          "passed_counts": [
+            "2"
+          ],
+          "test_seconds": [
+            8.28
+          ],
+          "missing_workspace_capability": false,
+          "unbound_artifact_read": false,
+          "query_option_type_failure": false
+        },
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 488027,
+          "number": 78,
+          "result": "SUCCESS",
+          "owned_containers": [],
+          "owned_networks": [],
+          "file_counts": [
+            "9"
+          ],
+          "passed_counts": [
+            "75"
+          ],
+          "test_seconds": [
+            43.8
+          ],
+          "missing_workspace_capability": false,
+          "unbound_artifact_read": false,
+          "query_option_type_failure": false
+        }
+      ],
+      "backend": [
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 40476,
+          "number": 90,
+          "result": "FAILURE",
+          "owned_containers": [],
+          "owned_networks": [],
+          "file_counts": [],
+          "passed_counts": [],
+          "test_seconds": [
+            "24.02"
+          ],
+          "missing_workspace_capability": true,
+          "unbound_artifact_read": false,
+          "query_option_type_failure": false
+        },
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 48394,
+          "number": 91,
+          "result": "SUCCESS",
+          "owned_containers": [],
+          "owned_networks": [],
+          "file_counts": [],
+          "passed_counts": [
+            "23"
+          ],
+          "test_seconds": [
+            "26.26"
+          ],
+          "missing_workspace_capability": false,
+          "unbound_artifact_read": false,
+          "query_option_type_failure": false
+        }
+      ],
+      "formatter_probe": {
+        "containers": [],
+        "networks": []
+      },
+      "images": {
+        "deerflow-native:final-ci-tools-52ce": "sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01",
+        "deerflow-native:final-test-tools-52ce": "sha256:1e10b72009aa5427fab63b10fd5486c124d8461397f46b63adbf6f5af8e5edf2"
+      }
+    },
+    "source_sha256": {
+      "frontend/src/app/artifacts/view/layout.tsx": "3b2798d1d916edbc534b9291f140979ee933a4257a372bf250d0aa23d7c65447",
+      "frontend/src/app/artifacts/view/page.tsx": "54ab2b7d1da6294821eca4e9cb0e5cdddd674ef77718c13d0a8bed2554b3094e",
+      "frontend/src/components/workspace/artifacts/artifact-file-detail.tsx": "439f3b6bfd3997503b74ea064faead650b2e9a54ca6557b3a5c4373e2977a322",
+      "frontend/src/components/workspace/artifacts/artifact-file-list.tsx": "8db99a38fc9cdac035079c5122ca00dfde0104ca73f17a5883fc42f28b6c213d",
+      "frontend/src/components/workspace/artifacts/artifact-file-preview.tsx": "3fbf8f1069958c52d5e97ac87b1188eea0fe4522d5dd24f58b7331c3db7a6a39",
+      "frontend/src/components/workspace/artifacts/artifact-viewer.tsx": "d2985f35224b91135439b5bdbd1528936dbe8d6a9f0bd61912a6e17be7b14a3f",
+      "frontend/src/core/artifacts/utils.ts": "e5a5d8678626fe27ac7d829fd08b26aff9b3ac7840ff83f1c77586045c8365ad",
+      "frontend/src/core/artifacts/viewer.ts": "c828eaf5aefc68e258d5a9dd5f6862da9480956a27ac03ee54fe655ffda7993e",
+      "frontend/src/core/features/api.ts": "b60f696ba4e0d2f000ae15febe93e24630095bdaad6e0911daadfa7757ffc8de",
+      "frontend/src/core/i18n/locales/en-US.ts": "8164d8c682d45c974b51b380651f7230110f898de5e30f385b568852261b58a9",
+      "frontend/src/core/i18n/locales/types.ts": "0a57b55b3b6052330afeece3972c18a36ad3cc998036f396569f6da350df6a59",
+      "frontend/src/core/i18n/locales/zh-CN.ts": "46d8e14a6ce460935f75aa9cbd7d8e06e9c1c2d25fcb58d53daca1c44be6e2dd",
+      "frontend/src/core/workspaces/capability.ts": "8a702914f5d835b15b1790a01025be37116d47a43be0b0b2d9f48013c7b00b2f",
+      "frontend/src/core/workspaces/context.tsx": "b5b4d3c06eb505e74364c9ad0dd4a59d56af762f8ef2926a9958c65045e1ad59",
+      "frontend/src/core/workspaces/request-scope.ts": "11c87fe11475add615e9e7f7876e83149828349e57eeeb11ede46f1c6089f4e0",
+      "frontend/src/core/workspaces/server.ts": "e7401f828ccd248757f94f45877ec43b9cb3a23e6531f17cdbf590e2c6d3e6cb",
+      "frontend/src/core/workspaces/session.ts": "3ec2d5dbf665df2d008f30e8bf591a6e5bb84624148cbc18a4c54e45324c2f7d",
+      "frontend/tests/unit/components/workspace/artifacts/workspace-artifact-viewer.dom.test.tsx": "5c35808680f7ff9e8e3d8c0dbf10b316f7e54094c01bdd457e91d6915cda0cdf",
+      "frontend/tests/unit/components/workspace/artifacts/workspace-artifacts.dom.test.tsx": "fc32d4f52a697fdcb4d4fea647b3ff446dd7e426eedecbe64531c8cf379b437f",
+      "backend/app/gateway/routers/features.py": "45c434eaf0657c56163de9515b8c1cea9d6da3327be7024413435f6b79217407",
+      "backend/tests/test_features_router.py": "f6c734c89962b2840cdf1a7dadd0f577b2244ebafa9714444ae9df92e01dafa3"
+    },
+    "contract": "Startup-scoped /api/features.workspaces separates enabled (isolation required) from available (authorization service present); no activation bypass. Server-only viewer bootstrap reads capability using the native session cookie, no-store/redirect-error/bounded body deadline. URL workspace_id is an immutable locator through raw/viewer URLs and login next, never a capability. Actor/target-keyed WorkspaceProvider initializes the requested selector before content, existing catalog/current handshake and ReadyBoundary own scope/cache. Standalone AuthProvider is actor-keyed. Malformed/repeated locators, mock+workspace, required-but-unavailable metadata, unknown capability and membership failure do not fall back. Native legacy, public allowlisted and supported auth-disabled/static paths remain; query selectors cannot enable mode. Source/download/panel actions/list/fallback/PDF top-level URLs carry confirmed locator; active callback checks remain. Native renderer/styles and backend file authority retained.",
+    "proof_limits": "Backend test is actual FastAPI features projection over startup-state fixtures, not SQL/file authorization. Frontend executes real async route function, server capability helper, renderer, providers/session/REST against HTTP fixtures; SSR auth, cookies/navigation/locale are mocked. It proves native P/T render/link/return behavior, denied/corrupt metadata/selector refusal, native developer compatibility and actor replacement during delayed current decoding; not compiled Next RSC, live session/JWT/principal revocation, browser/new-window/download HTTP behavior, NAS or model evidence. Existing actual backend file authorization receipts remain separate.",
+    "warnings": "Native happy-dom iframe teardown fetch/abort output, intentional archive-error logs and KaTeX warning remain in passing tests.",
+    "remaining": [
+      "remaining Markdown/message image paths and browser/change-panel artifact URL call sites; nested HTML/CSS and other relative resource handling",
+      "real Next/browser/backend two-tab/standalone/download/cookie acceptance and capability/selector integration of the main workspace shell",
+      "remaining UI stores/title, scoped file-picker focus and same-space sidecar parent/unmount/quiet-stream audit; M4-M11 and physical isolation/principal/revocation; activation remains closed"
+    ]
   }
 }

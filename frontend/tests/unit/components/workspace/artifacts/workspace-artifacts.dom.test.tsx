@@ -310,6 +310,7 @@ function source(app: ReturnType<typeof mount>) {
 }
 it("uses each workspace for the real artifact preview, revision save, panel state and ZIP download", async () => {
   const net = fixture();
+  const opened = rs.spyOn(window, "open").mockReturnValue(null);
   const legacyKey = `deerflow:artifacts:v1:${encodeURIComponent(mocks.path)}`;
   sessionStorage.setItem(
     legacyKey,
@@ -332,6 +333,19 @@ it("uses each workspace for the real artifact preview, revision save, panel stat
       within(app.view.getByTestId("file-list")).getByText("report.txt"),
     );
     await waitFor(() => expect(app.state().selectedArtifact).toBe(FILE));
+    const beforeOpen = opened.mock.calls.length;
+    fireEvent.click(
+      app.view.getByRole("button", { name: "Open in new window" }),
+    );
+    fireEvent.click(app.view.getByRole("button", { name: "Download" }));
+    expect(opened).toHaveBeenCalledTimes(beforeOpen + 2);
+    for (const [target] of opened.mock.calls.slice(-2)) {
+      if (target === undefined)
+        throw new Error("Artifact window target missing");
+      expect(
+        new URL(target, location.href).searchParams.get("workspace_id"),
+      ).toBe(space);
+    }
     fireEvent.click(app.view.getByRole("button", { name: "Edit" }));
     fireEvent.change(source(app), { target: { value: `Edited-${space}` } });
     const before = mocks.success.mock.calls.length;

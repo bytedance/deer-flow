@@ -81,6 +81,13 @@ class ThreadActivityFeature(BaseModel):
     available: bool = Field(..., description="Whether GET /api/thread-activity, POST /api/threads/{thread_id}/read and the thread search `unread` field work (SQL persistence)")
 
 
+class WorkspacesFeature(BaseModel):
+    """Startup-scoped resource isolation requirement, separate from readiness."""
+
+    enabled: bool
+    available: bool
+
+
 class FeaturesResponse(BaseModel):
     """Frontend-facing feature availability flags."""
 
@@ -92,6 +99,7 @@ class FeaturesResponse(BaseModel):
     knowledge_base: KnowledgeBaseFeature
     scheduled_tasks: ScheduledTasksFeature
     thread_activity: ThreadActivityFeature
+    workspaces: WorkspacesFeature
 
 
 @router.get(
@@ -104,7 +112,12 @@ async def list_features(request: Request, config: AppConfig = Depends(get_config
     """Return availability of optional frontend features."""
     browser = browser_capability(config)
     subagent_batch_worker_running = bool(getattr(request.app.state, "subagent_batches_available", False))
+    workspace_available = getattr(request.app.state, "workspace_service", None) is not None
     return FeaturesResponse(
+        workspaces=WorkspacesFeature(
+            enabled=bool(getattr(request.app.state, "workspace_mode_enabled", False)) or workspace_available,
+            available=workspace_available,
+        ),
         agents_api=AgentsApiFeature(enabled=config.agents_api.enabled),
         browser_control=BrowserControlFeature(enabled=browser.available),
         # MCP task bindings and the submitter are startup-scoped. Report the

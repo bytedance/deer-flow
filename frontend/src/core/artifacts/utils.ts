@@ -1,3 +1,5 @@
+import { isWorkspaceId } from "@/core/workspaces/request-scope";
+
 import { getBackendBaseURL } from "../config";
 import { isStaticWebsiteOnly } from "../static-mode";
 import type { AgentThreadState } from "../threads";
@@ -58,12 +60,19 @@ export function urlOfArtifact({
   threadId,
   download = false,
   isMock = false,
+  workspaceId,
 }: {
   filepath: string;
   threadId: string;
   download?: boolean;
   isMock?: boolean;
+  workspaceId?: string;
 }) {
+  if (
+    workspaceId !== undefined &&
+    (!isWorkspaceId(workspaceId) || isMock || isStaticWebsiteOnly())
+  )
+    throw new Error("Invalid scoped artifact target");
   if (isStaticWebsiteOnly()) {
     return staticDemoArtifactURL({ filepath, threadId, download });
   }
@@ -72,7 +81,7 @@ export function urlOfArtifact({
   if (isMock) {
     return `${getBackendBaseURL()}/mock/api/threads/${encodedThreadId}/artifacts${encodedFilepath}${download ? "?download=true" : ""}`;
   }
-  return `${getBackendBaseURL()}/api/threads/${encodedThreadId}/artifacts${encodedFilepath}${download ? "?download=true" : ""}`;
+  return `${getBackendBaseURL()}/api/threads/${encodedThreadId}/artifacts${encodedFilepath}${download ? "?download=true" : ""}${workspaceId === undefined ? "" : `${download ? "&" : "?"}workspace_id=${workspaceId}`}`;
 }
 
 export function urlOfArtifactArchive({

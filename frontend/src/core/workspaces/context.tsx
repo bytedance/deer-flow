@@ -35,12 +35,16 @@ const unavailable: WorkspaceContextValue = Object.freeze({
 
 function ActorWorkspaceProvider({
   actorUserId,
+  initialWorkspaceId,
   children,
 }: {
   actorUserId: string;
+  initialWorkspaceId?: string;
   children: ReactNode;
 }) {
-  const [session] = useState(() => new WorkspaceSession(actorUserId));
+  const [session] = useState(
+    () => new WorkspaceSession(actorUserId, initialWorkspaceId),
+  );
   const state = useSyncExternalStore(
     session.subscribe,
     session.getSnapshot,
@@ -61,9 +65,11 @@ function ActorWorkspaceProvider({
 /** Enabled must come from the server capability, never browser storage. */
 export function WorkspaceProvider({
   enabled = false,
+  initialWorkspaceId,
   children,
 }: {
   enabled?: boolean;
+  initialWorkspaceId?: string;
   children: ReactNode;
 }) {
   const actorUserId = useOptionalAuthUserId();
@@ -75,7 +81,11 @@ export function WorkspaceProvider({
       </WorkspaceContext.Provider>
     );
   return (
-    <ActorWorkspaceProvider key={actorUserId} actorUserId={actorUserId}>
+    <ActorWorkspaceProvider
+      key={JSON.stringify([actorUserId, initialWorkspaceId ?? null])}
+      actorUserId={actorUserId}
+      initialWorkspaceId={initialWorkspaceId}
+    >
       {children}
     </ActorWorkspaceProvider>
   );
