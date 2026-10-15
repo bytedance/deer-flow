@@ -118,6 +118,8 @@ whether the original collected answer was truncated; legacy answers report
 `result.truncated=null` when that provenance is unknown. `result.available=false`
 distinguishes unfinished work, cancellation without an answer, and a legacy
 answer no longer retained. Inspect the source conversation for further evidence.
+Cancelled requests have no available answer at either cancellation timing;
+their cancellation notices remain in shared history.
 These tools expose retained task data, not hidden reasoning, execution inputs,
 approval responses, attachment bytes or an unbounded transcript archive.
 
