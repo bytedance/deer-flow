@@ -44,6 +44,60 @@ def test_stream_accounts_native_gemini_usage(client, last_text, initial_input):
     assert events[-1].data["usage"] == expected
 
 
+@pytest.mark.parametrize("provider", ["openai", "vllm"])
+def test_stream_accounts_openai_compatible_usage(client, provider):
+    from langchain.agents import create_agent
+    from langchain_openai import ChatOpenAI
+
+    from deerflow.models.vllm_provider import VllmChatModel
+
+    model_class = VllmChatModel if provider == "vllm" else ChatOpenAI
+    model = model_class(
+        model="offline-model",
+        api_key="offline-placeholder",
+        use_responses_api=False,
+        stream_usage=True,
+        **({"cumulative_stream_usage": True} if provider == "vllm" else {}),
+    )
+    responses = [
+        {
+            "id": "chatcmpl-usage",
+            "model": "offline-model",
+            "choices": [{"index": 0, "delta": {"role": "assistant", "content": text}, "finish_reason": "stop" if index else None}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": output, "total_tokens": 10 + output} if provider == "vllm" else None,
+        }
+        for index, (text, output) in enumerate([("Hello", 1), (" world", 4)])
+    ]
+    responses.append(
+        {
+            "id": "chatcmpl-usage",
+            "model": "offline-model",
+            "choices": [],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14},
+        }
+    )
+    response_stream = MagicMock()
+    response_stream.__enter__.return_value = iter(responses)
+    try:
+        with (
+            patch.object(model.client, "create", return_value=response_stream) as transport,
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", create_agent(model, tools=[])),
+        ):
+            events = list(client.stream("Say hello", thread_id=f"{provider}-usage"))
+        transport.assert_called_once()
+    finally:
+        model.root_client.close()
+
+    expected = {"input_tokens": 10, "output_tokens": 4, "total_tokens": 14}
+    assembled = [event for event in events if event.type == "values"][-1].data["messages"][-1]
+    assert {key: assembled["usage_metadata"][key] for key in expected} == expected
+    assert assembled["content"] == "Hello world"
+    assert "".join(event.data["content"] for event in events if event.type == "messages-tuple") == "Hello world"
+    assert events[-1].type == "end"
+    assert events[-1].data["usage"] == expected
+
+
 @pytest.mark.parametrize("include_snapshots", [False, True])
 def test_stream_sums_usage_deltas_per_message(client, include_snapshots):
     chunks = [
