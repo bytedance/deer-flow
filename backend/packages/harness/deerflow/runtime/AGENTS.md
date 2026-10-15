@@ -1,3 +1,10 @@
+### Redis Checkpoint Cache Purge
+
+Thread purge escapes Redis glob metacharacters in the complete literal key stem
+before SCAN, and checks returned byte/string keys against that stem before UNLINK.
+Do not interpret operator `key_prefix` text as a pattern or widen thread deletion
+to sibling namespaces. Keep the cursor loop and outage/TTL fallback unchanged.
+
 ### Stream Bridge Heartbeats
 
 Memory/Redis bridges keep startup-only `stream_bridge.heartbeat_interval_seconds`; explicit `subscribe(..., heartbeat_interval=...)` overrides it. Provider contexts drain owned cache/bridge/checkpointer/Store teardown across cancellation. `close_agent_stream()` shields close to completion: preserve counts, defer host cancellation, balance repeats, keep active errors, log attached close failures at callers, map close cancellation to failure, never time out.
@@ -116,6 +123,8 @@ invalid values) from the producer-supplied tool stamp; tool content, args,
 prompts, and derived hashes do not enter the event. Ordinary task-tool subagents use the narrow parent-loop
 recorder proxy, never the journal itself; durable batch runs have no parent
 journal and emit no such event. Recorder failures are fail-open.
+
+**RunJournal write ownership** (`runtime/journal.py`): a batch handed to `store.put_batch()` is owned by a journal task until its outcome settles, so a cancelled `flush()`/`close()` caller detaches the waiter and re-raises `CancelledError` only after the owned write is drained — never abandon or replay the in-flight batch. A generic `put_batch` exception is an ambiguous outcome: it is quarantined, blocks every successor write, and makes `flush()`/`close()` report non-success instead of replaying the batch. Only `RunEventStoreNotCommittedError` means the store proved none of the batch committed and may be deliberately retried; stores must raise it instead of a bare exception for that case. Explicit `flush()` and `close(flush=True)` share one per-journal operation lock, so a successor batch can never overtake an unsettled predecessor, every waiter observes the same settlement, and a normal close detaches only after the whole buffer has settled. `close(flush=False)` is a separate abort path that never queues on that lock: it revokes write ownership before its first await and makes any in-flight flush report non-success rather than a late success. A cancelled write waits a bounded time for the store call to end; `Task.cancelled()`/a clean return does not prove an uncooperative backend's I/O actually stopped, so this is a bound on waiting, not a termination guarantee. An inner store task that outlives that bound stays supervised until it settles, so its late result is retrieved and logged rather than dropped. Two adjacent limits are known and tracked separately, not fixed here: the bounded wait covers the store write, not a `progress_reporter` that ignores cancellation (a pre-existing hazard on the force-close path); and background-write warnings log the exception type and message, whose text is backend-controlled and may echo driver-level parameters, so log consumers must not treat it as payload-free.
 
 **JSONL record boundaries** (`runtime/events/store/jsonl.py`): thread reads,
 run reads, and sequence recovery split on physical newlines. Do not use

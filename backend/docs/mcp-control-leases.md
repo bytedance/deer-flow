@@ -14,9 +14,11 @@ row while the original remote request is still running. Separately, SQLite
 ignores `SELECT FOR UPDATE`: two deferred transactions can read the same due
 row and both return it as claimed.
 
-Poll/cancel claim transactions now reserve SQLite's writer with `BEGIN IMMEDIATE`
-before reading candidates. PostgreSQL continues using `FOR UPDATE SKIP LOCKED`.
-The transaction contains only claim bookkeeping, never remote calls.
+Poll claims retain the upstream conditional UPDATE that rechecks every eligibility
+predicate after reading candidates, including cancellation and lease ownership.
+Cancel claim transactions reserve SQLite's writer with `BEGIN IMMEDIATE` before
+reading candidates. PostgreSQL continues using `FOR UPDATE SKIP LOCKED`.
+These transactions contain only claim bookkeeping, never remote calls.
 
 Each control operation verifies and extends its claim before calling the driver,
 then renews every one third of the lease duration. Each renewal has its own

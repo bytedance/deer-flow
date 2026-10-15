@@ -10,6 +10,10 @@ Alembic stamp/upgrade workers started inside `bootstrap_schema()` remain owned b
 
 On SQLite, `BEGIN IMMEDIATE` takes the database-wide write lock, so every unrelated writer (run status, thread metadata, the scheduler) waits for the transaction and fails with `database is locked` after `busy_timeout` (30s). Do slow work such as document conversion before opening a locked transaction; lock only to revalidate and publish, as `ProjectDocumentRepository.publish_under_live_lock` does. `tests/test_project_document_tools.py::TestConversionSerialization` pins this.
 
+## Unique-key upserts
+
+A repository method that creates or updates a row by a unique key must survive two first writers: both can miss the SELECT, and the later INSERT raises `IntegrityError`, a 500 for the caller. Use a dialect `on_conflict_do_update` when every key column is non-null, or retry the select-then-write after rolling back the session, as `ChannelConnectionRepository.upsert_connection` / `set_thread_id` and `FeedbackRepository.upsert` do. Feedback keeps the retry because `user_id` is nullable and a NULL key never conflicts, so ON CONFLICT would stop updating the NULL-user row.
+
 ## JSON integer filters
 
 Stored JSON integers are not bounded by the signed-64-bit filter input contract.
@@ -29,4 +33,4 @@ Recovery locks task/run pairs in task-id/run-id order and restores `run_id`, `st
 
 ## MCP control leases
 
-`McpTaskRepository` reserves the SQLite writer before poll/cancel claim SELECTs; `FOR UPDATE SKIP LOCKED` alone does not serialize SQLite readers. Renewal is one owner/token/phase/expiry-fenced UPDATE and changes only lease expiry, explicitly preserving the ORM `updated_at` column. A stale generation, expired lease, terminal task or changed cancellation phase cannot renew. Keep local draining-row exclusions before LIMIT. See [control-call leases](../../../../docs/mcp-control-leases.md).
+`McpTaskRepository` retains upstream poll claims' eligibility-fenced UPDATE after candidate selection, so an interleaved cancellation or competing claim is not overwritten. Cancel claims reserve the SQLite writer before SELECT; `FOR UPDATE SKIP LOCKED` alone does not serialize SQLite readers. Renewal is one owner/token/phase/expiry-fenced UPDATE and changes only lease expiry, explicitly preserving the ORM `updated_at` column. A stale generation, expired lease, terminal task or changed cancellation phase cannot renew. Keep local draining-row exclusions before LIMIT. See [control-call leases](../../../../docs/mcp-control-leases.md).

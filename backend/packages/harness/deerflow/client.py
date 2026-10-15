@@ -1237,13 +1237,19 @@ class DeerFlowClient:
                 if msg_id:
                     seen_messages[msg_id] = msg
 
-                # Already streamed via ``messages`` mode; only (defensively)
-                # capture usage here and skip re-synthesizing the event.
+                # Already streamed via ``messages`` mode; emit only text added
+                # before this first snapshot, plus unsent tool calls/metadata.
                 if msg_id and msg_id in streamed_ids:
                     if isinstance(msg, AIMessage):
                         _account_usage(msg_id, getattr(msg, "usage_metadata", None))
                         additional_kwargs = self._serialize_additional_kwargs(msg)
                         additional_kwargs_delta = _unsent_additional_kwargs(msg_id, additional_kwargs)
+                        text = self._extract_text(msg.content)
+                        sent_text = sent_text_by_id.get(msg_id, "")
+                        if len(text) > len(sent_text) and text.startswith(sent_text):
+                            sent_text_by_id[msg_id] = text
+                            yield self._ai_text_event(msg_id, text[len(sent_text) :], None, additional_kwargs_delta)
+                            additional_kwargs_delta = None
                         if msg_id in pending_tool_call_ids and msg.tool_calls:
                             pending_tool_call_ids.discard(msg_id)
                             yield self._ai_tool_calls_event(msg_id, msg.tool_calls, additional_kwargs_delta)

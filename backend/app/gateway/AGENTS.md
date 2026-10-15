@@ -60,7 +60,16 @@ Durable MCP notifications use internal Agent runs. Keep their trusted delivery i
 
 CORS is same-origin by default when requests enter through nginx on port 2026. Split-origin or port-forwarded browser clients must opt in with `GATEWAY_CORS_ORIGINS` (exact origins); Gateway `CORSMiddleware` and `CSRFMiddleware` both read that variable so browser CORS and auth-origin checks stay aligned. Those clients also need `CORS_EXPOSED_HEADERS` (`csrf_middleware.py`): run-creating routes return the run's id in `Content-Location`, which is not CORS-safelisted, so JS cannot read it unless it is exposed — and the LangGraph SDK resolves run metadata from that header alone, so withholding it breaks `useStream`'s `onCreated` and thread-gated actions.
 
-Browser auth sessions are owned by `app.gateway.auth.session_cookie`. Login accepts a `remember_me` form flag, but the Gateway never stores passwords. `SessionCookiePolicy` persists the `HttpOnly access_token` cookie only for HTTPS/trusted-forwarded HTTPS, direct-host localhost HTTP, or explicit operator opt-in for insecure persistence; public HTTP sandbox URLs degrade to session cookies. Session-creating handlers stamp the final `max_age` on `request.state`; CSRF cookie creation mirrors it so the double-submit pair expires together, including re-issue after password changes and OIDC callbacks. A small `HttpOnly` preference cookie preserves the remember choice across re-issues. Logout clears all auth cookies and suppresses CSRF re-issue on the logout response.
+Browser sessions belong to `app.gateway.auth.session_cookie`. Login's `remember_me`
+flag never stores passwords. `SessionCookiePolicy` persists `HttpOnly access_token`
+only for HTTPS/trusted-forwarded HTTPS, direct-host localhost HTTP, or explicit
+operator opt-in; public HTTP otherwise uses session cookies. Session creators set
+final `max_age` on `request.state`; CSRF mirrors it across login, password changes
+and OIDC callbacks. A small `HttpOnly` preference cookie preserves the choice.
+Logout clears auth cookies and suppresses CSRF re-issue.
+
+OIDC redirects retain existing endpoint query bytes (RFC 6749 section 3.1).
+`tests/test_oidc_auth.py` pins query, state-cookie, nonce and PKCE agreement.
 
 Personal Access Tokens (`app.gateway.auth.pat`, `Authorization: Bearer dfp_...`) run as their owning user: an invalid Bearer is a hard 401 with no cookie fallback, which keeps `CSRFMiddleware`'s Bearer skip safe (origin checks still run). Scopes narrow within the allowlisted threads/runs/projects routes (including `POST /api/threads/{id}/move`); every other authenticated route 403s PAT callers (admin included). PAT management and `/change-password` require session auth; only SHA-256 digests are stored (`0017`).
 
@@ -230,7 +239,7 @@ failure policy rather than exposing the unfiltered user-scoped catalog.
 
 Cap edit reads at `MAX_EDITABLE_ARTIFACT_BYTES + 1` despite stale `lstat`.
 
-### Route and skill-listing authorization
+### Route and skill authorization
 
 `authz.authorize_model_use` shares the `model:use` decision between model details
 and follow-up suggestions, including the factory's first configured model when
@@ -238,10 +247,14 @@ the caller omits `model_name`. Suggestions check admission before their
 best-effort LLM error handler: explicit denies return 403 without invoking the
 model, while provider failures honor `authorization.fail_closed`.
 
-`authz.py::resolve_route_permissions()` is shared by HTTP, decorator-only auth, and Live Browser WebSocket admission. It evaluates full `resource:action` route targets; provider errors follow `authorization.fail_closed`, while disabled authorization preserves the legacy permission set. Owner/admin checks stay separate. Live requires `threads:write` with `is_internal=False` after login/Origin checks but before acceptance or session acquisition; denial closes 4403 and unexpected setup errors close 4501. Admission is connection-scoped. On disconnect, Live drains owned `stop_screencast()` cleanup across cancellation before releasing the session lease, so cancellation cannot strand a manager pin and consume browser-session capacity. Tests: `test_authorization_route_permissions.py`, `test_browser_readonly_security.py`, `test_auth.py`, `test_auth_middleware.py`.
+`authz.py::resolve_route_permissions()` is shared by HTTP, decorator-only auth, and Live Browser WebSocket admission. It evaluates full `resource:action` targets; provider errors follow `authorization.fail_closed`, while disabled authorization preserves legacy permissions. Owner/admin checks stay separate. Live requires `threads:write` with `is_internal=False` after login/Origin checks; denial closes 4403 and setup errors close 4501. Admission is connection-scoped. On disconnect, Live drains owned `stop_screencast()` cleanup before releasing the session lease. Tests: `test_authorization_route_permissions.py`, `test_browser_readonly_security.py`, `test_auth.py`, `test_auth_middleware.py`.
 
 Skill listing authorization mirrors the models pattern: `routers/skills.py` routes resolve `(provider, principal)` through `authz.py::resolve_skill_authorization()` — a thin sibling of `resolve_model_authorization`, both delegating to the shared `_resolve_route_scoped_authorization` core — and the shared `_filter_visible_skills` helper filters the user-scoped catalog (public + caller's custom skills) through `filter_resources(principal, "skill", ...)` by name. Three user-facing surfaces apply it: `GET /api/skills` (the frontend skill list / slash-command autocomplete), `GET /api/skills/custom`, and `GET /api/skills/{name}` — the detail endpoint returns the standard 404 for an invisible skill so it cannot become an existence oracle the filtered list closed (`get_model`'s 403 is an execution decision via `authorize("model", "use")`, which has no skills equivalent in this layer). Anonymous callers are unfiltered (mirroring `list_models`), and provider resolution/decision errors follow `authorization.fail_closed` (fail-closed → empty listing / 404, fail-open → full listing). Skill management endpoints (`install`/`upload`/`reload`/custom-skill CRUD) stay `require_admin_user`-gated, and runtime activation authorization is a separate layer. The built-in RBAC provider maps this to the per-role `skills` policy key. Tests: `tests/test_skills_listing_authorization.py`.
 
 Batch workers pin `app.state.extensions`; never persist snapshots.
 
-Personal MCP uses owner-only files/calls; platform MCP stays shared.
+Personal MCP is owner-only; platform MCP shared.
+
+### Web model provider presets
+
+Managed model routes expose provider metadata; routing stays server-owned. Align validation, probing, storage, keys, and revisions.

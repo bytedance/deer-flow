@@ -19,7 +19,7 @@ export default async function PublicShowcaseLayout({
 
   return (
     <I18nProvider initialLocale={locale}>
-      <AuthProvider initialUser={null}>
+      <AuthProvider initialUser={null} initialAuthUnknown>
         <QueryClientProvider>
           <SidebarProvider className="h-screen" defaultOpen={false}>
             <SidebarInset className="min-w-0">

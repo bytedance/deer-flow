@@ -943,7 +943,7 @@ class McpTaskService:
             if snapshot.status not in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED):
                 raise McpTaskProtocolError("MCP task cancellation must return a terminal status")
             _require_control_lease()
-            await self._repository.apply_cancel_snapshot(
+            applied = await self._repository.apply_cancel_snapshot(
                 record["id"],
                 lease_owner=self._lease_owner,
                 lease_token=record["lease_token"],
@@ -956,6 +956,11 @@ class McpTaskService:
                 input_required=snapshot.input_required,
                 completed_at=datetime.now(UTC),
             )
+            if not applied:
+                logger.info(
+                    "Discarded MCP task cancel result after lease ownership changed or expired (task_id=%s)",
+                    record.get("id"),
+                )
         except Exception as exc:  # noqa: BLE001 - remote cancellation is retryable
             _require_control_lease()
             attempts = max(0, int(record.get("cancel_attempt_count") or 1) - 1)

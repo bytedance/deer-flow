@@ -1,5 +1,8 @@
 # Conversation bookmarks — independent plugin example
 
+For the shared edit → test → packaging check → install workflow, see the
+[existing-example guide](../README.md).
+
 A Pi-inspired example of a complete feature in one package: save the last visible
 assistant answer from a conversation menu, then search, rename, read or delete
 bookmarks in its own **My bookmarks** page, reached from the workspace sidebar.

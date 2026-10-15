@@ -97,6 +97,41 @@ async def read_task(repo):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reclaimed", [False, True])
+async def test_cancel_snapshot_discard_is_logged_without_changing_peer_or_retry_state(task_repo, monkeypatch, caplog, reclaimed):
+    repo = task_repo
+    await repo.request_cancel("task-1", user_id="user-1", thread_id="thread-1", thread_incarnation=None, requested_at=Clock.current)
+    apply = repo.apply_cancel_snapshot
+    peer = None
+
+    async def apply_after_ownership_check(*args, **kwargs):
+        nonlocal peer
+        if reclaimed:
+            # Pause at the persistence boundary after _require_control_lease(),
+            # then let another worker reclaim before the real fenced UPDATE.
+            Clock.current += timedelta(seconds=6)
+            await repo.claim_cancel_requests(now=Clock.current, lease_owner="peer", lease_seconds=5, limit=1)
+            peer = await read_task(repo)
+        return await apply(*args, **kwargs)
+
+    monkeypatch.setattr(repo, "apply_cancel_snapshot", apply_after_ownership_check)
+    driver = SlowDriver()
+    driver.finish.set()
+    with caplog.at_level("INFO", logger=service_module.__name__):
+        await make_service(repo, driver)._run_cancellations(now=Clock.current)
+
+    stored = await read_task(repo)
+    messages = [record.getMessage() for record in caplog.records if "Discarded MCP task cancel result" in record.getMessage()]
+    if reclaimed:
+        assert peer is not None and peer["lease_owner"] == "peer"
+        assert stored == peer, "discarding the old snapshot must not mutate or retry the peer's claim"
+        assert len(messages) == 1 and "task_id=task-1" in messages[0]
+    else:
+        assert stored["status"] == "cancelled"
+        assert messages == [], "an applied cancellation must not be reported as discarded"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("phase,expected", [("poll", "completed"), ("cancel", "cancelled")])
 async def test_slow_control_call_keeps_claim_and_persists_terminal_result(task_repo, phase, expected):
     repo = task_repo
@@ -147,8 +182,8 @@ async def test_sqlite_claims_have_one_winner_when_reads_overlap(task_repo, monke
     try:
         await asyncio.wait_for(read.wait(), timeout=3)
         second = asyncio.create_task(claim(now=Clock.current, lease_owner="second", lease_seconds=5, limit=1))
-        # On SQLite a serialized writer waits here; the old deferred SELECT
-        # can commit its competing claim while the first read is paused.
+        # Let the competitor attempt its claim while the first read is paused.
+        # Serialized cancel claims and fenced poll UPDATEs must each yield one winner.
         await asyncio.wait({second}, timeout=0.2)
         resume.set()
         a, b = await asyncio.wait_for(asyncio.gather(first, second), timeout=3)

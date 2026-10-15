@@ -80,6 +80,49 @@ same database; it cannot dispatch through its actions or middleware.
 A new authenticated native mention can also reconnect its team. Existing queued
 jobs then continue under that caller's current delegated capability.
 
+## Find earlier team evidence
+
+Members have three read-only tools in addition to the short `read_team_context`:
+
+- `read_team_history`: page through retained shared messages, newest first.
+  Optional `member_id`, `job_id` and literal case-insensitive `query` filters
+  apply before pagination. The shared record retains at most 100 messages.
+- `search_team_results`: find finished requests by the same filters, searching
+  both task text and the stored answer. Results follow newest-first request
+  creation order and include completed, failed and cancelled requests; result
+  receipts are excluded to avoid listing a delivery as another member task.
+- `read_team_result`: read one request or receipt by `job_id`. It returns member,
+  requester, status, parent task, timestamps, and `conversation` thread/run IDs,
+  with a short request excerpt and the retained answer. Source IDs are references;
+  the host's ordinary conversation permissions remain authoritative.
+
+For example, a reviewer can search `{"team_id":"...","query":"release evidence"}`
+with `search_team_results`, then pass a returned `job_id` to `read_team_result`.
+The result remains available after leaving the recent eight-message context or
+the shared record, provided its bounded answer was saved in the task ledger.
+Reads work after service restart without reconnecting or starting Agent runs.
+Only the owning user's current member conversations may call these tools.
+
+Pages default to eight records and accept `limit` from 1 to 20. Follow
+`next_cursor` with the same tool and filters; page size may change. Cursors anchor
+to record identity, so newer arrivals do not shift an existing page. Pages are
+live, not immutable snapshots: newly completed older requests may appear on later
+result pages. If an anchor leaves retained history, `cursor_expired=true` returns
+an empty page; restart the query explicitly. Changed filters reject the cursor.
+
+Each response is limited to 24,000 UTF-8 JSON bytes, including metadata and
+escaping, so a page may contain fewer than `limit` records. Search summaries have
+500-byte request/result excerpts; history text and individual answers have a
+6,000-byte limit. `truncated=true` marks shortened text. New answers also preserve
+whether the original collected answer was truncated; legacy answers report
+`result.truncated=null` when that provenance is unknown. `result.available=false`
+distinguishes unfinished work, cancellation without an answer, and a legacy
+answer no longer retained. Inspect the source conversation for further evidence.
+Cancelled requests have no available answer at either cancellation timing;
+their cancellation notices remain in shared history.
+These tools expose retained task data, not hidden reasoning, execution inputs,
+approval responses, attachment bytes or an unbounded transcript archive.
+
 Deleting a finished team removes its plugin records, not its Agent conversations.
 Cancel/finish all queued, running and interrupted jobs first. Each user has their
 own teams. Sharing a host conversation does **not** share its team's private data.
@@ -90,17 +133,34 @@ own teams. Sharing a host conversation does **not** share its team's private dat
   or raw model invocation. Capabilities are process-local, never stored in SQLite.
   Gateway rechecks the user, permission ceiling, current permissions and thread
   access on every call. PAT/internal callers without this capability cannot run teams.
-- Different member conversations can run concurrently; admissions are bounded to
-  eight active plugin jobs shared by all owners in this process, without per-owner
-  quotas or fair scheduling. A busy owner can keep other owners' jobs queued.
-  The tick loop holds a shared lock while checking/admitting jobs, with a ten-second
-  timeout per job advancement; slow host calls delay create, send, cancel, resume,
-  delete and reconnect for all teams until the pass releases the lock. Per-owner
-  fairness and finer-grained locking are outside this example's current scope.
-  Each conversation is serialized, including result
-  receipts. A busy host conversation stays queued without cancelling its run.
-  Queued jobs blocked by an unanswered question or interrupt do not consume the
-  active-job budget before admission; an unknown admission outcome still does.
+- Admissions are bounded to eight active plugin jobs across this database.
+  New requests and pending answers rotate by owner, one admission attempt per
+  owner per round. The unfinished round carries over between passes, including
+  when a served owner's queue becomes empty. Unavailable queues drop out and new
+  owners join the tail. Spare capacity can be used by any queued owner; existing
+  runs are not preempted when another owner joins.
+- Each team has its own execution/control lock and background worker. Slow host
+  calls in one team do not hold another team's create, send, cancel, resume,
+  delete or reconnect operations, nor stop its background polling. Operations
+  within the same team remain serialized, with a ten-second timeout per job
+  advancement. Shutdown cancels and drains all workers before releasing the
+  database service lock.
+- Each conversation is serialized, including result receipts targeting a source
+  shared across teams. The first unfinished job retains the conversation until
+  it finishes or is cancelled. A busy host conversation stays queued without
+  cancelling its run. Unadmitted conversation waits release their temporary
+  reservation. An admitted job in `waiting_input` also releases its slot even
+  though its original input remains frozen; it still retains the conversation's
+  queue head. Pending answers wait for capacity. Other unfinished frozen jobs,
+  including unknown admission outcomes and resumes already attempted, keep their
+  slots while disconnected and after service restart. Reconnect the owning team
+  to reconcile them. Cancelling an unstarted answer does not admit it.
+- Each planning pass uses one indexed batch query for teams with unfinished jobs.
+  Completed history is not decoded. The plugin database adds a pending-job flag
+  and index, reads legacy rows completely before transactionally backfilling
+  them at initialization, and updates the flag with each team mutation. The
+  projection includes waiting-input jobs for conversation ordering even though
+  those jobs do not occupy active slots.
 - Each owner can have 20 teams. A team accepts at most 100 requests, with separate
   space for up to 100 result receipts (200 total job entries); a handoff chain
   accepts at most 12 requests. Start a new user request for another chain, or a
@@ -152,7 +212,18 @@ real ToolNode dispatch, mention middleware in the Lead middleware pipeline,
 host-compatible mention labels at the UTF-16 boundary with stable routing IDs,
 serialization, interrupts, cancellation, restart/reconnect (including incomplete
 creation), request capacity independent of receipts, ambiguous admission, and
-lifecycle locking. Host-run transport is controlled for deterministic tests.
+lifecycle locking. Event-gated scheduling regressions also cover cross-team control
+isolation, continued background cancellation, owner rotation with single-slot
+release and mixed backlogs, exhausted/cancelled queues and new owners, overlapping
+ticks, pending answers, shared-source receipts, worker
+shutdown and durable slots across restart. Storage regressions cover indexed batch
+reads, terminal-history exclusion, complete legacy reads before backfill, rollback
+and projection updates when queuing, cancelling, finishing or creating receipts.
+History tests cover filtered cursor pagination under new arrivals, expired anchors,
+output byte budgets with escaping and Unicode, old answers after record rotation
+and restart, legacy unavailable/truncation states, owner/member isolation, and
+real ToolNode retrieval followed by another peer handoff.
+Host-run transport is controlled for deterministic tests.
 Clarification tests execute the host's real tool and middleware in an Agent graph,
 including repeated questions, peer/mention/result-receipt paths, lost response
 acknowledgements and restart. Response regressions cover the 7,999/8,000/8,001-byte

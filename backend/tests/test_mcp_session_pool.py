@@ -3092,8 +3092,24 @@ async def test_mcp_tools_routed_to_source_server_with_prefix_overlap():
         response_format="content_and_artifact",
     )
 
-    extensions_config = MagicMock()
-    extensions_config.model_extra = {}
+    from deerflow.config.extensions_config import ExtensionsConfig
+
+    extensions_config = ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "web": {
+                    "type": "stdio",
+                    "command": "npx",
+                    "args": ["web"],
+                },
+                "web_scraper": {
+                    "type": "stdio",
+                    "command": "npx",
+                    "args": ["scraper"],
+                },
+            }
+        }
+    )
 
     # `web` is inserted before `web_scraper`, so a first-prefix-match mis-routes
     # `web_scraper_search` to `web`.

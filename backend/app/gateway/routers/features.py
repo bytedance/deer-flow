@@ -73,6 +73,7 @@ class ScheduledTasksFeature(BaseModel):
     running: bool = Field(..., description="Whether this process's scheduler poller is running, so tasks run on schedule and new tasks can be created")
     tool_enabled: bool = Field(..., description="Whether chats can create and manage tasks and scheduled runs can stop their own schedule")
     min_interval_seconds: int = Field(..., description="Shortest interval and earliest one-time delay, in seconds")
+    group_notifications: bool = Field(..., description="Whether scheduled tasks support explicitly selected group notifications")
 
 
 class ThreadActivityFeature(BaseModel):
@@ -143,11 +144,13 @@ def _scheduled_tasks_feature(request: Request, config: AppConfig) -> ScheduledTa
     service = getattr(state, "scheduled_task_service", None)
     running = bool(getattr(service, "is_running", False))
     scheduler = getattr(config, "scheduler", None)
+    repository_available = getattr(state, "scheduled_task_repo", None) is not None
     return ScheduledTasksFeature(
-        available=getattr(state, "scheduled_task_repo", None) is not None,
+        available=repository_available,
         running=running,
         tool_enabled=running and scheduler_tools_enabled(config),
         min_interval_seconds=int(getattr(scheduler, "min_once_delay_seconds", 60)),
+        group_notifications=repository_available and bool(getattr(getattr(config, "channel_connections", None), "enabled", False)),
     )
 
 

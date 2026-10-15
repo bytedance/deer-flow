@@ -10,6 +10,16 @@ ownership and capture cleanup. Retain the real XLSX conversion coverage.
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+Config-upgrade checkout fixtures clear inherited `DEER_FLOW_CONFIG_PATH`,
+`DEER_FLOW_PROJECT_ROOT` and `DEER_FLOW_ENV_FILE` before applying explicit test
+overrides. Exercise selector leaks through the real script with temporary
+configs; assert that the simulated developer config and its backup stay untouched.
+
+Image-context budget regressions use real PNG files through `view_image`, the
+state reducer, and both model-call wrappers. Check decoded payloads, cumulative
+base64 size and skipped file reads; keep count and byte limits independent.
+Re-view coverage must first observe omission, then restoration in model input.
+
 Local nginx path fixtures convert MSYS output through the selected Git Bash's
 PATH and decode both renderer and converter output as UTF-8. POSIX Git-layout
 stubs exercise Windows-style locale decoding and missing/failed/empty converters;
@@ -68,6 +78,10 @@ content, so native Windows cannot translate the bytes before the real read.
 Browser-asset confinement tests use `support.symlinks.symlink_or_skip` for real
 file and directory symlinks. Keep missing-file, duplicate-key, and size-limit
 checks separate so they still run when the host cannot create symlinks.
+
+Browserless reservation cleanup tests require a warning with the leftover path
+and unlink error while preserving the original publication exception, including
+interruption. Successful cleanup stays quiet.
 
 `blocking_io/test_web_tool_url_validation.py` resolves a synthetic `.invalid`
 hostname to loopback by patching `_socket.getaddrinfo`, below the real
@@ -193,6 +207,10 @@ tests never need credentials or network access.
 
 ## MCP claim fencing
 
+Notification recovery tests advance to the persisted `next_notification_at` after
+dispatch. It records completion time; a fixed scan-time offset can query before
+the notification is due on a slower runner. Preserve delivery and counter assertions.
+
 `test_mcp_task_repository.py` covers same-worker reclaim during an in-flight
 release, poll/cancel snapshot, or notification completion. Use explicit events
 to pause the old operation at the persistence boundary, reclaim via the real
@@ -274,3 +292,7 @@ Writable-directory cases remain portable.
 of an existing entry on failure. A cleanup failure must preserve the original
 publish exception, including interruption. Import the scanner during fixture
 setup, after the autouse fixtures initialize runtime, to avoid the package cycle.
+
+### Web model provider presets
+
+`test_managed_provider_presets.py` covers encrypted compatibility, auto IDs, key switching, snapshot isolation and native/compatible protocols. Its HTTP double is below actual LangChain/vendor SDK serialization; do not replace these adapters with successful stubs. `test_managed_presets_live.py` requires explicit opt-in and vendor credentials, and remains skipped in CI.
