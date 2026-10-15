@@ -629,3 +629,19 @@ loaded image/CSS/JSON without changing sandbox flags. This is a transport
 prototype, not production HTML integration or Gateway authorization proof.
 Keep allow-same-origin absent, preserve native Cookie policy, and implement
 remaining HTML resource delivery through the captured parent REST client.
+
+
+The parent HTML byte boundary is core/artifacts/html-resource-reader.ts. Create
+one reader per report document using its native source URL and captured
+WorkspaceLifetime scope/rest. It snapshots source/space/client, restricts byte
+requests to that thread's configured-Gateway artifact route, and owns GET/no-store
+whole ArrayBuffer decoding. HTTP status/MIME are retained without forwarding
+response headers or credentials. Inspect structural path normalization without
+rewriting the actual encoded filename. A read signal cancels only that read;
+dispose cancels the report reader, not other reports or background agent work.
+Scope retirement rejects held decoders before byte publication. This is source
+identity binding, not an atomic multi-file snapshot. It is not yet connected to
+the iframe renderer: child-owned byte delivery, document/channel validation,
+nested CSS/local scripts/modules/dynamic requests and disposal still require
+implementation and actual browser acceptance. Keep the sandbox/Cookie policy
+and runtime activation gate unchanged.

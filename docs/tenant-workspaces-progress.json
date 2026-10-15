@@ -4230,5 +4230,220 @@
       "Main shell capability/selector and actual Next/Gateway/browser two-tab, standalone/download/cookie/principal acceptance; remaining UI stores/title/focus/sidecar faults and live browser WSS/navigation.",
       "M4-M11 and physical isolation/revocation/migration/restore/business acceptance remain. All parent gates stay unchecked and runtime activation false."
     ]
+  },
+  "frontend_html_resource_reader": {
+    "status": "partial M3; parent HTML resource byte-read boundary only, not connected to the iframe renderer",
+    "base_commit": "2589295f",
+    "job": "deerflow-tenant-frontend",
+    "main_red": {
+      "build": 90,
+      "result": "FAILURE",
+      "archive_sha256": "f07972e0ed0700eac9a0aa816465da69495f273848eec7445bce519626a9eb43",
+      "reason": "New required reader module was absent; suite import failed, zero tests executed. This is a missing-feature build RED, not an observed network/auth failure. Earlier actual Chromium native-cookie failures remain separate evidence."
+    },
+    "main_green": {
+      "build": 91,
+      "result": "SUCCESS",
+      "archive_sha256": "701b07b6905ee737f7d0b12c786263e59a57c8fad869b36585119e1d10764592",
+      "tests_passed": 14,
+      "new_cases": 1,
+      "existing_regressions": 13,
+      "files": 2
+    },
+    "boundary_green": {
+      "build": 92,
+      "result": "SUCCESS",
+      "archive_sha256": "11c70e4a038b544f17f610b23f214fcf4889f681b1b647b3c4349b847e243f20",
+      "tests_passed": 16,
+      "new_cases": 3,
+      "existing_regressions": 13,
+      "files": 2
+    },
+    "normalization_red": {
+      "build": 93,
+      "result": "FAILURE",
+      "archive_sha256": "111c45b2c3c6aa041f2a014645f3d5ed8f64dca92d0a9623187e38bb45872148",
+      "tests_passed": 2,
+      "tests_failed": 1,
+      "reason": "Extend the same destination-refusal case with a double-encoded structural path: literal prefix checking accepted a URL whose decoded path can leave the thread file route. This is a client normalization refusal test, not a demonstrated live Nginx exploit. The normal main, safe literal-percent filename and retirement case passed."
+    },
+    "intermediate_type_failure": {
+      "build": 94,
+      "result": "FAILURE",
+      "tests_passed": 28,
+      "archive_sha256": "0f7302507675cd739d9cf7ebbb0b1d1716bb4d3e8fffc54d99891a9f7ffe6d93",
+      "reason": "Behavior, formatting and target lint passed. Early tsc rejected a test afterEach implicitly returning RstestUtilities (TS2322); use an explicit void cleanup body. Production reader and URL helper were unchanged."
+    },
+    "green": {
+      "build": 95,
+      "result": "SUCCESS",
+      "archive_sha256": "d95a0035cb09940e3ffa568ba5bf54ac267e751e93b744a97fa97d2f714c984e",
+      "tests_passed": 28,
+      "new_cases": 3,
+      "existing_regressions": 25,
+      "files": 4,
+      "checks": [
+        "behavior tests",
+        "three-file Prettier",
+        "target ESLint --max-warnings 0",
+        "early full tsc --noEmit",
+        "required full pnpm check"
+      ]
+    },
+    "contract": "One reader instance per report document snapshots its native source URL and WorkspaceLifetime scope/rest. Strict resource resolution confines parent reads to the configured Gateway artifact route of that source thread; source/base/destination credentials, arbitrary APIs, external URLs, foreign threads and normalized route escapes are refused before transport. Inspect bounded structural decoding without rewriting the actual request URL, preserving safe native literal-percent filenames. Content-authored workspace selectors are replaced with the captured selector. GET/no-store/redirect-error and whole ArrayBuffer decoding use the existing fixed REST/requestArtifact boundary. Return byte buffer, canonical resource locator/fragment, MIME and HTTP status; do not expose response headers or credentials. Non-success status uses native ArtifactRequestError after body cancellation. Per-read abort affects one read; dispose retires only that report reader; captured workspace abort retires its reads. Held decoders cannot publish after retirement; unrelated reports in a still-valid workspace continue. This binds source identity, not a coherent multi-file revision snapshot.",
+    "proof_limits": "Pure Node tests execute the actual reader, strict URL helpers and createWorkspaceRESTClient/consume with HTTP-wire doubles. They prove P/T CSS/nested-image/upload bytes, header/query binding, safe filename encoding, source/client snapshot, refusal-before-send, HTTP404 and held-decoder cancellation. They do not mount React, run iframe JS, load assets in a browser, contact Gateway/Nginx/SQL/NAS or prove live JWT/principal/revocation. The reader is not yet called by the production renderer, which retains its previous native HTML behavior. No new browser diagnostic was run; earlier opaque-frame prototype results remain diagnostic only.",
+    "evidence": {
+      "frontend": [
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 13372,
+          "number": 90,
+          "result": "FAILURE",
+          "owned_containers": [],
+          "owned_networks": [],
+          "file_counts": [],
+          "passed_counts": [],
+          "test_seconds": [
+            0.386
+          ],
+          "format_passed": false,
+          "full_check_invoked": false,
+          "type_errors": [],
+          "missing_reader_module": true,
+          "normalization_target_accepted": false
+        },
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 13290,
+          "number": 91,
+          "result": "SUCCESS",
+          "owned_containers": [],
+          "owned_networks": [],
+          "file_counts": [
+            "2"
+          ],
+          "passed_counts": [
+            "14"
+          ],
+          "test_seconds": [
+            0.871
+          ],
+          "format_passed": false,
+          "full_check_invoked": false,
+          "type_errors": [],
+          "missing_reader_module": false,
+          "normalization_target_accepted": false
+        },
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 16187,
+          "number": 92,
+          "result": "SUCCESS",
+          "owned_containers": [],
+          "owned_networks": [],
+          "file_counts": [
+            "2"
+          ],
+          "passed_counts": [
+            "16"
+          ],
+          "test_seconds": [
+            0.909
+          ],
+          "format_passed": false,
+          "full_check_invoked": false,
+          "type_errors": [],
+          "missing_reader_module": false,
+          "normalization_target_accepted": false
+        },
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 13412,
+          "number": 93,
+          "result": "FAILURE",
+          "owned_containers": [],
+          "owned_networks": [],
+          "file_counts": [],
+          "passed_counts": [
+            "2"
+          ],
+          "test_seconds": [
+            0.66
+          ],
+          "format_passed": false,
+          "full_check_invoked": false,
+          "type_errors": [],
+          "missing_reader_module": false,
+          "normalization_target_accepted": true
+        },
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 172887,
+          "number": 94,
+          "result": "FAILURE",
+          "owned_containers": [],
+          "owned_networks": [],
+          "file_counts": [
+            "4"
+          ],
+          "passed_counts": [
+            "28"
+          ],
+          "test_seconds": [
+            1.92
+          ],
+          "format_passed": true,
+          "full_check_invoked": false,
+          "type_errors": [
+            "TS2322"
+          ],
+          "missing_reader_module": false,
+          "normalization_target_accepted": false
+        },
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 428199,
+          "number": 95,
+          "result": "SUCCESS",
+          "owned_containers": [],
+          "owned_networks": [],
+          "file_counts": [
+            "4"
+          ],
+          "passed_counts": [
+            "28"
+          ],
+          "test_seconds": [
+            1.9
+          ],
+          "format_passed": true,
+          "full_check_invoked": true,
+          "type_errors": [],
+          "missing_reader_module": false,
+          "normalization_target_accepted": false
+        }
+      ],
+      "formatter_probe": {
+        "containers": [],
+        "networks": []
+      },
+      "image": "sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01"
+    },
+    "source_sha256": {
+      "frontend/src/core/artifacts/html-resource-reader.ts": "c9b10154d3d09f7e2888ef3b12b45a370c797ef1cfd51dc1a9205ccceaa3ceb6",
+      "frontend/src/core/artifacts/utils.ts": "7684585b0f209d2d1bc77dbdde8d0322ac35ee30822239431a8f4edccb5a636e",
+      "frontend/tests/unit/core/artifacts/html-resource-reader.test.ts": "afd9cf0fcf8cf47fb6a326aa61e5f26da32c194dd7d595e6ed232a9b9cefeb52"
+    },
+    "remaining": [
+      "Connect the parent reader to the native artifact renderer with document/channel/source identity validation and lifecycle-fenced byte transfer; keep cookies/credentials out of the child and retain the opaque sandbox.",
+      "Implement child-owned Blob asset delivery, nested CSS and local script/module graphs, dynamic local data requests, errors/cancellation and owned resource cleanup; verify the positive rich report main in actual Chromium before required fault boundaries.",
+      "Real Next/Gateway shell/selector/two-tab/standalone/download/principal, remaining stores/title/focus/sidecar/live-browser transport and all M4-M11/physical/migration/business gates remain. Every parent gate stays unchecked, runtime activation false."
+    ]
   }
 }

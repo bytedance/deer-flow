@@ -221,6 +221,61 @@ export function resolveScopedArtifactResource(
   }
 }
 
+function staysInHTMLArtifactThread(
+  target: { url: URL; threadId: string },
+  threadId: string,
+) {
+  if (
+    target.threadId !== threadId ||
+    target.url.username ||
+    target.url.password
+  )
+    return false;
+  let path = target.url.pathname;
+  // Inspect structural decoding that an intermediary may perform. Never rewrite
+  // the sent URL: literal percent sequences in native filenames must survive.
+  for (let depth = 0; depth < 32; depth += 1) {
+    const candidate = new URL(target.url);
+    candidate.pathname = path;
+    if (nativeArtifactTarget(candidate.href)?.threadId !== threadId)
+      return false;
+    const decoded = path.replace(/%(?:25|2f|5c|2e)/gi, (value) =>
+      String.fromCharCode(Number.parseInt(value.slice(1), 16)),
+    );
+    if (decoded === path) return true;
+    path = decoded;
+  }
+  return false;
+}
+
+/** Parent HTML byte reads cannot proxy web/API URLs or another thread. */
+export function resolveHTMLArtifactResourceURL(
+  reference: string,
+  sourceURL: string,
+  workspaceId: string,
+  baseURL = sourceURL,
+): string | undefined {
+  const source = nativeArtifactTarget(sourceURL);
+  const base = nativeArtifactTarget(baseURL);
+  if (
+    !source ||
+    !base ||
+    reference.startsWith("#") ||
+    !staysInHTMLArtifactThread(source, source.threadId) ||
+    !staysInHTMLArtifactThread(base, source.threadId)
+  )
+    return undefined;
+  const resolved = resolveScopedArtifactResource(
+    reference,
+    base.url.href,
+    workspaceId,
+  );
+  const target = resolved ? nativeArtifactTarget(resolved) : null;
+  if (!target || !staysInHTMLArtifactThread(target, source.threadId))
+    return undefined;
+  return bindArtifactURL(target.url.href, workspaceId);
+}
+
 function staticDemoArtifactURL({
   filepath,
   threadId,

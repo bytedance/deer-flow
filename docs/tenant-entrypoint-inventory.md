@@ -213,3 +213,12 @@ fences cover success/error feedback and timers. 59 tests/full check, extending
 three existing integration cases without adding cases. HTTP/router/clipboard
 wires remain doubles; not OS cancellation or real backend/browser/principal/
 physical proof. Nested HTML and other M3/M4-M11 gates remain; activation closed.
+
+
+HTML parent byte-read adapter (#95 frontend): source/lifetime/client snapshot,
+same-thread native file routing, structural-normalization refusal and whole
+ArrayBuffer cancellation use existing REST authority. 28 tests/full check with
+HTTP doubles, not actual browser/proxy/backend or physical proof. The native
+iframe renderer does not yet invoke it. Document-bound channel integration,
+child-owned Blob/CSS/script/module/data delivery and actual browser/fault
+acceptance remain required before M3; runtime activation stays closed.

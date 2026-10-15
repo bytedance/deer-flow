@@ -1,6 +1,6 @@
 # 2026-10-15 暂停与恢复检查点
 
-状态更新：用户已于 2026-10-15 明确要求继续，当前已恢复；最新验证见文末 #89。下面暂停段保留为历史记录。
+状态更新：用户已于 2026-10-15 明确要求继续，当前已恢复；最新验证见文末 #95。下面暂停段保留为历史记录。
 
 用户此前要求今天到这里，保存进度并允许本地提交。此检查点是 WIP，不能声称功能验收完成；不要自动继续开发、启动构建、部署或推送。用户再次要求继续后再恢复。
 
@@ -533,3 +533,38 @@ Main shell/selector, UI stores/title/focus/sidecar faults, live browser transpor
 and M4-M11 remain open. M3 partial, every parent gate unchecked, activation
 false. No deployment, remote push, local application runtime, model call or new
 image download.
+
+
+M3 HTML parent-read foundation: frontend #90 is a missing-feature build RED
+(new reader module absent, zero tests executed), not a network failure. #91
+main GREEN first: 14 tests (one new byte main, 13 existing URL regressions).
+#92 GREEN: 16 tests after only two boundary scenarios. Extend the same refusal
+case for encoded structural paths: #93 RED (two passed, one failed) shows literal
+prefix validation accepted a path that can normalize outside the thread route.
+Inspect structural normalization without rewriting actual filenames; safe literal
+percent names remain. #94 passed behaviors/format/target lint, but early tsc rejected an implicit
+RstestUtilities return from test afterEach (TS2322). Use an explicit void body;
+production code remains unchanged. #95 SUCCESS: 28 tests (three new, 25 existing), four files,
+three-file format/target lint, early full tsc and required full pnpm check. Exact
+source/archive/image/terminal/empty resources: frontend_html_resource_reader.
+
+The new reader snapshots native source/lifetime scope/rest, reads only that
+thread's configured-Gateway files through existing GET/no-store/whole ArrayBuffer
+decoding, and returns bytes/MIME/status/locator without response credentials or
+headers. Invalid/external/API/foreign-thread and normalized escape targets are
+refused before send. Source/client mutation cannot retarget an existing reader.
+Per-read abort, report dispose and workspace abort reject held byte decoders;
+report disposal leaves other reports and the workspace alive. Native HTTP404
+status remains typed. Pure Node HTTP-wire tests do not prove real proxy/backend,
+principal revocation, browser rendering, React lifecycle or physical isolation.
+This is source identity binding, not an atomic multi-file revision snapshot.
+
+Important: this reader is not yet connected to the production iframe renderer;
+HTML resource loading is still unaccepted and retains its previous behavior.
+Next wire it through a document/source-bound channel and child-owned byte/Blob
+delivery, implementing nested CSS, local scripts/module graphs, dynamic data
+requests and disposal. Verify an actual Chromium rich-report main before needed
+fault boundaries. Keep sandbox and Cookie policy unchanged. Main shell, actual
+backend/two-tab/principal, remaining UI/live-browser and all M4-M11 gates remain.
+M3 partial, parent boxes unchecked, activation false. No deployment, remote push,
+local application runtime, model call or new image download.
