@@ -599,6 +599,48 @@ def test_connect_existing_binding_code_channels_return_command_and_persist_state
     anyio.run(repo.close)
 
 
+@pytest.mark.parametrize("provider", ["qq", "wecom"])
+def test_browser_group_names_survive_state_consumption_and_bind_two_groups(tmp_path, monkeypatch, provider):
+    import anyio
+
+    from app.channels.message_bus import MessageBus
+    from app.channels.qq import QQChannel
+    from app.channels.wecom import WeComChannel
+
+    monkeypatch.setattr(channel_connections, "_ensure_runtime_channel_ready_if_available", AsyncMock())
+    repo = anyio.run(_make_repo, tmp_path)
+    config = ChannelConnectionsConfig.model_validate({"enabled": True, provider: {"enabled": True}})
+    runtime = {"qq": {"enabled": True, "app_id": "app-1", "client_secret": "offline"}, "wecom": {"enabled": True, "bot_id": "bot-1", "bot_secret": "offline"}}
+    app = _make_app(config, repo, runtime)
+    try:
+        with TestClient(app) as client:
+            responses = [client.post(f"/api/channels/{provider}/connect", json={"group_name": name}) for name in ("Release team", "Support team")]
+        assert all(response.status_code == 200 for response in responses), [response.text for response in responses]
+
+        async def bind_groups():
+            if provider == "qq":
+                channel = QQChannel(MessageBus(), {"app_id": "app-1", "connection_repo": repo})
+                channel.send = AsyncMock()
+            else:
+                channel = WeComChannel(MessageBus(), {"connection_repo": repo})
+                channel._send_connection_reply = AsyncMock()
+            for index, response in enumerate(responses):
+                code = response.json()["code"]
+                if provider == "qq":
+                    await channel._handle_inbound({"t": "GROUP_AT_MESSAGE_CREATE", "d": {"id": f"message-{index}", "author": {"member_openid": "alice"}, "group_openid": f"group-{index}", "content": f"/connect {code}"}})
+                else:
+                    await channel._bind_connection_from_connect_code(frame={"body": {"aibotid": "bot-1", "chattype": "group", "chatid": f"wr-group-{index}"}}, user_id="alice", code=code)
+            return await repo.list_connections(str(_user().id))
+
+        rows = anyio.run(bind_groups)
+        assert len(rows) == 2
+        assert len({row["id"] for row in rows}) == 2
+        assert len({row["workspace_id"] for row in rows}) == 2
+        assert {row["workspace_name"] for row in rows} == {"Release team", "Support team"}
+    finally:
+        anyio.run(repo.close)
+
+
 def test_connect_unconfigured_runtime_channel_returns_400(tmp_path):
     import anyio
 

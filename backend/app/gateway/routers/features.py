@@ -73,7 +73,7 @@ class ScheduledTasksFeature(BaseModel):
     running: bool = Field(..., description="Whether this process's scheduler poller is running, so tasks run on schedule and new tasks can be created")
     tool_enabled: bool = Field(..., description="Whether chats can create and manage tasks and scheduled runs can stop their own schedule")
     min_interval_seconds: int = Field(..., description="Shortest interval and earliest one-time delay, in seconds")
-    group_notifications: bool = Field(..., description="Whether scheduled tasks support explicitly selected Feishu group notifications")
+    group_notifications: bool = Field(..., description="Whether scheduled tasks support explicitly selected group notifications")
 
 
 class ThreadActivityFeature(BaseModel):
