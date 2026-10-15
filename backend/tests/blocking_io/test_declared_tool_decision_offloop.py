@@ -138,6 +138,7 @@ def _executor_with_declaration(monkeypatch, declaring):
     # AuthorizationConfig; the SimpleNamespace app_config above is scoped to
     # the declaration pass, which uses the explicitly-set provider.
     monkeypatch.setattr(SubagentExecutor, "_resolve_skill_authorization", lambda self: None)
+    monkeypatch.setattr("deerflow.agents.lead_agent.agent._authorize_model_name", lambda name, **_kwargs: name)
 
     executor = SubagentExecutor(
         config=SubagentConfig(name="researcher", description="d", system_prompt="p"),

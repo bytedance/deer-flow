@@ -201,12 +201,12 @@ async def test_bound_batch_task_uses_the_explicit_app_config(monkeypatch) -> Non
         "total_items": 1,
     }
 
-    def available_names(*, app_config, allowed_subagents):
-        captured["names"] = (app_config, allowed_subagents)
+    def available_names(*, app_config, allowed_subagents, user_id=None):
+        captured["names"] = (app_config, allowed_subagents, user_id)
         return ["general-purpose"]
 
-    def subagent_config(name, *, app_config):
-        captured["config"] = (name, app_config)
+    def subagent_config(name, *, app_config, user_id=None):
+        captured["config"] = (name, app_config, user_id)
         return SubagentConfig(
             name="general-purpose",
             description="General purpose",
@@ -232,8 +232,8 @@ async def test_bound_batch_task_uses_the_explicit_app_config(monkeypatch) -> Non
         max_running_items=None,
     )
 
-    assert captured["names"] == (app_config, ["general-purpose"])
-    assert captured["config"] == ("general-purpose", app_config)
+    assert captured["names"] == (app_config, ["general-purpose"], "user-1")
+    assert captured["config"] == ("general-purpose", app_config, "user-1")
     submitter.submit.assert_awaited_once()
 
 
@@ -342,3 +342,65 @@ def test_bound_batch_tools_expose_a_sync_invocation_path(monkeypatch) -> None:
     assert message.status == "success"
     assert message.additional_kwargs["subagent_batch_id"] == "subagent-batch-explicit"
     explicit.submit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("user_id", "allowed", "succeeds"), [("alice", ["writer"], True), ("bob", ["writer"], False), ("alice", [], False)])
+async def test_batch_dispatch_serializes_only_the_owners_allowed_agent(monkeypatch, tmp_path, user_id, allowed, succeeds):
+    """Exercise real file storage, registry resolution and durable submission together."""
+    import json
+
+    from deerflow.config.paths import Paths
+    from deerflow.config.subagents_config import SubagentsAppConfig
+    from deerflow.config.tool_config import ToolConfig
+    from deerflow.persistence.agents.file import FileAgentStore
+    from deerflow.subagents import registry
+
+    store = FileAgentStore()
+    monkeypatch.setattr("deerflow.config.agents_config.get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr("deerflow.persistence.agents.get_agent_store", lambda: store)
+    monkeypatch.setattr(registry, "_managed_definitions", lambda **kwargs: [])
+    store.create(
+        "writer",
+        {"name": "writer", "description": "Alice writer", "tool_groups": ["web"], "skills": ["style-guide"], "model": "writer-model", "model_settings": {"temperature": 0.2}, "thinking_enabled": True, "reasoning_effort": "high"},
+        "You are Alice's writer.",
+        user_id="alice",
+    )
+    app_config = SimpleNamespace(
+        subagents=SubagentsAppConfig(),
+        tools=[
+            ToolConfig(name="web_search", group="web", use="deerflow.community.search:search"),
+            ToolConfig(name="bash", group="bash", use="deerflow.sandbox.tools:bash_tool"),
+        ],
+    )
+    submitter = AsyncMock()
+    submitter.submit.return_value = {"id": "batch-1", "status": "queued", "total_items": 1}
+    bound = {tool.name: tool for tool in tool_module.bind_batch_tools(submitter, app_config=app_config)}
+    runtime = _runtime()
+    runtime.context["user_id"] = user_id
+    runtime.config["metadata"]["allowed_subagents"] = allowed
+    command = await bound["batch_task"].coroutine(
+        runtime=runtime,
+        title="Write",
+        items=[BatchTaskItem(key="one", prompt="Write a report")],
+        subagent_type="writer",
+        tool_call_id="call-store",
+        max_live_items=None,
+        max_running_items=None,
+    )
+    if not succeeds:
+        assert _message(command).status == "error"
+        submitter.submit.assert_not_awaited()
+        return
+
+    request = submitter.submit.await_args.args[0]
+    restored = SubagentConfig(**json.loads(json.dumps(request.execution_spec))["subagent_config"])
+    assert request.user_id == "alice"
+    assert restored.user_soul == "You are Alice's writer."
+    assert restored.model == "writer-model"
+    assert restored.model_settings == {"temperature": 0.2}
+    assert restored.thinking_enabled is True
+    assert restored.reasoning_effort == "high"
+    assert restored.skills == ["style-guide"]
+    assert restored.tools == ["web_search"]
+    assert set(restored.disallowed_tools) == {"task", "ask_clarification", "present_files"}

@@ -248,14 +248,27 @@ def test_apply_prompt_template_threads_explicit_app_config_to_subagents_without_
     def fail_get_subagents_app_config():
         raise AssertionError("ambient get_subagents_app_config() must not be used when app_config is explicit")
 
+    resolved_descriptions = {}
+    resolve_subagents = prompt_module.get_available_subagent_descriptions
+
+    def capture_subagent_descriptions(**kwargs):
+        assert kwargs["app_config"] is explicit_config
+        descriptions = resolve_subagents(**kwargs)
+        resolved_descriptions.update(descriptions)
+        return descriptions
+
     monkeypatch.setattr("deerflow.config.get_app_config", fail_get_app_config)
     monkeypatch.setattr("deerflow.config.subagents_config.get_subagents_app_config", fail_get_subagents_app_config)
+    monkeypatch.setattr(prompt_module, "get_available_subagent_descriptions", capture_subagent_descriptions)
     monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
     monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
 
     prompt = prompt_module.apply_prompt_template(subagent_enabled=True, app_config=explicit_config)
 
-    assert "**researcher**: Research agent" in prompt
+    assert resolved_descriptions["researcher"] == "Research agent\nwith details"
+    assert "researcher" not in prompt
+    assert "Research agent" not in prompt
+    assert "accompanying subagent catalog data" in prompt
     assert "**bash**" not in prompt
 
 

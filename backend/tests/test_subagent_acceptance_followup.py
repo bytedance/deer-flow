@@ -108,7 +108,7 @@ def test_gap_summaries_bound_and_escape_both_kinds_even_after_many_failures():
 @pytest.mark.parametrize("receipts_enabled", [True, False])
 @pytest.mark.parametrize("concurrency", [1, 3])
 def test_lead_and_tool_explain_each_outcome_and_budget(monkeypatch, receipts_enabled, concurrency):
-    monkeypatch.setattr(prompt_module, "get_available_subagent_names", lambda **kwargs: ["general-purpose"])
+    monkeypatch.setattr(prompt_module, "get_available_subagent_descriptions", lambda **kwargs: {"general-purpose": "General purpose"})
     app_config = SimpleNamespace(verification=SimpleNamespace(receipts_enabled=receipts_enabled))
     section = prompt_module._build_subagent_section(concurrency, app_config=app_config)
     for text in (section, task_tool.description):

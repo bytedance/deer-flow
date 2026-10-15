@@ -1028,7 +1028,6 @@ def test_subagent_executor_resolves_skill_authorization_for_chain(monkeypatch):
     into build_subagent_runtime_middlewares, built from the executor identity."""
     import importlib
     import sys
-    from types import SimpleNamespace
 
     import deerflow.authz.skill_filter as skill_filter_module
     from deerflow.authz.skill_filter import ResolvedSkillAuthorization
@@ -1058,22 +1057,17 @@ def test_subagent_executor_resolves_skill_authorization_for_chain(monkeypatch):
         _capture_builder,
     )
 
-    executor = SubagentExecutor.__new__(SubagentExecutor)
-    executor.config = SimpleNamespace(name="sub", skills=None, max_turns=25)
-    executor.model_name = "m"
-    executor.app_config = app_config
-    executor._resolved_app_config = app_config
-    executor._available_skill_names = None
-    executor.extensions = None
-    executor.user_id = "user-123"
-    executor.trace_id = "test-trace"
-    executor.user_role = "user"
-    executor.oauth_provider = None
-    executor.oauth_id = None
-    executor.channel_user_id = None
-    executor.is_internal = False
-    executor.authz_attributes = None
-    executor.tools = []
+    from deerflow.subagents.config import SubagentConfig
+
+    monkeypatch.setattr("deerflow.agents.lead_agent.agent._authorize_model_name", lambda name, **_kwargs: name)
+    executor = SubagentExecutor(
+        config=SubagentConfig(name="sub", description="Skill authorization probe", model="gpt-4", skills=None, max_turns=25),
+        tools=[],
+        app_config=app_config,
+        user_id="user-123",
+        user_role="user",
+        trace_id="test-trace",
+    )
 
     import asyncio
 
@@ -1422,25 +1416,17 @@ def test_subagent_executor_shares_one_skill_authorization_instance(monkeypatch):
     )
     monkeypatch.setattr(executor_module, "create_chat_model", lambda **kw: object())
 
-    executor = SubagentExecutor.__new__(SubagentExecutor)
-    executor.config = SimpleNamespace(name="sub", skills=None, max_turns=25)
-    executor.model_name = "m"
-    executor.app_config = app_config
-    executor._resolved_app_config = app_config
-    executor._available_skill_names = None
-    executor._skill_authorization = None
-    executor._stop_reason_middlewares = []
-    executor.extensions = None
-    executor.trace_id = "test-trace"
-    executor.user_id = "user-123"
-    executor.trace_id = "test-trace"
-    executor.user_role = "user"
-    executor.oauth_provider = None
-    executor.oauth_id = None
-    executor.channel_user_id = None
-    executor.is_internal = False
-    executor.authz_attributes = None
-    executor.tools = []
+    from deerflow.subagents.config import SubagentConfig
+
+    monkeypatch.setattr("deerflow.agents.lead_agent.agent._authorize_model_name", lambda name, **_kwargs: name)
+    executor = SubagentExecutor(
+        config=SubagentConfig(name="sub", description="Skill authorization probe", model="gpt-4", skills=None, max_turns=25),
+        tools=[],
+        app_config=app_config,
+        user_id="user-123",
+        user_role="user",
+        trace_id="test-trace",
+    )
 
     asyncio.run(executor._load_skills())
     import asyncio

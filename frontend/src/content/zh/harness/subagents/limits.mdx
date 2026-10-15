@@ -15,8 +15,8 @@ import { Callout } from "nextra/components";
 | ------------------ | ------------------------------------------------------------------------ | ----------------------------------------------- | ------------------------------------ | -------------------------------------------------------------------------------------------------- |
 | 每次响应并发数     | 请求上下文 `max_concurrent_subagents`                                    | `subagent_runtime.max_running`（默认 3）        | 1 到 64，且不超过 `subagent_runtime.max_running` | 多余的 `task` 调用被丢弃，只记日志                                                       |
 | 每次 run 总量      | `subagents.max_total_per_run`，请求上下文 `max_total_subagents` 可临时覆盖 | 6                                               | 1 到 50                              | 多余调用被丢弃。若响应前总量已经用尽，助手消息末尾追加 `[SUBAGENT LIMIT REACHED] ...`，本 run 的 `stop_reason` 记为 `subagent_limit_capped`；某次响应只是越过上限时，仅截断并记日志 |
-| 轮次               | `subagents.max_turns`（仅内置）、`subagents.agents.<name>.max_turns`     | general-purpose 150，bash 60，自定义 50         | 大于等于 1                           | 保留部分结果并标记 `turn_capped`；没有可用文本时 `failed`                                          |
-| 超时               | `subagents.timeout_seconds`（仅内置）、`subagents.agents.<name>.timeout_seconds` | 内置 1800 秒，自定义与设置页管理 900 秒 | 大于等于 1                           | 状态 `timed_out`                                                                                   |
+| 轮次               | `subagents.max_turns`（内置与用户 Custom Agent）、`subagents.agents.<name>.max_turns`     | general-purpose 150，bash 60，自定义 50         | 大于等于 1                           | 保留部分结果并标记 `turn_capped`；没有可用文本时 `failed`                                          |
+| 超时               | `subagents.timeout_seconds`（内置与用户 Custom Agent）、`subagents.agents.<name>.timeout_seconds` | 内置与用户 Custom Agent 1800 秒，自定义与设置页管理 900 秒 | 大于等于 1                           | 状态 `timed_out`                                                                                   |
 | 轮询次数           | 由超时推导：`(timeout_seconds + 60) / 5` 次，每 5 秒一次                 | 随超时                                          |                                      | 状态 `polling_timed_out`，运行时请求取消并安排延迟清理                                             |
 | token 预算         | `subagents.token_budget`，`subagents.agents.<name>.token_budget`         | 开启；`max_tokens` 2,000,000，摘要压缩开启时 1,000,000；`warn_threshold` 0.7 | `max_tokens` 大于等于 1000 | 当前轮被截断并强制收尾，`completed` + `token_capped`                                                |
 | 循环检测           | `loop_detection`（与 Lead Agent 共用）                                   | 开启；`warn_threshold` 3，`hard_limit` 5，`window_size` 20，`tool_freq_warn` 30，`tool_freq_hard_limit` 50 |  | `completed` + `loop_capped`                                                                        |
@@ -98,7 +98,7 @@ subagents:
       max_turns: 80
 ```
 
-按 Agent 的覆盖优先于全局值。全局 `timeout_seconds` 与 `max_turns` 只作用于内置子 Agent；自定义和设置页管理的子 Agent 有自己的默认值，要改请用 `agents.<name>`。
+按 Agent 的覆盖优先于全局值。全局 `timeout_seconds` 与 `max_turns` 作用于内置子 Agent 和用户 Custom Agent；自定义和设置页管理的子 Agent 有自己的默认值，要改请用 `agents.<name>`。
 
 <Callout type="tip">
   想严格只允许一个子 Agent 同时运行，把请求上下文的 `max_concurrent_subagents`
