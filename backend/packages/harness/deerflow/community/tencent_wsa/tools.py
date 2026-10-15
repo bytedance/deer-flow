@@ -44,7 +44,11 @@ def _coerce_max_results(value: object, *, default: int = _DEFAULT_MAX_RESULTS) -
     if isinstance(value, int) and not isinstance(value, bool):
         result = value
     elif isinstance(value, str) and value.strip().isdigit():
-        result = int(value.strip())
+        try:
+            result = int(value.strip())
+        except ValueError:
+            # isdigit() includes non-decimal digits; int() also limits length.
+            result = 0
     else:
         logger.warning("Invalid Tencent Cloud WSA max_results=%r; using default %s", value, default)
         return default

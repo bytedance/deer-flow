@@ -2,10 +2,45 @@
 
 import json
 import logging
+import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected", "warns"),
+    [pytest.param("\u00b2", 5, True, id="superscript"), pytest.param("1\u00b2", 5, True, id="mixed-digits"), pytest.param("9" * 641, 5, True, id="conversion-limit"), pytest.param("\u0663", 3, False, id="decimal-unicode")],
+)
+def test_configured_digit_strings_keep_search_usable(monkeypatch, caplog, configured, expected, warns):
+    from deerflow.community.tencent_wsa import tools
+
+    requests = []
+
+    def respond(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json={"Response": {"Pages": [{"title": str(i), "url": f"https://example.com/{i}"} for i in range(10)]}})
+
+    real_client = httpx.Client
+    monkeypatch.setattr(tools, "httpx", SimpleNamespace(Client=lambda **kwargs: real_client(transport=httpx.MockTransport(respond), **kwargs), HTTPStatusError=httpx.HTTPStatusError, HTTPError=httpx.HTTPError))
+    monkeypatch.setattr(tools, "get_app_config", lambda: SimpleNamespace(get_tool_config=lambda name: SimpleNamespace(model_extra={"api_key": "test-key", "max_results": configured})))
+    caplog.set_level(logging.WARNING, logger=tools.__name__)
+    previous_limit = sys.get_int_max_str_digits()
+    try:
+        sys.set_int_max_str_digits(640)
+        result = json.loads(tools.web_search_tool.invoke({"query": "reference", "max_results": 20}))
+    finally:
+        sys.set_int_max_str_digits(previous_limit)
+
+    assert requests == [{"Query": "reference"}]
+    assert result["total_results"] == expected
+    assert len(result["results"]) == expected
+    warnings = [record for record in caplog.records if record.name == tools.__name__ and record.levelno == logging.WARNING]
+    assert len(warnings) == int(warns)
+    if warns:
+        assert "using default 5" in warnings[0].getMessage()
 
 
 @pytest.fixture(autouse=True)

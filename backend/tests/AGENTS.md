@@ -286,6 +286,12 @@ secrets, shell/Compose dotenv overrides, readable read-only secrets, and teardow
 without secret exports. `down` must not probe, read, or generate secrets.
 Writable-directory cases remain portable.
 
+## Tencent WSA configured counts
+
+`test_tencent_wsa_tools.py` exercises invalid digit strings through the real tool
+with HTTPX MockTransport. Check fallback, warning, payload, and truncation; retain
+valid Unicode decimal coverage and restore Python's integer conversion limit.
+
 ## Workspace text cache
 
 `test_scanner_text_cache_atomic.py` verifies complete publication and preservation
