@@ -19,6 +19,7 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
 ## 官网
 
 想了解更多，或者直接看**真实演示**，可以访问[**官网**](https://deerflow.tech)。
+首页精选案例已配置为免登录白名单只读演示，无需登录即可查看。
 
 ## 姐妹项目
 
@@ -34,6 +35,8 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
 
 ## InfoQuest
 
+InfoQuest 的 reader、网页搜索与图片搜索采用 30 秒 HTTP 连接/读取非活动超时。抓取配置中的 `timeout` 和 `navigation_timeout` 仍为独立的服务端参数，不控制本地 HTTP 超时。
+
 DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[InfoQuest（支持免费在线体验）](https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest)
 
 <a href="https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest" target="_blank">
@@ -46,6 +49,7 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
 
 - [🦌 DeerFlow - 2.0](#-deerflow---20)
   - [官网](#官网)
+  - [姐妹项目](#姐妹项目)
   - [字节跳动火山引擎方舟 Coding Plan](#字节跳动火山引擎方舟-coding-plan)
   - [InfoQuest](#infoquest)
   - [目录](#目录)
@@ -837,6 +841,12 @@ DeerFlow 不只是“会说它能做”，它是真的有一台自己的“电�
 ```
 
 ### Agentic Browser Control
+
+浏览器截图与 Browserless 网页截屏（captures）支持原子化完整内容发布。新创建的文件使用宿主机的常规文件权限（通常为 `0644`），覆盖已有文件时会保留已有权限，以便沙箱代码在权限允许时能够读取截图。
+
+Browserless 会通过空占位文件提前预留截屏文件名，以防并发截屏相互覆盖。如果发布失败会自动释放该占位符；若清理失败，Gateway 会记录带有路径的告警日志，并保留原始的发布错误或中断信息。
+
+浏览器依赖自动检测支持在工具配置项中以任意顺序指定 `name`、`group` 与 `use`，且兼容缩进或非缩进风格的 YAML 列表。
 
 读取页面和真正“使用”页面不是一回事。除了只读的 `web_fetch` 和 `web_capture` 工具外，DeerFlow 还提供一组可选的 agentic browser 工具，为每次对话保持一个实时浏览器会话，让 agent 真正操作页面——导航、读取可交互元素、点击、输入、提交表单，并在重度 JavaScript 站点上完成多步流程。
 
