@@ -76,6 +76,10 @@ export const zhCN: Translations = {
         description:
           "使用固定示例文档演示只读检索与结构化工具结果，不连接外部知识库。",
       },
+      knowledge: {
+        title: "知识范围选择示例",
+        description: "用示例文档演示知识库和文件范围选择、检索及来源引用。",
+      },
     },
     pageUnavailable: "扩展页面不可用",
     pageUnavailableHint: "此页面未注册，或插件已停用、未能加载。",
