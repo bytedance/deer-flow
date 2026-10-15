@@ -1287,7 +1287,7 @@ class TestChat:
         """A model wrapper can extend streamed text before the model node commits."""
         from langchain.agents import create_agent
         from langchain.agents.middleware import AgentMiddleware, ModelResponse
-        from langchain_core.language_models.fake_chat_models import FakeListChatModel
+        from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 
         class AppendTextMiddleware(AgentMiddleware):
             def wrap_model_call(self, request, handler):
@@ -1295,7 +1295,10 @@ class TestChat:
                 message = response.result[0]
                 return ModelResponse(result=[message.model_copy(update={"content": message.content + suffix})])
 
-        graph = create_agent(model=FakeListChatModel(responses=["Hello"]), middleware=[AppendTextMiddleware()], state_schema=ThreadState)
+        # A stable ID connects streamed text to the first committed snapshot;
+        # id-less responses would bypass reconciliation and mask a regression.
+        model = FakeMessagesListChatModel(responses=[AIMessage(content="Hello", id="ai-1")])
+        graph = create_agent(model=model, middleware=[AppendTextMiddleware()], state_schema=ThreadState)
         with patch.object(client, "_ensure_agent"), patch.object(client, "_agent", graph):
             assert client.chat("hi", thread_id="t-first-snapshot") == "Hello" + suffix
 
