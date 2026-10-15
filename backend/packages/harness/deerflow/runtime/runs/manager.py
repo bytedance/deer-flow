@@ -687,7 +687,7 @@ class RunManager:
             status=RunStatus.pending,
             on_disconnect=on_disconnect,
             multitask_strategy=multitask_strategy,
-            metadata=metadata or {},
+            metadata={key: value for key, value in (metadata or {}).items() if key != "deerflow_assembly_evidence"},
             kwargs=kwargs or {},
             user_id=user_id,
             created_at=now,
@@ -1282,6 +1282,23 @@ class RunManager:
         except Exception:
             logger.warning("Failed to persist model_name update for run %s", run_id, exc_info=True)
 
+    async def record_assembly_evidence(self, run_id: str, evidence: dict) -> None:
+        """Publish only host assembly evidence, once, before execution."""
+        from deerflow.runtime.assembly_evidence import EVIDENCE_KEY
+
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is None or evidence.get("run_id") != run_id or evidence.get("thread_id") != record.thread_id:
+                raise ValueError("Assembly/run binding mismatch")
+            if EVIDENCE_KEY in record.metadata:
+                if record.metadata[EVIDENCE_KEY] != evidence:
+                    raise ValueError("Run assembly evidence is immutable")
+                return
+            record.metadata = {**record.metadata, EVIDENCE_KEY: copy.deepcopy(evidence)}
+            if not await self._persist_to_store(record):
+                record.metadata.pop(EVIDENCE_KEY, None)
+                raise RuntimeError("Unable to persist assembly evidence")
+
     async def update_model_name(self, run_id: str, model_name: str | None) -> None:
         """Update the model name for a run."""
         async with self._lock:
@@ -1706,7 +1723,7 @@ class RunManager:
             on_disconnect=on_disconnect,
             operation_kind=operation_kind,
             multitask_strategy=multitask_strategy,
-            metadata=metadata or {},
+            metadata={key: value for key, value in (metadata or {}).items() if key != "deerflow_assembly_evidence"},
             kwargs=kwargs or {},
             user_id=user_id,
             created_at=now,

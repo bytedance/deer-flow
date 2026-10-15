@@ -43,7 +43,7 @@ export const enUS: Translations = {
       workflows: {
         title: "Script workflows",
         description:
-          "Run inspectable Agent workflows with bounded parallel steps, progress and cancellation. Phase 1 has no resume, human approval or hard monetary budget.",
+          "Save versioned Agent workflows, resume within the same Gateway process and review exact retained output versions. No restart replay or hard monetary budget.",
       },
       agentTeams: {
         title: "Agent teams",

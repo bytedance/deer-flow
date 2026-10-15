@@ -3340,8 +3340,12 @@ The [script workflows extension](examples/deerflow-extension-workflows/README.md
 adds inspectable JavaScript orchestration through full AgentRuns, background launch,
 bounded parallel execution, progress, retained results and cancellation. It is
 disabled by default and requires a POSIX Gateway and operator-authorized Agent
-references. Phase 1 does not support resume, human output approval, restart replay
-or a hard monetary budget. Workflow deadlines and child-observation timeouts are
+references. Versioned definitions, retained step outputs, live-process pause/resume
+and authenticated human checkpoints support staged inspection reports. Confirmation
+binds the exact retained output or captured file version (SHA-256); preview and
+downstream reads use the same immutable bytes. Each child retains host-generated
+assembly evidence for its resolved instructions, model, tools and Skills.
+Gateway restart ends resumability. There is no restart replay or hard monetary budget. Workflow deadlines and child-observation timeouts are
 reported separately from uncertain admission. Accepted launches retain their request
 identity across inspection refresh failures, with a separate inspection retry action. A runnable example, installation steps
 and QuickJS source-build prerequisites for other Python/CPU combinations are included.

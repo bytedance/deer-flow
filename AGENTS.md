@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Repository guidance source of truth; `CLAUDE.md` imports `@AGENTS.md`.
+Guidance source; `CLAUDE.md` imports `@AGENTS.md`.
 Module guides:
 
 - **[backend/AGENTS.md](backend/AGENTS.md)** — backend depth: harness/app split, agent &
@@ -84,8 +84,8 @@ compaction, or authentication. If existing hooks cannot express the feature, add
 generic hook to the extension contract plus an extension that uses it — do not
 hard-code business logic into core. Working examples:
 `examples/deerflow-extension-{example,bookmarks,agent-teams}`.
-[Script workflows guide](examples/deerflow-extension-workflows/AGENTS.md): public
-AgentRuns; POSIX, one process/store; no resume/replay or hard currency budget.
+[Workflow guide](examples/deerflow-extension-workflows/AGENTS.md): public
+AgentRuns; POSIX, one process/store; live resume/approval; no restart replay or hard currency budget.
 
 Runtime config lives at the **repo root**: copy `config.example.yaml` → `config.yaml`
 (main app config) and `extensions_config.example.json` → `extensions_config.json` (MCP

@@ -449,8 +449,8 @@ for (const locale of ["en-US", "zh-CN"]) {
     await expect(workflow).toHaveCount(1);
     await expect(workflow).toContainText(
       zh
-        ? "不支持恢复、人工审批或硬金额预算"
-        : "no resume, human approval or hard monetary budget",
+        ? "不支持重启回放或硬金额预算"
+        : "No restart replay or hard monetary budget",
     );
     await workflow
       .getByRole("button", {
