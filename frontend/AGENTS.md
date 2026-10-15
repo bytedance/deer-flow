@@ -662,3 +662,12 @@ boundaries. Local ESM graphs, XHR/dynamically-created elements, srcset, external
 base/fragment handling, broader CSS/media/error fidelity and actual backend/
 principal/two-tab acceptance remain open. M3 is partial; runtime activation stays
 closed. Do not advertise general HTML resource support from this checkpoint.
+
+
+Local module delivery is currently WIP (html-module-plan and existing resource
+plan/session/child). Babel parses import/re-export/dynamic/meta syntax; native
+import maps and child Blobs are intended to retain module execution and cycles.
+Do not treat this as verified: #101 reproduced missing relative resolution; #102
+timed out in initial browser networkidle before assertions. Current pause and
+exact next diagnostics live in docs/tenant-workspaces-resume-2026-10-16.md.
+Last complete check remains #100; full M3/general HTML acceptance stays open.

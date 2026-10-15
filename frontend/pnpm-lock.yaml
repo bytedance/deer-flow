@@ -11,6 +11,9 @@ importers:
 
   .:
     dependencies:
+      '@babel/parser':
+        specifier: 7.29.9
+        version: 7.29.9
       '@codemirror/lang-css':
         specifier: ^6.3.1
         version: 6.3.1

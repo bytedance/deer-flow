@@ -4,6 +4,8 @@ import valueParser from "postcss-value-parser";
 
 import type { createHTMLArtifactResourceReader } from "./html-resource-reader";
 
+import { planHTMLModule, type HTMLModulePlan } from "./html-module-plan";
+
 type Reader = ReturnType<typeof createHTMLArtifactResourceReader>;
 export interface HTMLResourceEdit {
   start: number;
@@ -99,8 +101,9 @@ function decodeCSSReference(value: string) {
 export interface HTMLDocumentResource {
   token: string;
   reference?: string;
-  kind: "asset" | "css";
+  kind: "asset" | "css" | "module";
   css?: HTMLCSSPlan;
+  module?: HTMLModulePlan;
   attribute?: boolean;
 }
 
@@ -143,6 +146,13 @@ export function planHTMLDocument(
     return token;
   };
   visit(document, (node) => {
+    const isModule = node.tagName === "script" && node.attrs.some((attr)=>attr.name === "type" && attr.value.trim().toLowerCase() === "module");
+    if (isModule && !node.attrs.some((attr)=>attr.name === "src")) {
+      const text=node.childNodes.map((child)=>"value" in child ? child.value : "").join("");
+      node.childNodes=[];
+      node.attrs.push({name:"src",value:tokenFor({kind:"module",module:planHTMLModule(text),attribute:true})});
+      return;
+    }
     for (const attr of node.attrs) {
       if (attr.name === "style") {
         attr.value = tokenFor({
@@ -174,7 +184,7 @@ export function planHTMLDocument(
       ) {
         attr.value = tokenFor({
           reference: attr.value,
-          kind: node.tagName === "link" ? "css" : "asset",
+          kind: isModule ? "module" : node.tagName === "link" ? "css" : "asset",
           attribute: true,
         });
       }
@@ -188,5 +198,5 @@ export function planHTMLDocument(
           });
     }
   });
-  return { html: serialize(document), resources, baseURL };
+  return { html: serialize(document), resources, baseURL,sourceURL:reader.sourceURL };
 }

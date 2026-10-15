@@ -1549,10 +1549,10 @@
   },
   "latest_checkpoint": {
     "work_package": "M3",
-    "status": "partial",
+    "status": "paused; partial M3",
     "last_verified_job": "deerflow-tenant-frontend",
     "last_verified_build": 100,
-    "next": "Finish remaining HTML resource fidelity/local module graphs, then compiled Next/actual backend and shell/selector acceptance; all M0-M11 gates remain",
+    "next": "Resume from docs/tenant-workspaces-resume-2026-10-16.md after user asks; last fully verified build remains frontend #100",
     "tenant_activation": "closed",
     "deployment": "none",
     "previous_backend_job": "deerflow-tenant-m1-postgres",
@@ -2122,11 +2122,16 @@
     ]
   },
   "user_pause_checkpoint": {
-    "date": "2026-10-15",
-    "document": "docs/tenant-workspaces-resume-2026-10-15.md",
-    "reason": "User requested stop for today, save progress and local commit only; do not automatically continue",
-    "work_package": "M3 partial; all M0-M11 parent gates remain open",
-    "state": "resumed by explicit user instruction on 2026-10-15"
+    "status": "paused at explicit user request; do not resume builds/development until requested",
+    "date": "2026-10-16",
+    "reason": "今天先到这里了，保存下进度",
+    "last_fully_verified_commit": "3fb8ed75",
+    "last_fully_verified_frontend_build": 100,
+    "work_package": "M3 HTML modules WIP",
+    "resume_document": "docs/tenant-workspaces-resume-2026-10-16.md",
+    "runtime_activation": false,
+    "deployment": "none",
+    "remote_push": "none"
   },
   "frontend_thread_actions_wip": {
     "job": "deerflow-tenant-frontend",
@@ -5369,5 +5374,144 @@
     "runtime_activation": false,
     "deployment": "none",
     "remote_push": "none"
+  },
+  "frontend_html_module_wip": {
+    "status": "WIP; module feature not verified",
+    "base_commit": "3fb8ed75",
+    "source_sha256": {
+      "frontend/package.json": "be9aa7e743c6d03f7b3053b46b6e26f158e8b3830d8b4bf27e6d2a912fb9a8c4",
+      "frontend/pnpm-lock.yaml": "8422e252d357648bf72d5d545ec7aefdcb1789e31765660acbb9a172b0be6ca8",
+      "frontend/src/core/artifacts/html-module-plan.ts": "81a5a079e140a2140f7e0c34c6c989e9d8aee064f087eef766b3ddf8015522e3",
+      "frontend/src/core/artifacts/html-resource-child.ts": "428d0bc4a414b0016ca8d054d8583934f086783d80f44dd061bdfa8bdef4f8c3",
+      "frontend/src/core/artifacts/html-resource-plan.ts": "fd5a90d6f383d5c37534a674be5727b90887c7e66299d1e9518d1b0c69323e20",
+      "frontend/src/core/artifacts/html-resource-session.ts": "df6c08ad4120eb94f090c6b3007c8b2852cca197af4ef8b80664faea5a75650f",
+      "frontend/tests/browser-fixtures/html-preview.tsx": "2ce7a6331a6c21268464cfe2cef319118542ef9ac84ad34e7499bc52ed71c932",
+      "scripts/tenant_artifact_html_bridge_probe.py": "e7ca497ab56ab8b08197affd652930b158fb2c2ea8a3e4f82ecffee50b9e5bf3"
+    },
+    "evidence": [
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 57407,
+        "number": 101,
+        "result": "FAILURE",
+        "tests_passed": [
+          "16"
+        ],
+        "full_check_invoked": false,
+        "browser": {
+          "status": "main_failed",
+          "browser_version": "149.0.7827.55",
+          "rows": [
+            {
+              "imageWidth": 1,
+              "color": "rgb(12, 34, 56)",
+              "background": "url(\"blob:null/8a41ebcb-5762-4671-b5b3-282b5d4a7f53\")",
+              "script": "script:11111111-1111-1111-1111-111111111111",
+              "data": "11111111-1111-1111-1111-111111111111:1",
+              "isolated": true,
+              "external": "https://example.test/source",
+              "workspace": "11111111-1111-1111-1111-111111111111",
+              "parent_control_width": 1,
+              "modules": {
+                "main": "waiting",
+                "inline": "waiting",
+                "literal": "waiting",
+                "meta": "waiting",
+                "dynamic": "waiting"
+              },
+              "refreshed": true
+            },
+            {
+              "imageWidth": 1,
+              "color": "rgb(12, 34, 56)",
+              "background": "url(\"blob:null/bdd4fd19-e48e-48cb-8888-77b55d5973b3\")",
+              "script": "script:22222222-2222-2222-2222-222222222222",
+              "data": "22222222-2222-2222-2222-222222222222:1",
+              "isolated": true,
+              "external": "https://example.test/source",
+              "workspace": "22222222-2222-2222-2222-222222222222",
+              "parent_control_width": 1,
+              "modules": {
+                "main": "waiting",
+                "inline": "waiting",
+                "literal": "waiting",
+                "meta": "waiting",
+                "dynamic": "waiting"
+              },
+              "refreshed": true
+            }
+          ],
+          "boundaries": {
+            "read_only_thread_route": true,
+            "retired_bootstrap_revoked": true,
+            "held_transport_aborted": true,
+            "new_document_survives": true
+          },
+          "forbidden_hits": [],
+          "errors": [
+            "Failed to resolve module specifier \"./bridge.js\". Invalid relative url or base scheme isn't hierarchical.",
+            "Failed to resolve module specifier \"./modules/value.js\". Invalid relative url or base scheme isn't hierarchical.",
+            "Failed to resolve module specifier \"./bridge.js\". Invalid relative url or base scheme isn't hierarchical.",
+            "Failed to resolve module specifier \"./modules/value.js\". Invalid relative url or base scheme isn't hierarchical.",
+            "Failed to resolve module specifier \"./bridge.js\". Invalid relative url or base scheme isn't hierarchical.",
+            "Failed to resolve module specifier \"./modules/value.js\". Invalid relative url or base scheme isn't hierarchical."
+          ],
+          "failure": null,
+          "scope": "actual native React ArtifactFilePreview/Auth/Workspace/REST against cookie/scope HTTP fixtures and navigation/env build doubles; not Next/Gateway/SQL acceptance",
+          "network": "none",
+          "models_called": false,
+          "native_source_sha256": "0eee3ee8f64c3a2fc3dadeff3de28fe7139dfe759127454c59d61ef54585384f",
+          "module_sha256": "0cd0539de941ce8ab38e5879142c5fb783c9d9ff3b4608524225cb0310180aac",
+          "images": {
+            "compiler": "sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01",
+            "browser": "sha256:52ce23272ed5c945389367eb92f97fdd6754aa93d1c369bb01d7a44d45c5f47e"
+          },
+          "request_observation_count": 26
+        },
+        "browser_log_tail": "",
+        "browser_exit": "1",
+        "archive_sha256": "3c4f04067325411ea87916b4cec210ca70c4495bd39332dd46db90b76d0e0cac",
+        "owned_resources": {
+          "containers": [],
+          "networks": []
+        },
+        "artifacts": {
+          "log": "101/artifact/m3-html-module-main-red.log",
+          "browser": "same prefix with -html.json/-html.log/-html.exit"
+        }
+      },
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 69073,
+        "number": 102,
+        "result": "FAILURE",
+        "tests_passed": [
+          "16"
+        ],
+        "full_check_invoked": false,
+        "browser": null,
+        "browser_log_tail": "Traceback (most recent call last):\n  File \"/data/jenkins-agent/deerflow/tenant-frontend/deerflow-tenant-frontend-102-html-probe.py\", line 256, in <module>\n    main()\n  File \"/data/jenkins-agent/deerflow/tenant-frontend/deerflow-tenant-frontend-102-html-probe.py\", line 225, in main\n    raise RuntimeError(run.stderr[-2500:])\nRuntimeError: Traceback (most recent call last):\n  File \"<stdin>\", line 108, in <module>\n  File \"/usr/local/lib/python3.12/asyncio/runners.py\", line 195, in run\n    return runner.run(main)\n           ^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.12/asyncio/runners.py\", line 118, in run\n    return self._loop.run_until_complete(task)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.12/asyncio/base_events.py\", line 691, in run_until_complete\n    return future.result()\n           ^^^^^^^^^^^^^^^\n  File \"<stdin>\", line 68, in main\n  File \"/app/backend/.venv/lib/python3.12/site-packages/playwright/async_api/_generated.py\", line 9865, in wait_for_load_state\n    await self._impl_obj.wait_for_load_state(\n  File \"/app/backend/.venv/lib/python3.12/site-packages/playwright/_impl/_page.py\", line 580, in wait_for_load_state\n    return await self._main_frame.wait_for_load_state(**locals_to_params(locals()))\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/app/backend/.venv/lib/python3.12/site-packages/playwright/_impl/_frame.py\", line 298, in wait_for_load_state\n    return await self._wait_for_load_state_impl(state, timeout)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/app/backend/.venv/lib/python3.12/site-packages/playwright/_impl/_frame.py\", line 326, in _wait_for_load_state_impl\n    await waiter.result()\nplaywright._impl._errors.TimeoutError: Timeout 30000ms exceeded.\n\n",
+        "browser_exit": "1",
+        "archive_sha256": "9586533bf2d22e1613251c83acb7c07083a34447453c6ff155d4313e83abe1b5",
+        "owned_resources": {
+          "containers": [],
+          "networks": []
+        }
+      }
+    ],
+    "implemented_but_unaccepted": [
+      "Babel syntax-based static import/re-export, dynamic import and import.meta plans",
+      "Native import-map IDs and child-owned module Blobs for module graphs/cycles; inline modules use the same graph",
+      "Same-thread parent resource reader remains authority; graph/module cleanup follows existing document retirement"
+    ],
+    "remaining": [
+      "Investigate #102 browser initial networkidle timeout; collect page errors and outstanding resource/module requests before that wait fails. No browser main assertions were reached and no diagnostic JSON was emitted; do not treat this as passing or blindly extend timeouts.",
+      "After root-cause fix, pass the same P/T static/cycle/re-export/inline/literal/computed-dynamic/import.meta main first, then only necessary module refusal/retirement boundaries.",
+      "Run cloud formatting/target lint/full typecheck and required pnpm check before claiming acceptance. WIP sources are not formatted or fully checked.",
+      "Complete remaining HTML/base/fragment/CSS/import-map/dynamic media fidelity, compiled Next/backend/two-tab/shell and all M4-M11 gates."
+    ],
+    "runtime_activation": false
   }
 }

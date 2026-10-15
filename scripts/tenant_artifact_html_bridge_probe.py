@@ -59,6 +59,18 @@ class Handler(BaseHTTPRequestHandler):
    if u.path.endswith("/css/main.css"):return self.reply(200,b'@import "./theme.css";body{color:rgb(12,34,56)}',"text/css;charset=utf-8")
    if u.path.endswith("/css/theme.css"):return self.reply(200,b'.box{background-image:url("../img/tile.png");height:24px;width:24px}',"text/css;charset=utf-8")
    if u.path.endswith("/script.js"):return self.reply(200,('document.getElementById("script").textContent="script:'+ws+'";').encode(),"text/javascript;charset=utf-8")
+   module_files={
+    "/modules/value.js":'window.valueLoads=(window.valueLoads||0)+1;export const label='+json.dumps(ws)+';',
+    "/modules/bridge.js":'export {label} from "./value.js";',
+    "/modules/cycle-a.js":'import {b} from "./cycle-b.js";export function a(){return "a";}export function cycle(){return b();}',
+    "/modules/cycle-b.js":'import {a} from "./cycle-a.js";export function b(){return a()+"b";}',
+    "/modules/main.js":'import {label} from "./bridge.js";import {cycle} from "./cycle-a.js";document.getElementById("module").textContent="module:"+label+":"+cycle();const response=await fetch(new URL("./module-data.json",import.meta.url));document.getElementById("module-meta").textContent=(await response.json()).workspace;document.getElementById("dynamic").addEventListener("click",async()=>{const path="./dynamic.js";const module=await import(path);document.getElementById("dynamic-module").textContent=module.value+":"+window.dynamicLoads+":"+window.valueLoads;});window.moduleReady=true;',
+    "/modules/literal.js":'import {label} from "./value.js";export const literal="literal:"+label;',
+    "/modules/dynamic.js":'import {label} from "./value.js";window.dynamicLoads=(window.dynamicLoads||0)+1;export const value=await Promise.resolve("dynamic:"+label);'
+   }
+   for suffix,script in module_files.items():
+    if u.path.endswith(suffix):return self.reply(200,script.encode(),"text/javascript;charset=utf-8")
+   if u.path.endswith("/modules/module-data.json"):return self.reply(200,json.dumps({"workspace":ws}).encode(),"application/json")
    if u.path.endswith("/data.json"):
     if parse_qs(u.query).get("hold")==["1"]:
      held_started.set();held_release.wait(12);return self.reply(200,b'{"workspace":"retired"}',"application/json")
@@ -84,6 +96,12 @@ async def main():
       await frame.wait_for_function("window.probe && document.querySelector('#asset')?.complete && document.querySelector('#data')?.textContent!=='waiting'",timeout=15000)
       state=await frame.evaluate("({imageWidth:document.querySelector('#asset').naturalWidth,color:getComputedStyle(document.body).color,background:getComputedStyle(document.querySelector('.box')).backgroundImage,script:document.querySelector('#script').textContent,data:document.querySelector('#data').textContent,isolated:probe.isolated,external:document.querySelector('#external').getAttribute('href')})")
       state['workspace']=ws;state['parent_control_width']=1
+      try:
+       await frame.wait_for_function("window.moduleReady && document.querySelector('#literal-module').textContent!=='waiting'",timeout=5000)
+       await frame.get_by_role('button',name='Load module',exact=True).click();await frame.wait_for_function("(ws)=>document.querySelector('#dynamic-module').textContent==='dynamic:'+ws+':1:1'",arg=ws)
+       await frame.get_by_role('button',name='Load module',exact=True).click();await frame.wait_for_function("(ws)=>document.querySelector('#dynamic-module').textContent==='dynamic:'+ws+':1:1'",arg=ws)
+      except Exception:pass
+      state['modules']=await frame.evaluate("({main:document.querySelector('#module').textContent,inline:document.querySelector('#inline-module').textContent,literal:document.querySelector('#literal-module').textContent,meta:document.querySelector('#module-meta').textContent,dynamic:document.querySelector('#dynamic-module').textContent})")
       if state['data']==ws+':1':
        await frame.get_by_role('button',name='Refresh data').click();await frame.wait_for_function("(ws) => document.querySelector('#data').textContent===ws+':2'",arg=ws);state['refreshed']=True
       else:state['refreshed']=False
@@ -103,7 +121,7 @@ async def main():
      boundaries['held_transport_aborted']=any('hold=1' in url for url in failed_requests)
      boundaries['new_document_survives']=await frame.locator('#data').inner_text()==T+':3'
     except Exception as e:failure=str(e);errors.append((await page.locator('#root').inner_text())[:1000])
-    passed=len(rows)==2 and len(boundaries)==4 and all(boundaries.values()) and all(x['imageWidth']==1 and x['color']=='rgb(12, 34, 56)' and x['background'].startswith('url("blob:') and x['script']=='script:'+x['workspace'] and x['data']==x['workspace']+':1' and x['refreshed'] and x['isolated'] and x['external']=='https://example.test/source' for x in rows)
+    passed=len(rows)==2 and len(boundaries)==4 and all(boundaries.values()) and all(x['modules']=={'main':'module:'+x['workspace']+':ab','inline':'inline:'+x['workspace'],'literal':'literal:'+x['workspace'],'meta':x['workspace'],'dynamic':'dynamic:'+x['workspace']+':1:1'} and x['imageWidth']==1 and x['color']=='rgb(12, 34, 56)' and x['background'].startswith('url("blob:') and x['script']=='script:'+x['workspace'] and x['data']==x['workspace']+':1' and x['refreshed'] and x['isolated'] and x['external']=='https://example.test/source' for x in rows)
     print(json.dumps({"status":"main_passed" if passed else "main_failed","browser_version":browser.version,"rows":rows,"boundaries":boundaries,"forbidden_hits":forbidden_hits,"requests":requests,"errors":errors,"failure":failure,"scope":"actual native React ArtifactFilePreview/Auth/Workspace/REST against cookie/scope HTTP fixtures and navigation/env build doubles; not Next/Gateway/SQL acceptance","network":"none","models_called":False}),flush=True)
     return passed
    finally:await browser.close()

@@ -1,5 +1,6 @@
 import type { WorkspaceLifetime } from "@/core/workspaces/session";
 
+import { planHTMLModule } from "./html-module-plan";
 import { HTML_ARTIFACT_CHILD } from "./html-resource-child";
 import { planHTMLDocument, planHTMLStylesheet } from "./html-resource-plan";
 import { createHTMLArtifactResourceReader } from "./html-resource-reader";
@@ -101,7 +102,7 @@ export function createHTMLArtifactResourceSession({
         !("baseURL" in data) ||
         typeof data.baseURL !== "string" ||
         !("kind" in data) ||
-        (data.kind !== "css" && data.kind !== "asset")
+        (data.kind !== "css" && data.kind !== "asset" && data.kind !== "module")
       )
         return;
       const controller = new AbortController();
@@ -118,7 +119,8 @@ export function createHTMLArtifactResourceSession({
             kind === "css"
               ? planHTMLStylesheet(new TextDecoder().decode(resource.bytes))
               : undefined;
-          port?.postMessage({ type: "resource", id, ...resource, css }, [
+          const module = kind === "module" ? planHTMLModule(new TextDecoder().decode(resource.bytes)) : undefined;
+          port?.postMessage({ type: "resource", id, ...resource, css,module }, [
             resource.bytes,
           ]);
         })
