@@ -87,10 +87,9 @@ hard-code business logic into core. Working examples:
 [Workflow guide](examples/deerflow-extension-workflows/AGENTS.md): public
 AgentRuns; POSIX, one process/store; live resume/approval; no restart replay or hard currency budget.
 
-Runtime config lives at the **repo root**: copy `config.example.yaml` → `config.yaml`
-(main app config) and `extensions_config.example.json` → `extensions_config.json` (MCP
-servers + skills). Both real files are gitignored and may be edited at runtime via the
-Gateway API. Config schema and resolution order are documented in
+Root runtime configs: copy `config.example.yaml` → `config.yaml` and
+`extensions_config.example.json` → `extensions_config.json` (MCP/skills).
+Both are gitignored and Gateway-editable; schema/resolution:
 [backend/AGENTS.md](backend/AGENTS.md).
 
 Skill quality review note:
@@ -164,8 +163,6 @@ cd frontend && pnpm check     # Lint + type check (run before committing)
 cd frontend && pnpm test      # Unit tests
 ```
 
-Root `make` drives the stack; backend `make` and frontend `pnpm` drive their modules.
-
 Host pnpm calls use `scripts/pnpm.py`: native Windows tries `pnpm.cmd` before
 `pnpm`; POSIX reverses the order. Its Corepack fallback applies the same ordering
 to `corepack.cmd` and `corepack`. The runner operates from `frontend/` so
@@ -173,16 +170,9 @@ Corepack honors its pinned package-manager version.
 
 ### Prerequisites before `make dev`
 
-First-time setup (`make dev` does not generate config):
-
-```bash
-make config      # copy config.example.yaml -> config.yaml and extensions_config.example.json -> extensions_config.json (both gitignored)
-make install     # install frontend + backend deps and pre-commit hooks
-make dev         # then start everything
-```
-
-Services require `config.yaml`. Both runtime configs are API-editable and gitignored;
-never commit them.
+Run `make config`, then `make install`, then `make dev` on first setup.
+`make dev` requires existing config; both runtime configs are API-editable and
+gitignored. Never commit them.
 
 ### Run a single test
 
