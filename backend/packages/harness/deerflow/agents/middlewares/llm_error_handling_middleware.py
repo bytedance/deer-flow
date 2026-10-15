@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import re
 import threading
 import time
 from collections import deque
@@ -168,6 +169,22 @@ _REASON_RETRY_BUDGETS: dict[str, int] = {
 # Lower-cased message of the ``ValueError`` langchain_core raises when a
 # streamed response (HTTP 200) yields no generation chunk at all.
 _EMPTY_STREAM_MARKER = "no generations found in stream"
+
+# An HTTP status written into the text of an error that carries no status:
+# ``[504]`` - but not an index such as ``messages[502]``, which the bracketed
+# form's lookbehind rejects; ``HTTP 502``, ``(HTTP 502)``, ``HTTP/1.1 502``;
+# ``status 503``, ``status: 503``, ``status_code=503``, ``"status": 503``. The
+# keyword is required and must be separated from the number - by spaces or tabs
+# after ``HTTP``, and also by ``:`` or ``=`` after ``status`` - so a bare number
+# (``130504 tokens``), one on the next line or one run into the keyword
+# (``status503``) never counts. Digits are ASCII only: ``\d`` and ``int()``
+# also accept other scripts' digits. The spaces before and after ``:``/``=``
+# are separate runs, which keeps matching linear in the length of the message.
+_IN_BAND_STATUS_RE = re.compile(r"(?<![\w\]])\[([0-9]{3})\]|\bhttp(?:/[0-9](?:\.[0-9])?)?[ \t]+([0-9]{3})\b|\bstatus(?:[ _]?code)?(?:[\"']?[ \t]*[:=][ \t]*|[\"']?[ \t]+)([0-9]{3})\b")
+
+# Runs of ``_``, ``-`` and whitespace. A status-less error's busy check reads each
+# run as one space, so ``rate-limit`` and ``RATE_LIMIT_...`` match ``rate limit``.
+_SEPARATOR_RUN_RE = re.compile(r"[\s_\-]+")
 
 # Exception class names that indicate the upstream stream-chunk watchdog
 # fired because the model stalled mid-flight. These deserve a more specific
@@ -611,6 +628,13 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         lowered = detail.lower()
         error_code = _extract_error_code(exc)
         status_code = _extract_status_code(exc)
+        # A provider that has already answered ``200`` reports a later failure
+        # inside the stream; the openai SDK raises it as a bare ``APIError`` with
+        # no status code and no response. Only such status-less errors take a
+        # status from their own fields and text (``_extract_in_band_status``).
+        # As with a mid-stream ``ReadError``, a retry re-runs the whole call:
+        # tokens the failed attempt already streamed are not taken back.
+        status_less = status_code is None
 
         if isinstance(exc, EmptyModelResponseError):
             return True, "empty_response"
@@ -659,9 +683,15 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         # Same upstream-payload glitch, same retry/backoff path.
         if isinstance(exc, ValueError) and _EMPTY_STREAM_MARKER in lowered:
             return True, "transient"
+        if status_less:
+            status_code = _extract_in_band_status(exc)
+            if status_code is not None and 500 <= status_code <= 599:
+                return True, "transient"
         if status_code in _RETRIABLE_STATUS_CODES:
             return True, "transient"
         if _matches_any(lowered, _BUSY_PATTERNS):
+            return True, "busy"
+        if status_code is None and (_matches_any(_normalize_separators(detail), _BUSY_PATTERNS) or _matches_any(_normalize_separators(str(error_code)), _BUSY_PATTERNS)):
             return True, "busy"
 
         return False, "generic"
@@ -1076,6 +1106,57 @@ def _extract_status_code(exc: BaseException) -> int | None:
     response = getattr(exc, "response", None)
     status = getattr(response, "status_code", None)
     return status if isinstance(status, int) else None
+
+
+def _extract_in_band_status(exc: BaseException) -> int | None:
+    """Return the HTTP status that a status-less error carries in its contents.
+
+    Three sources, in order; the first that yields a status decides:
+    a numeric ``code`` on the error, or a numeric ``code``/``status``/
+    ``status_code`` in its body or the body's ``error`` object; an explicit
+    status in the message (``_IN_BAND_STATUS_RE``, leftmost match in 400-599);
+    and ``type == "server_error"``, which OpenAI-compatible APIs use for 5xx
+    failures (500).
+    """
+    body = getattr(exc, "body", None)
+    body = body if isinstance(body, dict) else {}
+    error = body.get("error")
+    error = error if isinstance(error, dict) else {}
+    for value in (
+        getattr(exc, "code", None),
+        body.get("code"),
+        error.get("code"),
+        body.get("status"),
+        body.get("status_code"),
+        error.get("status"),
+        error.get("status_code"),
+    ):
+        status = _as_http_status(value)
+        if status is not None:
+            return status
+    for match in _IN_BAND_STATUS_RE.finditer(_extract_error_detail(exc).lower()):
+        status = int(next(group for group in match.groups() if group))
+        if 400 <= status <= 599:
+            return status
+    for value in (getattr(exc, "type", None), body.get("type"), error.get("type")):
+        if isinstance(value, str) and value.strip().lower() == "server_error":
+            return 500
+    return None
+
+
+def _as_http_status(value: Any) -> int | None:
+    """Return ``value`` as an HTTP status if it is an int or a three-digit string in 400-599."""
+    if isinstance(value, str):
+        text = value.strip()
+        value = int(text) if len(text) == 3 and text.isascii() and text.isdigit() else None
+    if isinstance(value, int) and not isinstance(value, bool) and 400 <= value <= 599:
+        return value
+    return None
+
+
+def _normalize_separators(text: str) -> str:
+    """Lower-case ``text`` and replace each run of ``_``, ``-`` and whitespace with one space."""
+    return _SEPARATOR_RUN_RE.sub(" ", text.lower())
 
 
 def _extract_retry_after_ms(exc: BaseException) -> int | None:

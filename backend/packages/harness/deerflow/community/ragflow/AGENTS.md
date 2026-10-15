@@ -26,6 +26,9 @@ together, including delegated results and model-request history. Never shorten
 an excerpt under an existing ID. Drop entries that cannot fit, with an omission
 notice, while preserving unrelated artifact fields. This honors per-tool and
 fallback limits without exempting citation-bearing results from the budget.
+Synopsis cleanup preserves complete shared citation links (including escaped
+labels and sanitized anchors) while removing orphaned/truncated destinations,
+both before and after the synopsis head/tail split.
 
 ## Document validation
 

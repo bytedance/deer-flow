@@ -381,6 +381,7 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
 
    - Codex CLI reads `~/.codex/auth.json`
    - Codex function tools preserve explicit `strict: true` or `strict: false` in wrapped or flat dictionary definitions. Missing or null settings keep the provider default. `bind_tools` applies the same conversion to dictionaries and `BaseTool` schemas.
+   - Codex honors `tool_choice` in `bind_tools` and direct calls: `auto`, `none`, `required`, or a function name/selection. `any` and `True` mean `required`; `None` and `False` keep the provider default. Per-call choices override the bound policy. Bound choices are validated when binding; direct calls and overrides are validated before HTTP. `required` needs at least one function tool, and named selections must match a supplied function. `auto` and `none` also work without tools.
    - Completed Codex responses still return their text and tool calls when token usage is null, omitted, or empty; usage metadata remains unavailable.
    - The Codex model provider returns completed responses without waiting for the SSE connection to close. Failed or incomplete responses report the provider's error or reason; partial output is not returned as a successful answer. Non-object error details are reported as text.
    - Claude Code accepts `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_CREDENTIALS_PATH`, or `~/.claude/.credentials.json`
@@ -1377,6 +1378,8 @@ numbers use the selected interface language. New providers use the shared
 envelope; existing RAGFlow citation histories remain supported.
 Expand a completed subtask card to inspect its report's forwarded knowledge
 sources, including when reopening a saved conversation.
+Shortened mixed-provider task reports remove dangling citation fragments
+without flattening retained shared-source links.
 Existing web citations and the text-only Python `knowledge_search(query)` APIs
 remain supported. No knowledge management service or page is required.
 See [the knowledge contract guide](backend/docs/KNOWLEDGE.md).
@@ -2463,6 +2466,18 @@ the entire oversized file into memory.
 CSV and TSV artifacts open as tables in the artifact panel and in a separate window. The preview preserves text values (including leading zeros), supports an optional header row, and pages through up to 200 rows and 50 columns from the initial sample. Long or multiline cells can be opened and copied in full. Switch to source to inspect or edit the file; downloads and separate windows use the saved version.
 
 HTML artifact previews resolve relative assets from the artifact directory unless the document contains a real `<base>` element. Base-tag examples in comments or script text do not change that resolution.
+
+With authentication enabled, static resources in the same thread's artifact route
+(images, responsive images, classic scripts and CSS, including nested imports)
+are fetched by the parent and inlined without weakening the opaque iframe sandbox.
+Preparation has resource, byte, CSS-depth and time limits and reports partial
+previews. Dynamic JavaScript requests, ES module imports, nested iframes and
+navigation remain subject to sandbox restrictions; see the
+[frontend preview notes](frontend/README.md#development-notes) for the supported
+scope and limits.
+Optional resource failures, including 401 responses, keep the conversation open
+with a partial-preview notice. HTML doctypes and doctype-less rendering modes
+are preserved, and CSS references inside inline SVG styles are prepared too.
 
 Markdown report previews in the artifact panel and separate window resolve local
 images from the report's own directory and conversation. Both relative paths
