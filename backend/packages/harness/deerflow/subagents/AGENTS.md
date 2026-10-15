@@ -1,12 +1,18 @@
 ### Subagent System (`packages/harness/deerflow/subagents/`)
 
-Validated ToolMessage evidence accumulates across values frames in `SubagentResult.knowledge_sources` (100 sources, deduplicated by ID). Publish before terminal state; retain across compaction. `task` forwards reported handles with a bounded appendix and artifact. Mixed results keep native RAGFlow snapshots in `knowledge_sources`, shared evidence in `retrieval_sources`; pruning preserves the native snapshot. Scan the changed message suffix; reset on compaction/prefix replacement. Null frames must not crash capture.
+Accumulate validated ToolMessage knowledge across values frames in
+`SubagentResult.knowledge_sources`: at most 100 sources, deduplicated by evidence ID.
+Publish before terminal state; retain through compaction. Ordinary `task` forwards
+reported handles via a bounded appendix/artifact. Mixed artifacts keep native
+RAGFlow snapshots in `knowledge_sources` and shared `retrieval_sources`; pruning
+preserves native snapshots. Scan changed message suffixes; reset on compaction or
+prefix replacement, and tolerate null frames.
 
-Result-reader acceptance: SQLite and isolated PostgreSQL via TEST_POSTGRES_URI
-cover submission, completion, reopen and ToolNode continuation offline.
+Result-reader tests cover SQLite and isolated TEST_POSTGRES_URI schemas:
+submission, completion, reopen and ToolNode continuation, without paid models.
 Clean up temporary schemas.
 
-**CSV headers**: `file:<path> csv-columns:["id","name"]` uses shared file admission and authorized bounded reads. Require UTF-8-encodable decoded column names before file access. Parse only the first logical record; definite syntax errors within the header budget remain checked negatives regardless of later rows, while truncated quoting and exhausted budgets stay UNVERIFIED. Local reads and parsing share a cooperative 5-second deadline; remote transport keeps its own timeouts and parsing starts a separate 5-second deadline after the read returns. See README for exact matching and dialect.
+**CSV headers**: `file:<path> csv-columns:["id","name"]` shares authorized file admission/bounded reads. Require UTF-8-encodable decoded names before access. Parse the first logical record: definite header syntax errors are checked negatives even with later rows; truncated quoting/exhausted budgets stay UNVERIFIED. Local read/parse share a cooperative 5s deadline; remote keeps transport timeouts and starts a separate 5s parse deadline after reading. Exact matching/dialect: README.
 
 **JSON**: See README. Authorize before local metadata and reads; inaccessible paths stay UNVERIFIED.
 
@@ -27,7 +33,7 @@ deduplicate at each forwarding boundary before publishing the durable count.
 
 **Remote empty files**: GNU stat's `regular file`/`regular empty file` are regular files. Empty files pass exists/file_written, fail non-empty; reject symlinks, directories, FIFOs.
 
-**Context**: Capture after validation, before setup. Keep genuine replies, including hidden clarifications; exclude framework state/unpaired calls and mark unserializable media omitted. Classify content-block `type` by equality, never set membership: skip non-string types (including unhashable JSON) without losing surrounding history or raising TypeError. Log one warning for that skip; deliberate reasoning/signature/tool-use exclusions stay quiet.
+**Context**: Capture after validation, before setup. Keep genuine replies/hidden clarifications; exclude framework state/unpaired calls; mark unserializable media omitted. Probe block `type` by equality, never set membership. Skip non-string types, including unhashable JSON (`type: []`), with surrounding history intact and no snapshot TypeError. Log one warning per non-string block; intentional reasoning/signature/tool-use exclusions stay quiet.
 
 Native `document` snapshots neutralize reserved tags and input markers in textual
 `title`, `context`, text-source `data`, content-source text, and citation prose at
@@ -73,6 +79,8 @@ Require complete Maven or Gradle count summaries with consistent nonnegative
 counters and a non-skipped test. Failure/error counters take precedence;
 empty/all-skipped modules contribute no proof but do not veto tested modules.
 These summaries also participate in the command/output attribution guard.
+
+Cargo: complete positive siblings permit empty targets. All-empty/ignored or bare banners stay UNVERIFIED; failures win.
 
 **Events**: `task_started`, `task_running`, `task_completed`/`task_failed`/`task_timed_out`
 **Handled LLM failures**: `LLMErrorHandlingMiddleware` deliberately converts provider/model exceptions into an `AIMessage` so the graph can end cleanly, stamping `additional_kwargs.deerflow_error_fallback=true` plus error metadata. Clean graph termination does not imply subagent success: `SubagentExecutor` inspects the last assistant message at terminalization and maps a marked fallback to `SubagentStatus.FAILED`, which then emits `task_failed` and the existing structured `subagent_error`. Only the marker is authoritative — error-looking assistant prose without it remains a normal completed result, so neither the executor nor frontend parses display text as a status protocol.
