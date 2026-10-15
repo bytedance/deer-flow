@@ -1,20 +1,23 @@
 """Memory update queue with debounce mechanism.
 
-The queue collects conversation contexts and processes them after a
-per-key debounce period; multiple contexts for the same
+The queue collects normal conversation contexts and processes them after a
+per-key debounce period; multiple normal contexts for the same
 ``(thread_id, user_id, agent_name)`` key are coalesced into one update. A
 monotonic deadline caps debounce deferral at ``max_wait_seconds`` from the
 first pending arrival. One timer wakes for the earliest deadline; the single
-consumer processes only eligible items unless explicitly flushed.
+consumer processes only eligible items unless explicitly flushed. Emergency
+pre-compaction snapshots stay separate and are immediately eligible.
 
 The queue is a process-local in-memory list plus a debounce
 :class:`~threading.Timer`. Items still pending at process exit are lost
 (best-effort :meth:`MemoryUpdateQueue.flush_sync` drain softens this for
-graceful shutdown). Memory updates are best-effort: a failed or lost update is
-re-fed on the next conversation turn (the middleware passes the full
+graceful shutdown). Memory updates are best-effort: a failed or lost normal update
+is re-fed on the next conversation turn (the middleware passes the full
 conversation each cycle, and the updater's watermark does not advance on
 failure), so an in-memory queue covers the realistic graceful-deploy case
-without a persistence layer.
+without a persistence layer. Emergency snapshots cannot rely on that retry
+because compaction removes their messages; they are still in-memory only and
+can be lost on process exit or extraction failure.
 """
 
 from __future__ import annotations
@@ -66,9 +69,9 @@ class ConversationContext:
     signals: frozenset[str] = field(default_factory=frozenset)
     # Emergency (summarization) flushes bypass the updater's index watermark:
     # the subset they carry is a one-shot "extract before removal" snapshot whose
-    # own length would otherwise regress the conversation watermark. Such contexts
-    # also coexist with (do not replace) a pending normal update for the same key
-    # so a flush cannot drop a pending normal update's un-extracted tail. See
+    # own length would otherwise regress the conversation watermark. Each stays
+    # separate from other emergency snapshots and a pending normal update for the
+    # same key, so no compacted partition or un-extracted normal tail is replaced. See
     # ``_enqueue_locked``'s match-key + backpressure handling.
     bypass_watermark: bool = False
     # Monotonic scheduling times; timestamp remains wall-clock metadata.
@@ -174,18 +177,19 @@ class MemoryUpdateQueue:
         bypass_watermark: bool = False,
     ) -> ConversationContext:
         key = queue_key(thread_id, user_id, agent_name)
-        # Emergency (bypass) and normal updates coexist: the match key includes
-        # ``bypass_watermark`` so a summarization flush (bypass=True) never
-        # replaces a pending normal update for the same (thread, user, agent) --
-        # replacing it would drop the normal update's un-extracted tail, which
-        # the next turn may not re-feed if the user stops. Both are processed
-        # independently instead.
-        existing = next(
-            (c for c in self._items if queue_key(c.thread_id, c.user_id, c.agent_name) == key and c.bypass_watermark == bypass_watermark),
-            None,
-        )
+        # Only normal updates carry cumulative history and can replace an older
+        # normal update. Each emergency snapshot carries messages about to be
+        # removed by one compaction: a later snapshot may be disjoint and must
+        # not replace it. Keep emergency snapshots separate, in arrival order,
+        # from each other and from the pending normal update for this key.
+        existing = None
+        if not bypass_watermark:
+            existing = next(
+                (c for c in self._items if queue_key(c.thread_id, c.user_id, c.agent_name) == key and not c.bypass_watermark),
+                None,
+            )
         # Backpressure: once depth reaches the cap, reject NEW non-signal normal
-        # items. Same-key updates merge (do not grow depth); signal-bearing items
+        # items. Same-key normal updates merge (do not grow depth); signal-bearing items
         # and emergency (bypass) flushes are always admitted. Signals capture
         # important memories, and the emergency path captures messages about to
         # be removed by summarization -- neither can be re-fed next turn, so
