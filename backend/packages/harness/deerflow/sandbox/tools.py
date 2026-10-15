@@ -71,12 +71,18 @@ _SANDBOX_AUTHORIZATION_CHECKED: ContextVar[bool] = ContextVar(
 _ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![:\w])(?<!:/)/(?:[^\s\"'`;&|<>()]+)")
 # ``$NAME/...`` expands to a host path at runtime (``$HOME/.ssh/id_rsa``), but
 # the absolute-path regex skips a ``/`` that follows a word character, so the
-# bare-name form needs its own scan. ``${NAME}/`` and ``~/`` already surface
-# through the absolute-path regex because ``}`` and ``~`` are not word chars.
-_SHELL_VARIABLE_PATH_PATTERN = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)/[^\s\"'`;&|<>()]*")
+# bare-name form needs its own scan. Positional ``$1/etc/passwd`` slips the
+# same way, and ``bash -c`` gets no positionals, so it expands to ``/etc/passwd``.
+# ``${NAME}/``, ``~/`` and special parameters (``$@/``, ``$?/``) already surface
+# through the absolute-path regex because ``}``, ``~``, ``@`` and ``?`` are not
+# word chars.
+_SHELL_VARIABLE_PATH_PATTERN = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*|[0-9])/[^\s\"'`;&|<>()]*")
 # ``PWD`` written anywhere except as a ``$PWD`` expansion (``PWD=/``,
 # ``read PWD``, ``for PWD in``) may rebind it away from the workspace.
 _PWD_REBIND_PATTERN = re.compile(r"(?<!\$)\bPWD\b")
+# ``CDPATH`` makes a relative ``cd docs`` land outside the workspace without any
+# absolute path in the command.
+_CDPATH_PATTERN = re.compile(r"\bCDPATH\b")
 # A ``{...}`` block holding a single identifier-like placeholder (e.g. ``{id}``
 # in a REST template or ``{port}`` in an f-string). Bash brace expansion such as
 # ``{passwd,shadow}`` or ``{,.bak}`` does NOT match (commas/dots/empty inner).
@@ -1302,6 +1308,8 @@ def _validate_local_bash_shell_tokens(command: str, allowed_paths: list[str], to
     """Conservatively reject relative path escapes missed by absolute-path scanning."""
     if re.search(r"\$\([^)]*\b(?:cd|pushd)\b", command):
         raise PermissionError(f"Unsafe working directory change in command substitution. Use paths under {VIRTUAL_PATH_PREFIX}")
+    if _CDPATH_PATTERN.search(command):
+        raise PermissionError(f"Unsafe working directory change via CDPATH. Use paths under {VIRTUAL_PATH_PREFIX}")
 
     for token in tokens:
         if _is_shell_command_separator(token) or _is_shell_redirection_operator(token):
@@ -1424,7 +1432,7 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
     A small allowlist of common system path prefixes is kept for executable
     and device references (e.g. /bin/sh, /dev/null). Quoted shell words are
     validated whole, so a space inside quotes is not treated as a new segment.
-    A shell variable used as a path prefix (``$HOME/...``) is rejected like
+    A shell variable used as a path prefix (``$HOME/...``, ``$1/...``) is rejected like
     ``${HOME}/...`` and ``~/...``, since its runtime value is unknown here;
     ``$PWD/...`` is checked like the relative path it is equivalent to.
     A windows-incompatible segment still rejects a path that is not already
@@ -1470,6 +1478,10 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
         if _is_non_path_literal_fragment(match.group()):
             continue
         if match.group(1) == "PWD" and pwd_is_workspace:
+            continue
+        # ``$1/1024`` is awk-style arithmetic (``awk '{print $1/1024}'``), not a
+        # path: standard top-level host directories do not start with a digit.
+        if match.group(1).isdigit() and command[match.end(1) + 1 : match.end(1) + 2].isdigit():
             continue
         unsafe_paths.append(match.group())
 

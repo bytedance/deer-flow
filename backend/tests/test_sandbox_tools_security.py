@@ -1032,6 +1032,10 @@ def test_validate_local_bash_command_paths_blocks_brace_expansion_host_paths(com
         ("read PWD; cat $PWD/x", "$PWD/x"),
         ("for PWD in ~; do cat $PWD/.ssh/id_rsa; done", "$PWD/.ssh/id_rsa"),
         ("export PWD=/etc && cat $PWD/passwd", "$PWD/passwd"),
+        # ``bash -c`` gets no positionals, so ``$1`` expands to nothing.
+        ("cat $1/etc/passwd", "$1/etc/passwd"),
+        ('cat "$2/etc/passwd"', "$2/etc/passwd"),
+        ("ls $0/", "$0/"),
     ],
 )
 def test_validate_local_bash_command_paths_blocks_variable_prefixed_host_paths(command: str, rejected: str) -> None:
@@ -1057,10 +1061,27 @@ def test_validate_local_bash_command_paths_blocks_variable_prefixed_host_paths(c
         "cat $PWD/notes.txt",
         'export PATH="$PWD/.venv/bin:$PATH"',
         "cd /mnt/user-data/uploads && cat $PWD/report.pdf",
+        # awk field arithmetic is not a path.
+        "du -k /mnt/user-data/workspace | awk '{print $1/1024}'",
     ],
 )
 def test_validate_local_bash_command_paths_allows_non_path_variable_uses(command: str) -> None:
     validate_local_bash_command_paths(command, _THREAD_DATA)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # CDPATH relocates a relative ``cd`` outside the workspace, taking both
+        # ``$PWD`` and plain relative paths with it.
+        "CDPATH=$HOME cd docs && cat $PWD/x",
+        "CDPATH=/ cd etc && cat passwd",
+        "export CDPATH=/; cd etc; cat passwd",
+    ],
+)
+def test_validate_local_bash_command_paths_rejects_cdpath_relocation(command: str) -> None:
+    with pytest.raises(PermissionError, match="Unsafe working directory change via CDPATH"):
+        validate_local_bash_command_paths(command, _THREAD_DATA)
 
 
 def test_validate_local_bash_command_paths_rejects_pwd_traversal_like_relative_traversal() -> None:
@@ -1087,7 +1108,14 @@ def test_bash_tool_rejects_variable_prefixed_host_path_before_execution(monkeypa
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX shell expands $HOME")
-def test_local_bash_tool_does_not_read_variable_prefixed_host_file(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("command", "rejected"),
+    [
+        ('cat "$HOME/.ssh/id_rsa"', "Unsafe absolute paths in command: $HOME/.ssh/id_rsa"),
+        ('CDPATH="$HOME" cd .ssh && cat $PWD/id_rsa', "Unsafe working directory change via CDPATH"),
+    ],
+)
+def test_local_bash_tool_does_not_read_variable_prefixed_host_file(tmp_path: Path, monkeypatch, command: str, rejected: str) -> None:
     """End to end through a real ``LocalSandbox``: before the fix the shell
     expanded ``$HOME`` and printed the host file."""
     home = tmp_path / "home"
@@ -1111,10 +1139,10 @@ def test_local_bash_tool_does_not_read_variable_prefixed_host_file(tmp_path: Pat
     monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
     monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: True)
 
-    result = bash_tool.func(runtime=runtime, description="read key", command='cat "$HOME/.ssh/id_rsa"')
+    result = bash_tool.func(runtime=runtime, description="read key", command=command)
 
     assert "host-private-key" not in result
-    assert "Unsafe absolute paths in command: $HOME/.ssh/id_rsa" in result
+    assert rejected in result
 
 
 def test_bash_tool_rejects_host_bash_when_local_sandbox_default(monkeypatch) -> None:
