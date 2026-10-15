@@ -237,7 +237,7 @@ export function AgentSettingsDialog({
           ...((thinking !== initialSelections.thinking ||
             normalizeReasoning) && {
             thinking_enabled:
-              selectedModel && !supportsThinking
+              selectedModel !== undefined && !supportsThinking
                 ? null
                 : selectionToThinkingEnabled(effectiveThinking),
           }),
@@ -245,7 +245,7 @@ export function AgentSettingsDialog({
             normalizeReasoning) && {
             reasoning_effort:
               reasoningEffort === INHERIT_VALUE ||
-              (selectedModel &&
+              (selectedModel !== undefined &&
                 (!supportsReasoningEffort ||
                   !reasoningEffortOptions.includes(
                     reasoningEffort as ReasoningEffort,

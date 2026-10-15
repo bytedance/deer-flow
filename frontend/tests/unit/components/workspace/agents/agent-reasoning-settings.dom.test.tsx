@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, rs } from "@rstest/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -83,6 +84,7 @@ afterEach(() => {
 
 function renderSettings(value: Agent = agent) {
   const client = new QueryClient();
+  client.setQueryDefaults(["models"], { retryDelay: 0 });
   clients.push(client);
   const view = render(
     <AgentSettingsDialog agent={value} open onOpenChange={rs.fn()} />,
@@ -160,6 +162,30 @@ describe("custom agent reasoning update isolation", () => {
     expectReasoningOmitted(request);
   });
 
+  it("normalizes a global-default switch when the pending catalog resolves before saving", async () => {
+    let resolveCatalog!: (value: ModelsResponse) => void;
+    loadModels.mockReturnValue(
+      new Promise((resolve) => {
+        resolveCatalog = resolve;
+      }),
+    );
+    const { client } = renderSettings();
+    await selectOption(0, "Use global default");
+    expect(client.getQueryState(["models"])?.status).toBe("pending");
+
+    await act(async () => {
+      resolveCatalog({ ...catalog, models: [plainModel, reasoningModel] });
+    });
+    await waitFor(() =>
+      expect(client.getQueryState(["models"])?.status).toBe("success"),
+    );
+    expect(await saveRequest()).toMatchObject({
+      model: null,
+      thinking_enabled: null,
+      reasoning_effort: null,
+    });
+  });
+
   it.each(["reasoner", "missing", null])(
     "preserves unchanged reasoning for model %s after a successful catalog load",
     async (model) => {
@@ -225,6 +251,37 @@ describe("custom agent reasoning update isolation", () => {
     expect(request.thinking_enabled).toBe(true);
     expect(request).not.toHaveProperty("reasoning_effort");
   });
+
+  it.each(["pending", "failed"] as const)(
+    "preserves an explicit thinking edit if the catalog becomes %s before saving",
+    async (state) => {
+      const { client } = renderSettings();
+      await screen.findByText("Thinking mode");
+      await selectOption(1, "On");
+
+      // The control is hidden without model data. Edit while available, then
+      // clear the query so the draft survives a pending or failed reload.
+      if (state === "pending") {
+        loadModels.mockReturnValue(new Promise(() => undefined));
+      } else {
+        loadModels.mockRejectedValue(new Error("Model catalog unavailable"));
+      }
+      act(() => {
+        void client.resetQueries({ queryKey: ["models"] });
+      });
+      await waitFor(() => {
+        expect(client.getQueryState(["models"])?.status).toBe(
+          state === "pending" ? "pending" : "error",
+        );
+        expect(screen.queryByText("Thinking mode")).toBeNull();
+      });
+
+      const request = await saveRequest();
+      expect(request.thinking_enabled).toBe(true);
+      expect(request).not.toHaveProperty("model");
+      expect(request).not.toHaveProperty("reasoning_effort");
+    },
+  );
 
   it("submits an explicit inherit effort without rewriting thinking", async () => {
     renderSettings();

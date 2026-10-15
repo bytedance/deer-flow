@@ -221,9 +221,13 @@ round-trip validation must still reject newly entered skipped times.
 
 ## Contributing
 
-Follow `src/` layout, TypeScript types and error handling. Add unit/E2E tests
-in `tests/unit/` and `tests/e2e/`; run `pnpm test`, `pnpm test:e2e` and `pnpm check`
-before committing. Update this guide when architecture/commands/conventions change.
+When adding features:
+
+1. Follow the established `src/` structure
+2. Add TypeScript types and proper error handling
+3. Write unit tests under `tests/unit/` (`pnpm test`) and E2E tests under `tests/e2e/` (`pnpm test:e2e`)
+4. Run `pnpm check` before committing
+5. Update this `AGENTS.md` when architecture, commands, or conventions change
 
 Route asset budgets are enforced with `pnpm perf:check`. The command measures
 `/login` from a normal production build, then builds in static-demo mode for the
@@ -381,12 +385,10 @@ are open strings (`ReasoningEffortValue`), so provider-specific tokens such as
 `max` flow through local settings and account preferences unchanged; the custom
 agent dialog offers only the intersection with the per-agent `low/medium/high`
 schema and hides "off" for required-thinking models. Do not read the booleans in
-components directly. On a legacy model, `resolveReasoningEffort` keeps only its
-advertised generic values; this drops a remembered provider-specific token after
-a model switch without changing the backend's direct legacy-request behavior.
-
-Agent settings omit model/thinking/effort unchanged from the opening state;
-normalize only on a resolved model switch. Missing models never imply a clear.
+components directly. For legacy models, `resolveReasoningEffort` keeps advertised
+generic values after a model switch; backend legacy requests stay unchanged.
+Agent settings omit unchanged model/thinking/effort; normalize only after a
+resolved model switch. An unavailable catalog must not clear values.
 
 ## Full-stack plugin UI
 
