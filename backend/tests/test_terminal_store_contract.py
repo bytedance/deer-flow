@@ -86,6 +86,19 @@ async def test_confirmed_terminal_allows_only_matching_metadata(store):
 
 
 @pytest.mark.anyio
+async def test_terminal_metadata_needs_matching_owner_and_outcome_but_not_live_lease(store):
+    expired = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    await store.put("run", thread_id="thread", status="success", owner_worker_id="owner", lease_expires_at=expired)
+    assert await store.update_run_completion("run", status="success", require_terminal=True, owner_worker_id="owner", total_tokens=5)
+    assert await store.update_run_completion("run", status="success", require_terminal=True, owner_worker_id="peer", total_tokens=10) is False
+    assert await store.update_run_completion("run", status="error", require_terminal=True, owner_worker_id="owner", total_tokens=10) is False
+    row = await store.get("run")
+    assert row["status"] == "success"
+    assert row["total_tokens"] == 5
+    assert datetime.fromisoformat(row["lease_expires_at"]) == datetime.fromisoformat(expired)
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("method", ["renew_lease", "update_lease", "finalize_if_not_cancelled", "update_status"])
 async def test_postgres_checks_database_time_after_row_lock(store, monkeypatch, method):
     """A transaction begun before expiry cannot write after waiting past it."""

@@ -43,6 +43,14 @@ database clock in the conditional UPDATE after acquiring its writer lock.
 already-expired target leases. Success returns only after transaction commit.
 `update_run_completion(require_terminal=True, owner_worker_id=...)` requires the
 exact terminal status/owner atomically and leaves outcome fields unchanged;
-it cannot transition an active row. These are scoped guards, not a generation
+it cannot transition an active row. Metadata may arrive after the terminal lease
+expires: it authorizes no execution or outcome transition, and Manager already
+requires its own matching ACK. The owner/status predicate protects against a
+changed row, but cannot distinguish deletion/recreation with the same run ID,
+owner and outcome without a persistent generation. Third-party heartbeat stores
+must implement these keyword contracts and atomic predicates, returning explicit
+commit results; accepting `**kwargs` alone does not establish that guarantee.
+Unsupported owned calls fail closed; single-worker legacy calls remain supported.
+These are scoped guards, not a generation
 protocol covering every mutation. Contract/lock-wait tests live in
 `tests/test_terminal_store_contract.py` (Postgres uses `TEST_POSTGRES_URI`).

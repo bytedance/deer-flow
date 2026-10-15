@@ -96,7 +96,10 @@ signals are delivered per run as results arrive. Timeout requests cancellation
 without joining cancellation-resistant I/O, whose late results are observed but
 cannot restore local authority. Shutdown drains within its shared budget and
 reports outstanding I/O rather than claiming it stopped. SQL/Memory reject expired
-renewals; owned terminal writes require a live owner lease (Postgres checks DB time
+renewals. `stop_heartbeat()` is not a Store-resource idle barrier: a driver that
+suppresses cancellation can retain its connection until the supervised I/O settles
+or the process exits; closing that resource cannot be claimed safe from this return.
+Owned terminal writes require a live owner lease (Postgres checks DB time
 after its row lock). These guards do not fence every RunStore mutation or provide
 a persistent attempt identity. Permanently missing ACKs may conservatively fence
 a committed run. R2 does not guarantee continuation of the worker's full finalizer

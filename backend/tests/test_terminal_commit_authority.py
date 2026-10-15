@@ -9,7 +9,7 @@ import pytest
 
 from deerflow.config.run_ownership_config import RunOwnershipConfig
 from deerflow.runtime import RunManager, RunStatus
-from deerflow.runtime.runs.store.base import StatusFinalization
+from deerflow.runtime.runs.store.base import RunStore, StatusFinalization
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 
@@ -279,6 +279,57 @@ async def test_legacy_none_status_result_is_unconfirmed_in_heartbeat_mode():
     assert await manager.persist_current_status(record.run_id) is False
     assert record.ownership_lost
     assert not record.terminal_status_persisted
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("method", ["update_status", "legacy_finalization", "default_finalization"])
+async def test_unsupported_owned_store_contract_fails_closed_with_diagnostic(method, caplog):
+    store = MemoryRunStore()
+    manager = manager_for(store)
+    record = await staged(manager)
+    calls = []
+
+    async def legacy_write(run_id, status, *, error=None, stop_reason=None, goal_verdict=None):
+        calls.append(run_id)
+        return True
+
+    if method == "update_status":
+        store.update_status = legacy_write
+        assert await manager.persist_current_status(record.run_id) is False
+    else:
+        store.finalize_if_not_cancelled = legacy_write if method == "legacy_finalization" else RunStore.finalize_if_not_cancelled.__get__(store)
+        await manager.set_status_if_not_cancelled(record.run_id, RunStatus.success)
+
+    assert calls == []
+    assert (await store.get(record.run_id))["status"] == "pending"
+    assert record.ownership_lost
+    assert record.terminal_commit_proof is None
+    assert not record.terminal_status_persisted
+    assert manager._terminal_attempts == {}
+    assert "owner_worker_id" in caplog.text
+
+
+@pytest.mark.anyio
+async def test_legacy_completion_cannot_bypass_strict_contract(caplog):
+    store = MemoryRunStore()
+    manager = manager_for(store)
+    record = await staged(manager)
+    await manager.set_status_if_not_cancelled(record.run_id, RunStatus.success)
+    proof = record.terminal_commit_proof
+    assert proof is not None
+    calls = []
+
+    async def legacy_completion(run_id, *, status, total_tokens=0):
+        calls.append(run_id)
+        return True
+
+    store.update_run_completion = legacy_completion
+    await manager.update_run_completion(record.run_id, status="success", total_tokens=5)
+    assert calls == []
+    assert (await store.get(record.run_id)).get("total_tokens", 0) == 0
+    assert record.terminal_commit_proof is proof
+    assert not record.ownership_lost
+    assert "require_terminal" in caplog.text
 
 
 @pytest.mark.anyio

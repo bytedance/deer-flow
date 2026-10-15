@@ -1302,7 +1302,12 @@ class RunManager:
         except asyncio.CancelledError:
             await self._fence_unconfirmed_terminal(record)
             raise
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "Unconfirmed terminal finalization for run %s (%s); heartbeat RunStore.finalize_if_not_cancelled must support owner_worker_id and atomically enforce a live owner lease",
+                run_id,
+                type(exc).__name__,
+            )
             await self._fence_unconfirmed_terminal(record)
             return None
         if result.finalized is True:
