@@ -654,6 +654,64 @@ class TestRewriteLocalPathsInText:
 
         assert content[0]["text"] == f"{{{remote_field},{quote}file{quote}:{quote}{VIRTUAL_PATH_PREFIX}/workspace/temp/report.pdf{quote}}}"
 
+    @pytest.mark.parametrize(
+        "url, markup",
+        [
+            (r"https://example.com/download?label=\"q\"&filename=report.pdf", '{{"url":"{}","file":"temp/report.pdf"}}'),
+            (r"https://example.com/a\|b?filename=report.pdf", "| {} | temp/report.pdf |"),
+        ],
+    )
+    def test_escaped_remote_url_delimiters_do_not_hide_local_file_reference(self, paths: Paths, url: str, markup: str):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        src = _workspace_file(paths, "temp/report.pdf")
+
+        with _patch_paths(paths):
+            content, _ = mcp_tools._convert_call_tool_result(
+                CallToolResult(content=[TextContent(type="text", text=markup.format(url))]),
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+                changed_files=[src],
+            )
+
+        assert content[0]["text"] == markup.replace("temp/report.pdf", f"{VIRTUAL_PATH_PREFIX}/workspace/temp/report.pdf").format(url)
+
+    @pytest.mark.parametrize("delimiter", ['"', "<", ">", "`", "|"])
+    @pytest.mark.parametrize("backslash_count", [0, 1, 2, 3])
+    def test_remote_url_delimiter_respects_escape_parity(self, paths: Paths, delimiter: str, backslash_count: int):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        src = _workspace_file(paths, "temp/report.pdf")
+        prefix = "https://example.com/download" + "\\" * backslash_count + delimiter
+
+        with _patch_paths(paths):
+            content, _ = mcp_tools._convert_call_tool_result(
+                CallToolResult(content=[TextContent(type="text", text=f"{prefix}report.pdf")]),
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+                changed_files=[src],
+            )
+
+        expected_reference = "report.pdf" if backslash_count % 2 else f"{VIRTUAL_PATH_PREFIX}/workspace/temp/report.pdf"
+        assert content[0]["text"] == f"{prefix}{expected_reference}"
+
+    @pytest.mark.parametrize("whitespace", [" ", "\t", "\n"])
+    def test_remote_url_whitespace_boundary_is_not_escaped(self, paths: Paths, whitespace: str):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        src = _workspace_file(paths, "temp/report.pdf")
+        prefix = f"https://example.com/download\\{whitespace}"
+
+        with _patch_paths(paths):
+            content, _ = mcp_tools._convert_call_tool_result(
+                CallToolResult(content=[TextContent(type="text", text=f"{prefix}report.pdf")]),
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+                changed_files=[src],
+            )
+
+        assert content[0]["text"] == f"{prefix}{VIRTUAL_PATH_PREFIX}/workspace/temp/report.pdf"
+
     def test_adjacent_remote_markdown_links_preserve_each_destination(self, paths: Paths):
         workspace = paths.sandbox_work_dir("t1", user_id="u1")
         src = _workspace_file(paths, "temp/report.pdf")

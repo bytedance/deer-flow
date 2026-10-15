@@ -271,7 +271,7 @@ def _sub_outside_remote_urls(pattern: re.Pattern[str], replacement: Callable[[re
         escaped = False
         while end < len(text):
             char = text[end]
-            if char.isspace() or char in '<>"`|':
+            if char.isspace() or (char in '<>"`|' and not escaped):
                 break
             # An apostrophe is a delimiter only for a single-quoted URL.
             if single_quoted and char == "'" and not escaped:
