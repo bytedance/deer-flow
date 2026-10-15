@@ -38,6 +38,23 @@ jobs:
           --after "${{ github.sha }}"
           --github-annotations
 
+  lint-scripts:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    # The liveness check is wall-clock dependent (~15s); leave headroom for a
+    # cold runner. windows-latest runs the script under Git Bash, which is the
+    # environment #5177 was reported on: the powershell.exe probe and the
+    # CRLF handling in closed_port() only execute on that OS.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Run wait-for-port liveness check
+        run: bash scripts/check_wait_for_port_liveness.sh
+
   lint-backend:
     runs-on: ubuntu-latest
     steps:
