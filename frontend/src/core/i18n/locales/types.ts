@@ -234,6 +234,8 @@ export interface Translations {
   };
 
   artifactPreview: {
+    loadingPreview: string;
+    resourcesUnavailable: string;
     limited: (previewSize: string, totalSize?: string) => string;
     loadFullFile: string;
     loadingFullFile: string;

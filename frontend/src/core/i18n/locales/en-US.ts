@@ -297,6 +297,9 @@ export const enUS: Translations = {
   },
 
   artifactPreview: {
+    loadingPreview: "Preparing preview...",
+    resourcesUnavailable:
+      "Some preview resources could not be loaded. View the source or download the files for the complete content.",
     limited: (previewSize, totalSize) =>
       totalSize
         ? `Showing the first ${previewSize} of ${totalSize}.`
