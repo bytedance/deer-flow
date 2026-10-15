@@ -16,7 +16,7 @@ function mount(root, context) {
   script.value = "const result = await agent({stepId:'check',agentRef:'lead_agent',task:args.task});\nreturn result.output;";
   const args = node('textarea','',{rows:3,ariaLabel:t('JSON arguments','JSON 参数')});
   args.value = '{"task":"Write a short checklist"}';
-  let definition = null, libraryGeneration = 0;
+  let definition = null, libraryGeneration = 0, definitionBlocked = false;
   const definitions = node('select','',{ariaLabel:t('Saved workflow version','已保存工作流版本')});
   const definitionName = node('input','',{ariaLabel:t('Workflow name','工作流名称'),placeholder:'inspection'});
   const library = node('div');
@@ -27,22 +27,22 @@ function mount(root, context) {
   }
   definitions.onchange=async()=>{
     const version=++libraryGeneration, chosen=definitions.value?JSON.parse(definitions.value):null;
-    definition=null;submit.disabled=true;
+    definition=null;definitionBlocked=Boolean(chosen);submit.disabled=true;
     try {
       if(chosen){
         const item=await call('get_definition',chosen);
         if(version!==libraryGeneration)return;
-        script.value=item.script;definitionName.value=item.name;definition=chosen;
+        script.value=item.script;definitionName.value=item.name;definition=chosen;definitionBlocked=false;
       }
     } catch(e){if(version===libraryGeneration)notice.textContent=e.message;}
-    finally{if(version===libraryGeneration)submit.disabled=false;}
+    finally{if(version===libraryGeneration)submit.disabled=definitionBlocked;}
   };
-  script.oninput=()=>{libraryGeneration++;definition=null;definitions.value='';submit.disabled=false;};
+  script.oninput=()=>{libraryGeneration++;definition=null;definitions.value='';definitionBlocked=false;submit.disabled=false;};
   library.append(definitions,definitionName,button(t('Save workflow version','保存工作流版本'),async()=>{
     const version=libraryGeneration, source=script.value;
     const saved=await call('save_definition',{name:definitionName.value,script:source});
     await loadDefinitions();
-    if(version===libraryGeneration && script.value===source){definition=saved;definitions.value=JSON.stringify(saved);}
+    if(version===libraryGeneration && script.value===source){definition=saved;definitionBlocked=false;submit.disabled=false;definitions.value=JSON.stringify(saved);}
     notice.textContent=t(`Saved ${saved.name} · ${saved.version}`,`已保存 ${saved.name} · ${saved.version}`);
   }));
   const form = node('form');
@@ -91,13 +91,13 @@ function mount(root, context) {
       const review=node('section','',{className:'checkpoint'});
       review.append(node('h4',`${checkpoint.step_id} · ${checkpoint.status}`),node('pre',JSON.stringify(checkpoint,null,2)));
       detail.append(review);
-      if(checkpoint.status!=='pending')continue;
-      if(checkpoint.kind==='pause' && run.status==='paused'){
+      const canDecide=checkpoint.status==='pending' && run.status==='waiting_approval';
+      if(checkpoint.status==='pending' && checkpoint.kind==='pause' && run.status==='paused'){
         review.append(button(t('Resume this checkpoint','继续此检查点'),async()=>{
           await call('resume',{run_id:id,step_id:checkpoint.step_id,attempt:checkpoint.attempt,fingerprint:run.fingerprint});await show();
         }));
       }
-      if(checkpoint.kind==='humanCheckpoint' && run.status==='waiting_approval'){
+      if(checkpoint.kind==='humanCheckpoint'){
         review.append(button(t('Review exact output','审阅确切输出'),async()=>{
           const output=await call('get_step',{run_id:id,step_id:checkpoint.source_step_id});
           if(!alive(version)||id!==selected)return;
@@ -128,7 +128,7 @@ function mount(root, context) {
             else if(ext==='pdf'){const frame=node('iframe','',{src:url,title:output.name});frame.setAttribute('sandbox','');review.append(frame);}
             review.append(node('a',t('Download this exact version','下载此确切版本'),{href:url,download:output.name}));
           } else review.append(node('pre',JSON.stringify(output.output,null,2)));
-          for(const decision of ['approve','reject'])review.append(button(decision==='approve'?t('Approve this version','确认此版本'):t('Reject this version','拒绝此版本'),async()=>{
+          if(canDecide)for(const decision of ['approve','reject'])review.append(button(decision==='approve'?t('Approve this version','确认此版本'):t('Reject this version','拒绝此版本'),async()=>{
             await call('decide',{run_id:id,step_id:checkpoint.step_id,attempt:checkpoint.attempt,artifact_version:checkpoint.artifact_version,decision});await show();
           }));
         }));
@@ -154,7 +154,9 @@ function mount(root, context) {
     }
   }
   form.onsubmit=async event=>{
-    event.preventDefault();submit.disabled=true;notice.textContent='';
+    event.preventDefault();
+    if(definitionBlocked)return;
+    submit.disabled=true;notice.textContent='';
     try{
       const value=JSON.parse(args.value);
       if(!value || Array.isArray(value)||typeof value!=='object')throw Error(t('Arguments must be an object','参数必须是对象'));
@@ -165,7 +167,7 @@ function mount(root, context) {
       // Keep the identity for unchanged input, including after accepted-launch
       // refresh failures. Refresh retries must never submit another launch.
       selected=result.run_id;generation++;clearTimeout(timer);await inspectAccepted(result.run_id);
-    }catch(e){if(!disposed)notice.textContent=e.message;}finally{submit.disabled=false;}
+    }catch(e){if(!disposed)notice.textContent=e.message;}finally{submit.disabled=definitionBlocked;}
   };
   loadDefinitions().catch(e=>{if(!disposed)notice.textContent=e.message;});
   list().catch(e=>{if(!disposed)notice.textContent=e.message;});

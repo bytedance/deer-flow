@@ -970,3 +970,46 @@ async def test_approved_file_reference_is_bound_to_child_input(plugin):
     assert step["input_artifacts"] == task["approved_artifacts"]
     assert task["approved_artifacts"][0]["version"] == version
     assert task["approved_artifacts"][0]["sha256"] == paused["artifacts"][0]["sha256"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("duplicate", [False, True])
+async def test_parallel_approved_file_consumers_reserve_atomically(plugin, monkeypatch, duplicate):
+    import threading
+    from dataclasses import replace
+
+    _, actions, service, runs = plugin
+    service.config["max_calls"] = 8 if duplicate else 2
+    script = """
+await agent({stepId:'source',agentRef:'lead_agent',task:'file'});
+const f=await captureArtifact({stepId:'file',sourceStepId:'source',path:'/mnt/user-data/outputs/report.pdf'});
+await humanCheckpoint({stepId:'confirm',sourceStepId:'file',artifactVersion:f.artifactVersion});
+return await Promise.all([
+agent({stepId:'consumer',agentRef:'lead_agent',task:'read',artifacts:[f.artifactVersion]}),
+agent({stepId:args.second,agentRef:'lead_agent',task:'read',artifacts:[f.artifactVersion]})]);
+"""
+    launched = await launch(plugin, script, args={"second": "consumer" if duplicate else "other"})
+    run_id = launched["run_id"]
+    paused = await waiting(plugin, run_id)
+    original = service.store.artifact
+    barrier = threading.Barrier(2, timeout=5)
+    reads = []
+    lock = threading.Lock()
+
+    def synchronized(*args):
+        value = original(*args)
+        with lock:
+            reads.append(args)
+            decision_read = len(reads) == 1
+        if not decision_read:
+            barrier.wait()
+        return value
+
+    monkeypatch.setattr(service.store, "artifact", synchronized)
+    await actions["decide"]({"run_id": run_id, "step_id": "confirm", "attempt": 1, "artifact_version": paused["artifacts"][0]["version"], "decision": "approve"}, replace(context(runs), interaction="session"))
+    result = await done(plugin, run_id)
+    assert len(reads) == 3 and not barrier.broken
+    assert result["status"] == "failed", result
+    assert len(result["steps"]) <= 2
+    assert len(runs.starts) <= 2
+    assert len({s["step_id"] for s in result["steps"]}) == len(result["steps"])

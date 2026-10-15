@@ -18,7 +18,8 @@ Keep the workflow deadline handler outside asyncio.timeout and test external can
 separately. Hash the Agent allowlist in canonical sorted order. Owner scope applies
 to every public read and mutation.
 Own persistence through supervisor publication even if the launching caller cancels.
-Serialize launch admission and shutdown. Hold the process lock across service life;
+Serialize launch admission and shutdown. After artifact IO, validate call limits
+and step uniqueness together with await-free reservation. Hold the process lock across service life;
 do not recover live records while another Gateway owns the file.
 
 Anchor results on the visible human input, including canonical __user rewrites;

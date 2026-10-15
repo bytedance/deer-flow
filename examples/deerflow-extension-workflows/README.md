@@ -189,6 +189,10 @@ Agent completes. This stores independent bytes with SHA-256 and an immutable
 version, rather than approving a mutable path. Pass the capture step/version to
 `humanCheckpoint`. The browser reads that version, verifies its hash, and offers
 safe text/image/PDF preview or an exact-version download before approval.
+Completed checkpoint records retain this review/download entry after approval
+and when reopened; only pending checkpoints offer decision controls.
+A failed saved-definition lookup blocks launch until a version loads or the user
+explicitly selects a new script or edits the editor.
 `agent({..., artifacts:[version]})` admits only approved versions and includes
 version/hash references in the child input. The child reads bytes through
 `read_workflow_artifact`; scripts can use `readArtifact({artifactVersion, offset})`.

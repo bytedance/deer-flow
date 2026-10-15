@@ -20,6 +20,7 @@ const server=createServer(async(req,res)=>{
         calls.push({action,payload});
         if(action==='definitions')return {definitions:window.savedDefinitions};
         if(action==='save_definition'){const item={name:payload.name,version:'saved-version'};window.savedDefinitions=[item];window.definitionScript=payload.script;return item;}
+        if(action==='get_definition'&&window.failDefinition)throw Error('Definition lookup failed');
         if(action==='get_definition')return {...payload,script:window.definitionScript};
         const bytes=new TextEncoder().encode('Exact <img src=x onerror=alert(1)> file');
         const hash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),b=>b.toString(16).padStart(2,'0')).join('');
@@ -34,7 +35,7 @@ const server=createServer(async(req,res)=>{
         if(action==='list')return {runs:saved&&!window.hidden?[{run_id:'fixture-run',status:window.state}]:[]};
         if(action==='cancel'){window.state='cancelled';return {status:'cancelling'};}
         if(action==='delete'){window.hidden=true;return {deleted:true};}
-        if(action==='get')return {fingerprint:'fingerprint',checkpoints:window.state==='waiting_approval'?[{step_id:'confirm',attempt:1,kind:'humanCheckpoint',status:'pending',source_step_id:'check',artifact_version:'artifact-v1'}]:window.state==='paused'?[{step_id:'p',attempt:1,kind:'pause',status:'pending'}]:[],run_id:'fixture-run',status:window.state,script:saved.script,args:saved.args,script_hash:'script-version',args_hash:'args-version',limits:{concurrency:2,max_calls:8},steps:[{step_id:'check',agent_ref:'lead_agent',status:window.state,thread_id:'child-thread',run_id:'child-run'}],logs:['Checking'],result:'<img src=x onerror=alert(1)>'};
+        if(action==='get')return {fingerprint:'fingerprint',checkpoints:(window.state==='waiting_approval'||(window.fileReview&&window.state==='completed'))?[{step_id:'confirm',attempt:1,kind:'humanCheckpoint',status:window.state==='completed'?'approved':'pending',source_step_id:'check',artifact_version:'artifact-v1'}]:window.state==='paused'?[{step_id:'p',attempt:1,kind:'pause',status:'pending'}]:[],run_id:'fixture-run',status:window.state,script:saved.script,args:saved.args,script_hash:'script-version',args_hash:'args-version',limits:{concurrency:2,max_calls:8},steps:[{step_id:'check',agent_ref:'lead_agent',status:window.state,thread_id:'child-thread',run_id:'child-run'}],logs:['Checking'],result:'<img src=x onerror=alert(1)>'};
       }});
   </script></body></html>`);
 });
@@ -96,6 +97,15 @@ try{
   assert.equal(await page.locator('img').count(),0);
   await page.getByRole('button',{name:'Approve this version',exact:true}).click();
   await page.getByRole('heading',{name:'fixture-run · completed',exact:true}).waitFor();
+  await page.getByRole('button',{name:'Review exact output',exact:true}).click();
+  const retainedDownload=page.getByRole('link',{name:'Download this exact version',exact:true});
+  await retainedDownload.waitFor();
+  assert.equal(await retainedDownload.evaluate(async a=>await (await fetch(a.href)).text()),'Exact <img src=x onerror=alert(1)> file');
+  assert.equal(await page.getByRole('button',{name:'Approve this version',exact:true}).count(),0);
+  await page.getByRole('button',{name:'fixture- · completed',exact:true}).click();
+  await page.getByRole('button',{name:'Review exact output',exact:true}).click();
+  await retainedDownload.waitFor();
+  assert.equal(await retainedDownload.evaluate(async a=>await (await fetch(a.href)).text()),'Exact <img src=x onerror=alert(1)> file');
   await page.evaluate(()=>window.state='paused');
   await page.getByRole('button',{name:'Launch workflow',exact:true}).click();
   await page.getByRole('button',{name:'Resume this checkpoint',exact:true}).click();
@@ -108,6 +118,21 @@ try{
   await page.getByRole('button',{name:'Launch workflow',exact:true}).click();
   await page.waitForFunction(()=>calls.some(c=>c.action==='launch'&&c.payload.definition?.version==='saved-version'));
   assert.equal(await page.evaluate(()=>calls.filter(c=>c.action==='launch').at(-1).payload.script),undefined);
+  await page.getByLabel('Script',{exact:true}).fill('return "previous editor";');
+  await page.evaluate(()=>window.failDefinition=true);
+  await page.getByLabel('Saved workflow version',{exact:true}).selectOption(JSON.stringify({name:'inspection',version:'saved-version'}));
+  await page.waitForFunction(()=>document.querySelector('[role=status]').textContent.includes('Definition lookup failed'));
+  assert.equal(await page.getByRole('button',{name:'Launch workflow',exact:true}).isDisabled(),true);
+  const beforeFailedSubmit=await page.evaluate(()=>calls.filter(c=>c.action==='launch').length);
+  await page.locator('form').evaluate(form=>form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));
+  assert.equal(await page.evaluate(()=>calls.filter(c=>c.action==='launch').length),beforeFailedSubmit);
+  await page.getByLabel('Saved workflow version',{exact:true}).selectOption('');
+  assert.equal(await page.getByRole('button',{name:'Launch workflow',exact:true}).isDisabled(),false);
+  await page.getByLabel('Saved workflow version',{exact:true}).selectOption(JSON.stringify({name:'inspection',version:'saved-version'}));
+  await page.waitForFunction(()=>document.querySelector('button[type=submit]').disabled);
+  await page.getByLabel('Script',{exact:true}).fill('return "explicit edit";');
+  await page.getByRole('button',{name:'Launch workflow',exact:true}).click();
+  await page.waitForFunction(()=>calls.filter(c=>c.action==='launch').at(-1).payload.script==='return "explicit edit";');
   await page.evaluate(()=>view.dispose());
   assert.equal(await page.locator('.script-workflows').count(),0);
   assert.deepEqual(errors,[]);

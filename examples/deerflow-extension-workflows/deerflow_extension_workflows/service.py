@@ -306,11 +306,6 @@ class Workflows(Lifecycle, Artifacts):
                 raise ValueError("stepId must contain ASCII letters, digits, underscores or hyphens")
             if payload["agentRef"] not in self.config["agents"]:
                 raise ValueError("Agent reference not permitted by operator")
-            if any(s["step_id"] == step_id for s in record["steps"] + record.get("checkpoints", []) + record.get("artifacts", [])):
-                raise ValueError("Step ID already used")
-            if len(record["steps"]) >= self.config["max_calls"]:
-                entry["fault"] = "Total Agent call limit"
-                raise ValueError(entry["fault"])
             versions = payload.get("artifacts", [])
             if not isinstance(versions, list) or len(versions) > 16 or any(not isinstance(v, str) for v in versions):
                 raise ValueError("artifacts must contain at most 16 version IDs")
@@ -339,6 +334,12 @@ class Workflows(Lifecycle, Artifacts):
                     }
                 ]
             }
+            # Revalidate after file IO; validation and reservation must not yield.
+            if any(s["step_id"] == step_id for s in record["steps"] + record.get("checkpoints", []) + record.get("artifacts", [])):
+                raise ValueError("Step ID already used")
+            if len(record["steps"]) >= self.config["max_calls"]:
+                entry["fault"] = "Total Agent call limit"
+                raise ValueError(entry["fault"])
             row = {
                 "step_id": step_id,
                 "attempt": 1,
