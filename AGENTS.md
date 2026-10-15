@@ -11,10 +11,8 @@ Module guides:
 
 ## What is DeerFlow
 
-DeerFlow pairs a LangGraph super agent with a Next.js chat UI. The backend provides
-sandboxed execution, persistent memory, subagents, and extensible built-in, MCP,
-and community tools, isolated per thread. Feishu, Slack, Telegram, Discord, and
-DingTalk connect through the Gateway.
+DeerFlow combines LangGraph and Next.js with thread-isolated sandbox execution,
+memory, subagents and extensible tools. IM channels connect through the Gateway.
 
 ## Service Topology
 
