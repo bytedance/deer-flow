@@ -127,3 +127,109 @@ def test_present_files_rejects_paths_outside_outputs(tmp_path):
 
     assert "artifacts" not in result.update
     assert result.update["messages"][0].content == f"Error: Only files in /mnt/user-data/outputs can be presented: {leaked_path}"
+
+
+# --- Edge cases added in this PR ---
+
+
+def test_present_files_rejects_path_traversal_via_dotdot(tmp_path):
+    """Path traversal attempts (../../etc/passwd) must NOT escape outputs_path."""
+    outputs_dir = tmp_path / "threads" / "thread-1" / "user-data" / "outputs"
+    parent_dir = tmp_path / "threads" / "thread-1" / "user-data"
+    outputs_dir.mkdir(parents=True)
+
+    # Build a path that starts in outputs_dir and tries to escape via ..
+    traversal = outputs_dir / ".." / ".." / ".." / "etc" / "passwd"
+    traversal_str = str(traversal)
+
+    result = present_file_tool_module.present_file_tool.func(
+        runtime=_make_runtime(str(outputs_dir)),
+        filepaths=[traversal_str],
+        tool_call_id="tc-traversal",
+    )
+
+    assert "artifacts" not in result.update
+    assert "Error" in result.update["messages"][0].content
+    assert "Only files in /mnt/user-data/outputs can be presented" in result.update["messages"][0].content
+
+
+def test_present_files_rejects_symlink_pointing_outside_outputs(tmp_path):
+    """Symlinks pointing outside outputs_path must be rejected."""
+    outputs_dir = tmp_path / "threads" / "thread-1" / "user-data" / "outputs"
+    outside_dir = tmp_path / "outside"
+    outputs_dir.mkdir(parents=True)
+    outside_dir.mkdir(parents=True)
+    outside_target = outside_dir / "secret.txt"
+    outside_target.write_text("secret")
+    symlink_in_outputs = outputs_dir / "link_to_secret"
+    symlink_in_outputs.symlink_to(outside_target)
+
+    result = present_file_tool_module.present_file_tool.func(
+        runtime=_make_runtime(str(outputs_dir)),
+        filepaths=[str(symlink_in_outputs)],
+        tool_call_id="tc-symlink",
+    )
+
+    assert "artifacts" not in result.update
+    assert "Error" in result.update["messages"][0].content
+    assert "Only files in /mnt/user-data/outputs can be presented" in result.update["messages"][0].content
+
+
+def test_present_files_propagates_runtime_user_id_to_virtual_path_resolution(tmp_path, monkeypatch):
+    """When a runtime has a user_id, present_files must pass it through to resolve_virtual_path."""
+    outputs_dir = tmp_path / "threads" / "thread-1" / "user-data" / "outputs"
+    outputs_dir.mkdir(parents=True)
+    artifact_path = outputs_dir / "report.md"
+    artifact_path.write_text("ok")
+
+    captured_kwargs = {}
+
+    def fake_resolve(thread_id, virtual_path, *, user_id=None):
+        captured_kwargs["user_id"] = user_id
+        return artifact_path
+
+    monkeypatch.setattr(
+        present_file_tool_module,
+        "get_paths",
+        lambda: SimpleNamespace(resolve_virtual_path=fake_resolve),
+    )
+
+    runtime = SimpleNamespace(
+        state={"thread_data": {"outputs_path": str(outputs_dir)}},
+        context={"thread_id": "thread-1", "user_id": "alice-uuid-42"},
+        config={},
+    )
+
+    result = present_file_tool_module.present_file_tool.func(
+        runtime=runtime,
+        filepaths=["/mnt/user-data/outputs/report.md"],
+        tool_call_id="tc-userid",
+    )
+
+    assert captured_kwargs["user_id"] == "alice-uuid-42", (
+        f"user_id must propagate to resolve_virtual_path, got {captured_kwargs}"
+    )
+    assert result.update["artifacts"] == ["/mnt/user-data/outputs/report.md"]
+
+
+def test_present_files_batch_handles_mixed_valid_and_invalid_paths(tmp_path):
+    """In a batch of mixed valid/invalid paths, valid ones are presented and invalid ones are reported as errors.
+    The contract is that errors do NOT abort the whole call."""
+    outputs_dir = tmp_path / "threads" / "thread-1" / "user-data" / "outputs"
+    outputs_dir.mkdir(parents=True)
+    valid_path = outputs_dir / "ok.md"
+    valid_path.write_text("ok")
+
+    result = present_file_tool_module.present_file_tool.func(
+        runtime=_make_runtime(str(outputs_dir)),
+        filepaths=[str(valid_path), "/nonexistent/path/foo.md", str(valid_path)],
+        tool_call_id="tc-batch",
+    )
+
+    # Both valid paths should be in artifacts
+    assert result.update["artifacts"] == ["/mnt/user-data/outputs/ok.md", "/mnt/user-data/outputs/ok.md"]
+    # At least one error message should mention the invalid path
+    error_messages = [m.content for m in result.update.get("messages", []) if "Error" in m.content]
+    assert any("/nonexistent/path/foo.md" in m for m in error_messages), (
+        f"expected error message for /nonexistent/path/foo.md, got: {error_messages}"
+    )
