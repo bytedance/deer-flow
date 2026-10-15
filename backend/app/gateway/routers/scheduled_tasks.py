@@ -9,6 +9,8 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import AwareDatetime, BaseModel, Field
 
+from app.channels.capabilities import supports_proactive_group_notifications
+from app.channels.notification_groups import is_notification_group
 from app.gateway.authz import require_permission
 from app.gateway.deps import (
     get_config,
@@ -104,6 +106,42 @@ async def _task_response(repo, task: dict[str, Any]) -> dict[str, Any]:
     return {**task, "automatic_runs_used": used.get(task["id"], 0), "active_run_status": await repo.get_active_run_status(task["id"])}
 
 
+async def _validate_notification_group(request: Request, connection_id: str | None, *, user_id: str) -> str | None:
+    """Resolve an explicitly selected group without changing personal delivery."""
+    if connection_id is None:
+        return None
+    if not connection_id.strip() or len(connection_id) > 64:
+        raise scheduler_error(422, "invalid_notification_group", "Select a connected notification group belonging to this user")
+
+    # Reuse the connection UI's current config and owner-scoped repository.
+    # Keep this REST-only: the conversation scheduling tools have no group field.
+    from app.gateway.routers import channel_connections
+
+    try:
+        config = await channel_connections._get_channel_connections_config(request)
+        connections = await channel_connections._get_repository(request, config).list_connections(user_id) if config.enabled else []
+    except Exception as exc:
+        raise scheduler_error(503, "scheduler_unavailable", "Notification group lookup is unavailable; retry later") from exc
+    if not isinstance(connections, list):
+        raise scheduler_error(503, "scheduler_unavailable", "Notification group lookup is unavailable; retry later")
+    for connection in connections:
+        if not isinstance(connection, dict) or connection.get("id") != connection_id or connection.get("owner_user_id") != user_id:
+            continue
+        provider = connection.get("provider")
+        if (
+            isinstance(provider, str)
+            and supports_proactive_group_notifications(provider)
+            and is_notification_group(
+                provider=provider,
+                status=connection.get("status"),
+                workspace_id=connection.get("workspace_id"),
+                metadata=connection.get("metadata"),
+            )
+        ):
+            return connection_id
+    raise scheduler_error(422, "invalid_notification_group", "Select a connected notification group belonging to this user")
+
+
 class ScheduledTaskCreateRequest(BaseModel):
     # Types only: value rules (max_runs >= 1, lengths, end-time rules) raise
     # coded errors from the shared validation, never a FastAPI list detail.
@@ -122,6 +160,7 @@ class ScheduledTaskCreateRequest(BaseModel):
     end_at: datetime | None = None
     # The user's "stop when ..." rule, stored in its own column.
     stop_condition: str | None = None
+    notification_group_connection_id: str | None = None
 
 
 class ScheduledTaskUpdateRequest(BaseModel):
@@ -139,6 +178,7 @@ class ScheduledTaskUpdateRequest(BaseModel):
     max_runs: int | bool | None = None
     end_at: datetime | None = None
     stop_condition: str | None = None
+    notification_group_connection_id: str | None = None
 
 
 class ScheduledTaskResumeRequest(BaseModel):
@@ -226,6 +266,7 @@ async def create_scheduled_task(request: Request, body: ScheduledTaskCreateReque
         assistant_resolver=resolve_scheduled_task_assistant_id,
         now=datetime.now(UTC),
     )
+    definition["notification_group_connection_id"] = await _validate_notification_group(request, body.notification_group_connection_id, user_id=str(user.id))
     # After validation, so a bad request still reports what to fix: a task
     # created while this process's poller is off would silently never run.
     if not is_scheduler_running(request):
@@ -279,6 +320,8 @@ async def update_scheduled_task(task_id: str, request: Request, body: ScheduledT
     await _ensure_task_mutable(existing, repo)
     used = (await repo.automatic_runs_used_for([task_id])).get(task_id, 0)
     fields = body.model_dump(exclude_unset=True)
+    # Group destination edits are independent of schedule/goal lifecycle rules.
+    fields.pop("notification_group_connection_id", None)
     # Only a reused conversation needs the thread store (access check).
     reuses_thread = (fields.get("context_mode") or existing["context_mode"]) == "reuse_thread"
     updates = await validate_scheduled_task_update(
@@ -291,6 +334,8 @@ async def update_scheduled_task(task_id: str, request: Request, body: ScheduledT
         used=used,
         now=datetime.now(UTC),
     )
+    if "notification_group_connection_id" in body.model_fields_set:
+        updates["notification_group_connection_id"] = await _validate_notification_group(request, body.notification_group_connection_id, user_id=str(user.id))
     try:
         updated = await repo.update(
             task_id,

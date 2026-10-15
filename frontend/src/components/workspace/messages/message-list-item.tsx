@@ -36,7 +36,10 @@ import {
   resolveArtifactURL,
   resolveMessageImageURL,
 } from "@/core/artifacts/utils";
-import { extractCitationSources } from "@/core/citations/sources";
+import {
+  type RetrievalSource,
+  extractCitationSources,
+} from "@/core/citations/sources";
 import { readConversationReferences } from "@/core/conversation-references";
 import { useI18n } from "@/core/i18n/hooks";
 import {
@@ -146,6 +149,7 @@ export function MessageListItem({
   runId,
   threadId,
   artifactPaths = [],
+  knowledgeSources = [],
   showCopyButton = true,
   showWorkspaceChanges = false,
   durationSeconds,
@@ -159,6 +163,7 @@ export function MessageListItem({
   isLoading?: boolean;
   threadId: string;
   artifactPaths?: readonly string[];
+  knowledgeSources?: readonly RetrievalSource[];
   feedback?: FeedbackData | null;
   runId?: string;
   showCopyButton?: boolean;
@@ -231,6 +236,7 @@ export function MessageListItem({
         isLoading={isLoading}
         threadId={threadId}
         artifactPaths={artifactPaths}
+        knowledgeSources={knowledgeSources}
         runId={runId}
         showWorkspaceChanges={showWorkspaceChanges}
         durationSeconds={durationSeconds}
@@ -410,6 +416,7 @@ function MessageContent_({
   isLoading = false,
   threadId,
   artifactPaths,
+  knowledgeSources = [],
   runId,
   showWorkspaceChanges = false,
   durationSeconds,
@@ -420,6 +427,7 @@ function MessageContent_({
   isLoading?: boolean;
   threadId: string;
   artifactPaths: readonly string[];
+  knowledgeSources?: readonly RetrievalSource[];
   runId?: string;
   showWorkspaceChanges?: boolean;
   durationSeconds?: number;
@@ -444,9 +452,9 @@ function MessageContent_({
           maxWidth="90%"
         />
       ),
-      a: createMarkdownLinkComponent(threadId),
+      a: createMarkdownLinkComponent(threadId, knowledgeSources),
     }),
-    [artifactPaths, threadId],
+    [artifactPaths, threadId, knowledgeSources],
   );
 
   const rawContent = extractContentFromMessage(message);
@@ -493,8 +501,9 @@ function MessageContent_({
     return rawContent ?? "";
   }, [rawContent, isHuman]);
   const citationSources = useMemo(
-    () => (isHuman ? [] : extractCitationSources(contentToDisplay)),
-    [contentToDisplay, isHuman],
+    () =>
+      isHuman ? [] : extractCitationSources(contentToDisplay, knowledgeSources),
+    [contentToDisplay, isHuman, knowledgeSources],
   );
 
   const filesList =
