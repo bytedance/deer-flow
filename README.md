@@ -498,7 +498,9 @@ caches materialized checkpoint histories: `type` is `memory` (default) or
 Gateway/async-only; the sync TUI/embedded path supports `memory` only. The
 cache is performance-only — results are identical with it disabled — so it is
 never frozen and workers sharing one checkpoint database may safely run
-different cache settings.
+different cache settings. Redis thread cleanup treats a configured `key_prefix`
+as literal text, including glob metacharacters, so deletion stays within that
+namespace and thread.
 
 > [!TIP]
 > On Linux, if Docker-based commands fail with `permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock`, add your user to the `docker` group and re-login before retrying. See [CONTRIBUTING.md](CONTRIBUTING.md#linux-docker-daemon-permission-denied) for the full fix.
@@ -1457,6 +1459,8 @@ OAuth data remain isolated under
 `{DEER_FLOW_HOME}/users/{user_id}/integrations/lark-cli/{config,data}`. These
 secret directories are restricted to `0700`, regular credential files to
 `0600`, and symlinks are rejected.
+On Windows, waiting for another process's integration file lock retries for up
+to 15 minutes; other file-lock errors are reported immediately.
 
 After installation, users can click **Connect Lark** to open a browser
 authorization link; no terminal authorization is required. The same UI can
@@ -2145,6 +2149,12 @@ result text does not turn an unknown status into success or failure.
 Cancelled or timed-out background sub-agent executions retain provider-reported token usage from completed model calls, including responses received before their next progress update. Final usage delivery to the parent run does not count earlier progress snapshots twice.
 
 For `tests_passed:go test ./...`, packages marked `[no test files]` or `[no tests to run]` do not veto a passing summary from another package. Runs with only zero-test package summaries remain `UNVERIFIED`; failures still take precedence. This checks recorded execution evidence, not claim correctness.
+
+For `tests_passed:cargo test`, a complete passing target summary can coexist with
+empty unit, integration or documentation targets. Complete zero-pass successful
+summaries do not veto that sibling evidence. All-empty or all-ignored runs and
+bare `test result: ok` banners remain `UNVERIFIED`; incomplete zero-test summaries
+are kept as vetoes, and failures still take precedence.
 
 For Maven and Gradle test acceptance, a `BUILD SUCCESS` / `BUILD SUCCESSFUL`
 banner alone remains `UNVERIFIED`: builds can succeed without running tests.
