@@ -11,10 +11,11 @@ from deerflow.utils import file_conversion
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("file_size", [100, 1024 * 1024 + 1], ids=["small", "large"])
 @pytest.mark.parametrize("conversion_fails", [False, True], ids=["success", "failure"])
-async def test_cancelled_conversion_drains_worker_before_source_cleanup(tmp_path, monkeypatch, conversion_fails):
-    source = tmp_path / "large.pdf"
-    source.write_bytes(b"x" * (file_conversion._ASYNC_THRESHOLD_BYTES + 1))
+async def test_cancelled_conversion_drains_worker_before_source_cleanup(tmp_path, monkeypatch, conversion_fails, file_size):
+    source = tmp_path / "document.pdf"
+    source.write_bytes(b"x" * file_size)
     output = tmp_path / "converted.md"
     started = threading.Event()
     release = threading.Event()
@@ -24,7 +25,10 @@ async def test_cancelled_conversion_drains_worker_before_source_cleanup(tmp_path
     loop = asyncio.get_running_loop()
     worker_started = asyncio.Event()
 
+    loop_thread = threading.get_ident()
+
     def convert(path, _converter):
+        assert threading.get_ident() != loop_thread, "converter must not block the event loop"
         started.set()
         loop.call_soon_threadsafe(worker_started.set)
         try:
