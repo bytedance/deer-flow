@@ -67,6 +67,7 @@ drift.
 
 **Agent Conversation**:
 - `chat(message, thread_id)` — synchronous; returns final AI text.
+- The first `values` snapshot reconciles any suffix appended to already-streamed AI text by a model wrapper; unchanged text and non-prefix replacements are not re-emitted. Later snapshots retain the same append-only rule.
 - `stream(message, thread_id)` — subscribes to LangGraph `stream_mode=["values", "messages", "custom"]` and yields `StreamEvent`:
   - `"values"` — state snapshot (title, messages, artifacts, summary_text). Always forward `summary_text` (current summary or `None`), including unchanged values/resets. Never re-emit AI text delivered via `messages`; serialized `ToolMessage` entries retain non-`None` native `artifact`
   - `"messages-tuple"` — current-turn AI text **deltas** by `id` and each tool call/result once; excludes resumed history and preserves result `artifact`

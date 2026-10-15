@@ -2786,6 +2786,9 @@ are checked recursively as well.
 
 ## Embedded Python Client
 
+`chat()` and `stream()` preserve text appended by model middleware before the
+first state snapshot, emitting only the suffix after the streamed text.
+
 For `DeerFlowClient(agent_name="researcher")`, the named agent's `mcp_plugins`
 selection applies to both the lead agent and its `task` / `batch_task`
 delegations: `null` inherits all enabled MCP plugins, `[]` selects none, and
