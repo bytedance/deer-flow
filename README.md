@@ -2417,6 +2417,14 @@ AIO directory listings discard missing shell sessions so the next request can re
 After a dropped connection, directory listings and persistent shell commands report an
 unknown outcome without replaying the operation; later calls use a fresh session.
 
+Current-upload context tolerates malformed attachment metadata: invalid filename
+references and files that cannot be checked are skipped individually, while valid
+attachments in the same message remain available. Unusable or display-overflowing
+file sizes use the existing zero-size display fallback without dropping the file.
+Probe errors are logged at debug level. Sizes of 1 TB or more that can be rendered
+safely display as `>= 1 TB` to keep the prompt compact; stored byte counts remain
+unchanged.
+
 Uploaded Markdown outlines recognize ATX heading syntax, clean closing markers with a linear suffix scan, and skip HTML comment blocks and fenced and indented code examples, so hashtags and code comments do not
 crowd out real document sections from the agent's heading preview. Indented bold examples are also excluded; PDF-style bold headings with up to three leading spaces remain supported.
 Split-bold numeric table rows, including parenthesized years, signed values, and
