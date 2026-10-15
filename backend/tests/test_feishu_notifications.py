@@ -123,6 +123,17 @@ async def test_group_binding_reads_name_offloop_without_blocking_binding_on_fail
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("chat_type,expected", [("group", "Release team"), ("p2p", None)])
+async def test_owner_chosen_group_name_is_consumed_only_for_group_binding(channel, chat_type, expected):
+    channel._connection_repo = SimpleNamespace(consume_oauth_state=AsyncMock(return_value={"owner_user_id": "owner-1", "metadata": {"notification_group_name": "Release team"}}), upsert_connection=AsyncMock())
+    channel._reply_card = AsyncMock()
+    channel._get_group_name = AsyncMock()
+    await channel._bind_connection_from_connect_code(message_id="om_bind", chat_id="oc_group", user_id="ou_bound_user", code="connect-code", chat_type=chat_type)
+    assert channel._connection_repo.upsert_connection.await_args.kwargs["workspace_name"] == expected
+    channel._get_group_name.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_base_owner_notification_preserves_existing_provider_send(channel):
     channel.send_notification = AsyncMock()
 

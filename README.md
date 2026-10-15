@@ -133,6 +133,8 @@ That prompt is intended for coding agents. It tells the agent to clone the repo 
 
 ### Configuration
 
+With `run_events.backend: db`, caller-supplied ISO 8601 event timestamps are normalized to UTC before storage, preserving their instant when SQLite drops timezone information. Timestamps without an offset are treated as UTC. Previously stored timestamps are not rewritten.
+
 Operators can extend lead-agent, subagent, and DeerMem extraction prompts with
 literal prepend/append configuration without editing source templates. See
 [prompt overlays](backend/docs/CONFIGURATION.md#prompt-overlays).
@@ -381,6 +383,7 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
 
    - Codex CLI reads `~/.codex/auth.json`
    - Codex function tools preserve explicit `strict: true` or `strict: false` in wrapped or flat dictionary definitions. Missing or null settings keep the provider default. `bind_tools` applies the same conversion to dictionaries and `BaseTool` schemas.
+   - Codex honors `tool_choice` in `bind_tools` and direct calls: `auto`, `none`, `required`, or a function name/selection. `any` and `True` mean `required`; `None` and `False` keep the provider default. Per-call choices override the bound policy. Bound choices are validated when binding; direct calls and overrides are validated before HTTP. `required` needs at least one function tool, and named selections must match a supplied function. `auto` and `none` also work without tools.
    - Completed Codex responses still return their text and tool calls when token usage is null, omitted, or empty; usage metadata remains unavailable.
    - The Codex model provider returns completed responses without waiting for the SSE connection to close. Failed or incomplete responses report the provider's error or reason; partial output is not returned as a successful answer. Non-object error details are reported as text.
    - Claude Code accepts `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_CREDENTIALS_PATH`, or `~/.claude/.credentials.json`
@@ -2472,6 +2475,18 @@ CSV and TSV artifacts open as tables in the artifact panel and in a separate win
 
 HTML artifact previews resolve relative assets from the artifact directory unless the document contains a real `<base>` element. Base-tag examples in comments or script text do not change that resolution.
 
+With authentication enabled, static resources in the same thread's artifact route
+(images, responsive images, classic scripts and CSS, including nested imports)
+are fetched by the parent and inlined without weakening the opaque iframe sandbox.
+Preparation has resource, byte, CSS-depth and time limits and reports partial
+previews. Dynamic JavaScript requests, ES module imports, nested iframes and
+navigation remain subject to sandbox restrictions; see the
+[frontend preview notes](frontend/README.md#development-notes) for the supported
+scope and limits.
+Optional resource failures, including 401 responses, keep the conversation open
+with a partial-preview notice. HTML doctypes and doctype-less rendering modes
+are preserved, and CSS references inside inline SVG styles are prepared too.
+
 Markdown report previews in the artifact panel and separate window resolve local
 images from the report's own directory and conversation. Both relative paths
 such as `./charts/summary.png` and absolute `/mnt/...` paths are supported;
@@ -2992,7 +3007,7 @@ In the task form, switching an hourly, daily, weekly, or monthly schedule to **C
 Open **Settings → Notifications → IM notifications** to turn scheduled-task
 updates on or off for each connected, push-capable app. Existing connections
 keep receiving updates until you opt out. Turning a channel off cancels its
-pending and retrying notices, including an explicitly selected Feishu group;
+pending and retrying notices, including an explicitly selected group;
 turning it on again does not resend the old backlog. Notifications whose
 platform delivery already started may still arrive. Chat replies and scheduled
 execution are unaffected. All Gateway workers must run the upgraded version
@@ -3001,16 +3016,27 @@ for the preference to be enforced.
 WeChat needs a private message after binding to save its current conversation
 context securely; an old binding or changed bot token also needs a fresh private
 message. QQ requires a C2C/private binding and platform permission to send
-proactively. This version does not add WeChat or QQ group destinations.
+proactively. WeChat remains private-only; QQ and WeCom also support explicitly
+selected group destinations.
 See [setup and delivery limits](backend/docs/IM_CHANNEL_CONNECTIONS.md#proactive-notification-settings).
 
-### Optional Feishu group notifications
+The same page offers separate **Task & goal run notifications** for completion,
+terminal failure and requests for input. These ordinary web/background reminders
+are off by default. A pending input request takes precedence over completion;
+unmet goal stand-downs stay silent, and IM-originated chats keep their original
+reply rather than receiving a second proactive notice. Turning an event off
+also cancels its waiting backlog. Messages direct you back to Conversations.
 
-In a task's create or edit form, **Also notify a Feishu group (optional)** adds
+### Optional group notifications
+
+In a task's create or edit form, **Also notify a group (optional)** adds
 one chosen group to the existing personal notifications. Add the app bot to the
-group, use **Bind a Feishu group** to get a command, send it while mentioning the
-bot in that group, then refresh the list and select the group by name. The app
-needs bot-send permission and `im:chat:read` to display its group names.
+group, choose its supported channel in the binding panel, then send the displayed
+`/connect` command while mentioning the bot in that group. QQ and WeCom require
+a name in the binding panel so you can identify the receiving group; the name
+travels with the owner-issued binding code and is saved on the connection.
+Refresh and select the group by name. Feishu additionally needs `im:chat:read`
+to retrieve its group names; every provider needs permission to send proactively.
 
 While the form checks group-notification support, it shows a loading hint and
 retains the saved selection.
@@ -3019,7 +3045,7 @@ No group is selected automatically. Clearing the selection stops new group
 notices; changing it affects future notices, while already queued notices keep
 their original target. A disconnected binding never receives a waiting notice.
 The first version is configured through the task form or REST API; conversation
-schedule tools keep their existing inputs. See the [group delivery guide](backend/docs/IM_CHANNEL_CONNECTIONS.md#feishu-group-notifications).
+schedule tools keep their existing inputs. See the [group delivery guide](backend/docs/IM_CHANNEL_CONNECTIONS.md#group-notifications).
 
 ### Lifecycle, safety caps and stop conditions
 
