@@ -2179,6 +2179,12 @@ summaries do not veto that sibling evidence. All-empty or all-ignored runs and
 bare `test result: ok` banners remain `UNVERIFIED`; incomplete zero-test summaries
 are kept as vetoes, and failures still take precedence.
 
+For `tests_passed:python -m unittest`, a complete `Ran N tests in ...s` / `OK`
+summary must include at least one ordinary passing test. Skips and expected
+failures do not count as passes. Successful runs with all-skipped,
+all-expected-failure, empty or incomplete summaries remain `UNVERIFIED`;
+nonzero exits, failures and unexpected successes still take precedence.
+
 For Maven and Gradle test acceptance, a `BUILD SUCCESS` / `BUILD SUCCESSFUL`
 banner alone remains `UNVERIFIED`: builds can succeed without running tests.
 Complete `Tests run: N, Failures: F, Errors: E, Skipped: S` or `N tests completed`
