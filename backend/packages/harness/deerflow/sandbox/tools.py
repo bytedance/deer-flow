@@ -69,6 +69,14 @@ _SANDBOX_AUTHORIZATION_CHECKED: ContextVar[bool] = ContextVar(
 )
 
 _ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![:\w])(?<!:/)/(?:[^\s\"'`;&|<>()]+)")
+# ``$NAME/...`` expands to a host path at runtime (``$HOME/.ssh/id_rsa``), but
+# the absolute-path regex skips a ``/`` that follows a word character, so the
+# bare-name form needs its own scan. ``${NAME}/`` and ``~/`` already surface
+# through the absolute-path regex because ``}`` and ``~`` are not word chars.
+_SHELL_VARIABLE_PATH_PATTERN = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)/[^\s\"'`;&|<>()]*")
+# ``PWD`` written anywhere except as a ``$PWD`` expansion (``PWD=/``,
+# ``read PWD``, ``for PWD in``) may rebind it away from the workspace.
+_PWD_REBIND_PATTERN = re.compile(r"(?<!\$)\bPWD\b")
 # A ``{...}`` block holding a single identifier-like placeholder (e.g. ``{id}``
 # in a REST template or ``{port}`` in an f-string). Bash brace expansion such as
 # ``{passwd,shadow}`` or ``{,.bak}`` does NOT match (commas/dots/empty inner).
@@ -1416,6 +1424,9 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
     A small allowlist of common system path prefixes is kept for executable
     and device references (e.g. /bin/sh, /dev/null). Quoted shell words are
     validated whole, so a space inside quotes is not treated as a new segment.
+    A shell variable used as a path prefix (``$HOME/...``) is rejected like
+    ``${HOME}/...`` and ``~/...``, since its runtime value is unknown here;
+    ``$PWD/...`` is checked like the relative path it is equivalent to.
     A windows-incompatible segment still rejects a path that is not already
     stored on the host; an existing host file may be read or renamed.
     """
@@ -1447,6 +1458,20 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
             continue
 
         unsafe_paths.append(candidate)
+
+    # A variable's value is unknown here, so its path is never allowed. The one
+    # exception is ``$PWD``: ``$PWD/.venv/bin`` names the same file as the
+    # relative ``.venv/bin``, which this guard already accepts, unless the
+    # command rebinds ``PWD`` itself.
+    pwd_is_workspace = not _PWD_REBIND_PATTERN.search(command)
+    for match in _SHELL_VARIABLE_PATH_PATTERN.finditer(command):
+        if _is_in_spans(match.start(), url_spans):
+            continue
+        if _is_non_path_literal_fragment(match.group()):
+            continue
+        if match.group(1) == "PWD" and pwd_is_workspace:
+            continue
+        unsafe_paths.append(match.group())
 
     if unsafe_paths:
         unsafe = ", ".join(sorted(dict.fromkeys(unsafe_paths)))

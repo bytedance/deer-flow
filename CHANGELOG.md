@@ -5968,6 +5968,15 @@ This release closes that milestone with **621 merged pull requests**.
   whose head stamp was lost logged 29 (SQLite) or 36 (Postgres), burying the
   real type mismatch the warning exists to catch. Both sides are now compared
   as the connected database spells them. ([#6865])
+- **sandbox:** With host bash enabled, the local path guard now rejects a
+  shell variable used as a path prefix, such as `cat $HOME/.ssh/id_rsa`.
+  `~/`, `${HOME}/` and `"$HOME"/` were already rejected, but the
+  absolute-path scan skips a `/` that follows a word character, so the
+  bare `$HOME/...` form (quoted or not) reached the host. `$PWD/...` stays
+  allowed because it names the same file as the equivalent relative path,
+  unless the command rebinds `PWD` itself. Variables inside
+  URLs are unaffected. The guard remains best-effort and is not an isolation
+  boundary.
 
 ### Security
 
