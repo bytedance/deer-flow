@@ -2581,5 +2581,74 @@
       "artifact direct URLs and HTML relative resources, standalone views/download/iframe in actual browser, other resource clients",
       "same-space sidecar parent/unmount/quiet-stream faults; actual shell/capability/selector and browser/backend two tabs; principal/session/revocation and all M4-M11; activation closed"
     ]
+  },
+  "frontend_composer_drafts": {
+    "job": "deerflow-tenant-frontend",
+    "status": "scoped text/reference drafts and positive native project UI workflow verified with fixtures; full M3 incomplete",
+    "base_commit": "43d061cda15b7edbd93214067ed9c4d67e433035",
+    "history": {
+      "66": {
+        "result": "FAILURE",
+        "scope": "genuine draft RED: enabled workspace composer restored Legacy personal notes from an unscoped key. Project page test separately hit ambiguous Instructions label (tabpanel plus textbox); query narrowed to the actual textbox, not behavior evidence.",
+        "legacy_draft_leak": true,
+        "archive_sha256": "3160aed543e6de40794868ba46640c1c5ae083f79c15ec89959ce85ef44f0e25"
+      },
+      "67": {
+        "result": "SUCCESS",
+        "scope": "two normal P/T project workflow and immediate-switch draft mains, plus 19 existing regressions; main first before adding lifecycle/reference case. Project/settings/sidebar/NewProjectDialog implementation unchanged.",
+        "tests_passed": 21,
+        "archive_sha256": "7ef3a4e3e3ed982b998031ecd7ffe4daad3edac9bab5e43c3834b4ecdb970216"
+      },
+      "68": {
+        "result": "FAILURE",
+        "scope": "78 behaviors/three-file format passed; target lint rejected String(body.instructions ?? \"\") on an unknown test fixture field. Explicit typeof narrowing fixes only the fixture; production bytes unchanged.",
+        "tests_passed": 78,
+        "archive_sha256": "0244532e8c31f534be897b86b2f4543a3c035363cc58a9bcb76941dd6690b66e"
+      }
+    },
+    "green": {
+      "build": 69,
+      "result": "SUCCESS",
+      "tests_passed": 78,
+      "test_files": 8,
+      "tests_added": 3,
+      "existing_regressions": 75,
+      "test_seconds": [
+        92.0
+      ],
+      "build_seconds": 533.115,
+      "archive_sha256": "bc01f384b5aec74bf2dde1d0629efeee2a4fb7574f577d47e00ddb51b5cf88e4",
+      "image_id": "sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01",
+      "production_bytes_identical_to_behavior_green_68": true,
+      "checks": "three UI/context/REST scenarios plus existing composer draft, project page/nested-menu, InputBox attachments/mentions/agent skill hydration and scoped shelf regressions; three-file Prettier/target ESLint, early tsc, full pnpm check"
+    },
+    "source_sha256": {
+      "frontend/src/core/threads/composer-draft.ts": "e7678cfa69b3735e46f0c01de0bec611a876091c09a4a2e2d8e5fa38a07b52c4",
+      "frontend/src/components/workspace/input-box.tsx": "fcc10e4a9be958bd31381803f0a9f5a746be3818619432079ac0d309fd85ae41",
+      "frontend/tests/unit/components/workspace/projects/workspace-project-workflow.dom.test.tsx": "a227d145b27b940b3d5fa1c6ebcfb116472f6ef9a3c56ef9feacb273a9315002"
+    },
+    "reused_native_sources_sha256": {
+      "frontend/src/app/workspace/projects/[id]/page.tsx": "750d2b742d2da656d1cfe81e32d19c48c7c0bf54c8e6dc713cdaa69d5c435dd2",
+      "frontend/src/components/workspace/projects-section.tsx": "a98475a38afdefe71e890e3a633208587c6c4cad00987eeb3b1656e56279d3a2",
+      "frontend/src/components/workspace/move-to-project-menu.tsx": "63d9f349d69008866dd6cfa3bd2797665dda164f006194adb650554aa649ec8a"
+    },
+    "scope": "new disjoint actor/workspace/agent/thread composer draft namespace; immutable scoped Storage adapter refuses foreign/legacy keys and all operations after expiry; no legacy adoption and native key format unchanged. InputBox read/write/flush/retire/clear and new-thread file-reference transfer use the captured storage/key. Scoped edits save the visible snapshot while active because selection closes scope before React cleanup; unscoped mode retains native 300ms debounce and native draft reconciliation.",
+    "evidence": "real ProjectPage, ProjectsSection, NewProjectDialog and project/thread hooks/REST show P/T instructions/rename/archive/restore/sidebar creation/create-then-move/delete navigation using existing implementations unchanged. Real InputBox/Context shows no legacy adoption, immediate P/T draft preservation, expired/foreign store refusal, old onSent not clearing a fresh same-space replacement, and reference metadata restoring its own chip after P/T/P. HTTP, peripheral catalog/router/toast and final onSubmit boundary are doubled; document/thread panes and layout shell are leaves. Not backend/browser/PAT/principal authorization or actual Run evidence.",
+    "cleanup": "#66-#69 terminal; exact owned containers/networks and formatter inventories empty; private dependency cache retained",
+    "warnings": "Existing KaTeX quirks and Radix Description warnings remain. No production styling changes were made.",
+    "remaining": [
+      "artifact clients/direct URLs/relative HTML resources and standalone/iframe/browser downloads; audit remaining UI stores/global title and scope-sensitive state",
+      "explicit scoped file-picker prepare/attach/focus race and same-space sidecar parent/unmount/quiet-stream fault proof; project publication faults not covered by positive UI main still belong to boundary audit",
+      "actual shell/capability/selector/browser/backend two tabs; principal/session/revocation and all M4-M11; activation remains closed"
+    ],
+    "browser_inventory_probe": {
+      "image_id": "sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01",
+      "uid": "999:987",
+      "scope": "existing image PATH probes for chromium/chromium-browser/google-chrome plus four standard browser cache/install directories; no paths found. This is not an inventory of other images, host binaries or inaccessible/custom caches.",
+      "exit_code": 0,
+      "owned_containers": [],
+      "owned_networks": [],
+      "next": "inspect reusable authorized browser tooling/cache before preparing remote real-browser gates; no image downloaded"
+    }
   }
 }

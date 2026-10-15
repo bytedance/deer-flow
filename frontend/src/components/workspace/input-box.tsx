@@ -117,6 +117,7 @@ import type { AgentThreadContext, GoalState } from "@/core/threads";
 import { compactThreadContext } from "@/core/threads/api";
 import {
   buildComposerDraftKey,
+  createWorkspaceComposerDraftStorage,
   clearComposerDraft,
   getSessionComposerDraftStorage,
   readComposerDraft,
@@ -874,16 +875,22 @@ export function InputBox({
     [t],
   );
 
+  const scopedDraftStorage = useMemo(
+    () =>
+      lifetime ? createWorkspaceComposerDraftStorage(lifetime.scope) : null,
+    [lifetime],
+  );
   const draftKey = useMemo(
     () =>
       buildComposerDraftKey({
-        userId: user?.id ?? "anonymous",
+        userId: lifetime?.scope.actorUserId ?? user?.id ?? "anonymous",
+        ...(lifetime ? { workspaceId: lifetime.scope.workspaceId } : {}),
         agentName:
           draftAgentName ??
           (typeof context.agent_name === "string" ? context.agent_name : null),
         threadId: draftThreadId,
       }),
-    [context.agent_name, draftAgentName, draftThreadId, user?.id],
+    [context.agent_name, draftAgentName, draftThreadId, user?.id, lifetime],
   );
   const agentScopedSkills = useMemo(
     () =>
@@ -963,6 +970,12 @@ export function InputBox({
       latestDraftRef.current = { key, draft };
       cancelDraftSaveTimer();
       draftSaveGenerationRef.current += 1;
+      // Switching closes the scope before React cleanup. Persist this visible
+      // snapshot while active; late timers/cleanup cannot regain write access.
+      if (scopedDraftStorage) {
+        writeComposerDraft(scopedDraftStorage, key, draft);
+        return null;
+      }
       const generation = draftSaveGenerationRef.current;
       const timer = window.setTimeout(() => {
         if (
@@ -972,13 +985,18 @@ export function InputBox({
           return;
         }
         draftSaveTimerRef.current = null;
-        writeComposerDraft(getSessionComposerDraftStorage(), key, draft);
+        writeComposerDraft(
+          scopedDraftStorage ?? getSessionComposerDraftStorage(),
+          key,
+          draft,
+        );
       }, COMPOSER_DRAFT_SAVE_DELAY_MS);
       draftSaveTimerRef.current = timer;
       return timer;
     },
     [
       cancelDraftSaveTimer,
+      scopedDraftStorage,
       draftKey,
       conversationReferences,
       conversationCapability,
@@ -993,12 +1011,12 @@ export function InputBox({
       }
       cancelDraftSaveTimer();
       writeComposerDraft(
-        getSessionComposerDraftStorage(),
+        scopedDraftStorage ?? getSessionComposerDraftStorage(),
         latest.key,
         latest.draft,
       );
     },
-    [cancelDraftSaveTimer],
+    [cancelDraftSaveTimer, scopedDraftStorage],
   );
 
   const promptHistory = useMemo(() => {
@@ -1064,7 +1082,7 @@ export function InputBox({
     }
 
     const savedDraft = readComposerDraft(
-      getSessionComposerDraftStorage(),
+      scopedDraftStorage ?? getSessionComposerDraftStorage(),
       draftKey,
     );
     if (!savedDraft) {
@@ -1111,6 +1129,7 @@ export function InputBox({
     initialValue,
     setTextInput,
     agentScopedSkills,
+    scopedDraftStorage,
     agentSkillsLoading,
     skillsLoading,
     textInput.value,
@@ -1553,7 +1572,7 @@ export function InputBox({
             // only what this send persisted, keeping anything a later
             // composer saved or staged since.
             retireSentComposerDraft(
-              getSessionComposerDraftStorage(),
+              scopedDraftStorage ?? getSessionComposerDraftStorage(),
               draftKey,
               sentDraftTexts,
             );
@@ -1571,7 +1590,10 @@ export function InputBox({
             pendingDraftSubmissionRef.current = null;
             latestDraftRef.current = null;
             invalidateDraftSaveTimer();
-            clearComposerDraft(getSessionComposerDraftStorage(), draftKey);
+            clearComposerDraft(
+              scopedDraftStorage ?? getSessionComposerDraftStorage(),
+              draftKey,
+            );
           }
           sidecar?.clearConversationQuotes(quoteIds);
           setConversationReferences([]);
@@ -1614,6 +1636,7 @@ export function InputBox({
       onSubmit,
       projectAttachments,
       projectAttachmentStore,
+      scopedDraftStorage,
       lifetime,
       setProjectAttachments,
       reportUploadLimitViolations,
@@ -2081,9 +2104,10 @@ export function InputBox({
       ) {
         // A prepared new conversation now owns real files. Move its draft to
         // the durable identity before the page replaces /new with that ID.
-        const storage = getSessionComposerDraftStorage();
+        const storage = scopedDraftStorage ?? getSessionComposerDraftStorage();
         const nextKey = buildComposerDraftKey({
-          userId: user?.id ?? "anonymous",
+          userId: lifetime?.scope.actorUserId ?? user?.id ?? "anonymous",
+          ...(lifetime ? { workspaceId: lifetime.scope.workspaceId } : {}),
           agentName:
             draftAgentName ??
             (typeof context.agent_name === "string"
@@ -2123,6 +2147,7 @@ export function InputBox({
       onPrepareThread,
       polishingInput,
       projectAttachments,
+      scopedDraftStorage,
       lifetime,
       projectId,
       setProjectAttachments,

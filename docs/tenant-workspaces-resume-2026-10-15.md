@@ -1,6 +1,6 @@
 # 2026-10-15 暂停与恢复检查点
 
-状态更新：用户已于 2026-10-15 明确要求继续，当前已恢复；最新验证见文末 #65。下面暂停段保留为历史记录。
+状态更新：用户已于 2026-10-15 明确要求继续，当前已恢复；最新验证见文末 #69。下面暂停段保留为历史记录。
 
 用户此前要求今天到这里，保存进度并允许本地提交。此检查点是 WIP，不能声称功能验收完成；不要自动继续开发、启动构建、部署或推送。用户再次要求继续后再恢复。
 
@@ -277,3 +277,52 @@ selector/browser/backend two-tab acceptance. Same-space sidecar faults and
 principal/session/revocation remain. M3 is partial, every M0-M11 parent gate
 remains open and activation stays closed. No deployment, Git remote push,
 model call or local application runtime was performed.
+
+
+M3 composer drafts/native project workflow checkpoint (2026-10-15): #66 RED
+proved a scoped composer restored Legacy personal notes from an unscoped
+key. The separate project-page fixture hit a label ambiguity (Instructions
+tabpanel and textbox); querying the actual textbox fixes the fixture. #67
+main GREEN (21 cases: two new, 19 existing) preceded lifecycle expansion.
+#68 passed 78 behaviors/format but target lint rejected unknown test-field
+string coercion; typeof narrowing fixes only the fixture. #69 SUCCESS:
+78 cases (three new, 75 existing), eight files, three-file Prettier/target
+lint, early tsc and required full pnpm check. Production bytes match #68;
+source/archive hashes and exact empty #66-#69/formatter resource inventories
+are captured in frontend_composer_drafts in progress JSON.
+
+The text/reference draft namespace is disjoint from legacy keys and binds
+actor/workspace/agent/thread. Captured Storage handles refuse foreign or
+legacy keys and all access after expiry. InputBox hydration, save, flush,
+retirement/clear and new-thread file-reference transfer use this client/key.
+Scoped edits persist the visible snapshot while active: selection aborts
+before React cleanup, so relying on a final expired flush would lose the
+latest keystrokes. Native unscoped keys, 300ms debounce, disabled-storage
+behavior and draft reconciliation stay unchanged. No automatic legacy
+adoption occurs. Current namespace remains persistent across own remounts;
+old handles cannot change a fresh lifetime's same-space replacement.
+
+Positive UI verification reuses ProjectPage, ProjectsSection and
+NewProjectDialog unchanged: P/T instructions editing, rename, archive/restore,
+sidebar create, create-then-move and delete navigation pass through real
+project/thread hooks and REST. No replacement project UI or extra mutation
+layer was necessary. Their unchanged source hashes are recorded alongside
+the code changes. Real InputBox P/T immediate switching preserves own draft;
+old onSent and expired/foreign Storage cannot clear replacements; stored
+reference metadata restores its own chip after P/T/P. HTTP/catalog/router/
+toast, layout/document/thread leaves and final onSubmit are fixtures; this
+is not actual backend/browser/Run/principal authorization proof. Existing
+KaTeX/Radix warnings remain; production styles were not changed.
+
+A bounded existing-image browser inventory (uid 999:987) found no standard
+PATH browser or four common cache/install directories; probe exit 0 and
+owned resources empty. This does not inventory other images/host/custom or
+inaccessible caches; inspect reusable tools before preparing browser gates.
+
+Next: artifact clients/direct/relative HTML/standalone/iframe URLs and remaining
+UI-store/global-title audit, explicit scoped file-picker/focus and same-space
+sidecar faults, then actual shell/capability/selector and browser/backend
+two-tab acceptance. Positive project UI workflow is not every publication
+fault. Principal/session/revocation and all M4-M11 gates remain. M3 is partial,
+every parent M0-M11 gate stays open and activation remains closed. No
+deployment, Git remote push, model call or local application runtime ran.

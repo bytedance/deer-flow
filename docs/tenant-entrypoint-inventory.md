@@ -162,3 +162,12 @@ scoped preview effect and direct document URL selector. P/T/P persistence and
 legacy isolation, late attach/send and same-space project multi-file navigation
 passed with 105 native regressions/full check. Other page/store/artifact and
 actual browser/backend/Run/physical boundaries remain pending.
+
+
+Composer text/reference drafts/native project UI (#69): disjoint scoped draft
+keys with expired/foreign handle fences and active snapshot persistence;
+InputBox storage and new-thread transfer bound. P/T/P text/reference/old
+onSent proof plus positive native project/settings/sidebar/create-then-move/
+delete navigation pass, with those page implementations unchanged. HTTP/
+catalog/router/submit and leaf fixtures do not prove real browser/backend/
+principal, every callback fault, or remaining artifact/store boundaries.

@@ -546,3 +546,14 @@ URLs carry the existing workspace_id selector, which never grants access.
 Distinct shelf/files project keys and current-view guards stop stale file-loop
 continuations and publication. Other project callers, composer text/reference
 stores, artifact URLs/HTML relatives and real browser/backend acceptance remain.
+
+
+Composer text/reference drafts (#69: three UI mains + 75 existing regressions/
+full check) use a disjoint actor/workspace/agent/thread key and captured
+Storage adapter; expired/foreign/legacy keys are inert. Route every InputBox
+save/read/flush/retire/clear and new-thread transfer through it. Persist the
+scoped visible snapshot while active, since selection closes scope before
+unmount cleanup; unscoped mode keeps native keys/300ms debounce. Do not adopt
+legacy drafts. Original project/settings/sidebar/NewProjectDialog positive
+P/T workflows pass with their source unchanged. Real browser/backend/Run/
+principal and remaining artifact/store/publication fault acceptance stay open.
