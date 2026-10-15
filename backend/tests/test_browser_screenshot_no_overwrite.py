@@ -106,6 +106,70 @@ async def test_failed_publication_reports_an_error_and_leaves_no_files(tmp_path,
     assert (tmp_path / "report.png").read_bytes() == b"user report"
 
 
+def _swap_staged_before_link(monkeypatch, replace_staged, watch: Path | None = None) -> list[int]:
+    """Replace the staged capture right before it is linked, as a sandbox writing ``outputs/`` could.
+
+    Returns the link counts of *watch* observed right after each link call.
+    """
+    link = os.link
+    link_counts: list[int] = []
+
+    def swapped_link(source, destination, *args, **kwargs):
+        source = Path(source)
+        if source.name.startswith(".") and source.is_file() and not source.is_symlink():
+            source.unlink()
+            replace_staged(source)
+        try:
+            return link(source, destination, *args, **kwargs)
+        finally:
+            if watch is not None:
+                link_counts.append(watch.stat().st_nlink)
+
+    monkeypatch.setattr(os, "link", swapped_link)
+    return link_counts
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink creation")
+@pytest.mark.asyncio
+async def test_a_staged_capture_swapped_for_a_symlink_never_publishes_its_target(tmp_path, monkeypatch):
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    secret = tmp_path / "host-secret.txt"
+    secret.write_bytes(b"host secret")
+    link_counts = _swap_staged_before_link(monkeypatch, lambda staged: staged.symlink_to(secret), watch=secret)
+
+    result = await _screenshot(outputs)
+
+    assert "artifacts" not in result.update
+    assert "Error: could not capture screenshot" in result.update["messages"][0].content
+    assert list(outputs.iterdir()) == []
+    # The host file never gains a name in outputs/, not even briefly.
+    assert link_counts and set(link_counts) == {1}
+
+
+@pytest.mark.asyncio
+async def test_a_staged_capture_swapped_for_another_file_is_not_published(tmp_path, monkeypatch):
+    _swap_staged_before_link(monkeypatch, lambda staged: staged.write_bytes(b"planted"))
+
+    result = await _screenshot(tmp_path)
+
+    assert "artifacts" not in result.update
+    assert "Error: could not capture screenshot" in result.update["messages"][0].content
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_a_failed_staging_write_leaves_no_files(tmp_path, monkeypatch):
+    def fail(*args):
+        raise OSError(errno.ENOSPC, "disk full")
+
+    monkeypatch.setattr(os, "fsync", fail)
+    result = await _screenshot(tmp_path)
+
+    assert "Error: could not capture screenshot" in result.update["messages"][0].content
+    assert list(tmp_path.iterdir()) == []
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits and umask")
 @pytest.mark.parametrize("mask", [0o022, 0o077])
 @pytest.mark.asyncio

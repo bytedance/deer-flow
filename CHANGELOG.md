@@ -1256,7 +1256,9 @@ This release closes that milestone with **621 merged pull requests**.
   complete capture is hard-linked onto the name, so a name taken concurrently
   is skipped rather than replaced and the final name never shows a partial
   file. Like Gateway uploads, the outputs directory needs hard-link support;
-  without it the tool reports an error instead of overwriting. ([#6913])
+  without it the tool reports an error instead of overwriting. A staged
+  capture swapped before publication, for example for a symlink to a host
+  file, is never linked into outputs; the tool reports an error. ([#6913])
 
 - **llm:** A provider error that arrives inside a streaming response that has
   already returned `200` is now retried like the same error sent as an HTTP

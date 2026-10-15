@@ -53,6 +53,8 @@ _BROWSER_FRAMES_DIRNAME = BROWSER_FRAMES_DIRNAME
 _FRAMES_VIRTUAL_PREFIX = f"{_OUTPUTS_VIRTUAL_PREFIX}/{_BROWSER_FRAMES_DIRNAME}"
 _SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _MAX_FILENAME_COLLISION_PROBES = 1000
+# Without no-follow support, os.link may follow a symlink at the staged name.
+_LINK_CAN_SKIP_SYMLINKS = os.link in os.supports_follow_symlinks
 
 
 @dataclass(frozen=True)
@@ -458,23 +460,48 @@ def _publish_screenshot_no_overwrite(outputs_path: Path, name: str, content: byt
 
     The outputs directory also holds the user's own deliverables, so a
     screenshot never replaces an existing file. The complete capture is staged
-    under a hidden sibling, then hard-linked onto each candidate name: the
+    under a hidden, exclusively created sibling (``0666 & ~umask``, like
+    ``Path.write_bytes``), then hard-linked onto each candidate name: the
     ``os.link`` is the whole no-overwrite guard, failing with
     :class:`FileExistsError` when the name exists as anything (a file, a
     symlink, a concurrent capture), so no name is checked before it is claimed.
     The final name never shows a partial capture. Staging shares the outputs
     directory, so the link is same-filesystem; like Gateway uploads, outputs
     need hard-link support and other link failures propagate.
+
+    The sandbox can write ``outputs/`` too, so it could swap the staged name for
+    a symlink to a host file before the link. The link does not follow symlinks
+    where supported, and the published name must be the inode written here;
+    anything else is removed and the capture fails.
     """
     outputs_path.mkdir(parents=True, exist_ok=True)
     staged = outputs_path / f".{name}.{uuid4().hex}.tmp"
-    _publish_bytes_atomically(staged, content)
+    fd = os.open(staged, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0), 0o666)
     try:
+        try:
+            handle = os.fdopen(fd, "wb")
+            fd = None  # The file object now owns the descriptor.
+            with handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+                staged_stat = os.fstat(handle.fileno())
+        except BaseException:
+            if fd is not None:
+                os.close(fd)
+            raise
         for candidate in _screenshot_name_candidates(name):
+            destination = outputs_path / candidate
             try:
-                os.link(staged, outputs_path / candidate)
+                if _LINK_CAN_SKIP_SYMLINKS:
+                    os.link(staged, destination, follow_symlinks=False)
+                else:
+                    os.link(staged, destination)
             except FileExistsError:
                 continue
+            if not os.path.samestat(os.lstat(destination), staged_stat):
+                destination.unlink(missing_ok=True)
+                raise OSError(f"Staged browser screenshot changed before publication: {staged.name}")
             return candidate
         raise FileExistsError(errno.EEXIST, "No free screenshot name", str(outputs_path / name))
     finally:
