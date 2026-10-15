@@ -115,7 +115,7 @@ class SandboxMessages(MessagesState):
         (" def test_pass(self): pass\n", (True, True)),
         (' def test_pass(self): pass\n @unittest.skip("optional")\n def test_skip(self): pass\n', (True, True)),
         (' @unittest.skip("optional")\n def test_skip(self): pass\n', (False, False)),
-        (" pass\n", (False, False)),
+        (" pass\n", (True, False)),
         (" @unittest.expectedFailure\n def test_xfail(self): self.fail()\n", (False, False)),
         (" def test_pass(self): pass\n @unittest.expectedFailure\n def test_xfail(self): self.fail()\n", (True, True)),
         (" def test_fail(self): self.fail()\n", (True, False)),
@@ -154,5 +154,7 @@ async def test_native_unittest_results_reach_parent_acceptance(tmp_path, monkeyp
     verdict = check_acceptance_criteria([f"tests_passed:{command}"], bash_executions=executions)
     assert (verdict["leaves"][0]["checked"], verdict["all_hold"]) == expected, (outputs, verdict)
     if expected == (True, False):
-        assert "Exit Code: 1" in outputs[0]
+        # Python 3.12+ exits 5 for an empty selection, 1 for test errors/failures.
+        exit_code = 5 if methods == " pass\n" else 1
+        assert f"Exit Code: {exit_code}" in outputs[0]
         assert executions[0]["status"] == "error"
