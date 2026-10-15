@@ -276,7 +276,11 @@ export function ArtifactFilePreview({
         >
           {content ?? ""}
         </SafeStreamdown>
-        <CitationSourcesPanel sources={citationSources} className="mb-4" />
+        <CitationSourcesPanel
+          sources={citationSources}
+          resourceKey={JSON.stringify([scrollKey, active])}
+          className="mb-4"
+        />
       </div>
     );
   }

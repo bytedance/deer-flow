@@ -602,9 +602,16 @@ paths that escape it rather than fetching the app/default workspace. Use the
 source file base for scoped successful write_file previews too; native unscoped
 preview behavior remains unchanged. Original citation/safe-href guards stay. Resolve file locators
 before message citation early returns. Use Streamdown defaultUrlTransform before
-scoped image resolution, keeping its default image renderer and controls. The
-separate CitationSourcesPanel raw source links/copy still require binding and
-per-view publication fences before M3 acceptance.
+scoped image resolution, keeping its default image renderer and controls.
+CitationSourcesPanel file links and copied Markdown references use the same
+captured locator, preserving external sources and the native clipboard helper.
+Pass the owning thread/message or artifact scrollKey/active state as resourceKey:
+two reports can cite the same URL while owning different pending copy actions.
+Copied feedback, success/error toasts and reset timers use the captured source/view
+incarnation. Old cleanup cannot clear a replacement timer. Omit unbindable native
+file destinations and disable their copy control; do not fall back to a default
+workspace. These guards fence UI publication, not an already-issued OS clipboard
+operation. HTML and actual browser/backend/principal acceptance remain open.
 
 core/api/request.ts owns optional WorkspaceRequestOptions and the whole-decoder
 requestWithWorkspace boundary. Artifact request exports remain aliases; feedback

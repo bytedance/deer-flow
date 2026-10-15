@@ -203,3 +203,13 @@ and parent Blob URLs insufficient in the opaque sandbox; child-made Blob bytes
 load fixture image/CSS/JSON. CitationSourcesPanel raw source links/copy remain a separate unbound consumer.
 Actual product HTML protocol/resources, main shell,
 two-tab/principal/physical and other M3/M4-M11 gates remain, activation closed.
+
+
+Source-list links/copied references (#89 frontend): the two native callers
+(message and artifact preview) pass their owning view key; source URL alone
+is insufficient when two reports cite the same file. Confirmed file locators,
+whole native copied-reference formatting and source/view/workspace publication
+fences cover success/error feedback and timers. 59 tests/full check, extending
+three existing integration cases without adding cases. HTTP/router/clipboard
+wires remain doubles; not OS cancellation or real backend/browser/principal/
+physical proof. Nested HTML and other M3/M4-M11 gates remain; activation closed.

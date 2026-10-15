@@ -639,7 +639,10 @@ function MessageContent_({
         className="my-3"
         components={components}
       />
-      <CitationSourcesPanel sources={citationSources} />
+      <CitationSourcesPanel
+        sources={citationSources}
+        resourceKey={JSON.stringify([threadId, message.id])}
+      />
       <KnowledgeSourcesPanel content={contentToDisplay} />
       {message.type === "ai" && showWorkspaceChanges && (
         <WorkspaceChangeBadge

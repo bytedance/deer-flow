@@ -1989,7 +1989,7 @@ For example, independent read-only research can run concurrently when the wall-c
 
 ### Sandbox & File System
 
-Standalone artifact previews retain their file link through sign-in. They show a loading state while confirming access, and an unavailable message with a refresh hint when access cannot be confirmed. Workspace-aware report links and images are being integrated; tenant activation remains gated by the [workspace acceptance plan](docs/superpowers/plans/2026-10-13-tenant-workspaces.md).
+Standalone artifact previews retain their file link through sign-in. They show a loading state while confirming access, and an unavailable message with a refresh hint when access cannot be confirmed. Workspace-aware report links, source references and images are being integrated; tenant activation remains gated by the [workspace acceptance plan](docs/superpowers/plans/2026-10-13-tenant-workspaces.md).
 
 Host-externalized tool outputs use the Gateway's normal file-creation umask.
 Host and sandbox outputs use deterministic filenames hashed from the raw tool

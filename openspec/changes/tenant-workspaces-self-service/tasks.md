@@ -754,3 +754,42 @@ match #85. The cleaned script's four browser observations were reverified in
 pinned Shanghai containers with empty owned resources, directly on Jenkins host
 (not a new Jenkins build). Full frontend checks were not repeated. Exact script/
 archive hashes and results: frontend_resource_surfaces.post_gate_probe.
+
+
+M3 source-list references checkpoint: frontend #86 RED extended the existing
+main and reproduced a source-list link retaining a foreign content-authored
+selector. #87 main GREEN first: eight tests in two files, including five native
+source-panel SSR/style/locale regressions. Actual message/report lists link and
+copy in P/T through native parsing, reference formatting and clipboard helper;
+external web sources keep their original URL/text. No new cases were added.
+Then extend the same two existing boundary cases: old same-space copy completion
+and an expired workspace/clipboard failure, plus an unbindable native source.
+#88 controlled regression omits only the new artifact owner's resourceKey with
+locator binding retained: two reports cite the same URL, and the old copy adds
+a second toast after a new-view copy (one failed, two passed). Restore the owner
+key. #89 SUCCESS: 59 tests/12 files, four-file formatting/target lint, early full
+tsc and required full pnpm check. The same three integration cases were extended,
+with 56 unchanged regressions; zero additional cases. Source/archive/image/
+terminal/empty-resource receipts: frontend_source_references in progress JSON.
+
+Source-list file hrefs and copied Markdown use the confirmed locator; unbindable
+native file links are inert with copy disabled. Native layout, counts, locales,
+formatter and clipboard fallback stay. Both actual callers pass the owning
+thread/message or artifact scrollKey/active identity. Copied feedback, success/
+error publication and timers belong to that source/view/workspace incarnation;
+old cleanup cannot clear a replacement timer. HTTP/router/clipboard wires are
+doubled, and source details are opened in the DOM fixture. This does not prove
+OS clipboard cancellation, browser permissions/downloads, compiled Next/hydration,
+live backend/principal/two-tab or physical isolation. Already-issued clipboard
+operations cannot be undone; guards protect UI publication. Native paragraph/
+image nesting and KaTeX warnings remain. Existing HTML helper/probe code is
+unchanged and was not rerun; its prior transport evidence is not product HTML
+acceptance.
+
+Next: scoped HTML resource delivery through captured parent REST into iframe-
+owned bytes, retaining native sandbox/Cookie policy, then source validation,
+nested CSS/dynamic requests, disposal and actual browser/backend acceptance.
+Main shell/selector, UI stores/title/focus/sidecar faults, live browser transport
+and M4-M11 remain open. M3 partial, every parent gate unchecked, activation
+false. No deployment, remote push, local application runtime, model call or new
+image download.

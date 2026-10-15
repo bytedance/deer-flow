@@ -4072,5 +4072,163 @@
       }
     },
     "source_identity": "15 frontend files exactly match the #85 archive; diagnostic script matches the post_gate_probe archive. Its only change from #85 is four removed blank-line spaces."
+  },
+  "frontend_source_references": {
+    "status": "partial M3; native source-list file links, copied references and view publication only",
+    "base_commit": "a6057de7",
+    "job": "deerflow-tenant-frontend",
+    "main_red": {
+      "build": 86,
+      "result": "FAILURE",
+      "archive_sha256": "db13cb28294c46743a624f2f98e37a7adeeb2c04a66e42c1395b87fdcf2c74bd",
+      "tests_failed": 1,
+      "tests_passed": 2,
+      "reason": "Extended existing real message/report main: source-list link kept content-authored team selector while current workspace was personal."
+    },
+    "main_green": {
+      "build": 87,
+      "result": "SUCCESS",
+      "archive_sha256": "cc8011eaac964060428d1116cae022c7c3526daeb832b4ff6f257ee3be2c8484",
+      "tests_passed": 8,
+      "files": 2,
+      "new_cases": 0,
+      "reason": "Existing main proves actual message/report source lists, native clipboard helper with wire double, positive P/T links and copied Markdown plus untouched external references. Five original source-panel SSR/locale/style regressions pass."
+    },
+    "owner_regression_red": {
+      "build": 88,
+      "result": "FAILURE",
+      "archive_sha256": "f2cf9a63e0b1973fce39572f8e553072cd0a8ae0653e6d62b7170f1cfa4495dc",
+      "tests_failed": 1,
+      "tests_passed": 2,
+      "reason": "Controlled regression after main green: omit only the new artifact owner resourceKey while keeping locator binding. Two reports cite the same exact source URL; releasing the old clipboard promise after a new-view copy produced two success toasts instead of one. Normal main and scope-expiry/unbindable-source boundary passed. Restore the required owning-view key."
+    },
+    "green": {
+      "build": 89,
+      "result": "SUCCESS",
+      "archive_sha256": "1faaa5fa6937218cd85ba3d73aafeb2b4ae01db751232adac7930ca45c166a4f",
+      "tests_passed": 59,
+      "files": 12,
+      "new_cases": 0,
+      "extended_existing_cases": 3,
+      "unchanged_regressions": 56,
+      "command": "python3 /tmp/tenant-source/scripts/pnpm.py exec rstest run tests/unit/components/workspace/artifacts/workspace-resource-surfaces.dom.test.tsx tests/unit/components/workspace/citations/citation-sources-panel.test.ts tests/unit/core/artifacts/utils.test.ts tests/unit/components/workspace/messages/markdown-link.test.ts tests/unit/components/workspace/citations/artifact-link.test.ts tests/unit/core/workspace-changes/api.test.ts tests/unit/components/workspace/messages/message-list-item.dom.test.tsx tests/unit/components/workspace/messages/message-group-duration.dom.test.tsx tests/unit/core/artifacts/api.test.ts tests/unit/core/artifacts/loader.test.ts tests/unit/components/workspace/artifacts/workspace-artifacts.dom.test.tsx tests/unit/components/workspace/artifacts/workspace-artifact-viewer.dom.test.tsx",
+      "checks": [
+        "behavior tests",
+        "four-file Prettier",
+        "target ESLint --max-warnings 0",
+        "early full tsc --noEmit",
+        "required full pnpm check"
+      ]
+    },
+    "contract": "CitationSourcesPanel binds configured-Gateway native artifact source URLs and copied Markdown references to the confirmed workspace, including replacement of content-authored selectors. External web references and legacy/no-workspace behavior remain. Reuse the native clipboard helper, formatter, source labels/counts/icons/layout and localized feedback. Unbindable native file URLs render the existing inert marker with copy disabled. Actual message and artifact callers provide thread/message or scrollKey/active resourceKey: a source URL alone cannot own a pending clipboard operation across report changes. Copied state, post-await success/error toasts and reset timers belong to the captured source/view/workspace incarnation; cleanup and queued timers cannot alter a replacement timer.",
+    "proof_limits": "Actual React source lists in MessageListItem and ArtifactFilePreview, native source parser/formatter/clipboard helper, Context/session/REST run with HTTP/catalog/router/clipboard wire doubles. Source details are made visible in the DOM fixture. This is not real OS clipboard, browser download/permission, Next hydration, live Gateway/JWT/principal/two-tab, NAS or model proof. Already-issued clipboard operations cannot be retroactively cancelled; guards stop stale UI publication and fresh stale invocations. Existing paragraph/image nesting and KaTeX warnings remain; HTML implementation is still open. No new HTML browser diagnostic or backend rerun was needed for unchanged helpers.",
+    "evidence": {
+      "frontend": [
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 23100,
+          "number": 86,
+          "result": "FAILURE",
+          "owned_containers": [],
+          "owned_networks": [],
+          "file_counts": [],
+          "passed_counts": [
+            "2"
+          ],
+          "test_seconds": [
+            9.81
+          ],
+          "format_passed": false,
+          "full_check_invoked": false,
+          "type_errors": [],
+          "source_locator_mismatch": true,
+          "duplicate_old_copy_toast": false
+        },
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 27709,
+          "number": 87,
+          "result": "SUCCESS",
+          "owned_containers": [],
+          "owned_networks": [],
+          "file_counts": [
+            "2"
+          ],
+          "passed_counts": [
+            "8"
+          ],
+          "test_seconds": [
+            12.4
+          ],
+          "format_passed": false,
+          "full_check_invoked": false,
+          "type_errors": [],
+          "source_locator_mismatch": false,
+          "duplicate_old_copy_toast": false
+        },
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 27748,
+          "number": 88,
+          "result": "FAILURE",
+          "owned_containers": [],
+          "owned_networks": [],
+          "file_counts": [],
+          "passed_counts": [
+            "2"
+          ],
+          "test_seconds": [
+            11.6
+          ],
+          "format_passed": false,
+          "full_check_invoked": false,
+          "type_errors": [],
+          "source_locator_mismatch": false,
+          "duplicate_old_copy_toast": true
+        },
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 488561,
+          "number": 89,
+          "result": "SUCCESS",
+          "owned_containers": [],
+          "owned_networks": [],
+          "file_counts": [
+            "12"
+          ],
+          "passed_counts": [
+            "59"
+          ],
+          "test_seconds": [
+            48.3
+          ],
+          "format_passed": true,
+          "full_check_invoked": true,
+          "type_errors": [],
+          "source_locator_mismatch": false,
+          "duplicate_old_copy_toast": false
+        }
+      ],
+      "formatter_probe": {
+        "containers": [],
+        "networks": []
+      },
+      "image": "sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01"
+    },
+    "source_sha256": {
+      "frontend/src/components/workspace/citations/citation-sources-panel.tsx": "50a44cf518914ecd9fae01c85f214e0897315afe1bf5daca72cd55999ed9e0f4",
+      "frontend/src/components/workspace/messages/message-list-item.tsx": "33082bf3614886c920985388850865be3237f0b2ab438ef2640c80db60159095",
+      "frontend/src/components/workspace/artifacts/artifact-file-preview.tsx": "e1672ed55fb1c38194aa34bcdf23e01f3323658f0fc73d3afec36239660efbc5",
+      "frontend/tests/unit/components/workspace/artifacts/workspace-resource-surfaces.dom.test.tsx": "4e3a8216c3c8dc62d99f5e29e1970087339f817a26152937258bfba3d1855095"
+    },
+    "remaining": [
+      "Implement scoped HTML resource delivery with captured parent REST and iframe-owned bytes; source/document validation, nested CSS/dynamic requests, cancellation and owned resource cleanup still require production code and browser verification.",
+      "Main shell capability/selector and actual Next/Gateway/browser two-tab, standalone/download/cookie/principal acceptance; remaining UI stores/title/focus/sidecar faults and live browser WSS/navigation.",
+      "M4-M11 and physical isolation/revocation/migration/restore/business acceptance remain. All parent gates stay unchecked and runtime activation false."
+    ]
   }
 }

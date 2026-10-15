@@ -7,8 +7,10 @@ import {
   fireEvent,
   render,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { useEffect } from "react";
+import { toast } from "sonner";
 
 import { QueryClientProvider } from "@/components/query-client-provider";
 import { Sheet } from "@/components/ui/sheet";
@@ -228,7 +230,7 @@ function mount(options: { reportContent?: string } = {}) {
           message={{
             type: "ai",
             id: "answer",
-            content: `[Message report](/mnt/user-data/outputs/report.md?download=true#section) ![Message chart](chart.png) [External reference](https://example.test/source) [citation:Message evidence](/mnt/user-data/outputs/evidence.txt?download=true#evidence) [citation:Raw evidence](${location.origin}/api/threads/${threadId}/artifacts/mnt/user-data/outputs/raw-evidence.txt?workspace_id=${T})`,
+            content: `[Message report](/mnt/user-data/outputs/report.md?download=true#section) ![Message chart](chart.png) [External reference](https://example.test/source) [citation:Message evidence](/mnt/user-data/outputs/evidence.txt?download=true#evidence) [citation:Raw evidence](${location.origin}/api/threads/${threadId}/artifacts/mnt/user-data/outputs/raw-evidence.txt?workspace_id=${T}) [citation:Web evidence](https://example.test/evidence?workspace_id=${T})`,
           }}
         />
         <MessageListItem
@@ -264,7 +266,7 @@ function mount(options: { reportContent?: string } = {}) {
         </div>
         <ArtifactFilePreview
           language="markdown"
-          scrollKey="report"
+          scrollKey={`${threadId}:report`}
           url={urlOfArtifact({
             threadId,
             filepath: "/mnt/user-data/outputs/reports/report.md",
@@ -274,7 +276,8 @@ function mount(options: { reportContent?: string } = {}) {
             `# Source report
 [Appendix](../appendix.md?download=true#method)
 ![Report evidence](../evidence.png)
-[Owned file](/mnt/user-data/outputs/owned.txt?workspace_id=${P}#owned)`
+[Owned file](/mnt/user-data/outputs/owned.txt?workspace_id=${P}#owned)
+[citation:Report source](${location.origin}/api/threads/${threadId}/artifacts/mnt/user-data/outputs/report-source.txt?workspace_id=${P}#report)`
           }
         />
         <MessageGroup threadId={threadId} messages={tool} />
@@ -351,13 +354,39 @@ function thumb(app: ReturnType<typeof mount>) {
     throw new Error("Feedback control missing");
   return button;
 }
+const originalClipboard = Object.getOwnPropertyDescriptor(
+  navigator,
+  "clipboard",
+);
+function clipboardWire(write: (text: string) => Promise<void>) {
+  const writeText = rs.fn(write);
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText },
+  });
+  return writeText;
+}
+function sourceList(app: ReturnType<typeof mount>, title: string) {
+  const details = app.view
+    .getAllByText(title)
+    .find((node) => node.closest("ol"))
+    ?.closest("details");
+  if (!(details instanceof HTMLDetailsElement))
+    throw new Error("Source list missing");
+  details.open = true;
+  return within(details);
+}
 afterEach(() => {
   cleanup();
   rs.unstubAllGlobals();
   rs.restoreAllMocks();
   mocks.threadId = "thread-1";
+  if (originalClipboard)
+    Object.defineProperty(navigator, "clipboard", originalClipboard);
+  else Reflect.deleteProperty(navigator, "clipboard");
 });
 it("binds the real message, report, screenshot, feedback and file-change main path to each workspace", async () => {
+  const writeText = clipboardWire(() => Promise.resolve());
   const seen = fixture();
   const app = mount();
   for (const workspace of [P, T]) {
@@ -372,6 +401,44 @@ it("binds the real message, report, screenshot, feedback and file-change main pa
     );
     expect(url.searchParams.get("download")).toBe("true");
     expect(url.hash).toBe("#section");
+    for (const [title, path] of [
+      ["Raw evidence", "raw-evidence.txt"],
+      ["Report source", "report-source.txt"],
+    ] as const) {
+      const list = sourceList(app, title);
+      const href = list
+        .getByRole("link", { name: new RegExp(title) })
+        .getAttribute("href");
+      resource(href, workspace, `/mnt/user-data/outputs/${path}`);
+      fireEvent.click(
+        list.getByRole("button", { name: enUS.citations.copyReference(title) }),
+      );
+      await waitFor(() =>
+        expect(writeText).toHaveBeenLastCalledWith(`[${title}](${href})`),
+      );
+      await waitFor(() =>
+        expect(
+          list.getByRole("button", {
+            name: enUS.citations.copiedReference(title),
+          }),
+        ).toBeTruthy(),
+      );
+    }
+    const web = sourceList(app, "Web evidence");
+    expect(
+      web.getByRole("link", { name: /Web evidence/ }).getAttribute("href"),
+    ).toBe(`https://example.test/evidence?workspace_id=${T}`);
+    fireEvent.click(
+      web.getByRole("button", {
+        name: enUS.citations.copyReference("Web evidence"),
+      }),
+    );
+    await waitFor(() =>
+      expect(writeText).toHaveBeenLastCalledWith(
+        `[Web evidence](https://example.test/evidence?workspace_id=${T})`,
+      ),
+    );
+
     const evidence = resource(
       app.view
         .getByRole("link", { name: "Message evidence" })
@@ -491,6 +558,14 @@ function deferred<T>() {
   return { promise, resolve };
 }
 it("keeps replacement feedback pending and new file changes intact when old same-space bodies finish", async () => {
+  const oldCopy = deferred<void>();
+  const copiedToast = rs
+    .spyOn(toast, "success")
+    .mockImplementation(() => "source-copy");
+  let copyCount = 0;
+  clipboardWire(() =>
+    ++copyCount === 1 ? oldCopy.promise : Promise.resolve(),
+  );
   const oldVote = deferred<void>(),
     newVote = deferred<void>(),
     oldChanges = deferred<void>();
@@ -527,13 +602,21 @@ it("keeps replacement feedback pending and new file changes intact when old same
       return response;
     },
   });
-  const app = mount();
+  const app = mount({
+    reportContent: `[citation:Same source](${location.origin}/api/threads/thread-1/artifacts/mnt/user-data/outputs/constant-source.txt?workspace_id=${P})`,
+  });
   await enteredChanges.promise;
   await app.view.findByRole("link", { name: "Message report" });
   const life = app.lifetime();
   const cache = app.cache();
   fireEvent.click(thumb(app));
   await enteredVote.promise;
+  fireEvent.click(
+    sourceList(app, "Same source").getByRole("button", {
+      name: enUS.citations.copyReference("Same source"),
+    }),
+  );
+  expect(copyCount).toBe(1);
   app.route("thread-2");
   await waitFor(() =>
     expect(
@@ -545,14 +628,35 @@ it("keeps replacement feedback pending and new file changes intact when old same
   expect(app.lifetime()).toBe(life);
   expect(app.cache()).toBe(cache);
   expect(life.scope.signal.aborted).toBe(false);
+  const newSources = sourceList(app, "Same source");
+  fireEvent.click(
+    newSources.getByRole("button", {
+      name: enUS.citations.copyReference("Same source"),
+    }),
+  );
+  await waitFor(() =>
+    expect(
+      newSources.getByRole("button", {
+        name: enUS.citations.copiedReference("Same source"),
+      }),
+    ).toBeTruthy(),
+  );
+  expect(copiedToast).toHaveBeenCalledTimes(1);
   fireEvent.click(thumb(app));
   await enteredNewVote.promise;
   expect(thumb(app).disabled).toBe(true);
   await act(async () => {
+    oldCopy.resolve();
     oldVote.resolve();
     oldChanges.resolve();
     await Promise.all([decodedVote.promise, decodedChanges.promise]);
   });
+  expect(copiedToast).toHaveBeenCalledTimes(1);
+  expect(
+    newSources.getByRole("button", {
+      name: enUS.citations.copiedReference("Same source"),
+    }),
+  ).toBeTruthy();
   expect(thumb(app).disabled).toBe(true);
   expect(
     thumb(app).querySelector("svg")?.classList.contains("fill-current"),
@@ -588,7 +692,20 @@ it("keeps replacement feedback pending and new file changes intact when old same
 });
 it("binds content-authored raw file URLs but omits escaped report paths and preserves web references", async () => {
   fixture();
+  const lateCopy = deferred<void>();
+  const copyFinished = deferred<void>();
+  const writeText = clipboardWire(async () => {
+    await lateCopy.promise;
+    copyFinished.resolve();
+    throw new Error("Clipboard fixture unavailable");
+  });
+  const errorToast = rs
+    .spyOn(toast, "error")
+    .mockImplementation(() => "source-error");
   const raw = `${location.origin}/api/threads/${THREAD}/artifacts/mnt/user-data/outputs/raw.txt?download=true&workspace_id=${P}&workspace_id=${P}#source`;
+  const blocked = new URL(raw);
+  blocked.username = "fixture";
+  blocked.password = "fixture";
   const app = mount({
     reportContent: `# Report part
 [Raw file](${raw})
@@ -597,7 +714,9 @@ it("binds content-authored raw file URLs but omits escaped report paths and pres
 ![Escape image](../../../../../../../../unbound.png)
 [Literal percent](/mnt/user-data/outputs/a%2520b.txt)
 [Local anchor](#report-part)
-[Web source](https://example.test/source?workspace_id=${P})`,
+[Web source](https://example.test/source?workspace_id=${P})
+[citation:Scoped source](${raw})
+[citation:Blocked source](${blocked.href})`,
   });
   await app.select(T);
   const url = resource(
@@ -634,4 +753,31 @@ it("binds content-authored raw file URLs but omits escaped report paths and pres
   expect(
     app.view.getByRole("link", { name: "Web source" }).getAttribute("href"),
   ).toBe(`https://example.test/source?workspace_id=${P}`);
+  const blockedSources = sourceList(app, "Blocked source");
+  expect(
+    blockedSources.queryByRole("link", { name: /Blocked source/ }),
+  ).toBeNull();
+  const blockedCopy = blockedSources.getByRole("button", {
+    name: enUS.citations.copyReference("Blocked source"),
+  });
+  expect((blockedCopy as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(blockedCopy);
+  expect(writeText).not.toHaveBeenCalled();
+  fireEvent.click(
+    sourceList(app, "Scoped source").getByRole("button", {
+      name: enUS.citations.copyReference("Scoped source"),
+    }),
+  );
+  expect(writeText).toHaveBeenCalledTimes(1);
+  await app.select(P);
+  await act(async () => {
+    lateCopy.resolve();
+    await copyFinished.promise;
+  });
+  expect(errorToast).not.toHaveBeenCalled();
+  expect(
+    sourceList(app, "Scoped source").queryByRole("button", {
+      name: enUS.citations.copiedReference("Scoped source"),
+    }),
+  ).toBeNull();
 });
