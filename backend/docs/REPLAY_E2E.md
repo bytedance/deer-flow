@@ -1,8 +1,8 @@
 # Record/Replay E2E — front-back contract verification
 
 Deterministic, **key-free** end-to-end checks that a backend change can't
-silently break the frontend (and vice-versa). Two complementary layers, fed by a
-single recording.
+silently break the frontend (and vice-versa). Two complementary layers replay
+recorded or purpose-built model decisions through the real runtime.
 
 ## Why
 
@@ -16,7 +16,7 @@ so contract drift turns the build red instead.
 - **Layer 1 — backend golden** (`tests/test_replay_golden.py`): replays a fixture
   through the real FastAPI gateway with `ReplayChatModel` and asserts the streamed
   SSE event sequence equals a committed golden. Fast, no browser. Guards protocol
-  *shape*.
+  *shape* and scenario-specific runtime semantics.
 - **Layer 2 — full-stack render** (`frontend/tests/e2e-real-backend/`): real
   Next.js + real gateway (replay model) + Chromium; asserts the replayed
   auto-title and a follow-up suggestion render in the browser. Guards semantic
@@ -73,6 +73,31 @@ A swallowed hash-miss keeps the SSE *event shapes* identical (the gateway wraps 
 into a normal assistant error message), so the Layer-1 golden can't catch a miss
 by shape alone — it inspects `replay_provider.replay_misses()` and fails loud
 instead. Layer-2 already fails on a miss (the recorded turns never render).
+
+## Agent orchestration scenario: delegated file task
+
+`subagent_file_task.ultra.json` fixes four model decisions so the scenario is
+stable and key-free, then exercises the production runtime around those
+decisions:
+
+1. The Lead Agent calls the real `task` tool.
+2. The real `SubagentExecutor` runs a `general-purpose` subagent.
+3. The subagent calls the real sandbox `write_file` tool.
+4. The task result returns to the Lead Agent, which produces the final answer.
+
+The test subscribes to both `values` and `custom` streams. In addition to the
+event-shape golden, it asserts that one correlated task progresses from
+`task_started` through at least one `task_running` event to `task_completed`,
+never emits a failure terminal state, returns the expected result, creates the
+expected workspace file, and is reflected in the Lead Agent's final response.
+Raw payload values remain uncommitted; the golden stores only event names and
+sorted top-level keys so volatile IDs and paths cannot make CI flaky.
+
+`tests/conftest.py` installs a lightweight executor mock to break a package
+import cycle for unit tests. This scenario imports the production executor only
+after the Gateway graph has been imported, patches the already-loaded task tool
+for the duration of the test, and relies on `monkeypatch` to restore the shared
+test process afterwards.
 
 ## Record a new scenario (needs a real key — dev machine only)
 
