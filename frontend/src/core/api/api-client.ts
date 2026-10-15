@@ -111,10 +111,12 @@ function streamOptionSignal(options: unknown): AbortSignal | undefined {
  * Recover the submitted input before replaying an active run. The incremental
  * chat stream intentionally omits `values`, so a page reload can otherwise
  * receive the run's AI/tool chunks before its human message has reached the
- * durable history feed. `runs.get` retains the original graph input in
- * `kwargs.input`; merge it into the latest durable values for one synthetic
- * snapshot. Any read failure is deliberately ignored so reconnect semantics
- * remain unchanged for deployments without run metadata.
+ * durable history feed. Initial streams supply the sanitized `submittedInput`
+ * directly, avoiding a run-metadata read. Otherwise, use `kwargs.input` from
+ * the supplied run record, falling back to `runs.get` when needed. Merge the
+ * input into the latest durable values for one synthetic snapshot. Any read
+ * failure is deliberately ignored so reconnect semantics remain unchanged for
+ * deployments without run metadata.
  */
 async function loadReconnectInputSnapshot(
   client: LangGraphClient,
