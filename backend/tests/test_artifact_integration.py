@@ -134,6 +134,8 @@ def test_handle_projected_into_model_context():
         ("https://files.example/report.pdf?token=abc", "]"),
         pytest.param("https://files.example/report.pdf?token=part.csvX#page=2", "\u3002\u201d\uff09", id="cjk-punctuation"),
         pytest.param("https://files.example/report.PdF?token=part.csvX#page=2", "]", id="mixed-case-extension"),
+        pytest.param("https://files.example/report.pdf?label=(old)", "]", id="ascii-query-parentheses"),
+        pytest.param("https://files.example/report.pdf#section[1]", "]", id="ascii-fragment-brackets"),
     ],
 )
 def test_remote_url_survives_capture_checkpoint_and_resolved_download(url, closing_punctuation):
@@ -177,10 +179,10 @@ def test_remote_url_survives_capture_checkpoint_and_resolved_download(url, closi
     assert persisted["real_ref"] == url
 
 
-def test_glob_directory_survives_capture_checkpoint_and_resolved_listing(tmp_path):
+@pytest.mark.parametrize("directory_name", ["项目（归档）", "archive(old)", "archive[old]", "archive{old}", "archive(old[1])"])
+def test_glob_directory_survives_capture_checkpoint_and_resolved_listing(tmp_path, directory_name):
     from deerflow.sandbox.tools import _format_glob_results
 
-    directory_name = "项目（归档）"
     real_ref = f"/mnt/user-data/workspace/{directory_name}"
     directory = tmp_path / directory_name
     directory.mkdir()
