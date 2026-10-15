@@ -1,7 +1,7 @@
 """Fence inbound dedupe cleanup to its admission generation.
 
-Revision ID: 0043_webhook_claim_tokens
-Revises: 0042_channel_leases
+Revision ID: 0044_webhook_claim_tokens
+Revises: 0043_runtime_im_notices
 Create Date: 2026-10-10
 """
 
@@ -11,8 +11,8 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 
-revision: str = "0043_webhook_claim_tokens"
-down_revision: str | Sequence[str] | None = "0042_channel_leases"
+revision: str = "0044_webhook_claim_tokens"
+down_revision: str | Sequence[str] | None = "0043_runtime_im_notices"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

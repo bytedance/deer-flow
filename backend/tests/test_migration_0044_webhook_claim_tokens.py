@@ -20,14 +20,14 @@ from deerflow.persistence.base import Base
 from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 from deerflow.persistence.webhook_delivery.model import WebhookDeliveryRow  # noqa: F401 -- registers the ORM table
 
-REVISION = "0043_webhook_claim_tokens"
-PREVIOUS = "0042_channel_leases"
+REVISION = "0044_webhook_claim_tokens"
+PREVIOUS = "0043_runtime_im_notices"
 TABLE = "webhook_deliveries"
 LEGACY_COLUMNS = {"channel", "workspace_id", "chat_id", "message_id", "first_seen"}
 pytestmark = pytest.mark.asyncio
 
 
-async def test_0043_extends_the_single_migration_chain():
+async def test_0044_extends_the_single_migration_chain():
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
     assert len(script.get_heads()) == 1
     assert script.get_revision(REVISION).down_revision == PREVIOUS
@@ -71,7 +71,7 @@ async def _orm_diff(engine):
 
 
 @pytest.mark.parametrize("backend", ["sqlite", "postgres"])
-async def test_0043_preserves_legacy_rows_and_supports_repeat_upgrade_and_downgrade(tmp_path, backend):
+async def test_0044_preserves_legacy_rows_and_supports_repeat_upgrade_and_downgrade(tmp_path, backend):
     engine, schema = _engine(tmp_path, backend)
     cfg = bootstrap._get_alembic_config(engine, postgres_schema=schema or "")
     try:

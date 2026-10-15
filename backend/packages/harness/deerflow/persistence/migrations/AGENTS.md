@@ -32,8 +32,8 @@ The empty-DB path keeps using `create_all` because `Base.metadata` is the only a
 `0035_login_throttle` → `0036_run_idempotency_request` → `0037_project_document_summaries` →
 `0038_channel_thread_bindings` → `0039_user_disabled` →
 `0040_scheduled_group_notice` → `0041_im_notice_preferences` →
-`0042_channel_leases` →
-`0043_webhook_claim_tokens` (current head). The preference
+`0042_channel_leases` → `0043_runtime_im_notices` →
+`0044_webhook_claim_tokens` (current head). The preference
 revision adds a separate owner/key table with a cascading users foreign key and
 does not alter users; the project-documents revision adds a new owner-scoped
 shelf table, and the MCP lease-token revision adds two nullable token columns to

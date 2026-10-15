@@ -161,7 +161,7 @@ describe("TaskFormDialog", () => {
     ).toBeNull();
     expect(
       screen.queryByRole("combobox", {
-        name: "Also notify a Feishu group (optional)",
+        name: "Also notify a group (optional)",
       }),
     ).toBeNull();
     expect(
@@ -185,7 +185,7 @@ describe("TaskFormDialog", () => {
     await waitFor(() =>
       expect(
         screen.getByRole("combobox", {
-          name: "Also notify a Feishu group (optional)",
+          name: "Also notify a group (optional)",
         }).textContent,
       ).toBe("Planning team"),
     );
@@ -274,7 +274,7 @@ describe("TaskFormDialog", () => {
     ).toBeNull();
     expect(
       screen.queryByRole("combobox", {
-        name: "Also notify a Feishu group (optional)",
+        name: "Also notify a group (optional)",
       }),
     ).toBeNull();
     fireEvent.click(
@@ -297,7 +297,7 @@ describe("TaskFormDialog", () => {
     });
     expect(
       screen.queryByRole("combobox", {
-        name: "Also notify a Feishu group (optional)",
+        name: "Also notify a group (optional)",
       }),
     ).toBeNull();
     expect(
@@ -365,17 +365,98 @@ describe("TaskFormDialog", () => {
     );
   });
 
+  test("WeCom and QQ group bind buttons request provider-specific binding codes", async () => {
+    connectProvider.mockImplementation(async (provider: string) => ({
+      provider,
+      mode: "binding_code",
+      code: `${provider}-group-code`,
+      instruction: "unused",
+      expires_in: 600,
+    }));
+    renderForm({ mode: "create" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Bind a WeCom group" }));
+    fireEvent.change(
+      await screen.findByRole("textbox", { name: "Group name" }),
+      {
+        target: { value: "Release team" },
+      },
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Generate a new code" }),
+    );
+    const command = await screen.findByRole("textbox", {
+      name: "Group binding command",
+    });
+    await waitFor(() =>
+      expect(command).toHaveProperty("value", "/connect wecom-group-code"),
+    );
+    expect(connectProvider).toHaveBeenCalledWith("wecom", {
+      groupName: "Release team",
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Bind a QQ group" }));
+    expect(screen.getByRole("textbox", { name: "Group name" })).toHaveProperty(
+      "value",
+      "",
+    );
+    expect(
+      screen.queryByRole("textbox", { name: "Group binding command" }),
+    ).toBeNull();
+    fireEvent.change(screen.getByRole("textbox", { name: "Group name" }), {
+      target: { value: "Support team" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Generate a new code" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("textbox", { name: "Group binding command" }),
+      ).toHaveProperty("value", "/connect qq-group-code"),
+    );
+    expect(connectProvider).toHaveBeenCalledWith("qq", {
+      groupName: "Support team",
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Bind a Feishu group" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("textbox", { name: "Group binding command" }),
+      ).toHaveProperty("value", "/connect feishu-group-code"),
+    );
+    expect(screen.queryByRole("textbox", { name: "Group name" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Bind a WeCom group" }));
+    expect(
+      screen.getByRole("textbox", { name: "Group binding command" }),
+    ).toHaveProperty("value", "/connect wecom-group-code");
+    expect(connectProvider).toHaveBeenCalledTimes(3);
+    fireEvent.change(screen.getByRole("textbox", { name: "Group name" }), {
+      target: { value: "Operations" },
+    });
+    expect(
+      screen.queryByRole("textbox", { name: "Group binding command" }),
+    ).toBeNull();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Generate a new code" }),
+    );
+    await waitFor(() =>
+      expect(connectProvider).toHaveBeenLastCalledWith("wecom", {
+        groupName: "Operations",
+      }),
+    );
+    await screen.findByRole("textbox", { name: "Group binding command" });
+  });
+
   test("refreshing after binding discovers the group without changing the task automatically", async () => {
     listConnections.mockResolvedValueOnce([]).mockResolvedValue([group()]);
     renderForm({ mode: "create" });
-    await screen.findByText(
-      "Bind a Feishu group below, then refresh the list.",
-    );
+    await screen.findByText("Bind a group below, then refresh the list.");
     fireEvent.click(screen.getByRole("button", { name: "Refresh group list" }));
     await waitFor(() => expect(listConnections).toHaveBeenCalledTimes(2));
     fireEvent.keyDown(
       screen.getByRole("combobox", {
-        name: "Also notify a Feishu group (optional)",
+        name: "Also notify a group (optional)",
       }),
       { key: "ArrowDown" },
     );
@@ -393,7 +474,7 @@ describe("TaskFormDialog", () => {
     await waitFor(() => expect(listConnections).toHaveBeenCalled());
     fireEvent.keyDown(
       screen.getByRole("combobox", {
-        name: "Also notify a Feishu group (optional)",
+        name: "Also notify a group (optional)",
       }),
       { key: "ArrowDown" },
     );
@@ -419,7 +500,7 @@ describe("TaskFormDialog", () => {
     );
     expect(
       screen.getByRole("combobox", {
-        name: "Also notify a Feishu group (optional)",
+        name: "Also notify a group (optional)",
       }).textContent,
     ).toBe("Selected group unavailable");
     expect(document.body.textContent).not.toContain("saved-group-binding");
@@ -445,7 +526,7 @@ describe("TaskFormDialog", () => {
     );
     fireEvent.keyDown(
       screen.getByRole("combobox", {
-        name: "Also notify a Feishu group (optional)",
+        name: "Also notify a group (optional)",
       }),
       { key: "ArrowDown" },
     );
@@ -463,11 +544,11 @@ describe("TaskFormDialog", () => {
     listConnections.mockResolvedValue([group({ workspace_name: null })]);
     renderForm({ mode: "create" });
     await screen.findByText(
-      "Check the app's group-information permission, then bind the group again to load its name.",
+      "Bind the group again with a recognizable name before selecting it.",
     );
     fireEvent.keyDown(
       screen.getByRole("combobox", {
-        name: "Also notify a Feishu group (optional)",
+        name: "Also notify a group (optional)",
       }),
       { key: "ArrowDown" },
     );
@@ -483,13 +564,13 @@ describe("TaskFormDialog", () => {
   test("the Chinese group field explains that personal notifications stay unchanged", async () => {
     renderForm({ mode: "create" }, { locale: "zh-CN" });
     expect(
-      screen.getByRole("combobox", { name: "额外通知到飞书群（可选）" })
+      screen.getByRole("combobox", { name: "额外通知到群聊（可选）" })
         .textContent,
     ).toBe("仅通知本人");
     expect(
       screen.getByText("你现有的个人通知保持不变，所选群也会收到任务更新。"),
     ).toBeTruthy();
-    await screen.findByText("先在下方绑定飞书群，再刷新群列表。");
+    await screen.findByText("先在下方绑定群聊，再刷新群列表。");
   });
 
   test("every field resolves by its label", () => {

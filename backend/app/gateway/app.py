@@ -2,6 +2,7 @@ import asyncio
 import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager, suppress
+from typing import Any
 
 from deerflow_extension_api import (
     EXTENSION_PLUGIN_AUTHZ_RESOLVER_ASYNC_KEY,
@@ -514,6 +515,46 @@ async def _start_scheduled_task_notification_delivery(app: FastAPI, startup_conf
             row = await run_repo.get(run_id, user_id=user_id)
             return row.get("last_ai_message") if row else None
 
+        async def resolve_human_input_pending(delivery: dict[str, Any]) -> bool | None:
+            payload = delivery.get("payload") or {}
+            thread_id = payload.get("thread_id")
+            request_id = payload.get("request_id")
+            owner_user_id = delivery.get("owner_user_id")
+            if not isinstance(thread_id, str) or not thread_id:
+                return False
+            thread_store = getattr(app.state, "thread_store", None)
+            if thread_store is not None and owner_user_id:
+                thread_meta = await thread_store.get(thread_id, user_id=owner_user_id)
+                if thread_meta is None:
+                    return False
+            checkpointer = getattr(app.state, "checkpointer", None)
+            if checkpointer is None:
+                return True
+            from types import SimpleNamespace
+
+            from app.gateway.context_usage import _load_checkpoint_messages
+            from app.gateway.services import build_thread_checkpoint_state_accessor
+            from deerflow.agents.human_input import extract_unanswered_human_input_request
+            from deerflow.runtime.user_context import reset_current_user, set_current_user
+
+            owner_token = set_current_user(SimpleNamespace(id=owner_user_id)) if isinstance(owner_user_id, str) and owner_user_id else None
+            try:
+                accessor, checkpoint_config = await build_thread_checkpoint_state_accessor(
+                    SimpleNamespace(app=app, headers={}, state=SimpleNamespace(), cookies={}),
+                    thread_id=thread_id,
+                )
+                messages = await _load_checkpoint_messages(accessor, checkpoint_config)
+            finally:
+                if owner_token is not None:
+                    reset_current_user(owner_token)
+            current_request = extract_unanswered_human_input_request(messages)
+            if current_request is None:
+                return False
+            if isinstance(request_id, str) and request_id and current_request.get("request_id") != request_id:
+                return False
+            return True
+
+        prefs_repo = ImNotificationPreferencesRepository(get_session_factory())
         worker = NotificationDeliveryWorker(
             delivery_repo=notification_repo,
             resolve_channel=channel_service.get_channel,
@@ -526,7 +567,9 @@ async def _start_scheduled_task_notification_delivery(app: FastAPI, startup_conf
             # Under channels.leader_lease, rows for a provider whose transport
             # another instance holds are left to that instance.
             excluded_providers=getattr(channel_service, "notification_excluded_providers", None),
-            resolve_notification_preferences=ImNotificationPreferencesRepository(get_session_factory()).get,
+            resolve_notification_preferences=prefs_repo.get,
+            resolve_notification_event_preferences=prefs_repo.get_event_preferences,
+            resolve_human_input_pending=resolve_human_input_pending,
             poll_interval_seconds=startup_config.scheduler.poll_interval_seconds,
             # Language of notices whose owner has no UI language preference.
             default_locale=startup_config.channel_connections.notification_locale,

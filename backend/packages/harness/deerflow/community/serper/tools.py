@@ -90,7 +90,14 @@ def _response_items(data: dict, field: str, query: str) -> tuple[list[dict] | No
     if not isinstance(items, list):
         logger.error("Serper returned unexpected '%s' payload type: %s", field, type(items).__name__)
         return None, _unexpected_format_error(query)
-    return [item for item in items if isinstance(item, dict)], None
+    usable = [item for item in items if isinstance(item, dict)]
+    if items and not usable:
+        # Same containment rule as groundroute/tavily: a populated container
+        # holding nothing usable is malformed, not an empty search. Reporting
+        # "No results found" tells the agent the query matched nothing.
+        logger.error("Serper returned '%s' with no usable result objects", field)
+        return None, _unexpected_format_error(query)
+    return usable, None
 
 
 def _clean_query(query: str) -> str:
@@ -490,6 +497,7 @@ def image_search_tool(query: str, max_results: int = 5) -> str:
                 "title": r.get("title", ""),
                 "image_url": image_url,
                 "thumbnail_url": thumbnail_url,
+                "source_url": _safe_public_url(r.get("link")),
             }
         )
         if len(normalized_results) >= max_results:
