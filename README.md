@@ -1,6 +1,6 @@
 # 🦌 DeerFlow - 2.0
 
-English | [中文](./README_zh.md) | [日本語](./README_ja.md) | [Français](./README_fr.md) | [Русский](./README_ru.md) | [Português](./README_pt.md)
+English | [中文](./README_zh.md) | [日本語](./README_ja.md) | [Français](./README_fr.md) | [Русский](./README_ru.md) | [Português](./README_pt.md) | [한국어](./README_ko.md)
 
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](./backend/pyproject.toml)
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](./Makefile)
@@ -181,6 +181,8 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
    Tavily web search and fetch contain malformed HTTP-success payloads the same way: a non-object payload, or a `results`/`failed_results` container that is not a list, returns the provider's format error, and non-object entries in an otherwise valid list are skipped in order. Missing, null, or empty results keep the existing response (`[]` for search, `Error: No results found` for fetch); missing or null search fields (`title`, `url`, `content`) normalize to empty text, and a non-string fetch `raw_content` is coerced to text before the truncation limit.
 
    Sofya web search and fetch contain malformed HTTP-success payloads the same way: a non-object payload, a `results` container that is not a list, or a non-empty list with no object entries returns the provider's format error, while non-object entries in an otherwise valid list are skipped in order. Missing, null, or empty results keep the existing "No results found" response.
+
+   Serper web and image search preserve valid entries in mixed result lists. A malformed `organic`/`images` container, or a non-empty list holding no object entries, returns Serper's format error; missing, null, or empty containers keep the existing "No results found" / "No images found" response. Format errors log the container field name only, without queries, credentials, or payload values.
 
    Tencent Cloud WSA web search contains malformed HTTP-success payloads the same way: a `Pages` container that is not a list, or a non-empty container holding no usable page, returns the provider's format error, while malformed page entries in an otherwise valid container are skipped so the valid rows survive. Missing, null, or empty `Pages` keep the existing "No results found" response.
 
@@ -2590,10 +2592,15 @@ This is the difference between a chatbot with tool access and an agent with an a
 
 ### Agentic Browser Control
 
-Browser screenshots and Browserless capture/fetch outputs are published only
-after the complete file is written. New files use the host's normal creation
-permissions (typically `0644`), and replacements preserve existing permissions,
-so sandbox code can read captures when those permissions allow it.
+Browser screenshots and Browserless captures publish complete content atomically.
+New files use the host's normal creation permissions (typically `0644`), and
+replacements preserve existing permissions, so sandbox code can read captures
+when those permissions allow it.
+
+Browserless reserves capture names with empty placeholders to prevent concurrent
+captures from overwriting one another. Failed publication releases the placeholder;
+if cleanup fails, Gateway logs a warning with its path and preserves the original
+publication error or interruption.
 
 Browser dependency auto-detection accepts `name`, `group`, and `use` in any
 order within a tool entry, with either indented or indentless YAML lists.

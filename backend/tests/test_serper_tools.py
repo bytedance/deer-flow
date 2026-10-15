@@ -776,6 +776,25 @@ class TestWebSearchTool:
         assert parsed["total_results"] == 1
         assert parsed["results"][0]["title"] == "T"
 
+    def test_organic_with_no_usable_objects_returns_error(self, mock_config_with_key):
+        """A populated container holding nothing usable is malformed, not an empty search.
+
+        Mirrors groundroute/tavily: reporting "No results found" would tell the
+        agent the query legitimately matched nothing.
+        """
+        mock_resp = _make_serper_response(["bad", 3, None, ["nested"]])
+
+        with patch("deerflow.community.serper.tools.httpx.Client") as mock_client_cls:
+            mock_client_cls.return_value.__enter__.return_value.post.return_value = mock_resp
+
+            from deerflow.community.serper.tools import web_search_tool
+
+            result = web_search_tool.invoke({"query": "test"})
+            parsed = json.loads(result)
+
+        assert parsed["error"] == "Serper returned an unexpected response format"
+        assert parsed["query"] == "test"
+
     def test_timeout_returns_error(self, mock_config_with_key):
         with patch("deerflow.community.serper.tools.httpx.Client") as mock_client_cls:
             mock_client_cls.return_value.__enter__.return_value.post.side_effect = httpx.TimeoutException("Read timed out")
@@ -827,11 +846,13 @@ class TestImageSearchTool:
                 "title": "Cat 1",
                 "imageUrl": "https://example.com/cat1.jpg",
                 "thumbnailUrl": "https://example.com/cat1_thumb.jpg",
+                "link": "https://example.com/cats/1",
             },
             {
                 "title": "Cat 2",
                 "imageUrl": "https://example.com/cat2.jpg",
                 "thumbnailUrl": "https://example.com/cat2_thumb.jpg",
+                "link": "https://example.com/cats/2",
             },
         ]
         mock_resp = _make_serper_images_response(images)
@@ -849,6 +870,7 @@ class TestImageSearchTool:
         assert parsed["results"][0]["title"] == "Cat 1"
         assert parsed["results"][0]["image_url"] == "https://example.com/cat1.jpg"
         assert parsed["results"][0]["thumbnail_url"] == "https://example.com/cat1_thumb.jpg"
+        assert parsed["results"][0]["source_url"] == "https://example.com/cats/1"
         assert parsed["usage_hint"] == "Use the 'image_url' values as reference images in image generation. Download them first if needed."
 
     def test_sends_correct_headers_and_payload_to_images_endpoint(self, mock_config_with_key):
@@ -989,6 +1011,21 @@ class TestImageSearchTool:
 
         assert "error" in parsed
         assert parsed["error"] == "No images found"
+        assert parsed["query"] == "no results"
+
+    def test_images_with_no_usable_objects_returns_error(self, mock_config_with_key):
+        """Same containment rule on the images container, which shares the helper."""
+        mock_resp = _make_serper_images_response(["https://x/y.png", 7])
+
+        with patch("deerflow.community.serper.tools.httpx.Client") as mock_client_cls:
+            mock_client_cls.return_value.__enter__.return_value.post.return_value = mock_resp
+
+            from deerflow.community.serper.tools import image_search_tool
+
+            result = image_search_tool.invoke({"query": "no results"})
+            parsed = json.loads(result)
+
+        assert parsed["error"] == "Serper returned an unexpected response format"
         assert parsed["query"] == "no results"
 
     def test_missing_api_key_returns_error_json(self, mock_config_no_key):
@@ -1243,7 +1280,7 @@ class TestImageSearchTool:
         images = [
             {"title": "Local", "imageUrl": "file:///etc/passwd", "thumbnailUrl": "http://127.0.0.1/thumb.jpg"},
             {"title": "Data", "imageUrl": "data:image/png;base64,abc", "thumbnailUrl": "http://10.0.0.1/thumb.jpg"},
-            {"title": "Safe", "imageUrl": "https://example.com/i.jpg", "thumbnailUrl": "http://example.com/t.jpg"},
+            {"title": "Safe", "imageUrl": "https://example.com/i.jpg", "thumbnailUrl": "http://example.com/t.jpg", "link": "http://127.0.0.1/page"},
         ]
         mock_resp = _make_serper_images_response(images)
 
@@ -1259,6 +1296,7 @@ class TestImageSearchTool:
         assert parsed["results"][0]["title"] == "Safe"
         assert parsed["results"][0]["image_url"] == "https://example.com/i.jpg"
         assert parsed["results"][0]["thumbnail_url"] == "http://example.com/t.jpg"
+        assert parsed["results"][0]["source_url"] == ""
 
     def test_all_unsafe_image_urls_return_error(self, mock_config_with_key):
         images = [
