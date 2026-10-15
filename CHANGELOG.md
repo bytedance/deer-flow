@@ -5974,9 +5974,9 @@ This release closes that milestone with **621 merged pull requests**.
   absolute-path scan skips a `/` that follows a word character, so the
   bare `$HOME/...` form (quoted or not) reached the host. `$PWD/...` stays
   allowed because it names the same file as the equivalent relative path,
-  unless the command rebinds `PWD` itself. Variables inside
-  URLs are unaffected. The guard remains best-effort and is not an isolation
-  boundary.
+  unless the command rebinds `PWD` itself. Variables inside URLs are
+  unaffected. The guard remains best-effort and is not an isolation boundary.
+  ([#6930])
 
 ### Security
 
@@ -11772,3 +11772,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6876]: https://github.com/bytedance/deer-flow/pull/6876
 [#6897]: https://github.com/bytedance/deer-flow/pull/6897
 [#6909]: https://github.com/bytedance/deer-flow/pull/6909
+[#6930]: https://github.com/bytedance/deer-flow/pull/6930

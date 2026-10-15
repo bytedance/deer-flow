@@ -4533,7 +4533,7 @@
   但绝对路径扫描会跳过紧跟在单词字符之后的 `/`，因此不带花括号的 `$HOME/...`
   （无论是否加引号）会直达主机。`$PWD/...` 仍然允许，因为它与对应的相对路径指向
   同一文件，除非命令自己重新绑定了 `PWD`。URL 中的变量不受影响。该守卫
-  仍是尽力而为的检查，并非隔离边界。
+  仍是尽力而为的检查，并非隔离边界。([#6930])
 
 ### 安全
 
@@ -9386,3 +9386,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6876]: https://github.com/bytedance/deer-flow/pull/6876
 [#6897]: https://github.com/bytedance/deer-flow/pull/6897
 [#6909]: https://github.com/bytedance/deer-flow/pull/6909
+[#6930]: https://github.com/bytedance/deer-flow/pull/6930
