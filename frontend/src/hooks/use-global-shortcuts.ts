@@ -19,16 +19,22 @@ interface Shortcut {
 export function useGlobalShortcuts(shortcuts: Shortcut[]) {
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
+      if (typeof event.key !== "string" || event.key.length === 0) {
+        return;
+      }
+
       const meta = event.metaKey || event.ctrlKey;
+      const eventKey = event.key.toLowerCase();
 
       for (const shortcut of shortcuts) {
+        const shortcutKey = shortcut.key.toLowerCase();
         if (
-          event.key.toLowerCase() === shortcut.key.toLowerCase() &&
+          eventKey === shortcutKey &&
           meta === shortcut.meta &&
           (shortcut.shift ?? false) === event.shiftKey
         ) {
           // Allow Cmd+K even in inputs (standard command palette behavior)
-          if (shortcut.key !== "k") {
+          if (shortcutKey !== "k") {
             const target = event.target as HTMLElement;
             const tag = target.tagName;
             if (

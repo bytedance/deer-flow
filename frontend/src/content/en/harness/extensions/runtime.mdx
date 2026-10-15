@@ -1,0 +1,203 @@
+---
+title: Runtime Model
+description: How the Gateway loads extensions at startup, how one immutable snapshot of them follows each run into its subagents, the app and task scopes and their ExtensionData stores, the notification loop and fail-open rules, and where diagnostics go.
+---
+
+import { Callout } from "nextra/components";
+
+# Runtime Model
+
+This chapter describes what the host does with an extension after `install()` returns: when each piece of state exists, which snapshot a run uses, and what happens when a callback is slow or fails. Read it before writing any contribution that keeps state.
+
+## Loading
+
+Extensions load exactly once, while the Gateway constructs its FastAPI application. The sequence is:
+
+1. The Gateway reads the `plugins:` list from `config.yaml`. A `config.yaml` that exists but does not validate is a configuration error and stops startup; only a missing file is tolerated, and it loads no extensions.
+2. For each entry, in list order:
+   1. If the entry declares `table_prefix`, the prefix is registered first, even when the entry is disabled. See [Table prefixes](#table-prefixes).
+   2. If `enabled` is `false`, the entry is skipped without importing anything.
+   3. The `use` path is imported and must resolve to a callable.
+   4. The `@extension(api=...)` marker, if present, is checked against the host's `API_VERSION`. See [Version check](#version-check).
+   5. `install(registry, config)` runs with a shallow copy of the entry's `config`.
+3. The finished registry is frozen into an immutable `LoadedExtensions` value, published as the process-wide set, and stored on `app.state.extensions`.
+4. After every host route is mounted, contributed routers are mounted.
+
+The Gateway logs one summary line when loading finishes:
+
+```text
+Extensions loaded: 2/3 (acme_audit:install, acme_costs:install)
+```
+
+The count includes disabled entries in the total, so `2/3` can mean one failure or one disabled entry. Each failure has its own `Extension <use>: ...` error line.
+
+### Positional rollback
+
+Everything an `install()` registers is attributed to its entry. If `install()` raises partway through, the host removes exactly the registrations made since that call started and moves on to the next entry. A half-registered extension would be worse than an absent one, because the data it produced would look complete.
+
+Rollback is positional rather than by name, so two entries may share the same `use` with different `config`. A failing second instance never removes the first instance's registrations.
+
+### `required`
+
+With the default `required: false`, every failure in steps 2.3 to 2.5 is logged and the extension is skipped. With `required: true`, the same failure raises `ExtensionLoadError` and the Gateway does not start:
+
+```text
+ExtensionLoadError: required extension acme_audit:install failed to install
+```
+
+Reserve `required: true` for extensions whose absence makes the deployment wrong, such as a mandatory audit trail. Recovering needs shell access to edit `config.yaml`.
+
+### Version check
+
+A missing marker skips the check. Otherwise the rule before 1.0 is: same major and minor as the host, and a patch no newer than the host's. From 1.0 on it will be: same major, and a minor and patch no newer than the host's. With the host at `0.2.1`:
+
+| `@extension(api=...)` | Result                                                                          |
+| --------------------- | ------------------------------------------------------------------------------- |
+| not decorated         | Loaded                                                                          |
+| `"0.2"`, `"0.2.0"`, `"0.2.1"` | Loaded                                                                  |
+| `"0.2.2"`             | Refused: the extension may use additions this host lacks                         |
+| `"0.1.9"`, `"0.3.0"`, `"1.0"` | Refused: a different pre-1.0 minor or a different major                  |
+| `"0.2.x"`             | Refused: not a dotted numeric version                                            |
+
+A refusal names the range to install:
+
+```text
+Extension acme_audit:install: extension requires extension-api 0.2.2, host provides 0.2.1. Install a matching version: pip install 'deerflow-extension-api>=0.2.2,<0.3'
+```
+
+The marker is a safety net for `--no-deps` installs and editable checkouts. Your package's `deerflow-extension-api` dependency range is the primary compatibility mechanism.
+
+### Table prefixes
+
+An extension that keeps its own database tables, under its own SQLAlchemy `MetaData` and migration chain, declares the prefix it owns:
+
+```yaml filename="config.yaml"
+plugins:
+  - name: acme
+    use: acme_audit:install
+    table_prefix: acme_
+```
+
+The host excludes tables with that prefix from `alembic revision --autogenerate`, so a host migration never proposes to drop them. The prefix is registered even for a disabled or failing entry, because the tables may already exist. An empty prefix is rejected when the config is validated. A prefix that collides with a host table name always aborts startup, whatever `required` says.
+
+## Snapshots
+
+`LoadedExtensions` is immutable. Each lead run resolves it once when the run starts and uses that same object for its task store, its lifecycle notifications, and agent construction. The run also publishes the snapshot on its runtime context, and the `task` tool reads it back, so every subagent the run delegates to is built from the same extension generation as the Lead Agent. A caller-supplied value under that host-internal key is never trusted.
+
+Callers that do not publish a snapshot, such as the embedded `DeerFlowClient` or a standalone LangGraph Server, fall back to the process-wide set.
+
+Because loading is startup-only, the process-wide set does not change while a Gateway runs. The per-run binding matters for hosts and tests that replace it, and it guarantees that one run never mixes two generations.
+
+## Scopes and stores
+
+The host hands extensions `ExtensionData` stores instead of letting them keep global state. Each store belongs to one scope and is discarded when that scope ends.
+
+| Scope    | `scope_id`                                         | Created                                              | Dropped                         |
+| -------- | -------------------------------------------------- | ---------------------------------------------------- | ------------------------------- |
+| App      | `"app"`                                            | When the registry is frozen at startup               | With the Gateway process         |
+| Lead task | The run id                                        | When the run starts, before `on_task_start`           | After `on_task_stop`             |
+| Subagent task | The delegating tool-call id, or the subagent execution id when there is none | Before the subagent's `on_task_start` | After its `on_task_stop` |
+| Detached | `"detached"`                                       | For one notification with no live task               | After that notification          |
+
+Every callback receives the store for the current scope, so you never need to capture one or check whether it is stale.
+
+A task store is allocated only when at least one middleware contributor, task-lifecycle contributor, system-model observer, or context-compaction observer is registered. An extension that registers only services, routers, or assembly observers costs a run nothing.
+
+The app store is shared by every extension in the process. It is safe because stores are keyed by type, as described below.
+
+### Detached stores
+
+Some notifications have no live task. Memory extraction normally runs on a background thread after the run, and compaction observers are always dispatched outside the turn. These receive a fresh store whose `scope_id` is `"detached"`. Anything written to it is discarded as soon as the notification finishes, so write to the app store if the value must outlive the call.
+
+## ExtensionData
+
+```python
+class ExtensionData:
+    scope_id: str
+    def get(self, typ: type[T]) -> T | None
+    def get_or_init(self, typ: type[T], init: Callable[[], T]) -> T
+    def set(self, value: T) -> None
+    def remove(self, typ: type[T]) -> T | None
+```
+
+- **Keyed by type.** `set(value)` stores under `type(value)` exactly; subclasses are separate keys. Define a small class for each value you keep. Two extensions cannot collide unless they share a class.
+- **Thread-safe.** Every method holds a re-entrant lock, so the same store can be used from middleware, lifecycle hooks, and observers on different threads.
+- **`init` runs under the lock.** `get_or_init` calls `init()` while holding the lock, so two concurrent callers never create two values. Keep `init` cheap: construct an empty container and do heavy lazy work inside it.
+- **Values are yours to synchronize.** The store protects its own map, not the objects in it. A counter updated from concurrent tool calls needs its own lock, as the [bundled example](https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-example) does.
+
+```python
+from dataclasses import dataclass, field
+from threading import Lock
+
+
+@dataclass
+class ToolCallCount:
+    value: int = 0
+    _lock: Lock = field(default_factory=Lock, repr=False)
+
+    def increment(self) -> None:
+        with self._lock:
+            self.value += 1
+
+
+counts = task_store.get_or_init(ToolCallCount, ToolCallCount)
+counts.increment()
+```
+
+## Host policy
+
+`HostPolicySnapshot` is a narrow projection of the limits the host enforces. It reaches extensions through `AgentBuildContext.policy` and `ExtensionRuntimeDeps.policy`. Every field has a default, so later additions stay compatible.
+
+| Field                   | Source in `config.yaml`                          | When not enabled |
+| ----------------------- | ------------------------------------------------ | ---------------- |
+| `token_budget_enabled`  | `token_budget.enabled`                           | `False`          |
+| `max_input_tokens`      | `token_budget.max_input_tokens`                  | `None`           |
+| `max_output_tokens`     | `token_budget.max_output_tokens`                 | `None`           |
+| `max_total_tokens`      | `token_budget.max_tokens`                        | `None`           |
+| `budget_warn_fraction`  | `token_budget.warn_threshold`                    | `None`           |
+| `budget_hard_fraction`  | `token_budget.hard_stop_threshold`               | `None`           |
+| `max_subagents_per_run` | The effective per-run delegation total for the Lead Agent | `None` for subagents |
+
+The five token fields are `None` whenever the token budget is disabled. A subagent's build context projects the subagent budget (`subagents.token_budget`, or the per-agent override when one is configured) instead of the Lead Agent's.
+
+## Notifications and fail-open
+
+Task-lifecycle hooks and observers are notified through one helper with the same rules everywhere:
+
+- **Registration order.** Contributors run one after another in the order they were registered.
+- **Isolation.** An exception from one contributor is logged with its entry point and does not skip the next one.
+- **One shared budget.** Task-lifecycle notifications get **3 seconds** for all contributors together, for both lead runs and subagents. A contributor still running when the budget runs out is cancelled, and every contributor after it is skipped with a warning:
+
+  ```text
+  Extension acme_audit:install: on_task_start timed out for task 7f3c...; the 3.0s notification budget was spent
+  Extension acme_costs:install: on_task_start skipped for task 7f3c...; the 3.0s notification budget was spent
+  ```
+
+  The budget applies to each of `on_task_start` and `on_task_stop` separately. Keep lifecycle hooks to bookkeeping and hand slow work to a [service](/docs/harness/extensions/services-and-routes).
+- **One loop.** The Gateway registers its serving event loop as the extension notification loop. Subagents can run on their own event loop, but their lifecycle hooks and observer notifications are dispatched to the Gateway loop. That way an extension only ever touches the resources it started, such as clients and connection pools, on the loop that owns them.
+
+### Cancellation
+
+`asyncio.CancelledError` reaches a contributor for two unrelated reasons, and the host tells them apart by where it came from:
+
+- **The host task is being cancelled**, for example because the user pressed stop or the Gateway is shutting down. The error propagates and the remaining contributors are not called.
+- **The contributor raised it itself**, for example through an internal timeout built on cancellation. The error is contained like any other exception, logged as `raised CancelledError`, and the next contributor still runs. A self-inflicted cancellation cannot end an otherwise successful run as cancelled.
+
+`KeyboardInterrupt` and `SystemExit` always propagate.
+
+### Shutdown
+
+At shutdown the Gateway stops accepting new fire-and-forget observations, such as memory, compaction, and cancelled system calls, before it flushes memory. It keeps the notification loop until in-flight runs and subagents have drained, so their `on_task_stop` hooks still run.
+
+## Diagnostics
+
+A diagnostic is a problem attributed to one extension. Every diagnostic is written to the Gateway log with the entry point as its prefix. Load failures, middleware construction and isolation failures, router mount rejections, and service start and stop failures are also collected in a live list on `app.state.extension_diagnostics`, which keeps the most recent **1000** entries. There is no HTTP endpoint for it, so operators read the Gateway log.
+
+Failures of task-lifecycle hooks and observers are logged but not added to that list.
+
+<Callout type="info">
+  To confirm an extension loaded, look for the `Extensions loaded: N/M (...)`
+  line at startup. Its absence means the Gateway never read a `plugins:` list,
+  for example because the entries are in `extensions_config.json` instead of
+  `config.yaml`.
+</Callout>

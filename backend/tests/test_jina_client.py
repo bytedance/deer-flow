@@ -1,5 +1,6 @@
 """Tests for JinaClient async crawl method."""
 
+import json
 import logging
 from unittest.mock import MagicMock
 
@@ -8,7 +9,12 @@ import pytest
 
 import deerflow.community.jina_ai.jina_client as jina_client_module
 from deerflow.community.jina_ai.jina_client import JinaClient
-from deerflow.community.jina_ai.tools import web_fetch_tool
+from deerflow.community.jina_ai.tools import (
+    _coerce_bool,
+    _coerce_proxy,
+    _coerce_timeout,
+    web_fetch_tool,
+)
 
 
 @pytest.fixture
@@ -26,6 +32,57 @@ async def test_crawl_success(jina_client, monkeypatch):
     monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
     result = await jina_client.crawl("https://example.com")
     assert result == "<html><body>Hello</body></html>"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("max_retries", [0, 1])
+async def test_crawl_follows_jina_api_redirect(jina_client, monkeypatch, max_retries):
+    """A redirected Jina API endpoint should still return fetched content."""
+    requests = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.read()) == {"url": "https://example.com"}
+        requests.append(request)
+        if request.url.path == "/":
+            return httpx.Response(307, headers={"Location": "https://r.jina.ai/reader"})
+        return httpx.Response(200, text="Fetched page")
+
+    original_client = httpx.AsyncClient
+    transport = httpx.MockTransport(handle)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: original_client(transport=transport, **kwargs))
+
+    result = await jina_client.crawl("https://example.com", max_retries=max_retries)
+
+    assert result == "Fetched page"
+    assert [request.url.path for request in requests] == ["/", "/reader"]
+    assert all(request.method == "POST" for request in requests)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("max_retries", [0, 1])
+async def test_crawl_strips_api_key_on_cross_host_redirect(jina_client, monkeypatch, max_retries):
+    """A redirected host must not receive the Jina bearer credential."""
+    requests: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.read()) == {"url": "https://example.com"}
+        requests.append(request)
+        if request.url.host == "r.jina.ai":
+            return httpx.Response(307, headers={"Location": "https://redirect.example/final"})
+        return httpx.Response(200, text="Fetched page")
+
+    original_client = httpx.AsyncClient
+    transport = httpx.MockTransport(handle)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: original_client(transport=transport, **kwargs))
+    monkeypatch.setenv("JINA_API_KEY", "test-key")
+
+    result = await jina_client.crawl("https://example.com", max_retries=max_retries)
+
+    assert result == "Fetched page"
+    assert [request.url.host for request in requests] == ["r.jina.ai", "redirect.example"]
+    assert [request.method for request in requests] == ["POST", "POST"]
+    assert requests[0].headers["Authorization"] == "Bearer test-key"
+    assert "Authorization" not in requests[1].headers
 
 
 @pytest.mark.anyio
@@ -84,6 +141,9 @@ async def test_crawl_network_error(jina_client, monkeypatch):
 async def test_crawl_transient_failure_logs_without_traceback(jina_client, monkeypatch, caplog):
     """Transient network failures must log at WARNING without a traceback and include the exception type."""
 
+    # Keep the missing-key warning independent of test order and shard placement.
+    monkeypatch.setenv("JINA_API_KEY", "test-key")
+
     async def mock_post(self, url, **kwargs):
         raise httpx.ConnectTimeout("timed out")
 
@@ -115,6 +175,60 @@ async def test_crawl_passes_headers(jina_client, monkeypatch):
     await jina_client.crawl("https://example.com", return_format="markdown", timeout=30)
     assert captured_headers["X-Return-Format"] == "markdown"
     assert captured_headers["X-Timeout"] == "30"
+
+
+@pytest.mark.anyio
+async def test_crawl_passes_proxy_to_httpx_client(jina_client, monkeypatch):
+    """Explicit proxy config should be passed to httpx.AsyncClient."""
+    captured_client_kwargs = {}
+
+    class MockAsyncClient:
+        def __init__(self, **kwargs):
+            captured_client_kwargs.update(kwargs)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, **kwargs):
+            return httpx.Response(200, text="ok", request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "AsyncClient", MockAsyncClient)
+
+    result = await jina_client.crawl("https://example.com", proxy="http://127.0.0.1:7890")
+
+    assert result == "ok"
+    assert captured_client_kwargs["proxy"] == "http://127.0.0.1:7890"
+    assert captured_client_kwargs["trust_env"] is True
+    assert captured_client_kwargs["follow_redirects"] is True
+
+
+@pytest.mark.anyio
+async def test_crawl_can_disable_trust_env(jina_client, monkeypatch):
+    """Callers can disable environment proxy lookup for deterministic networking."""
+    captured_client_kwargs = {}
+
+    class MockAsyncClient:
+        def __init__(self, **kwargs):
+            captured_client_kwargs.update(kwargs)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, **kwargs):
+            return httpx.Response(200, text="ok", request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "AsyncClient", MockAsyncClient)
+
+    result = await jina_client.crawl("https://example.com", trust_env=False)
+
+    assert result == "ok"
+    assert captured_client_kwargs == {"trust_env": False, "follow_redirects": True}
 
 
 @pytest.mark.anyio
@@ -200,6 +314,60 @@ async def test_web_fetch_tool_returns_markdown_on_success(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_web_fetch_tool_forwards_proxy_and_trust_env(monkeypatch):
+    """web_fetch tool config should be forwarded to JinaClient.crawl."""
+    captured_crawl_kwargs = {}
+
+    async def mock_crawl(self, url, **kwargs):
+        captured_crawl_kwargs.update(kwargs)
+        return "<html><body><p>Hello world</p></body></html>"
+
+    mock_config = MagicMock()
+    mock_tool_config = MagicMock()
+    mock_tool_config.model_extra = {
+        "timeout": "20",
+        "proxy": "http://host.docker.internal:7890",
+        "trust_env": "false",
+    }
+    mock_config.get_tool_config.return_value = mock_tool_config
+    monkeypatch.setattr("deerflow.community.jina_ai.tools.get_app_config", lambda: mock_config)
+    monkeypatch.setattr(JinaClient, "crawl", mock_crawl)
+
+    result = await web_fetch_tool.ainvoke("https://example.com")
+
+    assert "Hello world" in result
+    assert captured_crawl_kwargs == {
+        "return_format": "html",
+        "timeout": 20,
+        "proxy": "http://host.docker.internal:7890",
+        "trust_env": False,
+    }
+
+
+@pytest.mark.anyio
+async def test_web_fetch_tool_ignores_empty_proxy(monkeypatch):
+    """Empty proxy values from unresolved env vars should not be passed to httpx."""
+    captured_crawl_kwargs = {}
+
+    async def mock_crawl(self, url, **kwargs):
+        captured_crawl_kwargs.update(kwargs)
+        return "<html><body><p>Hello world</p></body></html>"
+
+    mock_config = MagicMock()
+    mock_tool_config = MagicMock()
+    mock_tool_config.model_extra = {"proxy": "   ", "trust_env": True}
+    mock_config.get_tool_config.return_value = mock_tool_config
+    monkeypatch.setattr("deerflow.community.jina_ai.tools.get_app_config", lambda: mock_config)
+    monkeypatch.setattr(JinaClient, "crawl", mock_crawl)
+
+    result = await web_fetch_tool.ainvoke("https://example.com")
+
+    assert "Hello world" in result
+    assert captured_crawl_kwargs["proxy"] is None
+    assert captured_crawl_kwargs["trust_env"] is True
+
+
+@pytest.mark.anyio
 async def test_web_fetch_tool_offloads_extraction_to_thread(monkeypatch):
     """Test that readability extraction is offloaded via asyncio.to_thread to avoid blocking the event loop."""
     import asyncio
@@ -224,3 +392,60 @@ async def test_web_fetch_tool_offloads_extraction_to_thread(monkeypatch):
     result = await web_fetch_tool.ainvoke("https://example.com")
     assert to_thread_called, "extract_article must be called via asyncio.to_thread to avoid blocking the event loop"
     assert "threaded" in result
+
+
+@pytest.mark.parametrize(
+    ("value", "default", "expected"),
+    [
+        (True, False, True),
+        (False, True, False),
+        ("true", False, True),
+        ("YES", False, True),
+        (" on ", False, True),
+        ("1", False, True),
+        ("false", True, False),
+        ("No", True, False),
+        ("off", True, False),
+        ("0", True, False),
+        ("maybe", True, True),
+        ("maybe", False, False),
+        (None, True, True),
+        (123, False, False),
+    ],
+)
+def test_coerce_bool(value, default, expected):
+    """_coerce_bool normalizes booleans, known strings, and falls back to the default."""
+    assert _coerce_bool(value, default) is expected
+
+
+@pytest.mark.parametrize(
+    ("value", "default", "expected"),
+    [
+        (30, 10, 30),
+        ("45", 10, 45),
+        ("not-a-number", 10, 10),
+        (True, 10, 10),
+        (False, 10, 10),
+        (None, 10, 10),
+        (1.5, 10, 10),
+    ],
+)
+def test_coerce_timeout(value, default, expected):
+    """_coerce_timeout accepts ints and numeric strings, rejecting bools and junk."""
+    assert _coerce_timeout(value, default) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("http://127.0.0.1:7890", "http://127.0.0.1:7890"),
+        ("  http://proxy:8080  ", "http://proxy:8080"),
+        ("", None),
+        ("   ", None),
+        (None, None),
+        (123, None),
+    ],
+)
+def test_coerce_proxy(value, expected):
+    """_coerce_proxy trims strings and treats empty/non-string values as None."""
+    assert _coerce_proxy(value) == expected

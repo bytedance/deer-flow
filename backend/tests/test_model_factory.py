@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import copy
+
 import pytest
 from langchain.chat_models import BaseChatModel
+from langchain_core.messages import HumanMessage
 
 from deerflow.config.app_config import AppConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.models import factory as factory_module
 from deerflow.models import openai_codex_provider as codex_provider_module
+from deerflow.models.reasoning import resolve_reasoning_contract
+from deerflow.reflection import resolve_class
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -78,6 +83,26 @@ def _patch_factory(monkeypatch, app_config: AppConfig, model_class=FakeChatModel
     monkeypatch.setattr(factory_module, "build_tracing_callbacks", lambda: [])
 
 
+def _capturing_class(base_cls: type, captured: dict) -> type:
+    """Build a kwargs-capturing subclass of a REAL provider class.
+
+    ``_apply_stream_chunk_timeout_default`` gates on ``issubclass(model_class,
+    BaseChatOpenAI)``, so the resolved class must genuinely subclass the real
+    provider for the test to exercise that gate. ``__init__`` only records the
+    constructor kwargs and deliberately skips the provider's real ``__init__`` (so no
+    api_key / network / event loop is required); the factory never reads the returned
+    instance's fields when tracing is patched to ``[]``, so a bare instance is safe
+    for these config-level assertions.
+    """
+
+    class _Capturing(base_cls):  # type: ignore[valid-type,misc]
+        def __init__(self, **kwargs):
+            captured.clear()
+            captured.update(kwargs)
+
+    return _Capturing
+
+
 # ---------------------------------------------------------------------------
 # Model selection
 # ---------------------------------------------------------------------------
@@ -101,6 +126,115 @@ def test_raises_when_model_not_found(monkeypatch):
 
     with pytest.raises(ValueError, match="ghost-model"):
         factory_module.create_chat_model(name="ghost-model")
+
+
+def test_pricing_metadata_never_reaches_the_provider_client(monkeypatch):
+    """`models[*].pricing` is console-only metadata (issue: ChatOpenAI forwards
+    unknown kwargs into the completion request payload, so an un-stripped
+    `pricing` block breaks every live LLM call with
+    ``Completions.create() got an unexpected keyword argument 'pricing'``)."""
+    model = _make_model("priced")
+    # ModelConfig is extra="allow" — pricing rides along as an extra field.
+    model.pricing = {"currency": "CNY", "input_per_million": 8, "output_per_million": 32, "input_cache_hit_per_million": 0.8}
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="priced")
+
+    assert "pricing" not in FakeChatModel.captured_kwargs
+
+
+def test_context_window_never_reaches_the_provider_client(monkeypatch):
+    """Context sizing metadata belongs to DeerFlow, not the provider SDK."""
+    model = _make_model("large-context")
+    model.context_window = 200_000
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="large-context")
+
+    assert "context_window" not in FakeChatModel.captured_kwargs
+
+
+def test_context_window_attaches_langchain_profile(monkeypatch):
+    """The declared context window is translated into the langchain ``profile``
+    so profile-dependent features (e.g. SummarizationMiddleware fraction triggers,
+    which resolve thresholds from ``profile["max_input_tokens"]``) work for
+    third-party OpenAI-compatible models whose SDK ships no profile of its own
+    (#3103: `trigger: fraction` used to crash the whole agent build)."""
+    model = _make_model("windowed")
+    model.context_window = 200_000
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    created = factory_module.create_chat_model(name="windowed")
+
+    assert "profile" not in FakeChatModel.captured_kwargs
+    assert created.profile == {"max_input_tokens": 200_000}
+
+
+def test_context_window_merges_into_inferred_profile(monkeypatch):
+    """A provider-inferred profile must survive the context_window translation:
+    passing ``profile`` to the constructor would REPLACE the whole inferred
+    metadata (tool_calling, structured_output, output limits) with the single
+    key, changing LangChain feature selection. The declared window wins on
+    ``max_input_tokens`` itself — the operator declared it because the inferred
+    value doesn't match their gateway."""
+    inferred = {
+        "tool_calling": True,
+        "structured_output": True,
+        "max_output_tokens": 16_384,
+        "max_input_tokens": 999_999,
+    }
+
+    class _InferredProfileChatModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.profile = dict(inferred)
+
+    model = _make_model("windowed")
+    model.context_window = 200_000
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg, model_class=_InferredProfileChatModel)
+
+    created = factory_module.create_chat_model(name="windowed")
+
+    assert created.profile == {
+        "tool_calling": True,
+        "structured_output": True,
+        "max_output_tokens": 16_384,
+        "max_input_tokens": 200_000,
+    }
+
+
+def test_unset_context_window_leaves_profile_unset(monkeypatch):
+    """No declared window -> no invented profile; fraction triggers degrade
+    with a warning instead of silently assuming a capacity."""
+    cfg = _make_app_config([_make_model("opaque")])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    created = factory_module.create_chat_model(name="opaque")
+
+    assert "profile" not in FakeChatModel.captured_kwargs
+    assert created.profile is None
+
+
+def test_context_window_does_not_clobber_explicit_profile(monkeypatch):
+    """A caller-supplied profile wins over the context_window translation."""
+    model = _make_model("windowed")
+    model.context_window = 200_000
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    created = factory_module.create_chat_model(name="windowed", profile={"max_input_tokens": 100})
+
+    assert FakeChatModel.captured_kwargs.get("profile") == {"max_input_tokens": 100}
+    assert created.profile == {"max_input_tokens": 100}
 
 
 def test_appends_all_tracing_callbacks(monkeypatch):
@@ -151,6 +285,331 @@ def test_thinking_enabled_merges_when_thinking_enabled_settings(monkeypatch):
 
     assert FakeChatModel.captured_kwargs.get("temperature") == 1.0
     assert FakeChatModel.captured_kwargs.get("max_tokens") == 16000
+
+
+def _legacy_model_with_base_extra_body(when_thinking_enabled: dict, extra_body: dict, when_thinking_disabled: dict | None = None) -> ModelConfig:
+    """A profile without ``reasoning:`` whose base ``extra_body`` carries keys the templates must not clobber."""
+    return ModelConfig(
+        name="legacy-glm",
+        display_name="legacy-glm",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="legacy-glm",
+        supports_thinking=True,
+        extra_body=extra_body,
+        when_thinking_enabled=when_thinking_enabled,
+        when_thinking_disabled=when_thinking_disabled,
+    )
+
+
+@pytest.mark.parametrize("thinking_enabled", [True, False], ids=["thinking-on", "thinking-off"])
+def test_legacy_when_thinking_disabled_template_deep_merges_like_the_enable_template(monkeypatch, thinking_enabled):
+    """Most ``extra_body``-based profiles in ``config.example.yaml`` declare *both* templates.
+    An operator-provided ``when_thinking_disabled`` was still ``dict.update``-ed, so fixing only
+    the enable branch would have left thinking-off dropping ``tool_stream`` while thinking-on
+    kept it. The same profile must not behave differently depending on the toggle."""
+    model = _legacy_model_with_base_extra_body(
+        when_thinking_enabled={"extra_body": {"thinking": {"type": "enabled"}}},
+        when_thinking_disabled={"extra_body": {"thinking": {"type": "disabled"}}},
+        extra_body={"tool_stream": True},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="legacy-glm", thinking_enabled=thinking_enabled)
+
+    expected_type = "enabled" if thinking_enabled else "disabled"
+    assert captured["extra_body"] == {"tool_stream": True, "thinking": {"type": expected_type}}
+
+
+@pytest.mark.parametrize(
+    "templates",
+    [
+        {"when_thinking_disabled": {"extra_body": {"thinking": {"type": "disabled"}}}},
+        {"when_thinking_enabled": {"extra_body": {"thinking": {"type": "enabled"}}}},
+    ],
+    ids=["operator-disable-template", "synthesized-disable"],
+)
+def test_disable_cannot_clear_enable_only_keys_kept_in_the_base_extra_body(monkeypatch, templates):
+    """Stated migration rule: keys are never removed, so a base
+    ``extra_body.thinking: {type: enabled, budget_tokens: N}`` reaches the provider as
+    ``{type: disabled, budget_tokens: N}`` when thinking is off. The synthesized disable payload
+    (and the contract path) already behaved this way on ``main``; the operator-provided legacy
+    disable template now does too. Enable-only keys belong in ``when_thinking_enabled`` — the
+    changelog, ``models/AGENTS.md`` and ``configuration.mdx`` say so, and this test keeps the
+    behaviour deliberate rather than accidental."""
+    model = ModelConfig(
+        name="legacy-anthropic-proxy",
+        display_name="legacy-anthropic-proxy",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="claude",
+        supports_thinking=True,
+        extra_body={"thinking": {"type": "enabled", "budget_tokens": 4096}},
+        **templates,
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="legacy-anthropic-proxy", thinking_enabled=False)
+
+    assert captured["extra_body"]["thinking"] == {"type": "disabled", "budget_tokens": 4096}
+
+
+def _mapping_ids(value: object) -> set[int]:
+    """Identities of every mapping reachable from *value*, for alias checks."""
+    if not isinstance(value, dict):
+        return set()
+    ids = {id(value)}
+    for nested in value.values():
+        ids |= _mapping_ids(nested)
+    return ids
+
+
+@pytest.mark.parametrize(
+    "base_extra_body, template_extra_body",
+    [
+        ({"top_k": 20}, {"chat_template_kwargs": {"thinking": True}}),
+        (None, {"chat_template_kwargs": {"thinking": True}}),
+        ({"top_k": 20}, {"thinking": {"type": "enabled", "options": {"budget_tokens": 1024}}}),
+    ],
+    ids=["template-adds-a-nested-mapping", "profile-has-no-extra_body", "template-adds-two-levels"],
+)
+def test_thinking_templates_are_copied_not_aliased_into_constructor_kwargs(monkeypatch, base_extra_body, template_extra_body):
+    """Wherever the base lacked a key, the merge used to store the template's own mapping by
+    reference, so the constructor kwargs (and any later in-place adjustment, such as the vLLM
+    switch mirroring) pointed at the cached ``ModelConfig``. Every mapping a template
+    contributes, at every depth, must be a copy, and the profile must be unchanged after the
+    build."""
+    template = {"extra_body": template_extra_body}
+    model = _legacy_model_with_base_extra_body(when_thinking_enabled=template, extra_body=base_extra_body)
+    pristine = copy.deepcopy(model.when_thinking_enabled)
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="legacy-glm", thinking_enabled=True)
+
+    assert captured["extra_body"] == {**(base_extra_body or {}), **template_extra_body}
+    assert _mapping_ids(captured["extra_body"]) & _mapping_ids(model.when_thinking_enabled) == set()
+    assert model.when_thinking_enabled == pristine
+
+
+def test_legacy_templates_only_add_or_override_nested_keys_never_remove_them(monkeypatch):
+    """The flip side of deep-merging: a template cannot drop a base key by omitting it.
+    OpenRouter-style ``reasoning: {exclude: true}`` in the profile survives a template that
+    only sets ``reasoning.effort`` — the operator must clear a key explicitly if that is meant."""
+    model = _legacy_model_with_base_extra_body(
+        when_thinking_enabled={"extra_body": {"reasoning": {"effort": "high"}}},
+        extra_body={"reasoning": {"exclude": True}},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="legacy-glm", thinking_enabled=True)
+
+    assert captured["extra_body"] == {"reasoning": {"exclude": True, "effort": "high"}}
+
+
+@pytest.mark.parametrize(
+    "when_thinking_enabled, expected_extra_body",
+    [
+        ({"extra_body": "oops"}, "oops"),
+        ({"extra_body": {"chat_template_kwargs": True}}, {"chat_template_kwargs": True}),
+    ],
+    ids=["extra_body-not-a-mapping", "chat_template_kwargs-not-a-mapping"],
+)
+def test_legacy_non_mapping_template_values_are_forwarded_not_rejected(monkeypatch, when_thinking_enabled, expected_extra_body):
+    """``ModelConfig.when_thinking_enabled`` is ``dict | None`` with unvalidated nested values,
+    so a non-mapping ``extra_body`` or ``chat_template_kwargs`` is reachable from ``config.yaml``.
+    The factory used to forward it unchanged; the vLLM-switch bookkeeping must not turn that
+    into an ``AttributeError`` / ``TypeError`` inside ``create_chat_model``."""
+    model = _legacy_model_with_base_extra_body(
+        when_thinking_enabled=when_thinking_enabled,
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="legacy-glm", thinking_enabled=True)
+
+    assert captured["extra_body"] == expected_extra_body
+
+
+@pytest.mark.parametrize(
+    ("thinking_enabled", "when_thinking_enabled", "expected"),
+    [
+        (False, {"extra_body": None, "thinking": {"type": "enabled"}}, {"thinking": {"type": "disabled"}}),
+        (True, {"extra_body": None, "thinking": {"type": "enabled"}}, {"extra_body": None, "thinking": {"type": "enabled"}}),
+        (False, {"extra_body": None}, {}),
+        (False, {"thinking": None}, {}),
+        (False, {"extra_body": {"thinking": None}}, {}),
+        (True, {"extra_body": {"thinking": None}}, {"extra_body": {"thinking": None}}),
+        (False, {"extra_body": {"thinking": None}, "thinking": {"type": "enabled"}}, {"thinking": {"type": "disabled"}}),
+        (
+            False,
+            {"extra_body": {"thinking": None, "chat_template_kwargs": {"enable_thinking": True}}},
+            {"extra_body": {"chat_template_kwargs": {"enable_thinking": False}}},
+        ),
+    ],
+    ids=["thinking-off", "thinking-on", "extra-body-null", "thinking-null", "nested-null-off", "nested-null-on", "nested-null-native-fallback", "nested-null-vllm-fallback"],
+)
+def test_legacy_null_template_values_build_on_both_thinking_paths(monkeypatch, thinking_enabled, when_thinking_enabled, expected):
+    """A template key left blank in ``config.yaml`` (``extra_body:``, ``thinking:``) loads as an
+    explicit ``None`` — and ``dict.get(key, {})`` only defaults an *absent* key. The legacy
+    disable path therefore called ``.get`` on ``None`` and every ``create_chat_model`` for the
+    profile crashed with ``AttributeError`` — on the default ``thinking_enabled=False`` path,
+    i.e. title generation, summarization, subagent and lead-agent builds. A null template
+    value must fall through the disable-path dialect heuristics like an absent one, as the
+    guarded sibling accesses (``_infer_dialect``, the contract path) already do, while the
+    enable path keeps forwarding the template unchanged."""
+    model = _make_model("legacy-null", supports_thinking=True, when_thinking_enabled=when_thinking_enabled)
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="legacy-null", thinking_enabled=thinking_enabled)
+
+    for key in ("extra_body", "thinking"):
+        if key in expected:
+            assert captured[key] == expected[key]
+        else:
+            assert key not in captured
+
+
+@pytest.mark.parametrize("thinking_enabled", [True, False], ids=["thinking-on", "thinking-off"])
+def test_legacy_when_thinking_enabled_deep_merges_into_the_base_extra_body(monkeypatch, thinking_enabled):
+    """The legacy enable path used ``dict.update``, so ``when_thinking_enabled.extra_body``
+    replaced the profile's whole ``extra_body`` and dropped sibling keys such as GLM's
+    ``tool_stream`` — but only when thinking was ON; the disable path already deep-merged.
+    Both directions must keep the operator's keys."""
+    model = _legacy_model_with_base_extra_body(
+        when_thinking_enabled={"extra_body": {"thinking": {"type": "enabled"}}},
+        extra_body={"tool_stream": True},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="legacy-glm", thinking_enabled=thinking_enabled)
+
+    expected_type = "enabled" if thinking_enabled else "disabled"
+    assert captured["extra_body"] == {"tool_stream": True, "thinking": {"type": expected_type}}
+
+
+def test_legacy_when_thinking_enabled_merges_nested_mappings_recursively(monkeypatch):
+    """A vLLM template that only sets ``chat_template_kwargs.enable_thinking`` must keep the
+    profile's other chat-template kwargs, not replace the nested mapping."""
+    model = _legacy_model_with_base_extra_body(
+        when_thinking_enabled={"extra_body": {"chat_template_kwargs": {"enable_thinking": True}}},
+        extra_body={"tool_stream": True, "chat_template_kwargs": {"preserve_thinking": True}},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="legacy-glm", thinking_enabled=True)
+
+    assert captured["extra_body"] == {
+        "tool_stream": True,
+        "chat_template_kwargs": {"preserve_thinking": True, "enable_thinking": True},
+    }
+
+
+def _effective_vllm_switch(captured: dict) -> dict:
+    """What vLLM receives: the provider normalizes the legacy ``thinking`` alias just before sending."""
+    from deerflow.models.vllm_provider import _normalize_vllm_chat_template_kwargs
+
+    payload = {"extra_body": dict(captured["extra_body"])}
+    _normalize_vllm_chat_template_kwargs(payload)
+    return payload["extra_body"]["chat_template_kwargs"]
+
+
+def _vllm_switch_profile(*, base_key: str, template_key: str, base_value: bool, reasoning: dict | None, use: str = "deerflow.models.vllm_provider:VllmChatModel") -> ModelConfig:
+    kwargs: dict = dict(
+        name="qwen",
+        display_name="qwen",
+        description=None,
+        use=use,
+        model="qwen",
+        supports_thinking=True,
+        extra_body={"chat_template_kwargs": {base_key: base_value, "preserve_thinking": True}},
+        when_thinking_enabled={"extra_body": {"chat_template_kwargs": {template_key: True}}},
+    )
+    if reasoning is not None:
+        kwargs["reasoning"] = reasoning
+    return ModelConfig(**kwargs)
+
+
+@pytest.mark.parametrize("reasoning", [None, {"thinking": "optional", "dialect": "vllm_chat_template"}], ids=["legacy", "contract"])
+@pytest.mark.parametrize("base_key, template_key", [("enable_thinking", "thinking"), ("thinking", "enable_thinking")], ids=["base-enable_thinking/template-thinking", "base-thinking/template-enable_thinking"])
+@pytest.mark.parametrize("thinking_enabled", [True, False], ids=["thinking-on", "thinking-off"])
+def test_vllm_switch_spelled_by_the_template_wins_over_the_profile_alias(monkeypatch, reasoning, base_key, template_key, thinking_enabled):
+    """vLLM's toggle has two spellings (legacy ``thinking``, current ``enable_thinking``) and the
+    provider maps the alias only when ``enable_thinking`` is absent. A profile that spells the
+    switch differently from its template must not be able to pin the switch after the merge:
+    the template's (or synthesized) spelling decides, in both directions, on both paths."""
+    from deerflow.models.vllm_provider import VllmChatModel
+
+    model = _vllm_switch_profile(base_key=base_key, template_key=template_key, base_value=not thinking_enabled, reasoning=reasoning)
+    captured: dict = {}
+    # Resolve the REAL provider class, so a future class-gated merge is exercised as vLLM.
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(VllmChatModel, captured))
+
+    factory_module.create_chat_model(name="qwen", thinking_enabled=thinking_enabled)
+
+    effective = _effective_vllm_switch(captured)
+    assert effective["enable_thinking"] is thinking_enabled
+    assert effective["preserve_thinking"] is True  # unrelated chat-template kwargs still survive
+
+
+@pytest.mark.parametrize("reasoning", [None, {"thinking": "optional", "dialect": "vllm_chat_template"}], ids=["legacy", "contract"])
+@pytest.mark.parametrize("base_key, template_key", [("enable_thinking", "thinking"), ("thinking", "enable_thinking")], ids=["base-enable_thinking/template-thinking", "base-thinking/template-enable_thinking"])
+@pytest.mark.parametrize("thinking_enabled", [True, False], ids=["thinking-on", "thinking-off"])
+def test_vllm_switch_is_mirrored_onto_the_profile_spelling_for_classes_that_do_not_normalize(monkeypatch, reasoning, base_key, template_key, thinking_enabled):
+    """Only ``VllmChatModel`` maps the ``thinking`` alias onto ``enable_thinking``; a plain
+    ``langchain_openai:ChatOpenAI`` profile pointed at vLLM sends ``chat_template_kwargs`` raw, and
+    the server reads whichever key its chat template honors. Deleting the profile's spelling would
+    remove the only key such a server reads (a base ``enable_thinking: false`` beside a template
+    ``thinking: false`` would leave Qwen3 defaulting to *on*). So the template's value is mirrored
+    onto the profile's spelling instead: both keys carry the template's intent, raw."""
+    from langchain_openai import ChatOpenAI
+
+    model = _vllm_switch_profile(base_key=base_key, template_key=template_key, base_value=not thinking_enabled, reasoning=reasoning, use="langchain_openai:ChatOpenAI")
+    captured: dict = {}
+    # Resolve the REAL ChatOpenAI (not a stand-in), so a merge gated on the vLLM class would fail here.
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(ChatOpenAI, captured))
+
+    factory_module.create_chat_model(name="qwen", thinking_enabled=thinking_enabled)
+
+    raw = captured["extra_body"]["chat_template_kwargs"]  # no normalization: what ChatOpenAI puts on the wire
+    assert raw == {base_key: thinking_enabled, template_key: thinking_enabled, "preserve_thinking": True}
+
+
+def test_vllm_switch_mirroring_never_invents_the_other_spelling(monkeypatch):
+    """A template that spells the switch one way, on a profile that does not spell it at all,
+    must not grow the second key: ``VllmChatModel`` would ignore it, but a chat template that
+    honors only ``thinking`` would suddenly see an ``enable_thinking`` it never asked for."""
+    model = _legacy_model_with_base_extra_body(
+        when_thinking_enabled={"extra_body": {"chat_template_kwargs": {"thinking": True}}},
+        extra_body={"chat_template_kwargs": {"preserve_thinking": True}},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="legacy-glm", thinking_enabled=True)
+
+    assert captured["extra_body"]["chat_template_kwargs"] == {"preserve_thinking": True, "thinking": True}
+
+
+def test_legacy_when_thinking_enabled_template_still_wins_on_conflicts(monkeypatch):
+    """Deep-merging must not weaken precedence: a key set in both places takes the template's value."""
+    model = _legacy_model_with_base_extra_body(
+        when_thinking_enabled={"extra_body": {"thinking": {"type": "enabled", "budget_tokens": 4096}}},
+        extra_body={"thinking": {"type": "disabled", "budget_tokens": 1}, "tool_stream": True},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="legacy-glm", thinking_enabled=True)
+
+    assert captured["extra_body"] == {"tool_stream": True, "thinking": {"type": "enabled", "budget_tokens": 4096}}
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +703,49 @@ def test_thinking_disabled_no_when_thinking_enabled_does_nothing(monkeypatch):
     assert "thinking" not in captured
     # reasoning_effort not forced (supports_reasoning_effort defaults to False → cleared)
     assert captured.get("reasoning_effort") is None
+
+
+def test_required_thinking_profile_keeps_base_payload_when_runtime_requests_disabled():
+    """Always-thinking models keep their base payload on every call.
+
+    Required-thinking models such as GLM-5.3-Flash intentionally declare no
+    conditional thinking settings.  A runtime ``thinking_enabled=False`` must
+    therefore leave the profile's unconditional ``extra_body.thinking`` block
+    untouched, while the capability guard drops DeerFlow's generic effort value.
+    """
+    model = ModelConfig(
+        name="glm-5.3-flash",
+        display_name="GLM-5.3-Flash",
+        description=None,
+        use="deerflow.models.patched_deepseek:PatchedChatDeepSeek",
+        model="glm-5.3-flash",
+        api_base="https://api.z.ai/api/paas/v4",
+        api_key="test-key",
+        supports_thinking=True,
+        supports_reasoning_effort=False,
+        supports_vision=True,
+        stream_usage=False,
+        extra_body={
+            "thinking": {"type": "enabled", "clear_thinking": True},
+            "tool_stream": True,
+        },
+    )
+    cfg = _make_app_config([model])
+    chat_model = factory_module.create_chat_model(
+        name="glm-5.3-flash",
+        thinking_enabled=False,
+        reasoning_effort="medium",
+        app_config=cfg,
+        attach_tracing=False,
+    )
+    payload = chat_model._get_request_payload([HumanMessage(content="ping")])
+
+    assert payload["extra_body"] == {
+        "thinking": {"type": "enabled", "clear_thinking": True},
+        "tool_stream": True,
+    }
+    assert "reasoning_effort" not in payload
+    assert chat_model.stream_usage is False
 
 
 # ---------------------------------------------------------------------------
@@ -566,11 +1068,11 @@ def test_thinking_shortcut_not_leaked_into_model_when_disabled(monkeypatch):
 def test_openai_compatible_provider_passes_base_url(monkeypatch):
     """OpenAI-compatible providers like MiniMax should pass base_url through to the model."""
     model = ModelConfig(
-        name="minimax-m2.5",
-        display_name="MiniMax M2.5",
+        name="minimax-m3",
+        display_name="MiniMax M3",
         description=None,
         use="langchain_openai:ChatOpenAI",
-        model="MiniMax-M2.5",
+        model="MiniMax-M3",
         base_url="https://api.minimax.io/v1",
         api_key="test-key",
         max_tokens=4096,
@@ -578,21 +1080,17 @@ def test_openai_compatible_provider_passes_base_url(monkeypatch):
         supports_vision=True,
         supports_thinking=False,
     )
+    from langchain_openai import ChatOpenAI
+
     cfg = _make_app_config([model])
-    _patch_factory(monkeypatch, cfg)
-
     captured: dict = {}
+    # Real ChatOpenAI: it declares the stream_usage field, so the factory's
+    # class-field default path (not a use-path allowlist) enables it.
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
 
-    class CapturingModel(FakeChatModel):
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-            BaseChatModel.__init__(self, **kwargs)
+    factory_module.create_chat_model(name="minimax-m3")
 
-    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
-
-    factory_module.create_chat_model(name="minimax-m2.5")
-
-    assert captured.get("model") == "MiniMax-M2.5"
+    assert captured.get("model") == "MiniMax-M3"
     assert captured.get("base_url") == "https://api.minimax.io/v1"
     assert captured.get("api_key") == "test-key"
     assert captured.get("temperature") == 1.0
@@ -603,11 +1101,11 @@ def test_openai_compatible_provider_passes_base_url(monkeypatch):
 def test_openai_compatible_provider_respects_explicit_stream_usage(monkeypatch):
     """Explicit stream_usage should not be overwritten by the factory default."""
     model = ModelConfig(
-        name="minimax-m2.5",
-        display_name="MiniMax M2.5",
+        name="minimax-m3",
+        display_name="MiniMax M3",
         description=None,
         use="langchain_openai:ChatOpenAI",
-        model="MiniMax-M2.5",
+        model="MiniMax-M3",
         base_url="https://api.minimax.io/v1",
         api_key="test-key",
         stream_usage=False,
@@ -626,7 +1124,7 @@ def test_openai_compatible_provider_respects_explicit_stream_usage(monkeypatch):
 
     monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
 
-    factory_module.create_chat_model(name="minimax-m2.5")
+    factory_module.create_chat_model(name="minimax-m3")
 
     assert captured.get("stream_usage") is False
 
@@ -644,17 +1142,11 @@ def test_openai_compatible_provider_enables_stream_usage_for_openai_api_base(mon
         supports_vision=False,
         supports_thinking=False,
     )
+    from langchain_openai import ChatOpenAI
+
     cfg = _make_app_config([model])
-    _patch_factory(monkeypatch, cfg)
-
     captured: dict = {}
-
-    class CapturingModel(FakeChatModel):
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-            BaseChatModel.__init__(self, **kwargs)
-
-    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
 
     factory_module.create_chat_model(name="openai-compatible")
 
@@ -695,11 +1187,11 @@ def test_non_openai_provider_does_not_receive_stream_usage_default(monkeypatch):
 def test_openai_compatible_provider_multiple_models(monkeypatch):
     """Multiple models from the same OpenAI-compatible provider should coexist."""
     m1 = ModelConfig(
-        name="minimax-m2.5",
-        display_name="MiniMax M2.5",
+        name="minimax-m3",
+        display_name="MiniMax M3",
         description=None,
         use="langchain_openai:ChatOpenAI",
-        model="MiniMax-M2.5",
+        model="MiniMax-M3",
         base_url="https://api.minimax.io/v1",
         api_key="test-key",
         temperature=1.0,
@@ -707,15 +1199,15 @@ def test_openai_compatible_provider_multiple_models(monkeypatch):
         supports_thinking=False,
     )
     m2 = ModelConfig(
-        name="minimax-m2.5-highspeed",
-        display_name="MiniMax M2.5 Highspeed",
+        name="minimax-m2.7-highspeed",
+        display_name="MiniMax M2.7 Highspeed",
         description=None,
         use="langchain_openai:ChatOpenAI",
-        model="MiniMax-M2.5-highspeed",
+        model="MiniMax-M2.7-highspeed",
         base_url="https://api.minimax.io/v1",
         api_key="test-key",
         temperature=1.0,
-        supports_vision=True,
+        supports_vision=False,  # M2.7 is text-only; M3 supports vision
         supports_thinking=False,
     )
     cfg = _make_app_config([m1, m2])
@@ -731,12 +1223,12 @@ def test_openai_compatible_provider_multiple_models(monkeypatch):
     monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
 
     # Create first model
-    factory_module.create_chat_model(name="minimax-m2.5")
-    assert captured.get("model") == "MiniMax-M2.5"
+    factory_module.create_chat_model(name="minimax-m3")
+    assert captured.get("model") == "MiniMax-M3"
 
     # Create second model
-    factory_module.create_chat_model(name="minimax-m2.5-highspeed")
-    assert captured.get("model") == "MiniMax-M2.5-highspeed"
+    factory_module.create_chat_model(name="minimax-m2.7-highspeed")
+    assert captured.get("model") == "MiniMax-M2.7-highspeed"
 
 
 # ---------------------------------------------------------------------------
@@ -804,6 +1296,35 @@ def test_codex_provider_defaults_reasoning_effort_to_medium(monkeypatch):
 
     FakeChatModel.captured_kwargs = {}
     factory_module.create_chat_model(name="codex", thinking_enabled=True)
+
+    assert FakeChatModel.captured_kwargs.get("reasoning_effort") == "medium"
+
+
+@pytest.mark.parametrize(
+    ("supports_reasoning_effort", "requested_effort"),
+    [
+        pytest.param(True, "minimal", id="value-outside-codex-levels"),
+        pytest.param(False, "high", id="profile-without-effort-support"),
+    ],
+)
+def test_codex_provider_falls_back_to_medium_for_request_it_cannot_honor(monkeypatch, supports_reasoning_effort, requested_effort):
+    """Codex resolves the requested effort itself; the generic request layering
+    must not smuggle a value past its level check or the capability guard."""
+    cfg = _make_app_config(
+        [
+            _make_model(
+                "codex",
+                use="deerflow.models.openai_codex_provider:CodexChatModel",
+                supports_thinking=True,
+                supports_reasoning_effort=supports_reasoning_effort,
+            )
+        ]
+    )
+    _patch_factory(monkeypatch, cfg, model_class=FakeCodexChatModel)
+    monkeypatch.setattr(codex_provider_module, "CodexChatModel", FakeCodexChatModel)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="codex", thinking_enabled=True, reasoning_effort=requested_effort)
 
     assert FakeChatModel.captured_kwargs.get("reasoning_effort") == "medium"
 
@@ -996,6 +1517,41 @@ def test_openai_responses_api_settings_are_passed_to_chatopenai(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Provider class path resolution
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("model_id", ["mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-flash"])
+def test_create_chat_model_resolves_patched_mimo_provider(model_id):
+    from deerflow.models.patched_mimo import PatchedChatMiMo
+
+    model = ModelConfig(
+        name=f"{model_id}-thinking",
+        display_name=f"{model_id} Thinking",
+        description=None,
+        use="deerflow.models.patched_mimo:PatchedChatMiMo",
+        model=model_id,
+        api_key="test-key",
+        base_url="https://api.xiaomimimo.com/v1",
+        supports_thinking=True,
+        when_thinking_enabled={"extra_body": {"thinking": {"type": "enabled"}}},
+        supports_vision=False,
+    )
+    cfg = _make_app_config([model])
+
+    chat_model = factory_module.create_chat_model(
+        name=f"{model_id}-thinking",
+        thinking_enabled=True,
+        app_config=cfg,
+        attach_tracing=False,
+    )
+
+    assert isinstance(chat_model, PatchedChatMiMo)
+    assert chat_model.model_name == model_id
+    assert chat_model.extra_body["thinking"]["type"] == "enabled"
+
+
+# ---------------------------------------------------------------------------
 # Duplicate keyword argument collision (issue #1977)
 # ---------------------------------------------------------------------------
 
@@ -1032,5 +1588,1193 @@ def test_no_duplicate_kwarg_when_reasoning_effort_in_config_and_thinking_disable
     # Must not raise TypeError
     factory_module.create_chat_model(name="doubao-model", thinking_enabled=False)
 
-    # kwargs (runtime) takes precedence: thinking-disabled path sets reasoning_effort=minimal
+    # The thinking-disabled path governs the profile value: it sets reasoning_effort=minimal
     assert captured.get("reasoning_effort") == "minimal"
+
+
+@pytest.mark.parametrize(
+    ("runtime_effort", "expected_effort"),
+    [
+        (None, "high"),
+        ("low", "low"),
+    ],
+)
+def test_runtime_reasoning_effort_merges_with_profile_without_duplicate_kwarg(
+    monkeypatch,
+    runtime_effort,
+    expected_effort,
+):
+    model = ModelConfig(
+        name="deepseek-reasoner",
+        display_name="DeepSeek Reasoner",
+        description=None,
+        use="deerflow.models.patched_deepseek:PatchedChatDeepSeek",
+        model="deepseek-reasoner",
+        reasoning_effort="high",
+        supports_thinking=True,
+        supports_reasoning_effort=True,
+        supports_vision=False,
+    )
+    cfg = _make_app_config([model])
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    _patch_factory(monkeypatch, cfg, model_class=CapturingModel)
+
+    factory_module.create_chat_model(
+        name="deepseek-reasoner",
+        thinking_enabled=True,
+        reasoning_effort=runtime_effort,
+    )
+
+    assert captured["reasoning_effort"] == expected_effort
+
+
+@pytest.mark.parametrize(
+    ("profile", "thinking_enabled", "requested_effort", "expected_effort"),
+    [
+        pytest.param({"reasoning_effort": "high"}, True, None, "high", id="unset-request-keeps-profile-value"),
+        pytest.param({"reasoning_effort": "high"}, True, "low", "low", id="request-replaces-profile-value"),
+        pytest.param({"when_thinking_enabled": {"reasoning_effort": "medium"}}, True, "high", "medium", id="thinking-enabled-settings-govern-request"),
+        pytest.param({"when_thinking_enabled": {"extra_body": {"thinking": {"type": "enabled"}}}}, False, "high", "minimal", id="extra-body-disable-path-governs-request"),
+        pytest.param({"when_thinking_disabled": {"reasoning_effort": "low"}}, False, "high", "low", id="thinking-disabled-settings-govern-request"),
+    ],
+)
+def test_requested_reasoning_effort_layers_over_profile_value(profile, thinking_enabled, requested_effort, expected_effort):
+    """The regular lead-agent build forwards ``reasoning_effort`` even when None
+    (neither the request nor the custom agent chose one). When the profile also yields one,
+    the real ChatOpenAI must still build instead of raising ``got multiple
+    values for keyword argument 'reasoning_effort'``, and the request must layer
+    like ``model_overrides``: it replaces a profile value, None never clobbers
+    one, and the thinking settings still govern the result."""
+    model = ModelConfig(
+        name="effort-profile",
+        display_name="Effort Profile",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="effort-profile",
+        api_key="test-key",
+        supports_thinking=True,
+        supports_reasoning_effort=True,
+        supports_vision=False,
+        **profile,
+    )
+
+    chat_model = factory_module.create_chat_model(
+        name="effort-profile",
+        thinking_enabled=thinking_enabled,
+        reasoning_effort=requested_effort,
+        app_config=_make_app_config([model]),
+        attach_tracing=False,
+    )
+
+    assert chat_model._get_request_payload([HumanMessage(content="ping")])["reasoning_effort"] == expected_effort
+
+
+# ---------------------------------------------------------------------------
+# stream_chunk_timeout default injection (issue #3189)
+# ---------------------------------------------------------------------------
+
+
+def test_stream_chunk_timeout_defaults_to_240_for_openai_compatible_model(monkeypatch):
+    """A bare ChatOpenAI client must receive a generous 240s chunk-gap budget by
+    default, so reasoning models with long thinking pauses don't trip
+    langchain-openai's aggressive built-in default.
+    """
+    from langchain_openai import ChatOpenAI
+
+    model = _make_model(use="langchain_openai:ChatOpenAI")
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
+    factory_module.create_chat_model(name="test-model")
+
+    assert captured.get("stream_chunk_timeout") == 240.0
+
+
+def test_stream_chunk_timeout_user_value_not_overridden(monkeypatch):
+    """If the user explicitly sets stream_chunk_timeout in config.yaml, the
+    factory must not overwrite it with the default — even if the value is
+    smaller (60s) or larger (600s) than the default.
+    """
+    from langchain_openai import ChatOpenAI
+
+    model = ModelConfig(
+        name="custom-timeout-model",
+        display_name="Custom Timeout",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="gpt-4o-mini",
+        stream_chunk_timeout=60.0,  # user-set explicit value
+    )
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
+    factory_module.create_chat_model(name="custom-timeout-model")
+
+    assert captured.get("stream_chunk_timeout") == 60.0
+
+
+def test_stream_chunk_timeout_not_injected_for_non_openai_provider(monkeypatch):
+    """Only BaseChatOpenAI subclasses receive the default. A genuinely non-OpenAI
+    client (ChatAnthropic) that does not declare this kwarg must not be polluted
+    with it.
+    """
+    from langchain_anthropic import ChatAnthropic
+
+    model = _make_model(use="langchain_anthropic:ChatAnthropic")
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatAnthropic, captured))
+    factory_module.create_chat_model(name="test-model")
+
+    assert "stream_chunk_timeout" not in captured
+
+
+def test_stream_chunk_timeout_default_constant_is_documented():
+    """Lock the default value at 240s. If we ever want to change this, the
+    deliberate update here (and the docstring on _apply_stream_chunk_timeout_default)
+    forces a paired review of the rationale comment block above the constant.
+    """
+    assert factory_module._DEFAULT_STREAM_CHUNK_TIMEOUT_SECONDS == 240.0
+
+
+def test_stream_chunk_timeout_popped_for_non_openai_provider_when_user_set_it(monkeypatch):
+    """Regression for CR feedback on issue #3189: if a user accidentally sets
+    ``stream_chunk_timeout`` on a non-OpenAI provider, the factory must drop the
+    kwarg before forwarding it to the model constructor. ChatAnthropic does not
+    declare the field, so it would otherwise divert the value into ``model_kwargs``
+    and fail at request time.
+    """
+    from langchain_anthropic import ChatAnthropic
+
+    model = ModelConfig(
+        name="anthropic-with-stray-timeout",
+        display_name="Anthropic With Stray Timeout",
+        description=None,
+        use="langchain_anthropic:ChatAnthropic",
+        model="claude-sonnet-4",
+        stream_chunk_timeout=60.0,  # user-set on a non-OpenAI provider — must be dropped
+    )
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatAnthropic, captured))
+    factory_module.create_chat_model(name="anthropic-with-stray-timeout")
+
+    assert "stream_chunk_timeout" not in captured
+
+
+# ---------------------------------------------------------------------------
+# stream_chunk_timeout applies to ALL BaseChatOpenAI subclasses, not just the
+# ChatOpenAI/PatchedChatOpenAI class-path allowlist (issue #3189 was reported on
+# mimo-v2.5 → PatchedChatMiMo, which the original #3195 allowlist excluded).
+# ---------------------------------------------------------------------------
+
+# Every in-repo provider that subclasses BaseChatOpenAI (and therefore inherits the
+# stream_chunk_timeout mechanism) but was NOT in the original ChatOpenAI /
+# PatchedChatOpenAI allowlist.
+_STREAM_TIMEOUT_OPENAI_SUBCLASS_USE_PATHS = [
+    "deerflow.models.vllm_provider:VllmChatModel",
+    "deerflow.models.mindie_provider:MindIEChatModel",
+    "deerflow.models.patched_deepseek:PatchedChatDeepSeek",
+    "deerflow.models.patched_mimo:PatchedChatMiMo",
+    "deerflow.models.patched_stepfun:PatchedChatStepFun",
+    "deerflow.models.patched_minimax:PatchedChatMiniMax",
+]
+
+
+@pytest.mark.parametrize("use_path", _STREAM_TIMEOUT_OPENAI_SUBCLASS_USE_PATHS)
+def test_stream_chunk_timeout_defaults_to_240_for_all_openai_subclasses(monkeypatch, use_path):
+    """Every BaseChatOpenAI subclass provider — not just ChatOpenAI — must receive
+    the 240s default when the user leaves stream_chunk_timeout unset. These classes
+    were silently excluded by the original class-path allowlist and fell back to
+    langchain-openai's aggressive built-in gap timeout.
+    """
+    real_cls = resolve_class(use_path, BaseChatModel)
+    model = _make_model(use=use_path)
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(real_cls, captured))
+    factory_module.create_chat_model(name="test-model")
+
+    assert captured.get("stream_chunk_timeout") == 240.0
+
+
+@pytest.mark.parametrize("use_path", _STREAM_TIMEOUT_OPENAI_SUBCLASS_USE_PATHS)
+def test_stream_chunk_timeout_user_override_honored_for_all_openai_subclasses(monkeypatch, use_path):
+    """A user's explicit stream_chunk_timeout must survive for every BaseChatOpenAI
+    subclass provider. The original allowlist popped it unconditionally for these
+    classes, silently discarding a config.yaml override with no warning.
+    """
+    real_cls = resolve_class(use_path, BaseChatModel)
+    model = ModelConfig(
+        name="override-model",
+        display_name="Override",
+        description=None,
+        use=use_path,
+        model="reasoning-model",
+        stream_chunk_timeout=300.0,  # explicit user override
+    )
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(real_cls, captured))
+    factory_module.create_chat_model(name="override-model")
+
+    assert captured.get("stream_chunk_timeout") == 300.0
+
+
+def test_stream_chunk_timeout_240_reaches_real_mimo_constructor(monkeypatch):
+    """End-to-end anchor for issue #3189 (reported on mimo-v2.5): the 240s default
+    must be accepted as a genuine ``stream_chunk_timeout`` field by the real
+    ``PatchedChatMiMo`` constructor — not diverted into ``model_kwargs`` — so the
+    streaming layer actually honors it. Builds the real class (no network / dummy
+    key) instead of a capturing stub.
+    """
+    model = _make_model_with_extras(
+        "mimo",
+        use="deerflow.models.patched_mimo:PatchedChatMiMo",
+        api_key="sk-dummy",
+        base_url="http://localhost:8000/v1",
+    )
+    cfg = _make_app_config([model])
+    # Do NOT patch resolve_class — construct the real PatchedChatMiMo class.
+    monkeypatch.setattr(factory_module, "get_app_config", lambda: cfg)
+    monkeypatch.setattr(factory_module, "build_tracing_callbacks", lambda: [])
+
+    instance = factory_module.create_chat_model(name="mimo")
+
+    assert instance.stream_chunk_timeout == 240.0
+
+
+# ---------------------------------------------------------------------------
+# OpenAI base_url normalization + unknown-key warning
+# (regression: api_base copied onto a ChatOpenAI model crashed at request time)
+# ---------------------------------------------------------------------------
+
+
+def _make_model_with_extras(name="extra-model", *, use="langchain_openai:ChatOpenAI", **extras):
+    """Build a ModelConfig with arbitrary extra keys (ModelConfig is extra='allow')."""
+    return ModelConfig(
+        name=name,
+        display_name=name,
+        description=None,
+        use=use,
+        model=name,
+        supports_thinking=False,
+        supports_reasoning_effort=False,
+        supports_vision=False,
+        **extras,
+    )
+
+
+def test_api_base_normalized_to_base_url_for_chatopenai(monkeypatch):
+    """A config that sets api_base on a ChatOpenAI model should reach the constructor as base_url."""
+    from langchain_openai import ChatOpenAI
+
+    cfg = _make_app_config([_make_model_with_extras("oai", api_base="http://localhost:4001/v1")])
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
+
+    factory_module.create_chat_model(name="oai")
+
+    assert captured.get("base_url") == "http://localhost:4001/v1"
+    assert "api_base" not in captured
+
+
+def test_base_url_takes_precedence_when_both_set(monkeypatch):
+    """When both base_url and api_base are present, base_url wins and api_base is dropped."""
+    from langchain_openai import ChatOpenAI
+
+    cfg = _make_app_config([_make_model_with_extras("oai", base_url="http://canonical/v1", api_base="http://alias/v1")])
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
+
+    factory_module.create_chat_model(name="oai")
+
+    assert captured.get("base_url") == "http://canonical/v1"
+    assert "api_base" not in captured
+
+
+def test_api_base_preserved_for_provider_that_declares_it(monkeypatch):
+    """PatchedChatDeepSeek declares ``api_base`` as its own field, so the key is canonical there.
+
+    This is the guard against over-widening the normalization. ``PatchedChatDeepSeek`` *is* a
+    ``BaseChatOpenAI`` subclass, so a naive ``issubclass`` gate would rewrite its ``api_base`` into
+    ``base_url`` and break every Doubao / Kimi config in ``config.example.yaml``, which document
+    ``api_base`` for exactly this class.
+    """
+    from deerflow.models.patched_deepseek import PatchedChatDeepSeek
+
+    cfg = _make_app_config([_make_model_with_extras("ds", use="deerflow.models.patched_deepseek:PatchedChatDeepSeek", api_base="http://ds/v3")])
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(PatchedChatDeepSeek, captured))
+
+    factory_module.create_chat_model(name="ds")
+
+    assert captured.get("api_base") == "http://ds/v3"
+    assert "base_url" not in captured
+
+
+def test_no_op_when_neither_base_url_nor_api_base(monkeypatch):
+    """Normalization is a no-op when the model declares no endpoint override."""
+    cfg = _make_app_config([_make_model("plain")])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="plain")
+
+    assert "base_url" not in FakeChatModel.captured_kwargs
+    assert "api_base" not in FakeChatModel.captured_kwargs
+
+
+def test_unknown_config_key_emits_warning(monkeypatch, caplog):
+    """A typo'd config key should produce a heads-up warning naming the offending key.
+
+    Uses the real ChatOpenAI class (not the stub) so the field/alias schema is realistic — the
+    warning's whole value is that it matches what LangChain will actually divert to model_kwargs.
+    """
+    import logging
+
+    from langchain_openai import ChatOpenAI
+
+    cfg = _make_app_config([_make_model_with_extras("typo", api_key="sk-test", definitely_not_a_real_kwarg=True)])
+    _patch_factory(monkeypatch, cfg, model_class=ChatOpenAI)
+
+    with caplog.at_level(logging.WARNING, logger=factory_module.__name__):
+        factory_module.create_chat_model(name="typo")
+
+    assert any("definitely_not_a_real_kwarg" in rec.message for rec in caplog.records)
+
+
+def test_known_config_keys_emit_no_warning(monkeypatch, caplog):
+    """Recognized keys (model, base_url alias, max_tokens, factory-injected kwargs) must not warn."""
+    import logging
+
+    from langchain_openai import ChatOpenAI
+
+    cfg = _make_app_config([_make_model_with_extras("clean", api_key="sk-test", base_url="http://ok/v1", max_tokens=100)])
+    _patch_factory(monkeypatch, cfg, model_class=ChatOpenAI)
+
+    with caplog.at_level(logging.WARNING, logger=factory_module.__name__):
+        factory_module.create_chat_model(name="clean")
+
+    assert not any("not recognized parameters" in rec.message for rec in caplog.records)
+
+
+def test_api_base_normalized_for_patched_chatopenai(monkeypatch):
+    """The PatchedChatOpenAI subclass is in the OpenAI-compatible family and must normalize too."""
+    from deerflow.models.patched_openai import PatchedChatOpenAI
+
+    cfg = _make_app_config([_make_model_with_extras("patched", use="deerflow.models.patched_openai:PatchedChatOpenAI", api_base="http://localhost:4001/v1")])
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(PatchedChatOpenAI, captured))
+
+    factory_module.create_chat_model(name="patched")
+
+    assert captured.get("base_url") == "http://localhost:4001/v1"
+    assert "api_base" not in captured
+
+
+def test_api_base_dropped_when_openai_api_base_field_name_set(monkeypatch):
+    """If the field-name openai_api_base is set alongside api_base, the alias is dropped (no dup)."""
+    from langchain_openai import ChatOpenAI
+
+    cfg = _make_app_config([_make_model_with_extras("oai", openai_api_base="http://canonical/v1", api_base="http://alias/v1")])
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
+
+    factory_module.create_chat_model(name="oai")
+
+    assert captured.get("openai_api_base") == "http://canonical/v1"
+    assert "api_base" not in captured
+    assert "base_url" not in captured
+
+
+def test_no_unknown_key_warning_for_non_openai_class(monkeypatch, caplog):
+    """The unknown-key warning is scoped to the OpenAI family; other providers must not false-positive.
+
+    Regression: a ChatAnthropic model with a legit kwarg like frequency_penalty (which LangChain
+    routes into model_kwargs for that provider) previously tripped the 'not recognized' warning.
+    """
+    import logging
+
+    from langchain_anthropic import ChatAnthropic
+
+    cfg = _make_app_config([_make_model_with_extras("anthropic", use="langchain_anthropic:ChatAnthropic", frequency_penalty=0.5, api_base="http://x/v1")])
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatAnthropic, captured))
+
+    with caplog.at_level(logging.WARNING, logger=factory_module.__name__):
+        factory_module.create_chat_model(name="anthropic")
+
+    assert not any("not recognized parameters" in rec.message for rec in caplog.records)
+    # api_base normalization is likewise scoped to the OpenAI family: a non-BaseChatOpenAI
+    # provider must never have its keys rewritten. The config sets api_base, so this
+    # actually exercises the normalization-skip path (not just its absence): the alias
+    # is passed through verbatim and never rewritten to base_url.
+    assert captured.get("api_base") == "http://x/v1"
+    assert "base_url" not in captured
+
+
+# ---------------------------------------------------------------------------
+# The OpenAI-compatible family is issubclass(BaseChatOpenAI), not a class-path allowlist
+# (regression: six in-repo BaseChatOpenAI subclasses were excluded from api_base
+#  normalization and from the unknown-key warning)
+# ---------------------------------------------------------------------------
+
+# Every in-repo BaseChatOpenAI subclass that inherits only `openai_api_base` (alias `base_url`)
+# and was NOT in the original ChatOpenAI / PatchedChatOpenAI allowlist. PatchedChatDeepSeek is
+# deliberately absent: it declares `api_base` itself and is covered by the preservation test above.
+_OPENAI_SUBCLASS_USE_PATHS_WITHOUT_API_BASE = [
+    "deerflow.models.vllm_provider:VllmChatModel",
+    "deerflow.models.mindie_provider:MindIEChatModel",
+    "deerflow.models.patched_mimo:PatchedChatMiMo",
+    "deerflow.models.patched_stepfun:PatchedChatStepFun",
+    "deerflow.models.patched_minimax:PatchedChatMiniMax",
+]
+
+
+@pytest.mark.parametrize("use_path", _OPENAI_SUBCLASS_USE_PATHS_WITHOUT_API_BASE)
+def test_api_base_normalized_for_all_openai_subclasses(monkeypatch, use_path):
+    """`api_base` must become `base_url` for every BaseChatOpenAI subclass, not just the two
+    stock OpenAI paths.
+
+    These classes inherit the endpoint field as `openai_api_base` (alias `base_url`) and do not
+    declare `api_base`. Excluded by the old class-path allowlist, a user's `api_base` was diverted
+    into `model_kwargs` — so the endpoint override was silently dropped (the client fell back to
+    the default OpenAI endpoint) and the stray key was spread into every `Completions.create()`
+    call, failing at request time with an opaque `unexpected keyword argument 'api_base'`.
+    """
+    real_cls = resolve_class(use_path, BaseChatModel)
+    cfg = _make_app_config([_make_model_with_extras("m", use=use_path, api_base="http://gw.example/v1")])
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(real_cls, captured))
+
+    factory_module.create_chat_model(name="m")
+
+    assert captured.get("base_url") == "http://gw.example/v1"
+    assert "api_base" not in captured
+
+
+@pytest.mark.parametrize("use_path", _OPENAI_SUBCLASS_USE_PATHS_WITHOUT_API_BASE)
+def test_unknown_config_key_warns_for_all_openai_subclasses(monkeypatch, use_path, caplog):
+    """The unknown-key warning must fire for every BaseChatOpenAI subclass.
+
+    The `model_kwargs` divert-and-crash behaviour is implemented in `BaseChatOpenAI`, so every
+    subclass inherits it. Scoping the warning to the two stock paths meant the diagnostic that
+    exists to surface this failure was disabled for exactly the classes that suffer it.
+    """
+    import logging
+
+    real_cls = resolve_class(use_path, BaseChatModel)
+    cfg = _make_app_config([_make_model_with_extras("m", use=use_path, definitely_not_a_real_kwarg=True)])
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(real_cls, captured))
+
+    with caplog.at_level(logging.WARNING, logger=factory_module.__name__):
+        factory_module.create_chat_model(name="m")
+
+    assert any("definitely_not_a_real_kwarg" in rec.message for rec in caplog.records)
+
+
+def test_api_base_reaches_real_minimax_constructor_as_base_url(monkeypatch):
+    """End-to-end anchor on a real provider class, nothing stubbed.
+
+    Builds the genuine `PatchedChatMiniMax` (dummy key, no network) from a config that sets
+    `api_base`, and asserts the endpoint actually lands on the client's `openai_api_base` field
+    instead of being diverted into `model_kwargs`.
+    """
+    cfg = _make_app_config(
+        [
+            _make_model_with_extras(
+                "minimax",
+                use="deerflow.models.patched_minimax:PatchedChatMiniMax",
+                api_key="sk-dummy",
+                api_base="https://api.minimax.io/v1",
+            )
+        ]
+    )
+    # Do NOT patch resolve_class — construct the real PatchedChatMiniMax class.
+    monkeypatch.setattr(factory_module, "get_app_config", lambda: cfg)
+    monkeypatch.setattr(factory_module, "build_tracing_callbacks", lambda: [])
+
+    instance = factory_module.create_chat_model(name="minimax")
+
+    assert instance.openai_api_base == "https://api.minimax.io/v1"
+    assert "api_base" not in (instance.model_kwargs or {})
+
+
+# ---------------------------------------------------------------------------
+# Per-agent model_overrides (issue #4336)
+# ---------------------------------------------------------------------------
+
+
+def test_model_overrides_layer_on_top_of_profile(monkeypatch):
+    """A caller's model_overrides win over the profile's same-named values."""
+    cfg = _make_app_config([_make_model("base", max_tokens=4096)])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="base", model_overrides={"temperature": 0.2, "max_tokens": 12000})
+
+    assert FakeChatModel.captured_kwargs.get("temperature") == 0.2
+    assert FakeChatModel.captured_kwargs.get("max_tokens") == 12000
+
+
+def test_model_overrides_ignore_none_values(monkeypatch):
+    """A None override never clobbers a configured profile value."""
+    cfg = _make_app_config([_make_model("base", max_tokens=4096)])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="base", model_overrides={"temperature": None, "max_tokens": None})
+
+    assert "temperature" not in FakeChatModel.captured_kwargs
+    assert FakeChatModel.captured_kwargs.get("max_tokens") == 4096
+
+
+def test_model_overrides_none_is_a_noop(monkeypatch):
+    """Passing model_overrides=None leaves the profile untouched."""
+    cfg = _make_app_config([_make_model("base", max_tokens=4096)])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="base", model_overrides=None)
+
+    assert FakeChatModel.captured_kwargs.get("max_tokens") == 4096
+
+
+def test_codex_still_strips_overridden_max_tokens(monkeypatch):
+    """Codex drops max_tokens even when it arrived via an override, so the
+    provider-specific normalization still governs the merged value."""
+    cfg = _make_app_config([_make_model("codex", use="deerflow.models.openai_codex_provider:CodexChatModel")])
+    captured: dict = {}
+    monkeypatch.setattr(factory_module, "get_app_config", lambda: cfg)
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: _capturing_class(codex_provider_module.CodexChatModel, captured))
+    monkeypatch.setattr(factory_module, "build_tracing_callbacks", lambda: [])
+
+    factory_module.create_chat_model(name="codex", model_overrides={"max_tokens": 9999})
+
+    assert "max_tokens" not in captured
+
+
+# ---------------------------------------------------------------------------
+# Declarative reasoning capability contract (issue #5073)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("provider_name", ["ollama_qwen", "ollama_gemma"])
+def test_ollama_wizard_native_reasoning_survives_config_load_and_model_build(monkeypatch, provider_name):
+    import yaml
+    from wizard.providers import LLM_PROVIDERS
+    from wizard.writer import build_minimal_config
+
+    provider = next(item for item in LLM_PROVIDERS if item.name == provider_name)
+    content = build_minimal_config(
+        provider_use=provider.use,
+        model_name=provider.default_model,
+        display_name=provider.display_name,
+        api_key_field=provider.api_key_field,
+        env_var=provider.env_var,
+        extra_model_config=provider.extra_config,
+    )
+    config = AppConfig.model_validate(yaml.safe_load(content))
+    model = config.models[0]
+    assert model.reasoning is True
+    assert model.supports_thinking is True
+    assert resolve_reasoning_contract(model).source == "legacy"
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, config, model_class=_capturing_class(FakeChatModel, captured))
+    factory_module.create_chat_model(name=model.name, thinking_enabled=True)
+    assert captured["reasoning"] is True
+
+
+@pytest.mark.parametrize("level", ["low", "medium", "high"])
+def test_native_provider_reasoning_level_string_is_forwarded(monkeypatch, level):
+    """langchain-ollama accepts ``reasoning: low|medium|high`` (e.g. gpt-oss). Before the
+    contract field existed the string passed straight through; it still must."""
+    model = ModelConfig(name="ollama", use="langchain_ollama:ChatOllama", model="gpt-oss:20b", reasoning=level)
+    assert model.reasoning == level
+    assert model.supports_thinking is False
+    assert resolve_reasoning_contract(model).source == "legacy"
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="ollama", thinking_enabled=True)
+
+    assert captured["reasoning"] == level
+
+
+def test_native_provider_reasoning_false_is_forwarded(monkeypatch):
+    model = ModelConfig(name="ollama", use="langchain_ollama:ChatOllama", model="ollama", reasoning=False)
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="ollama", thinking_enabled=False)
+
+    assert captured["reasoning"] is False
+
+
+def _glm_effort() -> dict:
+    return {"values": ["low", "high", "max"], "default": "max", "aliases": {"minimal": "low", "medium": "high"}}
+
+
+def _contract_model(name: str = "contract-model", *, use: str = "langchain_openai:ChatOpenAI", reasoning: dict, **extras) -> ModelConfig:
+    return ModelConfig(
+        name=name,
+        display_name=name,
+        description=None,
+        use=use,
+        model=name,
+        api_key="test-key",
+        supports_vision=False,
+        reasoning=reasoning,
+        **extras,
+    )
+
+
+def test_contract_required_thinking_never_receives_a_disable_payload():
+    """A background caller asking for ``thinking_enabled=False`` on GLM-5.3-Flash
+    keeps thinking on and receives a mapped provider effort instead of the
+    synthesized ``thinking.type=disabled`` + ``reasoning_effort=minimal`` pair."""
+    model = _contract_model(
+        "glm-5.3-flash",
+        use="deerflow.models.patched_deepseek:PatchedChatDeepSeek",
+        reasoning={"thinking": "required", "dialect": "openai_extra_body", "history": "clear", "effort": _glm_effort()},
+        api_base="https://api.z.ai/api/paas/v4",
+        stream_usage=False,
+        extra_body={"tool_stream": True},
+    )
+    chat_model = factory_module.create_chat_model(
+        name="glm-5.3-flash",
+        thinking_enabled=False,
+        reasoning_effort="medium",
+        app_config=_make_app_config([model]),
+        attach_tracing=False,
+    )
+    payload = chat_model._get_request_payload([HumanMessage(content="ping")])
+
+    assert payload["extra_body"] == {
+        "thinking": {"type": "enabled", "clear_thinking": True},
+        "tool_stream": True,
+    }
+    assert payload["reasoning_effort"] == "high"
+    assert chat_model.stream_usage is False
+
+
+def test_contract_required_thinking_uses_the_default_effort_for_background_callers():
+    model = _contract_model(
+        "glm-5.3-flash",
+        use="deerflow.models.patched_deepseek:PatchedChatDeepSeek",
+        reasoning={"thinking": "required", "dialect": "openai_extra_body", "effort": _glm_effort()},
+        api_base="https://api.z.ai/api/paas/v4",
+    )
+    chat_model = factory_module.create_chat_model(name="glm-5.3-flash", thinking_enabled=False, app_config=_make_app_config([model]), attach_tracing=False)
+    payload = chat_model._get_request_payload([HumanMessage(content="ping")])
+
+    assert payload["extra_body"]["thinking"] == {"type": "enabled"}
+    assert payload["reasoning_effort"] == "max"
+
+
+def test_contract_optional_thinking_disable_path_maps_effort_instead_of_synthesizing_minimal(monkeypatch):
+    model = _contract_model(
+        reasoning={"thinking": "optional", "dialect": "openai_extra_body", "effort": {"values": ["low", "medium", "high"], "aliases": {"minimal": "low"}}},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=False, reasoning_effort="minimal")
+
+    assert captured["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert captured["reasoning_effort"] == "low"
+
+
+def test_contract_unknown_effort_without_default_is_not_forwarded(monkeypatch):
+    model = _contract_model(reasoning={"thinking": "optional", "effort": {"values": ["low", "high"]}})
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=True, reasoning_effort="medium")
+
+    assert "reasoning_effort" not in captured
+
+
+def test_contract_custom_effort_path_drops_generic_override(monkeypatch):
+    model = _contract_model(reasoning={"thinking": "optional", "effort": {"values": ["low", "high"], "default": "high", "path": "extra_body.thinking.effort"}})
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=True, model_overrides={"reasoning_effort": "minimal"})
+
+    assert "reasoning_effort" not in captured
+    assert captured["extra_body"]["thinking"]["effort"] == "high"
+
+
+def test_contract_custom_effort_path_stays_canonical_for_codex(monkeypatch):
+    model = _contract_model(
+        "codex-model",
+        use="deerflow.models.openai_codex_provider:CodexChatModel",
+        reasoning={"thinking": "optional", "effort": {"values": ["low", "high"], "default": "high", "path": "extra_body.thinking.effort"}},
+    )
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=FakeCodexChatModel)
+    monkeypatch.setattr(codex_provider_module, "CodexChatModel", FakeCodexChatModel)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="codex-model", thinking_enabled=True, model_overrides={"reasoning_effort": "minimal"})
+
+    assert "reasoning_effort" not in FakeChatModel.captured_kwargs
+    assert FakeChatModel.captured_kwargs["extra_body"]["thinking"]["effort"] == "high"
+
+
+def test_contract_without_effort_never_forwards_reasoning_effort(monkeypatch):
+    model = _contract_model(reasoning={"thinking": "optional"})
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=True, reasoning_effort="high")
+
+    assert "reasoning_effort" not in captured
+
+
+def test_contract_dialect_auto_infers_disable_payload_from_when_thinking_enabled(monkeypatch):
+    model = _contract_model(
+        reasoning={"thinking": "optional", "effort": {"values": ["low", "medium", "high"], "aliases": {"minimal": "low"}}},
+        when_thinking_enabled={"extra_body": {"thinking": {"type": "enabled"}}},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=False)
+
+    assert captured["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert "reasoning_effort" not in captured
+
+
+@pytest.mark.parametrize(("thinking_enabled", "expected"), [(True, True), (False, False)])
+def test_contract_dialect_vllm_synthesizes_chat_template_kwargs(monkeypatch, thinking_enabled, expected):
+    model = _contract_model(reasoning={"thinking": "optional", "dialect": "vllm_chat_template"})
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=thinking_enabled)
+
+    assert captured["extra_body"] == {"chat_template_kwargs": {"enable_thinking": expected}}
+
+
+def test_contract_dialect_vllm_enable_mirrors_the_declared_template_keys(monkeypatch):
+    """A template that declares the older ``thinking`` switch must not also grow
+    ``enable_thinking`` on the enable path — the legacy path never produced that shape."""
+    model = _contract_model(
+        reasoning={"thinking": "optional", "dialect": "vllm_chat_template"},
+        when_thinking_enabled={"extra_body": {"chat_template_kwargs": {"thinking": True}}},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=True)
+
+    assert captured["extra_body"] == {"chat_template_kwargs": {"thinking": True}}
+
+
+def test_contract_dialect_vllm_disable_mirrors_the_declared_template_keys(monkeypatch):
+    model = _contract_model(
+        reasoning={"thinking": "optional", "dialect": "vllm_chat_template"},
+        when_thinking_enabled={"extra_body": {"chat_template_kwargs": {"thinking": True}}},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=False)
+
+    assert captured["extra_body"] == {"chat_template_kwargs": {"thinking": False}}
+
+
+def test_contract_dialect_anthropic_merges_the_thinking_shortcut(monkeypatch):
+    model = _contract_model(reasoning={"thinking": "optional", "dialect": "anthropic"}, thinking={"budget_tokens": 2048})
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=True)
+    assert captured["thinking"] == {"type": "enabled", "budget_tokens": 2048}
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=False)
+    assert captured["thinking"] == {"type": "disabled"}
+
+
+@pytest.mark.parametrize(("thinking_enabled", "expected"), [(True, True), (False, False)])
+def test_contract_dialect_ollama_sets_the_reasoning_flag(monkeypatch, thinking_enabled, expected):
+    model = _contract_model(reasoning={"thinking": "optional", "dialect": "ollama"})
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=thinking_enabled)
+
+    assert captured["reasoning"] is expected
+
+
+def test_contract_dialect_none_leaves_the_payload_alone(monkeypatch):
+    model = _contract_model(reasoning={"thinking": "optional", "dialect": "none", "effort": {"values": ["minimal", "low", "medium", "high"]}})
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=False, reasoning_effort="minimal")
+
+    assert "extra_body" not in captured
+    assert "thinking" not in captured
+    assert captured["reasoning_effort"] == "minimal"
+
+
+def test_contract_history_preserve_serializes_clear_thinking_false(monkeypatch):
+    model = _contract_model(reasoning={"thinking": "optional", "dialect": "openai_extra_body", "history": "preserve"})
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=True)
+
+    assert captured["extra_body"] == {"thinking": {"type": "enabled", "clear_thinking": False}}
+
+
+def test_contract_history_is_inferred_for_auto_dialect(monkeypatch):
+    model = _contract_model(
+        reasoning={"thinking": "optional", "history": "clear"},
+        when_thinking_enabled={"extra_body": {"thinking": {"type": "enabled"}}},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=True)
+
+    assert captured["extra_body"] == {"thinking": {"type": "enabled", "clear_thinking": True}}
+
+
+def test_contract_effort_path_serializes_nested_values(monkeypatch):
+    model = _contract_model(
+        reasoning={"thinking": "optional", "dialect": "openai_extra_body", "effort": {"values": ["low", "high"], "path": "extra_body.thinking.effort"}},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=True, reasoning_effort="high")
+
+    assert captured["extra_body"] == {"thinking": {"type": "enabled", "effort": "high"}}
+    assert "reasoning_effort" not in captured
+
+
+def test_contract_when_thinking_enabled_deep_merges_into_the_base_extra_body(monkeypatch):
+    model = _contract_model(
+        reasoning={"thinking": "optional"},
+        extra_body={"tool_stream": True},
+        when_thinking_enabled={"extra_body": {"thinking": {"type": "enabled"}}},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=True)
+
+    assert captured["extra_body"] == {"tool_stream": True, "thinking": {"type": "enabled"}}
+
+
+def test_contract_when_thinking_disabled_template_wins_over_dialect_synthesis(monkeypatch):
+    model = _contract_model(
+        reasoning={"thinking": "optional", "dialect": "openai_extra_body", "effort": {"values": ["low", "high"]}},
+        when_thinking_disabled={"reasoning_effort": "low"},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=False)
+
+    assert "extra_body" not in captured
+    assert captured["reasoning_effort"] == "low"
+
+
+@pytest.mark.parametrize(("requested", "expected"), [("high", "high"), (None, "medium")])
+def test_contract_validated_request_wins_over_template_effort(monkeypatch, requested, expected):
+    model = _contract_model(
+        reasoning={"thinking": "optional", "effort": {"values": ["low", "medium", "high"]}},
+        when_thinking_enabled={"reasoning_effort": "medium"},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=True, reasoning_effort=requested)
+
+    assert captured["reasoning_effort"] == expected
+
+
+def test_contract_reject_policy_fails_before_the_provider_is_built(monkeypatch):
+    model = _contract_model(reasoning={"thinking": "required", "on_disable_request": "reject", "dialect": "openai_extra_body"})
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    with pytest.raises(ValueError, match="requires thinking"):
+        factory_module.create_chat_model(name="contract-model", thinking_enabled=False)
+
+    assert captured == {}
+
+
+def test_contract_codex_maps_aliases_before_codex_validation(monkeypatch):
+    model = _contract_model(
+        "codex-model",
+        use="deerflow.models.openai_codex_provider:CodexChatModel",
+        reasoning={"thinking": "optional", "dialect": "none", "effort": {"values": ["low", "medium", "high", "xhigh"], "aliases": {"minimal": "low"}}},
+    )
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=FakeCodexChatModel)
+    monkeypatch.setattr(codex_provider_module, "CodexChatModel", FakeCodexChatModel)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="codex-model", thinking_enabled=True, reasoning_effort="minimal")
+
+    assert FakeChatModel.captured_kwargs.get("reasoning_effort") == "low"
+
+
+def test_legacy_profiles_are_untouched_by_the_contract_machinery(monkeypatch):
+    """A profile without ``reasoning:`` still takes the historical disable path, including
+    the hard-coded ``minimal`` effort the contract path deliberately drops."""
+    wte = {"extra_body": {"thinking": {"type": "enabled"}}}
+    cfg = _make_app_config([_make_model("legacy", supports_thinking=True, supports_reasoning_effort=True, when_thinking_enabled=wte)])
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="legacy", thinking_enabled=False, reasoning_effort="high")
+
+    assert captured["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert captured["reasoning_effort"] == "minimal"
+
+
+# ---------------------------------------------------------------------------
+# gpt-6 → OpenAI Responses API default routing (issue #6841)
+# ---------------------------------------------------------------------------
+
+
+def test_gpt6_model_routes_through_responses_api_by_default(monkeypatch):
+    """A gpt-6 model configured with ``langchain_openai:ChatOpenAI`` must receive
+    ``use_responses_api=true`` + ``output_version=responses/v1`` by default, so
+    tool use goes through ``/v1/responses`` instead of the chat-completions
+    endpoint that OpenAI rejects for the gpt-6 family (locked
+    langchain-openai==1.2.1 has no gpt-6 routing branch).
+    """
+    from langchain_openai import ChatOpenAI
+
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_BASE", raising=False)
+
+    model = _make_model("gpt-6.1-sol", use="langchain_openai:ChatOpenAI")
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
+    factory_module.create_chat_model(name="gpt-6.1-sol")
+
+    assert captured.get("use_responses_api") is True
+    assert captured.get("output_version") == "responses/v1"
+
+
+def test_gpt6_explicit_responses_config_not_overridden(monkeypatch):
+    """If the operator already set ``use_responses_api``/``output_version`` on a
+    gpt-6 model, the factory must not clobber the explicit value.
+    """
+    from langchain_openai import ChatOpenAI
+
+    model = ModelConfig(
+        name="gpt-6-custom",
+        display_name="GPT-6 custom",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="gpt-6.1-sol",
+        use_responses_api=False,  # operator deliberately opted out
+        output_version=None,
+    )
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
+    factory_module.create_chat_model(name="gpt-6-custom")
+
+    assert captured.get("use_responses_api") is False
+    assert captured.get("output_version") is None
+
+
+def test_non_gpt6_openai_model_not_rerouted(monkeypatch):
+    """The default must not fire for non-gpt-6 OpenAI models (gpt-4o, gpt-5, …),
+    which keep their historical chat-completions routing.
+    """
+    from langchain_openai import ChatOpenAI
+
+    model = _make_model("gpt-4o", use="langchain_openai:ChatOpenAI")
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
+    factory_module.create_chat_model(name="gpt-4o")
+
+    assert captured.get("use_responses_api") is None
+    assert captured.get("output_version") is None
+
+
+def test_gpt6_custom_base_url_not_rerouted(monkeypatch):
+    """A gpt-6 model pointed at an OpenAI-compatible gateway/proxy via ``base_url``
+    must not be silently re-pointed at ``/responses`` — many gateways (LiteLLM,
+    vLLM, one-api, …) do not implement it, so the operator owns routing there.
+    """
+    from langchain_openai import ChatOpenAI
+
+    model = ModelConfig(
+        name="gpt-6-gateway",
+        display_name="GPT-6 via gateway",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="gpt-6.1-sol",
+        base_url="https://my-gateway.example.com/v1",
+    )
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
+    factory_module.create_chat_model(name="gpt-6-gateway")
+
+    assert captured.get("use_responses_api") is None
+    assert captured.get("output_version") is None
+
+
+def test_gpt6_openai_api_base_alias_not_rerouted(monkeypatch):
+    """The legacy ``openai_api_base`` alias is treated like a custom endpoint:
+    after ``_normalize_openai_base_url`` it is the canonical key the gate reads.
+    """
+    from langchain_openai import ChatOpenAI
+
+    model = ModelConfig(
+        name="gpt-6-alias",
+        display_name="GPT-6 alias endpoint",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="gpt-6.1-sol",
+        openai_api_base="https://my-gateway.example.com/v1",
+    )
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
+    factory_module.create_chat_model(name="gpt-6-alias")
+
+    assert captured.get("use_responses_api") is None
+    assert captured.get("output_version") is None
+
+
+def test_gpt6_azure_not_rerouted(monkeypatch):
+    """``AzureChatOpenAI`` is a ``BaseChatOpenAI`` subclass, but Azure's Responses
+    API additionally requires ``api-version >= 2025-04-01-preview``; an Azure
+    gpt-6 deployment must not be silently flipped.
+    """
+    from langchain_openai import AzureChatOpenAI
+
+    model = ModelConfig(
+        name="gpt-6-azure",
+        display_name="GPT-6 Azure",
+        description=None,
+        use="langchain_openai:AzureChatOpenAI",
+        model="gpt-6.1-sol",
+        azure_endpoint="https://example.openai.azure.com/",
+        azure_deployment="gpt-6-deploy",
+        api_version="2024-02-01",
+    )
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(AzureChatOpenAI, captured))
+    factory_module.create_chat_model(name="gpt-6-azure")
+
+    assert captured.get("use_responses_api") is None
+    assert captured.get("output_version") is None
+
+
+def test_gpt6_output_version_only_still_routes(monkeypatch):
+    """An operator who pinned only ``output_version`` (implying Responses
+    formatting) without ``use_responses_api`` must still get Responses routing —
+    otherwise gpt-6 stays on /v1/chat/completions and the issue #6841 400s
+    silently reappear. The explicit ``output_version`` is preserved.
+    """
+    from langchain_openai import ChatOpenAI
+
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_BASE", raising=False)
+
+    model = ModelConfig(
+        name="gpt-6-output-version",
+        display_name="GPT-6 pinned output version",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="gpt-6.1-sol",
+        output_version="responses/v1",
+    )
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
+    factory_module.create_chat_model(name="gpt-6-output-version")
+
+    assert captured.get("use_responses_api") is True
+    assert captured.get("output_version") == "responses/v1"
+
+
+@pytest.mark.parametrize("endpoint_env", ["OPENAI_BASE_URL", "OPENAI_API_BASE"])
+def test_gpt6_env_var_base_url_not_rerouted(monkeypatch, endpoint_env):
+    """A gpt-6 model with no ``base_url`` in settings but a gateway wired purely
+    via either supported endpoint env var must not be re-pointed at ``/responses``.
+    Clear both variables first so each case exercises its own gate.
+    """
+    from langchain_openai import ChatOpenAI
+
+    model = _make_model("gpt-6.1-sol", use="langchain_openai:ChatOpenAI")
+    cfg = _make_app_config([model])
+
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_BASE", raising=False)
+    monkeypatch.setenv(endpoint_env, "https://env-gateway.example.com/v1")
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
+    factory_module.create_chat_model(name="gpt-6.1-sol")
+
+    assert captured.get("use_responses_api") is None
+    assert captured.get("output_version") is None
+
+
+def test_gpt6_explicit_responses_config_wins_on_custom_endpoint(monkeypatch):
+    """An explicit ``use_responses_api`` is the operator's routing decision and
+    must win even on a custom endpoint: the explicit-key check precedes the
+    endpoint gate, so a ``base_url``-configured gpt-6 model keeps its explicit
+    value instead of being silently left on default chat-completions routing.
+    """
+    from langchain_openai import ChatOpenAI
+
+    model = ModelConfig(
+        name="gpt-6-gateway-explicit",
+        display_name="GPT-6 gateway with explicit routing",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="gpt-6.1-sol",
+        base_url="https://my-gateway.example.com/v1",
+        use_responses_api=True,
+        output_version="responses/v1",
+    )
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
+    factory_module.create_chat_model(name="gpt-6-gateway-explicit")
+
+    assert captured.get("use_responses_api") is True
+    assert captured.get("output_version") == "responses/v1"

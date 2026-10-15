@@ -1,4 +1,4 @@
-.env
+**/.env
 Dockerfile
 .dockerignore
 .git
@@ -65,7 +65,22 @@ frontend/node_modules
 backend/.venv
 backend/htmlcov
 backend/.coverage
+
+# Runtime data written by a running DeerFlow, not build inputs. backend/Dockerfile
+# does `COPY backend ./backend`, so leaving these in the context both bakes the
+# sqlite database, per-user uploads and the JWT secret into the image and breaks
+# the build outright once the app has created directories owned by the container's
+# root that the build client cannot read.
+**/.deer-flow/
+backend/sandbox/
 *.md
 !README.md
 !frontend/README.md
 !backend/README.md
+
+# Extension manager snapshots must enter the backend builder intact. A Python
+# package may require README metadata, native modules, or package assets that
+# the general image-context exclusions above intentionally omit elsewhere.
+!backend/extensions/
+!backend/extensions/sources/
+!backend/extensions/sources/**

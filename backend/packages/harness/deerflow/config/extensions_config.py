@@ -1,13 +1,185 @@
 """Unified extensions configuration for MCP servers and skills."""
 
+import errno
 import json
+import logging
+import math
 import os
+import stat
+import tempfile
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
+from deerflow.config._boolean_guards import reject_boolean
+from deerflow.config.file_signature import ConfigSignature, get_config_signature, read_config_with_signature
 from deerflow.config.runtime_paths import existing_project_file
+from deerflow.constants import (
+    DEFAULT_MCP_SESSION_INIT_TIMEOUT,
+    MCP_TASK_NAME_MAX_LENGTH,
+    MCP_TASK_SERVER_NAME_MAX_LENGTH,
+)
+
+logger = logging.getLogger(__name__)
+
+_JSON_KWARGS_ERROR = "middleware kwargs values must be JSON types (object, array, string, number, boolean, or null)"
+_non_atomic_fallback_targets: set[Path] = set()
+_non_atomic_fallback_targets_lock = threading.Lock()
+
+
+def normalize_mcp_transport_alias(data: Any) -> Any:
+    """Promote MCP-spec ``transport`` to ``type`` when ``type`` is absent."""
+    if isinstance(data, dict):
+        transport = data.get("transport")
+        if transport and not data.get("type"):
+            return {**data, "type": transport}
+    return data
+
+
+class McpRoutingConfig(BaseModel):
+    """Soft routing hints for MCP tool preference."""
+
+    mode: Literal["off", "prefer"] = Field(
+        default="off",
+        description="Whether to emit prompt hints preferring this MCP tool for matching requests.",
+    )
+    priority: int = Field(
+        default=0,
+        description="Ordering key for routing hints. Higher values are rendered first.",
+    )
+    keywords: list[str] = Field(
+        default_factory=list,
+        description="Operator-authored keywords that describe when this MCP tool should be preferred.",
+    )
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("priority")
+    @classmethod
+    def _clamp_priority(cls, value: int) -> int:
+        if value < 0:
+            logger.warning("MCP routing priority %s is below 0; clamping to 0.", value)
+            return 0
+        if value > 100:
+            logger.warning("MCP routing priority %s is above 100; clamping to 100.", value)
+            return 100
+        return value
+
+
+class McpToolOverride(BaseModel):
+    """Per-tool MCP configuration overrides."""
+
+    routing: McpRoutingConfig = Field(default_factory=McpRoutingConfig)
+    model_config = ConfigDict(extra="allow")
+
+
+class McpTaskToolsetConfig(BaseModel):
+    """One ordinary submit/status/cancel contract exposed by an MCP server.
+
+    Tool names are the exact raw names advertised by that server. The
+    presentation prefix added by ``langchain-mcp-adapters`` is deliberately not
+    part of this durable binding.
+    """
+
+    name: str = Field(
+        min_length=1,
+        max_length=MCP_TASK_NAME_MAX_LENGTH,
+        description="Stable local name shown for tasks from this toolset",
+    )
+    submit_tool: str = Field(min_length=1, description="Raw MCP tool name used to submit work")
+    status_tool: str = Field(min_length=1, description="Raw MCP tool name used to poll work")
+    cancel_tool: str = Field(min_length=1, description="Raw MCP tool name used to cancel work")
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name_is_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("MCP task toolset name must not be empty")
+        return value
+
+
+class McpUserScopedAuthConfig(BaseModel):
+    """Per-user credential injection for a shared MCP server (HTTP/SSE transports).
+
+    Maps DeerFlow user ids to credential header values so that one configured
+    MCP server can serve several users, each authenticated to the remote
+    service with their own credential. The credential for the authenticated
+    user is injected into every tool call by the built-in user-scoped auth
+    interceptor; the server entry's static ``headers`` are only used for
+    startup tool discovery.
+
+    Values support the same ``$ENV_VAR`` resolution as the rest of this file,
+    so raw secrets can stay in the process environment.
+    """
+
+    enabled: bool = Field(default=True, description="Whether user-scoped credential injection is enabled")
+    header: str = Field(default="Authorization", description="HTTP header to set with the resolved user credential")
+    users: dict[str, str] = Field(
+        default_factory=dict,
+        description="Map of DeerFlow user id to full credential header value (e.g. 'Bearer <token>'); values support $ENV_VAR references",
+    )
+    on_missing: Literal["deny", "passthrough"] = Field(
+        default="deny",
+        description=("Behavior when the calling user has no mapped credential (or the mapped value resolved empty): 'deny' fails the tool call with an actionable error; 'passthrough' forwards the request with the server's static headers"),
+    )
+    model_config = ConfigDict(extra="allow")
+
+    @field_validator("header")
+    @classmethod
+    def _validate_header_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("user_auth.header must not be empty")
+        return value
+
+
+class McpContextHeadersConfig(BaseModel):
+    """Per-request credential injection for an MCP server (HTTP/SSE transports).
+
+    Maps HTTP header names to keys of the run request's ``config.context.secrets``
+    carrier, so one configured MCP server can serve callers that each supply their
+    own credential *per request* rather than per configured user. The built-in
+    context-headers interceptor resolves the mapping on every tool call; the
+    server entry's static ``headers`` are only used for startup tool discovery.
+
+    Unlike ``user_auth``, this block stores **no credential** — only header names
+    and run-context key names — so it is safe to return unmasked from the config
+    API. The values arrive out-of-band with each run and never enter the prompt,
+    tool arguments, or trace payloads (see ``runtime/secret_context.py``).
+    """
+
+    enabled: bool = Field(default=True, description="Whether request-scoped header injection is enabled")
+    headers: dict[str, str] = Field(
+        default_factory=dict,
+        description="Map of HTTP header name to the key to read from the run request's config.context.secrets (e.g. {'X-Tenant-Id': 'tenant_id'})",
+    )
+    on_missing: Literal["deny", "passthrough"] = Field(
+        default="deny",
+        description=("Behavior when a mapped key is absent from the request secrets (or resolved empty): 'deny' fails the tool call with an actionable error; 'passthrough' forwards the request with the server's static headers"),
+    )
+    model_config = ConfigDict(extra="allow")
+
+    @field_validator("headers")
+    @classmethod
+    def _validate_mapping_entries(cls, value: dict[str, str]) -> dict[str, str]:
+        seen: dict[str, str] = {}
+        for header_name, secret_key in value.items():
+            if not header_name.strip():
+                raise ValueError("headers_from_context.headers must not contain a blank header name")
+            if not isinstance(secret_key, str) or not secret_key.strip():
+                raise ValueError(f"headers_from_context.headers[{header_name!r}] must name a non-blank secret key from config.context.secrets")
+            # HTTP field names are case-insensitive, so two spellings of one
+            # header are one header with two candidate values, and which one
+            # reaches the remote would depend on dict ordering.
+            lowered = header_name.lower()
+            if lowered in seen:
+                raise ValueError(f"headers_from_context.headers maps the same HTTP header under two spellings ({seen[lowered]!r} and {header_name!r}); header names are case-insensitive, so keep only one")
+            seen[lowered] = header_name
+        return value
 
 
 class McpOAuthConfig(BaseModel):
@@ -28,7 +200,17 @@ class McpOAuthConfig(BaseModel):
     token_type_field: str = Field(default="token_type", description="Field name containing token type in token response")
     expires_in_field: str = Field(default="expires_in", description="Field name containing expiry (seconds) in token response")
     default_token_type: str = Field(default="Bearer", description="Default token type when missing in token response")
-    refresh_skew_seconds: int = Field(default=60, description="Refresh token this many seconds before expiry")
+    refresh_skew_seconds: int = Field(
+        default=60,
+        ge=0,
+        description="Refresh token this many seconds before expiry",
+    )
+
+    @field_validator("refresh_skew_seconds", mode="before")
+    @classmethod
+    def _reject_boolean_refresh_skew(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="an integer")
+
     extra_token_params: dict[str, str] = Field(default_factory=dict, description="Additional form params sent to token endpoint")
     model_config = ConfigDict(extra="allow")
 
@@ -40,12 +222,109 @@ class McpServerConfig(BaseModel):
     type: str = Field(default="stdio", description="Transport type: 'stdio', 'sse', or 'http'")
     command: str | None = Field(default=None, description="Command to execute to start the MCP server (for stdio type)")
     args: list[str] = Field(default_factory=list, description="Arguments to pass to the command (for stdio type)")
+    cwd: str | None = Field(default=None, description="Working directory for the MCP server process (for stdio type)")
     env: dict[str, str] = Field(default_factory=dict, description="Environment variables for the MCP server")
     url: str | None = Field(default=None, description="URL of the MCP server (for sse or http type)")
     headers: dict[str, str] = Field(default_factory=dict, description="HTTP headers to send (for sse or http type)")
     oauth: McpOAuthConfig | None = Field(default=None, description="OAuth configuration (for sse or http type)")
+    user_auth: McpUserScopedAuthConfig | None = Field(
+        default=None,
+        description="Per-user credential injection (for sse or http type): map DeerFlow user ids to per-user credential header values",
+    )
+    headers_from_context: McpContextHeadersConfig | None = Field(
+        default=None,
+        description="Per-request credential injection (for sse or http type): map HTTP header names to keys of the run request's config.context.secrets",
+    )
     description: str = Field(default="", description="Human-readable description of what this MCP server provides")
+    routing: McpRoutingConfig = Field(default_factory=McpRoutingConfig, description="Soft routing hints for tools from this MCP server")
+    tools: dict[str, McpToolOverride] = Field(default_factory=dict, description="Per-original-tool MCP configuration overrides")
+    tool_name_prefix: bool = Field(
+        default=True,
+        description="Whether to prefix discovered tool names with the MCP server name to avoid cross-server collisions",
+    )
+    tool_call_timeout: float | None = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+        description=("Timeout in seconds for individual stdio MCP tool calls and durable-task calls on every transport. Other HTTP/SSE tools use transport-level timeouts. None means no call-level timeout."),
+    )
+    session_init_timeout: float | None = Field(
+        default=DEFAULT_MCP_SESSION_INIT_TIMEOUT,
+        gt=0,
+        allow_inf_nan=False,
+        description=(
+            "Timeout in seconds for MCP server bring-up: tool discovery (subprocess spawn + initialize + tools/list) "
+            "and persistent stdio session initialization, plus ephemeral HTTP/SSE durable-task session "
+            "initialization. Defaults to DEFAULT_MCP_SESSION_INIT_TIMEOUT so a hung server cannot block agent "
+            "construction or the task poller indefinitely. None means no timeout."
+        ),
+    )
+
+    @field_validator("tool_call_timeout", "session_init_timeout", mode="before")
+    @classmethod
+    def _reject_boolean_mcp_timeouts(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="a number")
+
+    task_toolsets: list[McpTaskToolsetConfig] = Field(
+        default_factory=list,
+        description="Ordinary submit/status/cancel tool groups managed by the durable MCP task runtime",
+    )
     model_config = ConfigDict(extra="allow")
+
+    @field_validator("headers")
+    @classmethod
+    def _validate_header_names(cls, value: dict[str, str]) -> dict[str, str]:
+        # HTTP field names are case-insensitive, so two spellings of one header
+        # are one field with two candidate values. The adapter copies the static
+        # mapping verbatim, so both would reach the wire; a later per-request or
+        # OAuth override only replaces one spelling, leaving the other to leak a
+        # shared credential across tenant authority. Reject at config time so a
+        # bad mapping cannot reach the connection.
+        seen: dict[str, str] = {}
+        for header_name in value:
+            lowered = header_name.lower()
+            if lowered in seen:
+                raise ValueError(f"headers maps the same HTTP header under two spellings ({seen[lowered]!r} and {header_name!r}); header names are case-insensitive, so keep only one")
+            seen[lowered] = header_name
+        return value
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_transport_alias(cls, data: Any) -> Any:
+        """Accept the MCP-spec ``transport`` field as an alias for ``type``.
+
+        The official MCP configuration schema uses ``transport`` to indicate
+        the transport mechanism (``stdio``/``sse``/``http``). Earlier versions
+        of this project only honored ``type``, which caused remote SSE/HTTP
+        servers configured with just ``transport`` to be incorrectly treated as
+        ``stdio`` (the default). This validator normalizes the two so either
+        spelling works, with ``type`` taking precedence when both are provided.
+        """
+        return normalize_mcp_transport_alias(data)
+
+    @model_validator(mode="after")
+    def _validate_task_tool_bindings(self) -> "McpServerConfig":
+        claimed: dict[str, str] = {}
+        for toolset in self.task_toolsets:
+            for role in ("submit_tool", "status_tool", "cancel_tool"):
+                raw_name = getattr(toolset, role)
+                previous = claimed.get(raw_name)
+                if previous is not None:
+                    raise ValueError(f"MCP task tool {raw_name!r} must be unique across task_toolsets and roles; it is configured as both {previous} and {toolset.name}.{role}")
+                claimed[raw_name] = f"{toolset.name}.{role}"
+        return self
+
+
+def resolve_effective_mcp_routing(server_config: McpServerConfig | None, original_tool_name: str) -> dict[str, Any]:
+    """Merge server-level routing with per-tool overrides for one MCP tool."""
+    if server_config is None:
+        return McpRoutingConfig().model_dump(mode="json")
+
+    effective = server_config.routing.model_dump(mode="json")
+    override = server_config.tools.get(original_tool_name)
+    if override is not None and "routing" in override.model_fields_set:
+        effective.update(override.routing.model_dump(mode="json", exclude_unset=True))
+    return effective
 
 
 class SkillStateConfig(BaseModel):
@@ -54,9 +333,77 @@ class SkillStateConfig(BaseModel):
     enabled: bool = Field(default=True, description="Whether this skill is enabled")
 
 
+def _coerce_json_kwargs_value(value: Any) -> Any:
+    """Keep JSON types; stringify YAML timestamps so they match JSON strings."""
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(_JSON_KWARGS_ERROR)
+        return value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, time):
+        return value.isoformat()
+    if isinstance(value, dict):
+        if not all(isinstance(key, str) and key.strip() for key in value):
+            raise ValueError("middleware kwargs keys must be non-empty strings")
+        return {key: _coerce_json_kwargs_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_coerce_json_kwargs_value(item) for item in value]
+    raise ValueError(_JSON_KWARGS_ERROR)
+
+
+class ConfiguredMiddlewareSpec(BaseModel):
+    """One config-declared AgentMiddleware with optional constructor arguments."""
+
+    class_path: str = Field(
+        ...,
+        alias="class",
+        min_length=1,
+        description="AgentMiddleware class path in 'module.path:ClassName' form.",
+    )
+    kwargs: dict[str, Any] = Field(
+        default_factory=dict,
+        description=("Keyword arguments passed to the middleware constructor. Values must be JSON types (object, array, string, number, boolean, or null); YAML dates and timestamps are coerced to ISO strings so they match JSON."),
+    )
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    @field_validator("class_path")
+    @classmethod
+    def _strip_class_path(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("middleware class path must be a non-empty string")
+        return stripped
+
+    @field_validator("kwargs", mode="before")
+    @classmethod
+    def _kwargs_none_is_empty(cls, value: Any) -> Any:
+        return {} if value is None else value
+
+    @field_validator("kwargs")
+    @classmethod
+    def _kwargs_are_json_object(cls, value: dict[str, Any]) -> dict[str, Any]:
+        coerced = _coerce_json_kwargs_value(value)
+        json.dumps(coerced)
+        return coerced
+
+
 class ExtensionsConfig(BaseModel):
     """Unified configuration for MCP servers and skills."""
 
+    middlewares: list[str | ConfiguredMiddlewareSpec] = Field(
+        default_factory=list,
+        description=(
+            "AgentMiddleware entries loaded into the lead-agent and subagent middleware chains. "
+            "Each entry is a 'module.path:ClassName' string or an object with 'class' and optional "
+            "'kwargs'. kwargs values must be JSON types; YAML dates and timestamps are coerced to "
+            "ISO strings."
+        ),
+    )
     mcp_servers: dict[str, McpServerConfig] = Field(
         default_factory=dict,
         description="Map of MCP server name to configuration",
@@ -68,6 +415,29 @@ class ExtensionsConfig(BaseModel):
     )
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
+    @field_validator("middlewares")
+    @classmethod
+    def _normalize_middleware_entries(cls, value: list[str | ConfiguredMiddlewareSpec]) -> list[str | ConfiguredMiddlewareSpec]:
+        normalized: list[str | ConfiguredMiddlewareSpec] = []
+        for entry in value:
+            if isinstance(entry, str):
+                stripped = entry.strip()
+                if not stripped:
+                    raise ValueError("middleware class path must be a non-empty string")
+                normalized.append(stripped)
+                continue
+            normalized.append(entry)
+        return normalized
+
+    @model_validator(mode="after")
+    def _validate_task_server_names_fit_storage(self) -> "ExtensionsConfig":
+        for server_name, server in self.mcp_servers.items():
+            if not server.task_toolsets:
+                continue
+            if not server_name.strip() or len(server_name) > MCP_TASK_SERVER_NAME_MAX_LENGTH:
+                raise ValueError(f"MCP task server name must contain 1 to {MCP_TASK_SERVER_NAME_MAX_LENGTH} characters")
+        return self
+
     @classmethod
     def resolve_config_path(cls, config_path: str | None = None) -> Path | None:
         """Resolve the extensions config file path.
@@ -77,7 +447,7 @@ class ExtensionsConfig(BaseModel):
         2. If provided `DEER_FLOW_EXTENSIONS_CONFIG_PATH` environment variable, use it.
         3. Otherwise, search the caller project root for `extensions_config.json`, then `mcp_config.json`.
         4. For backward compatibility, also search legacy backend/repository-root defaults.
-        5. If not found, return None (extensions are optional).
+        5. If not found via search, return None (extensions are optional).
 
         Args:
             config_path: Optional path to extensions config file.
@@ -90,15 +460,37 @@ class ExtensionsConfig(BaseModel):
             4. Finally, search backend/repository-root defaults for monorepo compatibility.
 
         Returns:
-            Path to the extensions config file if found, otherwise None.
+            Path to the extensions config file if found via the resolution
+            order above.
+
+            An explicit `config_path` argument or a set
+            `DEER_FLOW_EXTENSIONS_CONFIG_PATH` is an operator assertion that
+            one particular file must be used, so a missing file in either of
+            those two modes raises ``FileNotFoundError`` (see Raises below)
+            instead of degrading to "no config" — a bad Docker mount, typo,
+            or deleted production config should surface as a loud, actionable
+            error rather than silently starting with every MCP server and
+            skill absent.
+
+            Only the fallback *search* mode (no explicit argument and no env
+            var set) returns ``None`` when nothing is found: that case means
+            extensions were never configured in the first place, which is the
+            legitimate "extensions are optional" case some callers (e.g. the
+            MCP tools-cache staleness check in `deerflow.mcp.cache`) rely on
+            as a clean, expected signal.
+
+        Raises:
+            FileNotFoundError: If `config_path` is given, or
+                `DEER_FLOW_EXTENSIONS_CONFIG_PATH` is set, and the resolved
+                path does not exist.
         """
         if config_path:
             path = Path(config_path)
             if not path.exists():
                 raise FileNotFoundError(f"Extensions config file specified by param `config_path` not found at {path}")
             return path
-        elif os.getenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH"):
-            path = Path(os.getenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH"))
+        elif env_path := os.getenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH"):
+            path = Path(env_path)
             if not path.exists():
                 raise FileNotFoundError(f"Extensions config file specified by environment variable `DEER_FLOW_EXTENSIONS_CONFIG_PATH` not found at {path}")
             return path
@@ -118,7 +510,9 @@ class ExtensionsConfig(BaseModel):
                 if path.exists():
                     return path
 
-            # Extensions are optional, so return None if not found
+            # Extensions are optional: unlike the explicit config_path/env-var
+            # branches above, finding nothing here is the expected case, so
+            # return None rather than raising.
             return None
 
     @classmethod
@@ -132,24 +526,32 @@ class ExtensionsConfig(BaseModel):
 
         Returns:
             ExtensionsConfig: The loaded config, or empty config if file not found.
+            Its ``$VAR`` strings are already resolved, so it must never be
+            serialized back to disk; writers use
+            :func:`read_raw_extensions_config` instead.
         """
         resolved_path = cls.resolve_config_path(config_path)
         if resolved_path is None:
             # Return empty config if extensions config file is not found
             return cls(mcp_servers={}, skills={})
 
+        return cls._from_path_with_signature(resolved_path)[0]
+
+    @classmethod
+    def _from_path_with_signature(cls, resolved_path: Path) -> tuple["ExtensionsConfig", ConfigSignature]:
+        """Parse the exact bytes whose signature the singleton will record."""
         try:
-            with open(resolved_path, encoding="utf-8") as f:
-                config_data = json.load(f)
-            cls.resolve_env_variables(config_data)
-            return cls.model_validate(config_data)
+            data, signature = read_config_with_signature(resolved_path)
+            config_data = json.loads(data.decode("utf-8-sig"))
+            config_data = cls.resolve_env_variables(config_data)
+            return cls.model_validate(config_data), signature
         except json.JSONDecodeError as e:
             raise ValueError(f"Extensions config file at {resolved_path} is not valid JSON: {e}") from e
         except Exception as e:
             raise RuntimeError(f"Failed to load extensions config from {resolved_path}: {e}") from e
 
     @classmethod
-    def resolve_env_variables(cls, config: dict[str, Any]) -> dict[str, Any]:
+    def resolve_env_variables(cls, config: Any) -> Any:
         """Recursively resolve environment variables in the config.
 
         Environment variables are resolved using the `os.getenv` function. Example: $OPENAI_API_KEY
@@ -160,23 +562,26 @@ class ExtensionsConfig(BaseModel):
         Returns:
             The config with environment variables resolved.
         """
-        for key, value in config.items():
-            if isinstance(value, str):
-                if value.startswith("$"):
-                    env_value = os.getenv(value[1:])
-                    if env_value is None:
-                        # Unresolved placeholder — store empty string so downstream
-                        # consumers (e.g. MCP servers) don't receive the literal "$VAR"
-                        # token as an actual environment value.
-                        config[key] = ""
-                    else:
-                        config[key] = env_value
-                else:
-                    config[key] = value
-            elif isinstance(value, dict):
-                config[key] = cls.resolve_env_variables(value)
-            elif isinstance(value, list):
-                config[key] = [cls.resolve_env_variables(item) if isinstance(item, dict) else item for item in value]
+        if isinstance(config, str):
+            if not config.startswith("$"):
+                return config
+            env_value = os.getenv(config[1:])
+            if env_value is None:
+                # Unresolved placeholder — store empty string so downstream
+                # consumers (e.g. MCP servers) don't receive the literal "$VAR"
+                # token as an actual environment value.
+                return ""
+            return env_value
+
+        if isinstance(config, dict):
+            return {key: cls.resolve_env_variables(value) for key, value in config.items()}
+
+        if isinstance(config, list):
+            return [cls.resolve_env_variables(item) for item in config]
+
+        if isinstance(config, tuple):
+            return tuple(cls.resolve_env_variables(item) for item in config)
+
         return config
 
     def get_enabled_mcp_servers(self) -> dict[str, McpServerConfig]:
@@ -192,34 +597,387 @@ class ExtensionsConfig(BaseModel):
 
         Args:
             skill_name: Name of the skill
-            skill_category: Category of the skill
+            skill_category: Category of the skill (public, custom, or legacy)
 
         Returns:
-            True if enabled, False otherwise
+            True if enabled, False otherwise.
+
+        Note:
+            All skill categories (public, custom, legacy) respect the
+            extensions_config enabled/disabled state.  When no explicit
+            entry exists, skills default to enabled.
         """
         skill_config = self.skills.get(skill_name)
         if skill_config is None:
-            # Default to enable for public & custom skill
-            return skill_category in ("public", "custom")
+            # Default to enabled for all skill categories
+            return skill_category in ("public", "custom", "legacy", "integrations")
         return skill_config.enabled
 
 
+# Process-wide cache of the parsed ``extensions_config.json``. The file is
+# edited at runtime (MCP and skill updates through the Gateway API or
+# ``DeerFlowClient``), and in a multi-worker or multi-instance deployment the
+# process that writes it is usually not the one that later reads it: every
+# Gateway process shares one ``extensions_config.json`` on the same volume.
+# Writers reload their own process explicitly; every other process has to
+# notice the change by itself. ``get_extensions_config()`` therefore
+# revalidates the cached instance against the resolved path and the file's
+# ``(mtime, size, sha256)`` signature, the same freshness contract
+# ``get_app_config()`` applies to ``config.yaml`` and ``deerflow.mcp.cache``
+# applies to its tools cache. The local-bash absolute path allowlist is
+# derived from this cache, so a stale copy is a security drift between
+# replicas, not merely a stale tool list.
 _extensions_config: ExtensionsConfig | None = None
+_extensions_config_path: Path | None = None
+_extensions_config_signature: ConfigSignature | None = None
+_extensions_config_is_custom = False
+# The explicit ``config_path`` the cached revision was loaded from, when
+# ``reload_extensions_config(config_path=...)`` chose a file that default
+# resolution would not. The probe and later reloads follow that file until
+# ``reset_extensions_config()`` or an argument-less reload; probing the
+# default resolution instead would either flip the cache back to the default
+# file or pin a stale copy of the explicit one.
+_extensions_config_source: str | None = None
+# ``(path, signature)`` of the on-disk revision that most recently could not
+# be loaded after a successful load (file gone, truncated or invalid). The
+# cache keeps serving the last-known-good configuration and warns once per
+# such revision rather than on every call.
+_extensions_config_rejected: tuple[Path | None, ConfigSignature | None] | None = None
+# Serializes probe-compare-reload so two concurrent reloads cannot leave the
+# cache holding one revision's content under another revision's signature.
+_extensions_config_lock = threading.Lock()
+
+
+def _fsync_directory_best_effort(directory: Path) -> None:
+    """Persist a directory entry update where the platform supports it."""
+    if os.name == "nt":
+        return
+
+    try:
+        directory_fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+
+    try:
+        os.fsync(directory_fd)
+    except OSError:
+        logger.debug("Could not fsync extensions config directory: %s", directory, exc_info=True)
+    finally:
+        try:
+            os.close(directory_fd)
+        except OSError:
+            logger.debug("Could not close extensions config directory: %s", directory, exc_info=True)
+
+
+def _overwrite_in_place(target_path: Path, source_path: Path) -> None:
+    """Copy *source_path* onto *target_path* without unlinking the destination inode.
+
+    Fallback for destinations that cannot be replaced by rename — see
+    :func:`atomic_write_extensions_config`. This deliberately truncates the
+    live file, so a crash mid-write leaves it short; the caller only reaches
+    this path when the atomic route is impossible.
+    """
+    payload = source_path.read_bytes()
+    with open(target_path, "wb") as target_file:
+        target_file.write(payload)
+        target_file.flush()
+        os.fsync(target_file.fileno())
+
+
+def _log_non_atomic_fallback(target_path: Path) -> None:
+    """Warn once per target when a bind mount forces the unsafe write path."""
+    warning_key = target_path.resolve(strict=False)
+    with _non_atomic_fallback_targets_lock:
+        first_fallback = warning_key not in _non_atomic_fallback_targets
+        _non_atomic_fallback_targets.add(warning_key)
+
+    logger.log(
+        logging.WARNING if first_fallback else logging.DEBUG,
+        "Cannot atomically replace %s (it is a bind-mount point); overwriting in place. A crash during this write can leave the file truncated.",
+        target_path,
+    )
+
+
+def atomic_write_extensions_config(path: Path, data: dict[str, Any]) -> None:
+    """Write extensions config without exposing a truncated or partial file.
+
+    Falls back to a non-atomic in-place overwrite when the destination is a
+    bind-mounted file: Docker mounts ``extensions_config.json`` as its own
+    mount point, and the kernel refuses to rename over a mount point with
+    ``EBUSY`` regardless of whether the mount is read-only. Without the
+    fallback every Gateway write to this file fails in the production
+    compose stack (MCP enable/disable, ``PUT``/``PATCH /api/mcp/config``,
+    skill updates), contradicting the documented promise that the file is
+    editable at runtime through the API.
+    """
+    path = Path(path)
+    target_path = path.resolve(strict=False) if path.is_symlink() else path
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+
+    existing_mode: int | None = None
+    try:
+        existing_mode = stat.S_IMODE(target_path.stat().st_mode)
+    except FileNotFoundError:
+        pass
+
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=target_path.parent,
+            prefix=f".{target_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            json.dump(data, temporary_file, indent=2)
+            if existing_mode is not None:
+                temporary_path.chmod(existing_mode)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+
+        try:
+            os.replace(temporary_path, target_path)
+        except OSError as exc:
+            if exc.errno != errno.EBUSY:
+                raise
+            _log_non_atomic_fallback(target_path)
+            _overwrite_in_place(target_path, temporary_path)
+        _fsync_directory_best_effort(target_path.parent)
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning(
+                    "Could not remove temporary extensions config file: %s",
+                    temporary_path,
+                    exc_info=True,
+                )
+
+
+def read_raw_extensions_config(path: Path) -> dict[str, Any]:
+    """Read the on-disk config object with ``$VAR`` placeholders left intact.
+
+    This is the only safe merge source for a read-modify-write.
+    ``ExtensionsConfig.from_file()`` resolves placeholders into live values and
+    unset variables into ``""``, so writing its model back would persist
+    secrets in plaintext and erase the references. Raises ``FileNotFoundError``
+    when *path* does not exist, and ``ValueError`` for a malformed document;
+    that message omits the path so API callers can surface it as-is.
+    """
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            raw_data = json.load(f)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Extensions configuration is not valid JSON: {e.msg} at line {e.lineno} column {e.colno}") from e
+    if not isinstance(raw_data, dict):
+        raise ValueError("Extensions configuration must be a JSON object")
+    return raw_data
+
+
+def validate_raw_extensions_config(raw_data: dict[str, Any]) -> ExtensionsConfig:
+    """Validate a raw write candidate exactly as the runtime will load it.
+
+    Resolution works on a copy, so *raw_data* keeps its placeholders and can be
+    written as-is once this returns.
+    """
+    return ExtensionsConfig.model_validate(ExtensionsConfig.resolve_env_variables(raw_data))
+
+
+def set_raw_skill_enabled(raw_data: dict[str, Any], skill_name: str, enabled: bool) -> None:
+    """Set one skill's enabled state in a raw config, leaving everything else as written."""
+    skills = raw_data.setdefault("skills", {})
+    if not isinstance(skills, dict):
+        raise ValueError("Extensions config `skills` must be a JSON object")
+    entry = skills.get(skill_name)
+    if isinstance(entry, dict):
+        entry["enabled"] = enabled
+    else:
+        skills[skill_name] = {"enabled": enabled}
+
+
+def _probe_extensions_config_state() -> tuple[Path | None, ConfigSignature | None]:
+    """Return the currently resolved config path and its content signature.
+
+    Only used once a configuration has been loaded. The explicit path the
+    cache was reloaded from, if any, takes precedence over default
+    resolution. An explicit path or ``DEER_FLOW_EXTENSIONS_CONFIG_PATH`` that
+    no longer exists makes
+    ``resolve_config_path`` raise; for a loaded cache that means "no usable
+    file right now" and is reported as ``(None, None)`` so the caller keeps
+    the last-known-good configuration instead of failing a hot path. The
+    first load does not use this probe and still raises for a missing
+    explicit file.
+    """
+    try:
+        path = ExtensionsConfig.resolve_config_path(_extensions_config_source)
+    except FileNotFoundError:
+        return None, None
+    if path is None:
+        return None, None
+    return path, get_config_signature(path)
+
+
+def _load_and_cache_extensions_config(config_path: str | None = None) -> ExtensionsConfig:
+    """Load the config from disk and record the revision it came from.
+
+    The caller holds ``_extensions_config_lock``. Parsing and the recorded
+    digest use one read, so a competing edit or backup restore cannot leave
+    one revision cached under another revision's signature.
+    """
+    global _extensions_config, _extensions_config_path, _extensions_config_signature
+    global _extensions_config_is_custom, _extensions_config_source, _extensions_config_rejected
+
+    resolved_path = ExtensionsConfig.resolve_config_path(config_path)
+    if resolved_path is None:
+        loaded, signature = ExtensionsConfig(), None
+    else:
+        loaded, signature = ExtensionsConfig._from_path_with_signature(resolved_path)
+    _extensions_config = loaded
+    _extensions_config_path = resolved_path
+    _extensions_config_signature = signature
+    _extensions_config_is_custom = False
+    _extensions_config_source = config_path or None
+    _extensions_config_rejected = None
+    return loaded
+
+
+def _describe_load_failure(exc: BaseException) -> str:
+    """Name the failure without its message.
+
+    ``from_file`` resolves ``$VAR`` placeholders before validation, so a
+    validation message can embed resolved credentials; only exception types
+    are safe to log.
+    """
+    cause = exc.__cause__
+    if cause is None:
+        return type(exc).__name__
+    return f"{type(exc).__name__} from {type(cause).__name__}"
+
+
+def _keep_last_known_good(current_path: Path | None, current_signature: ConfigSignature | None, message: str, *args: object) -> None:
+    """Warn once per unusable on-disk revision; the caller keeps the cache."""
+    global _extensions_config_rejected
+
+    rejected = (current_path, current_signature)
+    if _extensions_config_rejected == rejected:
+        return
+    _extensions_config_rejected = rejected
+    logger.warning(message + "; keeping the previously loaded configuration", *args)
 
 
 def get_extensions_config() -> ExtensionsConfig:
     """Get the extensions config instance.
 
-    Returns a cached singleton instance. Use `reload_extensions_config()` to reload
-    from file, or `reset_extensions_config()` to clear the cache.
+    Returns a cached singleton instance and reloads it when the resolved
+    config file path or the file's content signature changes, so a write made
+    by another Gateway worker or instance that shares the file is visible on
+    the next call without an explicit reload. An instance injected with
+    `set_extensions_config()` is pinned until `reload_extensions_config()` or
+    `reset_extensions_config()`.
+
+    Once a configuration has been loaded, a revision that cannot be loaded
+    (the file vanished, or it is truncated or invalid, for example midway
+    through the non-atomic overwrite fallback of
+    :func:`atomic_write_extensions_config`) keeps the last-known-good
+    configuration and is logged once. The first load still raises, so a
+    broken configuration at startup stays loud.
 
     Returns:
         The cached ExtensionsConfig instance.
     """
-    global _extensions_config
-    if _extensions_config is None:
-        _extensions_config = ExtensionsConfig.from_file()
-    return _extensions_config
+    global _extensions_config, _extensions_config_path, _extensions_config_signature, _extensions_config_rejected
+
+    with _extensions_config_lock:
+        if _extensions_config is None:
+            return _load_and_cache_extensions_config()
+        if _extensions_config_is_custom:
+            return _extensions_config
+
+        current_path, current_signature = _probe_extensions_config_state()
+        if current_path == _extensions_config_path and current_signature == _extensions_config_signature:
+            return _extensions_config
+
+        if current_path is None:
+            _keep_last_known_good(current_path, current_signature, "Extensions config at %s is no longer available", _extensions_config_path)
+            return _extensions_config
+
+        try:
+            # Parse the probed file: a second search could publish an empty
+            # config if that file disappeared before parsing.
+            loaded, loaded_signature = ExtensionsConfig._from_path_with_signature(current_path)
+        except Exception as exc:
+            _keep_last_known_good(current_path, current_signature, "Extensions config at %s changed but could not be loaded (%s)", current_path, _describe_load_failure(exc))
+            return _extensions_config
+
+        logger.info("Extensions config at %s changed on disk; reloaded", current_path)
+        _extensions_config = loaded
+        _extensions_config_path = current_path
+        _extensions_config_signature = loaded_signature
+        _extensions_config_rejected = None
+        return loaded
+
+
+#: Serializes read-modify-write cycles on ``extensions_config.json`` across every
+#: writer. Both the skills router (skill enable/disable) and the MCP router
+#: (server config updates) read this file, merge a change and write it back.
+#: While each RMW ran inline on the event loop they were implicitly serialized;
+#: once a writer offloads its RMW to a worker thread the loop is free to
+#: interleave the other writer inside the read->write window, and the second
+#: write silently drops the first one's change.
+#:
+#: This is a ``threading.Lock`` rather than an ``asyncio.Lock``, and it must be
+#: acquired *inside* the worker that performs the RMW. An asyncio lock held
+#: around ``await asyncio.to_thread(...)`` protects only the awaiting task: if
+#: that task is cancelled the context manager releases immediately while the
+#: worker thread keeps writing, letting a second writer in. Owning the lock from
+#: the worker keeps it held until the write and reload actually finish. It also
+#: has no event-loop affinity, so writers running on different loops still
+#: exclude each other.
+extensions_config_write_lock = threading.Lock()
+
+
+@contextmanager
+def extensions_config_file_lock(path: Path) -> Iterator[None]:
+    """Exclude read-modify-write cycles in other Gateway processes.
+
+    ``extensions_config_write_lock`` serializes threads in this process. This
+    sidecar advisory lock extends the same critical section across worker
+    processes and separate embedded clients that share the config directory.
+    Callers must hold both locks around the complete read, merge, write, and
+    reload cycle; locking only the final atomic replace still permits lost
+    updates.
+    """
+    target_path = Path(path)
+    target_path = target_path.resolve(strict=False) if target_path.is_symlink() else target_path.absolute()
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = target_path.parent / f".{target_path.name}.lock"
+
+    with open(lock_path, "a+b") as lock_file:
+        if os.name == "nt":
+            import msvcrt
+
+            lock_file.seek(0, os.SEEK_END)
+            if lock_file.tell() == 0:
+                lock_file.write(b"\0")
+                lock_file.flush()
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def reload_extensions_config(config_path: str | None = None) -> ExtensionsConfig:
@@ -232,12 +990,17 @@ def reload_extensions_config(config_path: str | None = None) -> ExtensionsConfig
         config_path: Optional path to extensions config file. If not provided,
                      uses the default resolution strategy.
 
+    The loaded revision is recorded, so a following `get_extensions_config()`
+    does not reload it again. When *config_path* is given, the cache keeps
+    following that file (its later edits are picked up and default
+    resolution is not consulted) until `reset_extensions_config()` or an
+    argument-less reload.
+
     Returns:
         The newly loaded ExtensionsConfig instance.
     """
-    global _extensions_config
-    _extensions_config = ExtensionsConfig.from_file(config_path)
-    return _extensions_config
+    with _extensions_config_lock:
+        return _load_and_cache_extensions_config(config_path)
 
 
 def reset_extensions_config() -> None:
@@ -247,17 +1010,35 @@ def reset_extensions_config() -> None:
     `get_extensions_config()` to reload from file. Useful for testing
     or when switching between different configurations.
     """
-    global _extensions_config
-    _extensions_config = None
+    global _extensions_config, _extensions_config_path, _extensions_config_signature
+    global _extensions_config_is_custom, _extensions_config_source, _extensions_config_rejected
+
+    with _extensions_config_lock:
+        _extensions_config = None
+        _extensions_config_path = None
+        _extensions_config_signature = None
+        _extensions_config_is_custom = False
+        _extensions_config_source = None
+        _extensions_config_rejected = None
 
 
 def set_extensions_config(config: ExtensionsConfig) -> None:
     """Set a custom extensions config instance.
 
-    This allows injecting a custom or mock config for testing purposes.
+    This allows injecting a custom or mock config for testing purposes. The
+    instance is pinned: `get_extensions_config()` returns it without consulting
+    the file until `reload_extensions_config()` or `reset_extensions_config()`.
 
     Args:
         config: The ExtensionsConfig instance to use.
     """
-    global _extensions_config
-    _extensions_config = config
+    global _extensions_config, _extensions_config_path, _extensions_config_signature
+    global _extensions_config_is_custom, _extensions_config_source, _extensions_config_rejected
+
+    with _extensions_config_lock:
+        _extensions_config = config
+        _extensions_config_path = None
+        _extensions_config_signature = None
+        _extensions_config_is_custom = True
+        _extensions_config_source = None
+        _extensions_config_rejected = None

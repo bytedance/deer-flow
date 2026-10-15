@@ -3,7 +3,7 @@ title: Deployment Guide
 description: "This guide covers all supported deployment methods for DeerFlow App: local development, Docker Compose, and production with Kubernetes-managed sandboxes."
 ---
 
-import { Callout, Cards, Steps, Tabs } from "nextra/components";
+import { Callout, Steps, Tabs } from "nextra/components";
 
 # Deployment Guide
 
@@ -114,9 +114,49 @@ For production, use a named volume or a Persistent Volume Claim (PVC) instead of
 | -------------------------------------- | ------------------------------------------ |
 | `LocalSandboxProvider`                 | Single-user, trusted local workflows       |
 | `AioSandboxProvider` (Docker)          | Multi-user, moderate isolation requirement |
+| `E2BSandboxProvider` (e2b cloud)       | Hosted/serverless, no Docker/K8s ops, instant Jupyter |
 | `AioSandboxProvider` + K8s Provisioner | Production, strong isolation, multi-user   |
 
 For any deployment with more than one concurrent user, use a container-based sandbox to prevent users from interfering with each other's execution environments.
+
+### Database backend
+
+SQLite is convenient for local development and single-user deployments, but it is not a production backend for concurrent users.
+
+In SQLite mode, DeerFlow stores LangGraph checkpoint data and application data in one `deerflow.db` file. WAL mode allows concurrent reads, but SQLite still permits only one writer at a time. When several users run agents at once, checkpoint writes and application writes can contend for the same file and raise `sqlite3.OperationalError: database is locked`.
+
+For production or any multi-user deployment, use Postgres:
+
+```bash
+# .env
+DATABASE_URL=postgresql://user:password@postgres:5432/deerflow
+UV_EXTRAS=postgres
+```
+
+```yaml
+# config.yaml
+database:
+  backend: postgres
+  postgres_url: $DATABASE_URL
+
+run_events:
+  backend: db
+```
+
+Keep SQLite deployments to local, single-node, or short-lived evaluation environments.
+
+### Running more than one Gateway replica
+
+The Helm chart ships `gateway.replicas: 1`. Raising it is supported for the web and API path once every replica shares Postgres and Redis. The chart's default `config` already sets what the Gateway's startup gate checks:
+
+- `database.backend: postgres`, with the `checkpointer` section pointing at the same database
+- `run_events.backend: db`, so message history and delivery receipts are shared
+- `run_ownership.heartbeat_enabled: true`, so a starting Pod only reclaims runs whose owner is really gone
+- `stream_bridge.type: redis`, so SSE streams and reconnects work from any Pod (sandbox ownership leases are inferred from it)
+
+The chart exports `DEER_FLOW_MULTI_INSTANCE=true` when `gateway.replicas > 1`, and the Gateway refuses to start if any of these is missing. If you scale with `kubectl scale` or an HPA instead of `gateway.replicas`, set `gateway.multiInstance: true` first so the declaration, the PodDisruptionBudget and the required shared `AUTH_JWT_SECRET` do not keep their single-replica rendering (the PodDisruptionBudget then blocks node drains of the single Pod until the scale-up happens; disable it with `gateway.podDisruptionBudget.enabled: false` for that interim if needed). On multi-node clusters also set `persistence.home.accessMode: ReadWriteMany` (uploads, outputs, memory and `extensions_config.json` live on that volume; MCP and skill changes made through one Pod are then visible to the others on their next request) and `agent_storage.backend: db` so custom agents are visible on every Pod.
+
+IM channels work on several replicas through `channels.leader_lease` in `config` (default `auto`): one Pod holds each platform connection, and when it dies another Pod takes over within `lease_seconds + grace_seconds` plus one renewal interval (50 seconds by default). The startup gate refuses `enabled: false` while channels are enabled. Channel credentials saved from the web UI reach the Pod holding that platform only when it next starts the channel, so restart that Pod after changing them; a takeover loses the IM replies the old Pod was still delivering, although the runs themselves finish and their threads stay readable in the web UI. Still single-instance: the WeChat QR login and browser tools. Keep one replica while those are enabled.
 
 ### K8s Provisioner setup
 
@@ -153,7 +193,7 @@ USERDATA_PVC_NAME=deer-flow-userdata-pvc
 SKILLS_PVC_NAME=deer-flow-skills-pvc
 ```
 
-When `USERDATA_PVC_NAME` is set, the provisioner automatically uses subPath (`threads/{thread_id}/user-data`) so each thread gets its own directory in the PVC.
+When `USERDATA_PVC_NAME` is set, the provisioner automatically uses subPath (`deer-flow/users/{user_id}/threads/{thread_id}/user-data`) so each user's threads get their own directories in the PVC.
 
 </Steps>
 

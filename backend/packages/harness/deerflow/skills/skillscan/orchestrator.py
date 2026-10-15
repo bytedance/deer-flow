@@ -1,0 +1,1984 @@
+"""Native deterministic scanning for DeerFlow skills.
+
+``scan_archive_preflight()`` and ``scan_skill_dir()`` are synchronous pure
+functions of their inputs; async callers must dispatch them off the event
+loop. Policy is one code constant — ``CRITICAL`` blocks, everything else is a
+warning — applied by ``enforce_static_scan()``, which also honours the
+``skill_scan.enabled`` kill switch. Rule specs live next to the analyzers
+that match them so a rule is authored, read, and tested in one place.
+"""
+
+from __future__ import annotations
+
+import ast
+import io
+import logging
+import posixpath
+import re
+import stat
+import zipfile
+from collections import deque
+from collections.abc import Iterable
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import Any
+from urllib.parse import urlsplit
+
+from deerflow.skills.package_files import is_code_file, is_executable_binary_prefix
+from deerflow.skills.package_paths import is_eval_fixture_skill_md
+from deerflow.skills.skillscan.models import (
+    FindingSeverity,
+    RuleSpec,
+    ScanResult,
+    SecurityFinding,
+    StaticScanBlockedError,
+    StaticScannerError,
+)
+
+logger = logging.getLogger(__name__)
+
+MAX_TOTAL_ARCHIVE_BYTES = 512 * 1024 * 1024
+MAX_FILE_BYTES = 64 * 1024 * 1024
+
+_BLOCK_SEVERITY = "CRITICAL"
+_NESTED_ZIP_PEEK_MEMBER_LIMIT = 256
+_MAX_ARCHIVE_MEMBERS = 4096
+_TEXT_PROBE_BYTES = 4096
+
+_SPECS = [
+    RuleSpec("package-path-traversal", "CRITICAL", "Archive member path traverses outside the skill root.", "Remove parent-directory traversal from the package path."),
+    RuleSpec("package-absolute-path", "CRITICAL", "Archive member path is absolute.", "Use relative paths inside the skill archive."),
+    RuleSpec(
+        "package-ads-stream-name",
+        "CRITICAL",
+        "Archive member path contains a colon, which on Windows/NTFS addresses an alternate data stream hidden from directory listing.",
+        "Remove colons from archive member paths.",
+    ),
+    RuleSpec("package-symlink", "HIGH", "Package contains a symlink entry.", "Remove symlinks from the skill package."),
+    RuleSpec("package-nested-skill-md", "CRITICAL", "Package contains a nested SKILL.md file.", "Keep exactly one SKILL.md at the skill root."),
+    RuleSpec("package-oversized-total", "CRITICAL", "Package total uncompressed size exceeds the limit.", "Remove large files or split assets out of the skill package."),
+    RuleSpec("package-too-many-members", "CRITICAL", "Package contains more members than the allowed limit.", "Reduce the number of files in the skill package."),
+    RuleSpec("package-oversized-file", "CRITICAL", "Package contains a file that exceeds the per-file size limit.", "Remove or shrink the oversized file."),
+    RuleSpec("package-executable-binary", "CRITICAL", "Package contains an executable binary.", "Remove binary executables from the skill package."),
+    RuleSpec("package-nested-archive", "HIGH", "Package contains a nested archive file.", "Unpack and review nested archives before packaging the skill."),
+    RuleSpec("package-hidden-sensitive-file", "HIGH", "Package contains a hidden sensitive file.", "Remove hidden credential or package-manager config files."),
+    RuleSpec("package-undecodable-script", "HIGH", "Code file is not NUL-free UTF-8 text, so it was analyzed from a lossy decode.", "Store code as UTF-8 text without NUL bytes, and keep compiled or binary artifacts out of scripts/."),
+    RuleSpec("package-git-directory", "MEDIUM", "Package contains a .git directory.", "Package only source files needed by the skill, excluding repository metadata."),
+    RuleSpec("secret-private-key", "CRITICAL", "Private key material is embedded in skill content.", "Move private keys to a managed secret store and remove them from the skill."),
+    RuleSpec("secret-cloud-token", "CRITICAL", "High-confidence cloud or API token is embedded in skill content.", "Move tokens to environment variables or a secret store."),
+    RuleSpec("secret-env-assignment", "HIGH", "Secret-like assignment contains a non-placeholder value.", "Replace hardcoded credentials with documented runtime configuration."),
+    RuleSpec("declaration-prompt-override", "HIGH", "SKILL.md contains a prompt override phrase.", "Rephrase examples so they describe unsafe text instead of instructing the agent to follow it."),
+    RuleSpec("declaration-sensitive-capability", "HIGH", "SKILL.md declares a sensitive capability.", "Make the capability explicit, narrow, and justified, or remove it."),
+    RuleSpec("declaration-sensitive-path", "HIGH", "SKILL.md references sensitive host or credential paths.", "Remove references to sensitive host paths unless they are harmless documentation."),
+    RuleSpec("declaration-external-endpoint", "MEDIUM", "SKILL.md declares an external network endpoint.", "Document why the endpoint is needed and prefer HTTPS."),
+    RuleSpec("python-dynamic-exec", "CRITICAL", "Python dynamic code execution primitive is used in a skill file.", "Remove dynamic execution and replace it with explicit typed logic."),
+    RuleSpec("python-shell-exec", "CRITICAL", "Python shell execution primitive is used in a skill file.", "Use subprocess with a fixed argument list and shell=False, or remove shell execution."),
+    RuleSpec("python-sensitive-exfil", "CRITICAL", "Python code reads a sensitive path and uses an outbound network sink in the same file.", "Remove the sensitive read or network sink, and keep credential access outside skills."),
+    RuleSpec("python-env-dump-exfil", "CRITICAL", "Python code reads the process environment in bulk and uses an outbound network sink in the same file.", "Avoid bulk environment reads and never send environment data over the network."),
+    RuleSpec("python-reverse-shell", "CRITICAL", "Python code matches a reverse-shell shape.", "Remove reverse-shell behavior from the skill."),
+    RuleSpec("python-dynamic-import", "HIGH", "Python dynamically imports a non-literal module.", "Use explicit imports or a constrained allowlist."),
+    RuleSpec("python-subprocess", "HIGH", "Python invokes subprocess without shell=True.", "Review subprocess usage and keep arguments fixed and minimal."),
+    RuleSpec("python-sensitive-path-read", "HIGH", "Python reads a sensitive path.", "Remove sensitive host-path access from the skill."),
+    RuleSpec("python-unsafe-deserialization", "MEDIUM", "Python uses unsafe deserialization.", "Use safe loaders or trusted typed formats."),
+    RuleSpec("shell-reverse-shell", "CRITICAL", "Shell script contains a reverse-shell idiom.", "Remove reverse-shell behavior from the skill."),
+    RuleSpec("shell-reverse-shell-heuristic", "HIGH", "Shell script resembles a reverse-shell idiom.", "Confirm this is not reverse-shell behavior; unmistakable reverse-shell signals are blocked outright."),
+    RuleSpec("shell-sensitive-exfil", "CRITICAL", "Shell script reads sensitive paths and sends data over the network.", "Remove sensitive reads or outbound transfer commands."),
+    RuleSpec("shell-curl-pipe-shell", "HIGH", "Shell script pipes remote content into a shell.", "Download, verify, and execute reviewed code explicitly instead."),
+    RuleSpec("shell-destructive-command", "HIGH", "Shell script contains an unmistakably destructive command.", "Remove destructive commands from skill scripts."),
+    RuleSpec("shell-env-dump", "MEDIUM", "Shell script dumps the environment.", "Avoid bulk environment dumps in skills."),
+    RuleSpec("network-cloud-metadata", "CRITICAL", "Skill content references a cloud metadata service.", "Remove cloud metadata access from the skill."),
+    RuleSpec("resource-fork-bomb", "CRITICAL", "Skill content contains a fork-bomb pattern.", "Remove resource-exhaustion payloads."),
+    RuleSpec("network-cleartext-http", "MEDIUM", "Skill content references a non-local cleartext HTTP endpoint.", "Use HTTPS or document why cleartext local development is required."),
+    RuleSpec("network-local-http", "LOW", "Skill content references a local HTTP endpoint.", "Confirm the local endpoint is expected for this skill."),
+]
+
+RULES: dict[str, RuleSpec] = {spec.rule_id: spec for spec in _SPECS}
+
+_ARCHIVE_SUFFIXES = (
+    ".zip",
+    ".tar",
+    ".tar.gz",
+    ".tgz",
+    ".tar.bz2",
+    ".tbz2",
+    ".tar.xz",
+    ".txz",
+    ".7z",
+    ".rar",
+    ".whl",
+)
+_HIDDEN_SENSITIVE_FILES = {
+    ".env",
+    ".npmrc",
+    ".pypirc",
+    ".netrc",
+    "credentials",
+    "config",
+}
+_PLACEHOLDER_VALUES = {"", "x", "xx", "xxx", "xxxx", "changeme", "change-me", "example", "placeholder", "test", "dummy", "your-key", "<your-key>"}
+# `name[:=]value` sweep for line-oriented text (config, shell, YAML, Markdown). Python is
+# analyzed from its AST instead, because a regex cannot tell an annotation from a value.
+# The key may be quoted, so that JSON (`{"api_key": "..."}`) reads the same as the YAML,
+# `.env`, `.ini` and shell spellings of the same binding.
+# The leading guard is "not preceded by an alphanumeric" rather than `\b`: a separator
+# may introduce the credential word (`access_token`, `client_secret`, `MY_API_KEY`),
+# which `\b` cannot match because `_` is a word character. A run of letters before the
+# word (`tokenizer`, `secretive`) still stays quiet, so this is not a blanket match.
+_SECRET_ASSIGNMENT_RE = re.compile(r"(?im)(?<![A-Za-z0-9])(token|password|passwd|api[_-]?key|secret|credential)s?\b[\"']?\s*[:=]\s*[\"']?([^\"'\s#]+)")
+_SECRET_ASSIGNMENT_NAME_RE = re.compile(r"(?i)^(?:token|password|passwd|api[_-]?key|secret|credential)s?$")
+_SECRET_TOKEN_PATTERNS = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b",
+        r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b",
+        r"\bgithub_pat_[A-Za-z0-9_]{20,}\b",
+        r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b",
+        r"\bsk-[A-Za-z0-9_-]{20,}\b",
+        r"\bAIza[0-9A-Za-z_-]{35}\b",
+    )
+)
+_SENSITIVE_PATH_RE = re.compile(r"(~/.ssh|/etc/passwd|/etc/shadow|/var/run/docker\.sock|docker\.sock|169\.254\.169\.254)")
+_EXTERNAL_HTTP_RE = re.compile(r"(?i:http)://(?:[^/?#\s)'\"<>]*@)?(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(?::\d+)?(?:/|\b|(?=$|[\s)'\"<>?#]))")
+_URL_RE = re.compile(r"(?i:https?)://[^\s)'\"<>]+")
+_LOCAL_HTTP_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+# A fork bomb is matched by shape, not spelling: a shell function whose body
+# pipes into a background job that names the function itself, e.g.
+# `bomb(){ bomb|bomb& };bomb` as well as `:(){ :|:& };:`. The name must recur
+# after the pipe, so a benign pipeline such as
+# `backup() { rsync -a src/ | logger & }` stays clean. Every quantifier is
+# bounded so a whitespace-free blob costs O(n), not O(n^2); pipe-less
+# self-backgrounding recursion (`f(){ f & };f`, `f(){ f & f & };f`) and the
+# spaced `|&` spelling are out of scope for this pattern. Kept byte-identical
+# to the runtime gate in agents/middlewares/sandbox_audit_middleware.py so the
+# pre-LLM static scan never passes a payload (renamed or respaced included)
+# the sandbox blocks.
+_FORK_BOMB_PATTERN = r"(?P<fn>[^\s(){};|&]{1,64})\(\)\s*\{[^{}]{0,2048}\|\s*[^{}\s&]{0,64}(?P=fn)\s*&"
+# `rm` with a recursive flag (any order/combination, optional --no-preserve-root)
+# targeting the filesystem root, a wildcard, or a complete system-root directory.
+# Subpaths like ``/tmp/scratch`` or ``/home/user/project`` stay unflagged.
+_DESTRUCTIVE_RM_RE = (
+    r"\brm\s+(?:-\S+\s+|--no-preserve-root\s+)*-\S*[rR]\S*\s+"
+    r"(?:-\S+\s+|--no-preserve-root\s+)*"
+    r"/(?:\*|\s|$|(?:bin|boot|dev|etc|home|lib|lib64|opt|proc|root|run|sbin|srv|sys|usr|var)(?:/\*?)?(?:\s|$))"
+)
+# `env`, `printenv` and `export -p` count only at a real command position. The
+# text is first reduced to shell code by `_shell_code_only`, excluding comments
+# and heredoc bodies. The `env` match is classified separately because `env` may
+# launch a command instead of dumping the environment.
+_SHELL_ENV_COMMAND_RE = re.compile(
+    r"(?m)(?:^|(?<=[;&|()`])|\{(?=[ \t])|(?<![\w/.-])(?:if|then|elif|else|while|until|do|exec)\b[ \t]+)"
+    r"[ \t]*(?:[A-Za-z_]\w*=[^\s]*[ \t]+)*(?P<cmd>(?:/[\w./-]+/)?(?:env|sudo|command|exec)\b|printenv\b|export[ \t]+-p\b)"
+)
+_SHELL_DOWNLOAD_PIPE_RE = re.compile(r"\b(?:curl|wget)\b(?:[^\\\r\n|;&]|\\\r?\n|\\[^\r\n])*\|")
+_ENV_REDIRECTION_RE = re.compile(r"(?:(?P<fd>[0-9]+)|\{\w+\})?(?P<op><<<|<<-?|>>|<>|>\||>&|<&|>|<)(?P<target>.*)")
+_ENV_LONG_VALUE_OPTIONS = {"--argv0", "--chdir", "--split-string", "--unset"}
+_ENV_SHORT_VALUE_OPTIONS = {"a", "C", "P", "S", "u"}
+_ENV_STANDALONE_OPTIONS = {"0", "i", "v"}
+_ENV_EXIT_OPTIONS = {"--help", "--version", "--null"}
+_ENV_MAX_SPLIT_STEPS = 256
+_ENV_MAX_SPLIT_CHARS = 65_536
+_SHELL_NAMES = {"bash", "dash", "fish", "sh", "zsh"}
+_SHELL_SEPARATORS = {";", "&", "&&", "|", "||", "(", ")", "`", "\n"}
+# The head of a heredoc redirection: `<<` or `<<-`, an optional quoted delimiter,
+# then the delimiter word. Requiring a leading letter/underscore keeps arithmetic
+# shifts such as `$((1 << 2))` from being read as a heredoc opener.
+_HEREDOC_HEAD_RE = re.compile(r"<<(-?)[ \t]*([\"']?)([A-Za-z_]\w*)\2")
+
+
+def skill_scan_enabled(app_config: Any | None = None) -> bool:
+    if app_config is None:
+        try:
+            from deerflow.config import get_app_config
+
+            app_config = get_app_config()
+        except Exception:
+            app_config = None
+    skill_scan_config = getattr(app_config, "skill_scan", None)
+    if skill_scan_config is not None and hasattr(skill_scan_config, "enabled"):
+        return bool(skill_scan_config.enabled)
+    return True
+
+
+def format_static_findings(findings: list[SecurityFinding]) -> str:
+    parts = []
+    for finding in findings:
+        location = finding["file"] or "<archive>"
+        if finding["line"] is not None:
+            location = f"{location}:{finding['line']}"
+        parts.append(f"{finding['rule_id']} ({finding['severity']}) at {location}: {finding['message']} Remediation: {finding['remediation']}")
+    return "; ".join(parts)
+
+
+def enforce_static_scan(
+    skill_dir: Path,
+    *,
+    skill_name: str | None = None,
+    app_config: Any | None = None,
+) -> list[SecurityFinding]:
+    if not skill_scan_enabled(app_config):
+        return []
+
+    result = scan_skill_dir(Path(skill_dir))
+    blocked = [finding for finding in result["findings"] if finding["severity"] == _BLOCK_SEVERITY]
+    if blocked:
+        raise StaticScanBlockedError(
+            blocked,
+            skill_name=skill_name,
+            message=f"Static security scan blocked skill '{skill_name}': {format_static_findings(blocked)}" if skill_name else f"Static security scan blocked skill content: {format_static_findings(blocked)}",
+        )
+    if result["scanner_errors"]:
+        logger.warning("SkillScan analyzer errors for %s: %s", skill_name or skill_dir, "; ".join(result["scanner_errors"]))
+    warnings = [finding for finding in result["findings"] if finding["severity"] != _BLOCK_SEVERITY]
+    if warnings:
+        logger.warning("SkillScan warning findings for %s: %s", skill_name or skill_dir, format_static_findings(warnings))
+    return [dict(finding) for finding in result["findings"]]  # type: ignore[misc]
+
+
+def scan_archive_preflight(archive_path: Path) -> ScanResult:
+    findings: list[SecurityFinding] = []
+    scanner_errors: list[str] = []
+    total_size = 0
+    try:
+        with zipfile.ZipFile(archive_path, "r") as zf:
+            members = zf.infolist()
+            if len(members) > _MAX_ARCHIVE_MEMBERS:
+                # Early-abort before the per-member reads below: a huge member
+                # count is a bounded DoS vector even when the total size is small.
+                finding = _finding("package-too-many-members", file=None, evidence=f"{len(members)} members")
+                return _scan_result([finding], scanner_errors)
+            for info in members:
+                normalized = _normalize_archive_name(info.filename)
+                findings.extend(_scan_archive_member_metadata(info, normalized))
+                if info.is_dir():
+                    continue
+                total_size += max(info.file_size, 0)
+                if info.file_size > MAX_FILE_BYTES:
+                    findings.append(_finding("package-oversized-file", file=normalized, evidence=f"{info.file_size} bytes"))
+                if _is_hidden_sensitive_path(normalized):
+                    findings.append(_finding("package-hidden-sensitive-file", file=normalized, evidence=Path(normalized).name))
+                if ".git" in PurePosixPath(normalized).parts:
+                    findings.append(_finding("package-git-directory", file=normalized, evidence=".git"))
+                if _is_symlink_member(info):
+                    continue
+                try:
+                    with zf.open(info) as member:
+                        prefix = member.read(8)
+                except Exception as e:
+                    scanner_errors.append(f"{normalized}: failed to read archive member prefix: {e}")
+                    continue
+                if is_executable_binary_prefix(prefix):
+                    findings.append(_finding("package-executable-binary", file=normalized, evidence=_binary_magic_evidence(prefix)))
+                if _is_nested_archive_name(normalized) or _looks_like_archive(prefix):
+                    findings.append(_nested_archive_finding(normalized, prefix, lambda: _read_archive_member(zf, info), scanner_errors))
+            if total_size > MAX_TOTAL_ARCHIVE_BYTES:
+                findings.append(_finding("package-oversized-total", file=None, evidence=f"{total_size} bytes"))
+    except (zipfile.BadZipFile, OSError) as e:
+        raise StaticScannerError(f"failed to read skill archive: {e}") from e
+
+    return _scan_result(_dedupe(findings), scanner_errors)
+
+
+def scan_skill_dir(skill_dir: Path) -> ScanResult:
+    root = Path(skill_dir)
+    if not root.is_dir():
+        raise StaticScannerError(f"skill_dir is not a directory: {root}")
+
+    findings: list[SecurityFinding] = []
+    scanner_errors: list[str] = []
+    for path in sorted(candidate for candidate in root.rglob("*") if candidate.is_file()):
+        rel_path = _relative_file(path, root)
+        try:
+            file_size = path.stat().st_size
+        except OSError as e:
+            scanner_errors.append(f"{rel_path}: failed to stat file: {e}")
+            continue
+        try:
+            # One bounded read for every file: files smaller than MAX_FILE_BYTES
+            # come back whole, oversized ones are truncated and recorded below —
+            # no unbounded read regardless of growth between stat() and here
+            # (mirrors _read_archive_member).
+            with path.open("rb") as handle:
+                file_bytes = handle.read(MAX_FILE_BYTES + 1)
+        except OSError as e:
+            scanner_errors.append(f"{rel_path}: failed to read file: {e}")
+            continue
+
+        findings.extend(_scan_file_package_properties(rel_path, file_bytes, file_size))
+        text = _decode_text_for_analysis(file_bytes)
+        if text is None:
+            text = _decode_script_lossily(rel_path, file_bytes)
+            if text is None:
+                continue
+            evidence = "NUL byte" if b"\x00" in file_bytes[:_TEXT_PROBE_BYTES] else "invalid UTF-8"
+            findings.append(_finding("package-undecodable-script", file=rel_path, evidence=evidence))
+            # A decoded executable is string-table noise that reads as secrets
+            # and URLs; its CRITICAL executable finding already blocks it.
+            if is_executable_binary_prefix(file_bytes[:8]):
+                continue
+
+        try:
+            findings.extend(_scan_text_file(rel_path, text))
+        except Exception as e:
+            scanner_errors.append(f"{rel_path}: analyzer failed: {e}")
+            logger.warning("SkillScan analyzer failed for %s", rel_path, exc_info=True)
+
+    return _scan_result(_dedupe(findings), scanner_errors)
+
+
+def _scan_archive_member_metadata(info: zipfile.ZipInfo, normalized: str) -> list[SecurityFinding]:
+    findings: list[SecurityFinding] = []
+    if _archive_member_is_absolute(info.filename):
+        findings.append(_finding("package-absolute-path", file=normalized, evidence=info.filename))
+    elif _archive_member_traverses(info.filename):
+        findings.append(_finding("package-path-traversal", file=normalized, evidence=info.filename))
+    elif _archive_member_has_colon(info.filename):
+        findings.append(_finding("package-ads-stream-name", file=normalized, evidence=info.filename))
+    if _is_symlink_member(info):
+        findings.append(_finding("package-symlink", file=normalized, evidence=info.filename))
+    parts = PurePosixPath(normalized).parts
+    if parts and parts[-1] == "SKILL.md" and len(parts) > 2 and not is_eval_fixture_skill_md(PurePosixPath(normalized)):
+        findings.append(_finding("package-nested-skill-md", file=normalized, evidence=normalized))
+    return findings
+
+
+def _scan_file_package_properties(rel_path: str, file_bytes: bytes, file_size: int) -> list[SecurityFinding]:
+    findings: list[SecurityFinding] = []
+    path = PurePosixPath(rel_path)
+    if path.name == "SKILL.md" and len(path.parts) > 1 and not is_eval_fixture_skill_md(path):
+        findings.append(_finding("package-nested-skill-md", file=rel_path, evidence=rel_path))
+    if file_size > MAX_FILE_BYTES:
+        findings.append(_finding("package-oversized-file", file=rel_path, evidence=f"{file_size} bytes"))
+    if _is_hidden_sensitive_path(rel_path):
+        findings.append(_finding("package-hidden-sensitive-file", file=rel_path, evidence=path.name))
+    if ".git" in path.parts:
+        findings.append(_finding("package-git-directory", file=rel_path, evidence=".git"))
+    if _is_nested_archive_name(rel_path) or _looks_like_archive(file_bytes):
+        findings.append(_nested_archive_finding(rel_path, file_bytes[:8], lambda: file_bytes, []))
+    if is_executable_binary_prefix(file_bytes[:8]):
+        findings.append(_finding("package-executable-binary", file=rel_path, evidence=_binary_magic_evidence(file_bytes[:8])))
+    return findings
+
+
+def _scan_text_file(rel_path: str, text: str) -> list[SecurityFinding]:
+    findings: list[SecurityFinding] = []
+    findings.extend(_scan_secrets(rel_path, text))
+    if PurePosixPath(rel_path).name == "SKILL.md":
+        findings.extend(_scan_declaration(rel_path, text))
+    if _is_python_path(rel_path, text):
+        findings.extend(_scan_python(rel_path, text))
+    if _is_shell_path(rel_path, text):
+        findings.extend(_scan_shell(rel_path, text))
+    findings.extend(_scan_network_and_resource(rel_path, text))
+    return findings
+
+
+def _scan_secrets(rel_path: str, text: str) -> list[SecurityFinding]:
+    findings: list[SecurityFinding] = []
+    private_key = re.search(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----", text)
+    if private_key:
+        findings.append(_finding_from_match("secret-private-key", rel_path, text, private_key))
+
+    for pattern in _SECRET_TOKEN_PATTERNS:
+        for match in pattern.finditer(text):
+            if _looks_like_placeholder(match.group(0)):
+                continue
+            findings.append(_finding_from_match("secret-cloud-token", rel_path, text, match))
+            break
+        else:
+            continue
+        break
+
+    if _is_python_path(rel_path, text):
+        findings.extend(_scan_python_secret_assignments(rel_path, text))
+        return findings
+
+    findings.extend(_scan_secret_assignments_by_text(rel_path, text))
+    return findings
+
+
+def _scan_secret_assignments_by_text(rel_path: str, text: str) -> list[SecurityFinding]:
+    """``name[:=]value`` sweep for line-oriented text, and for Python that will not parse."""
+    for match in _SECRET_ASSIGNMENT_RE.finditer(text):
+        value = match.group(2).strip()
+        if not _looks_like_placeholder(value):
+            return [_finding_from_match("secret-env-assignment", rel_path, text, match)]
+    return []
+
+
+def _python_secret_assignment_target(node: ast.expr) -> str | None:
+    """Final identifier bound by a simple assignment target, else None."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str):
+        return node.slice.value
+    return None
+
+
+def _python_secret_unpacked_span(elts: list[ast.expr]) -> tuple[int, int, bool]:
+    """Fixed head, fixed tail and star presence of one side of an unpacking.
+
+    Python aligns everything before the first ``*`` and everything after the last one; only
+    the elements between stars share a runtime-determined slice. A side without a star has
+    its whole length fixed, so its head is every element and its tail is none.
+    """
+    stars = [index for index, element in enumerate(elts) if isinstance(element, ast.Starred)]
+    if not stars:
+        return len(elts), 0, False
+    return stars[0], len(elts) - stars[-1] - 1, True
+
+
+def _python_secret_unpacked_pairs(target: ast.expr, value: ast.expr) -> list[tuple[ast.expr, ast.expr]] | None:
+    """Target-and-value pairs of an unpacking assignment, or None when it is not one.
+
+    ``host, api_key = endpoint, "…"`` binds each name to the value written in the same
+    position, so the two sides have to be read together. Pairs come only from the fixed
+    head and tail of the two element lists (``_python_secret_unpacked_span``): what falls
+    between two stars is a runtime slice. An unpacking with no star on either side binds
+    only when the lengths match, so a mismatch -- which raises before binding anything --
+    contributes none. Nested targets align positionally too, so they are read the same way.
+    """
+    if not isinstance(target, (ast.Tuple, ast.List)):
+        return None
+    if not isinstance(value, (ast.Tuple, ast.List)):
+        return []
+    target_head, target_tail, target_starred = _python_secret_unpacked_span(target.elts)
+    value_head, value_tail, value_starred = _python_secret_unpacked_span(value.elts)
+    if not target_starred and not value_starred:
+        if len(target.elts) != len(value.elts):
+            return []
+        head, tail = len(target.elts), 0
+    else:
+        # A star-free side is fully fixed, so its tail is whatever its head did not consume.
+        head = min(target_head, value_head)
+        tail = min(len(target.elts) - head if not target_starred else target_tail, len(value.elts) - head if not value_starred else value_tail)
+    pairs = list(zip(target.elts[:head], value.elts[:head], strict=True))
+    if tail:
+        pairs += list(zip(target.elts[len(target.elts) - tail :], value.elts[len(value.elts) - tail :], strict=True))
+    expanded: list[tuple[ast.expr, ast.expr]] = []
+    for paired_target, paired_value in pairs:
+        nested = _python_secret_unpacked_pairs(paired_target, paired_value)
+        expanded.extend(nested or [(paired_target, paired_value)])
+    return expanded
+
+
+def _python_secret_bindings(tree: ast.AST) -> list[tuple[str | None, ast.expr]]:
+    """Every ``(bound name, value expression)`` pair the tree binds, in walk order.
+
+    Assignment statements are not the only place a skill can park a credential:
+    a keyword argument, a parameter default and a walrus all read as
+    ``name=value`` to the line-oriented sweep this rule replaced, so a caller
+    that merely moves the assignment into a call escapes the gate. An unpacking
+    assignment reads the same way once its targets are paired with values.
+    """
+    bindings: list[tuple[str | None, ast.expr]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                pairs = _python_secret_unpacked_pairs(target, node.value)
+                if pairs is None:
+                    bindings.append((_python_secret_assignment_target(target), node.value))
+                    continue
+                bindings.extend((_python_secret_assignment_target(paired_target), paired_value) for paired_target, paired_value in pairs)
+        elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
+            # A bare annotation binds no value at all, so ``AnnAssign.value`` is None.
+            bindings.append((_python_secret_assignment_target(node.target), node.value))
+        elif isinstance(node, ast.keyword):
+            # ``**spread`` carries ``arg=None`` and binds no name of its own.
+            if node.arg is not None:
+                bindings.append((node.arg, node.value))
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            params = [*node.args.posonlyargs, *node.args.args]
+            if node.args.defaults:
+                # Positional defaults align with the trailing parameters.
+                bindings.extend((param.arg, default) for param, default in zip(params[len(params) - len(node.args.defaults) :], node.args.defaults, strict=True))
+            bindings.extend((param.arg, default) for param, default in zip(node.args.kwonlyargs, node.args.kw_defaults, strict=True) if default is not None)
+    return bindings
+
+
+def _python_secret_literal(expr: ast.expr) -> str | None:
+    """Text of a value Python resolves from source alone, else None.
+
+    The pre-AST sweep reported a hardcoded credential that was spelled as a
+    concatenation of literals (``API_KEY = "sk-" + "a1b2c3d4"``), because its
+    line-oriented value capture stopped at the first closing quote. Splitting
+    the quotes is not obfuscation: the bound value is still the same constant,
+    so the shapes the sweep saw stay visible here - a literal, an explicit
+    ``+`` of literals, an implicit (adjacent) literal run, and a placeholder-free
+    f-string. Anything that needs runtime data - a call, a variable,
+    ``%``-formatting of a template - is not a literal this rule can assert on.
+    """
+    texts: list[str] = []
+    for part in _python_secret_literal_parts(expr):
+        text = _python_secret_literal_atom(part)
+        if text is None:
+            return None
+        texts.append(text)
+    return "".join(texts)
+
+
+def _python_secret_literal_parts(expr: ast.expr) -> list[ast.expr]:
+    """Operands of a concatenation, in source order; a single node for anything else.
+
+    A stack loop rather than recursion: the caller reports a finding from this
+    value, and a chain deep enough to pass the recursion limit would raise past
+    the per-file analyzer guard, which drops every other finding for that file.
+    """
+    stack: list[ast.expr] = [expr]
+    parts: list[ast.expr] = []
+    while stack:
+        node = stack.pop()
+        if not (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add)):
+            parts.append(node)
+            continue
+        # Right goes on first so the left operand is collected first: a
+        # concatenation reads in source order however it is parenthesised.
+        stack.append(node.right)
+        stack.append(node.left)
+    return parts
+
+
+def _python_secret_literal_atom(node: ast.expr) -> str | None:
+    if isinstance(node, ast.Constant):
+        value = node.value
+        if not isinstance(value, (str, bytes, int)):
+            return None
+        return value.decode("utf-8", "replace") if isinstance(value, bytes) else str(value)
+    if isinstance(node, ast.JoinedStr):
+        parts: list[str] = []
+        for part in node.values:
+            if not isinstance(part, ast.Constant) or not isinstance(part.value, str):
+                return None
+            parts.append(part.value)
+        return "".join(parts)
+    return None
+
+
+def _python_secret_literal_members(expr: ast.expr) -> list[ast.expr]:
+    """Values held inside a container or a conditional, in the order they are written.
+
+    ``api_key = ["…"]``, ``api_key = {"live": "…"}`` and ``api_key = "…" if prod else
+    "…"`` are each a finding for the line-oriented sweep this rule replaced: its value
+    capture stops at the first quote after the name, so it reports the line even when the
+    token it grabbed is only a bracket. This names the literal instead of the bracket.
+    Each member is asserted on by itself, because joining a container's members would
+    describe a string that no Python program ever binds.
+
+    Mapping keys are structural labels, so they need independent evidence from a
+    recognized token format; the enclosing secret-like name is evidence only for values.
+    """
+    if isinstance(expr, (ast.List, ast.Tuple, ast.Set)):
+        return list(expr.elts)
+    if isinstance(expr, ast.Dict):
+        # A ``{**spread}`` entry carries a None key and names nothing of its own.
+        members: list[ast.expr] = []
+        for key, value in zip(expr.keys, expr.values, strict=True):
+            if key is not None:
+                literal = _python_secret_literal(key)
+                if literal is not None and any(pattern.search(literal) for pattern in _SECRET_TOKEN_PATTERNS):
+                    members.append(key)
+            members.append(value)
+        return members
+    if isinstance(expr, ast.IfExp):
+        return [expr.body, expr.orelse]
+    return []
+
+
+def _python_secret_literal_candidates(expr: ast.expr) -> list[tuple[ast.expr, str]]:
+    """Every ``(node, literal)`` pair this binding can assert on, in source order.
+
+    A concatenation yields the whole value, because ``"sk-" + "a1b2"`` binds one
+    string; a container or a conditional yields its members. A work list rather than
+    recursion, matching ``_python_secret_literal_parts``: an expression tree holds each
+    node once, so a node queued from its parent is never queued again.
+    """
+    candidates: list[tuple[ast.expr, str]] = []
+    pending: list[ast.expr] = [expr]
+    while pending:
+        node = pending.pop()
+        literal = _python_secret_literal(node)
+        if literal is not None:
+            candidates.append((node, literal))
+            continue
+        pending.extend(_python_secret_literal_members(node))
+    candidates.sort(key=lambda candidate: (candidate[0].lineno, candidate[0].col_offset))
+    return candidates
+
+
+def _scan_python_secret_assignments(rel_path: str, text: str) -> list[SecurityFinding]:
+    """Report embedded Python secrets from real literal bindings, not from raw text.
+
+    A line-oriented sweep cannot tell an annotation (``token: Optional[str]``), a
+    statement colon (``if not api_key:``), or this rule's own remediation
+    (``api_key = os.getenv("X")``) from a literal, and it points at an annotated
+    assignment's annotation rather than at its value.
+
+    ``_python_secret_bindings`` preserves the sweep's binding forms, and
+    ``_python_secret_literal_candidates`` covers literal values inside containers
+    and conditionals. Mapping labels do not inherit credential evidence from the
+    enclosing name; only keys matching a recognized token format are candidates.
+
+    A file Python cannot parse falls back to that sweep: the AST is only an
+    improvement, and returning nothing would let one syntax error (or a NUL byte)
+    silence a HIGH-severity rule for the whole file. That sweep reads the run of
+    characters that follows ``name[:=]``, so it never reaches a credential an earlier
+    element of the same line precedes (``host, api_key = "https://…", "…"``) or a bracket
+    separates from its name (``[token, version] = ["…", 2]``): those two shapes are
+    reported while the file parses and go quiet once it carries a syntax error.
+    """
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return _scan_secret_assignments_by_text(rel_path, text)
+
+    for name, value in _python_secret_bindings(tree):
+        if not _SECRET_ASSIGNMENT_NAME_RE.match(name or ""):
+            continue
+        for node, literal in _python_secret_literal_candidates(value):
+            if _looks_like_placeholder(literal):
+                continue
+            return [_finding_for_node("secret-env-assignment", rel_path, node, literal)]
+    return []
+
+
+def _scan_declaration(rel_path: str, text: str) -> list[SecurityFinding]:
+    findings: list[SecurityFinding] = []
+    prompt_re = re.compile(r"(?i)\b(ignore|disregard)\s+(all\s+)?(previous|prior)\s+instructions\b|\boverride\s+(the\s+)?(system|developer)\s+instructions\b")
+    if match := prompt_re.search(text):
+        findings.append(_finding_from_match("declaration-prompt-override", rel_path, text, match))
+
+    capability_re = re.compile(r"(?i)(execute\s+(arbitrary\s+)?commands?|shell\s+commands?|credential\s+access|read\s+secrets?|arbitrary\s+network|network\s+egress)")
+    if match := capability_re.search(text):
+        findings.append(_finding_from_match("declaration-sensitive-capability", rel_path, text, match))
+
+    if match := _SENSITIVE_PATH_RE.search(text):
+        findings.append(_finding_from_match("declaration-sensitive-path", rel_path, text, match))
+
+    for match in _URL_RE.finditer(text):
+        if match.group(0)[:7].lower() == "http://":
+            host = _http_host(match.group(0))
+            if host and host not in _LOCAL_HTTP_HOSTS:
+                findings.append(_finding_from_match("declaration-external-endpoint", rel_path, text, match))
+                break
+    return findings
+
+
+def _scan_python(rel_path: str, text: str) -> list[SecurityFinding]:
+    findings: list[SecurityFinding] = []
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return findings
+
+    aliases = _collect_python_aliases(tree)
+    has_sensitive_read = False
+    has_env_dump = False
+    has_network_sink = False
+    sensitive_node: ast.AST | None = None
+    env_node: ast.AST | None = None
+    network_node: ast.AST | None = None
+    reverse_shell_parts: set[str] = set()
+    reverse_shell_node: ast.AST | None = None
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if _SENSITIVE_PATH_RE.search(node.value):
+                has_sensitive_read = True
+                sensitive_node = sensitive_node or node
+            if _is_outbound_url(node.value):
+                has_network_sink = True
+                network_node = network_node or node
+
+        if isinstance(node, (ast.Attribute, ast.Name)) and _python_name(node, aliases) == "os.environ":
+            has_env_dump = True
+            env_node = env_node or node
+
+        if not isinstance(node, ast.Call):
+            continue
+
+        call_name = _python_call_name(node, aliases)
+        if call_name in {"eval", "exec"} or (call_name == "compile" and _compile_mode_is_exec(node)):
+            findings.append(_finding_for_node("python-dynamic-exec", rel_path, node, call_name))
+        elif call_name in {"os.system", "os.popen"} or (call_name.startswith("subprocess.") and _call_shell_may_be_true(node)):
+            findings.append(_finding_for_node("python-shell-exec", rel_path, node, call_name))
+        elif call_name.startswith("subprocess."):
+            findings.append(_finding_for_node("python-subprocess", rel_path, node, call_name))
+        elif call_name == "__import__" or call_name == "importlib.import_module":
+            if not node.args or not isinstance(node.args[0], ast.Constant):
+                findings.append(_finding_for_node("python-dynamic-import", rel_path, node, call_name))
+        elif call_name in {"pickle.load", "pickle.loads"} or (call_name == "yaml.load" and not _yaml_load_uses_safe_loader(node)):
+            findings.append(_finding_for_node("python-unsafe-deserialization", rel_path, node, call_name))
+
+        if _call_is_network_sink(call_name):
+            has_network_sink = True
+            network_node = network_node or node
+
+        if call_name == "os.dup2":
+            reverse_shell_parts.add("dup2")
+            reverse_shell_node = reverse_shell_node or node
+        elif call_name in {"socket.socket", "socket.create_connection"}:
+            reverse_shell_parts.add("socket")
+        elif call_name.startswith("subprocess.") or call_name in {"os.system", "os.popen"}:
+            reverse_shell_parts.add("subprocess")
+
+    if not has_network_sink:
+        try:
+            if handle_sink := _find_client_handle_sink(tree, rel_path):
+                has_network_sink = True
+                network_node = network_node or handle_sink
+        except RecursionError:
+            # The AST is untrusted. Preserve deterministic findings collected above when an
+            # adversarially deep tree exceeds the recursive handle-analysis budget.
+            logger.warning("SkillScan client-handle analysis hit recursion limit for %s", rel_path)
+
+    if {"dup2", "socket", "subprocess"} <= reverse_shell_parts:
+        findings.append(_finding_for_node("python-reverse-shell", rel_path, reverse_shell_node, "socket + dup2 + subprocess"))
+
+    if has_sensitive_read and has_network_sink:
+        findings.append(_finding_for_node("python-sensitive-exfil", rel_path, sensitive_node or network_node, "sensitive read + network sink"))
+    elif has_sensitive_read:
+        findings.append(_finding_for_node("python-sensitive-path-read", rel_path, sensitive_node, "sensitive path read"))
+    if has_env_dump and has_network_sink:
+        findings.append(_finding_for_node("python-env-dump-exfil", rel_path, env_node or network_node, "environment dump + network sink"))
+    return findings
+
+
+def _split_shell_line(line: str) -> tuple[str, list[tuple[str, bool]]]:
+    """Split one shell line into its code part and the heredocs it declares.
+
+    Quote-aware: a `#` outside quotes starts a comment only at a word start, and
+    `<<` outside quotes opens a heredoc. Returns the code text (comment stripped)
+    together with the `(delimiter, strip_tabs)` pairs the line opens.
+
+    A `{` or `}` immediately before the `#` is not a word start: bash reads
+    `${#HOME}` as the length operator and `}#` as part of a word, while a brace
+    group needs the space of `{ # ...`. Those two characters are therefore left
+    out of the set that admits a comment.
+    """
+    heredocs: list[tuple[str, bool]] = []
+    in_single = in_double = False
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if in_single:
+            in_single = ch != "'"
+        elif in_double:
+            if ch == "\\":
+                i += 2
+                continue
+            in_double = ch != '"'
+        elif ch == "\\":
+            i += 2
+            continue
+        elif ch == "'":
+            in_single = True
+        elif ch == '"':
+            in_double = True
+        elif ch == "#" and (i == 0 or line[i - 1] in " \t;&|()<>"):
+            return line[:i], heredocs
+        elif ch == "<" and line.startswith("<<", i) and not line.startswith("<<<", i) and (i == 0 or not (line[i - 1].isalnum() or line[i - 1] == "_")):
+            if head := _HEREDOC_HEAD_RE.match(line, i):
+                heredocs.append((head.group(3), head.group(1) == "-"))
+                i = head.end()
+                continue
+        i += 1
+    return line, heredocs
+
+
+def _shell_code_only(text: str) -> str:
+    """Blank out comment text and heredoc bodies, preserving line structure.
+
+    `_SHELL_ENV_DUMP_RE` matches at a command position, but a `;` inside a
+    comment (`# documentation; env is only an example`) and a bare `env` line
+    inside heredoc data are not commands. Replacing them with blanks -- one
+    output line per input line, so `_line_number` stays correct -- leaves the
+    matcher looking only at shell code.
+    """
+    lines: list[str] = []
+    pending: list[tuple[str, bool]] = []
+    for raw in text.split("\n"):
+        if pending:
+            delimiter, strip_tabs = pending[0]
+            if (raw.lstrip("\t") if strip_tabs else raw) == delimiter:
+                pending.pop(0)
+            lines.append("")
+            continue
+        code, heredocs = _split_shell_line(raw)
+        pending.extend(heredocs)
+        lines.append(code)
+    return "\n".join(lines)
+
+
+class _ShellWord(str):
+    """An argv word, kept distinct from unquoted shell operators."""
+
+
+@dataclass
+class _ShellTokenBudget:
+    remaining: int
+
+
+def _tokenize_shell(command: str, start: int = 0, *, budget: _ShellTokenBudget | None = None) -> list[str] | None:
+    """Read one simple command in place, without copying the rest of a file."""
+    tokens: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    command_depth = 0
+    word_started = False
+    word_quoted = False
+    i = start
+    limit = min(len(command), start + budget.remaining) if budget else len(command)
+
+    def flush() -> None:
+        nonlocal word_started, word_quoted
+        if word_started:
+            tokens.append(_ShellWord("".join(current)))
+        current.clear()
+        word_started = word_quoted = False
+
+    try:
+        while i < limit:
+            ch = command[i]
+            if quote == "'":
+                if ch == "'":
+                    quote = None
+                else:
+                    current.append(ch)
+                i += 1
+                continue
+            if quote == '"':
+                if ch == '"':
+                    quote = None
+                    i += 1
+                elif ch == "\\" and i + 1 < limit and command[i + 1] in '$`"\\\r\n':
+                    if command[i + 1] == "\r" and command[i + 2 : i + 3] == "\n":
+                        i += 3
+                    elif command[i + 1] == "\n":
+                        i += 2
+                    else:
+                        current.append(command[i + 1])
+                        i += 2
+                else:
+                    current.append(ch)
+                    i += 1
+                continue
+            if ch == "\\" and i + 1 < limit:
+                if command[i + 1] == "\r" and command[i + 2 : i + 3] == "\n":
+                    i += 3
+                elif command[i + 1] == "\n":
+                    i += 2
+                else:
+                    current.append(command[i + 1])
+                    word_started = word_quoted = True
+                    i += 2
+                continue
+            if ch in {"'", '"'}:
+                quote = ch
+                word_started = word_quoted = True
+                i += 1
+                continue
+            if command.startswith("$(", i):
+                current.append("$(")
+                word_started = True
+                command_depth += 1
+                i += 2
+                continue
+            if ch == ")" and command_depth:
+                current.append(ch)
+                command_depth -= 1
+                i += 1
+                continue
+            if command_depth:
+                current.append(ch)
+                i += 1
+                continue
+            if ch == "#" and not word_started:
+                break
+            if ch in " \t\r":
+                flush()
+                i += 1
+                continue
+            if ch in "<>":
+                prefix = "".join(current)
+                if word_quoted or not (prefix.isdecimal() or re.fullmatch(r"\{\w+\}", prefix)):
+                    flush()
+                    prefix = ""
+                else:
+                    current.clear()
+                    word_started = word_quoted = False
+                operator = next(op for op in ("<<<", "<<-", "<<", ">>", "<>", ">|", ">&", "<&", ">", "<") if command.startswith(op, i))
+                tokens.append(prefix + operator)
+                i += len(operator)
+                continue
+            if ch in "\n;|&()`":
+                # A leading subshell group can wrap the pipeline consumer.
+                if ch == "(" and not word_started and (not tokens or (tokens[-1] == "(" and not isinstance(tokens[-1], _ShellWord))):
+                    tokens.append("(")
+                    i += 1
+                    continue
+                break
+            current.append(ch)
+            word_started = True
+            i += 1
+        if quote or command_depth or (i >= limit and limit < len(command)):
+            return None
+        flush()
+        return tokens
+    finally:
+        if budget is not None:
+            budget.remaining = max(0, budget.remaining - (i - start))
+
+
+def _is_env_redirection(tokens: list[str], index: int) -> tuple[int, bool, bool]:
+    token = tokens[index]
+    match = None if isinstance(token, _ShellWord) else _ENV_REDIRECTION_RE.fullmatch(token)
+    if not match:
+        return index, False, False
+    stdin = "<" in match.group("op") and match.group("fd") in {None, "0"} and not token.startswith("{")
+    if not match.group("target"):
+        if index + 1 >= len(tokens) or (not isinstance(tokens[index + 1], _ShellWord) and tokens[index + 1] in _SHELL_SEPARATORS):
+            return index + 1, True, stdin
+        return index + 2, True, stdin
+    return index + 1, True, stdin
+
+
+def _split_env_string(value: str) -> list[str] | None:
+    """Split env -S argv, whose escapes and separators are not shell syntax.
+
+    Runtime environment expansion is unknown to a static scan; never consult
+    the scanner process's environment to resolve it.
+    """
+    tokens: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    started = False
+    escapes = {"f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v", '"': '"', "'": "'", "#": "#", "$": "$", "\\": "\\"}
+    i = 0
+
+    def flush() -> None:
+        nonlocal started
+        if started:
+            tokens.append(_ShellWord("".join(current)))
+        current.clear()
+        started = False
+
+    while i < len(value):
+        ch = value[i]
+        if ch in {"'", '"'} and (quote is None or quote == ch):
+            quote = ch if quote is None else None
+            started = True
+            i += 1
+            continue
+        if ch in " \t\n\v\f\r" and quote is None:
+            flush()
+            i += 1
+            continue
+        if ch == "#" and not started:
+            break
+        if ch == "$" and quote != "'":
+            return None
+        if ch == "\\" and (quote != "'" or value[i + 1 : i + 2] in {"\\", "'"}):
+            if i + 1 >= len(value):
+                return None
+            escaped = value[i + 1]
+            if escaped == "c":
+                if quote == '"':
+                    return None
+                break
+            if escaped == "_":
+                if quote == '"':
+                    current.append(" ")
+                    started = True
+                else:
+                    flush()
+            elif escaped in escapes:
+                current.append(escapes[escaped])
+                started = True
+            else:
+                return None
+            i += 2
+            continue
+        current.append(ch)
+        started = True
+        i += 1
+    if quote:
+        return None
+    flush()
+    return tokens
+
+
+def _env_command(tokens: list[str], index: int = 0) -> tuple[list[str], int] | None:
+    """Resolve env operands iteratively with bounded split expansion work."""
+    pending = deque(tokens[index:])
+    options = True
+    split_steps = 0
+    split_chars = 0
+    while pending:
+        token = pending.popleft()
+        if not isinstance(token, _ShellWord) and token in _SHELL_SEPARATORS:
+            return None
+        if options and token in {"--", "-"}:
+            options = False
+            continue
+        split_value = None
+        if options and token.startswith("-"):
+            if token in _ENV_EXIT_OPTIONS or token == "-0":
+                return None
+            if token.startswith("--split-string="):
+                split_value = token.removeprefix("--split-string=")
+            elif token in _ENV_LONG_VALUE_OPTIONS:
+                if not pending:
+                    return None
+                value = pending.popleft()
+                if token == "--split-string":
+                    split_value = value
+            elif any(token.startswith(option + "=") for option in _ENV_LONG_VALUE_OPTIONS) or token.startswith("--"):
+                continue
+            else:
+                cluster = token[1:]
+                value_position = next((position for position, option in enumerate(cluster) if option in _ENV_SHORT_VALUE_OPTIONS), -1)
+                flags = cluster[:value_position] if value_position >= 0 else cluster
+                if "0" in flags or not set(flags) <= _ENV_STANDALONE_OPTIONS:
+                    return None
+                if value_position >= 0:
+                    value = cluster[value_position + 1 :]
+                    if not value:
+                        if not pending:
+                            return None
+                        value = pending.popleft()
+                    if cluster[value_position] == "S":
+                        split_value = value
+            if split_value is not None:
+                split_steps += 1
+                split_chars += len(split_value)
+                if split_steps > _ENV_MAX_SPLIT_STEPS or split_chars > _ENV_MAX_SPLIT_CHARS:
+                    return None
+                expanded = _split_env_string(split_value)
+                if expanded is None:
+                    return None
+                pending.extendleft(reversed(expanded))
+            continue
+        if "=" in token:
+            options = False
+            continue
+        return [token, *pending], 0
+    return None
+
+
+def _env_invocation(tokens: list[str]) -> tuple[list[str], int, bool] | None:
+    """Find env through command/exec/sudo wrappers and shell redirections."""
+    words: list[str] = []
+    stdin_redirected = False
+    index = 0
+    while index < len(tokens):
+        next_index, redirected, stdin = _is_env_redirection(tokens, index)
+        if redirected:
+            stdin_redirected |= stdin
+            index = next_index
+        else:
+            words.append(tokens[index])
+            index += 1
+    index = 0
+    while index < len(words):
+        word = words[index]
+        if word == "(" and not isinstance(word, _ShellWord):
+            index += 1
+            continue
+        name = PurePosixPath(word).name
+        if name == "env":
+            return words, index + 1, stdin_redirected
+        if name not in {"command", "exec", "sudo"}:
+            return None
+        index += 1
+        while index < len(words) and words[index].startswith("-"):
+            option = words[index]
+            index += 1
+            if option == "--":
+                break
+            if name == "command" and ("v" in option or "V" in option):
+                return None
+            takes_value = (name == "exec" and option == "-a") or (name == "sudo" and (option in {"--user", "--group", "--host", "--prompt", "--chdir", "--chroot", "--role", "--type"} or (len(option) == 2 and option[1] in "acCDghprRtTuU")))
+            if takes_value:
+                index += 1
+    return None
+
+
+def _env_launches_shell(tokens: list[str]) -> bool:
+    invocation = _env_invocation(tokens)
+    if invocation is None:
+        return False
+    words, index, stdin_redirected = invocation
+    command = _env_command(words, index)
+    if command is None or stdin_redirected:
+        return False
+    command_tokens, command_index = command
+    return PurePosixPath(command_tokens[command_index]).name in _SHELL_NAMES
+
+
+def _scan_shell(rel_path: str, text: str) -> list[SecurityFinding]:
+    findings: list[SecurityFinding] = []
+    # Unmistakable reverse-shell signals hard-block; weaker idioms (bash -i,
+    # mkfifo) only warn->LLM because they appear in legitimate scripts.
+    if match := re.search(r"(/dev/tcp/|nc\s+-e\b)", text):
+        findings.append(_finding_from_match("shell-reverse-shell", rel_path, text, match))
+    if match := re.search(r"(bash\s+-i\b|mkfifo\s+)", text):
+        findings.append(_finding_from_match("shell-reverse-shell-heuristic", rel_path, text, match))
+    if re.search(r"(/etc/shadow|/etc/passwd)", text) and re.search(r"\b(curl|wget|nc|scp)\b", text):
+        findings.append(_finding_for_text("shell-sensitive-exfil", rel_path, text, "/etc"))
+    code = _shell_code_only(text)
+    # Both passes share a file-sized work bound, even if regex anchors overlap
+    # inside untrusted quoted text. Exhaustion conservatively retains a warning.
+    token_budget = _ShellTokenBudget(2 * len(code))
+    if match := re.search(
+        # Each repeated alternative consumes a distinct first character (or
+        # a backslash plus a distinct following character), avoiding nested
+        # overlapping repeats when a download command has no pipe.
+        r"\b(?:curl|wget)\b(?:[^\\\r\n|;]|\\\r?\n|\\[^\r\n])*"
+        r"\|(?:\s|\\\r?\n)*(?:sudo(?:\s|\\\r?\n)+"
+        # A sudo option that takes a separate value (`-u user`, `-g group`,
+        # `-h host`, ...) must swallow that value too: otherwise
+        # `| sudo -u deploy bash` leaves the matcher parked on the username and
+        # misses the shell. This class is hand-maintained, so an option that
+        # takes a value must be listed here or it regresses to a miss; the
+        # case-sensitivity also keeps `-H` (no value) in the next branch.
+        r"(?:-[acCDghprRtTuU]\b(?:\s|\\\r?\n)+[^\s|;\\]+(?:\s|\\\r?\n)+"
+        # The standalone branch must not re-consume a value-taking option:
+        # `-u` would otherwise match both alternatives, and a chain of them
+        # inside `*?` lets the matcher explore every one-/two-token partition
+        # (exponential) before the non-shell tail fails. The lookahead keeps
+        # the two branches mutually exclusive, so each token is consumed in
+        # exactly one way and a failing chain stays linear.
+        r"|-(?![acCDghprRtTuU]\b)\S+(?:\s|\\\r?\n)+)*?)?(?:/usr/(?:local/)?bin/|/bin/)?"
+        r"(?:bash|zsh|dash|fish|sh)\b",
+        text,
+    ):
+        findings.append(_finding_from_match("shell-curl-pipe-shell", rel_path, text, match))
+    else:
+        for pipe_match in _SHELL_DOWNLOAD_PIPE_RE.finditer(code):
+            tokens = _tokenize_shell(code, pipe_match.end(), budget=token_budget)
+            if tokens and _env_launches_shell(tokens):
+                findings.append(_finding_from_match("shell-curl-pipe-shell", rel_path, code, pipe_match))
+                break
+    if match := re.search(
+        _DESTRUCTIVE_RM_RE + r"|" + _FORK_BOMB_PATTERN + r"|dd\s+[^#\n]*\bof=/dev/",
+        text,
+    ):
+        findings.append(_finding_from_match("shell-destructive-command", rel_path, text, match))
+    # Only a command position counts, and only in shell code: see `_shell_code_only`.
+    for match in _SHELL_ENV_COMMAND_RE.finditer(code):
+        command = match.group("cmd")
+        if command != "printenv" and not command.startswith("export"):
+            tokens = _tokenize_shell(code, match.start("cmd"), budget=token_budget)
+            invocation = _env_invocation(tokens) if tokens else None
+            if tokens and invocation is None:
+                continue
+            if invocation is not None and _env_command(invocation[0], invocation[1]) is not None:
+                continue
+        findings.append(_finding("shell-env-dump", file=rel_path, line=_line_number(code, match.start("cmd")), evidence=command))
+        break
+    return findings
+
+
+def _scan_network_and_resource(rel_path: str, text: str) -> list[SecurityFinding]:
+    findings: list[SecurityFinding] = []
+    if match := re.search(r"(169\.254\.169\.254|metadata\.google\.internal)", text, re.IGNORECASE):
+        findings.append(_finding_from_match("network-cloud-metadata", rel_path, text, match))
+    if match := re.search(_FORK_BOMB_PATTERN, text):
+        findings.append(_finding_from_match("resource-fork-bomb", rel_path, text, match))
+    for match in _EXTERNAL_HTTP_RE.finditer(text):
+        host = _http_host(match.group(0)) or ""
+        if host in _LOCAL_HTTP_HOSTS or host.startswith("10.") or host.startswith("192.168.") or re.match(r"172\.(1[6-9]|2\d|3[01])\.", host):
+            rule_id = "network-local-http"
+        else:
+            rule_id = "network-cleartext-http"
+        finding = _finding_from_match(rule_id, rel_path, text, match)
+        if "@" in match.group(0):
+            finding["evidence"] = "http://" + match.group(0).rsplit("@", 1)[1]
+        findings.append(finding)
+        break
+    return findings
+
+
+def _finding(rule_id: str, *, file: str | None, evidence: str | None, line: int | None = None, severity: FindingSeverity | None = None) -> SecurityFinding:
+    spec = RULES[rule_id]
+    if evidence is not None and rule_id.startswith("secret-"):
+        evidence = _redact_secret_evidence(evidence)
+    return {
+        "rule_id": rule_id,
+        "severity": severity or spec.severity,
+        "file": file,
+        "line": line,
+        "message": spec.message,
+        "remediation": spec.remediation,
+        "evidence": evidence,
+    }
+
+
+def _finding_from_match(rule_id: str, rel_path: str, text: str, match: re.Match[str]) -> SecurityFinding:
+    return _finding(rule_id, file=rel_path, line=_line_number(text, match.start()), evidence=match.group(0))
+
+
+def _finding_for_text(rule_id: str, rel_path: str, text: str, evidence: str) -> SecurityFinding:
+    index = text.find(evidence)
+    return _finding(rule_id, file=rel_path, line=_line_number(text, index if index >= 0 else 0), evidence=evidence)
+
+
+def _finding_for_node(rule_id: str, rel_path: str, node: ast.AST | None, evidence: str) -> SecurityFinding:
+    return _finding(rule_id, file=rel_path, line=getattr(node, "lineno", 1), evidence=evidence)
+
+
+def _nested_archive_finding(rel_path: str, prefix: bytes, read_data, scanner_errors: list[str]) -> SecurityFinding:
+    name = PurePosixPath(rel_path).name
+    if prefix.startswith(b"PK\x03\x04"):
+        try:
+            data = read_data()
+        except Exception as e:
+            scanner_errors.append(f"{rel_path}: failed to read nested archive for inspection: {e}")
+        else:
+            if data is not None and _nested_zip_contains_executable(data):
+                return _finding("package-nested-archive", file=rel_path, evidence=f"{name}: contains an executable binary member", severity="CRITICAL")
+    return _finding("package-nested-archive", file=rel_path, evidence=name)
+
+
+def _nested_zip_contains_executable(data: bytes) -> bool:
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as nested:
+            for info in nested.infolist()[:_NESTED_ZIP_PEEK_MEMBER_LIMIT]:
+                if info.is_dir():
+                    continue
+                try:
+                    with nested.open(info) as member:
+                        if is_executable_binary_prefix(member.read(8)):
+                            return True
+                except Exception:
+                    continue
+    except (zipfile.BadZipFile, OSError):
+        return False
+    return False
+
+
+def _read_archive_member(zf: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes | None:
+    if info.file_size > MAX_FILE_BYTES:
+        return None
+    with zf.open(info) as member:
+        return member.read(MAX_FILE_BYTES + 1)
+
+
+def _redact_secret_evidence(value: str) -> str:
+    # Drop the value entirely: the rule_id already names the secret category, and
+    # any retained prefix (e.g. value[:6]) leaks real token bytes into findings
+    # that flow to Gateway responses and LLM context.
+    return "[redacted]"
+
+
+def _scan_result(findings: list[SecurityFinding], scanner_errors: list[str]) -> ScanResult:
+    blocked = any(finding["severity"] == _BLOCK_SEVERITY for finding in findings)
+    return {"findings": findings, "blocked": blocked, "scanner_errors": scanner_errors}
+
+
+def _dedupe(findings: Iterable[SecurityFinding]) -> list[SecurityFinding]:
+    seen: set[tuple[str, str | None, int | None]] = set()
+    deduped: list[SecurityFinding] = []
+    for finding in findings:
+        key = (finding["rule_id"], finding["file"], finding["line"])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(finding)
+    return deduped
+
+
+def _line_number(text: str, index: int) -> int:
+    return text[: max(index, 0)].count("\n") + 1
+
+
+def _normalize_archive_name(name: str) -> str:
+    return posixpath.normpath(name.replace("\\", "/")).removeprefix("./")
+
+
+def _archive_member_is_absolute(name: str) -> bool:
+    normalized = name.replace("\\", "/")
+    return normalized.startswith("/") or PurePosixPath(normalized).is_absolute() or PureWindowsPath(name).is_absolute()
+
+
+def _archive_member_traverses(name: str) -> bool:
+    return ".." in PurePosixPath(name.replace("\\", "/")).parts
+
+
+def _archive_member_has_colon(name: str) -> bool:
+    # A colon has no legitimate use in a relative archive member path (zip
+    # entries use ``/`` separators; a real Windows drive prefix is already
+    # caught by ``_archive_member_is_absolute``). On Windows/NTFS a colon
+    # elsewhere in the path addresses an Alternate Data Stream on the
+    # preceding path component (e.g. ``scripts/run.sh:hidden.txt`` attaches
+    # hidden content to ``run.sh`` instead of creating a sibling file), and
+    # that stream is invisible to directory-listing-based scanning. Reject
+    # outright rather than trying to allow-list "safe" colon positions.
+    return ":" in name
+
+
+def _is_symlink_member(info: zipfile.ZipInfo) -> bool:
+    return stat.S_ISLNK(info.external_attr >> 16)
+
+
+def _relative_file(path: Path, root: Path) -> str:
+    return path.resolve().relative_to(root.resolve()).as_posix()
+
+
+def _is_hidden_sensitive_path(rel_path: str) -> bool:
+    parts = PurePosixPath(rel_path).parts
+    if ".aws" in parts and parts[-1] == "credentials":
+        return True
+    if ".git" in parts and parts[-1] == "config":
+        return True
+    return parts[-1] in _HIDDEN_SENSITIVE_FILES and (parts[-1].startswith(".") or any(token in parts[-1].lower() for token in ("credential", "npmrc", "pypirc", "netrc")))
+
+
+def _is_nested_archive_name(rel_path: str) -> bool:
+    lower = rel_path.lower()
+    return any(lower.endswith(suffix) for suffix in _ARCHIVE_SUFFIXES)
+
+
+def _looks_like_archive(file_bytes: bytes) -> bool:
+    return file_bytes.startswith(b"PK\x03\x04") or file_bytes.startswith(b"\x1f\x8b") or file_bytes.startswith(b"7z\xbc\xaf\x27\x1c")
+
+
+def _binary_magic_evidence(prefix: bytes) -> str:
+    if prefix.startswith(b"\x7fELF"):
+        return "ELF"
+    if prefix.startswith(b"MZ"):
+        return "PE"
+    return "Mach-O"
+
+
+def _decode_text_for_analysis(file_bytes: bytes) -> str | None:
+    # Binaries are rejected by the NUL probe and the decode failure below, so
+    # every NUL-free, UTF-8-decodable file is analyzed regardless of extension.
+    if b"\x00" in file_bytes[:_TEXT_PROBE_BYTES]:
+        return None
+    try:
+        return file_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def _decode_script_lossily(rel_path: str, file_bytes: bytes) -> str | None:
+    # Interpreters run code despite a stray NUL or non-UTF-8 byte (a PEP 263
+    # cookie even makes Latin-1 valid Python), so skipping code files as binaries
+    # would let one byte hide the whole file. Replacement characters keep line numbers.
+    if not is_code_file(rel_path, file_bytes):
+        return None
+    return file_bytes.decode("utf-8", errors="replace")
+
+
+def _is_python_path(rel_path: str, text: str) -> bool:
+    return PurePosixPath(rel_path).suffix.lower() == ".py" or text.startswith("#!") and "python" in text.splitlines()[0].lower()
+
+
+def _is_shell_path(rel_path: str, text: str) -> bool:
+    suffix = PurePosixPath(rel_path).suffix.lower()
+    return suffix in {".sh", ".bash", ".zsh"} or text.startswith("#!") and any(shell in text.splitlines()[0].lower() for shell in ("sh", "bash", "zsh"))
+
+
+def _looks_like_placeholder(value: str) -> bool:
+    normalized = value.strip().strip("\"'").lower()
+    if normalized in _PLACEHOLDER_VALUES:
+        return True
+    return normalized.startswith("<") or normalized.startswith("${") or "your" in normalized or "example" in normalized
+
+
+def _http_host(url: str) -> str | None:
+    if not url[:8].lower().startswith(("http://", "https://")):
+        return None
+    try:
+        # Parse the authority so IPv6 brackets and userinfo cannot be mistaken
+        # for the host. Malformed URLs remain outbound in _is_outbound_url.
+        host = urlsplit(url).hostname
+    except ValueError:
+        return None
+    return host.lower() if host else None
+
+
+def _is_outbound_url(value: str) -> bool:
+    return bool(value[:8].lower().startswith(("http://", "https://")) and (_http_host(value) or "") not in _LOCAL_HTTP_HOSTS)
+
+
+def _collect_python_aliases(tree: ast.AST) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                aliases[alias.asname or alias.name] = alias.name
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            for alias in node.names:
+                aliases[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    return aliases
+
+
+def _python_name(node: ast.AST, aliases: dict[str, str]) -> str:
+    if isinstance(node, ast.Name):
+        return aliases.get(node.id, node.id)
+    if isinstance(node, ast.Attribute):
+        base = _python_name(node.value, aliases)
+        return f"{base}.{node.attr}" if base else node.attr
+    return ""
+
+
+def _python_import_name(node: ast.AST, aliases: dict[str, str]) -> str:
+    """Resolve only names proven by the scope-local import map."""
+    if isinstance(node, ast.Name):
+        return aliases.get(node.id, "")
+    if isinstance(node, ast.Attribute):
+        base = _python_import_name(node.value, aliases)
+        return f"{base}.{node.attr}" if base else ""
+    return ""
+
+
+def _python_call_name(node: ast.Call, aliases: dict[str, str]) -> str:
+    return _python_name(node.func, aliases)
+
+
+def _compile_mode_is_exec(node: ast.Call) -> bool:
+    if len(node.args) >= 3 and isinstance(node.args[2], ast.Constant):
+        return node.args[2].value == "exec"
+    return any(keyword.arg == "mode" and isinstance(keyword.value, ast.Constant) and keyword.value.value == "exec" for keyword in node.keywords)
+
+
+def _call_shell_may_be_true(node: ast.Call) -> bool:
+    # Fail closed on ambiguity: a ``shell=`` keyword is only safe when it is a
+    # literal, statically-provable ``False``. Any other value under that keyword,
+    # the literal ``True``, any other literal, or a non-literal expression such as
+    # a variable or a function call (``shell=shell_flag``, ``shell=bool(1)``),
+    # cannot be proven safe by static analysis, so it is treated the same as an
+    # explicit ``shell=True`` rather than silently falling through to the
+    # non-blocking ``python-subprocess`` classification.
+    for keyword in node.keywords:
+        if keyword.arg is None:
+            # ``**mapping`` / ``**kwargs`` unpacking: represented in the AST as a
+            # keyword with ``arg is None``. The mapping's contents (and whether it
+            # even carries a ``shell`` key) are not knowable by static analysis, so
+            # this fails closed the same as a variable/expression shell= value.
+            # Deliberate, documented over-block: a harmless kwargs-unpack with no
+            # ``shell`` key also blocks, since the alternative (inspecting the
+            # unpacked mapping's contents) is not generally possible statically.
+            return True
+        if keyword.arg == "shell":
+            return not (isinstance(keyword.value, ast.Constant) and keyword.value.value is False)
+    return False
+
+
+def _call_is_network_sink(call_name: str) -> bool:
+    return call_name in {
+        "requests.get",
+        "requests.post",
+        "requests.put",
+        "requests.patch",
+        "requests.delete",
+        "requests.head",
+        "requests.options",
+        "requests.request",
+        "httpx.get",
+        "httpx.post",
+        "httpx.put",
+        "httpx.patch",
+        "httpx.delete",
+        "httpx.head",
+        "httpx.options",
+        "httpx.request",
+        "httpx.stream",
+        "urllib.request.urlopen",
+        "urllib.request.urlretrieve",
+        "socket.socket",
+        "socket.create_connection",
+    }
+
+
+# Instance clients split construction from egress: the constructor does no I/O and the
+# outbound call is an attribute call on a variable, so neither statement alone is a
+# call-name sink. The signal therefore follows only the minimum high-confidence chain:
+# known constructor -> simple name/alias -> constructor-supported direct method call in
+# the same lexical scope. Nested scopes inherit only stable import aliases and never client
+# handles. Comprehensions, walrus-bearing statements, annotations, and executable expressions
+# in complex binding targets deliberately produce no finding from this signal; any names those
+# skipped constructs may bind are invalidated so stale state cannot create a finding.
+#
+# Handles reached by a value rather than by a name -- an attribute, a container item, a factory
+# return, a locally aliased constructor, a dynamic `getattr` -- and sinks invoked as anything other
+# than `name.method(...)` are outside that chain by construction: following them is value tracking,
+# which RFC #2634 puts beyond Phase 5. These are scope decisions, not gaps; issue #4296 enumerates
+# them and `test_python_declared_false_negatives_stay_unreported` pins each one, so widening or
+# narrowing the model has to change that test rather than change behaviour silently.
+#
+# Compound bodies are still walked from isolated entry-state copies so `if True:` is not a
+# universal bypass, but ambiguous bindings are dropped rather than joined. Every AST visit
+# and copied scope entry consumes a deterministic work budget, and the walk stops as soon
+# as it finds one sink. This bounds the branch-copy cost on untrusted source.
+
+
+@dataclass(frozen=True)
+class _ClientSpec:
+    methods: frozenset[str]
+    sync_context: bool = False
+    async_context: bool = False
+
+
+# Keep response-only operations such as `getresponse()` out: this signal needs outbound I/O.
+_PYTHON_CLIENT_SPECS = {
+    "http.client.HTTPConnection": _ClientSpec(frozenset({"request", "connect", "send"})),
+    "http.client.HTTPSConnection": _ClientSpec(frozenset({"request", "connect", "send"})),
+    "requests.Session": _ClientSpec(frozenset({"request", "get", "post", "put", "patch", "delete", "head", "options", "send"}), sync_context=True),
+    "urllib3.PoolManager": _ClientSpec(frozenset({"request", "urlopen"}), sync_context=True),
+    "aiohttp.ClientSession": _ClientSpec(frozenset({"request", "get", "post", "put", "patch", "delete", "head", "options"}), async_context=True),
+}
+_PYTHON_CLIENT_CONSTRUCTORS = frozenset(_PYTHON_CLIENT_SPECS)
+_PYTHON_CLIENT_SINK_METHODS = frozenset().union(*(spec.methods for spec in _PYTHON_CLIENT_SPECS.values()))
+_PYTHON_CLIENT_ANALYSIS_BUDGET = 100_000
+_PYTHON_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+_PYTHON_COMPREHENSION_NODES = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+_PYTHON_MATCH_CAPTURE_NODES = (ast.MatchAs, ast.MatchStar, ast.MatchMapping)
+# Statements whose parts do not all run, or run an unknown number of times. Their bodies are
+# analyzed from a copy and every name they bind is dropped afterwards.
+_PYTHON_BRANCHING_NODES = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try, ast.TryStar, ast.Match)
+
+
+@dataclass
+class _ClientScope:
+    handles: dict[str, str]
+    aliases: dict[str, str]
+    unstable_aliases: frozenset[str] = frozenset()
+
+    def copy_without(self, analysis: _ClientAnalysis, names: set[str] | None = None) -> _ClientScope:
+        names = names or set()
+        analysis.charge(len(self.handles) + len(self.aliases) + 1)
+        return _ClientScope(
+            handles={name: constructor for name, constructor in self.handles.items() if name not in names},
+            aliases={name: target for name, target in self.aliases.items() if name not in names},
+            unstable_aliases=self.unstable_aliases,
+        )
+
+    def aliases_only(self, analysis: _ClientAnalysis, names: set[str] | None = None, unstable_aliases: frozenset[str] = frozenset()) -> _ClientScope:
+        names = names or set()
+        analysis.charge(len(self.aliases) + 1)
+        return _ClientScope(
+            handles={},
+            aliases={name: target for name, target in self.aliases.items() if name not in names and name not in self.unstable_aliases},
+            unstable_aliases=unstable_aliases,
+        )
+
+
+class _ClientAnalysisBudgetExceeded(Exception):
+    pass
+
+
+@dataclass
+class _ClientAnalysis:
+    remaining: int
+    found: ast.AST | None = None
+
+    def charge(self, cost: int = 1) -> None:
+        if cost > self.remaining:
+            raise _ClientAnalysisBudgetExceeded
+        self.remaining -= cost
+
+
+def _find_client_handle_sink(tree: ast.AST, rel_path: str) -> ast.AST | None:
+    analysis = _ClientAnalysis(remaining=_PYTHON_CLIENT_ANALYSIS_BUDGET)
+    module = _ClientScope(handles={}, aliases={})
+    try:
+        if isinstance(tree, ast.Module):
+            module.unstable_aliases = _client_unstable_aliases(tree.body, analysis)
+        _walk_client_scope(tree, module, module, analysis)
+    except _ClientAnalysisBudgetExceeded:
+        logger.warning("SkillScan client-handle analysis exhausted work budget for %s", rel_path)
+    return analysis.found
+
+
+def _walk_client_statements(body: list[ast.AST], scope: _ClientScope, inherited: _ClientScope, analysis: _ClientAnalysis) -> None:
+    """Walk ordinary statements; a walrus-bearing statement is an explicit false negative."""
+    for statement in body:
+        if analysis.found is not None:
+            return
+        walrus_names = set() if isinstance(statement, _PYTHON_SCOPE_NODES) else _walrus_target_names(statement, analysis)
+        if walrus_names:
+            bound_names: set[str] = set()
+            declared_names: set[str] = set()
+            _collect_client_scope_bindings(statement, bound_names, declared_names, analysis)
+            _drop_client_bindings(scope, walrus_names | (bound_names - declared_names))
+            continue
+        _walk_client_scope(statement, scope, inherited, analysis)
+
+
+def _walk_client_scope(node: ast.AST, scope: _ClientScope, inherited: _ClientScope, analysis: _ClientAnalysis) -> None:
+    """Walk executable AST in statement order, carrying a one-level client-handle map."""
+    if analysis.found is not None:
+        return
+    analysis.charge()
+    if isinstance(node, ast.Module):
+        _walk_client_statements(node.body, scope, inherited, analysis)
+        return
+    if isinstance(node, _PYTHON_SCOPE_NODES):
+        _walk_client_nested_scope(node, scope, inherited, analysis)
+        return
+    if isinstance(node, _PYTHON_COMPREHENSION_NODES):
+        return
+    if isinstance(node, ast.NamedExpr):
+        _drop_client_bindings(scope, set(_client_assignment_target_names(node.target)))
+        return
+    if isinstance(node, ast.TypeAlias):
+        # PEP 695: the value of `type X = ...` is evaluated lazily -- never on import, only on a
+        # later access to `X.__value__`. Walking it for sinks reports egress that cannot happen and
+        # hard-blocks a benign file, the same reason annotations are not walked (see
+        # _client_scope_prelude). The name it binds is invalidated here rather than descended into,
+        # so skipping the value cannot leave a stale handle behind.
+        _drop_client_bindings(scope, set(_client_assignment_target_names(node.name)))
+        return
+    if isinstance(node, _PYTHON_BRANCHING_NODES):
+        _walk_client_branching(node, scope, inherited, analysis)
+        return
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        _bind_client_import(node, scope)
+        return
+    if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+        if node.value is not None:
+            _walk_client_scope(node.value, scope, inherited, analysis)
+        if analysis.found is not None:
+            return
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        _rebind_client_scope(targets, node.value if isinstance(node, (ast.Assign, ast.AnnAssign)) else None, scope)
+        return
+    if isinstance(node, (ast.With, ast.AsyncWith)):
+        bound_names = {name for item in node.items if item.optional_vars is not None for name in _client_assignment_target_names(item.optional_vars)}
+        for item in node.items:
+            _walk_client_scope(item.context_expr, scope, inherited, analysis)
+            if analysis.found is not None:
+                return
+            constructor = _client_constructor_from_value(item.context_expr, scope)
+            if item.optional_vars is not None:
+                _drop_client_bindings(scope, set(_client_assignment_target_names(item.optional_vars)))
+            if constructor:
+                spec = _PYTHON_CLIENT_SPECS[constructor]
+                supported = spec.async_context if isinstance(node, ast.AsyncWith) else spec.sync_context
+                if not supported:
+                    _drop_client_bindings(scope, bound_names)
+                    return
+                if isinstance(item.optional_vars, ast.Name):
+                    scope.handles[item.optional_vars.id] = constructor
+        _walk_client_statements(node.body, scope, inherited, analysis)
+        return
+    if isinstance(node, ast.Delete):
+        _drop_client_bindings(scope, {name for target in node.targets for name in _client_assignment_target_names(target)})
+        return
+    if isinstance(node, ast.Call):
+        if _call_is_client_handle_sink(node, scope.handles):
+            analysis.found = node
+            return
+    for child in ast.iter_child_nodes(node):
+        _walk_client_scope(child, scope, inherited, analysis)
+        if analysis.found is not None:
+            return
+
+
+def _walk_client_branching(node: ast.AST, scope: _ClientScope, inherited: _ClientScope, analysis: _ClientAnalysis) -> None:
+    """Analyze a compound statement without deciding which of its parts run, or in what order.
+
+    Every name the statement may bind is dropped *before* any body is walked, not after. Dropping
+    afterwards would be wrong for the parts that run after a sibling has already rebound the name --
+    a `finally` after a handler replaced the handle, a later `except*` clause, a second loop
+    iteration -- and each of those disagreements is a benign file hard-blocked as `CRITICAL`.
+    Ordering the parts instead of dropping is the control-flow interpreter this signal is not.
+
+    Bodies are still walked, each from its own copy, so a construction inside one branch cannot leak
+    into a sibling and a sink inside a branch is still seen. What is lost is a name that the same
+    statement both calls and rebinds; that is the documented false negative.
+    """
+    _drop_client_bindings(scope, _branching_bound_names(node, analysis))
+    for header in _branching_header_exprs(node):
+        walrus_names = _walrus_target_names(header, analysis)
+        if walrus_names:
+            _drop_client_bindings(scope, walrus_names)
+            continue
+        _walk_client_scope(header, scope, inherited, analysis)
+        if analysis.found is not None:
+            return
+    for body in _branching_bodies(node):
+        branch_scope = scope.copy_without(analysis)
+        _walk_client_statements(body, branch_scope, inherited, analysis)
+        if analysis.found is not None:
+            return
+
+
+def _branching_header_exprs(node: ast.AST) -> list[ast.AST]:
+    if isinstance(node, ast.If):
+        return [node.test]
+    if isinstance(node, (ast.For, ast.AsyncFor)):
+        return [node.iter]
+    if isinstance(node, ast.While):
+        return [node.test]
+    if isinstance(node, ast.Match):
+        return [node.subject]
+    return []  # `try` has no header; handler types run only when an exception was raised
+
+
+def _branching_bodies(node: ast.AST) -> list[list[ast.AST]]:
+    if isinstance(node, (ast.Try, ast.TryStar)):
+        # A handler's `type` expression and its body run on the same path, so they share one copy.
+        handlers = [[*([handler.type] if handler.type is not None else []), *handler.body] for handler in node.handlers]
+        return [node.body, *handlers, node.orelse, node.finalbody]
+    if isinstance(node, ast.Match):
+        return [[*([case.guard] if case.guard is not None else []), *case.body] for case in node.cases]
+    if isinstance(node, ast.If):
+        return [node.body, node.orelse]
+    if isinstance(node, (ast.For, ast.AsyncFor)):
+        return [node.body, node.orelse]
+    if isinstance(node, ast.While):
+        return [node.body, node.orelse]
+    return []
+
+
+def _branching_bound_names(node: ast.AST, analysis: _ClientAnalysis) -> set[str]:
+    """Every name the statement may bind, including the loop/handler/capture targets themselves."""
+    names: set[str] = set()
+    declared: set[str] = set()
+    if isinstance(node, (ast.For, ast.AsyncFor)):
+        names.update(_client_assignment_target_names(node.target))
+    for body in _branching_bodies(node):
+        for statement in body:
+            _collect_client_scope_bindings(statement, names, declared, analysis)
+    if isinstance(node, (ast.Try, ast.TryStar)):
+        names.update(handler.name for handler in node.handlers if handler.name)
+    if isinstance(node, ast.Match):
+        for case in node.cases:
+            _collect_client_scope_bindings(case.pattern, names, declared, analysis)
+    return names - declared
+
+
+def _walrus_target_names(node: ast.AST, analysis: _ClientAnalysis) -> set[str]:
+    """Return walrus targets in this scope so the entire ambiguous statement can be skipped."""
+    if isinstance(node, _PYTHON_SCOPE_NODES):
+        return set()
+    found: set[str] = set()
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        analysis.charge()
+        if isinstance(current, ast.NamedExpr):
+            found.update(_client_assignment_target_names(current.target))
+        for child in ast.iter_child_nodes(current):
+            if isinstance(child, _PYTHON_SCOPE_NODES):
+                continue
+            stack.append(child)
+    return found
+
+
+def _walk_client_nested_scope(node: ast.AST, scope: _ClientScope, inherited: _ClientScope, analysis: _ClientAnalysis) -> None:
+    annotation_bindings = {name for annotation in _client_scope_annotations(node) for name in _walrus_target_names(annotation, analysis)}
+    _drop_client_bindings(scope, annotation_bindings)
+    for expr in _client_scope_prelude(node):
+        _walk_client_scope(expr, scope, inherited, analysis)
+        if analysis.found is not None:
+            return
+    body = node.body if isinstance(node.body, list) else [node.body]
+    unstable_aliases = _client_unstable_aliases(body, analysis)
+    if isinstance(node, ast.ClassDef):
+        inner, nested = inherited.aliases_only(analysis, unstable_aliases=unstable_aliases), inherited
+    else:
+        inner = inherited.aliases_only(analysis, _client_scope_bindings(node, analysis), unstable_aliases)
+        nested = inner
+    _walk_client_statements(body, inner, nested, analysis)
+    if not isinstance(node, ast.Lambda):
+        _drop_client_bindings(scope, {node.name})
+
+
+def _match_capture_names(node: ast.AST) -> list[str]:
+    if isinstance(node, ast.MatchMapping):
+        return [node.rest] if node.rest else []
+    return [node.name] if node.name else []
+
+
+def _client_scope_prelude(node: ast.AST) -> list[ast.AST]:
+    """Expressions a scope-defining statement evaluates in its *enclosing* scope, not the new one:
+    decorators, argument/keyword defaults, and class bases/keywords. Annotations are not walked for
+    sinks -- whether the runtime evaluates one depends on the scope, on `from __future__ import
+    annotations`, and on the Python version. Their possible binding effects are invalidated
+    separately so skipping an annotation cannot leave a stale handle behind.
+    """
+    if isinstance(node, ast.ClassDef):
+        return [*node.decorator_list, *node.bases, *(keyword.value for keyword in node.keywords)]
+    defaults = [default for default in [*node.args.defaults, *node.args.kw_defaults] if default is not None]
+    if isinstance(node, ast.Lambda):
+        return defaults
+    return [*node.decorator_list, *defaults]
+
+
+def _client_scope_annotations(node: ast.AST) -> list[ast.AST]:
+    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return []
+    args = node.args
+    annotations = [arg.annotation for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs] if arg.annotation is not None]
+    for extra in (args.vararg, args.kwarg):
+        if extra is not None and extra.annotation is not None:
+            annotations.append(extra.annotation)
+    if node.returns is not None:
+        annotations.append(node.returns)
+    return annotations
+
+
+def _client_unstable_aliases(body: list[ast.AST], analysis: _ClientAnalysis) -> frozenset[str]:
+    """Names whose import-alias value is not stable for a nested scope.
+
+    This is a binding-only prepass: it never interprets expression values or paths. Any ordinary
+    binding makes a same-named import alias non-inheritable, as does a repeated/star import. Scope
+    bodies are skipped, while walrus targets in their enclosing-scope preludes are invalidated.
+    """
+    imported: set[str] = set()
+    unstable: set[str] = set()
+    saw_star_import = False
+    stack = list(reversed(body))
+    while stack:
+        current = stack.pop()
+        analysis.charge()
+        if isinstance(current, (ast.Import, ast.ImportFrom)):
+            for alias in current.names:
+                if alias.name == "*":
+                    saw_star_import = True
+                    continue
+                name = alias.asname or alias.name.split(".")[0]
+                if name in imported:
+                    unstable.add(name)
+                imported.add(name)
+            continue
+        if isinstance(current, _PYTHON_SCOPE_NODES):
+            if not isinstance(current, ast.Lambda):
+                unstable.add(current.name)
+            for expr in [*_client_scope_prelude(current), *_client_scope_annotations(current)]:
+                unstable.update(_walrus_target_names(expr, analysis))
+            continue
+        if isinstance(current, _PYTHON_COMPREHENSION_NODES):
+            unstable.update(_walrus_target_names(current, analysis))
+            continue
+        if isinstance(current, ast.Global | ast.Nonlocal):
+            continue
+        if isinstance(current, ast.Name) and isinstance(current.ctx, (ast.Store, ast.Del)):
+            unstable.add(current.id)
+        elif isinstance(current, ast.ExceptHandler) and current.name:
+            unstable.add(current.name)
+        elif isinstance(current, _PYTHON_MATCH_CAPTURE_NODES):
+            unstable.update(_match_capture_names(current))
+        stack.extend(reversed(list(ast.iter_child_nodes(current))))
+    if saw_star_import:
+        unstable.update(imported)
+    return frozenset(unstable)
+
+
+def _client_scope_bindings(node: ast.AST, analysis: _ClientAnalysis) -> set[str]:
+    """Names that shadow inherited constructor aliases throughout a function scope."""
+    args = node.args
+    names = {arg.arg for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs]}
+    for extra in (args.vararg, args.kwarg):
+        if extra is not None:
+            names.add(extra.arg)
+    declared: set[str] = set()
+    for statement in node.body if isinstance(node.body, list) else [node.body]:
+        _collect_client_scope_bindings(statement, names, declared, analysis)
+    return names - declared
+
+
+def _collect_client_scope_bindings(node: ast.AST, names: set[str], declared: set[str], analysis: _ClientAnalysis) -> None:
+    analysis.charge()
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        names.add(node.name)  # The statement binds its own name here; its body is a separate scope.
+        return
+    if isinstance(node, ast.Lambda):
+        return
+    if isinstance(node, (ast.Global, ast.Nonlocal)):
+        declared.update(node.names)
+        return
+    if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+        names.add(node.id)
+    elif isinstance(node, ast.ExceptHandler) and node.name:
+        names.add(node.name)
+    elif isinstance(node, (ast.Import, ast.ImportFrom)):
+        for alias in node.names:
+            names.add(alias.asname or alias.name.split(".")[0])
+    elif isinstance(node, _PYTHON_MATCH_CAPTURE_NODES):
+        names.update(_match_capture_names(node))
+    if isinstance(node, _PYTHON_COMPREHENSION_NODES):
+        # The expression is not analyzed for sinks, but a walrus target is local to the
+        # containing function. Removing a same-named inherited constructor alias prevents a
+        # definition-order false positive; whether the comprehension executes remains a false
+        # negative by design.
+        names.update(_walrus_target_names(node, analysis))
+        return
+    for child in ast.iter_child_nodes(node):
+        _collect_client_scope_bindings(child, names, declared, analysis)
+
+
+def _client_constructor_from_value(value: ast.AST | None, scope: _ClientScope) -> str:
+    if isinstance(value, ast.Call):
+        called = _python_import_name(value.func, scope.aliases)
+        return called if called in _PYTHON_CLIENT_CONSTRUCTORS else ""
+    if isinstance(value, ast.Name):
+        return scope.handles.get(value.id, "")
+    return ""
+
+
+def _rebind_client_scope(targets: list[ast.AST], value: ast.AST | None, scope: _ClientScope) -> None:
+    """Apply one binding: drop the targets, then re-add them if the value is a client handle.
+
+    The value is resolved before the targets are dropped, so `session = session` and `s = session`
+    keep the handle. Name-to-name propagation is what stops a two-character rename from shedding it;
+    it stays one level, so a handle reached through an attribute or an item is not tracked.
+    """
+    constructor = _client_constructor_from_value(value, scope)
+    names = {name for target in targets for name in _client_assignment_target_names(target)}
+    _drop_client_bindings(scope, names)
+    if constructor:
+        for target in targets:
+            if isinstance(target, ast.Name):
+                scope.handles[target.id] = constructor
+
+
+def _client_assignment_target_names(target: ast.AST) -> list[str]:
+    if isinstance(target, ast.Name):
+        return [target.id]
+    if isinstance(target, ast.Starred):
+        return _client_assignment_target_names(target.value)
+    if isinstance(target, (ast.List, ast.Tuple)):
+        return [name for element in target.elts for name in _client_assignment_target_names(element)]
+    return []
+
+
+def _drop_client_bindings(scope: _ClientScope, names: set[str]) -> None:
+    for name in names:
+        scope.handles.pop(name, None)
+        scope.aliases.pop(name, None)
+
+
+def _bind_client_import(node: ast.Import | ast.ImportFrom, scope: _ClientScope) -> None:
+    for alias in node.names:
+        if alias.name == "*":
+            continue
+        name = alias.asname or alias.name.split(".")[0]
+        _drop_client_bindings(scope, {name})
+        if isinstance(node, ast.Import):
+            scope.aliases[name] = alias.name if alias.asname else name
+        elif node.module:
+            scope.aliases[name] = f"{node.module}.{alias.name}"
+
+
+def _call_is_client_handle_sink(node: ast.Call, handles: dict[str, str]) -> bool:
+    func = node.func
+    if not isinstance(func, ast.Attribute) or not isinstance(func.value, ast.Name):
+        return False
+    constructor = handles.get(func.value.id)
+    return bool(constructor and func.attr in _PYTHON_CLIENT_SPECS[constructor].methods)
+
+
+def _yaml_load_uses_safe_loader(node: ast.Call) -> bool:
+    for keyword in node.keywords:
+        if keyword.arg in {"Loader", "loader"}:
+            name = _python_name(keyword.value, {})
+            if "SafeLoader" in name:
+                return True
+    return False

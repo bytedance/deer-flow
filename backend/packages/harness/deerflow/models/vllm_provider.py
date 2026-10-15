@@ -10,11 +10,19 @@ This provider preserves ``reasoning`` on:
 - non-streaming responses
 - streaming deltas
 - multi-turn request payloads
+
+Deployments that still emit the older ``reasoning_content`` wire field are
+covered too: when ``reasoning`` is absent or null the provider falls back to
+``reasoning_content``, so either spelling is echoed back under the single
+``reasoning`` key. A payload carrying both keeps ``reasoning``.
 """
 
 from __future__ import annotations
 
 import json
+import threading
+import time
+from collections import OrderedDict
 from collections.abc import Mapping
 from typing import Any, cast
 
@@ -30,10 +38,15 @@ from langchain_core.messages import (
     SystemMessageChunk,
     ToolMessageChunk,
 )
+from langchain_core.messages.ai import UsageMetadata, subtract_usage
 from langchain_core.messages.tool import tool_call_chunk
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from langchain_openai import ChatOpenAI
 from langchain_openai.chat_models.base import _create_usage_metadata
+from pydantic import Field, PrivateAttr
+
+_CUMULATIVE_USAGE_TRACKER_CAPACITY = 1024
+_CUMULATIVE_USAGE_TRACKER_IDLE_SECONDS = 60 * 60
 
 
 def _normalize_vllm_chat_template_kwargs(payload: dict[str, Any]) -> None:
@@ -59,7 +72,8 @@ def _normalize_vllm_chat_template_kwargs(payload: dict[str, Any]) -> None:
     normalized_chat_template_kwargs = dict(chat_template_kwargs)
     normalized_chat_template_kwargs.setdefault("enable_thinking", normalized_chat_template_kwargs["thinking"])
     normalized_chat_template_kwargs.pop("thinking", None)
-    extra_body["chat_template_kwargs"] = normalized_chat_template_kwargs
+    # LangChain may reuse the caller's or model's extra_body mapping across requests.
+    payload["extra_body"] = {**extra_body, "chat_template_kwargs": normalized_chat_template_kwargs}
 
 
 def _reasoning_to_text(reasoning: Any) -> str:
@@ -91,6 +105,12 @@ def _reasoning_to_text(reasoning: Any) -> str:
         return str(reasoning)
 
 
+def _pick_reasoning(fields: Mapping[str, Any]) -> Any:
+    """Prefer non-null ``reasoning`` (including empty strings) over the legacy field."""
+    reasoning = fields.get("reasoning")
+    return fields.get("reasoning_content") if reasoning is None else reasoning
+
+
 def _convert_delta_to_message_chunk_with_reasoning(_dict: Mapping[str, Any], default_class: type[BaseMessageChunk]) -> BaseMessageChunk:
     """Convert a streaming delta to a LangChain message chunk while preserving reasoning."""
     id_ = _dict.get("id")
@@ -104,7 +124,7 @@ def _convert_delta_to_message_chunk_with_reasoning(_dict: Mapping[str, Any], def
             function_call["name"] = ""
         additional_kwargs["function_call"] = function_call
 
-    reasoning = _dict.get("reasoning")
+    reasoning = _pick_reasoning(_dict)
     if reasoning is not None:
         additional_kwargs["reasoning"] = reasoning
         reasoning_text = _reasoning_to_text(reasoning)
@@ -149,11 +169,22 @@ def _convert_delta_to_message_chunk_with_reasoning(_dict: Mapping[str, Any], def
 
 def _restore_reasoning_field(payload_msg: dict[str, Any], orig_msg: AIMessage) -> None:
     """Re-inject vLLM reasoning onto outgoing assistant messages."""
-    reasoning = orig_msg.additional_kwargs.get("reasoning")
-    if reasoning is None:
-        reasoning = orig_msg.additional_kwargs.get("reasoning_content")
+    reasoning = _pick_reasoning(orig_msg.additional_kwargs)
     if reasoning is not None:
         payload_msg["reasoning"] = reasoning
+
+
+def _get_completion_id(chunk: Mapping[str, Any]) -> str | None:
+    """Return a stable completion id when the provider supplied one."""
+    candidates = [chunk.get("id")]
+    nested_chunk = chunk.get("chunk")
+    if isinstance(nested_chunk, Mapping):
+        candidates.append(nested_chunk.get("id"))
+
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+    return None
 
 
 class VllmChatModel(ChatOpenAI):
@@ -161,9 +192,40 @@ class VllmChatModel(ChatOpenAI):
 
     model_config = {"arbitrary_types_allowed": True}
 
+    cumulative_stream_usage: bool = Field(
+        default=False,
+        description=("Treat streaming usage snapshots from vLLM as cumulative per completion and convert them to per-chunk deltas."),
+    )
+    _cumulative_usage_by_completion: OrderedDict[str, tuple[UsageMetadata, float]] = PrivateAttr(default_factory=OrderedDict)
+    _cumulative_usage_lock: Any = PrivateAttr(default_factory=threading.Lock)
+
     @property
     def _llm_type(self) -> str:
         return "vllm-openai-compatible"
+
+    def _usage_delta(self, completion_id: str, usage: UsageMetadata, *, terminal: bool) -> UsageMetadata:
+        """Convert a completion's cumulative usage snapshot into a delta."""
+        with self._cumulative_usage_lock:
+            previous_snapshot = self._cumulative_usage_by_completion.get(completion_id)
+            previous = previous_snapshot[0] if previous_snapshot is not None else None
+            delta = subtract_usage(usage, previous)
+            if terminal:
+                self._cumulative_usage_by_completion.pop(completion_id, None)
+            else:
+                now = time.monotonic()
+                self._cumulative_usage_by_completion[completion_id] = (usage, now)
+                self._cumulative_usage_by_completion.move_to_end(completion_id)
+                while len(self._cumulative_usage_by_completion) > _CUMULATIVE_USAGE_TRACKER_CAPACITY:
+                    oldest_completion_id, (_, updated_at) = next(iter(self._cumulative_usage_by_completion.items()))
+                    if now - updated_at < _CUMULATIVE_USAGE_TRACKER_IDLE_SECONDS:
+                        break
+                    self._cumulative_usage_by_completion.pop(oldest_completion_id, None)
+            return delta
+
+    def _clear_usage_snapshot(self, completion_id: str) -> None:
+        """Forget a completed stream even when its terminal frame has no usage."""
+        with self._cumulative_usage_lock:
+            self._cumulative_usage_by_completion.pop(completion_id, None)
 
     def _get_request_payload(
         self,
@@ -201,7 +263,7 @@ class VllmChatModel(ChatOpenAI):
             message = generation.message
             if not isinstance(message, AIMessage):
                 continue
-            reasoning = choice.get("message", {}).get("reasoning")
+            reasoning = _pick_reasoning(choice.get("message") or {})
             if reasoning is None:
                 continue
             message.additional_kwargs["reasoning"] = reasoning
@@ -224,9 +286,15 @@ class VllmChatModel(ChatOpenAI):
         token_usage = chunk.get("usage")
         choices = chunk.get("choices", []) or chunk.get("chunk", {}).get("choices", [])
         usage_metadata = _create_usage_metadata(token_usage, chunk.get("service_tier")) if token_usage else None
+        completion_id = _get_completion_id(chunk) if self.cumulative_stream_usage else None
 
         if len(choices) == 0:
             generation_chunk = ChatGenerationChunk(message=default_chunk_class(content="", usage_metadata=usage_metadata), generation_info=base_generation_info)
+            if completion_id is not None:
+                if usage_metadata is not None and isinstance(generation_chunk.message, AIMessageChunk):
+                    generation_chunk.message.usage_metadata = self._usage_delta(completion_id, usage_metadata, terminal=True)
+                else:
+                    self._clear_usage_snapshot(completion_id)
             if self.output_version == "v1":
                 generation_chunk.message.content = []
                 generation_chunk.message.response_metadata["output_version"] = "v1"
@@ -252,6 +320,8 @@ class VllmChatModel(ChatOpenAI):
             generation_info["logprobs"] = logprobs
 
         if usage_metadata and isinstance(message_chunk, AIMessageChunk):
+            if completion_id is not None:
+                usage_metadata = self._usage_delta(completion_id, usage_metadata, terminal=False)
             message_chunk.usage_metadata = usage_metadata
 
         message_chunk.response_metadata["model_provider"] = "openai"

@@ -1,0 +1,301 @@
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from app.gateway.deps import get_config
+from app.gateway.routers import features
+
+
+@pytest.fixture(autouse=True)
+def isolated_worker_env(monkeypatch):
+    """Keep the feature surface independent of the invoking shell's worker count.
+
+    ``browser_capability()`` consults the Gateway worker count, which uvicorn takes
+    from ``WEB_CONCURRENCY`` on the launches that pass no ``--workers``. An exported
+    value there would otherwise make the browser-control assertions below report a
+    refusal the code under test did not produce.
+    """
+    monkeypatch.delenv("GATEWAY_WORKERS", raising=False)
+    monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
+
+
+def _app_with_config(
+    *,
+    agents_api_enabled: bool,
+    browser_enabled: bool = False,
+    browser_extra: dict | None = None,
+    mcp_tasks_available: bool = False,
+    subagent_batches_available: bool = False,
+    subagent_batch_repo_available: bool | None = None,
+    conversation_references_enabled: bool = False,
+    knowledge_base_enabled: bool = False,
+    scope_selection_enabled: bool = False,
+    knowledge_search_provider: str | None = None,
+    scheduled_task_repo_available: bool = False,
+    scheduler_running: bool = False,
+    scheduler_tool_enabled: bool = False,
+    channel_connections_enabled: bool | None = None,
+) -> FastAPI:
+    app = FastAPI()
+    app.state.scheduled_task_repo = object() if scheduled_task_repo_available else None
+    app.state.scheduled_task_service = SimpleNamespace(is_running=scheduler_running) if scheduled_task_repo_available else None
+    app.state.mcp_tasks_available = mcp_tasks_available
+    app.state.subagent_batches_available = subagent_batches_available
+    if subagent_batch_repo_available is None:
+        subagent_batch_repo_available = subagent_batches_available
+    app.state.subagent_batch_repo = object() if subagent_batch_repo_available else None
+    app.include_router(features.router)
+    tools = []
+    if browser_enabled:
+        tools.append(SimpleNamespace(name="browser_navigate", use="deerflow.community.browser:browser_navigate_tool", model_extra=browser_extra or {}))
+    if conversation_references_enabled:
+        tools.append(SimpleNamespace(name="read_conversation", use="deerflow.tools.conversation:read_conversation", model_extra={}))
+    fake_config = SimpleNamespace(
+        agents_api=SimpleNamespace(enabled=agents_api_enabled),
+        tools=tools,
+        subagent_runtime=SimpleNamespace(max_running=3),
+        knowledge_base=SimpleNamespace(
+            enabled=knowledge_base_enabled,
+            scope_selection_enabled=scope_selection_enabled,
+        ),
+        scheduler=SimpleNamespace(enabled=scheduler_running, tool_enabled=scheduler_tool_enabled, min_once_delay_seconds=60),
+    )
+    if channel_connections_enabled is not None:
+        fake_config.channel_connections = SimpleNamespace(enabled=channel_connections_enabled)
+    search_tool = SimpleNamespace(use=knowledge_search_provider) if knowledge_search_provider is not None else None
+    fake_config.get_tool_config = lambda name: search_tool if name == "knowledge_search" else None
+    app.dependency_overrides[get_config] = lambda: fake_config
+    return app
+
+
+def test_features_reports_agents_api_enabled() -> None:
+    with TestClient(_app_with_config(agents_api_enabled=True)) as client:
+        response = client.get("/api/features")
+    assert response.status_code == 200
+    assert response.json() == {
+        "agents_api": {"enabled": True},
+        "browser_control": {"enabled": False},
+        "mcp_tasks": {"enabled": False},
+        "subagent_batches": {
+            "enabled": False,
+            "repository_available": False,
+            "worker_running": False,
+            "max_running": 3,
+        },
+        "conversation_references": {"enabled": False, "max_references": 3},
+        "knowledge_base": {
+            "scope_selection_enabled": False,
+        },
+        "scheduled_tasks": {"available": False, "running": False, "tool_enabled": False, "min_interval_seconds": 60, "group_notifications": False},
+        "thread_activity": {"available": False},
+    }
+
+
+def test_features_reports_agents_api_disabled() -> None:
+    with TestClient(_app_with_config(agents_api_enabled=False)) as client:
+        response = client.get("/api/features")
+    assert response.status_code == 200
+    assert response.json() == {
+        "agents_api": {"enabled": False},
+        "browser_control": {"enabled": False},
+        "mcp_tasks": {"enabled": False},
+        "subagent_batches": {
+            "enabled": False,
+            "repository_available": False,
+            "worker_running": False,
+            "max_running": 3,
+        },
+        "conversation_references": {"enabled": False, "max_references": 3},
+        "knowledge_base": {
+            "scope_selection_enabled": False,
+        },
+        "scheduled_tasks": {"available": False, "running": False, "tool_enabled": False, "min_interval_seconds": 60, "group_notifications": False},
+        "thread_activity": {"available": False},
+    }
+
+
+def test_features_reports_conversation_references_when_the_tool_is_configured() -> None:
+    with TestClient(_app_with_config(agents_api_enabled=True, conversation_references_enabled=True)) as client:
+        response = client.get("/api/features")
+    assert response.status_code == 200
+    assert response.json()["conversation_references"] == {"enabled": True, "max_references": 3}
+
+
+def test_features_enables_scope_selection_only_for_exact_ragflow_provider() -> None:
+    with TestClient(
+        _app_with_config(
+            agents_api_enabled=True,
+            knowledge_base_enabled=True,
+            scope_selection_enabled=True,
+            knowledge_search_provider=("deerflow.community.ragflow.tools:knowledge_search_tool"),
+        )
+    ) as client:
+        response = client.get("/api/features")
+
+    assert response.status_code == 200
+    assert response.json()["knowledge_base"]["scope_selection_enabled"] is True
+
+
+@pytest.mark.parametrize(
+    ("knowledge_base_enabled", "provider"),
+    [
+        (False, "deerflow.community.ragflow.tools:knowledge_search_tool"),
+        (True, "deerflow.community.lightrag.tools:knowledge_search_tool"),
+        (True, "custom.provider:knowledge_search_tool"),
+        (True, None),
+    ],
+)
+def test_features_scope_selection_fails_closed(
+    knowledge_base_enabled: bool,
+    provider: str | None,
+) -> None:
+    with TestClient(
+        _app_with_config(
+            agents_api_enabled=True,
+            knowledge_base_enabled=knowledge_base_enabled,
+            scope_selection_enabled=True,
+            knowledge_search_provider=provider,
+        )
+    ) as client:
+        response = client.get("/api/features")
+
+    assert response.status_code == 200
+    assert response.json()["knowledge_base"]["scope_selection_enabled"] is False
+
+
+def test_features_reports_mcp_tasks_startup_capability() -> None:
+    with TestClient(_app_with_config(agents_api_enabled=True, mcp_tasks_available=True)) as client:
+        response = client.get("/api/features")
+    assert response.status_code == 200
+    assert response.json()["mcp_tasks"] == {"enabled": True}
+
+
+def test_features_reports_subagent_batch_startup_capability() -> None:
+    with TestClient(
+        _app_with_config(
+            agents_api_enabled=True,
+            subagent_batches_available=True,
+        )
+    ) as client:
+        response = client.get("/api/features")
+    assert response.status_code == 200
+    assert response.json()["subagent_batches"] == {
+        "enabled": True,
+        "repository_available": True,
+        "worker_running": True,
+        "max_running": 3,
+    }
+
+
+def test_features_distinguishes_batch_history_from_worker_availability() -> None:
+    with TestClient(
+        _app_with_config(
+            agents_api_enabled=True,
+            subagent_batches_available=False,
+            subagent_batch_repo_available=True,
+        )
+    ) as client:
+        response = client.get("/api/features")
+    assert response.status_code == 200
+    assert response.json()["subagent_batches"] == {
+        "enabled": False,
+        "repository_available": True,
+        "worker_running": False,
+        "max_running": 3,
+    }
+
+
+def test_features_reports_browser_control_enabled_when_configured_and_runtime_available() -> None:
+    with (
+        patch("app.gateway.browser_capability.importlib.util.find_spec", return_value=object()),
+        TestClient(_app_with_config(agents_api_enabled=True, browser_enabled=True)) as client,
+    ):
+        response = client.get("/api/features")
+    assert response.status_code == 200
+    assert response.json()["browser_control"] == {"enabled": True}
+
+
+def test_features_reports_browser_control_disabled_when_runtime_missing() -> None:
+    with (
+        patch("app.gateway.browser_capability.importlib.util.find_spec", return_value=None),
+        TestClient(_app_with_config(agents_api_enabled=True, browser_enabled=True)) as client,
+    ):
+        response = client.get("/api/features")
+    assert response.status_code == 200
+    assert response.json()["browser_control"] == {"enabled": False}
+
+
+def test_features_reports_browser_control_disabled_for_unguarded_cdp() -> None:
+    with (
+        patch("app.gateway.browser_capability.importlib.util.find_spec", return_value=object()),
+        TestClient(
+            _app_with_config(
+                agents_api_enabled=True,
+                browser_enabled=True,
+                browser_extra={"cdp_url": "http://127.0.0.1:9222"},
+            ),
+        ) as client,
+    ):
+        response = client.get("/api/features")
+    assert response.status_code == 200
+    assert response.json()["browser_control"] == {"enabled": False}
+
+
+@pytest.mark.parametrize(
+    ("repo", "running", "tool", "expected"),
+    [
+        (False, False, False, {"available": False, "running": False, "tool_enabled": False}),
+        (True, False, True, {"available": True, "running": False, "tool_enabled": False}),
+        (True, True, False, {"available": True, "running": True, "tool_enabled": False}),
+        (True, True, True, {"available": True, "running": True, "tool_enabled": True}),
+    ],
+    ids=["no-repo", "repo-service-not-running", "running-tool-off", "running-tool-on"],
+)
+def test_features_reports_scheduled_tasks_process_state(repo: bool, running: bool, tool: bool, expected: dict) -> None:
+    app = _app_with_config(agents_api_enabled=True, scheduled_task_repo_available=repo, scheduler_running=running, scheduler_tool_enabled=tool)
+    with TestClient(app) as client:
+        response = client.get("/api/features")
+    assert response.status_code == 200
+    assert response.json()["scheduled_tasks"] == {**expected, "min_interval_seconds": 60, "group_notifications": False}
+
+
+@pytest.mark.parametrize("repo", [False, True])
+@pytest.mark.parametrize("connections", [None, False, True])
+@pytest.mark.parametrize("running", [False, True])
+def test_features_group_notifications_require_repository_and_channel_connections(repo, connections, running):
+    app = _app_with_config(agents_api_enabled=True, scheduled_task_repo_available=repo, scheduler_running=running, channel_connections_enabled=connections)
+    with TestClient(app) as client:
+        response = client.get("/api/features")
+    assert response.status_code == 200
+    # Existing tasks remain configurable even while the local poller is stopped.
+    assert response.json()["scheduled_tasks"]["group_notifications"] is (repo and connections is True)
+
+
+class _SqlRunStore:
+    async def latest_change(self, *, user_id):
+        return None
+
+
+@pytest.mark.parametrize(
+    ("run_store", "read_repo", "available"),
+    [
+        (None, None, False),
+        (SimpleNamespace(), object(), False),  # memory run store: no run-change clock seek
+        (_SqlRunStore(), None, False),
+        (_SqlRunStore(), object(), True),
+    ],
+    ids=["memory", "memory-run-store", "no-read-repo", "sql"],
+)
+def test_features_reports_thread_activity_only_with_sql_persistence(run_store, read_repo, available: bool) -> None:
+    """The frontend polls /api/thread-activity only when this says so; a
+    missing block on an older backend means unavailable."""
+    app = _app_with_config(agents_api_enabled=True)
+    app.state.run_store = run_store
+    app.state.thread_read_repo = read_repo
+    with TestClient(app) as client:
+        response = client.get("/api/features")
+    assert response.status_code == 200
+    assert response.json()["thread_activity"] == {"available": available}

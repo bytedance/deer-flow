@@ -1,9 +1,9 @@
 "use client";
 
-import { Streamdown } from "streamdown";
+import { SafeStreamdown } from "@/core/streamdown/components";
 
 import { aboutMarkdown } from "./about-content";
 
 export function AboutSettingsPage() {
-  return <Streamdown>{aboutMarkdown}</Streamdown>;
+  return <SafeStreamdown>{aboutMarkdown}</SafeStreamdown>;
 }

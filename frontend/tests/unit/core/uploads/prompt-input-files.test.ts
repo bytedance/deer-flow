@@ -1,4 +1,4 @@
-import { afterEach, expect, test, vi } from "vitest";
+import { afterEach, expect, test, rs } from "@rstest/core";
 
 import {
   type PromptInputFilePart,
@@ -6,8 +6,8 @@ import {
 } from "@/core/uploads/prompt-input-files";
 
 afterEach(() => {
-  vi.restoreAllMocks();
-  vi.unstubAllGlobals();
+  rs.restoreAllMocks();
+  rs.unstubAllGlobals();
 });
 
 test("exports the prompt-input file conversion helper", () => {
@@ -17,9 +17,9 @@ test("exports the prompt-input file conversion helper", () => {
 test("reuses the original File when a prompt attachment already has one", async () => {
   const file = new File(["hello"], "note.txt", { type: "text/plain" });
 
-  vi.stubGlobal(
+  rs.stubGlobal(
     "fetch",
-    vi.fn(() => {
+    rs.fn(() => {
       throw new Error("fetch should not run when File is already present");
     }),
   );
@@ -76,11 +76,11 @@ test("returns null when upload preparation is missing required data", async () =
 });
 
 test("returns null when the URL fallback fetch fails", async () => {
-  const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => ({}));
+  const warnSpy = rs.spyOn(console, "warn").mockImplementation(() => ({}));
 
-  vi.stubGlobal(
+  rs.stubGlobal(
     "fetch",
-    vi.fn(async () => {
+    rs.fn(async () => {
       throw new Error("network down");
     }),
   );
@@ -96,11 +96,11 @@ test("returns null when the URL fallback fetch fails", async () => {
 });
 
 test("returns null when the URL fallback fetch response is non-ok", async () => {
-  const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => ({}));
+  const warnSpy = rs.spyOn(console, "warn").mockImplementation(() => ({}));
 
-  vi.stubGlobal(
+  rs.stubGlobal(
     "fetch",
-    vi.fn(
+    rs.fn(
       async () =>
         new Response("missing", {
           status: 404,

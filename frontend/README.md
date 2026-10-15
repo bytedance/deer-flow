@@ -97,6 +97,7 @@ tests/
 src/
 ├── app/                    # Next.js App Router pages
 │   ├── api/                # API routes
+│   ├── showcase/           # Allowlisted public read-only demos
 │   ├── workspace/          # Main workspace pages
 │   └── mock/               # Mock/demo pages
 ├── components/             # React components
@@ -126,24 +127,43 @@ src/
 
 ## Scripts
 
-| Command             | Description                             |
-| ------------------- | --------------------------------------- |
-| `pnpm dev`          | Start development server with Turbopack |
-| `pnpm build`        | Build for production                    |
-| `pnpm start`        | Start production server                 |
-| `pnpm test`         | Run unit tests with Vitest              |
-| `pnpm test:e2e`     | Run E2E tests with Playwright           |
-| `pnpm format`       | Check formatting with Prettier          |
-| `pnpm format:write` | Apply formatting with Prettier          |
-| `pnpm lint`         | Run ESLint                              |
-| `pnpm lint:fix`     | Fix ESLint issues                       |
-| `pnpm typecheck`    | Run TypeScript type checking            |
-| `pnpm check`        | Run both lint and typecheck             |
+| Command             | Description                           |
+| ------------------- | ------------------------------------- |
+| `pnpm dev`          | Start development server with Webpack |
+| `pnpm build`        | Build for production                  |
+| `pnpm start`        | Start production server               |
+| `pnpm test`         | Run unit tests with Rstest            |
+| `pnpm test:e2e`     | Run E2E tests with Playwright         |
+| `pnpm format`       | Check formatting with Prettier        |
+| `pnpm format:write` | Apply formatting with Prettier        |
+| `pnpm lint`         | Run ESLint                            |
+| `pnpm lint:fix`     | Fix ESLint issues                     |
+| `pnpm typecheck`    | Run TypeScript type checking          |
+| `pnpm check`        | Run both lint and typecheck           |
 
 ## Development Notes
 
+HTML artifact previews keep an opaque iframe sandbox. Static sibling images,
+responsive image sources, classic scripts, stylesheets, CSS imports and CSS
+`url()` resources in the same thread's artifact route are fetched by the
+authenticated parent and inlined as data URLs. Existing external
+resources and external `<base>` URLs retain their browser behavior. Resource
+preparation is capped at 32 resources, 4 MiB per resource, 16 MiB total, eight
+nested CSS imports, 24 MiB of expanded references and ten seconds; unavailable or oversized resources show a
+partial-preview notice. Switching artifacts cancels preparation and releases
+the generated document Blob URL.
+Resource 401 responses remain local to the partial preview; only the document
+load uses the application's login-redirect policy. Preparation preserves the
+original doctype (including its absence) and handles inline SVG styles.
+
+This supports static generated reports rather than a complete website runtime.
+ES module imports, resources created dynamically by JavaScript, `fetch()`/XHR,
+iframes and navigation still follow opaque-origin browser restrictions and do
+not receive the parent session. View source or download the files when a report
+requires those features.
+
 - Uses pnpm workspaces (see `packageManager` in package.json)
-- Turbopack enabled by default in development for faster builds
+- Webpack is the default development bundler until the upstream Turbopack PostCSS worker leak is fixed in a stable Next.js release (#5132). Set `DEER_FLOW_DEV_BUNDLER=turbo` to opt in to Turbopack for local diagnosis, or `DEER_FLOW_DEV_BUNDLER=webpack` to select Webpack explicitly. Reconsider the default after the stable fix is verified on macOS arm64 and Linux.
 - Environment validation can be skipped with `SKIP_ENV_VALIDATION=1` (useful for Docker)
 - Backend API URLs are optional; nginx proxy is used by default in development
 

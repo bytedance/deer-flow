@@ -1,0 +1,412 @@
+"""Command-line entry point and launch-mode planning for the DeerFlow TUI.
+
+``plan_launch`` is a pure decision function (fully unit-tested): given argv, TTY
+state and the environment, it decides whether to open the terminal UI or run a
+headless one-shot. ``main`` wires that decision to the embedded ``DeerFlowClient``
+and lazily imports the Textual app only when actually launching the UI, so the
+``deerflow`` console script still runs headless commands without Textual present.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from deerflow.client import StreamEvent
+
+_UNSET = object()
+
+Mode = Literal["tui", "print", "json", "headless-help"]
+
+
+@dataclass
+class LaunchPlan:
+    mode: Mode
+    message: str | None = None
+    read_stdin: bool = False
+    thread_id: str | None = None
+    continue_recent: bool = False
+    forced_tui: bool = False
+    transparent: bool = False
+    recursion_limit: int | None = None
+    reason: str = ""
+
+
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a positive integer") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="deerflow",
+        description="DeerFlow terminal workbench — a TUI over the embedded DeerFlow harness.",
+        epilog="Extension management: deerflow extensions --help",
+        add_help=True,
+    )
+    parser.add_argument("message", nargs="*", help="initial prompt for the TUI, or the message for --print, --json or --cli")
+    # One headless mode runs per invocation; refuse both so neither message is dropped.
+    headless = parser.add_mutually_exclusive_group()
+    headless.add_argument(
+        "--print",
+        dest="print",
+        nargs="*",
+        default=_UNSET,
+        metavar="MESSAGE",
+        help="headless one-shot: print the final answer and exit (reads stdin if no MESSAGE)",
+    )
+    headless.add_argument(
+        "--json",
+        dest="json",
+        nargs="*",
+        default=_UNSET,
+        metavar="MESSAGE",
+        help="headless streaming: emit newline-delimited JSON StreamEvents and exit",
+    )
+    parser.add_argument("--tui", action="store_true", help="force the terminal UI (error if unavailable)")
+    parser.add_argument(
+        "--tui-transparent",
+        action="store_true",
+        help="use the terminal's default background in the TUI",
+    )
+    parser.add_argument("--cli", action="store_true", help="force headless/classic mode for one invocation")
+    parser.add_argument("--continue", dest="continue_recent", action="store_true", help="resume the most recent thread")
+    parser.add_argument("--resume", dest="resume", metavar="THREAD", default=None, help="resume a thread by id or title")
+    parser.add_argument(
+        "--recursion-limit",
+        type=_positive_int,
+        metavar="N",
+        help="headless agent-loop super-step limit (default: 100)",
+    )
+    return parser
+
+
+def _strip_chat(argv: Sequence[str]) -> list[str]:
+    """Accept an optional leading ``chat`` subcommand as an alias for the default surface."""
+    argv = list(argv)
+    if argv and argv[0] == "chat":
+        return argv[1:]
+    return argv
+
+
+def _headless_message(parser: argparse.ArgumentParser, flag: str, values: list[str], positional: str | None) -> str | None:
+    """Return the words after a ``--print``/``--json`` flag, or else the positional words.
+
+    argparse loses the order between the flag's words and positional words, so a
+    message split around the flag is refused instead of reassembled by guess.
+    """
+    message = " ".join(values).strip() or None
+    if message and positional:
+        parser.error(f'{flag}: pass the message in one place, e.g. deerflow {flag} "your question"')
+    return message or positional
+
+
+def _truthy(value: object) -> bool:
+    return isinstance(value, str) and value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def plan_launch(
+    argv: Sequence[str],
+    *,
+    stdin_isatty: bool,
+    stdout_isatty: bool,
+    env: dict[str, str],
+) -> LaunchPlan:
+    """Decide what surface to launch. Pure: no I/O, no client construction."""
+    parser = build_parser()
+    args = parser.parse_args(_strip_chat(argv))
+    positional = " ".join(args.message).strip() or None
+    resume = args.resume
+    continue_recent = bool(args.continue_recent)
+    headless_requested = args.print is not _UNSET or args.json is not _UNSET or args.cli
+    if args.recursion_limit is not None and not headless_requested:
+        parser.error("--recursion-limit requires --print, --json, or --cli")
+
+    if args.print is not _UNSET:
+        message = _headless_message(parser, "--print", args.print, positional)
+        if message is None and stdin_isatty:
+            return LaunchPlan(mode="headless-help", reason="--print needs a MESSAGE argument or piped stdin.")
+        return LaunchPlan(
+            mode="print",
+            message=message,
+            read_stdin=message is None,
+            thread_id=resume,
+            continue_recent=continue_recent,
+            recursion_limit=args.recursion_limit,
+        )
+
+    if args.json is not _UNSET:
+        message = _headless_message(parser, "--json", args.json, positional)
+        if message is None and stdin_isatty:
+            return LaunchPlan(mode="headless-help", reason="--json needs a MESSAGE argument or piped stdin.")
+        return LaunchPlan(
+            mode="json",
+            message=message,
+            read_stdin=message is None,
+            thread_id=resume,
+            continue_recent=continue_recent,
+            recursion_limit=args.recursion_limit,
+        )
+
+    if args.cli:
+        if positional:
+            return LaunchPlan(
+                mode="print",
+                message=positional,
+                thread_id=resume,
+                continue_recent=continue_recent,
+                recursion_limit=args.recursion_limit,
+            )
+        # Mirror --print: a piped message or --continue is enough to run headless.
+        if continue_recent or not stdin_isatty:
+            return LaunchPlan(
+                mode="print",
+                message=None,
+                read_stdin=True,
+                thread_id=resume,
+                continue_recent=continue_recent,
+                recursion_limit=args.recursion_limit,
+            )
+        return LaunchPlan(
+            mode="headless-help",
+            reason='--cli needs a message. Try: deerflow --print "your question".',
+        )
+
+    forced_tui = bool(args.tui)
+    transparent = bool(args.tui_transparent) or _truthy(env.get("DEER_FLOW_TUI_TRANSPARENT"))
+    if forced_tui or _truthy(env.get("DEER_FLOW_TUI")) or (stdin_isatty and stdout_isatty):
+        return LaunchPlan(
+            mode="tui",
+            message=positional,
+            thread_id=resume,
+            continue_recent=continue_recent,
+            forced_tui=forced_tui,
+            transparent=transparent,
+        )
+
+    return LaunchPlan(
+        mode="headless-help",
+        message=positional,
+        thread_id=resume,
+        continue_recent=continue_recent,
+        reason="No interactive terminal detected. Use --print MESSAGE for one-shot output, or --tui to force the UI.",
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Runtime dispatch (not unit-tested here; covered by smoke + integration).
+# --------------------------------------------------------------------------- #
+
+_HEADLESS_HELP = """\
+deerflow — DeerFlow terminal workbench
+
+  deerflow                      launch the terminal UI (TTY required)
+  deerflow --tui                force the terminal UI
+  deerflow --tui-transparent    use the terminal's default background
+  deerflow --continue           resume the most recent thread in the UI
+  deerflow --resume THREAD      resume a thread by id or title
+  deerflow --print "question"   one-shot answer to stdout
+  deerflow --json "question"    stream newline-delimited JSON events
+  deerflow --recursion-limit N --print "question"
+                              set the headless agent-loop super-step limit
+  deerflow extensions --help  install and manage trusted Python extensions
+  echo "question" | deerflow --print
+
+  --print and --json exit 1 when the run fails, including an LLM error.
+"""
+
+
+def _resolve_message(plan: LaunchPlan) -> str:
+    if plan.read_stdin:
+        return sys.stdin.read().strip()
+    return plan.message or ""
+
+
+def _run_overrides(plan: LaunchPlan) -> dict[str, int]:
+    if plan.recursion_limit is None:
+        return {}
+    return {"recursion_limit": plan.recursion_limit}
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "extensions":
+        from deerflow.extensions.cli import main as extensions_main
+
+        return extensions_main(argv[1:])
+    plan = plan_launch(
+        argv,
+        stdin_isatty=sys.stdin.isatty(),
+        stdout_isatty=sys.stdout.isatty(),
+        env=dict(os.environ),
+    )
+
+    if plan.mode == "headless-help":
+        if plan.reason:
+            print(plan.reason, file=sys.stderr)
+        print(_HEADLESS_HELP, file=sys.stderr)
+        return 0 if not plan.reason else 2
+
+    if plan.mode == "print":
+        return _run_print(plan)
+
+    if plan.mode == "json":
+        return _run_json(plan)
+
+    return _run_tui(plan)
+
+
+def _make_session():
+    # Imported lazily so the pure planning path never imports the heavy harness.
+    # Headless one-shots never use the threads_meta writer, so skip persistence
+    # (no background loop / engine / connection pool just to discard it).
+    from .session import open_session
+
+    return open_session(persistence=False)
+
+
+def _error_text(exc: Exception) -> str:
+    """One-line user-facing error, matching the TUI's AssistantError convention."""
+    return str(exc) or type(exc).__name__
+
+
+def _silence_closed_stdout() -> None:
+    """Prevent the interpreter's shutdown flush from raising on a closed pipe.
+
+    A consumer that closes the pipe early (``deerflow --print ... | head``)
+    makes the final stdout write raise BrokenPipeError; Python then re-raises
+    the same error from the interpreter's shutdown flush of sys.stdout unless
+    the descriptor is pointed somewhere harmless first.
+    """
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+    except (OSError, ValueError):
+        pass
+
+
+class _RunOutcome:
+    """Track the final AI message of a headless run and whether it failed.
+
+    Provider failures do not raise out of the stream: the LLM error middleware
+    turns them into an AI message flagged ``deerflow_error_fallback``. That text
+    is still the run's output, but a script calling ``deerflow --print`` needs a
+    non-zero exit status to tell it apart from a real answer.
+    """
+
+    def __init__(self) -> None:
+        from deerflow.client import _AIMessageAccumulator
+
+        self._messages = _AIMessageAccumulator()
+        self._errors: dict[str, dict] = {}
+
+    def observe(self, event: StreamEvent) -> None:
+        self._messages.observe(event)
+        if event.type != "messages-tuple" or event.data.get("type") != "ai":
+            return
+        msg_id = event.data.get("id") or ""
+        additional_kwargs = event.data.get("additional_kwargs") or {}
+        if additional_kwargs.get("deerflow_error_fallback"):
+            self._errors[msg_id] = additional_kwargs
+
+    def answer(self) -> str:
+        return self._messages.answer()
+
+    def error_text(self) -> str | None:
+        """One-line description when the final AI message is an error fallback."""
+        # Error fallbacks carry text, or follow up on an id whose text was already sent.
+        error = self._errors.get(self._messages.last_id)
+        if error is None:
+            return None
+        details = ", ".join(f"{key}={error[key]}" for key in ("error_type", "error_reason") if error.get(key))
+        return f"LLM request failed ({details})" if details else "LLM request failed"
+
+
+def _report_json_error(error_text: str) -> int:
+    print(f"Error: {error_text}", file=sys.stderr)
+    try:
+        sys.stdout.write(json.dumps({"type": "error", "data": {"message": error_text}}, ensure_ascii=False, default=str) + "\n")
+        sys.stdout.flush()
+    except BrokenPipeError:
+        _silence_closed_stdout()
+    return 1
+
+
+def _run_print(plan: LaunchPlan) -> int:
+    message = _resolve_message(plan)
+    if not message:
+        print("No message provided.", file=sys.stderr)
+        return 2
+    try:
+        session = _make_session()
+        thread_id = session.resolve_thread(plan)
+        outcome = _RunOutcome()
+        for event in session.client.stream(message, thread_id=thread_id, **_run_overrides(plan)):
+            outcome.observe(event)
+    except Exception as exc:  # noqa: BLE001 - headless boundary: report, never traceback
+        print(f"Error: {_error_text(exc)}", file=sys.stderr)
+        return 1
+    try:
+        print(outcome.answer())
+    except BrokenPipeError:
+        _silence_closed_stdout()
+        return 1
+    if (error_text := outcome.error_text()) is not None:
+        print(f"Error: {error_text}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _run_json(plan: LaunchPlan) -> int:
+    message = _resolve_message(plan)
+    if not message:
+        print("No message provided.", file=sys.stderr)
+        return 2
+    try:
+        session = _make_session()
+        thread_id = session.resolve_thread(plan)
+        outcome = _RunOutcome()
+        for event in session.client.stream(message, thread_id=thread_id, **_run_overrides(plan)):
+            outcome.observe(event)
+            payload = {"type": event.type, "data": event.data}
+            sys.stdout.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+            sys.stdout.flush()
+    except Exception as exc:  # noqa: BLE001 - headless boundary: report, never traceback
+        return _report_json_error(_error_text(exc))
+    if (error_text := outcome.error_text()) is not None:
+        return _report_json_error(error_text)
+    return 0
+
+
+def _run_tui(plan: LaunchPlan) -> int:
+    try:
+        # Absolute import (not `from .app`) so the harness import-boundary check,
+        # which records relative module names verbatim, doesn't mistake the sibling
+        # `deerflow.tui.app` module for the forbidden top-level `app` package.
+        from deerflow.tui.app import run_tui
+    except ModuleNotFoundError as exc:  # textual missing
+        if getattr(exc, "name", "") == "textual" or "textual" in str(exc):
+            msg = "The terminal UI needs the optional 'textual' dependency.\nInstall it with:  uv pip install 'deerflow-harness[tui]'   (or: pip install textual)\n"
+            if plan.forced_tui:
+                print(msg, file=sys.stderr)
+                return 1
+            print(msg + "\nFalling back to headless help:\n", file=sys.stderr)
+            print(_HEADLESS_HELP, file=sys.stderr)
+            return 0
+        raise
+    return run_tui(plan)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

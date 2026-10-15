@@ -3,7 +3,7 @@ title: 运维与排障
 description: 本页面涵盖运行 DeerFlow 应用的操作信息：日志记录、常见问题和维护任务。
 ---
 
-import { Callout, Cards } from "nextra/components";
+import { Callout } from "nextra/components";
 
 # 运维与排障
 
@@ -44,15 +44,21 @@ curl http://localhost:8001/health
 curl http://localhost:2026/api/models
 ```
 
-## 配置升级
+## 升级已有的代码仓库
 
-当 `config.yaml` schema 更新时（由 `config_version` 字段标识），运行：
+保留现有的 `config.yaml`、`.env` 和 `extensions_config.json`，不要再次运行
+`make config`。先停止当前使用的运行模式，拉取更新，再用原模式启动：
 
-```bash
-make config-upgrade
-```
+| 当前模式 | 停止命令 | 拉取更新并重启 |
+| --- | --- | --- |
+| 本地开发 | `make stop` | `git pull --ff-only && make dev` |
+| 本地生产 | `make stop` | `git pull --ff-only && make start` |
+| Docker 开发 | `make docker-stop` | `git pull --ff-only && make docker-start` |
+| Docker 生产 | `make down` | `git pull --ff-only && make up` |
 
-这将 `config.example.yaml` 中的新字段合并到你现有的 `config.yaml` 中，而不覆盖你的自定义内容。
+不需要在每次 `git pull` 后运行 `make docker-init`，它只用于首次准备 sandbox 镜像。
+如果新版本需要新增配置字段，请在重启前运行 `make config-upgrade`；该命令会保留已有值，
+并在修改前生成 `config.yaml.bak`。
 
 ## 常见问题
 
@@ -91,6 +97,27 @@ ls -la backend/.deer-flow/threads/
 1. 确保 `backend/.deer-flow/` 对运行 DeerFlow 的进程可写。
 2. 在 Docker 部署中，验证卷挂载路径正确（`DEER_FLOW_ROOT` 设置为绝对路径）。
 3. 如果使用基于容器的沙箱，确认 Docker 已运行并且容器镜像已拉取。
+
+---
+
+### SQLite 报 `database is locked`
+
+**症状**：Docker 或团队部署中，多个用户同时使用时出现 `sqlite3.OperationalError: database is locked`。
+
+**原因**：SQLite 支持并发读取，但同一时间只有一个写入者。DeerFlow 的检查点写入和应用写入会共享同一个 SQLite 数据库文件，多用户并发时可能竞争文件锁。
+
+**解决**：生产环境或多用户部署切换到 Postgres：
+
+```yaml
+database:
+  backend: postgres
+  postgres_url: $DATABASE_URL
+
+run_events:
+  backend: db
+```
+
+SQLite 应只用于本地开发、单用户部署或短期评估环境。
 
 ---
 
@@ -142,14 +169,16 @@ grep -i "mcp\|timeout" logs/gateway.log | tail -20
 
 ## 数据备份
 
-DeerFlow 将持久化数据存储在：
+根据你启用的存储后端备份：
 
-- **线程数据**：`backend/.deer-flow/threads/` — 每个线程的上传文件、输出和工作区文件
-- **检查点**：取决于检查点器配置（SQLite：`backend/.deer-flow/checkpoints.db`，Redis：外部存储）
-- **记忆**：`backend/.deer-flow/memory.json`（以及 `agents/*/memory.json`）
-- **自定义 Agent 配置**：`backend/agents/*/config.yaml`
+- `backend/.deer-flow/threads/`：线程工作目录、上传文件和产出物。
+- `backend/.deer-flow/memory.json` 和 `backend/.deer-flow/agents/`：全局和 Agent 记忆。
+- `${database.sqlite_dir}/deerflow.db`：当使用 `database.backend: sqlite` 时备份，默认路径为 `.deer-flow/data/deerflow.db`。
+- Postgres 数据库备份：当使用 `database.backend: postgres` 时定期导出。
+- 旧的 `checkpointer.connection_string` 文件：如果你的部署仍配置独立 `checkpointer`。
+- `backend/agents/*/config.yaml`：自定义 Agent 配置。
 
-对于生产部署，定期备份这些目录。Docker 部署中，确保这些目录绑定挂载到持久卷，而不是容器内部。
+Docker 部署中，备份绑定挂载的宿主机路径，而不是容器内部文件系统。
 
 ## 停止和重启服务
 

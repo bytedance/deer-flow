@@ -4,13 +4,842 @@ Uses MemoryRunEventStore as the backend for direct event inspection.
 """
 
 import asyncio
+import logging
+import threading
+import weakref
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.outputs import ChatGeneration, LLMResult
 
+from deerflow.runtime.events.store.base import RunEventStoreNotCommittedError
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.journal import RunJournal
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+
+
+def test_run_journal_is_marked_as_loop_bound():
+    assert RunJournal.deerflow_loop_bound is True
+
+
+def test_tool_promotion_claim_is_atomic_across_parallel_sync_wrappers():
+    journal = RunJournal("r-claim", "t-claim", MemoryRunEventStore())
+    barrier = Barrier(16)
+
+    def claim():
+        barrier.wait()
+        return journal.claim_tool_promotions(["mcp_a"])
+
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        results = list(pool.map(lambda _: claim(), range(16)))
+
+    assert sum((result for result in results), []) == ["mcp_a"]
+
+
+@pytest.mark.anyio
+async def test_cross_thread_middleware_events_are_serialized_on_owner_loop():
+    store = MemoryRunEventStore()
+    journal = RunJournal("r-thread", "t-thread", store, flush_threshold=1)
+    owner_thread_id = threading.get_ident()
+    put_thread_ids: list[int] = []
+    original_put = journal._put
+
+    def tracked_put(**kwargs) -> None:
+        put_thread_ids.append(threading.get_ident())
+        original_put(**kwargs)
+
+    journal._put = tracked_put
+
+    def record_from_tool_worker() -> None:
+        journal.record_middleware(
+            "tool_progress",
+            name="ToolProgressMiddleware",
+            hook="wrap_tool_call",
+            action="warn",
+            changes={"from_phase": "active", "to_phase": "warned"},
+        )
+
+    await asyncio.to_thread(record_from_tool_worker)
+    await journal.flush()
+
+    assert put_thread_ids == [owner_thread_id]
+    events = await store.list_events("t-thread", "r-thread")
+    assert [event["event_type"] for event in events] == ["middleware:tool_progress"]
+    assert events[0]["content"]["changes"]["to_phase"] == "warned"
+
+
+@pytest.mark.anyio
+async def test_close_commits_cross_thread_event_still_pending_when_flush_starts():
+    """A hop queued by a worker that already returned must survive close(flush=True).
+
+    The worker runs on a raw thread and is joined with no await in between, so
+    its ``call_soon_threadsafe`` hop is provably still pending when ``close()``
+    starts. Without the yield at the top of ``flush()`` the flush executes zero
+    awaits, detach runs first and ``_put`` drops the event on ``_closed``; this
+    pins the behaviour on every Python version, not only on 3.13+ where
+    ``asyncio.to_thread`` can resume before the hop runs.
+    """
+    store = MemoryRunEventStore()
+    journal = RunJournal("r-pending", "t-pending", store, flush_threshold=100)
+
+    def record_from_tool_worker() -> None:
+        journal.record_middleware(
+            "tool_progress",
+            name="ToolProgressMiddleware",
+            hook="wrap_tool_call",
+            action="warn",
+            changes={"from_phase": "active", "to_phase": "warned"},
+        )
+
+    worker = threading.Thread(target=record_from_tool_worker)
+    worker.start()
+    worker.join()
+
+    await journal.close(flush=True)
+
+    events = await store.list_events("t-pending", "r-pending")
+    assert [event["event_type"] for event in events] == ["middleware:tool_progress"]
+
+
+def test_middleware_event_without_owner_loop_keeps_cross_thread_append():
+    store = MemoryRunEventStore()
+    journal = RunJournal("r-sync", "t-sync", store, flush_threshold=100)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pool.submit(
+            journal.record_middleware,
+            "tool_progress",
+            name="ToolProgressMiddleware",
+            hook="wrap_tool_call",
+            action="warn",
+            changes={"from_phase": "active", "to_phase": "warned"},
+        ).result(timeout=5)
+
+    asyncio.run(journal.flush())
+    events = asyncio.run(store.list_events("t-sync", "r-sync"))
+    assert [event["event_type"] for event in events] == ["middleware:tool_progress"]
+
+
+def test_middleware_event_uses_owner_loop_identity_after_loop_moves_threads():
+    loop = asyncio.new_event_loop()
+
+    async def build_journal():
+        return RunJournal("r-moved", "t-moved", MemoryRunEventStore(), flush_threshold=100)
+
+    journal = loop.run_until_complete(build_journal())
+
+    async def record_on_current_loop() -> int:
+        journal.record_middleware(
+            "tool_progress",
+            name="ToolProgressMiddleware",
+            hook="wrap_tool_call",
+            action="warn",
+            changes={},
+        )
+        return len(journal._buffer)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        buffered = pool.submit(loop.run_until_complete, record_on_current_loop()).result(timeout=5)
+
+    assert buffered == 1
+    loop.run_until_complete(journal.flush())
+    loop.close()
+
+
+@pytest.mark.anyio
+async def test_cross_thread_append_during_explicit_flush_is_not_flushed_concurrently():
+    class BlockingStore(MemoryRunEventStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.active_writes = 0
+            self.max_active_writes = 0
+
+        async def put_batch(self, events):
+            self.active_writes += 1
+            self.max_active_writes = max(self.max_active_writes, self.active_writes)
+            if not self.started.is_set():
+                self.started.set()
+                await self.release.wait()
+            try:
+                await super().put_batch(events)
+            finally:
+                self.active_writes -= 1
+
+    store = BlockingStore()
+    journal = RunJournal("r-flush", "t-flush", store, flush_threshold=1)
+    journal._buffer.append(
+        journal._make_event(
+            event_type="middleware:test",
+            category="middleware",
+            content={},
+        )
+    )
+    flush_task = asyncio.create_task(journal.flush())
+    await store.started.wait()
+
+    await asyncio.to_thread(
+        journal.record_middleware,
+        "tool_progress",
+        name="ToolProgressMiddleware",
+        hook="wrap_tool_call",
+        action="warn",
+        changes={},
+    )
+    await asyncio.sleep(0)
+    assert store.max_active_writes == 1
+
+    store.release.set()
+    await flush_task
+    assert store.max_active_writes == 1
+    events = await store.list_events("t-flush", "r-flush")
+    assert [event["event_type"] for event in events] == [
+        "middleware:test",
+        "middleware:tool_progress",
+    ]
+
+
+@pytest.mark.anyio
+async def test_close_flushes_and_detaches_runtime_dependencies():
+    class ProgressReporter:
+        async def __call__(self, snapshot):
+            del snapshot
+
+    store = MemoryRunEventStore()
+    reporter = ProgressReporter()
+    store_ref = weakref.ref(store)
+    reporter_ref = weakref.ref(reporter)
+    journal = RunJournal(
+        "r-close",
+        "t-close",
+        store,
+        progress_reporter=reporter,
+        flush_threshold=100,
+    )
+    journal.record_middleware("test", name="test", hook="after", action="record", changes={})
+
+    await journal.close()
+
+    assert journal._closed is True
+    assert journal._store is None
+    assert journal._progress_reporter is None
+    assert journal._buffer == []
+    del store, reporter
+    await asyncio.sleep(0)
+    assert store_ref() is None
+    assert reporter_ref() is None
+
+
+@pytest.mark.anyio
+async def test_closed_on_llm_end_returns_before_touching_response_or_state():
+    store = MemoryRunEventStore()
+    journal = RunJournal("r-closed-callback", "t-closed-callback", store)
+    await journal.close()
+    completion_before = journal.get_completion_data()
+
+    # A plain object has no generations attribute, so this also pins the
+    # early return ahead of response inspection.
+    journal.on_llm_end(object(), run_id=uuid4(), tags=["lead_agent"])
+
+    assert journal.get_completion_data() == completion_before
+    assert journal._pending_llm_response is None
+    assert journal._buffer == []
+    assert journal._counted_message_llm_run_ids == set()
+    assert journal._counted_llm_run_ids == set()
+
+
+@pytest.mark.anyio
+async def test_close_preserves_buffer_and_dependencies_when_flush_fails():
+    class FailOnceRunEventStore(MemoryRunEventStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.put_batch_calls = 0
+
+        async def put_batch(self, events):
+            self.put_batch_calls += 1
+            if self.put_batch_calls == 1:
+                raise RunEventStoreNotCommittedError("transient store failure")
+            return await super().put_batch(events)
+
+    store = FailOnceRunEventStore()
+    journal = RunJournal("r-close-retry", "t-close-retry", store, flush_threshold=100)
+    journal.record_middleware("test", name="test", hook="after", action="record", changes={})
+
+    with pytest.raises(RunEventStoreNotCommittedError, match="transient store failure"):
+        await journal.close()
+
+    assert journal._closed is False
+    assert journal._store is store
+    assert len(journal._buffer) == 1
+
+    await journal.close()
+
+    assert journal._closed is True
+    assert journal._store is None
+    assert journal._buffer == []
+    events = await store.list_events("t-close-retry", "r-close-retry")
+    assert [event["event_type"] for event in events] == ["middleware:test"]
+
+
+@pytest.mark.anyio
+async def test_close_retries_pending_no_usage_response_without_duplication():
+    class FailOnceRunEventStore(MemoryRunEventStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.put_batch_calls = 0
+
+        async def put_batch(self, events):
+            self.put_batch_calls += 1
+            if self.put_batch_calls == 1:
+                raise RunEventStoreNotCommittedError("transient store failure")
+            return await super().put_batch(events)
+
+    async def progress_reporter(snapshot):
+        del snapshot
+
+    store = FailOnceRunEventStore()
+    journal = RunJournal(
+        "r-close-pending-retry",
+        "t-close-pending-retry",
+        store,
+        flush_threshold=100,
+        progress_reporter=progress_reporter,
+    )
+    journal.record_middleware("before", name="test", hook="after", action="record", changes={})
+    journal.on_llm_end(
+        _make_llm_response("Canonical without usage"),
+        run_id=uuid4(),
+        parent_run_id=None,
+        tags=["lead_agent"],
+    )
+
+    assert journal._pending_llm_response is not None
+    assert journal.get_completion_data()["message_count"] == 0
+
+    with pytest.raises(RunEventStoreNotCommittedError, match="transient store failure"):
+        await journal.close()
+
+    assert journal._closed is False
+    assert journal._store is store
+    assert journal._progress_reporter is progress_reporter
+    assert journal._pending_llm_response is None
+    assert [event["event_type"] for event in journal._buffer] == [
+        "middleware:before",
+        "llm.ai.response",
+    ]
+    assert journal.get_completion_data()["message_count"] == 1
+    assert journal.get_completion_data()["last_ai_message"] == "Canonical without usage"
+
+    await journal.close()
+
+    events = await store.list_events("t-close-pending-retry", "r-close-pending-retry")
+    assert [event["event_type"] for event in events] == [
+        "middleware:before",
+        "llm.ai.response",
+    ]
+    responses = [event for event in events if event["event_type"] == "llm.ai.response"]
+    assert len(responses) == 1
+    assert responses[0]["content"]["content"] == "Canonical without usage"
+    assert responses[0]["content"]["usage_metadata"] is None
+    assert responses[0]["metadata"]["usage"] == {}
+    assert journal.get_completion_data()["message_count"] == 1
+    assert journal._closed is True
+    assert journal._store is None
+    assert journal._progress_reporter is None
+
+
+@pytest.mark.anyio
+async def test_close_without_flush_discards_buffer_and_detaches_runtime_dependencies():
+    class TrackingRunEventStore(MemoryRunEventStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.put_batch_calls = 0
+
+        async def put_batch(self, events):
+            self.put_batch_calls += 1
+            return await super().put_batch(events)
+
+    store = TrackingRunEventStore()
+    journal = RunJournal("r-close-discard", "t-close-discard", store, flush_threshold=100)
+    journal.record_middleware("test", name="test", hook="after", action="record", changes={})
+
+    await journal.close(flush=False)
+
+    assert store.put_batch_calls == 0
+    assert journal._closed is True
+    assert journal._store is None
+    assert journal._buffer == []
+
+
+@pytest.mark.anyio
+async def test_close_without_flush_detaches_when_cancellation_interrupts_pending_task_cleanup():
+    store = MemoryRunEventStore()
+    journal = RunJournal("r-close-cancelled", "t-close-cancelled", store, flush_threshold=100)
+    journal.record_middleware("test", name="test", hook="after", action="record", changes={})
+    first_cancellation_seen = asyncio.Event()
+
+    async def stubborn_pending_flush() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            first_cancellation_seen.set()
+            await asyncio.Event().wait()
+
+    pending_flush = asyncio.create_task(stubborn_pending_flush())
+    journal._owned_writes[pending_flush] = [{"event_type": "test", "category": "trace", "content": ""}]
+    close_task = asyncio.create_task(journal.close(flush=False))
+    await asyncio.wait_for(first_cancellation_seen.wait(), timeout=1)
+
+    close_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await close_task
+
+    assert pending_flush.done()
+    assert journal._closed is True
+    assert journal._store is None
+    assert journal._buffer == []
+    assert journal._owned_writes == {}
+
+
+class TestWriteOwnership:
+    @pytest.mark.anyio
+    async def test_close_without_flush_cancels_owned_store_task(self):
+        """A hung store write must be cancelled and reaped on lease-loss close."""
+        started = asyncio.Event()
+        store_task_ref: list[asyncio.Task] = []
+
+        class HungStore(MemoryRunEventStore):
+            async def put_batch(self, events):
+                started.set()
+                store_task_ref.append(asyncio.current_task())
+                await asyncio.Event().wait()
+
+        store = HungStore()
+        journal = RunJournal("r-hung", "t-hung", store, flush_threshold=100)
+        journal._put(event_type="A", category="trace", content="one")
+        journal._flush_sync()
+
+        await started.wait()
+        await journal.close(flush=False)
+
+        assert journal._owned_writes == {}
+        assert store_task_ref and store_task_ref[0].cancelled(), "inner store task was orphaned"
+
+    @pytest.mark.anyio
+    async def test_close_without_flush_returns_when_store_ignores_cancellation(self, monkeypatch):
+        """A store that ignores cancellation must not hang lease-loss close.
+
+        ``Task.cancelled()`` cannot prove the underlying I/O stopped, so the
+        journal bounds its wait instead of claiming the write was terminated.
+        """
+        import deerflow.runtime.journal as journal_module
+
+        monkeypatch.setattr(journal_module, "_WRITE_SETTLE_TIMEOUT_SECONDS", 0.05, raising=False)
+        started = asyncio.Event()
+        never = asyncio.Event()
+
+        class UncooperativeStore(MemoryRunEventStore):
+            async def put_batch(self, events):
+                started.set()
+                try:
+                    await never.wait()
+                except asyncio.CancelledError:
+                    # Swallow cancellation and keep the I/O "running".
+                    await never.wait()
+
+        journal = RunJournal("r-uncooperative", "t-uncooperative", UncooperativeStore(), flush_threshold=100)
+        journal._put(event_type="A", category="trace", content="one")
+        journal._flush_sync()
+
+        await started.wait()
+        await asyncio.wait_for(journal.close(flush=False), timeout=2.0)
+        assert journal._owned_writes == {}
+        assert journal._closed is True
+
+    @pytest.mark.anyio
+    async def test_committed_batch_with_lost_ack_is_not_replayed(self):
+        class CommitThenRaiseStore(MemoryRunEventStore):
+            def __init__(self) -> None:
+                super().__init__()
+                self.calls = 0
+
+            async def put_batch(self, events):
+                self.calls += 1
+                await super().put_batch(events)
+                raise ConnectionError("write committed but ACK lost")
+
+        store = CommitThenRaiseStore()
+        journal = RunJournal("r-lost-ack", "t-lost-ack", store, flush_threshold=100)
+        journal._put(event_type="A", category="trace", content="one")
+
+        with pytest.raises(Exception):
+            await journal.flush()
+        # The runner retries on its next flush; an ambiguous failure must not
+        # replay a batch the store already committed.
+        for _ in range(2):
+            with pytest.raises(Exception):
+                await journal.flush()
+
+        events = await store.list_events("t-lost-ack", "r-lost-ack")
+        seqs = [event["seq"] for event in events]
+        assert store.calls == 1, f"committed batch replayed {store.calls - 1} extra time(s)"
+        assert len(seqs) == len(set(seqs)), "duplicate seq created by replay"
+        assert [event["event_type"] for event in events] == ["A"]
+
+    @pytest.mark.anyio
+    async def test_background_completion_after_caller_cancel_is_reaped(self, caplog):
+        class FailingStore(MemoryRunEventStore):
+            def __init__(self) -> None:
+                super().__init__()
+                self.started = asyncio.Event()
+                self.finish = asyncio.Event()
+
+            async def put_batch(self, events):
+                self.started.set()
+                await self.finish.wait()
+                raise RuntimeError("store failed after caller detached")
+
+        store = FailingStore()
+        journal = RunJournal("r-bg-reap", "t-bg-reap", store, flush_threshold=100)
+        journal._put(event_type="A", category="trace", content="one")
+
+        flush_task = asyncio.create_task(journal.flush())
+        await store.started.wait()
+        flush_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await flush_task
+
+        with caplog.at_level(logging.WARNING, logger="deerflow.runtime.journal"):
+            store.finish.set()
+            for _ in range(5):
+                await asyncio.sleep(0)
+
+        assert journal._owned_writes == {}, "background write was not reaped"
+        assert len(journal._quarantined_batches) == 1, "background failure was lost"
+        assert "has an unknown outcome" in caplog.text
+        assert "store failed after caller detached" in caplog.text
+
+    @pytest.mark.anyio
+    async def test_caller_cancellation_does_not_cancel_owned_write(self):
+        class HangingStore(MemoryRunEventStore):
+            def __init__(self) -> None:
+                super().__init__()
+                self.started = asyncio.Event()
+                self.finish = asyncio.Event()
+                self.calls = 0
+
+            async def put_batch(self, events):
+                self.calls += 1
+                self.started.set()
+                await self.finish.wait()
+                return await super().put_batch(events)
+
+        store = HangingStore()
+        journal = RunJournal("r-caller-cancel", "t-caller-cancel", store, flush_threshold=100)
+        journal._put(event_type="A", category="trace", content="one")
+
+        flush_task = asyncio.create_task(journal.flush())
+        await store.started.wait()
+        flush_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(flush_task, timeout=1.0)
+
+        # The owned write is still outstanding and completes exactly once.
+        store.finish.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        events = await store.list_events("t-caller-cancel", "r-caller-cancel")
+        types = [event["event_type"] for event in events]
+        assert store.calls == 1, "cancelled write was retried (possible duplicate)"
+        assert types.count("A") == 1, f"A persisted {types.count('A')} times: {types}"
+
+    @pytest.mark.anyio
+    async def test_repeated_cancellation_and_concurrent_close_settle_write_once(self):
+        class HangingStore(MemoryRunEventStore):
+            def __init__(self) -> None:
+                super().__init__()
+                self.started = asyncio.Event()
+                self.finish = asyncio.Event()
+                self.calls = 0
+
+            async def put_batch(self, events):
+                self.calls += 1
+                self.started.set()
+                await self.finish.wait()
+                return await super().put_batch(events)
+
+        store = HangingStore()
+        journal = RunJournal("r-concurrent-close", "t-concurrent-close", store, flush_threshold=100)
+        journal._put(event_type="A", category="trace", content="first")
+
+        caller1 = asyncio.create_task(journal.close())
+        await store.started.wait()
+        caller1.cancel()
+        caller1.cancel()
+        await asyncio.sleep(0)
+
+        caller2 = asyncio.create_task(journal.close())
+        await asyncio.sleep(0)
+        store.finish.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await caller1
+        await asyncio.wait_for(caller2, timeout=1.0)
+
+        events = await store.list_events("t-concurrent-close", "r-concurrent-close")
+        types = [event["event_type"] for event in events]
+        assert store.calls == 1, "concurrent close retried the write"
+        assert types.count("A") == 1, f"A persisted {types.count('A')} times: {types}"
+
+    @pytest.mark.anyio
+    async def test_not_committed_batch_is_retried_once_per_flush(self):
+        class NeverCommittingStore(MemoryRunEventStore):
+            def __init__(self) -> None:
+                super().__init__()
+                self.calls = 0
+
+            async def put_batch(self, events):
+                self.calls += 1
+                raise RunEventStoreNotCommittedError("store rejected the batch")
+
+        store = NeverCommittingStore()
+        journal = RunJournal("r-no-busy-loop", "t-no-busy-loop", store, flush_threshold=100)
+        journal._put(event_type="A", category="trace", content="one")
+
+        with pytest.raises(RunEventStoreNotCommittedError):
+            await journal.flush()
+        # One attempt for this flush; the batch is re-buffered for a later one.
+        assert store.calls == 1, f"flush busy-looped on a not-committed batch: {store.calls} calls"
+        assert [event["event_type"] for event in journal._buffer] == ["A"]
+
+        with pytest.raises(RunEventStoreNotCommittedError):
+            await journal.flush()
+        assert store.calls == 2
+
+    @pytest.mark.anyio
+    async def test_background_not_committed_write_is_logged(self, caplog):
+        class DetachedNotCommittedStore(MemoryRunEventStore):
+            def __init__(self) -> None:
+                super().__init__()
+                self.started = asyncio.Event()
+                self.finish = asyncio.Event()
+
+            async def put_batch(self, events):
+                self.started.set()
+                await self.finish.wait()
+                raise RunEventStoreNotCommittedError("rejected before storage")
+
+        store = DetachedNotCommittedStore()
+        journal = RunJournal("r-bg-nc", "t-bg-nc", store, flush_threshold=100)
+        journal._put(event_type="A", category="trace", content="one")
+
+        flush_task = asyncio.create_task(journal.flush())
+        await store.started.wait()
+        flush_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await flush_task
+
+        with caplog.at_level(logging.WARNING, logger="deerflow.runtime.journal"):
+            store.finish.set()
+            for _ in range(5):
+                await asyncio.sleep(0)
+
+        assert journal._owned_writes == {}
+        assert [event["event_type"] for event in journal._buffer] == ["A"]
+        assert "came back not-committed" in caplog.text
+
+    @pytest.mark.anyio
+    async def test_sync_write_failure_is_not_double_logged_by_reaper(self, caplog):
+        class FailingStore(MemoryRunEventStore):
+            async def put_batch(self, events):
+                raise RuntimeError("store unavailable")
+
+        journal = RunJournal("r-sync-log", "t-sync-log", FailingStore(), flush_threshold=100)
+        journal._put(event_type="A", category="trace", content="one")
+
+        with caplog.at_level(logging.WARNING, logger="deerflow.runtime.journal"):
+            with pytest.raises(RuntimeError, match="store unavailable"):
+                await journal.flush()
+
+        # The drain surfaces the failure to the caller; the reaper must stay quiet
+        # so the same failure is not logged twice.
+        assert "has an unknown outcome" not in caplog.text
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("cancel_times", [1, 2])
+    async def test_flush_cancellation_preserves_task_cancel_count(self, cancel_times):
+        """Cancelling an explicit flush must not mutate the caller's cancel count.
+
+        The write is started by a threshold flush first, so the explicit flush
+        enters its already-in-flight drain (the branch that used to call
+        ``uncancel()``).
+        """
+
+        class HangingStore(MemoryRunEventStore):
+            def __init__(self) -> None:
+                super().__init__()
+                self.started = asyncio.Event()
+                self.finish = asyncio.Event()
+
+            async def put_batch(self, events):
+                self.started.set()
+                await self.finish.wait()
+                return await super().put_batch(events)
+
+        store = HangingStore()
+        journal = RunJournal("r-cancel-count", "t-cancel-count", store, flush_threshold=100)
+        journal._put(event_type="A", category="trace", content="one")
+        journal._flush_sync()  # start the owned write before the explicit flush
+        await store.started.wait()
+
+        flush_task = asyncio.create_task(journal.flush())
+        # flush() yields once before touching the buffer; pump until it is parked
+        # on the already-in-flight write so the cancel lands in the settle branch.
+        for _ in range(20):
+            await asyncio.sleep(0)
+            if journal._draining_tasks:
+                break
+        assert journal._draining_tasks, "flush did not enter its in-flight drain"
+
+        for _ in range(cancel_times):
+            flush_task.cancel()
+        await asyncio.sleep(0)
+        store.finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await flush_task
+
+        assert flush_task.cancelling() == cancel_times, "journal must not mutate the caller's cancel count"
+        for _ in range(20):
+            await asyncio.sleep(0)
+        types = [event["event_type"] for event in await store.list_events("t-cancel-count", "r-cancel-count")]
+        assert types.count("A") == 1
+
+    @pytest.mark.anyio
+    async def test_close_without_flush_supervises_abandoned_store_task(self, monkeypatch, caplog):
+        """A store that outlives bounded teardown must still have its result observed."""
+        import gc
+
+        import deerflow.runtime.journal as journal_module
+
+        monkeypatch.setattr(journal_module, "_WRITE_SETTLE_TIMEOUT_SECONDS", 0.02, raising=False)
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        class UncooperativeStore(MemoryRunEventStore):
+            async def put_batch(self, events):
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    # Swallow the teardown cancel and keep the "I/O" running.
+                    await release.wait()
+                raise RuntimeError("late failure after the writer was abandoned")
+
+        journal = RunJournal("r-abandoned", "t-abandoned", UncooperativeStore(), flush_threshold=100)
+        journal._put(event_type="A", category="trace", content="one")
+        journal._flush_sync()
+        await started.wait()
+
+        unretrieved: list[BaseException] = []
+        loop = asyncio.get_running_loop()
+        previous = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, ctx: unretrieved.append(ctx.get("exception")))
+        try:
+            with caplog.at_level(logging.WARNING, logger="deerflow.runtime.journal"):
+                await journal.close(flush=False)
+                assert journal._closed is True
+                assert len(journal._abandoned_store_tasks) == 1, "inner store task was not supervised"
+
+                release.set()
+                for _ in range(10):
+                    await asyncio.sleep(0)
+            assert journal._abandoned_store_tasks == {}
+            gc.collect()
+            await asyncio.sleep(0)
+        finally:
+            loop.set_exception_handler(previous)
+
+        assert unretrieved == [], f"abandoned store task exception was never retrieved: {unretrieved}"
+        assert "after the writer was abandoned" in caplog.text
+
+    @pytest.mark.anyio
+    async def test_abandoned_store_success_is_logged_without_clearing_quarantine(self, monkeypatch, caplog):
+        """A late successful store return must be observable but change nothing else."""
+        import deerflow.runtime.journal as journal_module
+
+        monkeypatch.setattr(journal_module, "_WRITE_SETTLE_TIMEOUT_SECONDS", 0.02, raising=False)
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        class LateSuccessStore(MemoryRunEventStore):
+            def __init__(self) -> None:
+                super().__init__()
+                self.put_batch_calls = 0
+
+            async def put_batch(self, events):
+                self.put_batch_calls += 1
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    # Swallow the teardown cancel, keep the "I/O" running, then
+                    # complete successfully once released.
+                    await release.wait()
+                return await super().put_batch(events)
+
+        store = LateSuccessStore()
+        journal = RunJournal("r-late-ok", "t-late-ok", store, flush_threshold=100)
+        journal._put(event_type="A", category="trace", content="one")
+        journal._flush_sync()
+        await started.wait()
+
+        with caplog.at_level(logging.WARNING, logger="deerflow.runtime.journal"):
+            await asyncio.wait_for(journal.close(flush=False), timeout=2.0)
+            assert journal._closed is True
+            assert len(journal._abandoned_store_tasks) == 1, "inner store task was not supervised"
+            assert len(journal._quarantined_batches) == 1, "writer teardown should have quarantined the batch"
+
+            release.set()
+            for _ in range(10):
+                await asyncio.sleep(0)
+
+        assert journal._abandoned_store_tasks == {}
+        assert store.put_batch_calls == 1
+        # Observability only: the late success must not clear quarantine, replay,
+        # release successors, or make close(flush=False) report durability.
+        assert len(journal._quarantined_batches) == 1, "late success must not clear quarantine"
+        events = await store.list_events("t-late-ok", "r-late-ok")
+        assert [event["event_type"] for event in events] == ["A"]
+        assert "completed successfully after writer abandonment" in caplog.text
+
+    @pytest.mark.anyio
+    async def test_store_self_cancellation_is_quarantined_not_replayed(self):
+        class SelfCancellingStore(MemoryRunEventStore):
+            def __init__(self) -> None:
+                super().__init__()
+                self.calls = 0
+
+            async def put_batch(self, events):
+                self.calls += 1
+                raise asyncio.CancelledError("store cancelled its own write")
+
+        store = SelfCancellingStore()
+        journal = RunJournal("r-self-cancel", "t-self-cancel", store, flush_threshold=100)
+        journal._put(event_type="A", category="trace", content="one")
+
+        with pytest.raises(asyncio.CancelledError):
+            await journal.flush()
+        # UNKNOWN: no replay, and no successor may overtake it.
+        with pytest.raises(Exception):
+            await journal.flush()
+        assert store.calls == 1, f"self-cancelled store write replayed {store.calls - 1} time(s)"
+        assert await store.list_events("t-self-cancel", "r-self-cancel") == []
 
 
 @pytest.fixture
@@ -56,7 +885,359 @@ def _make_llm_response(content="Hello", usage=None, tool_calls=None, additional_
     return response
 
 
+def _combine_llm_responses(*responses):
+    response = MagicMock()
+    response.generations = [generation for item in responses for generation in item.generations]
+    return response
+
+
+async def _pump_loop(ticks: int = 30) -> None:
+    for _ in range(ticks):
+        await asyncio.sleep(0)
+
+
+def _returned_normally(task: asyncio.Task) -> bool:
+    if not task.done() or task.cancelled():
+        return False
+    return task.exception() is None
+
+
+class _GatedRunEventStore(MemoryRunEventStore):
+    """Records ``put_batch`` call order and blocks chosen event types on a gate."""
+
+    def __init__(self, gates: dict[str, asyncio.Event], failures: dict[str, BaseException] | None = None):
+        super().__init__()
+        self._gates = gates
+        self._failures = failures or {}
+        self.calls: list[str] = []
+
+    async def put_batch(self, events):
+        event_type = events[0]["event_type"]
+        self.calls.append(event_type)
+        gate = self._gates.get(event_type)
+        if gate is not None:
+            await gate.wait()
+        failure = self._failures.get(event_type)
+        if failure is not None:
+            raise failure
+        return await super().put_batch(events)
+
+
+class TestOperationOwnership:
+    """Normal flush/close are one serialised operation; force close preempts it.
+
+    Explicit flush and close(flush=True) share an operation lock so a successor
+    batch can never overtake an unsettled predecessor, every waiter observes the
+    same settlement, and a normal close only detaches after the whole buffer has
+    settled. close(flush=False) is a separate abort path that must not queue
+    behind a stuck flush and must never let an in-flight flush report success.
+    """
+
+    @pytest.mark.anyio
+    async def test_concurrent_close_waits_for_successor_batch(self):
+        gate_a = asyncio.Event()
+        gate_b = asyncio.Event()
+        store = _GatedRunEventStore({"A": gate_a, "B": gate_b})
+        journal = RunJournal("r-cclose", "t-cclose", store, flush_threshold=1)
+
+        journal._put(event_type="A", category="trace", content="a")
+        await _pump_loop()
+        assert store.calls == ["A"]
+        journal._put(event_type="B", category="trace", content="b")
+
+        close1 = asyncio.create_task(journal.close())
+        close2 = asyncio.create_task(journal.close())
+        await _pump_loop()
+
+        gate_a.set()
+        await _pump_loop()
+
+        early = [i for i, task in enumerate((close1, close2)) if _returned_normally(task)]
+        assert not early, f"close(s) {early} returned before successor batch settled; calls={store.calls}"
+
+        gate_b.set()
+        results = await asyncio.gather(close1, close2)
+        assert results == [None, None], "both normal closes must complete successfully"
+        assert store.calls == ["A", "B"]
+        events = await store.list_events("t-cclose", "r-cclose")
+        assert [event["event_type"] for event in events] == ["A", "B"]
+
+    @pytest.mark.anyio
+    async def test_concurrent_flushes_do_not_overtake_unsettled_predecessor(self):
+        gate_a = asyncio.Event()
+        gate_b = asyncio.Event()
+        store = _GatedRunEventStore({"A": gate_a, "B": gate_b})
+        journal = RunJournal("r-cflush", "t-cflush", store, flush_threshold=1)
+
+        journal._put(event_type="A", category="trace", content="a")
+        await _pump_loop()
+        assert store.calls == ["A"]
+        journal._put(event_type="B", category="trace", content="b")
+        journal._put(event_type="C", category="trace", content="c")
+
+        f1 = asyncio.create_task(journal.flush())
+        f2 = asyncio.create_task(journal.flush())
+        await _pump_loop()
+
+        gate_a.set()
+        await _pump_loop()
+
+        assert "C" not in store.calls, f"successor C overtook unsettled predecessor: calls={store.calls}"
+
+        gate_b.set()
+        results = await asyncio.gather(f1, f2)
+        assert results == [None, None], "both concurrent flushes must complete successfully"
+        assert store.calls == ["A", "B", "C"], f"unexpected final submission order: {store.calls}"
+
+    @pytest.mark.anyio
+    async def test_concurrent_flushes_all_report_unknown(self):
+        gate_a = asyncio.Event()
+        store = _GatedRunEventStore({"A": gate_a}, failures={"A": RuntimeError("unknown outcome")})
+        journal = RunJournal("r-cunknown", "t-cunknown", store, flush_threshold=1)
+
+        journal._put(event_type="A", category="trace", content="a")
+        await _pump_loop()
+        assert store.calls == ["A"]
+
+        f1 = asyncio.create_task(journal.flush())
+        f2 = asyncio.create_task(journal.flush())
+        await _pump_loop()
+        gate_a.set()
+        await asyncio.gather(f1, f2, return_exceptions=True)
+
+        reported = [not task.cancelled() and task.exception() is not None for task in (f1, f2)]
+        assert all(reported), f"some waiter did not report the UNKNOWN outcome: f1={f1!r} f2={f2!r}"
+
+    @pytest.mark.anyio
+    async def test_finishing_one_flush_does_not_release_operation_guard(self):
+        gate_a = asyncio.Event()
+        gate_b = asyncio.Event()
+        store = _GatedRunEventStore({"A": gate_a, "B": gate_b})
+        journal = RunJournal("r-cguard", "t-cguard", store, flush_threshold=1)
+
+        journal._put(event_type="A", category="trace", content="a")
+        await _pump_loop()
+        journal._put(event_type="B", category="trace", content="b")
+
+        f1 = asyncio.create_task(journal.flush())
+        f2 = asyncio.create_task(journal.flush())
+        await _pump_loop()
+        gate_a.set()
+        await _pump_loop()
+
+        assert journal._operation_lock.locked() is True, "operation guard was released while another flush was active"
+
+        gate_b.set()
+        results = await asyncio.gather(f1, f2)
+        assert results == [None, None], "both concurrent flushes must succeed once the predecessor settles"
+
+    @pytest.mark.anyio
+    async def test_lease_loss_close_aborts_active_flush_without_success(self):
+        gate_a = asyncio.Event()
+        store = _GatedRunEventStore({"A": gate_a})
+        journal = RunJournal("r-lease", "t-lease", store, flush_threshold=1)
+
+        journal._put(event_type="A", category="trace", content="a")
+        await _pump_loop()
+
+        flush_task = asyncio.create_task(journal.flush())
+        await _pump_loop()
+        await journal.close(flush=False)
+        await _pump_loop()
+
+        assert not _returned_normally(flush_task), "active flush reported success after lease-loss close"
+        await asyncio.gather(flush_task, return_exceptions=True)
+
+    @pytest.mark.anyio
+    async def test_force_close_preempts_normal_close_without_success(self):
+        gate_a = asyncio.Event()
+        store = _GatedRunEventStore({"A": gate_a})
+        journal = RunJournal("r-mixclose", "t-mixclose", store, flush_threshold=1)
+
+        journal._put(event_type="A", category="trace", content="a")
+        await _pump_loop()
+        assert store.calls == ["A"]
+
+        normal_close = asyncio.create_task(journal.close())
+        await _pump_loop()
+        await journal.close(flush=False)
+        await _pump_loop()
+
+        assert not _returned_normally(normal_close), "normal close reported success after a force close"
+        await asyncio.gather(normal_close, return_exceptions=True)
+
+    @pytest.mark.anyio
+    async def test_queued_normal_close_after_force_close_does_not_report_success(self):
+        """A normal close already queueing on the lock must not succeed after abort."""
+        gate_a = asyncio.Event()
+        store = _GatedRunEventStore({"A": gate_a})
+        journal = RunJournal("r-queued-close", "t-queued-close", store, flush_threshold=1)
+
+        journal._put(event_type="A", category="trace", content="a")
+        await _pump_loop()
+        assert store.calls == ["A"]
+
+        normal_close = asyncio.create_task(journal.close())
+        await _pump_loop()
+        assert journal._operation_lock.locked(), "first close did not acquire the operation lock"
+
+        queued_close = asyncio.create_task(journal.close())
+        await _pump_loop()
+        assert not queued_close.done(), "second close did not queue behind the lock"
+
+        # Force close preempts without taking the lock (sets _closed + _abandoned).
+        await journal.close(flush=False)
+
+        gate_a.set()
+        await _pump_loop()
+
+        assert not _returned_normally(queued_close), "queued normal close reported success after a force close"
+        await asyncio.gather(normal_close, queued_close, return_exceptions=True)
+
+    @pytest.mark.anyio
+    async def test_force_close_after_durable_close_does_not_re_mark_abandoned(self):
+        """Terminal state is monotonic: DURABLY_CLOSED must not become ABANDONED."""
+        store = MemoryRunEventStore()
+        journal = RunJournal("r-mono", "t-mono", store, flush_threshold=100)
+        journal._put(event_type="A", category="trace", content="a")
+        await journal.close()
+
+        assert journal._closed is True
+        assert journal._abandoned is False
+
+        await journal.close(flush=False)
+
+        assert journal._abandoned is False, "a durably closed journal must not be re-marked ABORT"
+        await journal.flush()  # stays a silent no-op, does not raise
+        events = await store.list_events("t-mono", "r-mono")
+        assert [event["event_type"] for event in events] == ["A"]
+
+    @pytest.mark.anyio
+    async def test_double_force_close_is_characterised(self, monkeypatch):
+        """Characterisation: the 2nd force close returns while the 1st still cleans.
+
+        Force close makes no durability promise, so "returned" means the abort was
+        issued, not that local cleanup finished. This is documented rather than
+        changed here; whether callers should join one cleanup is a contract call.
+        """
+        import deerflow.runtime.journal as journal_module
+
+        monkeypatch.setattr(journal_module, "_WRITE_SETTLE_TIMEOUT_SECONDS", 0.05, raising=False)
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        class UncooperativeStore(MemoryRunEventStore):
+            async def put_batch(self, events):
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    await release.wait()
+                return await super().put_batch(events)
+
+        journal = RunJournal("r-2force", "t-2force", UncooperativeStore(), flush_threshold=1)
+        journal._put(event_type="A", category="trace", content="a")
+        await _pump_loop()
+        await started.wait()
+
+        first = asyncio.create_task(journal.close(flush=False))
+        await _pump_loop()
+        second = asyncio.create_task(journal.close(flush=False))
+        await _pump_loop()
+
+        assert second.done(), "second force close did not return promptly"
+        assert not first.done(), "first force close already finished its bounded settle"
+
+        release.set()
+        await asyncio.gather(first, second, return_exceptions=True)
+
+    @pytest.mark.anyio
+    async def test_force_close_progress_reporter_unbounded_is_characterised(self):
+        """Characterisation of a pre-existing limitation, tracked separately.
+
+        close(flush=False) bounds the store write (see the abandoned-store tests)
+        but still awaits the pending progress task without a deadline, so a
+        progress reporter that swallows cancellation can block a force close.
+        This reproduces identically on the pre-PR base, so it is documented here
+        rather than fixed inside the write-ownership PR.
+        """
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def reporter(snapshot):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await release.wait()
+
+        journal = RunJournal("r-prog", "t-prog", MemoryRunEventStore(), flush_threshold=100, progress_reporter=reporter)
+        journal._schedule_progress_flush()
+        await started.wait()
+        assert journal._pending_progress_task is not None
+
+        bounded = True
+        try:
+            await asyncio.wait_for(journal.close(flush=False), timeout=0.25)
+        except TimeoutError:
+            bounded = False
+        finally:
+            release.set()
+            await _pump_loop()
+
+        assert bounded is False, "force close became bounded; please update this characterisation"
+
+    @pytest.mark.anyio
+    async def test_concurrent_flush_not_committed_retry_is_characterised(self):
+        """Contract characterisation: a concurrent flush must not duplicate A."""
+        gate_a = asyncio.Event()
+        store = _GatedRunEventStore({"A": gate_a}, failures={"A": RunEventStoreNotCommittedError("not committed")})
+        journal = RunJournal("r-cnc", "t-cnc", store, flush_threshold=1)
+
+        journal._put(event_type="A", category="trace", content="a")
+        await _pump_loop()
+        assert store.calls == ["A"]
+
+        f1 = asyncio.create_task(journal.flush())
+        f2 = asyncio.create_task(journal.flush())
+        await _pump_loop()
+        gate_a.set()
+        await asyncio.gather(f1, f2, return_exceptions=True)
+        await _pump_loop()
+
+        # Durable-safety invariants only. The exact number of definite retries
+        # (and which waiter owns them) under concurrency is still an open
+        # maintainer contract decision, so it is deliberately not asserted here.
+        assert store.calls.count("A") >= 1, "A was never attempted"
+        surfaced = [task for task in (f1, f2) if not task.cancelled() and task.exception() is not None]
+        assert surfaced, "the not-committed failure was not surfaced to any waiter"
+        events = await store.list_events("t-cnc", "r-cnc")
+        assert sum(1 for event in events if event["event_type"] == "A") == 0, "A must not be persisted after a not-committed failure"
+
+
 class TestLlmCallbacks:
+    @pytest.mark.anyio
+    async def test_on_chat_model_start_persists_original_user_input_without_mutating_model_message(self, journal_setup):
+        j, store = journal_setup
+        wrapped_content = "--- BEGIN USER INPUT ---\nShow revenue\n--- END USER INPUT ---"
+        model_message = HumanMessage(
+            content=wrapped_content,
+            id="human-1",
+            additional_kwargs={ORIGINAL_USER_CONTENT_KEY: "Show revenue", "channel": "web"},
+        )
+
+        j.on_chat_model_start({}, [[model_message]], run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+
+        assert j._first_human_msg == "Show revenue"
+        events = await store.list_events("t1", "r1")
+        human_event = next(event for event in events if event["event_type"] == "llm.human.input")
+        assert human_event["content"]["content"] == "Show revenue"
+        assert human_event["content"]["id"] == "human-1"
+        assert human_event["content"]["additional_kwargs"] == {"channel": "web"}
+        assert model_message.content == wrapped_content
+        assert model_message.additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "Show revenue"
+
     @pytest.mark.anyio
     async def test_on_llm_end_produces_trace_event(self, journal_setup):
         j, store = journal_setup
@@ -179,15 +1360,16 @@ class TestLifecycleCallbacks:
         assert "run.end" in types
 
     @pytest.mark.anyio
-    async def test_nested_chain_no_run_start(self, journal_setup):
-        """Nested chains (parent_run_id set) should NOT produce run.start."""
+    async def test_nested_chain_no_run_lifecycle_events(self, journal_setup):
+        """Nested chains (parent_run_id set) should NOT produce root run lifecycle events."""
         j, store = journal_setup
         parent_id = uuid4()
         j.on_chain_start({}, {}, run_id=uuid4(), parent_run_id=parent_id)
-        j.on_chain_end({}, run_id=uuid4())
+        j.on_chain_end({}, run_id=uuid4(), parent_run_id=parent_id)
         await j.flush()
         events = await store.list_events("t1", "r1")
         assert not any(e["event_type"] == "run.start" for e in events)
+        assert not any(e["event_type"] == "run.end" for e in events)
 
 
 class TestToolCallbacks:
@@ -232,6 +1414,336 @@ class TestToolCallbacks:
         assert isinstance(events, list)
 
 
+class TestFinalToolMessageReconciliation:
+    @pytest.mark.anyio
+    async def test_root_chain_end_reconciles_missing_ask_clarification_tool_message(self, journal_setup):
+        from langchain_core.messages import ToolMessage
+
+        j, store = journal_setup
+        j.on_llm_end(
+            _make_llm_response("", tool_calls=[{"id": "call_clarify", "name": "ask_clarification", "args": {"question": "Which format?"}}]),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        tool_msg = ToolMessage(
+            content="Which format?",
+            tool_call_id="call_clarify",
+            name="ask_clarification",
+            artifact={"human_input": {"kind": "human_input_request", "request_id": "clarification:call_clarify"}},
+        )
+
+        j.on_chain_end({"messages": [tool_msg]}, run_id=uuid4())
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        tool_results = [m for m in messages if m["event_type"] == "llm.tool.result"]
+        assert len(tool_results) == 1
+        assert tool_results[0]["content"]["name"] == "ask_clarification"
+        assert tool_results[0]["content"]["artifact"]["human_input"]["request_id"] == "clarification:call_clarify"
+
+    @pytest.mark.anyio
+    async def test_root_chain_end_does_not_duplicate_tool_message_captured_by_on_tool_end(self, journal_setup):
+        from langchain_core.messages import ToolMessage
+
+        j, store = journal_setup
+        j.on_llm_end(
+            _make_llm_response("", tool_calls=[{"id": "call_clarify", "name": "ask_clarification", "args": {"question": "Which format?"}}]),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        tool_msg = ToolMessage(content="Which format?", tool_call_id="call_clarify", name="ask_clarification")
+
+        j.on_tool_end(tool_msg, run_id=uuid4())
+        j.on_chain_end({"messages": [tool_msg]}, run_id=uuid4())
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        tool_results = [m for m in messages if m["event_type"] == "llm.tool.result"]
+        assert len(tool_results) == 1
+
+    @pytest.mark.anyio
+    async def test_root_chain_end_ignores_retained_old_tool_message_from_previous_run(self, journal_setup):
+        from langchain_core.messages import ToolMessage
+
+        j, store = journal_setup
+        j.on_llm_end(
+            _make_llm_response("", tool_calls=[{"id": "call_current", "name": "ask_clarification", "args": {"question": "Current?"}}]),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        retained_old_tool_msg = ToolMessage(content="Old question", tool_call_id="call_old", name="ask_clarification")
+
+        j.on_chain_end({"messages": [retained_old_tool_msg]}, run_id=uuid4())
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert not any(m["event_type"] == "llm.tool.result" for m in messages)
+
+    @pytest.mark.anyio
+    async def test_root_chain_end_ignores_subagent_tool_message(self, journal_setup):
+        """Reconciliation covers the lead agent's own calls only.
+
+        A subagent's internal tool results belong to its own step feed
+        (``subagent.step``), not to the thread's message feed;
+        ``_remember_current_run_tool_calls`` records lead-agent calls only.
+        This is the boundary that keeps reconciliation safe now that it is no
+        longer narrowed to an ``ask_clarification`` allowlist.
+        """
+        from langchain_core.messages import ToolMessage
+
+        j, store = journal_setup
+        j.on_llm_end(
+            _make_llm_response("", tool_calls=[{"id": "call_search", "name": "web_search", "args": {"query": "deerflow"}}]),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["subagent:general-purpose"],
+        )
+        tool_msg = ToolMessage(content="Search result", tool_call_id="call_search", name="web_search")
+
+        j.on_chain_end({"messages": [tool_msg]}, run_id=uuid4())
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert not any(m["event_type"] == "llm.tool.result" for m in messages)
+
+    @pytest.mark.anyio
+    async def test_root_chain_end_ignores_hidden_ask_clarification_tool_message(self, journal_setup):
+        from langchain_core.messages import ToolMessage
+
+        j, store = journal_setup
+        j.on_llm_end(
+            _make_llm_response("", tool_calls=[{"id": "call_clarify", "name": "ask_clarification", "args": {"question": "Hidden?"}}]),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        tool_msg = ToolMessage(
+            content="Hidden?",
+            tool_call_id="call_clarify",
+            name="ask_clarification",
+            additional_kwargs={"hide_from_ui": True},
+        )
+
+        j.on_chain_end({"messages": [tool_msg]}, run_id=uuid4())
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert not any(m["event_type"] == "llm.tool.result" for m in messages)
+
+    @pytest.mark.anyio
+    async def test_root_chain_end_reconciles_any_middleware_short_circuited_tool_message(self, journal_setup):
+        """A middleware that blocks a tool call still returns a user-visible result.
+
+        ReadBeforeWriteMiddleware answers a blocked ``write_file`` with an error
+        ToolMessage instead of running the tool, so LangChain never emits
+        ``on_tool_end`` and the message never reached the event store. The user
+        saw it during the run and it vanished on reload (#4666). Reconciliation
+        is not specific to ``ask_clarification``: any visible tool result the
+        model asked for in this run belongs in the thread feed.
+        """
+        from langchain_core.messages import ToolMessage
+
+        j, store = journal_setup
+        j.on_llm_end(
+            _make_llm_response("", tool_calls=[{"id": "call_write", "name": "write_file", "args": {"path": "/mnt/user-data/outputs/a.txt"}}]),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        blocked = ToolMessage(
+            content="Error: write_file blocked — read the file before writing to it",
+            tool_call_id="call_write",
+            name="write_file",
+        )
+
+        j.on_chain_end({"messages": [blocked]}, run_id=uuid4())
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        tool_results = [m for m in messages if m["event_type"] == "llm.tool.result"]
+        assert len(tool_results) == 1
+        assert tool_results[0]["content"]["name"] == "write_file"
+
+    @pytest.mark.anyio
+    async def test_root_chain_end_does_not_reconcile_old_result_when_tool_call_id_is_reused(self, journal_setup):
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        j, store = journal_setup
+        j.on_llm_end(
+            _make_llm_response("", tool_calls=[{"id": "call_shared", "name": "write_file", "args": {}}]),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        old_ai = AIMessage(content="", tool_calls=[{"id": "call_shared", "name": "write_file", "args": {}}])
+        old = ToolMessage(content="Old", tool_call_id="call_shared", name="write_file")
+        current_ai = AIMessage(content="", tool_calls=[{"id": "call_shared", "name": "write_file", "args": {}}])
+        current = ToolMessage(content="Current", tool_call_id="call_shared", name="write_file")
+
+        j.on_chain_end({"messages": [old_ai, old, current_ai, current]}, run_id=uuid4())
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        tool_results = [event for event in messages if event["event_type"] == "llm.tool.result"]
+        assert len(tool_results) == 1
+        assert tool_results[0]["content"]["content"] == "Current"
+
+    @pytest.mark.anyio
+    async def test_model_start_persists_consumed_short_circuited_tool_result_before_later_run_error(self, journal_setup):
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        j, store = journal_setup
+        j.on_llm_end(
+            _make_llm_response("", tool_calls=[{"id": "call_write", "name": "write_file", "args": {"path": "/tmp/a", "content": "x"}}]),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        current_ai = AIMessage(content="", tool_calls=[{"id": "call_write", "name": "write_file", "args": {}}])
+        blocked = ToolMessage(
+            id="blocked-write",
+            content="Read the file before modifying it.",
+            tool_call_id="call_write",
+            name="write_file",
+            status="error",
+        )
+
+        j.on_chat_model_start({}, [[current_ai, blocked]], run_id=uuid4(), tags=["lead_agent"])
+        j.on_chain_error(RuntimeError("provider failed"), run_id=uuid4())
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        tool_results = [event for event in messages if event["event_type"] == "llm.tool.result"]
+        assert len(tool_results) == 1
+        assert tool_results[0]["content"]["id"] == "blocked-write"
+
+    @pytest.mark.anyio
+    async def test_model_start_does_not_duplicate_tool_result_captured_by_on_tool_end(self, journal_setup):
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        j, store = journal_setup
+        j.on_llm_end(
+            _make_llm_response("", tool_calls=[{"id": "call_write", "name": "write_file", "args": {}}]),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        current_ai = AIMessage(content="", tool_calls=[{"id": "call_write", "name": "write_file", "args": {}}])
+        blocked = ToolMessage(content="Blocked", tool_call_id="call_write", name="write_file")
+
+        j.on_tool_end(blocked, run_id=uuid4())
+        j.on_chat_model_start({}, [[current_ai, blocked]], run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert len([event for event in messages if event["event_type"] == "llm.tool.result"]) == 1
+
+    @pytest.mark.anyio
+    async def test_model_start_ignores_retained_old_run_tool_result(self, journal_setup):
+        from langchain_core.messages import ToolMessage
+
+        j, store = journal_setup
+        retained = ToolMessage(content="Old result", tool_call_id="call_old", name="write_file")
+
+        j.on_chat_model_start({}, [[retained]], run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert not any(event["event_type"] == "llm.tool.result" for event in messages)
+
+    @pytest.mark.anyio
+    async def test_model_start_ignores_reused_tool_call_id_without_current_run_boundary(self, journal_setup):
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        j, store = journal_setup
+        j.on_llm_end(
+            _make_llm_response("", tool_calls=[{"id": "call_shared", "name": "write_file", "args": {}}]),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        unrelated_ai = AIMessage(content="Old response")
+        retained = ToolMessage(content="Old result", tool_call_id="call_shared", name="write_file")
+
+        j.on_chat_model_start({}, [[unrelated_ai, retained]], run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert not any(event["event_type"] == "llm.tool.result" for event in messages)
+
+    @pytest.mark.anyio
+    async def test_model_start_ignores_hidden_tool_result(self, journal_setup):
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        j, store = journal_setup
+        j.on_llm_end(
+            _make_llm_response("", tool_calls=[{"id": "call_hidden", "name": "write_file", "args": {}}]),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        hidden = ToolMessage(
+            content="Hidden result",
+            tool_call_id="call_hidden",
+            name="write_file",
+            additional_kwargs={"hide_from_ui": True},
+        )
+
+        current_ai = AIMessage(content="", tool_calls=[{"id": "call_hidden", "name": "write_file", "args": {}}])
+        j.on_chat_model_start({}, [[current_ai, hidden]], run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert not any(event["event_type"] == "llm.tool.result" for event in messages)
+
+    @pytest.mark.anyio
+    async def test_subagent_model_start_ignores_tool_result_with_colliding_call_id(self, journal_setup):
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        j, store = journal_setup
+        j.on_llm_end(
+            _make_llm_response("", tool_calls=[{"id": "call_shared", "name": "write_file", "args": {}}]),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        current_ai = AIMessage(content="", tool_calls=[{"id": "call_shared", "name": "write_file", "args": {}}])
+        subagent_result = ToolMessage(content="Subagent result", tool_call_id="call_shared", name="write_file")
+
+        j.on_chat_model_start({}, [[current_ai, subagent_result]], run_id=uuid4(), tags=["subagent:general-purpose"])
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert not any(event["event_type"] == "llm.tool.result" for event in messages)
+
+    @pytest.mark.anyio
+    async def test_model_start_does_not_reconcile_old_result_when_tool_call_id_is_reused(self, journal_setup):
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        j, store = journal_setup
+        j.on_llm_end(
+            _make_llm_response("", tool_calls=[{"id": "call_shared", "name": "write_file", "args": {}}]),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        old_ai = AIMessage(content="", tool_calls=[{"id": "call_shared", "name": "write_file", "args": {}}])
+        old = ToolMessage(content="Old", tool_call_id="call_shared", name="write_file")
+        current_ai = AIMessage(content="", tool_calls=[{"id": "call_shared", "name": "write_file", "args": {}}])
+        current = ToolMessage(content="Current blocked", tool_call_id="call_shared", name="write_file")
+
+        j.on_chat_model_start({}, [[old_ai, old, current_ai, current]], run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        tool_results = [event for event in messages if event["event_type"] == "llm.tool.result"]
+        assert len(tool_results) == 1
+        assert tool_results[0]["content"]["content"] == "Current blocked"
+
+
 class TestCustomEvents:
     @pytest.mark.anyio
     async def test_on_custom_event_not_implemented(self, journal_setup):
@@ -250,13 +1762,27 @@ class TestBufferFlush:
         j, store = journal_setup
         j._flush_threshold = 2
         # Each on_llm_end emits 1 event
-        j.on_llm_end(_make_llm_response("A"), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        usage = {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+        j.on_llm_end(_make_llm_response("A", usage=usage), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
         assert len(j._buffer) == 1
-        j.on_llm_end(_make_llm_response("B"), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        j.on_llm_end(_make_llm_response("B", usage=usage), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
         # At threshold the buffer should have been flushed asynchronously
         await asyncio.sleep(0.1)
         events = await store.list_events("t1", "r1")
         assert len(events) >= 2
+
+    @pytest.mark.anyio
+    async def test_pending_response_counts_toward_flush_threshold(self, journal_setup):
+        j, store = journal_setup
+        j._flush_threshold = 2
+        j.record_middleware("before", name="BeforeMiddleware", hook="after_model", action="record", changes={})
+
+        j.on_llm_end(_make_llm_response("Pending"), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        await asyncio.sleep(0.1)
+
+        assert j._pending_llm_response is None
+        events = await store.list_events("t1", "r1")
+        assert [event["event_type"] for event in events] == ["middleware:before", "llm.ai.response"]
 
     @pytest.mark.anyio
     async def test_events_retained_when_no_loop(self, journal_setup):
@@ -280,6 +1806,60 @@ class TestBufferFlush:
         await j.flush()
         events = await store.list_events("t1", "r1")
         assert any(e["event_type"] == "llm.ai.response" for e in events)
+
+
+class TestFeedGeneration:
+    """The counter that tells a cached feed lookup when to re-ask.
+
+    A message this run produces is not in the feed while it is only buffered,
+    so a reader looking it up legitimately misses. Bumping this on every write
+    lets that reader retry exactly when retrying could answer differently,
+    rather than either polling the store or caching the miss for the whole run
+    (#4696 review).
+    """
+
+    @pytest.mark.anyio
+    async def test_pending_response_alone_does_not_advance_it(self, journal_setup):
+        j, _store = journal_setup
+        j.on_llm_end(_make_llm_response("A"), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+
+        assert j._buffer == []
+        assert j._pending_llm_response is not None
+        assert j.feed_generation == 0
+
+    @pytest.mark.anyio
+    async def test_a_threshold_flush_advances_it(self, journal_setup):
+        j, _store = journal_setup
+        j._flush_threshold = 1
+
+        usage = {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+        j.on_llm_end(_make_llm_response("A", usage=usage), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        await asyncio.sleep(0.1)
+
+        assert j.feed_generation == 1
+
+    @pytest.mark.anyio
+    async def test_a_terminal_flush_advances_it(self, journal_setup):
+        j, _store = journal_setup
+        j.on_llm_end(_make_llm_response("A"), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+
+        await j.flush()
+
+        assert j.feed_generation == 1
+
+    @pytest.mark.anyio
+    async def test_a_failed_write_leaves_it_alone(self):
+        """Nothing became readable, so a cached miss must not be re-asked."""
+
+        class FailingStore(MemoryRunEventStore):
+            async def put_batch(self, events):
+                raise RuntimeError("store unavailable")
+
+        j = RunJournal("r-gen", "t-gen", FailingStore(), flush_threshold=1)
+        j.on_llm_end(_make_llm_response("A"), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        await asyncio.sleep(0.1)
+
+        assert j.feed_generation == 0
 
 
 class TestIdentifyCaller:
@@ -364,6 +1944,7 @@ class TestConvenienceFields:
             parent_run_id=None,
             tags=["lead_agent"],
         )
+        await j.flush()
 
         data = j.get_completion_data()
 
@@ -386,6 +1967,7 @@ class TestConvenienceFields:
             parent_run_id=None,
             tags=["lead_agent"],
         )
+        await j.flush()
 
         data = j.get_completion_data()
 
@@ -396,6 +1978,7 @@ class TestConvenienceFields:
     async def test_last_ai_message_extracts_mapping_content(self, journal_setup):
         j, _ = journal_setup
         j.on_llm_end(_make_llm_response({"content": "Nested answer"}), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        await j.flush()
 
         data = j.get_completion_data()
 
@@ -426,6 +2009,7 @@ class TestConvenienceFields:
         j, _ = journal_setup
         j.on_llm_end(_make_llm_response("Lead answer"), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
         j.on_llm_end(_make_llm_response("Subagent detail"), run_id=uuid4(), parent_run_id=None, tags=["subagent:research"])
+        await j.flush()
 
         data = j.get_completion_data()
 
@@ -474,6 +2058,51 @@ class TestMiddlewareEvents:
         event_types = {e["event_type"] for e in events}
         assert "middleware:title" in event_types
         assert "middleware:guardrail" in event_types
+
+
+class TestContextEvents:
+    @pytest.mark.anyio
+    async def test_record_memory_context_is_readable_from_public_store_contract(self, journal_setup):
+        j, store = journal_setup
+
+        j.record_memory_context(
+            content_sha256="a" * 64,
+        )
+        # Goal continuations may enter the graph more than once under the same
+        # run-scoped journal; the effective frozen memory event stays singular.
+        j.record_memory_context(
+            content_sha256="a" * 64,
+        )
+        await j.flush()
+
+        events = await store.list_events("t1", "r1", event_types=["context:memory"])
+        assert len(events) == 1
+        assert events[0]["category"] == "context"
+        assert events[0]["content"] == {"content_sha256": "a" * 64, "project_context_revision": None, "project_shelf_revision": None}
+
+    @pytest.mark.anyio
+    async def test_record_memory_context_can_retry_after_buffer_failure(self, journal_setup, monkeypatch):
+        j, store = journal_setup
+        original_put = j._put
+        attempts = 0
+
+        def fail_once(**kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("buffer unavailable")
+            return original_put(**kwargs)
+
+        monkeypatch.setattr(j, "_put", fail_once)
+
+        with pytest.raises(RuntimeError, match="buffer unavailable"):
+            j.record_memory_context(content_sha256="a" * 64)
+        j.record_memory_context(content_sha256="a" * 64)
+        await j.flush()
+
+        events = await store.list_events("t1", "r1", event_types=["context:memory"])
+        assert len(events) == 1
+        assert events[0]["content"] == {"content_sha256": "a" * 64, "project_context_revision": None, "project_shelf_revision": None}
 
 
 class TestCallerBucketing:
@@ -535,17 +2164,317 @@ class TestCallerBucketing:
         assert j._lead_agent_tokens == 15
         assert j._llm_call_count == 1
 
-    def test_first_no_usage_second_with_usage(self, journal_setup):
-        """First callback with no usage must not block second callback with usage for same run_id."""
-        j, _ = journal_setup
+    @pytest.mark.anyio
+    async def test_dedup_same_run_id_persists_single_message(self, journal_setup):
+        """A re-fired on_llm_end for one run_id must persist the message once.
+
+        LangChain can deliver on_llm_end more than once for the same run_id.
+        Token accounting already dedups on that; the durable llm.ai.response
+        row must be deduped on the same premise, or count_messages and message
+        pagination (which read append-only rows without dedup) inflate.
+        """
+        j, store = journal_setup
+        run_id = uuid4()
+        response = _make_llm_response("Answer")
+        j.on_llm_end(response, run_id=run_id, parent_run_id=None, tags=["lead_agent"])
+        j.on_llm_end(response, run_id=run_id, parent_run_id=None, tags=["lead_agent"])
+        await j.flush()
+        messages = await store.list_messages("t1")
+        assert [m["event_type"] for m in messages] == ["llm.ai.response"]
+        assert await store.count_messages("t1") == 1
+        # The run summary counts the message exactly once as well.
+        assert j._msg_count == 1
+
+    @pytest.mark.anyio
+    async def test_adjacent_late_usage_enriches_canonical_response_only(self, journal_setup):
+        j, store = journal_setup
+        run_id = uuid4()
+        usage = {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+        original_tool_calls = [{"id": "call-original", "name": "search", "args": {}}]
+        replay_tool_calls = [{"id": "call-replay", "name": "write_file", "args": {}}]
+
+        j.on_llm_end(
+            _make_llm_response(
+                "Canonical",
+                tool_calls=original_tool_calls,
+                additional_kwargs={
+                    "deerflow_error_fallback": True,
+                    "error_detail": "canonical fallback",
+                },
+            ),
+            run_id=run_id,
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        j.on_llm_end(
+            _make_llm_response(
+                "Replay",
+                usage=usage,
+                tool_calls=replay_tool_calls,
+                additional_kwargs={
+                    "deerflow_error_fallback": True,
+                    "error_detail": "replay fallback",
+                },
+            ),
+            run_id=run_id,
+            parent_run_id=None,
+            tags=["subagent:research"],
+        )
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert len(messages) == 1
+        assert messages[0]["content"]["content"] == "Canonical"
+        assert messages[0]["content"]["tool_calls"] == original_tool_calls
+        assert messages[0]["content"]["additional_kwargs"]["error_detail"] == "canonical fallback"
+        assert messages[0]["content"]["usage_metadata"] == usage
+        assert messages[0]["metadata"]["caller"] == "lead_agent"
+        assert messages[0]["metadata"]["usage"] == usage
+        assert j._current_run_tool_call_names == {"call-original": "search"}
+        assert j.had_llm_error_fallback is True
+        assert j.llm_error_fallback_message == "canonical fallback"
+        assert j.get_completion_data()["last_ai_message"] == "Canonical"
+        assert j.get_completion_data()["lead_agent_tokens"] == 15
+        assert j.get_completion_data()["subagent_tokens"] == 0
+
+    @pytest.mark.anyio
+    async def test_same_message_object_replay_cannot_mutate_canonical_summary(self, journal_setup):
+        j, store = journal_setup
+        run_id = uuid4()
+        message = AIMessage(content="Canonical answer")
+        response = LLMResult(generations=[[ChatGeneration(message=message)]])
+
+        j.on_llm_end(response, run_id=run_id, parent_run_id=None, tags=["lead_agent"])
+        message.content = "Replay answer"
+        message.usage_metadata = {
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "total_tokens": 15,
+            "input_token_details": {"cache_read": 3},
+        }
+        j.on_llm_end(response, run_id=run_id, parent_run_id=None, tags=["lead_agent"])
+        message.usage_metadata["input_token_details"]["cache_read"] = 999
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert len(messages) == 1
+        assert messages[0]["content"]["content"] == "Canonical answer"
+        expected_usage = {
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "total_tokens": 15,
+            "input_token_details": {"cache_read": 3},
+        }
+        assert messages[0]["metadata"]["usage"] == expected_usage
+        assert messages[0]["content"]["usage_metadata"] == expected_usage
+        assert j.get_completion_data()["message_count"] == 1
+        assert j.get_completion_data()["last_ai_message"] == "Canonical answer"
+
+    @pytest.mark.anyio
+    async def test_positive_usage_event_does_not_retain_nested_provider_metadata(self, journal_setup):
+        j, store = journal_setup
+        usage = {
+            "input_tokens": 8,
+            "output_tokens": 3,
+            "total_tokens": 11,
+            "output_token_details": {"reasoning": 2},
+        }
+        message = AIMessage(content="Canonical with usage", usage_metadata=usage)
+        response = LLMResult(generations=[[ChatGeneration(message=message)]])
+
+        j.on_llm_end(response, run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        message.usage_metadata["output_token_details"]["reasoning"] = 999
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert len(messages) == 1
+        assert messages[0]["metadata"]["usage"]["output_token_details"] == {"reasoning": 2}
+        assert messages[0]["content"]["usage_metadata"]["output_token_details"] == {"reasoning": 2}
+
+    @pytest.mark.anyio
+    async def test_mutating_staged_message_before_flush_cannot_mutate_canonical_summary(self, journal_setup):
+        j, store = journal_setup
+        message = AIMessage(content="Canonical before flush")
+        response = LLMResult(generations=[[ChatGeneration(message=message)]])
+
+        j.on_llm_end(response, run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        message.content = "Mutation before flush"
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert len(messages) == 1
+        assert messages[0]["content"]["content"] == "Canonical before flush"
+        assert j.get_completion_data()["message_count"] == 1
+        assert j.get_completion_data()["last_ai_message"] == "Canonical before flush"
+
+    @pytest.mark.anyio
+    async def test_nested_same_message_object_replay_cannot_mutate_canonical_summary(self, journal_setup):
+        j, store = journal_setup
+        run_id = uuid4()
+        message = AIMessage(content=[{"type": "text", "text": "Canonical nested answer"}])
+        response = LLMResult(generations=[[ChatGeneration(message=message)]])
+
+        j.on_llm_end(response, run_id=run_id, parent_run_id=None, tags=["lead_agent"])
+        message.content[0]["text"] = "Replay nested answer"
+        message.usage_metadata = {"input_tokens": 8, "output_tokens": 3, "total_tokens": 11}
+        j.on_llm_end(response, run_id=run_id, parent_run_id=None, tags=["lead_agent"])
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert len(messages) == 1
+        assert messages[0]["content"]["content"] == [{"type": "text", "text": "Canonical nested answer"}]
+        assert messages[0]["content"]["usage_metadata"] == message.usage_metadata
+        assert j.get_completion_data()["message_count"] == 1
+        assert j.get_completion_data()["last_ai_message"] == "Canonical nested answer"
+
+    @pytest.mark.anyio
+    async def test_all_zero_usage_remains_pending_and_positive_usage_enriches_it(self, journal_setup):
+        j, store = journal_setup
+        run_id = uuid4()
+        zero_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        positive_usage = {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6}
+
+        j.on_llm_end(_make_llm_response("Zero usage", usage=zero_usage), run_id=run_id, parent_run_id=None, tags=["lead_agent"])
+        assert j._buffer == []
+        assert j._pending_llm_response is not None
+        assert j.get_completion_data()["message_count"] == 0
+
+        j.on_llm_end(_make_llm_response("Replay payload", usage=positive_usage), run_id=run_id, parent_run_id=None, tags=["lead_agent"])
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert len(messages) == 1
+        assert messages[0]["content"]["content"] == "Zero usage"
+        assert messages[0]["content"]["usage_metadata"] == positive_usage
+        assert messages[0]["metadata"]["usage"] == positive_usage
+        assert j.get_completion_data()["message_count"] == 1
+        assert j.get_completion_data()["last_ai_message"] == "Zero usage"
+
+    @pytest.mark.anyio
+    async def test_replay_generation_length_cannot_change_canonical_set(self, journal_setup):
+        j, store = journal_setup
+        short_usage = {"input_tokens": 8, "output_tokens": 3, "total_tokens": 11}
+        extra_usage = {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+        first_run_id = uuid4()
+        second_run_id = uuid4()
+
+        j.on_llm_end(
+            _combine_llm_responses(_make_llm_response("Canonical one"), _make_llm_response("Canonical two")),
+            run_id=first_run_id,
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        j.on_llm_end(
+            _make_llm_response("Short replay", usage=short_usage),
+            run_id=first_run_id,
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        j.on_llm_end(
+            _make_llm_response("Single canonical"),
+            run_id=second_run_id,
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        j.on_llm_end(
+            _combine_llm_responses(
+                _make_llm_response("Long replay one", usage=extra_usage),
+                _make_llm_response("Long replay two"),
+            ),
+            run_id=second_run_id,
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert [message["content"]["content"] for message in messages] == [
+            "Canonical one",
+            "Canonical two",
+            "Single canonical",
+        ]
+        assert messages[0]["metadata"]["usage"] == short_usage
+        assert messages[0]["content"]["usage_metadata"] == short_usage
+        assert messages[1]["metadata"]["usage"] == {}
+        assert messages[1]["content"]["usage_metadata"] is None
+        assert messages[2]["metadata"]["usage"] == extra_usage
+        assert messages[2]["content"]["usage_metadata"] == extra_usage
+        assert j.get_completion_data()["message_count"] == 3
+        assert j.get_completion_data()["last_ai_message"] == "Single canonical"
+
+    @pytest.mark.anyio
+    async def test_interleaved_late_usage_updates_summary_only(self, journal_setup):
+        j, store = journal_setup
+        first_run_id = uuid4()
+        second_run_id = uuid4()
+        usage = {"input_tokens": 9, "output_tokens": 4, "total_tokens": 13}
+
+        j.on_llm_end(_make_llm_response("First canonical"), run_id=first_run_id, parent_run_id=None, tags=["lead_agent"])
+        j.on_llm_end(_make_llm_response("Second canonical"), run_id=second_run_id, parent_run_id=None, tags=["lead_agent"])
+        j.on_llm_end(
+            _make_llm_response(
+                "Late replay",
+                usage=usage,
+                tool_calls=[{"id": "late-call", "name": "write_file", "args": {}}],
+                additional_kwargs={"deerflow_error_fallback": True, "error_detail": "late fallback"},
+            ),
+            run_id=first_run_id,
+            parent_run_id=None,
+            tags=["subagent:research"],
+        )
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert [message["content"]["content"] for message in messages] == ["First canonical", "Second canonical"]
+        assert messages[0]["metadata"]["usage"] == {}
+        assert messages[0]["content"]["usage_metadata"] is None
+        assert j.get_completion_data()["total_tokens"] == 13
+        assert j.get_completion_data()["lead_agent_tokens"] == 13
+        assert j.get_completion_data()["subagent_tokens"] == 0
+        assert j.get_completion_data()["message_count"] == 2
+        assert j.get_completion_data()["last_ai_message"] == "Second canonical"
+        assert "late-call" not in j._current_run_tool_call_names
+        assert j.had_llm_error_fallback is False
+
+    @pytest.mark.anyio
+    async def test_single_no_usage_response_persists_once_at_flush(self, journal_setup):
+        j, store = journal_setup
+
+        j.on_llm_end(_make_llm_response("No usage"), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        assert j._buffer == []
+        assert j._pending_llm_response is not None
+
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert len(messages) == 1
+        assert messages[0]["content"]["content"] == "No usage"
+        assert messages[0]["metadata"]["usage"] == {}
+
+    @pytest.mark.anyio
+    async def test_distinct_run_ids_each_persist_a_message(self, journal_setup):
+        """The dedup guard is per run_id and must not drop distinct responses."""
+        j, store = journal_setup
+        j.on_llm_end(_make_llm_response("First"), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        j.on_llm_end(_make_llm_response("Second"), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        await j.flush()
+        assert await store.count_messages("t1") == 2
+
+    @pytest.mark.anyio
+    async def test_first_no_usage_second_with_usage(self, journal_setup):
+        """Late usage enriches the single canonical event and the run summary."""
+        j, store = journal_setup
         run_id = uuid4()
         j.on_llm_end(_make_llm_response("A", usage=None), run_id=run_id, parent_run_id=None, tags=["lead_agent"])
-        assert str(run_id) not in j._counted_llm_run_ids
-        # Second callback for the same run_id with actual usage must still count
         usage = {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
         j.on_llm_end(_make_llm_response("A", usage=usage), run_id=run_id, parent_run_id=None, tags=["lead_agent"])
-        assert j._total_tokens == 15
-        assert j._lead_agent_tokens == 15
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert len(messages) == 1
+        assert messages[0]["metadata"]["usage"] == usage
+        assert messages[0]["content"]["usage_metadata"] == usage
+        assert j.get_completion_data()["total_tokens"] == 15
 
     def test_track_token_usage_false_skips_buckets(self):
         """When token tracking is disabled, caller buckets stay at 0."""
@@ -714,8 +2643,135 @@ class TestExternalUsageRecords:
         assert j._subagent_tokens == 0
 
 
+class TestProgressSnapshots:
+    @pytest.mark.anyio
+    async def test_on_llm_end_reports_progress_snapshot(self):
+        snapshots: list[dict] = []
+
+        async def reporter(snapshot: dict) -> None:
+            snapshots.append(snapshot)
+
+        store = MemoryRunEventStore()
+        j = RunJournal(
+            "r1",
+            "t1",
+            store,
+            flush_threshold=100,
+            progress_reporter=reporter,
+            progress_flush_interval=0,
+        )
+        usage = {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+        j.on_llm_end(_make_llm_response("Answer", usage=usage), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        await j.flush()
+
+        assert snapshots
+        assert snapshots[-1]["total_tokens"] == 15
+        assert snapshots[-1]["llm_call_count"] == 1
+        assert snapshots[-1]["message_count"] == 1
+        assert snapshots[-1]["last_ai_message"] == "Answer"
+
+    @pytest.mark.anyio
+    async def test_throttled_progress_flush_emits_trailing_snapshot(self):
+        snapshots: list[dict] = []
+        trailing_seen = asyncio.Event()
+
+        async def reporter(snapshot: dict) -> None:
+            snapshots.append(snapshot)
+            if snapshot["total_tokens"] == 45:
+                trailing_seen.set()
+
+        store = MemoryRunEventStore()
+        j = RunJournal(
+            "r1",
+            "t1",
+            store,
+            flush_threshold=100,
+            progress_reporter=reporter,
+            progress_flush_interval=0.01,
+        )
+        j.on_llm_end(
+            _make_llm_response("First", usage={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        j.on_llm_end(
+            _make_llm_response("Second", usage={"input_tokens": 20, "output_tokens": 10, "total_tokens": 30}),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        await asyncio.wait_for(trailing_seen.wait(), timeout=1.0)
+        await j.flush()
+
+        assert len(snapshots) >= 2
+        assert snapshots[-1]["total_tokens"] == 45
+        assert snapshots[-1]["llm_call_count"] == 2
+        assert snapshots[-1]["last_ai_message"] == "Second"
+
+    @pytest.mark.anyio
+    async def test_flush_cancels_delayed_progress_without_final_progress_write(self):
+        snapshots: list[dict] = []
+
+        async def reporter(snapshot: dict) -> None:
+            snapshots.append(snapshot)
+
+        store = MemoryRunEventStore()
+        j = RunJournal(
+            "r1",
+            "t1",
+            store,
+            flush_threshold=100,
+            progress_reporter=reporter,
+            progress_flush_interval=10.0,
+        )
+        j.on_llm_end(
+            _make_llm_response("First", usage={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        await asyncio.sleep(0)
+        assert snapshots[-1]["total_tokens"] == 15
+        j.on_llm_end(
+            _make_llm_response("Second", usage={"input_tokens": 20, "output_tokens": 10, "total_tokens": 30}),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        pending_task = j._pending_progress_task
+        assert pending_task is not None
+        pending_task_ref = weakref.ref(pending_task)
+
+        await asyncio.wait_for(j.flush(), timeout=0.2)
+
+        assert snapshots[-1]["total_tokens"] == 15
+        assert snapshots[-1]["llm_call_count"] == 1
+        assert snapshots[-1]["last_ai_message"] == "First"
+        assert j._pending_progress_task is None
+
+        # The journal must not keep the cancelled task (and its traceback
+        # frame) alive until cyclic GC. Dropping this last local reference
+        # should release it immediately.
+        del pending_task
+        await asyncio.sleep(0)
+        assert pending_task_ref() is None
+
+
 class TestChatModelStartHumanMessage:
     """Tests for on_chat_model_start extracting the first human message."""
+
+    @staticmethod
+    def _human_input_response(source: str = "ask_clarification") -> dict:
+        return {
+            "version": 1,
+            "kind": "human_input_response",
+            "source": source,
+            "request_id": "clarification:call-abc",
+            "response_kind": "option",
+            "option_id": "option-2",
+            "value": "staging",
+        }
 
     @pytest.mark.anyio
     async def test_extracts_first_human_message(self, journal_setup):
@@ -736,18 +2792,209 @@ class TestChatModelStartHumanMessage:
         assert human_events[0]["content"]["content"] == "What is AI?"
 
     @pytest.mark.anyio
-    async def test_skips_summary_named_human_messages(self, journal_setup):
-        """HumanMessages with name='summary' are skipped."""
+    async def test_skips_hidden_human_messages(self, journal_setup):
+        """HumanMessages hidden from the UI are internal context, not user input."""
         from langchain_core.messages import HumanMessage
 
         j, store = journal_setup
         messages_batch = [
-            [HumanMessage(content="Summarized context", name="summary"), HumanMessage(content="Real question")],
+            [
+                HumanMessage(content="What is the weather today?"),
+                HumanMessage(
+                    content="Your todo list from earlier...",
+                    name="todo_reminder",
+                    additional_kwargs={"hide_from_ui": True},
+                ),
+            ],
         ]
         j.on_chat_model_start({}, messages_batch, run_id=uuid4(), tags=["lead_agent"])
         await j.flush()
 
+        assert j._first_human_msg == "What is the weather today?"
+        assert j.get_completion_data()["message_count"] == 1
+        events = await store.list_events("t1", "r1")
+        human_events = [e for e in events if e["event_type"] == "llm.human.input"]
+        assert len(human_events) == 1
+        assert human_events[0]["content"]["content"] == "What is the weather today?"
+
+    @pytest.mark.anyio
+    async def test_only_hidden_human_messages_are_not_captured(self, journal_setup):
+        """A prompt containing only internal HumanMessages has no user input."""
+        from langchain_core.messages import HumanMessage
+
+        j, store = journal_setup
+        hidden_message = HumanMessage(
+            content="Internal context",
+            additional_kwargs={"hide_from_ui": True},
+        )
+        j.on_chat_model_start({}, [[hidden_message]], run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+
+        assert j._first_human_msg is None
+        assert j.get_completion_data()["message_count"] == 0
+        events = await store.list_events("t1", "r1")
+        assert not any(e["event_type"] == "llm.human.input" for e in events)
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("source", ["ask_clarification", "sandbox_network"])
+    async def test_hidden_human_input_response_is_captured(self, journal_setup, source):
+        """Hidden HumanInputCard replies are user-authored and must survive compaction."""
+        from langchain_core.messages import HumanMessage
+
+        j, store = journal_setup
+        hidden_response = HumanMessage(
+            content='For your clarification "Which environment?", my answer is: staging',
+            additional_kwargs={
+                "hide_from_ui": True,
+                "human_input_response": self._human_input_response(source=source),
+            },
+        )
+        j.on_chat_model_start({}, [[hidden_response]], run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+
+        assert j._first_human_msg == 'For your clarification "Which environment?", my answer is: staging'
+        assert j.get_completion_data()["message_count"] == 1
+        events = await store.list_events("t1", "r1")
+        human_events = [e for e in events if e["event_type"] == "llm.human.input"]
+        assert len(human_events) == 1
+        assert human_events[0]["content"]["additional_kwargs"]["hide_from_ui"] is True
+        assert human_events[0]["content"]["additional_kwargs"]["human_input_response"]["request_id"] == "clarification:call-abc"
+
+    @pytest.mark.anyio
+    async def test_hidden_human_input_response_wins_over_older_visible_prompt(self, journal_setup):
+        """The latest hidden card reply is the run input, not an older visible prompt."""
+        from langchain_core.messages import HumanMessage
+
+        j, store = journal_setup
+        older_prompt = HumanMessage(content="Write a quicksort PDF")
+        hidden_response = HumanMessage(
+            content='For your clarification "Which format?", my answer is: tutorial',
+            additional_kwargs={
+                "hide_from_ui": True,
+                "human_input_response": self._human_input_response(),
+            },
+        )
+        j.on_chat_model_start({}, [[older_prompt, hidden_response]], run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+
+        assert j._first_human_msg == 'For your clarification "Which format?", my answer is: tutorial'
+        events = await store.list_events("t1", "r1")
+        human_events = [e for e in events if e["event_type"] == "llm.human.input"]
+        assert len(human_events) == 1
+        assert human_events[0]["content"]["content"] == 'For your clarification "Which format?", my answer is: tutorial'
+
+    @pytest.mark.anyio
+    async def test_hidden_human_input_response_ignores_non_allowlisted_source(self, journal_setup):
+        """Only explicit HumanInputCard sources are persisted while hidden."""
+        from langchain_core.messages import HumanMessage
+
+        j, store = journal_setup
+        hidden_response = HumanMessage(
+            content="Internal approval response",
+            additional_kwargs={
+                "hide_from_ui": True,
+                "human_input_response": self._human_input_response(source="future_approval"),
+            },
+        )
+        j.on_chat_model_start({}, [[hidden_response]], run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+
+        assert j._first_human_msg is None
+        assert j.get_completion_data()["message_count"] == 0
+        events = await store.list_events("t1", "r1")
+        assert not any(e["event_type"] == "llm.human.input" for e in events)
+
+    @pytest.mark.anyio
+    async def test_legacy_summary_message_is_not_captured_as_user_input(self, journal_setup):
+        """Legacy synthetic summaries are internal context even if hide_from_ui is absent."""
+        from langchain_core.messages import HumanMessage
+
+        j, store = journal_setup
+        legacy_summary = HumanMessage(content="Older compressed conversation state", name="summary")
+        j.on_chat_model_start({}, [[legacy_summary]], run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+
+        assert j._first_human_msg is None
+        assert j.get_completion_data()["message_count"] == 0
+        events = await store.list_events("t1", "r1")
+        assert not any(e["event_type"] == "llm.human.input" for e in events)
+
+    @pytest.mark.anyio
+    async def test_visible_human_message_after_hidden_only_prompt_is_captured(self, journal_setup):
+        """Skipping an internal-only prompt does not block later user input."""
+        from langchain_core.messages import HumanMessage
+
+        j, store = journal_setup
+        hidden_message = HumanMessage(
+            content="Internal context",
+            additional_kwargs={"hide_from_ui": True},
+        )
+        j.on_chat_model_start({}, [[hidden_message]], run_id=uuid4(), tags=["lead_agent"])
+        j.on_chat_model_start(
+            {},
+            [[HumanMessage(content="Real question")]],
+            run_id=uuid4(),
+            tags=["lead_agent"],
+        )
+        await j.flush()
+
         assert j._first_human_msg == "Real question"
+        assert j.get_completion_data()["message_count"] == 1
+        events = await store.list_events("t1", "r1")
+        human_events = [e for e in events if e["event_type"] == "llm.human.input"]
+        assert len(human_events) == 1
+        assert human_events[0]["content"]["content"] == "Real question"
+
+    @pytest.mark.anyio
+    async def test_summarization_prompt_does_not_capture_first_human_message(self, journal_setup):
+        """Internal summarization prompts must not replace the run's real user input."""
+        from langchain_core.messages import HumanMessage
+
+        j, store = journal_setup
+        summarization_prompt = HumanMessage(
+            content="<role>\nContext Extraction Assistant\n</role>\n\n<primary_objective>\nExtract context...",
+        )
+        j.on_chat_model_start(
+            {},
+            [[summarization_prompt]],
+            run_id=uuid4(),
+            tags=["middleware:summarize"],
+        )
+        j.on_chat_model_start(
+            {},
+            [[HumanMessage(content="Real user follow-up")]],
+            run_id=uuid4(),
+            tags=["lead_agent"],
+        )
+        await j.flush()
+
+        assert j._first_human_msg == "Real user follow-up"
+        assert j.get_completion_data()["message_count"] == 1
+        events = await store.list_events("t1", "r1")
+        human_events = [e for e in events if e["event_type"] == "llm.human.input"]
+        assert len(human_events) == 1
+        assert human_events[0]["content"]["content"] == "Real user follow-up"
+        assert human_events[0]["metadata"]["caller"] == "lead_agent"
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("tags", [["middleware:summarize"], ["subagent:research"]])
+    async def test_non_lead_human_prompts_are_not_captured_as_user_input(self, journal_setup, tags):
+        """Only lead-agent LLM starts create UI-facing human input events."""
+        from langchain_core.messages import HumanMessage
+
+        j, store = journal_setup
+        j.on_chat_model_start(
+            {},
+            [[HumanMessage(content="Internal prompt")]],
+            run_id=uuid4(),
+            tags=tags,
+        )
+        await j.flush()
+
+        assert j._first_human_msg is None
+        assert j.get_completion_data()["message_count"] == 0
+        events = await store.list_events("t1", "r1")
+        assert not any(e["event_type"] == "llm.human.input" for e in events)
 
     @pytest.mark.anyio
     async def test_only_first_human_message_captured(self, journal_setup):
@@ -765,9 +3012,392 @@ class TestChatModelStartHumanMessage:
         assert len(human_events) == 1
 
     @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        "content",
+        [
+            pytest.param("", id="empty-text"),
+            pytest.param([{"type": "image_url", "image_url": {"url": "data:image/png;base64,aW1hZ2U="}}], id="image-only"),
+        ],
+    )
+    async def test_textless_human_input_is_captured_once(self, journal_setup, content):
+        """A missing display summary must not duplicate input on later model calls."""
+        j, store = journal_setup
+        message = HumanMessage(content=content, id="user-image")
+        for _ in range(2):
+            j.on_chat_model_start({}, [[message]], run_id=uuid4(), tags=["lead_agent"])
+            await j.flush()
+
+        events = await store.list_events("t1", "r1")
+        human_events = [event for event in events if event["event_type"] == "llm.human.input"]
+        assert len(human_events) == 1
+        assert human_events[0]["content"]["content"] == content
+        assert j.get_completion_data()["message_count"] == 1
+        assert j.get_completion_data()["first_human_message"] is None
+
+    @pytest.mark.anyio
+    async def test_textless_input_stops_capture_before_older_batches(self, journal_setup):
+        j, store = journal_setup
+        image = HumanMessage(content=[{"type": "image_url", "image_url": {"url": "data:image/png;base64,aW1hZ2U="}}], id="latest-input")
+        j.on_chat_model_start(
+            {},
+            [[HumanMessage(content="Older question", id="old-input")], [image]],
+            run_id=uuid4(),
+            tags=["lead_agent"],
+        )
+        await j.flush()
+
+        events = await store.list_events("t1", "r1")
+        human_events = [event for event in events if event["event_type"] == "llm.human.input"]
+        assert [event["content"]["id"] for event in human_events] == ["latest-input"]
+        assert j.get_completion_data()["first_human_message"] is None
+        assert j.get_completion_data()["message_count"] == 1
+
+    @pytest.mark.anyio
     async def test_empty_messages_no_crash(self, journal_setup):
         """on_chat_model_start with empty messages does not crash."""
         j, store = journal_setup
         j.on_chat_model_start({}, [], run_id=uuid4(), tags=["lead_agent"])
         await j.flush()
         assert j._first_human_msg is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["full", "delta"])
+async def test_image_input_is_journaled_once_across_graph_model_calls(mode):
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.graph import StateGraph
+
+    from deerflow.agents.thread_state import get_thread_state_schema
+    from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
+
+    store = MemoryRunEventStore()
+    journal = RunJournal("image-run", "image-thread", store)
+    model = FakeMessagesListChatModel(responses=[AIMessage(content="First response", id="a1"), AIMessage(content="Final response", id="a2")])
+
+    async def answer(state):
+        return {"messages": [await model.ainvoke(state["messages"])]}
+
+    builder = StateGraph(get_thread_state_schema(mode))
+    builder.add_node("first", answer)
+    builder.add_node("second", answer)
+    builder.set_entry_point("first")
+    builder.add_edge("first", "second")
+    builder.set_finish_point("second")
+    saver = InMemorySaver()
+    graph = builder.compile(checkpointer=saver)
+    accessor = CheckpointStateAccessor.bind(graph, saver, mode=mode)
+    image_content = [{"type": "image_url", "image_url": {"url": "data:image/png;base64,aW1hZ2U="}}]
+    config = {"configurable": {"thread_id": "image-thread"}, "callbacks": [journal]}
+
+    await graph.ainvoke({"messages": [HumanMessage(content=image_content, id="h1")]}, config)
+    await journal.flush()
+    events = await store.list_messages("image-thread")
+    assert [event["content"]["id"] for event in events] == ["h1", "a1", "a2"]
+    assert events[0]["content"]["content"] == image_content
+    assert journal.get_completion_data()["message_count"] == 3
+    snapshot = await accessor.aget(config)
+    assert [message.id for message in snapshot.values["messages"]] == ["h1", "a1", "a2"]
+    await journal.close()
+
+
+class TestDeliveryTracking:
+    """Slice 1 (#4272): journal records artifact production for run.delivery."""
+
+    @staticmethod
+    def _register_tool_call(j: RunJournal, tool_call_id: str, name: str) -> None:
+        from langchain_core.messages import AIMessage
+
+        ai = AIMessage(content="", tool_calls=[{"id": tool_call_id, "name": name, "args": {}}])
+        j._remember_current_run_tool_calls(ai, caller="lead_agent")
+
+    def test_callbacks_run_inline_to_serialize_parallel_mutations(self, journal_setup):
+        j, _ = journal_setup
+
+        # LangChain dispatches synchronous handlers with run_inline=False via
+        # run_in_executor, allowing parallel tool callbacks to mutate one
+        # journal from different threads.
+        assert j.run_inline is True
+
+    @pytest.mark.anyio
+    async def test_concurrent_callbacks_on_one_journal_are_serialized(self, journal_setup):
+        from langchain_core.callbacks.manager import ahandle_event
+        from langchain_core.messages import ToolMessage
+        from langgraph.types import Command
+
+        j, _ = journal_setup
+        commands = []
+        for index, path in enumerate(("report.md", "report.md", "appendix.md"), start=1):
+            tool_call_id = f"call_{index}"
+            self._register_tool_call(j, tool_call_id, "present_files")
+            commands.append(
+                Command(
+                    update={
+                        "artifacts": [f"/mnt/user-data/outputs/{path}"],
+                        "messages": [ToolMessage("Successfully presented files", tool_call_id=tool_call_id)],
+                    }
+                )
+            )
+
+        # This is the real LangChain async callback dispatcher. Because the
+        # journal is run_inline, each synchronous mutation completes on the
+        # event-loop thread instead of racing in executor threads.
+        await asyncio.gather(
+            *(
+                ahandle_event(
+                    [j],
+                    "on_tool_end",
+                    "ignore_agent",
+                    command,
+                    run_id=uuid4(),
+                )
+                for command in commands
+            )
+        )
+
+        content = j.get_delivery_content()
+        assert content["presented"] == 2
+        assert set(content["paths"]) == {
+            "/mnt/user-data/outputs/report.md",
+            "/mnt/user-data/outputs/appendix.md",
+        }
+        assert set(content["by_tool"]["present_files"]) == set(content["paths"])
+
+    @pytest.mark.anyio
+    async def test_concurrent_runs_keep_delivery_accumulators_isolated(self):
+        from langchain_core.messages import ToolMessage
+        from langgraph.types import Command
+
+        store = MemoryRunEventStore()
+        journals = [RunJournal(run_id, "t1", store, flush_threshold=100) for run_id in ("r1", "r2")]
+
+        async def finish_run(journal: RunJournal, index: int) -> None:
+            tool_call_id = f"call_run_{index}"
+            self._register_tool_call(journal, tool_call_id, "present_files")
+            journal.on_tool_end(
+                Command(
+                    update={
+                        "artifacts": [f"/mnt/user-data/outputs/report-{index}.md"],
+                        "messages": [ToolMessage("Successfully presented files", tool_call_id=tool_call_id)],
+                    }
+                ),
+                run_id=uuid4(),
+            )
+            await asyncio.sleep(0)
+            journal.record_delivery()
+            await journal.flush()
+
+        await asyncio.gather(*(finish_run(journal, index) for index, journal in enumerate(journals, start=1)))
+
+        for index in (1, 2):
+            events = await store.list_events("t1", f"r{index}")
+            content = next(e for e in events if e["event_type"] == "run.delivery")["content"]
+            assert content == {
+                "presented": 1,
+                "paths": [f"/mnt/user-data/outputs/report-{index}.md"],
+                "by_tool": {"present_files": [f"/mnt/user-data/outputs/report-{index}.md"]},
+            }
+
+    @pytest.mark.anyio
+    async def test_present_files_success_command_recorded_with_attribution(self, journal_setup):
+        from langchain_core.messages import ToolMessage
+        from langgraph.types import Command
+
+        j, store = journal_setup
+        self._register_tool_call(j, "call_1", "present_files")
+        cmd = Command(
+            update={
+                "artifacts": ["/mnt/user-data/outputs/report.md"],
+                "messages": [ToolMessage("Successfully presented files", tool_call_id="call_1")],
+            }
+        )
+        j.on_tool_end(cmd, run_id=uuid4())
+        j.record_delivery()
+        await j.flush()
+
+        events = await store.list_events("t1", "r1")
+        delivery = [e for e in events if e["event_type"] == "run.delivery"]
+        assert len(delivery) == 1
+        content = delivery[0]["content"]
+        assert content["presented"] == 1
+        assert content["paths"] == ["/mnt/user-data/outputs/report.md"]
+        assert content["by_tool"] == {"present_files": ["/mnt/user-data/outputs/report.md"]}
+        assert delivery[0]["category"] == "outputs"
+
+    @pytest.mark.anyio
+    async def test_tool_callback_name_preserves_attribution_when_message_lookup_misses(self, journal_setup):
+        from langchain_core.messages import ToolMessage
+        from langgraph.types import Command
+
+        j, store = journal_setup
+        tool_run_id = uuid4()
+        j.on_tool_start(
+            {"name": "present_files"},
+            "",
+            run_id=tool_run_id,
+        )
+        j.on_tool_end(
+            Command(
+                update={
+                    "artifacts": ["/mnt/user-data/outputs/report.md"],
+                    "messages": [ToolMessage("Successfully presented files", tool_call_id="call_missing")],
+                }
+            ),
+            run_id=tool_run_id,
+        )
+        j.record_delivery()
+        await j.flush()
+
+        events = await store.list_events("t1", "r1")
+        content = next(e for e in events if e["event_type"] == "run.delivery")["content"]
+        assert content["by_tool"] == {"present_files": ["/mnt/user-data/outputs/report.md"]}
+
+    @pytest.mark.anyio
+    async def test_command_with_multiple_messages_records_artifacts_once(self, journal_setup):
+        from langchain_core.messages import ToolMessage
+        from langgraph.types import Command
+
+        j, store = journal_setup
+        self._register_tool_call(j, "call_multi", "present_files")
+        cmd = Command(
+            update={
+                "artifacts": ["/mnt/user-data/outputs/report.md"],
+                "messages": [
+                    ToolMessage("Successfully presented files", tool_call_id="call_multi"),
+                    HumanMessage("Additional command message"),
+                ],
+            }
+        )
+        j.on_tool_end(cmd, run_id=uuid4())
+        j.record_delivery()
+        await j.flush()
+
+        events = await store.list_events("t1", "r1")
+        content = next(e for e in events if e["event_type"] == "run.delivery")["content"]
+        assert content == {
+            "presented": 1,
+            "paths": ["/mnt/user-data/outputs/report.md"],
+            "by_tool": {"present_files": ["/mnt/user-data/outputs/report.md"]},
+        }
+
+    @pytest.mark.anyio
+    async def test_command_with_multiple_tool_names_leaves_artifacts_unattributed(self, journal_setup):
+        from langchain_core.messages import ToolMessage
+        from langgraph.types import Command
+
+        j, store = journal_setup
+        self._register_tool_call(j, "call_present", "present_files")
+        self._register_tool_call(j, "call_browser", "browser_screenshot")
+        cmd = Command(
+            update={
+                "artifacts": [
+                    "/mnt/user-data/outputs/report.md",
+                    "/mnt/user-data/outputs/shot.png",
+                ],
+                "messages": [
+                    ToolMessage("Successfully presented files", tool_call_id="call_present"),
+                    ToolMessage("Saved browser screenshot", tool_call_id="call_browser"),
+                ],
+            }
+        )
+        j.on_tool_end(cmd, run_id=uuid4())
+        j.record_delivery()
+        await j.flush()
+
+        events = await store.list_events("t1", "r1")
+        content = next(e for e in events if e["event_type"] == "run.delivery")["content"]
+        assert content == {
+            "presented": 2,
+            "paths": [
+                "/mnt/user-data/outputs/report.md",
+                "/mnt/user-data/outputs/shot.png",
+            ],
+            "by_tool": {},
+        }
+
+    @pytest.mark.anyio
+    async def test_error_command_without_artifacts_not_recorded(self, journal_setup):
+        from langchain_core.messages import ToolMessage
+        from langgraph.types import Command
+
+        j, store = journal_setup
+        self._register_tool_call(j, "call_2", "present_files")
+        cmd = Command(update={"messages": [ToolMessage("Error: Only files in /mnt/user-data/outputs can be presented", tool_call_id="call_2")]})
+        j.on_tool_end(cmd, run_id=uuid4())
+        j.record_delivery()
+        await j.flush()
+
+        events = await store.list_events("t1", "r1")
+        delivery = [e for e in events if e["event_type"] == "run.delivery"]
+        assert len(delivery) == 1
+        assert delivery[0]["content"] == {"presented": 0, "paths": [], "by_tool": {}}
+
+    @pytest.mark.anyio
+    async def test_browser_tool_artifacts_recorded_under_producing_tool(self, journal_setup):
+        from langchain_core.messages import ToolMessage
+        from langgraph.types import Command
+
+        j, store = journal_setup
+        self._register_tool_call(j, "call_3", "browser_screenshot")
+        cmd = Command(
+            update={
+                "artifacts": ["/mnt/user-data/outputs/shot.png"],
+                "messages": [ToolMessage("Saved browser screenshot", tool_call_id="call_3")],
+            }
+        )
+        j.on_tool_end(cmd, run_id=uuid4())
+        j.record_delivery()
+        await j.flush()
+
+        events = await store.list_events("t1", "r1")
+        content = next(e for e in events if e["event_type"] == "run.delivery")["content"]
+        assert content["presented"] == 1
+        assert content["by_tool"] == {"browser_screenshot": ["/mnt/user-data/outputs/shot.png"]}
+
+    @pytest.mark.anyio
+    async def test_duplicate_path_tool_pair_recorded_once(self, journal_setup):
+        from langchain_core.messages import ToolMessage
+        from langgraph.types import Command
+
+        j, store = journal_setup
+        self._register_tool_call(j, "call_4", "present_files")
+        for _ in range(2):
+            j.on_tool_end(
+                Command(
+                    update={
+                        "artifacts": ["/mnt/user-data/outputs/report.md"],
+                        "messages": [ToolMessage("Successfully presented files", tool_call_id="call_4")],
+                    }
+                ),
+                run_id=uuid4(),
+            )
+        j.record_delivery()
+        await j.flush()
+
+        events = await store.list_events("t1", "r1")
+        content = next(e for e in events if e["event_type"] == "run.delivery")["content"]
+        assert content["presented"] == 1
+        assert content["paths"] == ["/mnt/user-data/outputs/report.md"]
+
+    @pytest.mark.anyio
+    async def test_unattributed_artifacts_counted_without_by_tool_entry(self, journal_setup):
+        from langchain_core.messages import ToolMessage
+        from langgraph.types import Command
+
+        j, store = journal_setup
+        # No _register_tool_call: attribution missing (e.g. tool_call names map miss).
+        cmd = Command(
+            update={
+                "artifacts": ["/mnt/user-data/outputs/anon.txt"],
+                "messages": [ToolMessage("ok", tool_call_id="call_unknown")],
+            }
+        )
+        j.on_tool_end(cmd, run_id=uuid4())
+        j.record_delivery()
+        await j.flush()
+
+        events = await store.list_events("t1", "r1")
+        content = next(e for e in events if e["event_type"] == "run.delivery")["content"]
+        assert content["presented"] == 1
+        assert content["paths"] == ["/mnt/user-data/outputs/anon.txt"]
+        assert content["by_tool"] == {}

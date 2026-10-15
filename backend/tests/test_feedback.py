@@ -4,8 +4,11 @@ Uses temp SQLite DB for ORM tests.
 """
 
 import pytest
+from _repository_race_helpers import miss_select_factory
+from sqlalchemy.exc import IntegrityError
 
 from deerflow.persistence.feedback import FeedbackRepository
+from deerflow.persistence.feedback.sql import _UPSERT_MAX_ATTEMPTS
 
 
 async def _make_feedback_repo(tmp_path):
@@ -174,6 +177,47 @@ class TestFeedbackRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_upsert_retries_as_update_when_concurrent_insert_wins(self, tmp_path):
+        """A losing first-submission INSERT updates the winner's row instead of raising IntegrityError."""
+        repo = await _make_feedback_repo(tmp_path)
+        try:
+            first = await repo.upsert(run_id="r1", thread_id="t1", rating=1, user_id="u1")
+            real_factory = repo._sf
+            repo._sf, _ = miss_select_factory(real_factory)
+            try:
+                second = await repo.upsert(run_id="r1", thread_id="t1", rating=-1, user_id="u1", comment="second tab")
+            finally:
+                repo._sf = real_factory
+
+            assert second["feedback_id"] == first["feedback_id"]
+            assert second["rating"] == -1
+            assert second["comment"] == "second tab"
+            rows = await repo.list_by_run("t1", "r1", user_id="u1")
+            assert [row["feedback_id"] for row in rows] == [first["feedback_id"]]
+        finally:
+            await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_upsert_raises_the_integrity_error_once_retries_are_exhausted(self, tmp_path):
+        """If every attempt still collides, the original IntegrityError propagates instead of being swallowed."""
+        repo = await _make_feedback_repo(tmp_path)
+        try:
+            first = await repo.upsert(run_id="r1", thread_id="t1", rating=1, user_id="u1")
+            real_factory = repo._sf
+            repo._sf, sessions = miss_select_factory(real_factory, misses=None)
+            try:
+                with pytest.raises(IntegrityError, match="feedback.thread_id, feedback.run_id, feedback.user_id"):
+                    await repo.upsert(run_id="r1", thread_id="t1", rating=-1, user_id="u1")
+            finally:
+                repo._sf = real_factory
+
+            assert [session.missed for session in sessions] == [_UPSERT_MAX_ATTEMPTS]
+            rows = await repo.list_by_run("t1", "r1", user_id="u1")
+            assert [(row["feedback_id"], row["rating"]) for row in rows] == [(first["feedback_id"], 1)]
+        finally:
+            await _cleanup()
+
+    @pytest.mark.anyio
     async def test_upsert_different_users_separate(self, tmp_path):
         repo = await _make_feedback_repo(tmp_path)
         r1 = await repo.upsert(run_id="r1", thread_id="t1", rating=1, user_id="u1")
@@ -226,6 +270,54 @@ class TestFeedbackRepository:
         repo = await _make_feedback_repo(tmp_path)
         grouped = await repo.list_by_thread_grouped("t1", user_id="u1")
         assert grouped == {}
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_list_by_run_ids_is_thread_and_owner_scoped(self, tmp_path):
+        repo = await _make_feedback_repo(tmp_path)
+        await repo.upsert(run_id="r1", thread_id="t1", rating=1, user_id="u1")
+        await repo.upsert(run_id="r2", thread_id="t1", rating=-1, user_id="u1")
+        await repo.upsert(run_id="r3", thread_id="t1", rating=1, user_id="u1")
+        await repo.upsert(run_id="r1", thread_id="t1", rating=-1, user_id="u2")
+        await repo.upsert(run_id="r2", thread_id="t2", rating=1, user_id="u1")
+
+        grouped = await repo.list_by_run_ids("t1", {"r1", "r2"}, user_id="u1")
+
+        assert set(grouped) == {"r1", "r2"}
+        assert grouped["r1"]["rating"] == 1
+        assert grouped["r2"]["rating"] == -1
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_unfiltered_reads_collapse_multi_user_feedback_deterministically(self, tmp_path):
+        """Explicit-None reads (internal callers) collapse same-run feedback rows.
+
+        Several browser users can hold feedback on one run of a shared
+        NULL-owner thread; the per-run collapse must be deterministic —
+        the most recently created feedback wins, ``feedback_id`` breaks ties.
+        """
+        import asyncio
+
+        repo = await _make_feedback_repo(tmp_path)
+        await repo.upsert(run_id="r1", thread_id="t1", rating=1, user_id="u1")
+        # Guarantee a strictly later created_at than the first row.
+        await asyncio.sleep(0.01)
+        second = await repo.upsert(run_id="r1", thread_id="t1", rating=-1, user_id="u2")
+
+        for _ in range(3):
+            grouped = await repo.list_by_thread_grouped("t1", user_id=None)
+            by_run_ids = await repo.list_by_run_ids("t1", {"r1"}, user_id=None)
+            assert grouped["r1"]["feedback_id"] == second["feedback_id"]
+            assert grouped["r1"]["rating"] == -1
+            assert grouped["r1"]["user_id"] == "u2"
+            assert by_run_ids["r1"]["feedback_id"] == second["feedback_id"]
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_list_by_run_ids_empty_skips_query(self, tmp_path):
+        repo = await _make_feedback_repo(tmp_path)
+
+        assert await repo.list_by_run_ids("t1", set(), user_id="u1") == {}
         await _cleanup()
 
 
@@ -287,3 +379,36 @@ class TestFollowUpAssociation:
         if recent and recent[0].get("status") == "success":
             follow_up = recent[0]["run_id"]
         assert follow_up == "r3"
+
+
+class TestDeleteByThread:
+    """Thread deletion clears feedback without crossing owner or thread scope."""
+
+    @pytest.mark.anyio
+    async def test_deletes_only_the_owners_rows_for_that_thread(self, tmp_path):
+        repo = await _make_feedback_repo(tmp_path)
+        try:
+            await repo.create(run_id="r1", thread_id="t1", rating=1, user_id="alice")
+            await repo.create(run_id="r2", thread_id="t1", rating=-1, user_id="alice")
+            await repo.create(run_id="r1", thread_id="t1", rating=1, user_id="bob")
+            await repo.create(run_id="r1", thread_id="t2", rating=1, user_id="alice")
+
+            count = await repo.delete_by_thread("t1", user_id="alice")
+
+            assert count == 2
+            assert await repo.list_by_thread("t1", user_id="alice") == []
+            assert len(await repo.list_by_thread("t1", user_id="bob")) == 1
+            assert len(await repo.list_by_thread("t2", user_id="alice")) == 1
+        finally:
+            await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_second_call_returns_zero(self, tmp_path):
+        repo = await _make_feedback_repo(tmp_path)
+        try:
+            await repo.create(run_id="r1", thread_id="t1", rating=1, user_id="alice")
+
+            assert await repo.delete_by_thread("t1", user_id="alice") == 1
+            assert await repo.delete_by_thread("t1", user_id="alice") == 0
+        finally:
+            await _cleanup()

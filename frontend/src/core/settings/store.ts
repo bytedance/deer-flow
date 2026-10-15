@@ -8,6 +8,7 @@ import {
   saveThreadModelName,
   type LocalSettings,
 } from "./local";
+import type { Preferences } from "./preferences-sync";
 
 type Listener = () => void;
 
@@ -22,11 +23,66 @@ const threadModelNames = new Map<string, string | undefined>();
 let baseSettings: LocalSettings = DEFAULT_LOCAL_SETTINGS;
 let baseSettingsLoaded = false;
 let storageListenerRegistered = false;
+let preferenceEdit:
+  | ((before: LocalSettings, after: LocalSettings) => void)
+  | undefined;
+
+/** Activate only after the workspace has identified the account. */
+export function activatePreferences(
+  initial: Preferences,
+  edit: (before: LocalSettings, after: LocalSettings) => void,
+) {
+  ensureBaseSettingsLoaded();
+  preferenceEdit = edit;
+  const apply = (value: Preferences) => {
+    if (preferenceEdit !== edit) return;
+    baseSettings = {
+      ...baseSettings,
+      notification: { enabled: value.notification_enabled ?? true },
+      context: {
+        ...baseSettings.context,
+        model_name: value.model_name ?? undefined,
+        mode: value.mode ?? undefined,
+        reasoning_effort: value.reasoning_effort ?? undefined,
+      },
+    };
+    emitChange();
+  };
+  apply(initial);
+  return {
+    apply,
+    stop: () => {
+      if (preferenceEdit === edit) {
+        apply({});
+        preferenceEdit = undefined;
+      }
+    },
+  };
+}
 
 function emitChange() {
   for (const listener of listeners) {
     listener();
   }
+}
+
+function persistLocalOnlySettings() {
+  if (!preferenceEdit) {
+    saveLocalSettings(baseSettings);
+    return;
+  }
+  // Account preferences never leak back into the legacy shared-origin key.
+  const legacy = getLocalSettings();
+  saveLocalSettings({
+    ...baseSettings,
+    notification: legacy.notification,
+    context: {
+      ...baseSettings.context,
+      model_name: legacy.context.model_name,
+      mode: legacy.context.mode,
+      reasoning_effort: legacy.context.reasoning_effort,
+    },
+  });
 }
 
 function ensureBaseSettingsLoaded() {
@@ -52,13 +108,42 @@ function mergeSettingsSection<K extends keyof LocalSettings>(
   key: K,
   value: Partial<LocalSettings[K]>,
 ): LocalSettings {
+  const current = settings[key];
+  if (
+    current !== null &&
+    typeof current === "object" &&
+    value !== null &&
+    typeof value === "object"
+  ) {
+    return {
+      ...settings,
+      [key]: {
+        ...current,
+        ...value,
+      },
+    } as LocalSettings;
+  }
   return {
     ...settings,
-    [key]: {
-      ...settings[key],
-      ...value,
+    [key]: value,
+  };
+}
+
+function readSharedSettings(): LocalSettings {
+  const local = getLocalSettings();
+  if (!preferenceEdit) return local;
+  // Device-local fields still follow other tabs, including key removal and
+  // storage.clear(). The legacy key must never replace account preferences.
+  return {
+    ...local,
+    notification: baseSettings.notification,
+    context: {
+      ...local.context,
+      model_name: baseSettings.context.model_name,
+      mode: baseSettings.context.mode,
+      reasoning_effort: baseSettings.context.reasoning_effort,
     },
-  } as LocalSettings;
+  };
 }
 
 function handleStorage(event: StorageEvent) {
@@ -69,14 +154,14 @@ function handleStorage(event: StorageEvent) {
   ensureBaseSettingsLoaded();
 
   if (event.key === null) {
-    baseSettings = getLocalSettings();
+    baseSettings = readSharedSettings();
     threadModelNames.clear();
     emitChange();
     return;
   }
 
   if (event.key === LOCAL_SETTINGS_KEY) {
-    baseSettings = getLocalSettings();
+    baseSettings = readSharedSettings();
     emitChange();
     return;
   }
@@ -119,8 +204,10 @@ export const updateLocalSettings: LocalSettingsSetter = (key, value) => {
   ensureBaseSettingsLoaded();
   ensureStorageListenerRegistered();
 
+  const previous = baseSettings;
   baseSettings = mergeSettingsSection(baseSettings, key, value);
-  saveLocalSettings(baseSettings);
+  persistLocalOnlySettings();
+  preferenceEdit?.(previous, baseSettings);
   emitChange();
 };
 
@@ -132,9 +219,11 @@ export function updateThreadSettings<K extends keyof LocalSettings>(
   ensureBaseSettingsLoaded();
   ensureStorageListenerRegistered();
 
+  const previous = baseSettings;
   const nextBaseSettings = mergeSettingsSection(baseSettings, key, value);
   baseSettings = nextBaseSettings;
-  saveLocalSettings(baseSettings);
+  persistLocalOnlySettings();
+  preferenceEdit?.(previous, baseSettings);
 
   if (
     key === "context" &&
@@ -146,5 +235,24 @@ export function updateThreadSettings<K extends keyof LocalSettings>(
     saveThreadModelName(threadId, threadModelName);
   }
 
+  emitChange();
+}
+
+/** Model availability/default resolution is not an explicit account edit. */
+export function resolveThreadContext(
+  threadId: string,
+  context: Partial<LocalSettings["context"]>,
+) {
+  if (!preferenceEdit) {
+    updateThreadSettings(threadId, "context", context);
+    return;
+  }
+  baseSettings = mergeSettingsSection(baseSettings, "context", context);
+  // Preserve explicit thread overrides, but do not create one from a temporary
+  // fallback: it would mask the account model when a slow GET finally arrives.
+  if (getThreadModelSnapshot(threadId) && "model_name" in context) {
+    threadModelNames.set(threadId, context.model_name);
+    saveThreadModelName(threadId, context.model_name);
+  }
   emitChange();
 }

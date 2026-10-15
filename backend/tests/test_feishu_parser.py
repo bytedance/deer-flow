@@ -1,12 +1,46 @@
 import asyncio
 import json
+import logging
+import tempfile
+import threading
+import time
+from collections import deque
+from io import BytesIO
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from support.symlinks import symlink_or_skip
 
+from app.channels import feishu as feishu_module
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.feishu import FeishuChannel
-from app.channels.message_bus import InboundMessage, MessageBus
+from app.channels.message_bus import (
+    PENDING_CLARIFICATION_METADATA_KEY,
+    RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY,
+    InboundMessage,
+    MessageBus,
+    OutboundMessage,
+)
+from app.channels.store import JsonChannelStore
+from deerflow.uploads.manager import PathTraversalError
+
+
+def _pending(
+    topic_id: str,
+    *,
+    thread_id: str | None = None,
+    source_message_id: str | None = None,
+    card_message_id: str | None = None,
+    created_at: float = 9999999999,
+) -> dict:
+    return {
+        "thread_id": thread_id or f"deer-thread-{topic_id}",
+        "topic_id": topic_id,
+        "source_message_id": source_message_id or topic_id,
+        "card_message_id": card_message_id or f"card-{topic_id}",
+        "created_at": created_at,
+    }
 
 
 def _run(coro):
@@ -15,6 +49,84 @@ def _run(coro):
         return loop.run_until_complete(coro)
     finally:
         loop.close()
+
+
+def _feishu_file_response(filename: str, content: bytes):
+    response = MagicMock()
+    response.success.return_value = True
+    response.file = BytesIO(content)
+    response.file_name = filename
+    return response
+
+
+def _feishu_stream_response(filename: str, stream):
+    response = MagicMock()
+    response.success.return_value = True
+    response.file = stream
+    response.file_name = filename
+    return response
+
+
+def _feishu_file_channel(*responses):
+    channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+    channel._GetMessageResourceRequest = MagicMock()
+    builder = MagicMock()
+    builder.message_id.return_value = builder
+    builder.file_key.return_value = builder
+    builder.type.return_value = builder
+    builder.build.return_value = object()
+    channel._GetMessageResourceRequest.builder.return_value = builder
+    channel._api_client = MagicMock()
+    channel._api_client.im.v1.message_resource.get.side_effect = responses
+    return channel
+
+
+@pytest.mark.parametrize("failure", [None, "sync", "release"])
+def test_feishu_receive_single_file_releases_sandbox_after_sync(tmp_path, monkeypatch, failure):
+    async def go():
+        from deerflow.config.paths import Paths
+
+        channel = _feishu_file_channel(_feishu_file_response("note.txt", b"hello uploads"))
+        provider = MagicMock()
+        provider.uses_thread_data_mounts = False
+        provider.acquire_async = AsyncMock(return_value="aio-1")
+        sandbox = provider.get.return_value
+        if failure == "sync":
+            sandbox.update_file.side_effect = RuntimeError("sync failed")
+        elif failure == "release":
+            provider.release.side_effect = RuntimeError("release failed")
+        monkeypatch.setattr(feishu_module, "get_paths", lambda: Paths(base_dir=tmp_path))
+        monkeypatch.setattr(feishu_module, "get_sandbox_provider", lambda: provider)
+
+        result = await channel._receive_single_file("message-1", "file-key", "file", "thread-a", user_id="owner-upload")
+
+        assert result == ("Failed to obtain the [file]" if failure == "sync" else "/mnt/user-data/uploads/note.txt")
+        provider.acquire_async.assert_awaited_once_with("thread-a", user_id="owner-upload")
+        sandbox.update_file.assert_called_once_with("/mnt/user-data/uploads/note.txt", b"hello uploads")
+        provider.release.assert_called_once_with("aio-1")
+
+    _run(go())
+
+
+def test_feishu_receive_single_file_skips_release_for_mounted_sandbox(tmp_path, monkeypatch):
+    async def go():
+        from deerflow.config.paths import Paths
+
+        channel = _feishu_file_channel(_feishu_file_response("note.txt", b"hello uploads"))
+        provider = MagicMock()
+        provider.uses_thread_data_mounts = True
+        monkeypatch.setattr(feishu_module, "get_paths", lambda: Paths(base_dir=tmp_path))
+        monkeypatch.setattr(feishu_module, "get_sandbox_provider", lambda: provider)
+
+        result = await channel._receive_single_file("message-1", "file-key", "file", "thread-a", user_id="owner-upload")
+
+        assert result == "/mnt/user-data/uploads/note.txt"
+        provider.acquire.assert_not_called()
+        provider.acquire_async.assert_not_called()
+        provider.get.assert_not_called()
+        provider.release.assert_not_called()
+
+    _run(go())
 
 
 def test_feishu_on_message_plain_text():
@@ -45,6 +157,308 @@ def test_feishu_on_message_plain_text():
 
         mock_make_inbound.assert_called_once()
         assert mock_make_inbound.call_args[1]["text"] == "Hello world"
+
+
+def test_feishu_is_not_running_when_ws_thread_exits():
+    bus = MessageBus()
+    channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test"})
+    channel._running = True
+    channel._thread = MagicMock()
+    channel._thread.is_alive.return_value = False
+
+    assert channel.is_running is False
+
+
+def test_feishu_stop_joins_ws_thread_off_the_event_loop():
+    async def go():
+        channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+        release = threading.Event()
+        # lark's ws client never returns from start(), so the join in stop()
+        # waits out its timeout; this thread blocks the same way, bounded so a
+        # join run on the event loop fails the assertion below instead of
+        # hanging the test.
+        ws_thread = threading.Thread(target=release.wait, args=(2,), daemon=True)
+        ws_thread.start()
+        channel._thread = ws_thread
+        channel._running = True
+
+        stop_task = asyncio.create_task(channel.stop())
+        await asyncio.sleep(0.05)
+        assert not stop_task.done()
+
+        release.set()
+        await stop_task
+        assert channel._thread is None
+
+    asyncio.run(go())
+
+
+def test_feishu_stop_retains_live_ws_thread_after_join_timeout():
+    async def go():
+        channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+        thread = MagicMock()
+        thread.is_alive.return_value = True
+        channel._thread = thread
+        channel._running = True
+
+        with pytest.raises(RuntimeError, match="still running after stop timeout"):
+            await channel.stop()
+
+        thread.join.assert_called_once_with(timeout=5)
+        assert channel._thread is thread
+
+    asyncio.run(go())
+
+
+class _FakeLarkWsClient:
+    """Stand-in for ``lark_oapi.ws.Client`` (1.7.x) with the same ``start()`` shape.
+
+    The SDK drives the module-level ``lark_oapi.ws.client.loop`` itself: it runs
+    ``_connect()`` to completion, falls into a reconnect branch that swallows
+    *any* exception while ``_auto_reconnect`` is set, then parks forever in
+    ``_select()``. A stop that only calls ``loop.stop()`` is therefore absorbed
+    by that reconnect branch; the channel has to disarm it first.
+    """
+
+    def __init__(self, *, connect_forever: bool = False, construct_gate: threading.Event | None = None, **_kwargs) -> None:
+        self._auto_reconnect = True
+        self.connect_forever = connect_forever
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self.start_calls = 0
+        self.disconnect_calls = 0
+        self.reconnect_calls = 0
+        self.connecting = threading.Event()
+        self.selected = threading.Event()
+        if construct_gate is not None:
+            construct_gate.wait(timeout=5)
+
+    async def _connect(self) -> None:
+        self.connecting.set()
+        if self.connect_forever:
+            await asyncio.Event().wait()
+
+    async def _disconnect(self) -> None:
+        self.disconnect_calls += 1
+
+    async def _reconnect(self) -> None:
+        self.reconnect_calls += 1
+        await asyncio.Event().wait()
+
+    async def _select(self) -> None:
+        self.selected.set()
+        while True:
+            await asyncio.sleep(3600)
+
+    def start(self) -> None:
+        import lark_oapi.ws.client as ws_client_mod
+
+        loop = ws_client_mod.loop
+        self.loop = loop
+        self.start_calls += 1
+        try:
+            loop.run_until_complete(self._connect())
+        except Exception:
+            loop.run_until_complete(self._disconnect())
+            if self._auto_reconnect:
+                loop.run_until_complete(self._reconnect())
+            else:
+                raise
+        loop.run_until_complete(self._select())
+
+
+def _feishu_channel_with_fake_ws(monkeypatch, **client_kwargs):
+    import lark_oapi
+
+    created: list[_FakeLarkWsClient] = []
+    constructed = threading.Event()
+
+    def factory(**_kwargs):
+        client = _FakeLarkWsClient(**client_kwargs)
+        created.append(client)
+        constructed.set()
+        return client
+
+    monkeypatch.setattr(lark_oapi.ws, "Client", factory)
+    channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+    return channel, created, constructed
+
+
+def test_feishu_stop_disconnects_sdk_and_exits_its_thread(monkeypatch):
+    async def go():
+        channel, created, constructed = _feishu_channel_with_fake_ws(monkeypatch)
+        await channel.start()
+        thread = channel._thread
+        assert thread is not None and thread.is_alive()
+        assert await asyncio.to_thread(constructed.wait, 5)
+        client = created[0]
+        assert await asyncio.to_thread(client.selected.wait, 5)
+        assert channel.is_running is True
+
+        started = time.monotonic()
+        await channel.stop()
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 5, f"stop() took {elapsed:.2f}s"
+        assert not thread.is_alive()
+        assert channel._thread is None
+        assert channel.is_running is False
+        assert client.start_calls == 1
+        assert client._auto_reconnect is False
+        assert client.disconnect_calls >= 1
+        assert client.reconnect_calls == 0
+        assert client.loop is not None and client.loop.is_closed()
+
+    asyncio.run(go())
+
+
+def test_feishu_stop_interrupts_sdk_connect_without_reconnecting(monkeypatch):
+    async def go():
+        channel, created, constructed = _feishu_channel_with_fake_ws(monkeypatch, connect_forever=True)
+        await channel.start()
+        thread = channel._thread
+        assert await asyncio.to_thread(constructed.wait, 5)
+        client = created[0]
+        assert await asyncio.to_thread(client.connecting.wait, 5)
+
+        started = time.monotonic()
+        await channel.stop()
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 5, f"stop() took {elapsed:.2f}s"
+        assert not thread.is_alive()
+        assert channel._thread is None
+        assert client._auto_reconnect is False
+        assert client.reconnect_calls == 0
+        assert client.loop is not None and client.loop.is_closed()
+
+    asyncio.run(go())
+
+
+def test_feishu_stop_before_sdk_client_exists_never_starts_it(monkeypatch):
+    async def go():
+        gate = threading.Event()
+        channel, created, constructed = _feishu_channel_with_fake_ws(monkeypatch, construct_gate=gate)
+        await channel.start()
+        thread = channel._thread
+
+        stop_task = asyncio.create_task(channel.stop())
+        await asyncio.sleep(0.05)
+        assert not stop_task.done()
+        gate.set()
+        await stop_task
+
+        assert await asyncio.to_thread(constructed.wait, 5)
+        assert created[0].start_calls == 0
+        assert not thread.is_alive()
+        assert channel._thread is None
+
+    asyncio.run(go())
+
+
+def _point_lark_at(monkeypatch, ws_url: str) -> None:
+    """Skip lark's endpoint-discovery POST and dial ``ws_url`` with the real client."""
+    import lark_oapi.ws.client as ws_client_mod
+
+    monkeypatch.setattr(ws_client_mod.Client, "_get_conn_url", lambda self: f"{ws_url}?device_id=d1&service_id=1")
+
+
+def test_feishu_stop_closes_real_sdk_connection(monkeypatch):
+    from websockets.asyncio.server import serve
+
+    async def go():
+        connected = asyncio.Event()
+        closed = asyncio.Event()
+
+        async def handler(websocket):
+            connected.set()
+            try:
+                async for _ in websocket:
+                    pass
+            finally:
+                closed.set()
+
+        async with serve(handler, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            _point_lark_at(monkeypatch, f"ws://127.0.0.1:{port}/")
+            channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+            await channel.start()
+            thread = channel._thread
+            await asyncio.wait_for(connected.wait(), 5)
+
+            started = time.monotonic()
+            await channel.stop()
+            elapsed = time.monotonic() - started
+
+            assert elapsed < 5, f"stop() took {elapsed:.2f}s"
+            await asyncio.wait_for(closed.wait(), 5)
+            assert not thread.is_alive()
+            assert channel._thread is None
+
+    asyncio.run(go())
+
+
+def test_feishu_stop_aborts_transport_when_peer_never_acks_close(monkeypatch, caplog):
+    """Real lark-oapi client against a peer that completes the handshake but never answers the close frame.
+
+    The bounded ``_disconnect()`` wait is cancelled before websockets' own
+    ``close_timeout`` abort runs, so the channel must release the socket itself;
+    ``peer.closed`` only fires once the TCP connection is actually gone.
+    """
+    from support.local_sockets import StalledWebSocketServer, transport_socket, wait_until
+
+    caplog.set_level(logging.WARNING, logger="app.channels.feishu")
+
+    async def go():
+        async with StalledWebSocketServer() as peer:
+            _point_lark_at(monkeypatch, peer.url)
+            monkeypatch.setattr(feishu_module, "FEISHU_WS_CLOSE_TIMEOUT_SECONDS", 0.5)
+            channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+            await channel.start()
+            thread = channel._thread
+            await asyncio.wait_for(peer.accepted.wait(), 5)
+            # Wait for lark to finish its dial (it assigns _conn under _lock).
+            connection = await wait_until(lambda: channel._ws_client is not None and not channel._ws_client._lock.locked() and channel._ws_client._conn)
+            sock = transport_socket(connection)
+            assert sock.fileno() != -1
+
+            started = time.monotonic()
+            await channel.stop()
+            elapsed = time.monotonic() - started
+
+            assert elapsed < 5, f"stop() took {elapsed:.2f}s"
+            assert not thread.is_alive()
+            assert channel._thread is None
+            # The socket is released by stop() itself, not by a later GC pass.
+            assert sock.fileno() == -1
+            assert "transport aborted" in caplog.text
+            await asyncio.wait_for(peer.closed.wait(), 5)
+
+    asyncio.run(go())
+
+
+def test_feishu_stop_without_sdk_thread_is_a_no_op_for_the_loop_signal():
+    async def go():
+        channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+        channel._running = True
+        await channel.stop()
+        assert channel._thread is None
+
+    asyncio.run(go())
+
+
+def test_feishu_event_handler_ignores_non_content_message_events():
+    import lark_oapi as lark
+
+    bus = MessageBus()
+    channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test"})
+
+    event_handler = channel._build_event_handler(lark)
+
+    assert "p2.im.message.receive_v1" in event_handler._processorMap
+    assert "p2.im.message.message_read_v1" in event_handler._processorMap
+    assert "p2.im.message.reaction.created_v1" in event_handler._processorMap
+    assert "p2.im.message.reaction.deleted_v1" in event_handler._processorMap
+    assert "p2.im.message.recalled_v1" in event_handler._processorMap
 
 
 def test_feishu_on_message_rich_text():
@@ -103,6 +517,266 @@ def test_feishu_receive_file_replaces_placeholders_in_order():
     _run(go())
 
 
+def test_feishu_receive_file_syncs_sandbox_with_explicit_user_id(tmp_path, monkeypatch):
+    async def go():
+        from deerflow.config.paths import Paths
+
+        channel = _feishu_file_channel(_feishu_file_response("report.md", b"file-bytes"))
+
+        provider = MagicMock()
+        provider.uses_thread_data_mounts = False
+        provider.acquire.side_effect = AssertionError("receive_file must use acquire_async")
+        provider.acquire_async = AsyncMock(return_value="aio-1")
+        sandbox = MagicMock()
+        provider.get.return_value = sandbox
+
+        monkeypatch.setattr("app.channels.feishu.get_paths", lambda: Paths(base_dir=tmp_path))
+        monkeypatch.setattr("app.channels.feishu.get_sandbox_provider", lambda: provider)
+        monkeypatch.setattr("app.channels.feishu.get_effective_user_id", lambda: "default")
+
+        virtual_path = await channel._receive_single_file("message-1", "file-key", "file", "thread-1", user_id="ou-user")
+
+        assert virtual_path == "/mnt/user-data/uploads/report.md"
+        assert (tmp_path / "users" / "ou-user" / "threads" / "thread-1" / "user-data" / "uploads" / "report.md").read_bytes() == b"file-bytes"
+        provider.acquire_async.assert_awaited_once_with("thread-1", user_id="ou-user")
+        sandbox.update_file.assert_called_once_with("/mnt/user-data/uploads/report.md", b"file-bytes")
+
+    _run(go())
+
+
+def test_feishu_receive_file_preserves_duplicate_filenames(tmp_path, monkeypatch):
+    async def go():
+        from deerflow.config.paths import Paths
+
+        channel = _feishu_file_channel(
+            _feishu_file_response("report.txt", b"FIRST"),
+            _feishu_file_response("report.txt", b"SECOND"),
+        )
+        provider = MagicMock()
+        provider.uses_thread_data_mounts = True
+        monkeypatch.setattr("app.channels.feishu.get_paths", lambda: Paths(base_dir=tmp_path))
+        monkeypatch.setattr("app.channels.feishu.get_sandbox_provider", lambda: provider)
+
+        first = await channel._receive_single_file("message-1", "file-1", "file", "thread-1", user_id="ou-user")
+        second = await channel._receive_single_file("message-2", "file-2", "file", "thread-1", user_id="ou-user")
+
+        uploads = tmp_path / "users" / "ou-user" / "threads" / "thread-1" / "user-data" / "uploads"
+        assert first == "/mnt/user-data/uploads/report.txt"
+        assert second == "/mnt/user-data/uploads/report_1.txt"
+        assert (uploads / "report.txt").read_bytes() == b"FIRST"
+        assert (uploads / "report_1.txt").read_bytes() == b"SECOND"
+
+    _run(go())
+
+
+def test_feishu_receive_file_does_not_follow_planted_symlink(tmp_path, monkeypatch):
+    async def go():
+        from deerflow.config.paths import Paths
+
+        paths = Paths(base_dir=tmp_path)
+        paths.ensure_thread_dirs("thread-1", user_id="ou-user")
+        uploads = paths.sandbox_uploads_dir("thread-1", user_id="ou-user")
+        victim = tmp_path / "victim.txt"
+        victim.write_bytes(b"SAFE")
+        symlink_or_skip(uploads / "report.txt", victim)
+
+        channel = _feishu_file_channel(_feishu_file_response("report.txt", b"PAYLOAD"))
+        provider = MagicMock()
+        provider.uses_thread_data_mounts = True
+        monkeypatch.setattr("app.channels.feishu.get_paths", lambda: paths)
+        monkeypatch.setattr("app.channels.feishu.get_sandbox_provider", lambda: provider)
+
+        virtual_path = await channel._receive_single_file("message-1", "file-1", "file", "thread-1", user_id="ou-user")
+
+        assert virtual_path == "/mnt/user-data/uploads/report_1.txt"
+        assert victim.read_bytes() == b"SAFE"
+        assert (uploads / "report_1.txt").read_bytes() == b"PAYLOAD"
+
+    _run(go())
+
+
+def test_feishu_receive_file_reserves_dangling_symlink_name(tmp_path, monkeypatch):
+    async def go():
+        from deerflow.config.paths import Paths
+
+        paths = Paths(base_dir=tmp_path)
+        paths.ensure_thread_dirs("thread-1", user_id="ou-user")
+        uploads = paths.sandbox_uploads_dir("thread-1", user_id="ou-user")
+        missing_target = tmp_path / "missing.txt"
+        symlink_or_skip(uploads / "report.txt", missing_target)
+
+        channel = _feishu_file_channel(_feishu_file_response("report.txt", b"PAYLOAD"))
+        provider = MagicMock()
+        provider.uses_thread_data_mounts = True
+        monkeypatch.setattr("app.channels.feishu.get_paths", lambda: paths)
+        monkeypatch.setattr("app.channels.feishu.get_sandbox_provider", lambda: provider)
+
+        virtual_path = await channel._receive_single_file("message-1", "file-1", "file", "thread-1", user_id="ou-user")
+
+        assert virtual_path == "/mnt/user-data/uploads/report_1.txt"
+        assert not missing_target.exists()
+        assert (uploads / "report_1.txt").read_bytes() == b"PAYLOAD"
+
+    _run(go())
+
+
+def test_feishu_receive_file_syncs_unique_path_to_remote_sandbox(tmp_path, monkeypatch):
+    async def go():
+        from deerflow.config.paths import Paths
+
+        paths = Paths(base_dir=tmp_path)
+        paths.ensure_thread_dirs("thread-1", user_id="ou-user")
+        uploads = paths.sandbox_uploads_dir("thread-1", user_id="ou-user")
+        (uploads / "report.md").write_bytes(b"OLDER")
+
+        channel = _feishu_file_channel(_feishu_file_response("report.md", b"NEWER"))
+        provider = MagicMock()
+        provider.uses_thread_data_mounts = False
+        provider.acquire_async = AsyncMock(return_value="aio-1")
+        sandbox = MagicMock()
+        provider.get.return_value = sandbox
+        monkeypatch.setattr("app.channels.feishu.get_paths", lambda: paths)
+        monkeypatch.setattr("app.channels.feishu.get_sandbox_provider", lambda: provider)
+
+        virtual_path = await channel._receive_single_file("message-1", "file-1", "file", "thread-1", user_id="ou-user")
+
+        assert virtual_path == "/mnt/user-data/uploads/report_1.md"
+        assert (uploads / "report.md").read_bytes() == b"OLDER"
+        assert (uploads / "report_1.md").read_bytes() == b"NEWER"
+        provider.acquire_async.assert_awaited_once_with("thread-1", user_id="ou-user")
+        sandbox.update_file.assert_called_once_with("/mnt/user-data/uploads/report_1.md", b"NEWER")
+
+    _run(go())
+
+
+def test_feishu_receive_file_path_traversal_failure_is_per_attachment(tmp_path, monkeypatch):
+    async def go():
+        from deerflow.config.paths import Paths
+
+        paths = Paths(base_dir=tmp_path)
+        channel = _feishu_file_channel(
+            _feishu_file_response("bad.txt", b"BAD"),
+            _feishu_file_response("ok.txt", b"OK"),
+        )
+        provider = MagicMock()
+        provider.uses_thread_data_mounts = True
+        monkeypatch.setattr("app.channels.feishu.get_paths", lambda: paths)
+        monkeypatch.setattr("app.channels.feishu.get_sandbox_provider", lambda: provider)
+
+        real_write = feishu_module.write_upload_file_no_symlink
+        call_count = 0
+
+        def flaky_write(base_dir, filename, data, *, exclusive=False):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise PathTraversalError("Path traversal detected")
+            return real_write(base_dir, filename, data, exclusive=exclusive)
+
+        monkeypatch.setattr(feishu_module, "write_upload_file_no_symlink", flaky_write)
+        msg = InboundMessage(
+            channel_name="feishu",
+            chat_id="chat_1",
+            user_id="user_1",
+            text="[file] then [file]",
+            thread_ts="message-1",
+            files=[{"file_key": "file-1"}, {"file_key": "file-2"}],
+        )
+
+        result = await channel.receive_file(msg, "thread-1", user_id="ou-user")
+
+        uploads = tmp_path / "users" / "ou-user" / "threads" / "thread-1" / "user-data" / "uploads"
+        assert result.text == "Failed to obtain the [file] then /mnt/user-data/uploads/ok.txt"
+        assert (uploads / "ok.txt").read_bytes() == b"OK"
+
+    _run(go())
+
+
+def test_feishu_receive_file_runtime_resolve_failure_is_per_attachment(tmp_path, monkeypatch):
+    async def go():
+        from deerflow.config.paths import Paths
+
+        real_paths = Paths(base_dir=tmp_path)
+
+        class FlakyPaths:
+            def __init__(self):
+                self.resolve_calls = 0
+
+            def ensure_thread_dirs(self, thread_id, *, user_id=None):
+                return real_paths.ensure_thread_dirs(thread_id, user_id=user_id)
+
+            def sandbox_uploads_dir(self, thread_id, *, user_id=None):
+                uploads = real_paths.sandbox_uploads_dir(thread_id, user_id=user_id)
+
+                class UploadsDirProxy:
+                    def resolve(inner_self):
+                        self.resolve_calls += 1
+                        if self.resolve_calls == 1:
+                            raise RuntimeError("symlink loop")
+                        return uploads.resolve()
+
+                return UploadsDirProxy()
+
+        paths = FlakyPaths()
+        channel = _feishu_file_channel(
+            _feishu_file_response("bad.txt", b"BAD"),
+            _feishu_file_response("ok.txt", b"OK"),
+        )
+        provider = MagicMock()
+        provider.uses_thread_data_mounts = True
+        monkeypatch.setattr("app.channels.feishu.get_paths", lambda: paths)
+        monkeypatch.setattr("app.channels.feishu.get_sandbox_provider", lambda: provider)
+
+        msg = InboundMessage(
+            channel_name="feishu",
+            chat_id="chat_1",
+            user_id="user_1",
+            text="[file] then [file]",
+            thread_ts="message-1",
+            files=[{"file_key": "file-1"}, {"file_key": "file-2"}],
+        )
+
+        result = await channel.receive_file(msg, "thread-1", user_id="ou-user")
+
+        uploads = tmp_path / "users" / "ou-user" / "threads" / "thread-1" / "user-data" / "uploads"
+        assert result.text == "Failed to obtain the [file] then /mnt/user-data/uploads/ok.txt"
+        assert (uploads / "ok.txt").read_bytes() == b"OK"
+
+    _run(go())
+
+
+def test_feishu_receive_file_rejects_oversized_resource(tmp_path, monkeypatch):
+    async def go():
+        from deerflow.config.paths import Paths
+
+        class TrackingStream:
+            def __init__(self):
+                self.requested_size = None
+
+            def read(self, size=-1):
+                self.requested_size = size
+                return b"12345"
+
+        stream = TrackingStream()
+        paths = Paths(base_dir=tmp_path)
+        paths.ensure_thread_dirs("thread-1", user_id="ou-user")
+        uploads = paths.sandbox_uploads_dir("thread-1", user_id="ou-user")
+        channel = _feishu_file_channel(_feishu_stream_response("large.txt", stream))
+        provider = MagicMock()
+        provider.uses_thread_data_mounts = True
+        monkeypatch.setattr("app.channels.feishu.FEISHU_MAX_INBOUND_FILE_BYTES", 4)
+        monkeypatch.setattr("app.channels.feishu.get_paths", lambda: paths)
+        monkeypatch.setattr("app.channels.feishu.get_sandbox_provider", lambda: provider)
+
+        virtual_path = await channel._receive_single_file("message-1", "file-1", "file", "thread-1", user_id="ou-user")
+
+        assert virtual_path == "Failed to obtain the [file]"
+        assert stream.requested_size == 5
+        assert list(uploads.iterdir()) == []
+
+    _run(go())
+
+
 def test_feishu_on_message_extracts_image_and_file_keys():
     bus = MessageBus()
     channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test"})
@@ -136,6 +810,786 @@ def test_feishu_on_message_extracts_image_and_file_keys():
         assert files == [{"image_key": "img_123"}, {"file_key": "file_456"}]
         assert "[image]" in mock_make_inbound.call_args[1]["text"]
         assert "[file]" in mock_make_inbound.call_args[1]["text"]
+        assert channel._pending_inbound_batches == {}
+
+
+async def _on_message_from_lark_thread(channel: FeishuChannel, event) -> None:
+    """Drive ``_on_message`` from a plain worker thread (no loop of its own) with the Gateway loop running.
+
+    The channel store is async, so ``_on_message`` bridges its lookups to
+    ``channel._main_loop``; running the callback on the Gateway loop's own
+    thread would be the deadlock the bridge refuses.
+    """
+    channel._main_loop = asyncio.get_running_loop()
+    await asyncio.to_thread(channel._on_message, event)
+
+
+async def _on_message_from_sdk_loop(channel: FeishuChannel, event) -> float:
+    """Drive ``_on_message`` exactly as lark-oapi 1.5.5 does in production.
+
+    ``FeishuChannel._run_ws`` gives the SDK thread its own event loop and
+    ``ws.Client.start()`` runs it; the SDK's async frame handler then calls
+    ``_on_message`` synchronously from inside that *running* loop, while the
+    Gateway loop (``channel._main_loop``) runs in another thread. So
+    ``asyncio.get_running_loop()`` succeeds inside the callback, but the loop it
+    returns is not the one the bridge submits to — blocking it briefly is fine
+    (it is the thread that used to block on the JSON rewrite); only a wait on
+    the Gateway loop itself would deadlock.
+    """
+    channel._main_loop = asyncio.get_running_loop()
+
+    def sdk_thread() -> float:
+        sdk_loop = asyncio.new_event_loop()
+        try:
+
+            async def frame_handler() -> float:
+                assert asyncio.get_running_loop() is sdk_loop
+                started = time.monotonic()
+                channel._on_message(event)  # synchronous call from inside the SDK's running loop
+                return time.monotonic() - started  # how long the SDK's loop was blocked
+
+            return sdk_loop.run_until_complete(frame_handler())
+        finally:
+            sdk_loop.close()
+
+    return await asyncio.to_thread(sdk_thread)
+
+
+class _GatedStore:
+    """A channel store whose database only answers once ``gate`` is set (slow or hung DB)."""
+
+    def __init__(self, inner: JsonChannelStore, gate: asyncio.Event) -> None:
+        self.inner = inner
+        self.gate = gate
+        self.lookups = 0
+        self.channels_dir = inner.channels_dir
+
+    async def get_thread_id(self, channel_name, chat_id, topic_id=None):
+        self.lookups += 1
+        await self.gate.wait()
+        return await self.inner.get_thread_id(channel_name, chat_id, topic_id=topic_id)
+
+    async def set_thread_id(self, channel_name, chat_id, thread_id, *, topic_id=None, user_id=""):
+        await self.gate.wait()
+        await self.inner.set_thread_id(channel_name, chat_id, thread_id, topic_id=topic_id, user_id=user_id)
+
+
+async def _eventually(predicate, *, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        assert time.monotonic() < deadline, "condition not met in time"
+        await asyncio.sleep(0.01)
+
+
+def _fast_store_budgets(monkeypatch, *, total: float = 5.0) -> None:
+    monkeypatch.setattr(feishu_module, "FEISHU_STORE_LOOKUP_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(feishu_module, "FEISHU_STORE_BRIDGE_TIMEOUT_SECONDS", 0.3)
+    monkeypatch.setattr(feishu_module, "FEISHU_STORE_RESOLVE_RETRY_BACKOFF_SECONDS", 0.05)
+    monkeypatch.setattr(feishu_module, "FEISHU_STORE_RESOLVE_TOTAL_BUDGET_SECONDS", total)
+
+
+def test_feishu_on_message_reuses_stored_parent_topic_for_card_replies():
+    async def go():
+        bus = MessageBus()
+        store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        await store.set_thread_id(
+            "feishu",
+            "chat_1",
+            "deer-thread-1",
+            topic_id="om_clarification_card",
+            user_id="user_1",
+        )
+        channel = FeishuChannel(
+            bus,
+            {"app_id": "test", "app_secret": "test", "channel_store": store},
+        )
+
+        event = MagicMock()
+        event.event.message.chat_id = "chat_1"
+        event.event.message.message_id = "msg_reply"
+        event.event.message.root_id = "om_unknown_root"
+        event.event.message.parent_id = "om_clarification_card"
+        event.event.message.thread_id = None
+        event.event.sender.sender_id.open_id = "user_1"
+        event.event.message.content = json.dumps({"text": "prod"})
+
+        with pytest.MonkeyPatch.context() as m:
+            mock_make_inbound = MagicMock()
+            m.setattr(channel, "_make_inbound", mock_make_inbound)
+            await _on_message_from_lark_thread(channel, event)
+
+            inbound = mock_make_inbound.return_value
+            assert inbound.topic_id == "om_clarification_card"
+            assert mock_make_inbound.call_args.kwargs["metadata"]["topic_id"] == "om_clarification_card"
+
+    _run(go())
+
+
+def test_feishu_on_message_drops_a_store_backed_message_without_a_running_gateway_loop(caplog):
+    """No loop to bridge to (direct construction, no ``start()``): the mapping cannot be
+    consulted, so the message is dropped with a warning — an unresolved lookup is never
+    routed as a miss onto the unknown root (nothing could dispatch it without the loop anyway)."""
+    store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+    bus = MessageBus()
+    channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test", "channel_store": store})
+    event = _make_text_event("prod", message_id="msg_reply", root_id="om_root", parent_id="om_card")
+
+    with pytest.MonkeyPatch.context() as m:
+        schedule = MagicMock()
+        batch = MagicMock()
+        m.setattr(channel, "_schedule_prepare_inbound", schedule)
+        m.setattr(channel, "_queue_file_inbound_batch", batch)
+        with caplog.at_level("WARNING", logger="app.channels.feishu"):
+            channel._on_message(event)
+
+    schedule.assert_not_called()
+    batch.assert_not_called()
+    assert "main loop not running, cannot resolve_topic_mapping" in caplog.text
+    assert "dropping message msg_reply" in caplog.text
+    assert len(bus._inbound_reservations) == 0  # the intake slot taken before routing came back
+
+
+def test_feishu_slow_store_defers_the_reply_until_it_resolves_to_the_mapped_parent_thread(monkeypatch, caplog):
+    """Thread 4 of the #6558 review: a lookup the database answers late is *unresolved*, not a
+    miss. The reply (parent card mapped to thread A, root unmapped) is not dispatched until
+    the store answers, then routes to A; no new conversation, no alias overwrite, and the
+    SDK's loop is never blocked past the short bridge bound."""
+
+    async def go():
+        _fast_store_budgets(monkeypatch)
+        inner = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        await inner.set_thread_id("feishu", "chat_1", "thread-a", topic_id="om_card", user_id="user_1")
+        gate = asyncio.Event()
+        store = _GatedStore(inner, gate)
+        channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test", "channel_store": store})
+        dispatched: list = []
+        monkeypatch.setattr(channel, "_schedule_prepare_inbound", lambda msg_id, inbound, **kwargs: dispatched.append(inbound))
+        event = _make_text_event("answer", message_id="msg_reply", root_id="om_unknown_root", parent_id="om_card")
+
+        with caplog.at_level("WARNING", logger="app.channels.feishu"):
+            blocked_for = await _on_message_from_sdk_loop(channel, event)
+            assert blocked_for < feishu_module.FEISHU_STORE_BRIDGE_TIMEOUT_SECONDS + 0.5  # the lark loop is released at the short bound
+            assert dispatched == []  # unresolved: not routed as a miss
+            await asyncio.sleep(0.3)
+            assert dispatched == []  # still waiting for the database, retrying on the Gateway loop
+
+            gate.set()
+            await _eventually(lambda: len(dispatched) == 1)
+
+        inbound = dispatched[0]
+        assert inbound.topic_id == "om_card" and inbound.metadata["topic_id"] == "om_card"  # thread A, not the unknown root
+        assert inbound.thread_ts == "msg_reply"
+        assert await inner.get_thread_id("feishu", "chat_1", topic_id="om_card") == "thread-a"  # no alias overwrite
+        assert "dropping message" not in caplog.text
+        assert "Gateway loop itself" not in caplog.text
+
+    _run(go())
+
+
+def test_feishu_store_that_never_answers_drops_the_message_instead_of_opening_a_new_conversation(monkeypatch, caplog):
+    async def go():
+        _fast_store_budgets(monkeypatch, total=0.6)
+        inner = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        await inner.set_thread_id("feishu", "chat_1", "thread-a", topic_id="om_card", user_id="user_1")
+        store = _GatedStore(inner, asyncio.Event())  # never set
+        channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test", "channel_store": store})
+        dispatched: list = []
+        monkeypatch.setattr(channel, "_schedule_prepare_inbound", lambda msg_id, inbound, **kwargs: dispatched.append(inbound))
+        event = _make_text_event("answer", message_id="msg_reply", root_id="om_unknown_root", parent_id="om_card")
+
+        with caplog.at_level("WARNING", logger="app.channels.feishu"):
+            await _on_message_from_sdk_loop(channel, event)
+            await _eventually(lambda: "dropping message msg_reply" in caplog.text)
+            await asyncio.sleep(0.2)
+
+        assert dispatched == []  # never routed as a miss
+        assert await inner.get_thread_id("feishu", "chat_1", topic_id="om_card") == "thread-a"
+        assert store.lookups >= 2  # it kept retrying up to the total budget before giving up
+
+    _run(go())
+
+
+def _reply_event(msg_id: str):
+    return _make_text_event("answer", message_id=msg_id, root_id="om_unknown_root", parent_id="om_card")
+
+
+def test_feishu_deferred_burst_is_bounded_by_inbound_queue_maxsize(monkeypatch, caplog):
+    """#6558 review: deferred messages must hold a bus intake slot. A burst during a store
+    outage retains exactly ``inbound_queue_maxsize`` messages, drops the rest immediately
+    with a warning, and returns the capacity once the store answers and the messages are
+    consumed from the bus."""
+
+    async def go():
+        _fast_store_budgets(monkeypatch, total=30.0)
+        inner = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        await inner.set_thread_id("feishu", "chat_1", "thread-a", topic_id="om_card", user_id="user_1")
+        gate = asyncio.Event()
+        store = _GatedStore(inner, gate)
+        bus = MessageBus(inbound_queue_maxsize=3)
+        channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test", "channel_store": store})
+        channel._add_reaction = AsyncMock()
+        channel._ensure_running_card_started = MagicMock()
+
+        with caplog.at_level("WARNING", logger="app.channels.feishu"):
+            for i in range(6):
+                await _on_message_from_sdk_loop(channel, _reply_event(f"msg_{i}"))
+            await asyncio.sleep(0.3)
+            assert bus.inbound_queue.qsize() == 0  # nothing routed as a miss
+            retained = len(bus._inbound_reservations)
+            assert retained == 3  # exactly the configured bound is retained (one slot per deferred message)
+            dropped = [line for line in caplog.text.splitlines() if "dropping message" in line]
+            assert len(dropped) == 3 and all("intake capacity" in line for line in dropped)
+
+            gate.set()
+            delivered = [await asyncio.wait_for(bus.get_inbound(), timeout=5) for _ in range(3)]
+        assert [m.thread_ts for m in delivered] == ["msg_0", "msg_1", "msg_2"]  # FIFO, the oldest survivors
+        assert all(m.topic_id == "om_card" for m in delivered)
+        await _eventually(lambda: len(bus._inbound_reservations) == 0)
+        assert bus.inbound_queue.qsize() == 0
+        # Capacity is back: the bound can be reserved again in full.
+        probes = [bus.reserve_inbound(delivered[0]) for _ in range(3)]
+        for probe in probes:
+            probe.release()
+        assert await inner.get_thread_id("feishu", "chat_1", topic_id="om_card") == "thread-a"
+
+    _run(go())
+
+
+def test_feishu_deferred_message_budget_runs_from_arrival_and_releases_capacity_on_drop(monkeypatch, caplog):
+    """The retry budget is per message from its arrival, not from when it reaches the queue
+    head: an expired message is dropped without another lookup and its intake slot is freed."""
+
+    async def go():
+        _fast_store_budgets(monkeypatch, total=0.5)
+        inner = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        store = _GatedStore(inner, asyncio.Event())  # never answers
+        bus = MessageBus(inbound_queue_maxsize=4)
+        channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test", "channel_store": store})
+        channel._main_loop = asyncio.get_running_loop()
+        parsed = channel._parse_message_event(_reply_event("msg_expired"))
+        reservation = bus.reserve_inbound(channel._make_inbound(chat_id="chat_1", user_id="user_1", text="x", msg_type=feishu_module.InboundMessageType.CHAT, thread_ts="msg_expired"))
+        attempt = feishu_module._RoutingAttempt(parsed, reservation=reservation, arrived_at=time.monotonic() - 100.0)
+        queue = deque([attempt])
+        channel._deferred_routing["chat_1"] = queue
+        lookups_before = store.lookups
+
+        with caplog.at_level("WARNING", logger="app.channels.feishu"):
+            await channel._drain_deferred_routing("chat_1", queue, None)
+
+        assert store.lookups == lookups_before  # expired at the head: no retry spent on it
+        assert "dropping message msg_expired" in caplog.text
+        assert len(bus._inbound_reservations) == 0  # the slot came back
+        assert "chat_1" not in channel._deferred_routing
+
+    _run(go())
+
+
+def test_feishu_stop_releases_deferred_intake_reservations(monkeypatch, caplog):
+    async def go():
+        _fast_store_budgets(monkeypatch, total=30.0)
+        inner = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        store = _GatedStore(inner, asyncio.Event())  # never answers
+        bus = MessageBus(inbound_queue_maxsize=4)
+        channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test", "channel_store": store})
+        await _on_message_from_sdk_loop(channel, _reply_event("msg_0"))
+        await _on_message_from_sdk_loop(channel, _reply_event("msg_1"))
+        assert len(bus._inbound_reservations) == 2
+
+        with caplog.at_level("WARNING", logger="app.channels.feishu"):
+            await channel._close_and_drain_threadsafe_futures()  # what stop() does to in-flight work
+        assert len(bus._inbound_reservations) == 0
+        assert channel._deferred_routing == {}
+        assert "dropping 2 deferred messages for chat chat_1" in caplog.text or "dropping 1 deferred messages for chat chat_1" in caplog.text
+
+    _run(go())
+
+
+def test_feishu_deferred_messages_keep_per_chat_fifo_order(monkeypatch):
+    """A later message for the same chat must not overtake a deferred predecessor."""
+
+    async def go():
+        _fast_store_budgets(monkeypatch)
+        inner = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        await inner.set_thread_id("feishu", "chat_1", "thread-a", topic_id="om_card", user_id="user_1")
+        gate = asyncio.Event()
+        store = _GatedStore(inner, gate)
+        channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test", "channel_store": store})
+        dispatched: list = []
+        monkeypatch.setattr(channel, "_schedule_prepare_inbound", lambda msg_id, inbound, **kwargs: dispatched.append(inbound))
+
+        await _on_message_from_sdk_loop(channel, _make_text_event("first", message_id="msg_first", root_id="om_unknown_root", parent_id="om_card"))
+        # Needs no store answer itself (no root/parent/thread), but queues behind the deferred predecessor.
+        blocked_for = await _on_message_from_sdk_loop(channel, _make_text_event("second", message_id="msg_second"))
+        assert blocked_for < 0.2
+        await asyncio.sleep(0.3)
+        assert dispatched == []
+
+        gate.set()
+        await _eventually(lambda: len(dispatched) == 2)
+        assert [inbound.thread_ts for inbound in dispatched] == ["msg_first", "msg_second"]
+        assert dispatched[0].topic_id == "om_card"
+        assert dispatched[1].topic_id == "msg_second"
+
+    _run(go())
+
+
+def test_feishu_sdk_loop_callback_still_consults_the_stored_parent_mapping(caplog):
+    """The production shape (#6558 review): the SDK calls ``_on_message`` from inside its own
+    running loop. The bridge must still look the parent card up on the Gateway loop — otherwise
+    a reply whose parent is mapped but whose root is not falls back to the unknown root (a
+    different DeerFlow conversation) and may consume an unrelated pending clarification."""
+
+    async def go():
+        bus = MessageBus()
+        store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        await store.set_thread_id("feishu", "chat_1", "deer-thread-card", topic_id="om_card", user_id="user_1")
+        channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test", "channel_store": store})
+        key = channel._pending_key("chat_1", "user_1")
+        channel._pending_clarifications[key] = [_pending("om_pending", thread_id="deer-thread-pending")]
+        event = _make_text_event("answer", message_id="msg_reply", root_id="om_unknown_root", parent_id="om_card")
+
+        with pytest.MonkeyPatch.context() as m:
+            mock_make_inbound = MagicMock()
+            m.setattr(channel, "_make_inbound", mock_make_inbound)
+            with caplog.at_level("WARNING", logger="app.channels.feishu"):
+                await _on_message_from_sdk_loop(channel, event)
+
+        metadata = mock_make_inbound.call_args.kwargs["metadata"]
+        assert metadata["topic_id"] == "om_card"  # the persisted parent mapping won, via the bridge
+        assert metadata[RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY] is False
+        assert key in channel._pending_clarifications  # the unrelated clarification was not consumed
+        assert "event-loop thread" not in caplog.text
+        assert "Gateway loop" not in caplog.text
+        assert "main loop not running" not in caplog.text
+
+    _run(go())
+
+
+def test_feishu_sdk_loop_callback_restores_the_pending_mapping_through_the_bridge(caplog):
+    """Same production shape for the bridge's write path: restoring a pending clarification's
+    topic mapping goes through the Gateway loop from inside the SDK's running loop."""
+
+    async def go():
+        bus = MessageBus()
+        store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test", "channel_store": store})
+        key = channel._pending_key("chat_1", "user_1")
+        channel._pending_clarifications[key] = [_pending("om_original", thread_id="deer-thread-1", card_message_id="om_card")]
+
+        with pytest.MonkeyPatch.context() as m:
+            mock_make_inbound = MagicMock()
+            m.setattr(channel, "_make_inbound", mock_make_inbound)
+            with caplog.at_level("WARNING", logger="app.channels.feishu"):
+                await _on_message_from_sdk_loop(channel, _make_text_event("2", message_id="msg_plain_2"))
+
+        metadata = mock_make_inbound.call_args.kwargs["metadata"]
+        assert metadata["topic_id"] == "om_original"
+        assert metadata[RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY] is True
+        assert key not in channel._pending_clarifications
+        assert await store.get_thread_id("feishu", "chat_1", topic_id="om_original") == "deer-thread-1"
+        assert "event-loop thread" not in caplog.text
+        assert "Gateway loop" not in caplog.text
+
+    _run(go())
+
+
+def test_feishu_store_bridge_refuses_to_block_the_gateway_loop_itself(caplog):
+    """Only a wait issued from the Gateway loop itself is refused: it would block the loop
+    that has to run the submitted coroutine. The refusal is reported as *unresolved* (never
+    a miss) and the coroutine factory is never invoked."""
+
+    async def go():
+        store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test", "channel_store": store})
+        channel._main_loop = asyncio.get_running_loop()
+        factory_calls = 0
+
+        def make_coroutine():
+            nonlocal factory_calls
+            factory_calls += 1
+            return store.get_thread_id("feishu", "chat_1", topic_id="om_card")
+
+        with caplog.at_level("WARNING", logger="app.channels.feishu"):
+            with pytest.raises(feishu_module.StoreLookupUnresolved):
+                channel._run_store_call(make_coroutine, name="resolve_topic_mapping", msg_id="msg_1")
+
+        assert factory_calls == 0
+        assert "resolve_topic_mapping requested on the Gateway loop itself" in caplog.text
+
+    _run(go())
+
+
+def _make_text_event(
+    text: str,
+    *,
+    chat_id: str = "chat_1",
+    message_id: str = "msg_1",
+    user_id: str = "user_1",
+    root_id: str | None = None,
+    parent_id: str | None = None,
+    thread_id: str | None = None,
+):
+    event = MagicMock()
+    event.event.message.chat_id = chat_id
+    event.event.message.message_id = message_id
+    event.event.message.root_id = root_id
+    event.event.message.parent_id = parent_id
+    event.event.message.thread_id = thread_id
+    event.event.sender.sender_id.open_id = user_id
+    event.event.message.content = json.dumps({"text": text})
+    return event
+
+
+def _make_file_event(
+    file_key: str,
+    *,
+    chat_id: str = "chat_1",
+    message_id: str = "msg_1",
+    user_id: str = "user_1",
+    root_id: str | None = None,
+    parent_id: str | None = None,
+    thread_id: str | None = None,
+):
+    event = MagicMock()
+    event.event.message.chat_id = chat_id
+    event.event.message.message_id = message_id
+    event.event.message.root_id = root_id
+    event.event.message.parent_id = parent_id
+    event.event.message.thread_id = thread_id
+    event.event.sender.sender_id.open_id = user_id
+    event.event.message.content = json.dumps({"file_key": file_key})
+    return event
+
+
+def test_feishu_batches_top_level_file_messages_from_same_user(monkeypatch):
+    async def go():
+        monkeypatch.setattr("app.channels.feishu.FEISHU_INBOUND_BATCH_WINDOW_SECONDS", 0.01)
+        # Keep both callbacks inside the batch window even on a busy CI runner.
+        monkeypatch.setattr("app.channels.feishu.time.time", lambda: 1_000.0)
+        bus = MessageBus()
+        channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test"})
+        channel._main_loop = asyncio.get_running_loop()
+        channel._add_reaction = AsyncMock()
+        channel._ensure_running_card_started = MagicMock()
+
+        channel._on_message(_make_file_event("file_a", message_id="msg_file_1"))
+        channel._on_message(_make_file_event("file_b", message_id="msg_file_2"))
+
+        inbound = await asyncio.wait_for(bus.get_inbound(), timeout=0.5)
+
+        assert inbound.thread_ts == "msg_file_1"
+        assert inbound.topic_id == "msg_file_1"
+        assert inbound.text == "[file]\n\n[file]"
+        assert inbound.files == [{"file_key": "file_a"}, {"file_key": "file_b"}]
+        assert inbound.metadata["message_id"] == "msg_file_1"
+        assert inbound.metadata["topic_id"] == "msg_file_1"
+        assert inbound.metadata["batched_message_ids"] == ["msg_file_1", "msg_file_2"]
+        channel._ensure_running_card_started.assert_called_once()
+        assert channel._ensure_running_card_started.call_args.args == ("msg_file_1",)
+        assert channel._ensure_running_card_started.call_args.kwargs["metadata"]["message_id"] == "msg_file_1"
+        assert channel._ensure_running_card_started.call_args.kwargs["metadata"]["batched_message_ids"] == [
+            "msg_file_1",
+            "msg_file_2",
+        ]
+        assert [call.args for call in channel._add_reaction.call_args_list] == [
+            ("msg_file_1", "OK"),
+            ("msg_file_2", "OK"),
+        ]
+
+    _run(go())
+
+
+def test_feishu_rich_text_file_message_does_not_enter_batch():
+    bus = MessageBus()
+    channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test"})
+    channel._schedule_prepare_inbound = MagicMock()
+
+    event = MagicMock()
+    event.event.message.chat_id = "chat_1"
+    event.event.message.message_id = "msg_rich_file"
+    event.event.message.root_id = None
+    event.event.message.parent_id = None
+    event.event.message.thread_id = None
+    event.event.sender.sender_id.open_id = "user_1"
+    event.event.message.content = json.dumps(
+        {
+            "content": [
+                [
+                    {"tag": "text", "text": "Review"},
+                    {"tag": "file", "file_key": "file_a"},
+                ]
+            ]
+        }
+    )
+
+    channel._on_message(event)
+
+    channel._schedule_prepare_inbound.assert_called_once()
+    inbound = channel._schedule_prepare_inbound.call_args.args[1]
+    assert inbound.text == "Review [file]"
+    assert inbound.files == [{"file_key": "file_a"}]
+    assert channel._pending_inbound_batches == {}
+
+
+def test_feishu_file_batch_window_expiry_starts_new_topic(monkeypatch):
+    async def go():
+        monkeypatch.setattr("app.channels.feishu.FEISHU_INBOUND_BATCH_WINDOW_SECONDS", 0.01)
+        bus = MessageBus()
+        channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test"})
+        channel._main_loop = asyncio.get_running_loop()
+        channel._add_reaction = AsyncMock()
+        channel._ensure_running_card_started = MagicMock()
+
+        channel._on_message(_make_file_event("file_a", message_id="msg_file_1"))
+        first = await asyncio.wait_for(bus.get_inbound(), timeout=0.5)
+
+        channel._on_message(_make_file_event("file_b", message_id="msg_file_2"))
+        second = await asyncio.wait_for(bus.get_inbound(), timeout=0.5)
+
+        assert first.topic_id == "msg_file_1"
+        assert first.files == [{"file_key": "file_a"}]
+        assert second.topic_id == "msg_file_2"
+        assert second.files == [{"file_key": "file_b"}]
+        assert channel._ensure_running_card_started.call_args_list[0].args == ("msg_file_1",)
+        assert channel._ensure_running_card_started.call_args_list[1].args == ("msg_file_2",)
+        assert channel._ensure_running_card_started.call_args_list[0].kwargs["metadata"]["message_id"] == "msg_file_1"
+        assert channel._ensure_running_card_started.call_args_list[1].kwargs["metadata"]["message_id"] == "msg_file_2"
+
+    _run(go())
+
+
+def test_feishu_explicit_file_reply_does_not_enter_batch(monkeypatch):
+    async def go():
+        monkeypatch.setattr("app.channels.feishu.FEISHU_INBOUND_BATCH_WINDOW_SECONDS", 10.0)
+        bus = MessageBus()
+        channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test"})
+        channel._main_loop = asyncio.get_running_loop()
+        channel._add_reaction = AsyncMock()
+        channel._ensure_running_card_started = MagicMock()
+
+        channel._on_message(_make_file_event("file_a", message_id="msg_reply", root_id="msg_root"))
+
+        inbound = await asyncio.wait_for(bus.get_inbound(), timeout=0.5)
+        assert inbound.thread_ts == "msg_reply"
+        assert inbound.topic_id == "msg_root"
+        assert inbound.files == [{"file_key": "file_a"}]
+        assert channel._pending_inbound_batches == {}
+
+    _run(go())
+
+
+def test_feishu_expired_file_batch_does_not_get_overwritten(monkeypatch):
+    monkeypatch.setattr("app.channels.feishu.FEISHU_INBOUND_BATCH_WINDOW_SECONDS", 0.5)
+    now = 0.0
+    monkeypatch.setattr("app.channels.feishu.time.time", lambda: now)
+
+    bus = MessageBus()
+    channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test"})
+    channel._schedule_batch_flush = MagicMock()
+    channel._schedule_prepare_inbound = MagicMock()
+
+    first = InboundMessage(
+        channel_name="feishu",
+        chat_id="chat_1",
+        user_id="user_1",
+        text="[file]",
+        thread_ts="msg_file_1",
+        files=[{"file_key": "file_a"}],
+    )
+    second = InboundMessage(
+        channel_name="feishu",
+        chat_id="chat_1",
+        user_id="user_1",
+        text="[file]",
+        thread_ts="msg_file_2",
+        files=[{"file_key": "file_b"}],
+    )
+
+    channel._queue_file_inbound_batch("msg_file_1", first)
+    now = 1.0
+    channel._queue_file_inbound_batch("msg_file_2", second)
+
+    channel._schedule_prepare_inbound.assert_called_once_with(
+        "msg_file_1",
+        first,
+        source_message_ids=["msg_file_1"],
+    )
+    assert channel._pop_pending_inbound_batch(channel._pending_key("chat_1", "user_1"), anchor_message_id="msg_file_1") is None
+
+    current = channel._pop_pending_inbound_batch(channel._pending_key("chat_1", "user_1"), anchor_message_id="msg_file_2")
+    assert current == ("msg_file_2", second, ["msg_file_2"])
+
+
+def test_feishu_plain_reply_consumes_pending_clarification_topic():
+    async def go():
+        bus = MessageBus()
+        store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        await store.set_thread_id("feishu", "chat_1", "deer-thread-1", topic_id="om_original", user_id="user_1")
+        channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test", "channel_store": store})
+        channel._pending_clarifications[channel._pending_key("chat_1", "user_1")] = [_pending("om_original", thread_id="deer-thread-1", card_message_id="om_card")]
+
+        with pytest.MonkeyPatch.context() as m:
+            mock_make_inbound = MagicMock()
+            m.setattr(channel, "_make_inbound", mock_make_inbound)
+            await _on_message_from_lark_thread(channel, _make_text_event("2", message_id="msg_plain_2"))
+
+            inbound = mock_make_inbound.return_value
+            metadata = mock_make_inbound.call_args.kwargs["metadata"]
+            assert inbound.topic_id == "om_original"
+            assert metadata["topic_id"] == "om_original"
+            assert metadata[RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY] is True
+            assert channel._pending_key("chat_1", "user_1") not in channel._pending_clarifications
+            # The pending clarification's mapping was restored through the store on the Gateway loop.
+            assert await store.get_thread_id("feishu", "chat_1", topic_id="om_original") == "deer-thread-1"
+
+    _run(go())
+
+
+def test_feishu_pending_clarification_is_consumed_once():
+    bus = MessageBus()
+    channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test"})
+    channel._pending_clarifications[channel._pending_key("chat_1", "user_1")] = [_pending("om_original", thread_id="deer-thread-1", card_message_id="om_card")]
+
+    with pytest.MonkeyPatch.context() as m:
+        created = []
+
+        def fake_make_inbound(**kwargs):
+            inbound = InboundMessage(channel_name="feishu", **kwargs)
+            created.append(inbound)
+            return inbound
+
+        mock_make_inbound = MagicMock(side_effect=fake_make_inbound)
+        m.setattr(channel, "_make_inbound", mock_make_inbound)
+        channel._on_message(_make_text_event("2", message_id="msg_first"))
+        channel._on_message(_make_text_event("next", message_id="msg_second"))
+
+        first_inbound = created[0]
+        second_inbound = created[1]
+        first_metadata = mock_make_inbound.call_args_list[0].kwargs["metadata"]
+        second_metadata = mock_make_inbound.call_args_list[1].kwargs["metadata"]
+        assert first_inbound.topic_id == "om_original"
+        assert second_inbound.topic_id == "msg_second"
+        assert first_metadata["topic_id"] == "om_original"
+        assert first_metadata[RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY] is True
+        assert second_metadata["topic_id"] == "msg_second"
+        assert second_metadata[RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY] is False
+
+
+def test_feishu_expired_pending_clarification_is_ignored(monkeypatch):
+    bus = MessageBus()
+    channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test"})
+    monkeypatch.setattr("app.channels.feishu.time.time", lambda: 10_000.0)
+    channel._pending_clarifications[channel._pending_key("chat_1", "user_1")] = [_pending("om_original", thread_id="deer-thread-1", card_message_id="om_card", created_at=0.0)]
+
+    with pytest.MonkeyPatch.context() as m:
+        mock_make_inbound = MagicMock()
+        m.setattr(channel, "_make_inbound", mock_make_inbound)
+        channel._on_message(_make_text_event("2", message_id="msg_plain_2"))
+
+        metadata = mock_make_inbound.call_args.kwargs["metadata"]
+        assert metadata["topic_id"] == "msg_plain_2"
+        assert metadata[RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY] is False
+        assert channel._pending_key("chat_1", "user_1") not in channel._pending_clarifications
+
+
+def test_feishu_command_does_not_consume_pending_clarification():
+    bus = MessageBus()
+    channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test"})
+    key = channel._pending_key("chat_1", "user_1")
+    channel._pending_clarifications[key] = [_pending("om_original", thread_id="deer-thread-1", card_message_id="om_card")]
+
+    with pytest.MonkeyPatch.context() as m:
+        mock_make_inbound = MagicMock()
+        m.setattr(channel, "_make_inbound", mock_make_inbound)
+        channel._on_message(_make_text_event("/status", message_id="msg_command"))
+
+        metadata = mock_make_inbound.call_args.kwargs["metadata"]
+        assert mock_make_inbound.call_args.kwargs["msg_type"].value == "command"
+        assert metadata["topic_id"] == "msg_command"
+        assert metadata[RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY] is False
+        assert key in channel._pending_clarifications
+
+
+def test_feishu_remembers_pending_clarification_only_after_final_card_success():
+    bus = MessageBus()
+    channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test"})
+    outbound = OutboundMessage(
+        channel_name="feishu",
+        chat_id="chat_1",
+        thread_id="deer-thread-1",
+        text="clarify?",
+        thread_ts="om_original",
+        metadata={
+            PENDING_CLARIFICATION_METADATA_KEY: True,
+            "user_id": "user_1",
+            "topic_id": "om_original",
+            "message_id": "om_original",
+        },
+    )
+
+    channel._remember_pending_clarification(outbound, None)
+    assert channel._pending_clarifications == {}
+
+    channel._remember_pending_clarification(outbound, "om_card")
+    pending = channel._pending_clarifications[channel._pending_key("chat_1", "user_1")][0]
+    assert pending["topic_id"] == "om_original"
+    assert pending["thread_id"] == "deer-thread-1"
+    assert pending["card_message_id"] == "om_card"
+
+
+def test_feishu_multiple_pending_clarifications_are_consumed_in_order():
+    bus = MessageBus()
+    channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test"})
+    key = channel._pending_key("chat_1", "user_1")
+    channel._pending_clarifications[key] = [
+        _pending("om_first", thread_id="deer-thread-1"),
+        _pending("om_second", thread_id="deer-thread-2"),
+    ]
+
+    with pytest.MonkeyPatch.context() as m:
+        created = []
+
+        def fake_make_inbound(**kwargs):
+            inbound = InboundMessage(channel_name="feishu", **kwargs)
+            created.append(inbound)
+            return inbound
+
+        m.setattr(channel, "_make_inbound", MagicMock(side_effect=fake_make_inbound))
+        channel._on_message(_make_text_event("first answer", message_id="msg_first"))
+        channel._on_message(_make_text_event("second answer", message_id="msg_second"))
+
+        assert [msg.topic_id for msg in created] == ["om_first", "om_second"]
+        assert key not in channel._pending_clarifications
+
+
+def test_feishu_explicit_reply_prefers_stored_mapping_over_pending():
+    async def go():
+        bus = MessageBus()
+        store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        await store.set_thread_id("feishu", "chat_1", "deer-thread-card", topic_id="om_card", user_id="user_1")
+        channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test", "channel_store": store})
+        key = channel._pending_key("chat_1", "user_1")
+        channel._pending_clarifications[key] = [_pending("om_pending", thread_id="deer-thread-pending")]
+
+        with pytest.MonkeyPatch.context() as m:
+            mock_make_inbound = MagicMock()
+            m.setattr(channel, "_make_inbound", mock_make_inbound)
+            await _on_message_from_lark_thread(
+                channel,
+                _make_text_event(
+                    "answer",
+                    message_id="msg_reply",
+                    root_id="om_unknown",
+                    parent_id="om_card",
+                ),
+            )
+
+            metadata = mock_make_inbound.call_args.kwargs["metadata"]
+            assert metadata["topic_id"] == "om_card"
+            assert metadata[RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY] is False
+            assert key in channel._pending_clarifications
+
+    _run(go())
 
 
 @pytest.mark.parametrize("command", sorted(KNOWN_CHANNEL_COMMANDS))
@@ -190,3 +1644,53 @@ def test_feishu_treats_unknown_slash_text_as_chat(text):
 
         mock_make_inbound.assert_called_once()
         assert mock_make_inbound.call_args[1]["msg_type"].value == "chat", f"{text!r} should be classified as CHAT"
+
+
+@pytest.mark.parametrize("text", ["@_user_1 /goal ship it", "@bot  /status", "@_user_1 @_user_2 /new"])
+def test_feishu_leading_mention_before_command_classifies_and_strips(text):
+    """Feishu group chats deliver "@bot /goal" with the mention left in the text
+    (im.message.group_at_msg requires @bot). It must classify as COMMAND and the
+    inbound must carry the bare command so ChannelManager parses it."""
+    bus = MessageBus()
+    config = {"app_id": "test", "app_secret": "test"}
+    channel = FeishuChannel(bus, config)
+
+    event = MagicMock()
+    event.event.message.chat_id = "chat_1"
+    event.event.message.message_id = "msg_1"
+    event.event.message.root_id = None
+    event.event.sender.sender_id.open_id = "user_1"
+    event.event.message.content = json.dumps({"text": text})
+
+    with pytest.MonkeyPatch.context() as m:
+        mock_make_inbound = MagicMock()
+        m.setattr(channel, "_make_inbound", mock_make_inbound)
+        channel._on_message(event)
+
+        mock_make_inbound.assert_called_once()
+        assert mock_make_inbound.call_args[1]["msg_type"].value == "command", f"{text!r} should be classified as COMMAND"
+        assert not mock_make_inbound.call_args[1]["text"].startswith("@"), "leading mention must be stripped for dispatch"
+
+
+def test_feishu_leading_mention_before_chat_keeps_mention():
+    """A mentioned non-command stays CHAT and keeps the mention so the agent still
+    sees who was addressed (only the command path is stripped)."""
+    bus = MessageBus()
+    config = {"app_id": "test", "app_secret": "test"}
+    channel = FeishuChannel(bus, config)
+
+    event = MagicMock()
+    event.event.message.chat_id = "chat_1"
+    event.event.message.message_id = "msg_1"
+    event.event.message.root_id = None
+    event.event.sender.sender_id.open_id = "user_1"
+    event.event.message.content = json.dumps({"text": "@_user_1 please summarise this"})
+
+    with pytest.MonkeyPatch.context() as m:
+        mock_make_inbound = MagicMock()
+        m.setattr(channel, "_make_inbound", mock_make_inbound)
+        channel._on_message(event)
+
+        mock_make_inbound.assert_called_once()
+        assert mock_make_inbound.call_args[1]["msg_type"].value == "chat"
+        assert mock_make_inbound.call_args[1]["text"] == "@_user_1 please summarise this"

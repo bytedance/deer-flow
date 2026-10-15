@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "deer-flow.fullname" . }}-frontend
+  namespace: {{ include "deer-flow.namespace" . }}
+  labels:
+    {{- include "deer-flow.labels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+spec:
+  replicas: {{ .Values.frontend.replicas }}
+  selector:
+    matchLabels:
+      {{- include "deer-flow.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: frontend
+  template:
+    metadata:
+      labels:
+        {{- include "deer-flow.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: frontend
+    spec:
+      {{- include "deer-flow.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        # Non-root: node:22-alpine ships a `node` user (uid 1000). fsGroup 1000
+        # is harmless here (no PVC) but keeps the pod spec uniform.
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: frontend
+          image: {{ include "deer-flow.frontendImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          workingDir: /app/frontend
+          args: ["pnpm", "start"]
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: DEER_FLOW_INTERNAL_GATEWAY_BASE_URL
+              value: http://gateway:8001
+            - name: BETTER_AUTH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "deer-flow.appSecret" . }}
+                  key: BETTER_AUTH_SECRET
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          {{- with .Values.frontend.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            # Next.js writes runtime cache to .next/cache; the dir is root-owned
+            # in the prod image, so mount an emptyDir to make it writable by 1000.
+            - name: next-cache
+              mountPath: /app/frontend/.next/cache
+      volumes:
+        - name: next-cache
+          emptyDir: {}

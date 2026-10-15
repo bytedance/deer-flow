@@ -13,6 +13,41 @@ from langchain_core.language_models import LanguageModelInput
 from langchain_core.messages import AIMessage
 from langchain_deepseek import ChatDeepSeek
 
+from deerflow.models.assistant_payload_replay import restore_assistant_payloads, restore_reasoning_content
+
+
+def _thinking_enabled(*sources: Any) -> bool:
+    """Return whether the request explicitly enables DeepSeek thinking mode."""
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        thinking = source.get("thinking")
+        if isinstance(thinking, dict) and thinking.get("type") == "enabled":
+            return True
+        extra_body = source.get("extra_body")
+        if isinstance(extra_body, dict):
+            nested = extra_body.get("thinking")
+            if isinstance(nested, dict) and nested.get("type") == "enabled":
+                return True
+    return False
+
+
+def _restore_deepseek_assistant_payload(
+    payload_msg: dict[str, Any],
+    orig_msg: AIMessage,
+    *,
+    thinking_enabled: bool,
+) -> None:
+    """Restore assistant history and required thinking-mode placeholders."""
+    restore_reasoning_content(payload_msg, orig_msg)
+    has_tool_calls = bool(payload_msg.get("tool_calls"))
+    if has_tool_calls and payload_msg.get("content") is None:
+        # DeepSeek requires an empty string, rather than null, for tool-call history.
+        payload_msg["content"] = ""
+    if thinking_enabled and has_tool_calls and "reasoning_content" not in payload_msg:
+        # Thinking-mode tool turns require this field even when no reasoning was emitted.
+        payload_msg["reasoning_content"] = ""
+
 
 class PatchedChatDeepSeek(ChatDeepSeek):
     """ChatDeepSeek with proper reasoning_content preservation.
@@ -43,31 +78,25 @@ class PatchedChatDeepSeek(ChatDeepSeek):
         Overrides the parent method to inject reasoning_content from
         additional_kwargs into assistant messages in the payload.
         """
-        # Get the original messages before conversion
         original_messages = self._convert_input(input_).to_messages()
+        request_messages = [message for message in original_messages if not (isinstance(message, AIMessage) and (message.additional_kwargs or {}).get("deerflow_error_fallback"))]
 
         # Call parent to get the base payload
-        payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        payload = super()._get_request_payload(request_messages, stop=stop, **kwargs)
 
-        # Match payload messages with original messages to restore reasoning_content
-        payload_messages = payload.get("messages", [])
-
-        # The payload messages and original messages should be in the same order
-        # Iterate through both and match by position
-        if len(payload_messages) == len(original_messages):
-            for payload_msg, orig_msg in zip(payload_messages, original_messages):
-                if payload_msg.get("role") == "assistant" and isinstance(orig_msg, AIMessage):
-                    reasoning_content = orig_msg.additional_kwargs.get("reasoning_content")
-                    if reasoning_content is not None:
-                        payload_msg["reasoning_content"] = reasoning_content
-        else:
-            # Fallback: match by counting assistant messages
-            ai_messages = [m for m in original_messages if isinstance(m, AIMessage)]
-            assistant_payloads = [(i, m) for i, m in enumerate(payload_messages) if m.get("role") == "assistant"]
-
-            for (idx, payload_msg), ai_msg in zip(assistant_payloads, ai_messages):
-                reasoning_content = ai_msg.additional_kwargs.get("reasoning_content")
-                if reasoning_content is not None:
-                    payload_messages[idx]["reasoning_content"] = reasoning_content
+        request_thinking_enabled = _thinking_enabled(
+            payload,
+            kwargs,
+            {"extra_body": getattr(self, "extra_body", None)},
+        )
+        restore_assistant_payloads(
+            payload.get("messages", []),
+            request_messages,
+            lambda payload_msg, orig_msg: _restore_deepseek_assistant_payload(
+                payload_msg,
+                orig_msg,
+                thinking_enabled=request_thinking_enabled,
+            ),
+        )
 
         return payload

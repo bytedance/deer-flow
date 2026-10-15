@@ -1,0 +1,148 @@
+"""Contract for the per-IP failed-login counter behind ``POST /api/v1/auth/login/local``.
+
+A store keeps one record per client IP: how many consecutive logins failed,
+and — once that count reached ``max_attempts`` — when the lock started and
+the sentence committed for it. The policy values (``max_attempts``,
+``lockout_seconds``) are *not* stored as configuration: the caller passes the
+live values on every call so a ``config.yaml`` edit applies to the next login
+without a restart, and the semantics below decide how an in-flight record
+follows a changed policy.
+
+Semantics every implementation must share (pinned by
+``tests/test_login_throttle_store.py`` against both stores):
+
+- ``record_failure`` increments the count. A new count below ``max_attempts``
+  leaves the IP counting with no lock (so a failure after the operator
+  raised the threshold clears an existing lock). A new count at or over the
+  threshold locks: a failure recorded while a lock is *active* keeps the
+  lock's start and committed duration — the sentence is "N seconds after the
+  lock started", never "after the last attempt" — while a served or absent
+  lock starts anew *now* with ``lockout_seconds`` as its committed duration
+  (a record already over the threshold but never locked — the operator
+  tightened the policy mid-count — locks on that next failure).
+- ``check`` allows a record below the current threshold (raising
+  ``max_attempts`` releases a lower count immediately) and one that is over
+  it but never locked (the count is kept, not reset). An active lock first
+  serves the duration committed for it: once that elapsed the record is
+  cleared, so a later raise of ``lockout_seconds`` never resurrects a served
+  sentence. While the committed sentence still runs, the lock follows the
+  *current* duration — a lowered value releases early, a raised value
+  extends — and that evaluation is committed to the record (decreases
+  included), so the stored sentence always matches the policy the lock was
+  last evaluated under.
+- ``reset`` forgets the IP (successful login).
+- ``check`` takes the policy as an async callable and resolves it lazily:
+  a clean IP (no record — the overwhelming majority of logins) returns
+  ``0.0`` without ever calling it, so the router's ``config.yaml`` read is
+  skipped there; a recorded IP resolves it exactly once, and the decision is
+  then made on a snapshot read *after* that resolution — the policy read is a
+  yield point, and a decision that needs no write has no compare-and-set to
+  catch a record a peer changed meanwhile. The SQL store does the probe,
+  the resolution and the decision in one session.
+- ``get`` is a non-mutating probe (tests and anchors use it); the router no
+  longer needs it because ``check`` skips the policy for clean IPs itself.
+
+``now`` is an epoch timestamp supplied by the caller (defaulting to
+``time.time()``) so replicas compare the same clock the lock was stamped with
+and tests can freeze it.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from typing import Protocol
+
+#: Resolves ``(max_login_attempts, lockout_seconds)``; awaited by ``check`` at most once, never for a clean IP.
+LoginThrottlePolicy = Callable[[], Awaitable[tuple[int, float]]]
+
+
+@dataclass(frozen=True, slots=True)
+class LoginThrottleRecord:
+    """One IP's throttle state.
+
+    ``locked_at == 0.0`` means "counting, never locked"; a lock stores the
+    epoch timestamp it started at and the duration committed for it.
+    """
+
+    fail_count: int
+    locked_at: float = 0.0
+    lock_duration: float = 0.0
+
+    @property
+    def locked(self) -> bool:
+        return self.locked_at > 0.0
+
+    @property
+    def expires_at(self) -> float:
+        """When the committed sentence ends (0.0 for a never-locked counter)."""
+        return self.locked_at + self.lock_duration if self.locked else 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class CheckDecision:
+    """What ``check`` concluded from one snapshot, and the write that must follow it.
+
+    ``remaining`` is the answer (seconds still locked, ``0.0`` = allowed);
+    ``discard`` asks the store to clear the snapshot's record (served or
+    released early); ``commit_duration`` asks it to store the live duration
+    on the still-active lock. At most one of the two writes is set. Stores
+    apply the write with a compare-and-set against the snapshot it was
+    decided on, so a record a peer changed meanwhile is never clobbered.
+    """
+
+    remaining: float
+    discard: bool = False
+    commit_duration: float | None = None
+
+
+def evaluate_check(record: LoginThrottleRecord, *, max_attempts: int, lockout_seconds: float, now: float) -> CheckDecision:
+    """The ``check`` contract on one snapshot, shared by every store (see the module docstring)."""
+    if record.fail_count < max_attempts:
+        return CheckDecision(0.0)
+    if not record.locked:
+        # Over the current threshold but the lock never started under the
+        # threshold these failures accumulated under (the operator tightened
+        # max_login_attempts mid-count). Keep the record: the next failure
+        # starts the lock and a successful login clears it — deleting here
+        # would hand the IP a fresh budget under a stricter policy.
+        return CheckDecision(0.0)
+    if now >= record.expires_at:
+        # The lock served the full sentence of the duration in force when it
+        # started — a later duration increase must not resurrect it.
+        return CheckDecision(0.0, discard=True)
+    if now < record.locked_at + lockout_seconds:
+        # Still locked. The sentence now follows the current duration, and that
+        # evaluation is committed — including decreases — so the stored sentence
+        # always matches the policy the lock was last evaluated under; a later
+        # raise can never resurrect time the lock already served under a shorter
+        # policy.
+        commit = lockout_seconds if lockout_seconds != record.lock_duration else None
+        return CheckDecision(record.locked_at + lockout_seconds - now, commit_duration=commit)
+    # Original sentence still running, but the current (lowered) duration has
+    # already elapsed — release early.
+    return CheckDecision(0.0, discard=True)
+
+
+class LoginThrottleStore(Protocol):
+    """Async per-IP failed-login counter shared by every login replica using it."""
+
+    async def get(self, ip: str) -> LoginThrottleRecord | None:
+        """Return the record for ``ip`` without mutating anything, or ``None`` for a clean IP."""
+        ...
+
+    async def check(self, ip: str, *, policy: LoginThrottlePolicy, now: float | None = None) -> float:
+        """Return the seconds the IP stays locked under the resolved policy, ``0.0`` when it may log in.
+
+        ``policy`` is awaited at most once and never for a clean IP. Clears
+        served / released locks as a side effect (see the module docstring).
+        """
+        ...
+
+    async def record_failure(self, ip: str, *, max_attempts: int, lockout_seconds: float, now: float | None = None) -> LoginThrottleRecord:
+        """Count one failed login under the given policy and return the new record."""
+        ...
+
+    async def reset(self, ip: str) -> None:
+        """Forget the IP after a successful login."""
+        ...

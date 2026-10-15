@@ -1,0 +1,1157 @@
+"""Tests for scripts/support_bundle.py."""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import zipfile
+from pathlib import Path
+
+import pytest
+import support_bundle
+from support.shell import require_script_bash
+
+
+@pytest.fixture(autouse=True)
+def _isolate_runtime_paths(monkeypatch):
+    for name in ("DEER_FLOW_HOME", "DEER_FLOW_PROJECT_ROOT", "DEER_FLOW_ENV_FILE"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def _zip_text(zip_path, name: str) -> str:
+    with zipfile.ZipFile(zip_path) as zf:
+        return zf.read(name).decode("utf-8")
+
+
+@pytest.mark.parametrize("failure", ["permission", "encoding"])
+@pytest.mark.parametrize("configured_home", [False, True])
+def test_unreadable_dotenv_keeps_thread_diagnostics(tmp_path, monkeypatch, failure, configured_home):
+    project = tmp_path / "checkout"
+    project.mkdir()
+    home = tmp_path / "data" if configured_home else project / ".deer-flow"
+    (home / "threads" / "broken-env" / "user-data").mkdir(parents=True)
+    env_file = project / ".env"
+    # A valid prefix must not partially change runtime paths when decoding fails.
+    env_file.write_bytes(b"DEER_FLOW_HOME=wrong-home\n" + b"#" * 10000 + b"\xff")
+    if configured_home:
+        monkeypatch.setenv("DEER_FLOW_HOME", str(home))
+    if failure == "permission":
+        original_open = Path.open
+
+        def guarded_open(path, *args, **kwargs):
+            if path == env_file:
+                raise PermissionError("Cannot read .env")
+            return original_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", guarded_open)
+
+    summary = support_bundle.collect_thread_summary(project, "broken-env")
+    assert summary["found"] is True
+
+
+@pytest.mark.parametrize("layout", ["threads/thread-home", "users/alice/threads/thread-home"])
+def test_thread_summary_uses_configured_runtime_home(tmp_path, monkeypatch, layout):
+    project = tmp_path / "checkout"
+    project.mkdir()
+    home = tmp_path / "runtime-data"
+    outputs = home / layout / "user-data" / "outputs"
+    outputs.mkdir(parents=True)
+    (outputs / "report.txt").write_text("private document contents", encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_HOME", str(home))
+
+    summary = support_bundle.collect_thread_summary(project, "thread-home")
+
+    assert summary["found"] is True
+    assert summary["outputs"][0]["path"] == "report.txt"
+    assert "private document contents" not in json.dumps(summary)
+    assert str(home) not in json.dumps(summary)
+    assert summary["layout"].startswith("{DEER_FLOW_HOME}/")
+
+
+def test_configured_home_does_not_fall_back_to_stale_checkout_thread(tmp_path, monkeypatch):
+    project = tmp_path / "checkout"
+    (project / ".deer-flow" / "threads" / "thread-home" / "user-data").mkdir(parents=True)
+    home = tmp_path / "runtime-data"
+    monkeypatch.setenv("DEER_FLOW_HOME", str(home))
+
+    summary = support_bundle.collect_thread_summary(project, "thread-home")
+
+    assert summary["found"] is False
+    assert summary["checked_layouts"] == ["{DEER_FLOW_HOME}/threads/thread-home/user-data"]
+
+
+def test_relative_runtime_home_is_resolved_from_current_directory(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DEER_FLOW_HOME", "runtime-data")
+    data = tmp_path / "runtime-data" / "users" / "alice" / "threads" / "thread-home" / "user-data"
+    data.mkdir(parents=True)
+    assert support_bundle.collect_thread_summary(tmp_path, "thread-home")["found"] is True
+
+
+def test_empty_runtime_home_keeps_legacy_lookup(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_HOME", "")
+    data = tmp_path / "backend" / ".deer-flow" / "threads" / "thread-home" / "user-data"
+    data.mkdir(parents=True)
+    assert support_bundle.collect_thread_summary(tmp_path, "thread-home")["found"] is True
+
+
+@pytest.mark.parametrize("host_encoding", ["ascii", "cp936"])
+@pytest.mark.parametrize("returncode", [0, 7])
+def test_run_command_decodes_utf8_independently_of_host_locale(tmp_path, monkeypatch, host_encoding, returncode):
+    monkeypatch.setattr(support_bundle.subprocess, "_text_encoding", lambda: host_encoding)
+    stdout = "✓ 检查通过 Bearer fake.stdout.secret"
+    stderr = "✗ 检查失败 Bearer fake.stderr.secret"
+    code = f"import sys; sys.stdout.buffer.write({stdout.encode('utf-8')!r}); sys.stderr.buffer.write({stderr.encode('utf-8')!r}); sys.exit({returncode})"
+
+    result = support_bundle._run_command([sys.executable, "-c", code], cwd=tmp_path)
+
+    assert result == {
+        "ok": returncode == 0,
+        "returncode": returncode,
+        "stdout": "✓ 检查通过 Bearer <redacted>",
+        "stderr": "✗ 检查失败 Bearer <redacted>",
+    }
+
+
+def test_run_command_gives_python_children_utf8_stdio_without_mutating_parent(tmp_path, monkeypatch):
+    monkeypatch.setenv("PYTHONIOENCODING", "ascii")
+    monkeypatch.setenv("PYTHONUTF8", "0")
+    monkeypatch.setenv("DEER_SUPPORT_TEST_MARKER", "inherited")
+    monkeypatch.setattr(support_bundle.subprocess, "_text_encoding", lambda: "ascii")
+    parent_env = dict(os.environ)
+    code = f"import os, sys; assert os.environ['DEER_SUPPORT_TEST_MARKER'] == 'inherited'; assert os.getcwd() == {str(tmp_path)!r}; sys.stdout.write({ascii('✓ 检查通过')}); sys.stderr.write({ascii('✗ 检查失败')})"
+
+    result = support_bundle._run_command([sys.executable, "-c", code], cwd=tmp_path)
+
+    assert result == {"ok": True, "returncode": 0, "stdout": "✓ 检查通过", "stderr": "✗ 检查失败"}
+    assert dict(os.environ) == parent_env
+
+
+@pytest.mark.parametrize("returncode", [0, 7])
+def test_run_command_preserves_diagnostics_with_invalid_utf8(tmp_path, returncode):
+    code = f"import sys; sys.stdout.buffer.write(b'out \\xff Bearer fake.stdout.secret'); sys.stderr.buffer.write(b'err \\xff Bearer fake.stderr.secret'); sys.exit({returncode})"
+
+    result = support_bundle._run_command([sys.executable, "-c", code], cwd=tmp_path)
+
+    assert result == {
+        "ok": returncode == 0,
+        "returncode": returncode,
+        "stdout": "out \ufffd Bearer <redacted>",
+        "stderr": "err \ufffd Bearer <redacted>",
+    }
+
+
+@pytest.mark.parametrize("returncode", [0, 7])
+def test_run_command_preserves_diagnostics_with_surrogate_characters(tmp_path, monkeypatch, returncode):
+    monkeypatch.setenv("PYTHONIOENCODING", "ascii:strict")
+    stdout = "✓ path \udcff Bearer fake.stdout.secret\ncontinued stdout"
+    stderr = "✗ path \udcff Bearer fake.stderr.secret\ncontinued stderr"
+    code = f"import sys; sys.stdout.write({ascii(stdout)}); sys.stderr.write({ascii(stderr)}); sys.exit({returncode})"
+
+    result = support_bundle._run_command([sys.executable, "-c", code], cwd=tmp_path)
+
+    assert result == {
+        "ok": returncode == 0,
+        "returncode": returncode,
+        "stdout": "✓ path \\udcff Bearer <redacted>\ncontinued stdout",
+        "stderr": "✗ path \\udcff Bearer <redacted>\ncontinued stderr",
+    }
+
+
+def test_collect_environment_routes_pnpm_through_shared_runner(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_version_command(name, args, cwd):
+        calls.append((name, args, cwd))
+        return {"name": name, "ok": True, "stdout": "version", "stderr": ""}
+
+    monkeypatch.setattr(support_bundle, "_version_command", fake_version_command)
+
+    support_bundle.collect_environment(tmp_path)
+
+    pnpm_calls = [call for call in calls if call[0] == "pnpm"]
+    assert pnpm_calls == [
+        (
+            "pnpm",
+            [sys.executable, str(tmp_path / "scripts" / "pnpm.py"), "--version"],
+            tmp_path / "frontend",
+        )
+    ]
+
+
+def test_redact_data_recursively_masks_secret_like_keys():
+    data = {
+        "models": [
+            {
+                "name": "default",
+                "api_key": "sk-live-secret",
+                "nested": {
+                    "client_secret": "client-secret-value",
+                    "safe": "visible",
+                },
+            }
+        ],
+        "headers": {
+            "Authorization": "Bearer header-secret",
+        },
+        "plain": "kept",
+    }
+
+    redacted = support_bundle.redact_data(data)
+
+    assert redacted["models"][0]["api_key"] == "<redacted>"
+    assert redacted["models"][0]["nested"]["client_secret"] == "<redacted>"
+    assert redacted["models"][0]["nested"]["safe"] == "visible"
+    assert redacted["headers"]["Authorization"] == "<redacted>"
+    assert redacted["plain"] == "kept"
+
+
+def test_redact_data_masks_url_credentials_and_cli_flag_secrets():
+    data = {
+        "models": [
+            {"name": "m", "base_url": "https://admin:S3cr3tPass@proxy.internal/v1"},
+            {"name": "n", "endpoint": "https://host/v1?access_token=AKIA1234567890ABCD"},
+            {"name": "h", "default_headers": {"X-My-Auth": "rawsecrettoken123"}},
+        ],
+        "database_url": "postgres://dfuser:dfpass@db:5432/deer",
+        "mcpServers": {
+            "svc": {"command": "npx", "args": ["-y", "server", "--api-key", "LIVE-MCP-SECRET-XYZ"]},
+        },
+    }
+
+    redacted = support_bundle.redact_data(data)
+
+    assert redacted["models"][0]["base_url"] == "https://<redacted>@proxy.internal/v1"
+    assert "AKIA1234567890ABCD" not in redacted["models"][1]["endpoint"]
+    assert redacted["models"][1]["endpoint"].endswith("access_token=<redacted>")
+    assert redacted["models"][2]["default_headers"]["X-My-Auth"] == "<redacted>"
+    assert "dfpass" not in redacted["database_url"]
+    assert redacted["database_url"] == "postgres://<redacted>@db:5432/deer"
+    args = redacted["mcpServers"]["svc"]["args"]
+    assert args[:3] == ["-y", "server", "--api-key"]
+    assert args[3] == "<redacted>"
+
+
+def test_redact_data_masks_inline_and_credential_only_url_secrets():
+    data = {
+        "mcpServers": {
+            "svc": {"command": "npx", "args": ["server", "--api-key=LIVE-COMBINED-SECRET"]},
+        },
+        "cache_url": "redis://:SuperSecretPass@cache:6379/0",
+    }
+
+    redacted = support_bundle.redact_data(data)
+
+    assert "LIVE-COMBINED-SECRET" not in json.dumps(redacted)
+    assert redacted["mcpServers"]["svc"]["args"][1] == "--api-key=<redacted>"
+    assert "SuperSecretPass" not in redacted["cache_url"]
+    assert redacted["cache_url"] == "redis://<redacted>@cache:6379/0"
+
+
+def test_redact_text_masks_url_userinfo_and_query_secrets():
+    text = "\n".join(
+        [
+            "base_url: https://admin:S3cr3tPass@proxy.internal/v1",
+            "postgres://dfuser:dfpass@db:5432/deer",
+            "endpoint: https://host/v1?api_key=LIVE-QUERY-SECRET&model=gpt-4o",
+        ]
+    )
+
+    redacted = support_bundle.redact_text(text)
+
+    assert "S3cr3tPass" not in redacted
+    assert "dfpass" not in redacted
+    assert "LIVE-QUERY-SECRET" not in redacted
+    assert "https://<redacted>@proxy.internal/v1" in redacted
+    assert "model=gpt-4o" in redacted
+
+
+def test_redact_keeps_non_secret_flags_visible():
+    redacted = support_bundle.redact_data(["--model", "gpt-4o", "--verbose"])
+    assert redacted == ["--model", "gpt-4o", "--verbose"]
+
+
+def test_redact_text_masks_env_assignments_and_bearer_tokens():
+    text = "\n".join(
+        [
+            "OPENAI_API_KEY=sk-live-secret",
+            "Authorization: Bearer abc.def.ghi",
+            "client_secret: very-secret",
+            "normal=value",
+        ]
+    )
+
+    redacted = support_bundle.redact_text(text)
+
+    assert "sk-live-secret" not in redacted
+    assert "abc.def.ghi" not in redacted
+    assert "very-secret" not in redacted
+    assert "OPENAI_API_KEY=<redacted>" in redacted
+    assert "Authorization: Bearer <redacted>" in redacted
+    assert "normal=value" in redacted
+
+
+def test_redact_text_masks_home_directory_paths():
+    text = "\n".join(
+        [
+            "/Users/alice/deer-flow/config.yaml",
+            "/home/bob/deer-flow/config.yaml",
+            r"C:\Users\carol\deer-flow\config.yaml",
+        ]
+    )
+
+    redacted = support_bundle.redact_text(text)
+
+    assert "alice" not in redacted
+    assert "bob" not in redacted
+    assert "carol" not in redacted
+    assert "/Users/<user>/deer-flow/config.yaml" in redacted
+    assert "/home/<user>/deer-flow/config.yaml" in redacted
+    assert r"C:\Users\<user>\deer-flow\config.yaml" in redacted
+
+
+def test_redact_data_masks_non_keyword_env_secrets_but_keeps_var_references():
+    data = {
+        "mcpServers": {
+            "supabase": {
+                "command": "npx",
+                "env": {
+                    "SUPABASE_SERVICE_ROLE_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.sig",
+                    "R2_ACCESS_KEY": "0123456789abcdef0123456789abcdef",
+                    "GEMINI_KEY": "AIzaSyA-EXAMPLE-hardcoded-google-key",
+                    "PROJECT_REF": "$SUPABASE_PROJECT_REF",
+                    "REGION": "${AWS_REGION}",
+                },
+            }
+        }
+    }
+
+    redacted = support_bundle.redact_data(data)
+    env = redacted["mcpServers"]["supabase"]["env"]
+
+    assert env["SUPABASE_SERVICE_ROLE_KEY"] == "<redacted>"
+    assert env["R2_ACCESS_KEY"] == "<redacted>"
+    assert env["GEMINI_KEY"] == "<redacted>"
+    assert env["PROJECT_REF"] == "$SUPABASE_PROJECT_REF"
+    assert env["REGION"] == "${AWS_REGION}"
+
+    dumped = json.dumps(redacted)
+    assert "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" not in dumped
+    assert "0123456789abcdef" not in dumped
+    assert "AIzaSyA-EXAMPLE-hardcoded-google-key" not in dumped
+
+
+def test_redact_data_masks_broadened_secret_key_names():
+    data = {
+        "aws_access_key_id": "AKIAIOSFODNN7EXAMPLE",
+        "db_pwd": "hunter2",
+        "signing_private_key": "-----BEGIN KEY-----abc-----END KEY-----",
+    }
+
+    redacted = support_bundle.redact_data(data)
+
+    assert redacted["aws_access_key_id"] == "<redacted>"
+    assert redacted["db_pwd"] == "<redacted>"
+    assert redacted["signing_private_key"] == "<redacted>"
+
+
+def test_redact_data_masks_secret_shaped_keys_in_arbitrary_provider_config():
+    """Guards the gap flagged on PR #3886's review: a fixed keyword allowlist
+    misses secrets stored under an unanticipated key name inside an
+    open-ended config dict, e.g. guardrails.provider.config (GuardrailProviderConfig.config
+    is an arbitrary dict of provider-specific kwargs)."""
+    data = {
+        "guardrails": {
+            "enabled": True,
+            "provider": {
+                "use": "my_org.guardrails:CustomProvider",
+                "config": {
+                    "db_pass": "hunter2-literal",
+                    "encryption_key": "0123456789abcdef-literal",
+                    "redis_pass": "redis-literal-secret",
+                    "webhook_signing_key": "whsec_literal_secret",
+                    "SUPABASE_SERVICE_ROLE_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.no-env-wrapper.sig",
+                    "gh_pat": "ghp_literalPatValue",
+                    "endpoint": "https://policy.internal/v1",
+                    "timeout_seconds": 30,
+                },
+            },
+        }
+    }
+
+    redacted = support_bundle.redact_data(data)
+    config = redacted["guardrails"]["provider"]["config"]
+
+    assert config["db_pass"] == "<redacted>"
+    assert config["encryption_key"] == "<redacted>"
+    assert config["redis_pass"] == "<redacted>"
+    assert config["webhook_signing_key"] == "<redacted>"
+    assert config["SUPABASE_SERVICE_ROLE_KEY"] == "<redacted>"
+    assert config["gh_pat"] == "<redacted>"
+    # Legitimate, non-secret fields in the same open-ended dict must survive.
+    assert config["endpoint"] == "https://policy.internal/v1"
+    assert config["timeout_seconds"] == 30
+
+    dumped = json.dumps(redacted)
+    for secret in (
+        "hunter2-literal",
+        "0123456789abcdef-literal",
+        "redis-literal-secret",
+        "whsec_literal_secret",
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+        "ghp_literalPatValue",
+    ):
+        assert secret not in dumped
+
+
+def test_redact_data_does_not_over_redact_lookalike_non_secret_keys():
+    """Broadening the key-name match must not catch fields that merely start
+    with the same letters as a secret keyword: MCP routing "keywords" hints
+    (extensions_config.json -> mcpServers.*.routing.keywords) and the
+    guardrails "passport" path/ID are real, non-secret fields."""
+    data = {
+        "routing": {"mode": "prefer", "priority": 50, "keywords": ["database", "SQL", "table"]},
+        "guardrails": {"passport": "/etc/deer-flow/passport.json"},
+    }
+
+    redacted = support_bundle.redact_data(data)
+
+    assert redacted["routing"]["keywords"] == ["database", "SQL", "table"]
+    assert redacted["routing"]["priority"] == 50
+    assert redacted["guardrails"]["passport"] == "/etc/deer-flow/passport.json"
+
+
+def test_redact_data_masks_passphrase_and_passcode_without_over_redacting_passport():
+    """Guards the gap flagged on this PR's review: the original token-boundary
+    `pass` match, (?<![a-zA-Z])pass(?![a-zA-Z]), correctly excludes "passport"
+    (a real, non-secret field, per the test above) but its blanket
+    not-followed-by-any-letter lookahead also excluded genuine secret-bearing
+    key names like "passphrase" and "passcode" -- both of which
+    env_policy.py's *PASS* substring match does catch, so they'd still leak
+    into config-summary.json. Narrowing the lookahead to only exclude a
+    trailing "port" (pass(?!port)) closes that gap while leaving passport,
+    compass, and bypass alone (those stay excluded via the leading-letter
+    lookbehind, independent of the lookahead)."""
+    data = {
+        "guardrails": {
+            "provider": {
+                "config": {
+                    "passphrase": "hunter2-literal",
+                    "passcode": "0000-literal",
+                    "passport": "/etc/deer-flow/passport.json",
+                    "compass_bearing": 42,
+                    "bypass_reason": "maintenance window",
+                }
+            }
+        }
+    }
+
+    redacted = support_bundle.redact_data(data)
+    config = redacted["guardrails"]["provider"]["config"]
+
+    assert config["passphrase"] == "<redacted>"
+    assert config["passcode"] == "<redacted>"
+    assert config["passport"] == "/etc/deer-flow/passport.json"
+    assert config["compass_bearing"] == 42
+    assert config["bypass_reason"] == "maintenance window"
+
+
+def test_create_support_bundle_masks_provider_config_secret_shaped_keys(tmp_path):
+    """End-to-end: an open-ended guardrails.provider.config block in config.yaml
+    must not leak into config-summary.json even though manifest.json declares
+    redacted_secret_fields=true."""
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    (project_root / "config.yaml").write_text(
+        "config_version: 27\n"
+        "models:\n  - name: default\n"
+        "guardrails:\n"
+        "  enabled: true\n"
+        "  provider:\n"
+        "    use: my_org.guardrails:CustomProvider\n"
+        "    config:\n"
+        "      db_pass: hunter2-literal\n"
+        "      encryption_key: 0123456789abcdef-literal\n"
+        "      redis_pass: redis-literal-secret\n"
+        "      webhook_signing_key: whsec_literal_secret\n",
+        encoding="utf-8",
+    )
+
+    output_path = tmp_path / "support.zip"
+    support_bundle.create_support_bundle(
+        project_root=project_root,
+        out_path=output_path,
+        include_doctor=False,
+    )
+
+    config_summary = json.loads(_zip_text(output_path, "config-summary.json"))
+    provider_config = config_summary["guardrails"]["provider"]["config"]
+    assert provider_config["db_pass"] == "<redacted>"
+    assert provider_config["encryption_key"] == "<redacted>"
+    assert provider_config["redis_pass"] == "<redacted>"
+    assert provider_config["webhook_signing_key"] == "<redacted>"
+
+    manifest = json.loads(_zip_text(output_path, "manifest.json"))
+    assert manifest["privacy"]["redacted_secret_fields"] is True
+
+    all_text = "\n".join(_zip_text(output_path, name) for name in zipfile.ZipFile(output_path).namelist())
+    for secret in ("hunter2-literal", "0123456789abcdef-literal", "redis-literal-secret", "whsec_literal_secret"):
+        assert secret not in all_text
+
+
+def test_create_support_bundle_masks_hardcoded_env_secret(tmp_path):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    (project_root / "config.yaml").write_text(
+        "config_version: 5\nmodels:\n  - name: default\n",
+        encoding="utf-8",
+    )
+    (project_root / "extensions_config.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "supabase": {
+                        "command": "npx",
+                        "env": {
+                            "SUPABASE_SERVICE_ROLE_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.leak.sig",
+                            "R2_ACCESS_KEY": "0123456789abcdef0123456789abcdef",
+                            "PROJECT_REF": "$SUPABASE_PROJECT_REF",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    output_path = tmp_path / "support.zip"
+    support_bundle.create_support_bundle(
+        project_root=project_root,
+        out_path=output_path,
+        include_doctor=False,
+    )
+
+    all_text = "\n".join(_zip_text(output_path, name) for name in zipfile.ZipFile(output_path).namelist())
+    assert "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.leak.sig" not in all_text
+    assert "0123456789abcdef" not in all_text
+
+    extensions_summary = json.loads(_zip_text(output_path, "extensions-summary.json"))
+    env = extensions_summary["mcpServers"]["supabase"]["env"]
+    assert env["SUPABASE_SERVICE_ROLE_KEY"] == "<redacted>"
+    assert env["R2_ACCESS_KEY"] == "<redacted>"
+    assert env["PROJECT_REF"] == "$SUPABASE_PROJECT_REF"
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig"])
+def test_create_support_bundle_writes_sanitized_zip(tmp_path, encoding):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    (project_root / "config.yaml").write_text(
+        """
+config_version: 5
+models:
+  - name: default
+    use: langchain_openai:ChatOpenAI
+    model: gpt-4o
+    api_key: sk-live-secret
+tools:
+  - name: web_search
+    use: deerflow.community.brave.tools:web_search_tool
+    api_key: brave-secret
+channels:
+  slack:
+    enabled: true
+    bot_token: xoxb-secret
+""",
+        encoding="utf-8",
+    )
+    (project_root / "extensions_config.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "private": {
+                        "command": "node",
+                        "env": {
+                            "PRIVATE_TOKEN": "mcp-secret",
+                        },
+                    }
+                },
+                "skills": {
+                    "public:research": {
+                        "enabled": True,
+                    }
+                },
+            }
+        ),
+        encoding=encoding,
+    )
+
+    output_path = tmp_path / "support.zip"
+    bundle_path = support_bundle.create_support_bundle(
+        project_root=project_root,
+        out_path=output_path,
+        thread_id=None,
+        include_doctor=False,
+    )
+
+    assert bundle_path == output_path
+    with zipfile.ZipFile(bundle_path) as zf:
+        names = set(zf.namelist())
+
+    assert {
+        "manifest.json",
+        "environment.json",
+        "config-summary.json",
+        "extensions-summary.json",
+        "git.json",
+    }.issubset(names)
+
+    all_text = "\n".join(_zip_text(bundle_path, name) for name in names if name.endswith(".json"))
+    assert "sk-live-secret" not in all_text
+    assert "brave-secret" not in all_text
+    assert "xoxb-secret" not in all_text
+    assert "mcp-secret" not in all_text
+
+    extensions_summary = json.loads(_zip_text(bundle_path, "extensions-summary.json"))
+    assert extensions_summary["mcpServers"]["private"]["env"]["PRIVATE_TOKEN"] == "<redacted>"
+
+    triage = json.loads(_zip_text(bundle_path, "triage.json"))
+    assert triage["signals"]["extensions_config_error"] is False
+    assert not any("fix `extensions_config.json` syntax" in step for step in triage["maintainer_next_steps"])
+
+    config_summary = json.loads(_zip_text(bundle_path, "config-summary.json"))
+    assert config_summary["models"][0]["api_key"] == "<redacted>"
+    assert config_summary["tools"][0]["api_key"] == "<redacted>"
+    assert config_summary["channels"]["slack"]["bot_token"] == "<redacted>"
+
+
+def test_create_support_bundle_writes_ai_triage_entrypoints(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+
+    monkeypatch.setattr(
+        support_bundle,
+        "collect_environment",
+        lambda _project_root: {
+            "platform": {
+                "system": "Darwin",
+                "release": "25.5.0",
+                "machine": "arm64",
+                "python": "3.12.11",
+            },
+            "commands": [
+                {"name": "node", "ok": True, "stdout": "v20.19.5", "stderr": ""},
+                {"name": "pnpm", "ok": True, "stdout": "11.7.0", "stderr": ""},
+                {"name": "uv", "ok": True, "stdout": "uv 0.8.11", "stderr": ""},
+                {"name": "nginx", "ok": True, "stdout": "", "stderr": "nginx version: nginx/1.31.1"},
+                {"name": "docker", "ok": False, "error": "docker not found"},
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        support_bundle,
+        "collect_git_summary",
+        lambda _project_root: {
+            "branch": {"ok": True, "stdout": "feat/community-support-bundle", "stderr": ""},
+            "head": {"ok": True, "stdout": "abc123", "stderr": ""},
+            "upstream": {"ok": True, "stdout": "origin/main", "stderr": ""},
+            "status_short": {"ok": True, "stdout": "## feat/community-support-bundle...origin/main\n M README.md", "stderr": ""},
+            "diff_stat": {"ok": True, "stdout": " README.md | 1 +", "stderr": ""},
+        },
+    )
+    monkeypatch.setattr(
+        support_bundle,
+        "collect_doctor_output",
+        lambda _project_root: {
+            "ok": False,
+            "returncode": 1,
+            "stdout": "\n".join(
+                [
+                    "DeerFlow Health Check",
+                    "  ✗ Node.js  (v20.19.5)",
+                    "      → Node.js 22+ required. Install from https://nodejs.org/",
+                    "  ✗ config.yaml found",
+                    "      → Run 'make setup' to create it",
+                    "Status: 2 error(s), 2 warning(s)",
+                ]
+            ),
+            "stderr": "",
+        },
+    )
+
+    output_path = tmp_path / "support.zip"
+    support_bundle.create_support_bundle(
+        project_root=project_root,
+        out_path=output_path,
+        include_doctor=True,
+    )
+
+    with zipfile.ZipFile(output_path) as zf:
+        names = set(zf.namelist())
+
+    assert {"README.md", "issue-summary.md", "ai-issue-draft.md", "triage.json"}.issubset(names)
+
+    triage = json.loads(_zip_text(output_path, "triage.json"))
+    assert triage["schema_version"] == 1
+    assert triage["status"] == "needs_user_setup"
+    assert triage["signals"]["config_missing"] is True
+    assert triage["signals"]["node_version_too_old"] is True
+    assert triage["signals"]["doctor_failed"] is True
+    assert triage["signals"]["dirty_worktree"] is True
+    assert triage["signals"]["extensions_config_missing"] is True
+    assert "doctor_included" not in triage["active_signals"]
+    assert "extensions_config_missing" not in triage["active_signals"]
+    assert triage["versions"]["python"] == "3.12.11"
+    assert triage["versions"]["node"] == "v20.19.5"
+    assert triage["doctor"]["errors"] == 2
+    assert "Run `make setup`" in triage["reporter_next_steps"][0]
+    assert any("Node.js 22+" in step for step in triage["reporter_next_steps"])
+    evidence_paths = [item["path"] for item in triage["evidence_files"]]
+    assert "issue-summary.md" in evidence_paths
+    assert "ai-issue-draft.md" in evidence_paths
+
+    issue_summary = _zip_text(output_path, "issue-summary.md")
+    assert "Triage status: needs_user_setup" in issue_summary
+    assert "config_missing" in issue_summary
+    assert "node_version_too_old" in issue_summary
+    assert "python=3.12.11" in issue_summary
+    assert "Reporter next steps" in issue_summary
+    assert "Run `make setup`" in issue_summary
+    assert "Attach the zip if a maintainer asks" in issue_summary
+    assert "Ask the reporter to complete local setup" in issue_summary
+
+    sidecar_summary = tmp_path / "support-issue-summary.md"
+    assert sidecar_summary.exists()
+    assert sidecar_summary.read_text(encoding="utf-8") == issue_summary
+
+    issue_draft = _zip_text(output_path, "ai-issue-draft.md")
+    assert "AI issue draft" in issue_draft
+    assert "Do not invent if unknown" in issue_draft
+    assert "Do not file this issue until every REQUIRED placeholder is replaced" in issue_draft
+    assert "Issue title" in issue_draft
+    assert "[bug] <REQUIRED: one-line problem summary>" in issue_draft
+    assert "### Problem summary" in issue_draft
+    assert "### Affected area(s)" in issue_draft
+    assert "Config / setup (make, config.yaml, env)" in issue_draft
+    assert "### What happened?" in issue_draft
+    assert "### Expected behavior" in issue_draft
+    assert "### Steps to reproduce" in issue_draft
+    assert "### Relevant logs" in issue_draft
+    assert "DeerFlow Health Check" in issue_draft
+    assert "### How are you running DeerFlow?" in issue_draft
+    assert "<REQUIRED: choose Local, Docker, CI, or Other>" in issue_draft
+    assert "### Operating system" in issue_draft
+    assert "macOS" in issue_draft
+    assert "### Platform details" in issue_draft
+    assert "arm64" in issue_draft
+    assert "### Python version" in issue_draft
+    assert "3.12.11" in issue_draft
+    assert "### Node.js version" in issue_draft
+    assert "v20.19.5" in issue_draft
+    assert "### Git state" in issue_draft
+    assert "branch: feat/community-support-bundle" in issue_draft
+    assert "commit: abc123" in issue_draft
+    assert "### Support bundle summary" in issue_draft
+    assert "Triage status: needs_user_setup" in issue_draft
+    assert "Attach the zip only if a maintainer asks" in issue_draft
+
+    sidecar_draft = tmp_path / "support-issue-draft.md"
+    assert sidecar_draft.exists()
+    assert sidecar_draft.read_text(encoding="utf-8") == issue_draft
+
+    bundle_readme = _zip_text(output_path, "README.md")
+    assert "Start here" in bundle_readme
+    assert "ai-issue-draft.md" in bundle_readme
+    assert "Attach the zip if a maintainer asks" in bundle_readme
+
+
+def test_triage_flags_config_parse_errors(tmp_path):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    (project_root / "config.yaml").write_text("models: [", encoding="utf-8")
+
+    output_path = tmp_path / "support.zip"
+    support_bundle.create_support_bundle(
+        project_root=project_root,
+        out_path=output_path,
+        include_doctor=False,
+    )
+
+    triage = json.loads(_zip_text(output_path, "triage.json"))
+    assert triage["status"] == "needs_user_setup"
+    assert triage["signals"]["config_error"] is True
+    assert "config_error" in triage["active_signals"]
+
+
+def test_triage_flags_extensions_parse_errors(tmp_path):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    (project_root / "config.yaml").write_text(
+        "config_version: 5\nmodels:\n  - name: default\n",
+        encoding="utf-8",
+    )
+    (project_root / "extensions_config.json").write_text("{ broken", encoding="utf-8")
+
+    output_path = tmp_path / "support.zip"
+    support_bundle.create_support_bundle(
+        project_root=project_root,
+        out_path=output_path,
+        include_doctor=False,
+    )
+
+    triage = json.loads(_zip_text(output_path, "triage.json"))
+    assert triage["signals"]["extensions_config_error"] is True
+    assert triage["status"] == "needs_user_setup"
+    assert "extensions_config_error" in triage["active_signals"]
+    assert any("extensions_config.json" in step for step in triage["maintainer_next_steps"])
+
+
+def test_thread_summary_lists_files_without_file_contents(tmp_path):
+    project_root = tmp_path / "project"
+    outputs = project_root / ".deer-flow" / "threads" / "thread-123" / "user-data" / "outputs"
+    uploads = project_root / ".deer-flow" / "threads" / "thread-123" / "user-data" / "uploads"
+    outputs.mkdir(parents=True)
+    uploads.mkdir(parents=True)
+    (outputs / "report.md").write_text("raw report content with secret-content", encoding="utf-8")
+    (outputs / "report-sk-live-secret.txt").write_text("filename token", encoding="utf-8")
+    (uploads / "input.csv").write_text("name,value\nsecret,1\n", encoding="utf-8")
+
+    output_path = tmp_path / "support.zip"
+    support_bundle.create_support_bundle(
+        project_root=project_root,
+        out_path=output_path,
+        thread_id="thread-123",
+        include_doctor=False,
+    )
+
+    thread_summary = json.loads(_zip_text(output_path, "thread-summary.json"))
+    output_names = [item["path"] for item in thread_summary["outputs"]]
+    upload_names = [item["path"] for item in thread_summary["uploads"]]
+
+    assert "report.md" in output_names
+    assert "input.csv" in upload_names
+
+    all_text = "\n".join(_zip_text(output_path, name) for name in zipfile.ZipFile(output_path).namelist())
+    assert "secret-content" not in all_text
+    assert "name,value" not in all_text
+    assert "sk-live-secret" not in all_text
+    assert "report-sk-<redacted>.txt" in all_text
+
+
+def test_missing_thread_summary_does_not_leak_absolute_checked_paths(tmp_path):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+
+    summary = support_bundle.collect_thread_summary(project_root, "missing-thread")
+
+    assert summary["found"] is False
+    assert summary["checked_layouts"]
+    assert all(not path.startswith("/") for path in summary["checked_layouts"])
+    assert all(str(tmp_path) not in path for path in summary["checked_layouts"])
+
+
+def test_thread_summary_rejects_path_like_thread_id(tmp_path):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+
+    with pytest.raises(ValueError, match="Invalid thread_id"):
+        support_bundle.collect_thread_summary(project_root, "../outside")
+
+
+@pytest.mark.parametrize("thread_id", ["..", ".", "...", "a..b", "....", "..%2f"])
+def test_validate_thread_id_rejects_dot_traversal(thread_id):
+    with pytest.raises(ValueError, match="Invalid thread_id"):
+        support_bundle._validate_thread_id(thread_id)
+
+
+def test_validate_thread_id_accepts_safe_ids():
+    support_bundle._validate_thread_id("thread-123")
+    support_bundle._validate_thread_id("ab_c-1")
+
+
+def test_validate_thread_id_rejects_noncanonical_ids():
+    """The script's pattern is pinned byte-identical to the canonical
+    ``THREAD_ID_PATTERN`` (see test_thread_id_validation.py) — dotted or
+    over-length IDs are rejected even though they are not traversals."""
+    with pytest.raises(ValueError, match="Invalid thread_id"):
+        support_bundle._validate_thread_id("a.b_c-1")
+    with pytest.raises(ValueError, match="Invalid thread_id"):
+        support_bundle._validate_thread_id("x" * 65)
+
+
+def test_main_reports_invalid_thread_id_without_traceback(tmp_path, capsys):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+
+    exit_code = support_bundle.main(
+        [
+            "--project-root",
+            str(project_root),
+            "--out",
+            str(tmp_path / "support.zip"),
+            "--thread-id",
+            "../outside",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "Invalid thread_id" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_main_prints_reporter_next_steps_and_optional_upload(tmp_path, capsys):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+
+    exit_code = support_bundle.main(
+        [
+            "--project-root",
+            str(project_root),
+            "--out",
+            str(tmp_path / "support.zip"),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "Issue summary:" in captured.out
+    assert "Issue draft:" in captured.out
+    assert "Suggested next steps:" in captured.out
+    assert "If an AI assistant files the issue, start from the issue draft" in captured.out
+    assert "Attach the zip if a maintainer asks" in captured.out
+
+
+@pytest.mark.parametrize("invocation_dir", [".", "backend"])
+def test_relative_home_matches_launcher_from_both_directories(tmp_path, monkeypatch, invocation_dir):
+    project = tmp_path / "checkout"
+    (project / "backend").mkdir(parents=True)
+    (project / ".deer-flow" / "users" / "alice" / "threads" / "relative" / "user-data").mkdir(parents=True)
+    monkeypatch.setenv("DEER_FLOW_HOME", ".deer-flow")
+    monkeypatch.chdir(project / invocation_dir)
+    assert support_bundle.collect_thread_summary(project, "relative")["found"] is True
+
+
+def test_thread_home_from_dotenv_does_not_mutate_environment(tmp_path, monkeypatch):
+    project = tmp_path / "checkout"
+    project.mkdir()
+    home = tmp_path / "data"
+    (home / "users" / "alice" / "threads" / "dotenv" / "user-data").mkdir(parents=True)
+    (project / ".env").write_text(f'DEER_FLOW_HOME="{home.as_posix()}"\nPRIVATE_KEY=private-value\n', encoding="utf-8")
+    monkeypatch.delenv("DEER_FLOW_HOME", raising=False)
+    original = dict(os.environ)
+    summary = support_bundle.collect_thread_summary(project, "dotenv")
+    assert summary["found"] is True
+    assert dict(os.environ) == original
+    assert "private-value" not in json.dumps(summary)
+    assert str(home) not in json.dumps(summary)
+
+
+def test_dotenv_home_wins_over_shell_without_exporting_secrets(tmp_path, monkeypatch):
+    (tmp_path / ".env").write_text("DEER_FLOW_HOME=dotenv-data\nPRIVATE_KEY=private-value\n", encoding="utf-8")
+    home = tmp_path / "shell-data"
+    (home / "threads" / "conflict" / "user-data").mkdir(parents=True)
+    (tmp_path / "dotenv-data" / "threads" / "conflict" / "user-data").mkdir(parents=True)
+    monkeypatch.setenv("DEER_FLOW_HOME", str(home))
+    original = dict(os.environ)
+    summary = support_bundle.collect_thread_summary(tmp_path, "conflict")
+    assert summary["layout"] == "dotenv-data/threads/conflict/user-data"
+    assert dict(os.environ) == original
+    assert "private-value" not in json.dumps(summary)
+
+
+@pytest.mark.parametrize("source", ["shell", "dotenv"])
+def test_thread_summary_honors_project_root_override(tmp_path, monkeypatch, source):
+    project = tmp_path / "checkout"
+    project.mkdir()
+    runtime_project = tmp_path / "other-project"
+    (runtime_project / ".deer-flow" / "threads" / "custom-root" / "user-data").mkdir(parents=True)
+    monkeypatch.delenv("DEER_FLOW_HOME", raising=False)
+    monkeypatch.delenv("DEER_FLOW_PROJECT_ROOT", raising=False)
+    if source == "shell":
+        monkeypatch.setenv("DEER_FLOW_PROJECT_ROOT", str(runtime_project))
+    else:
+        (project / ".env").write_text(f'DEER_FLOW_PROJECT_ROOT="{runtime_project.as_posix()}"\n', encoding="utf-8")
+    summary = support_bundle.collect_thread_summary(project, "custom-root")
+    assert summary["found"] is True
+    assert str(runtime_project) not in json.dumps(summary)
+
+
+def _local_launcher_home(project):
+    """Execute the launcher's actual dotenv/default blocks without starting services."""
+    bash = require_script_bash()
+    serve = (Path(support_bundle.__file__).parent / "serve.sh").read_text(encoding="utf-8")
+    dotenv_block = serve.split("# ── Load .env", 1)[1].split("\n\n", 1)[1].split("_pick_python()", 1)[0]
+    defaults = serve[serve.index("# Runtime path defaults.") :].split("# Extra flags", 1)[0]
+    result = subprocess.run(
+        [
+            bash,
+            "-c",
+            # Git Bash answers with POSIX paths, and its mount table (for example Windows TEMP
+            # at /tmp) is not reproducible from Python, so convert inside the shell. Passing the
+            # value through argv instead would let MSYS rewrite shell syntax inside it.
+            'set -e\ncd "$REPO_ROOT"\n' + dotenv_block + defaults + '\nif command -v cygpath >/dev/null 2>&1; then cygpath -w "$DEER_FLOW_HOME"; else printf "%s" "$DEER_FLOW_HOME"; fi',
+        ],
+        cwd=project,
+        env={**os.environ, "REPO_ROOT": str(project)},
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+    )
+    return Path(result.stdout.strip())
+
+
+@pytest.mark.parametrize("invocation_dir", [".", "backend"])
+@pytest.mark.parametrize("source", ["shell", "dotenv"])
+def test_project_root_only_finds_launchers_default_home(tmp_path, monkeypatch, invocation_dir, source):
+    project = tmp_path / "checkout"
+    (project / "backend").mkdir(parents=True)
+    runtime_project = tmp_path / "custom-project"
+    # A stale standalone-harness thread must not shadow the local launcher.
+    (runtime_project / ".deer-flow" / "threads" / "launcher" / "user-data").mkdir(parents=True)
+    if source == "shell":
+        monkeypatch.setenv("DEER_FLOW_PROJECT_ROOT", str(runtime_project))
+    else:
+        (project / ".env").write_text(f'DEER_FLOW_PROJECT_ROOT="{runtime_project.as_posix()}"\n', encoding="utf-8")
+    home = _local_launcher_home(project)
+    (home / "users" / "alice" / "threads" / "launcher" / "user-data").mkdir(parents=True)
+    monkeypatch.chdir(project / invocation_dir)
+
+    summary = support_bundle.collect_thread_summary(project, "launcher")
+
+    assert home == project / "backend" / ".deer-flow"
+    assert summary["found"] is True
+    assert summary["layout"] == "backend/.deer-flow/users/alice/threads/launcher/user-data"
+    assert str(runtime_project) not in json.dumps(summary)
+
+
+@pytest.mark.parametrize("value", ["~/runtime-data", "'~/runtime-data'", '"~/runtime-data"'])
+@pytest.mark.parametrize("variable", ["DEER_FLOW_HOME", "DEER_FLOW_PROJECT_ROOT"])
+def test_dotenv_tilde_matches_launcher_quote_semantics(tmp_path, monkeypatch, value, variable):
+    project = tmp_path / "checkout"
+    project.mkdir()
+    user_home = tmp_path / "user-home"
+    user_home.mkdir()
+    monkeypatch.setenv("HOME", str(user_home))
+    if os.name == "nt":
+        # Git Bash expands "~" from HOME, but Python's expanduser() reads USERPROFILE
+        # on Windows; pin both so the two resolution paths stay comparable.
+        monkeypatch.setenv("USERPROFILE", str(user_home))
+    (project / ".env").write_text(f"{variable}={value}\n", encoding="utf-8")
+    if variable == "DEER_FLOW_HOME":
+        home = _local_launcher_home(project)
+    else:
+        home = (project / "~/runtime-data" if value.startswith(("'", '"')) else user_home / "runtime-data") / ".deer-flow"
+    (home / "threads" / "tilde" / "user-data").mkdir(parents=True)
+    original = dict(os.environ)
+
+    summary = support_bundle.collect_thread_summary(project, "tilde")
+
+    assert summary["found"] is True
+    assert dict(os.environ) == original
+    assert str(user_home) not in json.dumps(summary)
+
+
+@pytest.mark.parametrize("dotenv_home", ["", "stale-data"])
+def test_dotenv_empty_home_also_overrides_shell(tmp_path, monkeypatch, dotenv_home):
+    project = tmp_path / "checkout"
+    project.mkdir()
+    (project / ".env").write_text(f"DEER_FLOW_HOME={dotenv_home}\n", encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path / "shell-data"))
+    home = _local_launcher_home(project)
+    (home / "threads" / "empty-home" / "user-data").mkdir(parents=True)
+
+    summary = support_bundle.collect_thread_summary(project, "empty-home")
+
+    assert summary["found"] is True
+    assert summary["layout"] == home.relative_to(project).as_posix() + "/threads/empty-home/user-data"
+
+
+@pytest.mark.parametrize("source", ["shell", "legacy"])
+def test_missing_dotenv_keeps_support_bundle_available(tmp_path, monkeypatch, source):
+    (tmp_path / ".env").write_text("DEER_FLOW_HOME=unavailable-data\nPRIVATE_KEY=private-value\n", encoding="utf-8")
+    import builtins
+
+    real_import = builtins.__import__
+
+    def without_dotenv(name, *args, **kwargs):
+        if name == "dotenv" or name.startswith("dotenv."):
+            raise ModuleNotFoundError("No module named dotenv")
+        return real_import(name, *args, **kwargs)
+
+    if source == "shell":
+        home = tmp_path / "shell-data"
+        monkeypatch.setenv("DEER_FLOW_HOME", str(home))
+    else:
+        home = tmp_path / "backend" / ".deer-flow"
+    (home / "threads" / "no-dotenv" / "user-data").mkdir(parents=True)
+    original = dict(os.environ)
+    with monkeypatch.context() as context:
+        context.setattr(builtins, "__import__", without_dotenv)
+        summary = support_bundle.collect_thread_summary(tmp_path, "no-dotenv")
+
+    assert summary["found"] is True
+    assert dict(os.environ) == original
+    assert "private-value" not in json.dumps(summary)
+
+
+@pytest.mark.parametrize("invocation_dir", [".", "backend"])
+@pytest.mark.parametrize(
+    ("setup", "value"),
+    [
+        ("", "$PWD/backend/.deer-flow"),
+        ("", '"$PWD/backend/.deer-flow"'),
+        ("", '"${PWD}/backend/.deer-flow"'),
+        ("", "'$PWD/backend/.deer-flow'"),
+        ("", "'${PWD}/backend/.deer-flow'"),
+        ("", r'"\$PWD/backend/.deer-flow"'),
+        ('RUNTIME_DATA="$PWD/runtime-data"\n', '"$RUNTIME_DATA"'),
+        ('RUNTIME_DATA="$PWD/old"\nRUNTIME_DATA="$PWD/new"\n', '"${RUNTIME_DATA}"'),
+        ('RUNTIME_DATA="$PWD/first"\nRUNTIME_DATA="$RUNTIME_DATA/second"\n', '"$RUNTIME_DATA"'),
+        ("", '"${RUNTIME_DATA:-runtime-data}"'),
+    ],
+)
+def test_dotenv_variable_paths_match_launcher(tmp_path, monkeypatch, invocation_dir, setup, value):
+    project = tmp_path / "checkout"
+    (project / "backend").mkdir(parents=True)
+    monkeypatch.setenv("PWD", str(tmp_path / "other-cwd"))
+    monkeypatch.setenv("RUNTIME_DATA", "")
+    (project / ".env").write_text(setup + f"DEER_FLOW_HOME={value}\nPRIVATE_KEY=private-value\n", encoding="utf-8")
+    home = _local_launcher_home(project)
+    outputs = home / "users" / "alice" / "threads" / "variables" / "user-data" / "outputs"
+    outputs.mkdir(parents=True)
+    (outputs / "report.txt").write_text("private contents", encoding="utf-8")
+    monkeypatch.chdir(project / invocation_dir)
+    original = dict(os.environ)
+
+    summary = support_bundle.collect_thread_summary(project, "variables")
+
+    assert summary["found"] is True
+    assert summary["outputs"][0]["path"] == "report.txt"
+    assert dict(os.environ) == original
+    assert "private-value" not in json.dumps(summary)
+    assert "private contents" not in json.dumps(summary)
+
+
+def test_dotenv_shell_variable_project_root_is_resolved(tmp_path, monkeypatch):
+    project = tmp_path / "checkout"
+    project.mkdir()
+    (project / ".env").write_text('DEER_FLOW_PROJECT_ROOT="$PWD/standalone"\n', encoding="utf-8")
+    home = project / "standalone" / ".deer-flow"
+    (home / "threads" / "variables" / "user-data").mkdir(parents=True)
+    monkeypatch.setenv("PWD", str(tmp_path / "other-cwd"))
+
+    assert support_bundle.collect_thread_summary(project, "variables")["found"] is True
+
+
+def test_dotenv_path_lookup_does_not_execute_shell_commands(tmp_path):
+    marker = tmp_path / "shell-executed"
+    (tmp_path / ".env").write_text(f'DEER_FLOW_HOME="$(touch {marker.as_posix()})"\n', encoding="utf-8")
+
+    summary = support_bundle.collect_thread_summary(tmp_path, "variables")
+
+    assert summary["found"] is False
+    assert not marker.exists()

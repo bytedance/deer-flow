@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import time
+from unittest.mock import Mock
+
 import pytest
 import requests
 
+import deerflow.skills.storage as storage_mod
+from deerflow.community.aio_sandbox import remote_backend as remote_backend_mod
 from deerflow.community.aio_sandbox.remote_backend import RemoteSandboxBackend
 from deerflow.community.aio_sandbox.sandbox_info import SandboxInfo
+from deerflow.skills.types import SkillCategory
 
 
 class _StubResponse:
@@ -14,21 +20,136 @@ class _StubResponse:
         status_code: int = 200,
         payload: object | None = None,
         json_exc: Exception | None = None,
+        headers: dict | None = None,
     ):
         self.status_code = status_code
         self._payload = {} if payload is None else payload
         self._json_exc = json_exc
+        self.headers = headers or {}
         self.ok = 200 <= status_code < 400
         self.text = ""
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
-            raise requests.HTTPError(f"HTTP {self.status_code}")
+            error = requests.HTTPError(f"HTTP {self.status_code}")
+            error.response = self
+            raise error
 
     def json(self) -> object:
         if self._json_exc is not None:
             raise self._json_exc
         return self._payload
+
+
+@pytest.mark.parametrize("status", ["Running", "Pending", "Terminating", "Failed"])
+def test_absence_requires_missing_pod_not_an_unhealthy_phase(monkeypatch, status):
+    backend = RemoteSandboxBackend("http://provisioner:8002", api_key="test-key")
+    calls = []
+
+    def get(url, **kwargs):
+        calls.append((url, kwargs["headers"]))
+        return _StubResponse(payload={"sandbox_id": "sandbox-id", "exists": True, "status": status})
+
+    monkeypatch.setattr(requests, "get", get)
+
+    assert backend.is_absent("sandbox-id") is False
+    assert calls == [("http://provisioner:8002/api/sandboxes/sandbox-id/presence", {"X-API-Key": "test-key"})]
+
+
+def test_absence_accepts_only_confirmed_not_found(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    monkeypatch.setattr(requests, "get", lambda *_args, **_kwargs: _StubResponse(payload={"sandbox_id": "sandbox-id", "exists": False}))
+    assert backend.is_absent("sandbox-id") is True
+    # Old provisioners can report 404 for a missing Service while the Pod lives.
+    monkeypatch.setattr(requests, "get", lambda *_args, **_kwargs: _StubResponse(status_code=404))
+    with pytest.raises(RuntimeError):
+        backend.is_absent("sandbox-id")
+
+
+@pytest.mark.parametrize("payload", [{}, {"exists": False}, {"sandbox_id": "another-id", "exists": False}, {"sandbox_id": "sandbox-id", "exists": "false"}])
+def test_absence_rejects_unattested_or_mismatched_responses(monkeypatch, payload):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    monkeypatch.setattr(requests, "get", lambda *_args, **_kwargs: _StubResponse(payload=payload))
+    with pytest.raises(RuntimeError):
+        backend.is_absent("sandbox-id")
+
+
+@pytest.mark.parametrize("generation", ["pod-generation", None])
+def test_runtime_inspection_preserves_pod_identity_without_a_service(monkeypatch, generation):
+    backend = RemoteSandboxBackend("http://provisioner:8002", api_key="test-key")
+    calls = []
+
+    def get(url, **kwargs):
+        calls.append((url, kwargs["headers"]))
+        return _StubResponse(payload={"sandbox_id": "sandbox-id", "exists": True, "container_id": generation})
+
+    monkeypatch.setattr(requests, "get", get)
+
+    info = backend.inspect_runtime("sandbox-id")
+    assert info.sandbox_id == "sandbox-id"
+    assert info.container_id == generation
+    assert info.sandbox_url == ""
+    assert calls == [("http://provisioner:8002/api/sandboxes/sandbox-id/presence", {"X-API-Key": "test-key"})]
+
+
+def test_runtime_inspection_returns_none_only_after_attested_absence(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    monkeypatch.setattr(requests, "get", lambda *_args, **_kwargs: _StubResponse(payload={"sandbox_id": "sandbox-id", "exists": False}))
+    assert backend.inspect_runtime("sandbox-id") is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"sandbox_id": "sandbox-id", "exists": True, "container_id": False},
+        {"sandbox_id": "sandbox-id", "exists": True, "container_id": ""},
+        {"sandbox_id": "sandbox-id", "exists": False, "container_id": "still-present"},
+    ],
+)
+def test_runtime_inspection_rejects_inconsistent_generation_metadata(monkeypatch, payload):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    monkeypatch.setattr(requests, "get", lambda *_args, **_kwargs: _StubResponse(payload=payload))
+    with pytest.raises(RuntimeError):
+        backend.inspect_runtime("sandbox-id")
+
+
+@pytest.mark.parametrize("failure", [requests.ConnectionError("provisioner unavailable"), ValueError("invalid response JSON")])
+def test_runtime_inspection_errors_do_not_attest_absence(monkeypatch, failure):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+
+    def get(*_args, **_kwargs):
+        if isinstance(failure, requests.RequestException):
+            raise failure
+        return _StubResponse(json_exc=failure)
+
+    monkeypatch.setattr(requests, "get", get)
+    with pytest.raises(RuntimeError):
+        backend.inspect_runtime("sandbox-id")
+
+
+@pytest.mark.parametrize(
+    "container_path",
+    [
+        "/",
+        "relative-skills",
+        "//custom-skills",
+        "/custom//skills",
+        "/custom/../skills",
+        "/mnt",
+        "/mnt/user-data/skills",
+        "/mnt/acp-workspace/skills",
+        "/mnt/integrations/lark-cli/skills",
+    ],
+)
+def test_skills_container_path_rejects_unsafe_or_noncanonical_roots(
+    container_path,
+):
+    with pytest.raises(ValueError):
+        remote_backend_mod._normalize_skills_container_path(container_path)
+
+
+def test_skills_container_path_accepts_isolated_custom_root():
+    assert remote_backend_mod._normalize_skills_container_path("/custom-skills") == "/custom-skills"
 
 
 def test_list_running_delegates_to_provisioner_list(monkeypatch):
@@ -46,9 +167,10 @@ def test_list_running_delegates_to_provisioner_list(monkeypatch):
 def test_provisioner_list_returns_sandbox_infos_and_filters_invalid_entries(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002")
 
-    def mock_get(url: str, timeout: int):
+    def mock_get(url: str, timeout: int, headers=None):
         assert url == "http://provisioner:8002/api/sandboxes"
         assert timeout == 10
+        assert headers == {}
         return _StubResponse(
             payload={
                 "sandboxes": [
@@ -67,10 +189,51 @@ def test_provisioner_list_returns_sandbox_infos_and_filters_invalid_entries(monk
     assert infos[0].sandbox_url == "http://k3s:31001"
 
 
+def test_provisioner_list_marks_insufficient_shell_capacity_for_replacement(monkeypatch):
+    backend = RemoteSandboxBackend(
+        "http://provisioner:8002",
+        max_shell_sessions=13,
+    )
+
+    def mock_get(url: str, timeout: int, headers=None):
+        return _StubResponse(
+            payload={
+                "sandboxes": [
+                    {
+                        "sandbox_id": "abc123",
+                        "sandbox_url": "http://k3s:31001",
+                        "max_shell_sessions": 10,
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    infos = backend._provisioner_list()
+
+    assert len(infos) == 1
+    assert infos[0].requires_replacement is True
+
+
+def test_provisioner_list_sends_auth_header_when_api_key_set(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002", api_key="secret")
+    captured: list[dict] = []
+
+    def mock_get(url: str, timeout: int, headers=None):
+        captured.append({"headers": headers})
+        return _StubResponse(payload={"sandboxes": []})
+
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    backend._provisioner_list()
+    assert captured[0]["headers"] == {"X-API-Key": "secret"}
+
+
 def test_provisioner_list_returns_empty_on_request_exception(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002")
 
-    def mock_get(url: str, timeout: int):
+    def mock_get(url: str, timeout: int, headers=None):
         raise requests.RequestException("network down")
 
     monkeypatch.setattr(requests, "get", mock_get)
@@ -81,7 +244,7 @@ def test_provisioner_list_returns_empty_on_request_exception(monkeypatch):
 def test_provisioner_list_returns_empty_when_payload_is_not_dict(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002")
 
-    def mock_get(url: str, timeout: int):
+    def mock_get(url: str, timeout: int, headers=None):
         return _StubResponse(payload=[{"sandbox_id": "abc", "sandbox_url": "http://k3s:31001"}])
 
     monkeypatch.setattr(requests, "get", mock_get)
@@ -92,7 +255,7 @@ def test_provisioner_list_returns_empty_when_payload_is_not_dict(monkeypatch):
 def test_provisioner_list_returns_empty_when_sandboxes_is_not_list(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002")
 
-    def mock_get(url: str, timeout: int):
+    def mock_get(url: str, timeout: int, headers=None):
         return _StubResponse(payload={"sandboxes": {"sandbox_id": "abc"}})
 
     monkeypatch.setattr(requests, "get", mock_get)
@@ -103,7 +266,7 @@ def test_provisioner_list_returns_empty_when_sandboxes_is_not_list(monkeypatch):
 def test_provisioner_list_skips_non_dict_sandbox_entries(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002")
 
-    def mock_get(url: str, timeout: int):
+    def mock_get(url: str, timeout: int, headers=None):
         return _StubResponse(
             payload={
                 "sandboxes": [
@@ -123,31 +286,75 @@ def test_provisioner_list_skips_non_dict_sandbox_entries(monkeypatch):
     assert infos[0].sandbox_url == "http://k3s:31001"
 
 
-def test_create_delegates_to_provisioner_create(monkeypatch):
+@pytest.mark.parametrize(
+    ("categories", "expected"),
+    [
+        ([SkillCategory.LEGACY], True),
+        (["legacy"], True),
+        ([SkillCategory.CUSTOM], False),
+    ],
+)
+def test_user_should_see_legacy_skills_follows_storage_visibility_rule(monkeypatch, categories, expected):
+    class _Storage:
+        def load_skills(self, *, enabled_only: bool = False):
+            assert enabled_only is False
+            return [type("SkillStub", (), {"category": category})() for category in categories]
+
+    monkeypatch.setattr(storage_mod, "get_or_new_user_skill_storage", lambda user_id: _Storage())
+
+    assert storage_mod.user_should_see_legacy_skills("user-1") is expected
+
+
+@pytest.mark.parametrize("expected_user_id", [None, "owner-1"])
+def test_create_delegates_to_provisioner_create(monkeypatch, expected_user_id):
     backend = RemoteSandboxBackend("http://provisioner:8002")
     expected = SandboxInfo(sandbox_id="abc123", sandbox_url="http://k3s:31001")
 
-    def mock_create(thread_id: str, sandbox_id: str, extra_mounts=None):
+    def mock_create(
+        thread_id: str,
+        sandbox_id: str,
+        extra_mounts=None,
+        *,
+        user_id=None,
+        skills_container_path="/mnt/skills",
+        provision_lark_cli_runtime=False,
+        provision_lark_cli_broker=False,
+    ):
         assert thread_id == "thread-1"
         assert sandbox_id == "abc123"
         assert extra_mounts == [("/host", "/container", False)]
+        assert user_id == expected_user_id
+        assert skills_container_path == "/mnt/skills"
+        assert provision_lark_cli_runtime is True
+        assert provision_lark_cli_broker is False
         return expected
 
     monkeypatch.setattr(backend, "_provisioner_create", mock_create)
 
-    result = backend.create("thread-1", "abc123", extra_mounts=[("/host", "/container", False)])
+    result = backend.create(
+        "thread-1",
+        "abc123",
+        extra_mounts=[("/host", "/container", False)],
+        user_id=expected_user_id,
+        provision_lark_cli_runtime=True,
+    )
     assert result == expected
 
 
 def test_provisioner_create_returns_sandbox_info(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002")
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda user_id: True)
 
-    def mock_post(url: str, json: dict, timeout: int):
+    def mock_post(url: str, json: dict, timeout: int, headers=None):
         assert url == "http://provisioner:8002/api/sandboxes"
         assert json == {
             "sandbox_id": "abc123",
             "thread_id": "thread-1",
             "user_id": "test-user-autouse",
+            "include_legacy_skills": True,
+            "skills_container_path": "/mnt/skills",
+            "provision_lark_cli_runtime": False,
+            "provision_lark_cli_broker": False,
         }
         assert timeout == 30
         return _StubResponse(payload={"sandbox_id": "abc123", "sandbox_url": "http://k3s:31001"})
@@ -159,10 +366,250 @@ def test_provisioner_create_returns_sandbox_info(monkeypatch):
     assert info.sandbox_url == "http://k3s:31001"
 
 
+@pytest.mark.parametrize("reported", [None, False, True])
+def test_broker_create_requires_attested_mode(monkeypatch, reported):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda _user_id: False)
+    payload = {"sandbox_url": "http://sandbox", "container_id": "pod-generation", "lark_cli_broker": reported}
+    monkeypatch.setattr(requests, "post", lambda *_args, **_kwargs: _StubResponse(payload=payload))
+    if reported is not True:
+        with pytest.raises(RuntimeError, match="broker"):
+            backend.create("thread", "sandbox", provision_lark_cli_broker=True)
+    else:
+        info = backend.create("thread", "sandbox", provision_lark_cli_broker=True)
+        assert info.lark_cli_broker is True
+        assert info.container_id == "pod-generation"
+
+
+@pytest.mark.parametrize("status", [409, 503])
+def test_create_config_conflict_marker_drops_cached_lark_broker_mode(monkeypatch, status):
+    """A marked 409/503 means the provisioner's lark config changed: re-probe next acquire."""
+    from deerflow.integrations import lark_cli
+
+    backend = RemoteSandboxBackend("http://provisioner:8002", api_key="test-key")
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda _user_id: False)
+    cache_key = ("http://provisioner:8002", "test-key")
+    stale = lark_cli._LarkBrokerModeCacheEntry(False, time.monotonic())
+    monkeypatch.setattr(lark_cli.sandbox_lark_broker_active, "_cache", {cache_key: stale}, raising=False)
+    headers = {lark_cli.PROVISIONER_CAPABILITY_REFRESH_HEADER: lark_cli.PROVISIONER_CAPABILITY_REFRESH_LARK_BROKER}
+    monkeypatch.setattr(requests, "post", lambda *_args, **_kwargs: _StubResponse(status_code=status, headers=headers))
+
+    with pytest.raises(RuntimeError, match="Provisioner create failed"):
+        backend._provisioner_create("thread-1", "abc123", provision_lark_cli_runtime=True)
+
+    assert cache_key not in lark_cli.sandbox_lark_broker_active._cache
+
+
+def test_create_coordination_conflict_keeps_cached_lark_broker_mode(monkeypatch):
+    """A marker-less 409 (capacity / incompatible Pod / terminating) is not a config change."""
+    from deerflow.integrations import lark_cli
+
+    backend = RemoteSandboxBackend("http://provisioner:8002", api_key="test-key")
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda _user_id: False)
+    cache_key = ("http://provisioner:8002", "test-key")
+    cached = lark_cli._LarkBrokerModeCacheEntry(False, time.monotonic())
+    monkeypatch.setattr(lark_cli.sandbox_lark_broker_active, "_cache", {cache_key: cached}, raising=False)
+    monkeypatch.setattr(requests, "post", lambda *_args, **_kwargs: _StubResponse(status_code=409))
+
+    with pytest.raises(RuntimeError, match="Provisioner create failed"):
+        backend._provisioner_create("thread-1", "abc123", provision_lark_cli_runtime=True)
+
+    assert lark_cli.sandbox_lark_broker_active._cache.get(cache_key) is cached
+
+
+def test_create_request_error_without_response_keeps_cached_lark_broker_mode(monkeypatch):
+    from deerflow.integrations import lark_cli
+
+    backend = RemoteSandboxBackend("http://provisioner:8002", api_key="test-key")
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda _user_id: False)
+    cache_key = ("http://provisioner:8002", "test-key")
+    cached = lark_cli._LarkBrokerModeCacheEntry(False, time.monotonic())
+    monkeypatch.setattr(lark_cli.sandbox_lark_broker_active, "_cache", {cache_key: cached}, raising=False)
+    monkeypatch.setattr(requests, "post", Mock(side_effect=requests.ConnectionError("unreachable")))
+
+    with pytest.raises(RuntimeError, match="Provisioner create failed"):
+        backend._provisioner_create("thread-1", "abc123", provision_lark_cli_runtime=True)
+
+    assert lark_cli.sandbox_lark_broker_active._cache.get(cache_key) is cached
+
+
+def test_discovery_reports_actual_broker_mode_and_generation(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    monkeypatch.setattr(requests, "get", lambda *_args, **_kwargs: _StubResponse(payload={"sandbox_url": "http://sandbox", "container_id": "pod-generation", "lark_cli_broker": True}))
+    info = backend.discover("sandbox")
+    assert info.lark_cli_broker is True
+    assert info.container_id == "pod-generation"
+
+
+def test_provisioner_create_forwards_supported_extra_mounts(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda user_id: False)
+
+    def mock_post(url: str, json: dict, timeout: int, headers=None):
+        assert url == "http://provisioner:8002/api/sandboxes"
+        assert json["include_legacy_skills"] is False
+        assert json["extra_mounts"] == [
+            {
+                "host_path": "/state/users/alice/skills/integrations",
+                "container_path": "/mnt/skills/integrations",
+                "read_only": True,
+            },
+            {
+                "host_path": "/state/users/alice/integrations/lark-cli/config",
+                "container_path": "/mnt/integrations/lark-cli/config",
+                "read_only": False,
+            },
+        ]
+        assert timeout == 30
+        return _StubResponse(payload={"sandbox_id": "abc123", "sandbox_url": "http://k3s:31001"})
+
+    monkeypatch.setattr(requests, "post", mock_post)
+
+    backend._provisioner_create(
+        "thread-1",
+        "abc123",
+        extra_mounts=[
+            ("/state/users/alice/threads/thread-1/user-data/workspace", "/mnt/user-data/workspace", False),
+            ("/skills", "/mnt/skills", True),
+            ("/state/users/alice/skills/integrations", "/mnt/skills/integrations", True),
+            ("/state/users/alice/integrations/lark-cli/config", "/mnt/integrations/lark-cli/config", False),
+        ],
+        user_id="alice",
+    )
+
+
+def test_provisioner_create_forwards_custom_skills_root_and_all_policy_mounts(
+    monkeypatch,
+):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    monkeypatch.setattr(
+        remote_backend_mod,
+        "user_should_see_legacy_skills",
+        lambda user_id: False,
+    )
+    captured: dict = {}
+
+    def mock_post(url: str, json: dict, timeout: int, headers=None):
+        captured.update(json)
+        return _StubResponse(
+            payload={
+                "sandbox_id": "abc123",
+                "sandbox_url": "http://k3s:31001",
+            }
+        )
+
+    monkeypatch.setattr(requests, "post", mock_post)
+    categories = ("public", "custom", "legacy", "integrations")
+
+    backend._provisioner_create(
+        "thread-1",
+        "abc123",
+        extra_mounts=[
+            (
+                f"/state/users/alice/threads/thread-1/skills_view/{category}",
+                f"/custom-skills/{category}",
+                True,
+            )
+            for category in categories
+        ],
+        user_id="alice",
+        skills_container_path="/custom-skills",
+    )
+
+    assert captured["skills_container_path"] == "/custom-skills"
+    assert {mount["container_path"] for mount in captured["extra_mounts"]} == {f"/custom-skills/{category}" for category in categories}
+
+
+def test_provisioner_create_strips_runtime_mount_when_init_container_enabled(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda user_id: False)
+
+    captured: dict = {}
+
+    def mock_post(url: str, json: dict, timeout: int, headers=None):
+        captured.update(json)
+        return _StubResponse(payload={"sandbox_id": "abc123", "sandbox_url": "http://k3s:31001", "lark_cli_broker": False})
+
+    monkeypatch.setattr(requests, "post", mock_post)
+
+    backend._provisioner_create(
+        "thread-1",
+        "abc123",
+        extra_mounts=[
+            ("/state/users/alice/integrations/lark-cli/config", "/mnt/integrations/lark-cli/config", False),
+            ("/state/users/alice/integrations/lark-cli/data", "/mnt/integrations/lark-cli/data", False),
+            ("/state/integrations/lark-cli/sandbox-cli", "/mnt/integrations/lark-cli/runtime", True),
+        ],
+        user_id="alice",
+        provision_lark_cli_runtime=True,
+    )
+
+    assert captured["provision_lark_cli_runtime"] is True
+    container_paths = {mount["container_path"] for mount in captured["extra_mounts"]}
+    # The init container supplies the runtime, so its mount is dropped, but the
+    # per-user credential mounts are still forwarded.
+    assert "/mnt/integrations/lark-cli/runtime" not in container_paths
+    assert "/mnt/integrations/lark-cli/config" in container_paths
+    assert "/mnt/integrations/lark-cli/data" in container_paths
+
+
+def test_provisioner_create_keeps_runtime_mount_when_init_container_disabled(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda user_id: False)
+
+    captured: dict = {}
+
+    def mock_post(url: str, json: dict, timeout: int, headers=None):
+        captured.update(json)
+        return _StubResponse(payload={"sandbox_id": "abc123", "sandbox_url": "http://k3s:31001"})
+
+    monkeypatch.setattr(requests, "post", mock_post)
+
+    backend._provisioner_create(
+        "thread-1",
+        "abc123",
+        extra_mounts=[
+            ("/state/integrations/lark-cli/sandbox-cli", "/mnt/integrations/lark-cli/runtime", True),
+        ],
+        user_id="alice",
+        provision_lark_cli_runtime=False,
+    )
+
+    assert captured["provision_lark_cli_runtime"] is False
+    container_paths = {mount["container_path"] for mount in captured["extra_mounts"]}
+    assert "/mnt/integrations/lark-cli/runtime" in container_paths
+
+
+def test_provisioner_create_accepts_anonymous_thread_id(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda user_id: False)
+
+    def mock_post(url: str, json: dict, timeout: int, headers=None):
+        assert url == "http://provisioner:8002/api/sandboxes"
+        assert json == {
+            "sandbox_id": "anon123",
+            "thread_id": None,
+            "user_id": "test-user-autouse",
+            "include_legacy_skills": False,
+            "skills_container_path": "/mnt/skills",
+            "provision_lark_cli_runtime": False,
+            "provision_lark_cli_broker": False,
+        }
+        assert timeout == 30
+        return _StubResponse(payload={"sandbox_id": "anon123", "sandbox_url": "http://k3s:31002"})
+
+    monkeypatch.setattr(requests, "post", mock_post)
+
+    info = backend.create(None, "anon123")
+    assert info.sandbox_id == "anon123"
+    assert info.sandbox_url == "http://k3s:31002"
+
+
 def test_provisioner_create_raises_runtime_error_on_request_exception(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002")
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda user_id: False)
 
-    def mock_post(url: str, json: dict, timeout: int):
+    def mock_post(url: str, json: dict, timeout: int, headers=None):
         raise requests.RequestException("boom")
 
     monkeypatch.setattr(requests, "post", mock_post)
@@ -187,7 +634,7 @@ def test_destroy_delegates_to_provisioner_destroy(monkeypatch):
 def test_provisioner_destroy_calls_delete(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002")
 
-    def mock_delete(url: str, timeout: int):
+    def mock_delete(url: str, timeout: int, headers=None):
         assert url == "http://provisioner:8002/api/sandboxes/abc123"
         assert timeout == 15
         return _StubResponse(status_code=200)
@@ -197,15 +644,16 @@ def test_provisioner_destroy_calls_delete(monkeypatch):
     backend._provisioner_destroy("abc123")
 
 
-def test_provisioner_destroy_swallows_request_exception(monkeypatch):
+def test_provisioner_destroy_propagates_request_exception(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002")
 
-    def mock_delete(url: str, timeout: int):
+    def mock_delete(url: str, timeout: int, headers=None):
         raise requests.RequestException("network down")
 
     monkeypatch.setattr(requests, "delete", mock_delete)
 
-    backend._provisioner_destroy("abc123")
+    with pytest.raises(RuntimeError, match="destroy failed"):
+        backend._provisioner_destroy("abc123")
 
 
 def test_is_alive_delegates_to_provisioner_is_alive(monkeypatch):
@@ -224,27 +672,51 @@ def test_is_alive_delegates_to_provisioner_is_alive(monkeypatch):
 def test_provisioner_is_alive_true_only_when_status_running(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002")
 
-    def mock_get_running(url: str, timeout: int):
+    def mock_get_running(url: str, timeout: int, headers=None):
         return _StubResponse(payload={"status": "Running"})
 
     monkeypatch.setattr(requests, "get", mock_get_running)
     assert backend._provisioner_is_alive("abc123") is True
 
-    def mock_get_pending(url: str, timeout: int):
+    def mock_get_pending(url: str, timeout: int, headers=None):
         return _StubResponse(payload={"status": "Pending"})
 
     monkeypatch.setattr(requests, "get", mock_get_pending)
     assert backend._provisioner_is_alive("abc123") is False
 
 
-def test_provisioner_is_alive_returns_false_on_request_exception(monkeypatch):
+def test_provisioner_is_alive_returns_false_on_404(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002")
 
-    def mock_get(url: str, timeout: int):
-        raise requests.RequestException("boom")
+    def mock_get(url: str, timeout: int, headers=None):
+        return _StubResponse(status_code=404)
 
     monkeypatch.setattr(requests, "get", mock_get)
     assert backend._provisioner_is_alive("abc123") is False
+
+
+def test_provisioner_is_alive_raises_on_request_exception(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+
+    def mock_get(url: str, timeout: int, headers=None):
+        raise requests.RequestException("boom")
+
+    monkeypatch.setattr(requests, "get", mock_get)
+    with pytest.raises(RuntimeError, match="Provisioner health check failed for abc123"):
+        backend._provisioner_is_alive("abc123")
+
+
+def test_provisioner_is_alive_raises_on_server_error(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+
+    def mock_get(url: str, timeout: int, headers=None):
+        response = _StubResponse(status_code=503)
+        response.text = "unavailable"
+        return response
+
+    monkeypatch.setattr(requests, "get", mock_get)
+    with pytest.raises(RuntimeError, match="HTTP 503 unavailable"):
+        backend._provisioner_is_alive("abc123")
 
 
 def test_discover_delegates_to_provisioner_discover(monkeypatch):
@@ -264,7 +736,7 @@ def test_discover_delegates_to_provisioner_discover(monkeypatch):
 def test_provisioner_discover_returns_none_on_404(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002")
 
-    def mock_get(url: str, timeout: int):
+    def mock_get(url: str, timeout: int, headers=None):
         return _StubResponse(status_code=404)
 
     monkeypatch.setattr(requests, "get", mock_get)
@@ -275,7 +747,7 @@ def test_provisioner_discover_returns_none_on_404(monkeypatch):
 def test_provisioner_discover_returns_info_on_success(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002")
 
-    def mock_get(url: str, timeout: int):
+    def mock_get(url: str, timeout: int, headers=None):
         return _StubResponse(payload={"sandbox_id": "abc123", "sandbox_url": "http://k3s:31001"})
 
     monkeypatch.setattr(requests, "get", mock_get)
@@ -286,10 +758,67 @@ def test_provisioner_discover_returns_info_on_success(monkeypatch):
     assert info.sandbox_url == "http://k3s:31001"
 
 
+def test_provisioner_discover_marks_insufficient_shell_capacity_for_replacement(monkeypatch):
+    backend = RemoteSandboxBackend(
+        "http://provisioner:8002",
+        max_shell_sessions=13,
+    )
+
+    def mock_get(url: str, timeout: int, headers=None):
+        return _StubResponse(
+            payload={
+                "sandbox_id": "abc123",
+                "sandbox_url": "http://k3s:31001",
+                "max_shell_sessions": 10,
+            }
+        )
+
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    info = backend._provisioner_discover("abc123")
+
+    assert info is not None
+    assert info.requires_replacement is True
+
+
+def test_provisioner_create_reports_version_skew_when_capacity_is_missing(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002", max_shell_sessions=13)
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda _user_id: False)
+
+    def mock_post(url: str, *, json: dict, headers=None, timeout: int):
+        return _StubResponse(payload={"sandbox_id": "abc123", "sandbox_url": "http://k3s:31001"})
+
+    monkeypatch.setattr(requests, "post", mock_post)
+
+    with pytest.raises(RuntimeError, match="version skew"):
+        backend._provisioner_create(None, "abc123")
+
+
+@pytest.mark.parametrize("reported_capacity", [4, 9, 13, None])
+def test_create_checks_runtime_minimum_without_sending_image_override(monkeypatch, reported_capacity):
+    backend = RemoteSandboxBackend("http://provisioner:8002", required_shell_sessions=9)
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda _user_id: False)
+
+    def post(_url, *, json, **_kwargs):
+        assert "max_shell_sessions" not in json
+        payload = {"sandbox_url": "http://sandbox:8080"}
+        if reported_capacity is not None:
+            payload["max_shell_sessions"] = reported_capacity
+        return _StubResponse(payload=payload)
+
+    monkeypatch.setattr(requests, "post", post)
+    if reported_capacity == 4:
+        with pytest.raises(RuntimeError, match="insufficient shell-session capacity"):
+            backend.create("thread-a", "example")
+    else:
+        # A legacy provisioner without metadata retains the known image default.
+        assert backend.create("thread-a", "example").sandbox_url == "http://sandbox:8080"
+
+
 def test_provisioner_discover_returns_none_on_request_exception(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002")
 
-    def mock_get(url: str, timeout: int):
+    def mock_get(url: str, timeout: int, headers=None):
         raise requests.RequestException("boom")
 
     monkeypatch.setattr(requests, "get", mock_get)

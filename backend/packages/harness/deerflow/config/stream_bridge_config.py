@@ -1,10 +1,15 @@
 """Configuration for stream bridge."""
 
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
+
+from deerflow.config._boolean_guards import reject_boolean
 
 StreamBridgeType = Literal["memory", "redis"]
+DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 15.0
+MAX_HEARTBEAT_INTERVAL_SECONDS = 86_400.0
+MAX_RECOVERED_STREAM_CLEANUP_DELAY_SECONDS = 86_400.0
 
 
 class StreamBridgeConfig(BaseModel):
@@ -12,16 +17,58 @@ class StreamBridgeConfig(BaseModel):
 
     type: StreamBridgeType = Field(
         default="memory",
-        description="Stream bridge backend type. 'memory' uses in-process asyncio.Queue (single-process only). 'redis' uses Redis Streams (planned for Phase 2, not yet implemented).",
+        description="Stream bridge backend type. 'memory' uses an in-process event log (single-process only). 'redis' uses Redis Streams for multi-worker Docker deployments.",
     )
     redis_url: str | None = Field(
         default=None,
-        description="Redis URL for the redis stream bridge type. Example: 'redis://localhost:6379/0'.",
+        description="Redis URL for the redis stream bridge type. If omitted, DEER_FLOW_STREAM_BRIDGE_REDIS_URL, REDIS_URL, or redis://localhost:6379/0 is used.",
     )
     queue_maxsize: int = Field(
         default=256,
-        description="Maximum number of events buffered per run in the memory bridge.",
+        ge=1,
+        description="Maximum number of events retained per run (memory bridge queue size / redis stream MAXLEN).",
     )
+    heartbeat_interval_seconds: float = Field(
+        default=DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+        gt=0,
+        le=MAX_HEARTBEAT_INTERVAL_SECONDS,
+        allow_inf_nan=False,
+        description=("Idle seconds between stream heartbeats (maximum 86400). Applies to SSE clients, non-streaming wait requests, and internal stream subscribers."),
+    )
+    max_connections: int | None = Field(
+        default=None,
+        description=(
+            "Max Redis connections in the pool for the redis stream bridge. Each live SSE "
+            "client holds one connection blocked in XREAD ... BLOCK for up to the configured "
+            "heartbeat_interval_seconds, so hundreds of concurrent clients open hundreds of "
+            "connections. Leave unset for redis-py's default (effectively unbounded), or set a "
+            "ceiling sized for peak concurrent SSE clients. Only applies to the redis bridge."
+        ),
+    )
+    stream_ttl_seconds: int = Field(
+        default=86400,
+        ge=0,
+        description=(
+            "Rolling Redis stream key TTL in seconds. The redis bridge refreshes this TTL after "
+            "each publish and publish_end so retained SSE replay buffers are eventually reclaimed "
+            "even if cleanup never runs. Set to 0 to disable. Only applies to the redis bridge."
+        ),
+    )
+    recovered_stream_cleanup_delay_seconds: float = Field(
+        default=60.0,
+        ge=0,
+        le=MAX_RECOVERED_STREAM_CLEANUP_DELAY_SECONDS,
+        allow_inf_nan=False,
+        description=(
+            "Seconds to wait after publishing an END marker for a recovered orphaned run before deleting the stream key (maximum 86400). Gives reconnecting SSE clients time to drain the end signal. Only applies to the redis bridge."
+        ),
+    )
+
+    @field_validator("heartbeat_interval_seconds", "recovered_stream_cleanup_delay_seconds", mode="before")
+    @classmethod
+    def reject_boolean_seconds(cls, value: Any, info: ValidationInfo) -> Any:
+        """Reject booleans before Pydantic coerces them to floats."""
+        return reject_boolean(value, info, kind="a number")
 
 
 # Global configuration instance — None means no stream bridge is configured

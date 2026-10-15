@@ -14,6 +14,12 @@ repos:
         language: system
         types_or: [python]
         files: ^backend/
+      - id: uv-lock-check
+        name: uv lock check
+        entry: bash -c 'cd backend && uv lock --check'
+        language: system
+        pass_filenames: false
+        files: ^backend/(pyproject\.toml|uv\.lock|packages/harness/pyproject\.toml)$
 
   # Frontend: eslint + prettier (must run from frontend/ for node_modules resolution)
   - repo: local

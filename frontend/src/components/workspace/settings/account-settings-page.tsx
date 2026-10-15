@@ -15,6 +15,7 @@ import { SettingsSection } from "./settings-section";
 export function AccountSettingsPage() {
   const { user, logout } = useAuth();
   const { t } = useI18n();
+  const isSsoUser = Boolean(user?.oauth_provider);
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -83,47 +84,76 @@ export function AccountSettingsPage() {
             <span className="text-sm font-medium capitalize">
               {user?.system_role ?? "—"}
             </span>
+            {isSsoUser && (
+              <>
+                <span className="text-muted-foreground text-sm">
+                  {t.settings.account.ssoProvider}
+                </span>
+                <span className="text-sm font-medium capitalize">
+                  {user?.oauth_provider}
+                </span>
+              </>
+            )}
           </div>
         </div>
       </SettingsSection>
 
-      <SettingsSection
-        title={t.settings.account.changePasswordTitle}
-        description={t.settings.account.changePasswordDescription}
-      >
-        <form onSubmit={handleChangePassword} className="max-w-sm space-y-3">
-          <Input
-            type="password"
-            placeholder={t.settings.account.currentPassword}
-            value={currentPassword}
-            onChange={(e) => setCurrentPassword(e.target.value)}
-            required
-          />
-          <Input
-            type="password"
-            placeholder={t.settings.account.newPassword}
-            value={newPassword}
-            onChange={(e) => setNewPassword(e.target.value)}
-            required
-            minLength={8}
-          />
-          <Input
-            type="password"
-            placeholder={t.settings.account.confirmNewPassword}
-            value={confirmPassword}
-            onChange={(e) => setConfirmPassword(e.target.value)}
-            required
-            minLength={8}
-          />
-          {error && <p className="text-sm text-red-500">{error}</p>}
-          {message && <p className="text-sm text-green-500">{message}</p>}
-          <Button type="submit" variant="outline" size="sm" disabled={loading}>
-            {loading
-              ? t.settings.account.updating
-              : t.settings.account.updatePassword}
-          </Button>
-        </form>
-      </SettingsSection>
+      {!isSsoUser ? (
+        <SettingsSection
+          title={t.settings.account.changePasswordTitle}
+          description={t.settings.account.changePasswordDescription}
+        >
+          <form onSubmit={handleChangePassword} className="max-w-sm space-y-3">
+            <Input
+              type="password"
+              placeholder={t.settings.account.currentPassword}
+              value={currentPassword}
+              onChange={(e) => setCurrentPassword(e.target.value)}
+              required
+            />
+            <Input
+              type="password"
+              placeholder={t.settings.account.newPassword}
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              required
+              minLength={8}
+            />
+            <Input
+              type="password"
+              placeholder={t.settings.account.confirmNewPassword}
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              required
+              minLength={8}
+            />
+            {error && <p className="text-sm text-red-500">{error}</p>}
+            {message && <p className="text-sm text-green-500">{message}</p>}
+            <Button
+              type="submit"
+              variant="outline"
+              size="sm"
+              disabled={loading}
+            >
+              {loading
+                ? t.settings.account.updating
+                : t.settings.account.updatePassword}
+            </Button>
+          </form>
+        </SettingsSection>
+      ) : (
+        <SettingsSection
+          title={t.settings.account.changePasswordTitle}
+          description={t.settings.account.ssoPasswordDescription}
+        >
+          <p className="text-muted-foreground text-sm">
+            {t.settings.account.ssoPasswordMessage.replace(
+              "{provider}",
+              user?.oauth_provider ?? "",
+            )}
+          </p>
+        </SettingsSection>
+      )}
 
       <SettingsSection title="" description="">
         <Button

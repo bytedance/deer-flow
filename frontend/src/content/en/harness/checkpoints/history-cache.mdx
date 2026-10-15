@@ -1,0 +1,195 @@
+---
+title: History Cache
+description: The delta-mode history cache — where it sits, its entry shape and immutability argument, every database.checkpoint_cache field with its default and env fallback, purge and redis failure semantics, stats, and the compiled accessor-graph cache cap.
+---
+
+import { Callout } from "nextra/components";
+
+# History Cache
+
+In `delta` mode a read has no message list to return: it reconstructs one by replaying ancestor writes back to the nearest `_DeltaSnapshot` (see [Snapshot Cadence](/docs/harness/checkpoints/cadence)). That walk is the materialization cost. The history cache stores the reconstructed histories so the next read pays a lookup instead of a walk, and it wraps the raw saver on the delta path.
+
+<Callout type="info">
+  The cache is performance-only. Nothing about correctness depends on it: no
+  field here is frozen, none must match across workers, and a full cache, an
+  empty cache, and no cache must all materialize identical state.
+</Callout>
+
+## Where the cache sits
+
+| Path | Wrapper | Backend |
+| --- | --- | --- |
+| Gateway / async | `CachedHistorySaver` wraps the selected saver when the effective mode is `delta`; the cache's lifetime equals the checkpointer context manager's | `memory` or `redis` |
+| Embedded / TUI (sync) | `_wrap_sync_if_delta` wraps with the memory backend only | `memory` only |
+| `full` mode | No wrapper at all — there is nothing to materialize | — |
+
+`CachedHistorySaver` overrides exactly one behaviour, `get_delta_channel_history` / `aget_delta_channel_history`. Everything else — tuple reads, writes, listing, copy, delete, prune — is delegated to the inner saver unchanged. The sync path shares one process-local memory cache and recreates it when `max_entries` or the derived key prefix changes, because entries under a stale prefix would be unreachable and no longer covered by thread purges.
+
+`redis` on the sync path is rejected outright: `database.checkpoint_cache.type 'redis' is not supported on the sync checkpointer path (TUI/embedded); use 'memory'.`
+
+## Entry shape
+
+An entry is a `DeltaChannelHistory`-shaped dict, exactly what the raw saver would return for that checkpoint and channel:
+
+| Field | Meaning |
+| --- | --- |
+| `writes` | On-path deltas for one channel, oldest to newest, as `PendingWrite` tuples. Always present, possibly empty. Writes stored at the target checkpoint itself are pending for the next super-step and are excluded from its own history. |
+| `seed` | The stored value at the nearest ancestor whose `channel_values[channel]` is populated. Omitted when the walk reaches the root without finding a stored value; a consumer treats absence as "start empty". |
+
+Reads are copy-on-read: `writes` comes back as a fresh list, while `seed` is shared by reference and never mutated in place.
+
+## Immutability: why there is no invalidation
+
+A checkpoint's delta history is a pure function of its sealed ancestor chain — the LangGraph contract excludes the target's own pending writes, parent links are fixed at creation, and an ancestor's writes are sealed once its child exists. Entries keyed by thread, namespace, checkpoint id, and channel are therefore immutable.
+
+| Property | Consequence |
+| --- | --- |
+| The key contains only immutable components | An entry never changes once written, so there is no invalidation path, no version field, and no coordination |
+| Ancestors are sealed when their child exists | A shared backend (redis) is coherent across processes without any handshake |
+| The cache never caches the "latest checkpoint" resolution | The target is resolved once through the inner saver before keys are built; only resolved, immutable checkpoint ids are keyed |
+| Thread deletion and prune are lifecycle events, not invalidation | They purge entries because the source checkpoints are gone, not because an entry went stale |
+
+That is why the whole policy is performance-only and safe to differ per worker.
+
+## Keys and namespace
+
+`make_history_key(key_prefix, thread_id, checkpoint_ns, checkpoint_id, channel)` builds:
+
+```
+{key_prefix}:{thread_id}:{sha256(checkpoint_ns \x00 checkpoint_id \x00 channel)[:24]}
+```
+
+| Fact | Detail |
+| --- | --- |
+| `thread_id` is left readable | Ops can identify a thread's keys without recomputing the digest |
+| The remaining components are hashed with NUL separators | A namespace containing `:` cannot produce an ambiguous key |
+| Thread purge stem | `{key_prefix}:{thread_id}:` — a prefix match, never per-key invalidation |
+| Default prefix | `ckpt-hist:v{CACHE_FORMAT_VERSION}:{hash12(database identity)}`, with `CACHE_FORMAT_VERSION = 1` |
+| `database.checkpoint_cache.key_prefix` | Replaces the whole derived prefix |
+| Database identity | Credential-free: postgres `host:port/database:schema`, the sqlite path, else `memory`. Rotating credentials does not change the namespace, so a credential rotation cannot cold-start the cache and orphan keys until TTL. Two deployments sharing one redis get different prefixes by default. |
+
+## Compose instead of walk
+
+Real runs create several checkpoints per super-step and only some are ever materialized as targets, so a target's direct parent is usually an unwarmed intermediate checkpoint. Composing only one level deep therefore measured zero cache hits on a 500-step sqlite run. The wrapper composes instead:
+
+| Step | Behaviour |
+| --- | --- |
+| Miss on the requested channel | Compose from the nearest warm ancestor, recursing one level per intermediate checkpoint |
+| Depth budget | `_COMPOSE_MAX_DEPTH = 8` |
+| Steady state | Each composed level is cached, so the warm frontier follows the run and lands on a warmed ancestor within about two levels |
+| Snapshot parent | The parent already holds the channel value, so the entry is built from the parent's writes plus its seed with no parent-history lookup at all |
+| Cold chain at depth 0 | Delegates exactly **one** inner fast-path walk (two SQL statements) for that level instead of crawling ancestors tuple by tuple. Ancestors below it stay cold and are resolved later from the nearest warm level. |
+| Root or missing parent | `{"writes": []}` |
+| Channel missing on every path | `{"writes": []}` |
+| Cache disabled | Passes straight through to the raw saver — composing over all-miss entries would be strictly more work than the walk |
+
+The sync path mirrors this recursion and shares the same cache and depth budget. Cold composition never calls the inner saver's history method: it either recurses or walks itself, so the fallback walk is the only place the raw saver is consulted.
+
+## Configuration
+
+The cache is built **with the checkpointer, once per process**. `langgraph_runtime()` constructs the
+checkpointer from the startup `AppConfig` snapshot (`backend/app/gateway/deps.py:463`), and the delta saver is wrapped in
+`CachedHistorySaver` around whatever `make_checkpoint_cache()` returned at that moment
+(`backend/packages/harness/deerflow/runtime/checkpointer/async_provider.py:250-254`). Nothing re-reads this section at runtime, so every field below keeps its
+startup value for the process's lifetime.
+
+| Key | Type | Default | Range | Restart to change | Notes |
+| --- | --- | --- | --- | --- | --- |
+| `database.checkpoint_cache.type` | `memory` \| `redis` | `memory` | — | Yes | `memory` is a process-local LRU; `redis` is a shared cache for multi-worker deployments, async/Gateway path only |
+| `database.checkpoint_cache.max_entries` | `int` | `128` | `ge=0` | Yes | LRU capacity of the memory backend; `0` disables the cache |
+| `database.checkpoint_cache.redis_url` | `str` or null | `null` | Any redis URL | Yes | Falls back to `DEER_FLOW_CHECKPOINT_CACHE_REDIS_URL`, then `REDIS_URL`, then `redis://localhost:6379/0` |
+| `database.checkpoint_cache.ttl_seconds` | `int` | `86400` | `ge=0` | Yes | Redis entry TTL, a leak safety net rather than a correctness mechanism; `0` disables expiry |
+| `database.checkpoint_cache.key_prefix` | `str` | `""` | Any string | Yes | Empty means the derived hash of the database identity |
+
+<Callout type="warning">
+  "Not frozen" is not "hot-reloadable". These settings are **not frozen** for correctness: they
+  cannot corrupt a thread, results are identical with the cache disabled, and processes sharing one
+  checkpoint database may safely run different values. But a running process never picks up an edit —
+  backend, capacity, Redis connection, prefix, and TTL all stay at their startup values — so changing
+  any of them needs a Gateway restart. The embedded and TUI paths behave the same way: their
+  checkpointer singleton is created once and reused for the life of the process. Only
+  [`database.checkpoint_graph_cache.accessor_graph_max`](#compiled-accessor-graph-cache) is re-read
+  at runtime.
+</Callout>
+
+```yaml
+database:
+  checkpoint_channel_mode: delta
+  checkpoint_cache:
+    type: memory            # memory | redis (redis is Gateway/async only)
+    max_entries: 128        # 0 disables the cache
+    redis_url: null         # or DEER_FLOW_CHECKPOINT_CACHE_REDIS_URL / REDIS_URL
+    ttl_seconds: 86400      # redis leak safety net; purge itself is immediate
+    key_prefix: ""          # default: hash of the database identity
+```
+
+Only the redis URL has environment fallbacks; nothing else here is read from the environment, and `$VAR` interpolation inside config values is handled centrally before this section is parsed.
+
+`max_entries: 0` disables the cache uniformly for both types: the factory yields a disabled memory backend (`enabled` is `max_entries > 0`), so the wrapper never needs a None check. A zero-entry cache must behave exactly like the raw inner saver — same digests, `hits == 0` — and that parity is pinned by test. The memory backend rejects negatives with `max_entries must be >= 0`. Eviction is strict LRU: hits and writes both refresh recency and the oldest entries are dropped while over capacity, with a cumulative `evictions` counter. A one-entry cache thrashes on every read but stays correct.
+
+The redis client is imported lazily; without the optional extra, constructing a redis backend raises `redis is required for the redis checkpoint cache backend. Install it with: uv sync --extra redis`. An unrecognised `type` raises `Unknown checkpoint cache type: {config.type!r}`.
+
+## Purge and lifecycle
+
+| Operation | Cache action |
+| --- | --- |
+| `delete_thread` / `adelete_thread` | Purge that thread's entries by key-prefix match, after the source delete |
+| `prune` / `aprune` | Purge the rewritten threads' entries: a pruned chain must not keep pre-prune cached histories or references to a deleted ancestor |
+| `delete_for_runs` / `adelete_for_runs` | **No purge.** Run-scoped deletes cannot be mapped back to threads without an extra query, so entries stay in place: they remain correct (the sealing argument is per-chain) and residual retention is bounded by LRU/TTL. There are no in-tree callers today. |
+| `copy_thread` / `acopy_thread` | Delegated; no purge |
+
+The rationale is data lifecycle: source-of-truth removal must not leave residual history payloads behind in the cache. It is never a correctness requirement.
+
+## Redis failure behaviour
+
+Every redis failure is performance-only. The source of truth has already been updated by the time the cache is touched, so an outage costs hits, never availability:
+
+| Failure | Warning (verbatim) | Effect |
+| --- | --- | --- |
+| `mget` fails | `checkpoint history cache mget failed; treating as all-miss: %s` | Every requested key counts as a miss; histories are recomposed |
+| Write fails | `checkpoint history cache write failed; skipping: %s` | The write is skipped; the next read simply recomputes |
+| Thread purge fails | `checkpoint history cache thread purge failed; residual entries expire via TTL: %s` | The source delete already happened; residual copies expire via `ttl_seconds`; this path never raises |
+
+The TTL is a leak safety net, not a correctness mechanism, because entries are immutable and no read depends on them. `ttl_seconds: 0` opts out of expiry entirely, so orphaned keys then rely on the redis `maxmemory` policy alone. A failed purge is the only way a deleted thread's history lingers, and only until the TTL.
+
+## Stats
+
+`CachedHistorySaver.stats()` merges the backend's counters with the wrapper's own composition counters. It is the only cache surface: no gateway endpoint or health check reports cache state.
+
+| Counter | Source | Meaning |
+| --- | --- | --- |
+| `hits` / `misses` | Backend | Per-key lookups |
+| `evictions` / `entries` | Memory backend only | LRU drops and the current entry count. Redis reports `0` for both — it keeps no local LRU or size, and its own `maxmemory` policy is the bound |
+| `compose_hits` | Wrapper | Levels composed from a stored parent value or from a cached history |
+| `full_walks` | Wrapper | Cold fallbacks that delegated an inner delta walk |
+
+A steady-state process should show `compose_hits` growing while `full_walks` stays low; a persistently high `full_walks` means composition keeps hitting cold chains, and `hits` pinned at `0` on a warm process means lookups never reach entries — usually a disabled cache or a namespace that does not match the entries' prefix, since the prefix is derived from the database identity. See [Troubleshooting](/docs/harness/checkpoints/troubleshooting).
+
+## Compiled accessor-graph cache
+
+Delta reads must go through the thread-state accessor, whose compiled graph is cached per assistant, channel mode, snapshot cadence, and app config. That cache has its own size cap:
+
+| Key | Type | Default | Range | Restart |
+| --- | --- | --- | --- | --- |
+| `database.checkpoint_graph_cache.accessor_graph_max` | `int` | `64` | `ge=1` | Not required — hot-reloadable |
+
+| Fact | Consequence |
+| --- | --- |
+| A larger or smaller cap only changes when the cache evicts, never graph semantics | The value is re-read on every eviction check, so a hot reload takes effect without a restart |
+| At the cap the whole cache is cleared (no LRU here) | The cap bounds distinct assistants and cadences, not recency |
+| A config reload rebuilds the `AppConfig` object, and cached entries re-validate factory and config identity | A hot reload never serves a graph compiled under the old config |
+| Unusable values (non-int, boolean, below 1) fall back to the in-code default `64` | A stub or partial config cannot break accessor caching |
+
+This cap applies in both modes and is unrelated to the history cache, which only wraps delta savers. It exposes no counters; it is bounded by size only.
+
+## Measuring the cache
+
+`cache_effect_ms` (state cold minus warm p50) is the decision metric for the production accessor-cache defaults, and it comes out of the production checkpoint benchmark, which also reports `state_cold_ms`, `state_warm_p50_ms`, `state_warm_p95_ms`, `db_bytes`, and per-limit history read times. The channel benchmark reports `warm_read_ms`, `cold_read_ms`, and `reducer_replay_ms` with `delta/full` ratios. Timing thresholds are not CI gates. See [Operating Checkpoints](/docs/harness/checkpoints/operations).
+
+## Related
+
+- [Snapshot Cadence](/docs/harness/checkpoints/cadence) — the walk this cache memoizes.
+- [Channel Modes](/docs/harness/checkpoints/modes) — the accessor and the mode marker.
+- [Observability](/docs/harness/checkpoints/observability) — where these counters surface.
+- [Troubleshooting](/docs/harness/checkpoints/troubleshooting) — redis errors on the embedded path and zero-hit caches.
+- [Reference](/docs/harness/checkpoints/reference) — the full config-key table.

@@ -23,6 +23,44 @@ def test_codex_provider_requires_credentials(monkeypatch):
         CodexChatModel()
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"access_token": "   "},
+        {"token": "\t\n"},
+        {"tokens": {"access_token": " \r\n "}},
+    ],
+)
+def test_codex_provider_rejects_blank_file_credentials(tmp_path, monkeypatch, payload):
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+    with pytest.raises(ValueError, match="Codex CLI credential not found"):
+        CodexChatModel(model="gpt-5.4")
+
+
+def test_codex_provider_uses_normalized_access_token_in_authorization_header(tmp_path, monkeypatch):
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(json.dumps({"access_token": "  codex-access-token\n"}), encoding="utf-8")
+    monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+    captured: dict[str, dict] = {}
+
+    def capture_request(self, headers, payload):
+        captured["headers"] = headers
+        captured["payload"] = payload
+        return {"output": [], "usage": {}}
+
+    monkeypatch.setattr(CodexChatModel, "_stream_response", capture_request)
+
+    model = CodexChatModel(model="gpt-5.4")
+    model._call_codex_api([HumanMessage(content="hello")])
+
+    assert captured["headers"]["Authorization"] == "Bearer codex-access-token"
+    assert captured["payload"]["input"] == [{"role": "user", "content": "hello"}]
+
+
 def test_codex_provider_concatenates_multiple_system_messages(monkeypatch):
     monkeypatch.setattr(
         CodexChatModel,

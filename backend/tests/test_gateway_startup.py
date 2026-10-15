@@ -1,0 +1,177 @@
+"""Regression coverage for local and Docker Gateway startup contracts."""
+
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+from support.compose import DOCKER, requires_docker_compose
+from support.shell import find_script_bash
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# Only the two deploy.sh tests shell out; they need Git Bash on Windows (the
+# WSL launcher and Store alias stubs cannot run the repo scripts).
+SCRIPT_BASH = find_script_bash()
+requires_script_bash = pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
+
+
+def _read(path: str) -> str:
+    return (REPO_ROOT / path).read_text(encoding="utf-8")
+
+
+def _deploy_fixture(tmp_path: Path, *, docker_script: str) -> tuple[Path, dict[str, str]]:
+    worktree = tmp_path / "repo"
+    shutil.copytree(REPO_ROOT / "scripts", worktree / "scripts")
+    shutil.copytree(REPO_ROOT / "docker", worktree / "docker")
+    (worktree / "backend").mkdir()
+    (worktree / "config.yaml").write_text("sandbox:\n  use: deerflow.sandbox:LocalSandboxProvider\n", encoding="utf-8")
+    (worktree / "extensions_config.json").write_text('{"mcpServers":{},"skills":{}}\n', encoding="utf-8")
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    docker = bin_dir / "docker"
+    docker.write_text(docker_script, encoding="utf-8")
+    docker.chmod(0o755)
+
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    env["BETTER_AUTH_SECRET"] = "test-better-auth-secret"
+    env["DEER_FLOW_INTERNAL_AUTH_TOKEN"] = "test-internal-auth-token"
+    return worktree, env
+
+
+def test_gateway_runtime_commands_never_sync_dependencies() -> None:
+    """A built environment must not resolve or install packages at process start."""
+    compose = _read("docker/docker-compose.yaml")
+    serve = _read("scripts/serve.sh")
+
+    # Dependency syncing is independent of the surrounding shell/exec form.
+    # Exact container launch forms belong to test_gateway_sigterm_delivery.py.
+    assert "uv run --no-sync uvicorn app.gateway.app:app" in compose
+    assert "uv run --no-sync uvicorn app.gateway.app:app" in serve
+
+
+def test_local_frontend_ignores_public_docker_port() -> None:
+    """Root PORT config is public Docker ingress, not the local Next.js port."""
+    serve = _read("scripts/serve.sh")
+
+    assert "env PORT=3000" in serve
+    assert 'run_service "Frontend"' in serve
+    assert "3000 300" in serve
+
+
+def test_production_gateway_has_a_real_readiness_probe() -> None:
+    """Compose readiness must exercise the Gateway HTTP endpoint."""
+    compose = _read("docker/docker-compose.yaml")
+
+    assert "healthcheck:" in compose
+    assert "http://127.0.0.1:8001/health" in compose
+    assert "gateway:\n        condition: service_healthy" in compose
+
+
+@requires_script_bash
+def test_deploy_waits_for_gateway_readiness_before_success(tmp_path: Path) -> None:
+    capture = tmp_path / "docker-args.txt"
+    worktree, env = _deploy_fixture(
+        tmp_path,
+        docker_script=('#!/usr/bin/env sh\nprintf "%s\\n" "$@" > "$CAPTURE_DOCKER_ARGS"\nexit 0\n'),
+    )
+    env["CAPTURE_DOCKER_ARGS"] = str(capture)
+
+    result = subprocess.run(
+        [SCRIPT_BASH, str(worktree / "scripts" / "deploy.sh"), "start"],
+        cwd=worktree,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    args = capture.read_text(encoding="utf-8").splitlines()
+    assert "--wait" in args
+    assert "--wait-timeout" in args
+    assert "DeerFlow is running!" in result.stdout
+
+
+@requires_script_bash
+def test_deploy_failure_prints_gateway_diagnostics_and_never_claims_success(tmp_path: Path) -> None:
+    capture = tmp_path / "docker-calls.txt"
+    worktree, env = _deploy_fixture(
+        tmp_path,
+        docker_script=('#!/usr/bin/env sh\nprintf "%s\\n" "$*" >> "$CAPTURE_DOCKER_CALLS"\ncase " $* " in\n  *" up "*) exit 1 ;;\n  *) exit 0 ;;\nesac\n'),
+    )
+    env["CAPTURE_DOCKER_CALLS"] = str(capture)
+
+    result = subprocess.run(
+        [SCRIPT_BASH, str(worktree / "scripts" / "deploy.sh"), "start"],
+        cwd=worktree,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "DeerFlow is running!" not in result.stdout
+    assert "DeerFlow services failed to become ready" in result.stderr
+    assert "supports `docker compose up --wait`" in result.stderr
+    assert "upgrade to Docker Compose 2.24+" in result.stderr
+    calls = capture.read_text(encoding="utf-8")
+    assert any(call.endswith(" ps") for call in calls.splitlines())
+    assert " logs --no-color --tail 100 gateway" in calls
+
+
+# Hands only read-only calls to the real client: `up`, `down` and `logs` become
+# `config --quiet` on the same global flags, so Compose parses exactly the
+# project the entry point would act on without touching a running stack.
+# Anything else fails loudly instead of reaching the real daemon.
+_READ_ONLY_COMPOSE = """#!/usr/bin/env bash
+args=()
+for arg in "$@"; do
+  case "$arg" in
+    up|down|logs) exec "$REAL_DOCKER" "${args[@]}" config --quiet ;;
+    config|version) exec "$REAL_DOCKER" "$@" ;;
+  esac
+  args+=("$arg")
+done
+echo "unexpected docker call: $*" >&2
+exit 97
+"""
+
+
+@requires_script_bash
+@requires_docker_compose
+@pytest.mark.parametrize(
+    "command",
+    [("deploy.sh",), ("deploy.sh", "start"), ("deploy.sh", "down"), ("docker.sh", "logs", "--prod")],
+    ids=["make-up", "deploy-start", "make-down", "make-prod-logs"],
+)
+def test_production_entry_points_parse_the_compose_project_without_env_files(tmp_path: Path, command: tuple[str, ...]) -> None:
+    """A fresh clone has no .env or frontend/.env (both gitignored).
+
+    `make up`, `make down` and `make prod-logs` all load docker-compose.yaml,
+    so each must get past Compose's parse on such a checkout.
+    """
+    worktree, env = _deploy_fixture(tmp_path, docker_script=_READ_ONLY_COMPOSE)
+    env["REAL_DOCKER"] = DOCKER
+    env["DEER_FLOW_HOME"] = str(tmp_path / "deer-flow-home")
+    assert not (worktree / ".env").exists()
+    assert not (worktree / "frontend" / ".env").exists()
+
+    script, *args = command
+    result = subprocess.run(
+        [SCRIPT_BASH, str(worktree / "scripts" / script), *args],
+        cwd=worktree,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "env file" not in result.stderr

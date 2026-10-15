@@ -4,6 +4,18 @@ import pytest
 from starlette.testclient import TestClient
 
 from app.gateway.auth_middleware import AuthMiddleware, _is_public
+from app.gateway.csrf_middleware import CSRFMiddleware
+from deerflow.config.authorization_config import AuthorizationConfig
+
+
+@pytest.fixture(autouse=True)
+def _default_route_authorization_config(monkeypatch):
+    """Keep minimal middleware apps independent of a repository config.yaml."""
+    monkeypatch.setattr(
+        "app.gateway.authz._get_route_authorization_config",
+        lambda: AuthorizationConfig(),
+    )
+
 
 # ── _is_public unit tests ─────────────────────────────────────────────────
 
@@ -32,12 +44,15 @@ def test_public_paths(path: str):
     [
         "/api/models",
         "/api/mcp/config",
+        "/api/mcp/cache/reset",
         "/api/memory",
         "/api/skills",
         "/api/threads/123",
         "/api/threads/123/uploads",
         "/api/agents",
         "/api/channels",
+        "/api/channels/providers",
+        "/api/channels/slack/connect",
         "/api/runs/stream",
         "/api/threads/123/runs",
         "/api/v1/auth/me",
@@ -88,7 +103,9 @@ def test_unknown_api_path_is_protected():
 
 def _make_app():
     """Create a minimal FastAPI app with AuthMiddleware for testing."""
-    from fastapi import FastAPI
+    from fastapi import FastAPI, Request
+
+    from deerflow.runtime.user_context import get_effective_user_id
 
     app = FastAPI()
     app.add_middleware(AuthMiddleware)
@@ -98,8 +115,16 @@ def _make_app():
         return {"status": "ok"}
 
     @app.get("/api/v1/auth/me")
-    async def auth_me():
-        return {"id": "1", "email": "test@test.com"}
+    async def auth_me(request: Request):
+        from app.gateway.deps import get_current_user_from_request
+
+        user = await get_current_user_from_request(request)
+        return {
+            "id": str(user.id),
+            "email": user.email,
+            "system_role": user.system_role,
+            "needs_setup": user.needs_setup,
+        }
 
     @app.get("/api/v1/auth/setup-status")
     async def setup_status():
@@ -109,8 +134,35 @@ def _make_app():
     async def models_get():
         return {"models": []}
 
+    @app.get("/api/whoami")
+    async def whoami(request: Request):
+        user = request.state.user
+        return {
+            "id": str(user.id),
+            "email": getattr(user, "email", None),
+            "system_role": getattr(user, "system_role", None),
+            "context_user_id": get_effective_user_id(),
+        }
+
+    @app.get("/api/current-user-from-dep")
+    async def current_user_from_dep(request: Request):
+        from app.gateway.deps import get_current_user_from_request
+
+        user = await get_current_user_from_request(request)
+        state_user = request.state.user
+        return {
+            "id": str(user.id),
+            "state_id": str(state_user.id),
+            "auth_source": request.state.auth_source,
+            "context_user_id": get_effective_user_id(),
+        }
+
     @app.put("/api/mcp/config")
     async def mcp_put():
+        return {"ok": True}
+
+    @app.post("/api/mcp/cache/reset")
+    async def mcp_cache_reset():
         return {"ok": True}
 
     @app.delete("/api/threads/abc")
@@ -132,8 +184,24 @@ def _make_app():
     return app
 
 
+def _make_auth_csrf_app():
+    """Create a minimal app with production middleware ordering."""
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    app.add_middleware(AuthMiddleware)
+    app.add_middleware(CSRFMiddleware)
+
+    @app.post("/api/threads/abc/runs/stream")
+    async def protected_mutation():
+        return {"ok": True}
+
+    return app
+
+
 @pytest.fixture
-def client():
+def client(monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "")
     return TestClient(_make_app())
 
 
@@ -146,6 +214,58 @@ def test_public_auth_path_no_cookie(client):
     """Public auth endpoints (login/register) pass without cookie."""
     res = client.get("/api/v1/auth/setup-status")
     assert res.status_code == 200
+
+
+@pytest.mark.parametrize(
+    "encoded_path",
+    [
+        "/api/v1/auth/setup-sta%0Atus",
+        "/api/v1/auth/setup-sta%0Dtus",
+        "/api/v1/auth/setup-sta%09tus",
+        "/api/v1/auth/setup-status%23private",
+        "/api/v1/auth/setup-status%3Fprivate",
+    ],
+)
+def test_url_reconstruction_cannot_turn_a_protected_route_path_public(
+    monkeypatch,
+    encoded_path,
+):
+    from fastapi import FastAPI
+
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "")
+    app = FastAPI()
+    app.add_middleware(AuthMiddleware)
+
+    @app.get("/api/v1/auth/setup-sta{gap}tus")
+    async def control_gap(gap: str):
+        return {"gap": gap}
+
+    @app.get("/api/v1/auth/setup-status{suffix}")
+    async def delimiter_suffix(suffix: str):
+        return {"suffix": suffix}
+
+    response = TestClient(app).get(encoded_path)
+
+    assert response.status_code == 401
+
+
+def test_auth_uses_the_same_root_path_projection_as_the_router(monkeypatch):
+    from fastapi import FastAPI
+
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "")
+    child = FastAPI()
+    child.add_middleware(AuthMiddleware)
+
+    @child.get("/health")
+    async def health():
+        return {"ok": True}
+
+    parent = FastAPI()
+    parent.mount("/prefix", child)
+
+    response = TestClient(parent).get("/prefix/health")
+
+    assert response.status_code == 200
 
 
 def test_protected_auth_path_no_cookie(client):
@@ -161,16 +281,155 @@ def test_protected_path_no_cookie_returns_401(client):
     assert body["detail"]["code"] == "not_authenticated"
 
 
+def test_auth_disabled_allows_protected_path_without_cookie(monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+    client = TestClient(_make_app())
+
+    res = client.get("/api/models")
+
+    assert res.status_code == 200
+    assert res.json() == {"models": []}
+
+
+def test_auth_disabled_stamps_default_admin_user_without_cookie(monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+    client = TestClient(_make_app())
+
+    res = client.get("/api/whoami")
+
+    assert res.status_code == 200
+    assert res.json() == {
+        "id": "default",
+        "email": "default@test.local",
+        "system_role": "admin",
+        "context_user_id": "default",
+    }
+
+
+def test_auth_disabled_auth_me_reuses_middleware_user_without_cookie(monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+    client = TestClient(_make_app())
+
+    res = client.get("/api/v1/auth/me")
+
+    assert res.status_code == 200
+    assert res.json() == {
+        "id": "default",
+        "email": "default@test.local",
+        "system_role": "admin",
+        "needs_setup": False,
+    }
+
+
+def test_auth_disabled_does_not_clobber_valid_session_cookie(monkeypatch):
+    from types import SimpleNamespace
+
+    async def fake_current_user(request):
+        return SimpleNamespace(
+            id="session-user",
+            email="session@test.local",
+            system_role="user",
+            needs_setup=False,
+        )
+
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+    monkeypatch.setattr("app.gateway.deps.get_current_user_from_request", fake_current_user)
+    client = TestClient(_make_app())
+
+    res = client.get("/api/whoami", cookies={"access_token": "valid-session"})
+
+    assert res.status_code == 200
+    assert res.json() == {
+        "id": "session-user",
+        "email": "session@test.local",
+        "system_role": "user",
+        "context_user_id": "session-user",
+    }
+
+
+def test_auth_disabled_does_not_clobber_internal_auth_identity(monkeypatch):
+    from app.gateway.internal_auth import create_internal_auth_headers
+    from deerflow.runtime.user_context import DEFAULT_USER_ID
+
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+    client = TestClient(_make_app())
+
+    res = client.get(
+        "/api/current-user-from-dep",
+        headers=create_internal_auth_headers(),
+    )
+
+    assert res.status_code == 200
+    assert res.json() == {
+        "id": DEFAULT_USER_ID,
+        "state_id": DEFAULT_USER_ID,
+        "auth_source": "internal",
+        "context_user_id": DEFAULT_USER_ID,
+    }
+
+
+def test_auth_disabled_skips_csrf_for_state_changing_requests(monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+    client = TestClient(_make_auth_csrf_app())
+
+    res = client.post("/api/threads/abc/runs/stream")
+
+    assert res.status_code == 200
+    assert res.json() == {"ok": True}
+
+
+def test_auth_disabled_is_ignored_in_explicit_production_env(monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+    monkeypatch.setenv("DEER_FLOW_ENV", "production")
+    client = TestClient(_make_app())
+
+    res = client.get("/api/models")
+
+    assert res.status_code == 401
+
+
+def test_auth_disabled_startup_warning_when_effective(monkeypatch, caplog):
+    from app.gateway.auth_disabled import warn_if_auth_disabled_enabled
+
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+    monkeypatch.delenv("DEER_FLOW_ENV", raising=False)
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+
+    with caplog.at_level("WARNING", logger="app.gateway.auth_disabled"):
+        warn_if_auth_disabled_enabled()
+
+    assert "authentication is bypassed" in caplog.text
+    assert "default" in caplog.text
+
+
+def test_auth_disabled_startup_warning_suppressed_in_explicit_production_env(monkeypatch, caplog):
+    from app.gateway.auth_disabled import warn_if_auth_disabled_enabled
+
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+    monkeypatch.setenv("ENVIRONMENT", "production")
+
+    with caplog.at_level("WARNING", logger="app.gateway.auth_disabled"):
+        warn_if_auth_disabled_enabled()
+
+    assert "authentication is bypassed" not in caplog.text
+
+
 def test_protected_path_with_junk_cookie_rejected(client):
     """Junk cookie → 401. Middleware strictly validates the JWT now
     (AUTH_TEST_PLAN test 7.5.8); it no longer silently passes bad
     tokens through to the route handler."""
-    res = client.get("/api/models", cookies={"access_token": "some-token"})
+    client.cookies.set("access_token", "some-token")
+    res = client.get("/api/models")
     assert res.status_code == 401
 
 
 def test_protected_post_no_cookie_returns_401(client):
     res = client.post("/api/threads/abc/runs/stream")
+    assert res.status_code == 401
+
+
+def test_mcp_cache_reset_post_no_cookie_returns_401(client):
+    res = client.post("/api/mcp/cache/reset")
     assert res.status_code == 401
 
 
@@ -186,6 +445,124 @@ def test_protected_post_with_internal_auth_header_passes():
     )
 
     assert res.status_code == 200
+
+
+def test_internal_auth_owner_header_of_suspended_account_rejected(tmp_path):
+    """(#3462 gap 3) IM-channel dispatch surface: the internal principal is
+    synthesized from trusted headers without a users-row lookup, so the
+    middleware itself rejects an owner-bound internal call whose account was
+    suspended — at the very next request, like every other surface."""
+    import asyncio
+    import json
+
+    from starlette.requests import Request as StarletteRequest
+    from starlette.responses import PlainTextResponse
+
+    from app.gateway.auth.models import User
+    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+    from app.gateway.auth_middleware import AuthMiddleware
+    from app.gateway.internal_auth import create_internal_auth_headers
+    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+
+    async def _dispatch(owner_user_id: str):
+        headers = create_internal_auth_headers(owner_user_id=owner_user_id)
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/threads/abc/runs/stream",
+            "root_path": "",
+            "query_string": b"",
+            "headers": [(name.lower().encode(), value.encode()) for name, value in headers.items()],
+        }
+
+        async def call_next(_request):
+            return PlainTextResponse("route-reached")
+
+        response = await AuthMiddleware(None).dispatch(StarletteRequest(scope), call_next)
+        body = json.loads(response.body) if response.status_code != 200 else {}
+        return response.status_code, body
+
+    async def _run():
+        await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path}/users.db", sqlite_dir=str(tmp_path))
+        repo = SQLiteUserRepository(get_session_factory())
+        owner = await repo.create_user(User(email="channel-owner@example.com", system_role="user"))
+        await repo.set_disabled(str(owner.id), True)
+
+        import app.gateway.deps as deps_module
+
+        saved_repo, saved_provider = deps_module._cached_repo, deps_module._cached_local_provider
+        deps_module._cached_repo = repo
+        deps_module._cached_local_provider = None
+        try:
+            status_code, body = await _dispatch(str(owner.id))
+            assert status_code == 401
+            assert body["detail"]["code"] == "account_disabled"
+
+            # Unknown owner ids stay allowed: an account that does not exist
+            # in the users store cannot be suspended.
+            status_code, body = await _dispatch("no-such-owner")
+            assert status_code == 200
+
+            # Re-enabling restores the internal surface immediately.
+            await repo.set_disabled(str(owner.id), False)
+            status_code, body = await _dispatch(str(owner.id))
+            assert status_code == 200
+        finally:
+            deps_module._cached_repo = saved_repo
+            deps_module._cached_local_provider = saved_provider
+
+    try:
+        asyncio.run(_run())
+    finally:
+        asyncio.run(close_engine())
+
+
+def test_internal_auth_owner_gate_skipped_in_auth_disabled_mode(monkeypatch):
+    """Auth-disabled mode sends the synthetic auth-disabled identity as the
+    internal owner; deployments may have no users store at all there, so the
+    suspension gate must not attempt a lookup (it would fail the request)."""
+    import asyncio
+
+    from starlette.requests import Request as StarletteRequest
+    from starlette.responses import PlainTextResponse
+
+    from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID
+    from app.gateway.auth_middleware import AuthMiddleware
+    from app.gateway.internal_auth import create_internal_auth_headers
+
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+
+    async def _run():
+        headers = create_internal_auth_headers(owner_user_id=AUTH_DISABLED_USER_ID)
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/threads/abc/runs/stream",
+            "root_path": "",
+            "query_string": b"",
+            "headers": [(name.lower().encode(), value.encode()) for name, value in headers.items()],
+        }
+
+        async def call_next(_request):
+            return PlainTextResponse("route-reached")
+
+        # No engine / users store is configured on purpose: a lookup here
+        # would raise and 500 the request.
+        response = await AuthMiddleware(None).dispatch(StarletteRequest(scope), call_next)
+        assert response.status_code == 200
+
+    asyncio.run(_run())
+
+
+def test_protected_post_with_non_ascii_internal_auth_header_returns_401(client):
+    from app.gateway.internal_auth import INTERNAL_AUTH_HEADER_NAME
+
+    res = client.post(
+        "/api/threads/abc/runs/stream",
+        headers={INTERNAL_AUTH_HEADER_NAME: "forged-tok\xe9n".encode("latin-1")},
+    )
+
+    assert res.status_code == 401
 
 
 # ── Method matrix: PUT/DELETE/PATCH also protected ────────────────────────

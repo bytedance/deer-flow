@@ -4,12 +4,15 @@
   "dependencies": [
     "."
   ],
-  "env": ".env",
+  "env": "../.env",
   "graphs": {
     "lead_agent": "deerflow.agents:make_lead_agent"
   },
   "auth": {
     "path": "./app/gateway/langgraph_auth.py:auth"
+  },
+  "http": {
+    "app": "./app/gateway/langgraph_studio.py:langgraph_app"
   },
   "checkpointer": {
     "path": "./packages/harness/deerflow/runtime/checkpointer/async_provider.py:make_checkpointer"

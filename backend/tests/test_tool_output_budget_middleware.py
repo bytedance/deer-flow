@@ -1,0 +1,2938 @@
+"""Comprehensive tests for ToolOutputBudgetMiddleware.
+
+Covers: pass-through, disk externalization, fallback truncation, UTF-8
+boundaries, Command results, model-request history patching, superseded
+write_file payload elision (issue #5328), config variations, exempt tools,
+per-tool overrides, bash exit-marker preservation after budget rewrites,
+edge cases, and both sync/async code paths.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import csv
+import hashlib
+import importlib.util
+import io
+import json
+import os
+import pathlib
+import re
+import sys
+import tempfile
+from types import SimpleNamespace
+
+import pytest
+from langchain.agents.middleware.types import ModelRequest
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langgraph.types import Command
+
+from deerflow.agents.middlewares.tool_output_budget_middleware import (
+    _BASH_EXIT_MARKER_TAIL_RE,
+    TOOL_OUTPUT_BLOB_KEY,
+    ToolOutputBudgetMiddleware,
+    _build_fallback,
+    _build_preview,
+    _effective_trigger,
+    _externalize,
+    _keep_exit_marker_last,
+    _message_text,
+    _needs_budget,
+    _patch_model_messages,
+    _sanitize_tool_name,
+    _snap_start_to_line_boundary,
+    _snap_to_line_boundary,
+    _tool_message_over_budget,
+)
+from deerflow.agents.middlewares.tool_output_synopsis import build_tool_output_synopsis
+from deerflow.config.app_config import AppConfig
+from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.config.tool_output_config import ToolOutputConfig
+from deerflow.storage import BlobReadError, BlobRef, BlobWriteError
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _lines_then_long_line(total: int, newline_ratio: float = 0.6) -> str:
+    """Content that is line-oriented for the first *newline_ratio*, then one unbroken line.
+
+    Mirrors real bash/web_fetch output that logs progress lines and then dumps a
+    single-line artifact (minified JSON, base64 blob). The last newline lands in
+    the second half of the content, which is what exercises line snapping around
+    the tail offset.
+    """
+    head_len = int(total * newline_ratio)
+    lines = "".join(f"[info] step {i} ok\n" for i in range(head_len // 18 + 1))[:head_len]
+    lines = lines[:-1] + "\n" if not lines.endswith("\n") else lines
+    return lines + "A" * (total - len(lines))
+
+
+def _make_request(tool_name: str = "remote_executor", tool_call_id: str = "tc-1", outputs_path: str | None = None) -> SimpleNamespace:
+    thread_data = {"outputs_path": outputs_path} if outputs_path else None
+    state = {"thread_data": thread_data} if thread_data else {}
+    runtime = SimpleNamespace(state=state, context={"thread_id": "thread-1"}, config={})
+    return SimpleNamespace(
+        tool_call={"name": tool_name, "id": tool_call_id},
+        runtime=runtime,
+    )
+
+
+@contextlib.contextmanager
+def _unwritable_outputs_path():
+    """Yield an ``outputs_path`` that ``os.makedirs`` cannot create, on any platform.
+
+    The parent component is a regular file, so creating a directory below it
+    fails with an ``OSError`` subclass everywhere (``NotADirectoryError`` on
+    POSIX, ``FileNotFoundError`` on Windows) and nothing is written outside the
+    temporary directory.
+
+    This deliberately avoids expressing "unwritable" as a magic absolute path.
+    ``/nonexistent/...`` was creatable by root in the CI container, and its
+    replacement ``/dev/null/...`` relies on ``/dev/null`` being a character
+    device, which is only true on POSIX -- on Windows it is an ordinary
+    relative path that ``os.makedirs`` happily creates at the drive root.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        blocker = pathlib.Path(tmpdir) / "not-a-directory"
+        blocker.touch()
+        yield os.path.join(blocker, "outputs")
+
+
+def _tm(content: str = "ok", name: str = "tool", tool_call_id: str = "tc-1") -> ToolMessage:
+    return ToolMessage(content=content, name=name, tool_call_id=tool_call_id)
+
+
+def _pytest_like_output(exit_line: str = "Exit Code: 1") -> str:
+    """Pytest-shaped bash output in the default 12k–20k budget window."""
+    return "============================= test session starts =============================\n" + ("collected 12 items\n" + "." * 12 + "\n") * 500 + f"12 passed in 1.23s\n{exit_line}"
+
+
+def _bash_tm(content: str, name: str = "bash") -> ToolMessage:
+    return ToolMessage(
+        content=content,
+        name=name,
+        tool_call_id="tc-1",
+        id="tool-msg-1",
+        artifact={"k": "v"},
+        additional_kwargs={"deerflow_tool_meta": {"status": "success", "source": "normalized"}},
+    )
+
+
+# ===========================================================================
+# Unit tests for helper functions
+# ===========================================================================
+
+
+class TestMessageText:
+    def test_string_content(self):
+        assert _message_text("hello") == "hello"
+
+    def test_none_content(self):
+        assert _message_text(None) is None
+
+    def test_list_of_strings(self):
+        assert _message_text(["a", "b"]) == "a\nb"
+
+    def test_list_of_text_dicts(self):
+        assert _message_text([{"text": "x"}, {"text": "y"}]) == "x\ny"
+
+    def test_list_with_image_returns_none(self):
+        assert _message_text([{"type": "image", "data": "..."}]) is None
+
+    def test_empty_list(self):
+        assert _message_text([]) is None
+
+    def test_non_string_non_list(self):
+        assert _message_text(42) is None
+
+    def test_json_block_is_rendered(self):
+        assert _message_text([{"type": "json", "json": {"a": 1}}]) == '{"a": 1}'
+
+    def test_json_block_mixed_with_text(self):
+        assert _message_text([{"text": "rows:"}, {"type": "json", "json": [1, 2]}]) == "rows:\n[1, 2]"
+
+    def test_json_block_non_serializable_falls_back_to_str(self):
+        assert _message_text([{"type": "json", "json": {"bad": {1}}}]) == "{'bad': {1}}"
+
+    def test_json_block_circular_falls_back_to_str(self):
+        payload: dict = {}
+        payload["self"] = payload
+        result = _message_text([{"type": "json", "json": payload}])
+        # repr of a recursive dict differs across versions ("..." vs "{...}")
+        assert result is not None and result.startswith("{'self': ") and "..." in result
+
+    def test_json_block_without_json_key_returns_none(self):
+        assert _message_text([{"type": "json"}]) is None
+
+
+class TestStructuredJsonMindIEBudget:
+    def test_mixed_json_media_externalizes_without_losing_media(self, tmp_path):
+        from deerflow.models.mindie_provider import _fix_messages
+
+        payload = {"rows": ["x" * 10_000], "answer": "TAIL_SENTINEL"}
+        media = {"type": "image", "base64": "BINARY_SENTINEL", "mime_type": "image/png"}
+        message = ToolMessage(
+            content=[{"type": "json", "json": payload}, media, {"type": "json"}],
+            name="query_rows",
+            tool_call_id="call_rows",
+            artifact={"source": "rows"},
+        )
+        middleware = ToolOutputBudgetMiddleware(config=ToolOutputConfig(externalize_min_chars=100, preview_head_chars=20, preview_tail_chars=10))
+
+        result = middleware.wrap_tool_call(_make_request(tool_name="query_rows", outputs_path=str(tmp_path)), lambda _: message)
+
+        assert result is not message
+        assert isinstance(result.content, list)
+        assert media in result.content
+        assert result.artifact == message.artifact
+        files = list((tmp_path / ".tool-results").iterdir())
+        assert len(files) == 1
+        assert json.loads(files[0].read_text(encoding="utf-8")) == payload
+        visible = _fix_messages([result])[0].content
+        assert "Full query_rows output saved to" in visible
+        assert "BINARY_SENTINEL" not in visible
+        assert "x" * 10_000 not in visible
+        assert message.content[0]["json"] == payload
+
+    @pytest.mark.anyio
+    async def test_mixed_json_media_history_is_budgeted_before_mindie(self):
+        from deerflow.models.mindie_provider import _fix_messages
+
+        payload = {"rows": "x" * 2000, "answer": "TAIL_SENTINEL"}
+        media = {"type": "image", "base64": "BINARY_SENTINEL", "mime_type": "image/png"}
+        message = ToolMessage(content=[{"type": "json", "json": payload}, media], name="query_rows", tool_call_id="call_history")
+        request = ModelRequest(model=None, messages=[message], tools=[], state={})
+        middleware = ToolOutputBudgetMiddleware(config=ToolOutputConfig(externalize_min_chars=100, fallback_max_chars=300, fallback_head_chars=80, fallback_tail_chars=40))
+        captured = {}
+
+        async def handler(req):
+            captured["request"] = req
+            return []
+
+        await middleware.awrap_model_call(request, handler)
+
+        forwarded = captured["request"]
+        assert forwarded is not request
+        assert media in forwarded.messages[0].content
+        visible = _fix_messages(forwarded.messages)[0].content
+        assert len(visible) <= 333  # Configured text limit plus XML framing.
+        assert "TAIL_SENTINEL" in visible
+        assert "BINARY_SENTINEL" not in visible
+        assert message.content[0]["json"] == payload
+
+    @pytest.mark.parametrize("structured", [False, True], ids=["plain-text", "json"])
+    @pytest.mark.parametrize(
+        "config,tool_name",
+        [
+            (ToolOutputConfig(enabled=False), "query_rows"),
+            (ToolOutputConfig(externalize_min_chars=60_000, fallback_max_chars=60_000), "query_rows"),
+            (ToolOutputConfig(), "read_file"),
+        ],
+        ids=["disabled", "increased-limits", "exempt-read"],
+    )
+    def test_configured_passthrough_survives_provider_normalization(self, config, tool_name, structured):
+        from deerflow.models.mindie_provider import _fix_messages
+
+        payload = "x" * 35_000 + "TAIL_SENTINEL"
+        content = [{"type": "json", "json": {"rows": payload}}] if structured else payload
+        message = ToolMessage(content=content, name=tool_name, tool_call_id="call_passthrough")
+        middleware = ToolOutputBudgetMiddleware(config=config)
+
+        result = middleware.wrap_tool_call(_make_request(tool_name=tool_name), lambda _: message)
+
+        assert result is message
+        assert payload in _fix_messages([result])[0].content
+
+
+class TestSnapToLineBoundary:
+    def test_snaps_to_newline(self):
+        text = "line1\nline2\nline3"
+        pos = 14  # inside "line3"
+        result = _snap_to_line_boundary(text, pos)
+        assert text[result - 1] == "\n"
+
+    def test_no_snap_when_no_newline_in_range(self):
+        text = "abcdefghij"
+        assert _snap_to_line_boundary(text, 8) == 8
+
+    def test_zero_pos(self):
+        assert _snap_to_line_boundary("abc", 0) == 0
+
+    def test_pos_beyond_length(self):
+        assert _snap_to_line_boundary("abc", 10) == 10
+
+
+class TestSnapStartToLineBoundary:
+    def test_snaps_forward_to_newline(self):
+        text = "line1\nline2\nline3"
+        result = _snap_start_to_line_boundary(text, 2)  # inside "line1"
+        assert text[result - 1] == "\n"
+        assert result >= 2
+
+    def test_never_moves_backwards(self):
+        text = "aaaa\n" + "b" * 20
+        for pos in range(1, len(text)):
+            assert _snap_start_to_line_boundary(text, pos) >= pos
+
+    def test_no_snap_when_no_newline_in_range(self):
+        assert _snap_start_to_line_boundary("abcdefghij", 2) == 2
+
+    def test_zero_pos(self):
+        assert _snap_start_to_line_boundary("a\nbc", 0) == 0
+
+    def test_pos_beyond_length(self):
+        assert _snap_start_to_line_boundary("abc", 10) == 10
+
+
+class TestExternalize:
+    def test_writes_file_and_returns_virtual_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = _externalize(
+                "full content here",
+                tool_name="bash",
+                tool_call_id="tc-1",
+                outputs_path=tmpdir,
+                storage_subdir=".tool-results",
+            )
+            assert path is not None
+            assert path.startswith("/mnt/user-data/outputs/.tool-results/bash-")
+            assert path.endswith(".log")
+
+            # Verify actual file on disk
+            storage_dir = os.path.join(tmpdir, ".tool-results")
+            files = os.listdir(storage_dir)
+            assert len(files) == 1
+            with open(os.path.join(storage_dir, files[0]), encoding="utf-8") as f:
+                assert f.read() == "full content here"
+
+    def test_returns_none_on_invalid_path(self):
+        with _unwritable_outputs_path() as outputs_path:
+            path = _externalize(
+                "data",
+                tool_name="test",
+                tool_call_id="tc-1",
+                outputs_path=outputs_path,
+                storage_subdir=".tool-results",
+            )
+            assert path is None
+
+    def test_txt_extension_for_unknown_tool(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = _externalize(
+                "data",
+                tool_name="unknown_tool",
+                tool_call_id="tc-1",
+                outputs_path=tmpdir,
+                storage_subdir=".tool-results",
+            )
+            assert path is not None
+            assert path.endswith(".txt")
+
+
+class TestSanitizeToolName:
+    def test_strips_path_separators(self):
+        assert _sanitize_tool_name("../../etc/passwd") == "passwd"
+
+    def test_strips_backslashes(self):
+        result = _sanitize_tool_name("..\\..\\windows\\system32")
+        assert ".." not in result
+        assert "/" not in result
+
+    def test_normal_name_unchanged(self):
+        assert _sanitize_tool_name("bash") == "bash"
+
+    def test_empty_becomes_unknown(self):
+        assert _sanitize_tool_name("") == "unknown"
+
+    def test_dots_only_becomes_unknown(self):
+        assert _sanitize_tool_name("..") == "unknown"
+
+
+class TestExternalizePathTraversal:
+    def test_traversal_tool_name_is_sanitized(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = _externalize(
+                "data",
+                tool_name="../../etc/passwd",
+                tool_call_id="tc-1",
+                outputs_path=tmpdir,
+                storage_subdir=".tool-results",
+            )
+            assert path is not None
+            assert "passwd-" in path
+            assert "../" not in path
+
+    def test_absolute_storage_subdir_rejected(self):
+        path = _externalize(
+            "data",
+            tool_name="tool",
+            tool_call_id="tc-1",
+            outputs_path="/tmp",
+            storage_subdir="/etc/evil",
+        )
+        assert path is None
+
+    def test_traversal_storage_subdir_rejected(self):
+        path = _externalize(
+            "data",
+            tool_name="tool",
+            tool_call_id="tc-1",
+            outputs_path="/tmp",
+            storage_subdir="../../../etc",
+        )
+        assert path is None
+
+
+class TestStorageSubdirConfig:
+    """storage_subdir must be a single path segment.
+
+    The workspace-changes scanner prunes by directory name during os.walk,
+    which yields one-segment dirnames — a nested value like
+    ``cache/tool-results`` would silently never match the exclusion and its
+    files would be counted as produced artifacts again. Rejecting it at config
+    time keeps the dir-name-based exclusion sound.
+    """
+
+    def test_default_is_single_segment(self):
+        assert ToolOutputConfig().storage_subdir == ".tool-results"
+
+    def test_single_segment_custom_accepted(self):
+        assert ToolOutputConfig(storage_subdir="tool-output-cache").storage_subdir == "tool-output-cache"
+
+    def test_nested_storage_subdir_rejected(self):
+        with pytest.raises(ValueError):
+            ToolOutputConfig(storage_subdir="cache/tool-results")
+
+    def test_windows_separator_storage_subdir_rejected(self):
+        with pytest.raises(ValueError):
+            ToolOutputConfig(storage_subdir="cache\\tool-results")
+
+    def test_absolute_storage_subdir_rejected(self):
+        with pytest.raises(ValueError):
+            ToolOutputConfig(storage_subdir="/abs/path")
+
+    def test_dot_and_dotdot_storage_subdir_rejected(self):
+        with pytest.raises(ValueError):
+            ToolOutputConfig(storage_subdir=".")
+        with pytest.raises(ValueError):
+            ToolOutputConfig(storage_subdir="..")
+
+    def test_empty_storage_subdir_rejected(self):
+        with pytest.raises(ValueError):
+            ToolOutputConfig(storage_subdir="")
+
+
+class TestNeedsBudget:
+    def test_small_output_does_not_need_budget(self):
+        config = ToolOutputConfig(externalize_min_chars=1000)
+        msg = _tm("small", name="tool")
+        assert _needs_budget(msg, config) is False
+
+    def test_large_output_needs_budget(self):
+        config = ToolOutputConfig(externalize_min_chars=50)
+        msg = _tm("x" * 100, name="tool")
+        assert _needs_budget(msg, config) is True
+
+    def test_exempt_tool_does_not_need_budget(self):
+        config = ToolOutputConfig(externalize_min_chars=10)
+        msg = _tm("x" * 100, name="read_file")
+        assert _needs_budget(msg, config) is False
+
+    def test_multimodal_does_not_need_budget(self):
+        config = ToolOutputConfig(externalize_min_chars=10)
+        msg = ToolMessage(content=[{"type": "image", "data": "x" * 100}], name="tool", tool_call_id="tc-1")
+        assert _needs_budget(msg, config) is False
+
+    def test_structured_json_output_needs_budget(self):
+        config = ToolOutputConfig(externalize_min_chars=50)
+        msg = ToolMessage(content=[{"type": "json", "json": {"rows": ["x" * 100]}}], name="query_rows", tool_call_id="tc-1")
+        assert _needs_budget(msg, config) is True
+
+
+class TestBuildPreview:
+    def test_contains_typed_summary_and_reference(self):
+        content = "HEAD_" + "x" * 5000 + "_TAIL"
+        preview = _build_preview(
+            content,
+            tool_name="bash",
+            virtual_path="/mnt/test/bash-abc.log",
+            head_chars=100,
+            tail_chars=50,
+        )
+        assert preview.startswith("[Full bash output saved to /mnt/test/bash-abc.log")
+        assert "Preview kind: text" in preview
+        assert "Text output" in preview
+        assert "/mnt/test/bash-abc.log" in preview
+        assert "read_file" in preview
+        assert "start_line and end_line" in preview
+
+    def test_reports_total_chars(self):
+        content = "a" * 10000
+        preview = _build_preview(
+            content,
+            tool_name="web_search",
+            virtual_path="/mnt/test/file.txt",
+            head_chars=200,
+            tail_chars=100,
+        )
+        assert "10000 chars" in preview
+
+    def test_json_preview_includes_structure_and_raw_sample(self):
+        content = '{"meta":{"source":"unit"},"items":[{"id":1,"name":"alpha"},{"id":2,"name":"beta"}],"payload":"' + "x" * 5000 + '","tail_marker":"SHOULD_NOT_NEED_TAIL"}'
+        preview = _build_preview(
+            content,
+            tool_name="mcp_json",
+            virtual_path="/mnt/test/result.json",
+            head_chars=80,
+            tail_chars=40,
+        )
+        assert "Preview kind: json" in preview
+        assert "JSON object with 4 top-level keys" in preview
+        assert "Top-level keys: meta, items, payload, tail_marker" in preview
+        assert "items: array length 2" in preview
+        assert '$.meta.source: "unit"' in preview
+        assert not preview.startswith('{"meta"')
+        # The synopsis no longer hides the raw head/tail bytes; the model
+        # gets the typed synopsis AND inline raw samples so it can read
+        # the file with a tighter start_line range.
+        assert "Raw sample (head + tail" in preview
+        # payload segment dominates the document, so even with head_chars=80
+        # the raw head sample is almost entirely 'x' characters.
+        assert preview.count("x") >= 50
+
+    def test_json_preview_reports_nested_paths_and_line_hints(self):
+        content = json.dumps(
+            {
+                "data": {
+                    "items": [{"id": idx, "name": f"item-{idx}"} for idx in range(47)],
+                    "next_cursor": "cursor-2",
+                },
+                "meta": {"source": "unit"},
+            },
+            indent=2,
+        )
+        preview = _build_preview(
+            content,
+            tool_name="api_tool",
+            virtual_path="/mnt/test/api.json",
+            head_chars=80,
+            tail_chars=40,
+        )
+        assert "$.data: object keys 2; keys items, next_cursor" in preview
+        assert "$.data.items: array length 47; first item object" in preview
+        # Location hints were removed: they are wrong when a key string also
+        # appears as a value earlier in the document, or when the same key
+        # recurs at multiple depths.
+        assert "line " not in preview.split("Access:")[0]
+        assert "byte offset " not in preview
+
+    def test_json_paths_are_emitted_without_line_hints(self):
+        content = "\n\n" + json.dumps({"data": {"items": [1, 2, 3]}}, indent=2)
+        preview = _build_preview(
+            content,
+            tool_name="api_tool",
+            virtual_path="/mnt/test/api.json",
+            head_chars=80,
+            tail_chars=40,
+        )
+        assert "$.data: object keys 1; keys items" in preview
+        assert "line " not in preview.split("Access:")[0]
+        assert "byte offset " not in preview
+
+    def test_table_preview_extracts_columns(self):
+        content = "name,score\n" + "\n".join(f"Ada{i},{90 + i}" for i in range(10)) + "\n"
+        preview = _build_preview(
+            content,
+            tool_name="csv_tool",
+            virtual_path="/mnt/test/table.csv",
+            head_chars=80,
+            tail_chars=40,
+        )
+        assert "Preview kind: csv" in preview
+        assert "CSV table with 10 data rows and 2 columns" in preview
+        assert "columns: name, score" in preview
+        assert "first data row: name=Ada0 | score=90" in preview
+
+
+class TestToolOutputSynopsis:
+    def test_code_synopsis_extracts_imports_and_symbols(self):
+        content = "import os\nfrom pathlib import Path\n\nclass Runner:\n    pass\n\ndef main():\n    return Path(os.getcwd())\n"
+        synopsis = build_tool_output_synopsis(content, tool_name="python")
+        assert synopsis.kind == "code"
+        assert "line count" in synopsis.structure[0]
+        assert any("imports: os, pathlib" in item for item in synopsis.structure)
+        assert "class Runner" in synopsis.notable_items
+        assert "def main" in synopsis.notable_items
+
+    def test_yaml_synopsis_extracts_top_level_keys(self):
+        content = "name: deer\nsettings:\n  enabled: true\n  retries: 3\nitems:\n  - alpha\n"
+        synopsis = build_tool_output_synopsis(content, tool_name="config")
+        assert synopsis.kind == "yaml"
+        assert "Top-level keys: name, settings, items" in synopsis.summary
+        assert "settings: object" in synopsis.structure
+        assert "items: array" in synopsis.structure
+
+    def test_xml_synopsis_extracts_root_and_children(self):
+        content = '<feed><entry id="1"/><entry id="2"/><meta/></feed>'
+        synopsis = build_tool_output_synopsis(content, tool_name="xml")
+        assert synopsis.kind == "xml"
+        assert "XML document with root tag feed." in synopsis.summary
+        assert "root tag: feed" in synopsis.structure
+        assert "entry: 2" in synopsis.structure
+
+    # ------------------------------------------------------------------
+    # Regression tests for the @willem-bd review of PR #3377.
+    # Each test pins one of the eight findings so a future change cannot
+    # silently regress the fix.
+    # ------------------------------------------------------------------
+
+    def test_review_5_log_lines_are_not_misclassified_as_yaml(self):
+        # 200 lines of log output shaped like "LEVEL: message". The previous
+        # _looks_yaml counted 2 'key:' lines and accepted it; _try_yaml then
+        # produced a "YAML object with 3 top-level keys: INFO, ERROR, WARN"
+        # summary that hid every line, count, and middle-of-log signal.
+        content = "INFO: starting service\nERROR: failed to connect\nWARN: retrying\nINFO: connected\n" * 200
+        synopsis = build_tool_output_synopsis(content, tool_name="bash")
+        assert synopsis.kind == "text", f"expected text, got {synopsis.kind!r}: {synopsis.summary}"
+
+    def test_review_6_json_paths_are_emitted_without_byte_offset(self):
+        # The previous _json_path_location anchored at the first textual
+        # occurrence of the key string, which is wrong when the key also
+        # appears as a value earlier in the document.
+        content = '{"label": "items", "items": {"id": 1, "name": "foo"}}'
+        preview = _build_preview(
+            content,
+            tool_name="api_tool",
+            virtual_path="/mnt/test/api.json",
+            head_chars=200,
+            tail_chars=200,
+        )
+        assert "byte offset" not in preview
+        # The path itself is still useful navigation.
+        assert "$.items" in preview
+
+    def test_review_7_scalar_examples_respects_depth_cap(self):
+        # build_tool_output_synopsis used to recurse without a depth cap
+        # in _scalar_examples, which could trigger RecursionError on
+        # deeply nested JSON. The cap is now mirrored from
+        # _JSON_STRUCTURE_DEPTH.
+        deep = {"k": 1}
+        for _ in range(500):
+            deep = {"k": deep}
+        # Should not raise.
+        synopsis = build_tool_output_synopsis(json.dumps(deep))
+        assert synopsis.kind == "json"
+
+    def test_review_8_csv_first_row_quoted_cells_round_trip(self):
+        # delimiter.join(rows[1]) silently re-split cells containing the
+        # delimiter inside a quoted cell, misleading the model about
+        # column count.
+        header = "name,description,score"
+        rows = [
+            'Ada,"a fine, brilliant logician",98',
+            'Grace,"a creator, of compilers",99',
+            'Alan,"a pioneer, of computing",95',
+            'Kurt,"a poet, of logic",91',
+            'Ada2,"another, fine mind",97',
+            'Grace2,"yet another, creator",93',
+        ]
+        content = header + "\n" + "\n".join(rows) + "\n"
+        synopsis = build_tool_output_synopsis(content, tool_name="csv_tool")
+        assert synopsis.kind == "csv"
+        first_row = next((line for line in synopsis.structure if line.startswith("first data row:")), "")
+        # All three columns must be present, and the quoted cell must
+        # round-trip without losing the embedded comma.
+        assert "name=Ada" in first_row
+        assert "score=98" in first_row
+        assert "a fine, brilliant logician" in first_row
+        # The re-joined comma-broken row is the failure mode we are guarding.
+        assert "Ada,a fine, brilliant" not in first_row
+
+    @pytest.mark.parametrize("delimiter,kind", [(",", "csv"), ("\t", "tsv")])
+    @pytest.mark.parametrize("newline", ["\n", "\r\n"])
+    @pytest.mark.parametrize("count", [6, 60])
+    def test_table_synopsis_counts_logical_records(self, delimiter, kind, newline, count):
+        """Count logical records even beyond the physical-line recognition sample."""
+        buffer = io.StringIO(newline="")
+        writer = csv.writer(buffer, delimiter=delimiter, lineterminator=newline)
+        writer.writerow(["id", "description", "score"])
+        for index in range(count):
+            writer.writerow([index, f"first{delimiter}part{newline}second part", 90])
+        content = buffer.getvalue()
+        synopsis = build_tool_output_synopsis(content)
+        assert synopsis.kind == kind
+        assert synopsis.summary == [f"{kind.upper()} table with {count} data rows and 3 columns."]
+        preview = _build_preview(content, tool_name="bash", virtual_path="/mnt/test/table", head_chars=100, tail_chars=100)
+        assert synopsis.summary[0] in preview
+
+    @pytest.mark.parametrize("delimiter,kind", [(",", "csv"), ("\t", "tsv")])
+    def test_table_synopsis_ignores_blank_records(self, delimiter, kind):
+        """Ignore blank records while preserving blank lines inside quoted fields."""
+        buffer = io.StringIO(newline="")
+        writer = csv.writer(buffer, delimiter=delimiter)
+        writer.writerow(["id", "description"])
+        for index in range(6):
+            writer.writerow([index, "first\n\nlast"])
+            writer.writerow([])
+            writer.writerow([" ", ""])
+        synopsis = build_tool_output_synopsis(buffer.getvalue())
+        assert synopsis.kind == kind
+        assert synopsis.summary == [f"{kind.upper()} table with 6 data rows and 2 columns."]
+
+    @pytest.mark.parametrize("delimiter,kind", [(",", "csv"), ("\t", "tsv")])
+    @pytest.mark.parametrize("suffix", ['"unterminated', '"closed"invalid', "field_limit"])
+    def test_table_synopsis_does_not_invent_count_after_parse_failure(self, delimiter, kind, suffix):
+        """Do not report an exact total when parsing fails beyond the sample."""
+        content = f"id{delimiter}description\n" + "".join(f"{index}{delimiter}ok\n" for index in range(60))
+        original_limit = csv.field_size_limit()
+        if suffix == "field_limit":
+            suffix = "x" * (original_limit + 1)
+        synopsis = build_tool_output_synopsis(content + f"61{delimiter}{suffix}")
+        assert synopsis.kind == kind
+        assert synopsis.summary == [f"{kind.upper()} table with an undetermined number of data rows and 2 columns."]
+        assert csv.field_size_limit() == original_limit
+
+    def test_table_synopsis_preserves_oversized_input_guard(self):
+        """Skip structured parsing when the input exceeds the byte budget."""
+        content = "id,description\n" + "1,ok\n" * 6 + "x" * 5_000_000
+        synopsis = build_tool_output_synopsis(content)
+        assert synopsis.kind == "unknown"
+        assert "Parsing skipped due to size limit" in synopsis.summary[0]
+
+    def test_review_9_tsv_detector_rejects_tab_indented_bash(self):
+        # Tab-indented output (ls -l, tree, indented logs) used to be
+        # accepted as TSV because _try_table only checked that the
+        # delimiter is present and rows agree on width.
+        row = "drwxr-xr-x  2 user  group   64 Jun 24 17:00 dir"
+        bash_out = "ls -l output:\n\ttotal 0\n" + "\n".join(f"\t{row}{i}" for i in range(1, 6)) + "\n"
+        synopsis = build_tool_output_synopsis(bash_out, tool_name="bash")
+        assert synopsis.kind == "text", f"expected text, got {synopsis.kind!r}: {synopsis.summary}"
+
+    def test_review_10_preview_includes_raw_head_and_tail_sample(self):
+        # Default behavior change in the PR removed the inline raw bytes
+        # for non-binary previews. The fix restores them so the model
+        # can see the actual first/last KB without a follow-up read_file.
+        content = "log line 1\n" * 200
+        preview = _build_preview(
+            content,
+            tool_name="bash",
+            virtual_path="/mnt/test/run.log",
+            head_chars=400,
+            tail_chars=400,
+        )
+        assert "Raw sample (head + tail" in preview
+        # head_chars=400 should capture the first 80 'log line 1' lines
+        # verbatim; tail_chars=400 should capture the last 80.
+        assert preview.count("log line 1") >= 70  # line snapping may lose a few
+
+    def test_review_11_short_text_does_not_duplicate_excerpts(self):
+        # For inputs shorter than 2 * _TEXT_EXCERPT_CHARS, the previous
+        # opener/closer slices overlapped and the model saw the same
+        # body twice. build_tool_output_synopsis is reachable directly
+        # from tests and other callers that pass small inputs.
+        short = "hello world " * 30  # ~360 chars
+        synopsis = build_tool_output_synopsis(short)
+        opener_line = next((ln for ln in synopsis.summary if ln.startswith("Opening excerpt: ")), "")
+        # Closer is now suppressed entirely for short inputs.
+        assert all(not ln.startswith("Closing excerpt: ") for ln in synopsis.summary), f"unexpected closer for short input: {synopsis.summary}"
+        assert opener_line, "opening excerpt should still be present"
+
+    def test_review_12_preview_head_tail_chars_are_operational(self):
+        # preview_head_chars / preview_tail_chars were silently no-op
+        # for every non-binary kind. The fix plumbs them through
+        # render_tool_output_preview as an explicit 'Raw sample' section.
+        content = "alpha " * 1000  # 6000 chars
+        preview = _build_preview(
+            content,
+            tool_name="bash",
+            virtual_path="/mnt/test/run.log",
+            head_chars=300,
+            tail_chars=300,
+        )
+        # The head sample should contain 'alpha' more times than the
+        # tail (or split-count), proving head_chars=300 took effect.
+        # The full document has 1000 'alpha' tokens; without head_chars
+        # we'd see fewer than 50 in the head sample.
+        assert preview.count("alpha") >= 50
+
+
+class TestBuildFallback:
+    def test_short_content_unchanged(self):
+        assert _build_fallback("short", tool_name="t", max_chars=100, head_chars=50, tail_chars=50) == "short"
+
+    def test_zero_max_disables(self):
+        content = "a" * 1000
+        assert _build_fallback(content, tool_name="t", max_chars=0, head_chars=50, tail_chars=50) == content
+
+    def test_truncates_long_content(self):
+        content = "H" * 5000 + "M" * 20000 + "T" * 5000
+        result = _build_fallback(content, tool_name="bash", max_chars=12000, head_chars=6000, tail_chars=3000)
+        assert len(result) < len(content)
+        assert "omitted from bash output" in result
+        assert "Persistent storage unavailable" in result
+
+    def test_preserves_head_and_tail(self):
+        content = "HEADSTART" + "x" * 50000 + "TAILEND"
+        result = _build_fallback(content, tool_name="t", max_chars=20000, head_chars=10000, tail_chars=5000)
+        assert result.startswith("HEADSTART")
+        assert "TAILEND" in result
+
+    def test_result_never_exceeds_max_chars(self):
+        """The marker itself has non-zero length; total must still respect max_chars."""
+        for max_chars in [200, 500, 1000, 5000, 20000]:
+            content = "x" * 50000
+            result = _build_fallback(content, tool_name="long_tool_name", max_chars=max_chars, head_chars=max_chars // 2, tail_chars=max_chars // 4)
+            assert len(result) <= max_chars, f"max_chars={max_chars}: got {len(result)}"
+
+    def test_result_never_exceeds_max_chars_with_newlines(self):
+        """Same guarantee as above, on content that actually exercises line snapping.
+
+        ``test_result_never_exceeds_max_chars`` passes newline-free content, so the
+        tail offset is never snapped. Real bash/web_fetch output has newlines.
+        """
+        for total in [50_000, 200_000, 1_000_000]:
+            content = _lines_then_long_line(total)
+            result = _build_fallback(content, tool_name="bash", max_chars=30_000, head_chars=8_000, tail_chars=3_000)
+            assert len(result) <= 30_000, f"total={total}: got {len(result)}"
+
+    def test_fallback_forward_snaps_tail_onto_line_boundary(self):
+        """The tail must begin *after* the newline, never before it.
+
+        The bound test above never moves the tail offset: its content has no
+        newline inside the snap window, so it would pass even with the snap
+        removed. Placing a newline in the window pins the direction instead —
+        a backward snap leaves the tail starting mid-line.
+        """
+        total, newline_pos = 100_000, 98_000  # window is [97_000, 98_500)
+        content = "A" * newline_pos + "\n" + "B" * (total - newline_pos - 1)
+        result = _build_fallback(content, tool_name="bash", max_chars=30_000, head_chars=8_000, tail_chars=3_000)
+        assert len(result) <= 30_000
+        tail = result.rsplit("]\n\n", 1)[1]
+        assert tail.startswith("B"), f"tail begins mid-line: {tail[:20]!r}"
+
+    def test_very_small_max_chars_does_not_crash(self):
+        content = "x" * 1000
+        result = _build_fallback(content, tool_name="t", max_chars=50, head_chars=20, tail_chars=10)
+        assert len(result) <= 50
+
+
+# ===========================================================================
+# Bash exit-marker preservation (harvest reads Exit Code: N from the end)
+# ===========================================================================
+
+
+class TestBashExitMarkerPreservation:
+    """Budget rewrites must keep a trailing bash exit marker last.
+
+    The subagent executor harvests status with ``Exit Code: N\\s*$``. Preview
+    construction always ends with an Access footer, so without this the
+    marker is no longer last and a failed command is harvested as success.
+    """
+
+    def test_keep_exit_marker_last_appends_for_bash(self):
+        original = "out\nExit Code: 1"
+        rewritten = "preview\nAccess:\n- Use read_file"
+        assert _keep_exit_marker_last(original, rewritten, tool_name="bash") == "preview\nAccess:\n- Use read_file\nExit Code: 1"
+
+    def test_keep_exit_marker_last_is_noop_for_other_tools(self):
+        original = "out\nExit Code: 1"
+        rewritten = "preview\nAccess:\n- Use read_file"
+        assert _keep_exit_marker_last(original, rewritten, tool_name="web_fetch") == rewritten
+
+    def test_keep_exit_marker_last_is_noop_when_already_last(self):
+        original = "out\nExit Code: 0"
+        rewritten = "preview\nExit Code: 0"
+        assert _keep_exit_marker_last(original, rewritten, tool_name="bash") == rewritten
+
+    def test_wrap_tool_call_keeps_failed_exit_marker_last(self):
+        content = _pytest_like_output("Exit Code: 1")
+        assert 12_000 < len(content) <= 20_000
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mw = ToolOutputBudgetMiddleware(config=ToolOutputConfig())
+            msg = _bash_tm(content)
+            result = mw.wrap_tool_call(_make_request(tool_name="bash", outputs_path=tmpdir), lambda _: msg)
+
+        assert isinstance(result, ToolMessage)
+        assert result is not msg
+        assert str(result.content).rstrip().endswith("Exit Code: 1")
+        assert "Access:" in result.content
+        assert "read_file" in result.content
+        assert result.additional_kwargs["deerflow_tool_meta"] == {"status": "success", "source": "normalized"}
+        assert result.artifact == {"k": "v"}
+        assert result.id == "tool-msg-1"
+
+    @pytest.mark.anyio
+    async def test_awrap_tool_call_keeps_failed_exit_marker_last(self):
+        content = _pytest_like_output("Exit Code: 1")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mw = ToolOutputBudgetMiddleware(config=ToolOutputConfig())
+            msg = _bash_tm(content)
+
+            async def handler(_):
+                return msg
+
+            result = await mw.awrap_tool_call(_make_request(tool_name="bash", outputs_path=tmpdir), handler)
+
+        assert str(result.content).rstrip().endswith("Exit Code: 1")
+        assert "Access:" in result.content
+        assert result.artifact == {"k": "v"}
+        assert result.id == "tool-msg-1"
+
+    def test_wrap_tool_call_keeps_successful_exit_marker_last(self):
+        content = _pytest_like_output("Exit Code: 0")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mw = ToolOutputBudgetMiddleware(config=ToolOutputConfig())
+            result = mw.wrap_tool_call(_make_request(tool_name="bash", outputs_path=tmpdir), lambda _: _bash_tm(content))
+        assert str(result.content).rstrip().endswith("Exit Code: 0")
+        assert "Access:" in result.content
+
+    def test_wrap_tool_call_without_marker_ends_at_access_footer(self):
+        content = _pytest_like_output("12 failed in 1.23s")
+        assert not content.rstrip().endswith("Exit Code: 1")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mw = ToolOutputBudgetMiddleware(config=ToolOutputConfig())
+            result = mw.wrap_tool_call(_make_request(tool_name="bash", outputs_path=tmpdir), lambda _: _bash_tm(content))
+        assert "Access:" in result.content
+        assert "read_file" in result.content
+        assert not str(result.content).rstrip().endswith("Exit Code: 1")
+        assert "Exit Code:" not in str(result.content).rsplit("Access:", 1)[-1]
+
+    def test_non_bash_tool_does_not_promote_exit_marker(self):
+        content = _pytest_like_output("Exit Code: 1")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mw = ToolOutputBudgetMiddleware(config=ToolOutputConfig())
+            result = mw.wrap_tool_call(
+                _make_request(tool_name="web_fetch", outputs_path=tmpdir),
+                lambda _: _bash_tm(content, name="web_fetch"),
+            )
+        assert "Access:" in result.content
+        assert not str(result.content).rstrip().endswith("Exit Code: 1")
+
+    def test_bash_tool_alias_also_preserves_marker(self):
+        content = _pytest_like_output("Exit Code: 1")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mw = ToolOutputBudgetMiddleware(config=ToolOutputConfig())
+            result = mw.wrap_tool_call(
+                _make_request(tool_name="bash_tool", outputs_path=tmpdir),
+                lambda _: _bash_tm(content, name="bash_tool"),
+            )
+        assert str(result.content).rstrip().endswith("Exit Code: 1")
+
+    def test_fallback_tiny_budget_keeps_marker_and_stays_within_max_chars(self):
+        content = _pytest_like_output("Exit Code: 1")
+        result = _build_fallback(content, tool_name="bash", max_chars=80, head_chars=8000, tail_chars=3000)
+        assert len(result) <= 80
+        assert result.rstrip().endswith("Exit Code: 1")
+
+    def test_fallback_default_budget_leaves_payload_unchanged(self):
+        content = _pytest_like_output("Exit Code: 1")
+        result = _build_fallback(content, tool_name="bash", max_chars=30_000, head_chars=8000, tail_chars=3000)
+        assert result == content
+        assert result.rstrip().endswith("Exit Code: 1")
+
+    def test_fallback_never_exceeds_max_chars_with_exit_marker(self):
+        content = _pytest_like_output("Exit Code: 1")
+        marker_line = "\nExit Code: 1"
+        for max_chars in [10, len(marker_line) - 1, len(marker_line), 20, 80, 200, 500, 1000, 5000, 20000]:
+            result = _build_fallback(content, tool_name="bash", max_chars=max_chars, head_chars=max_chars // 2, tail_chars=max_chars // 4)
+            assert len(result) <= max_chars, f"max_chars={max_chars}: got {len(result)}"
+            if max_chars >= len(marker_line):
+                assert result.rstrip().endswith("Exit Code: 1"), f"max_chars={max_chars}"
+            else:
+                assert not result.rstrip().endswith("Exit Code: 1")
+
+    def test_exit_marker_regex_matches_sandbox_truncation_tail_shapes(self):
+        from deerflow.sandbox.tools import _BASH_EXIT_MARKER_TAIL_RE as sandbox_re
+
+        for content in ("out\nExit Code: 1", "out\nExit Code: -9 \n", "out\nCommand exited with code 3", "Command exited with code 3"):
+            ours = _BASH_EXIT_MARKER_TAIL_RE.search(content)
+            theirs = sandbox_re.search(content)
+            assert ours is not None and theirs is not None
+            assert ours.start() == theirs.start(), content
+
+    def test_budgeted_failed_pytest_is_harvested_as_error_not_pass(self):
+        """End-to-end: wrap_tool_call rewrite → harvest status=error → leaf holds=False.
+
+        ``tests/conftest.py`` mocks ``deerflow.subagents.executor``, so the
+        production harvest helpers are loaded under a unique module name.
+        """
+        path = pathlib.Path(__file__).parents[1] / "packages/harness/deerflow/subagents/executor.py"
+        spec = importlib.util.spec_from_file_location("_budget_exit_marker_executor", path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        try:
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+            from deerflow.subagents import acceptance_checks
+
+            content = _pytest_like_output("Exit Code: 1")
+            with tempfile.TemporaryDirectory() as tmpdir:
+                mw = ToolOutputBudgetMiddleware(config=ToolOutputConfig())
+                result = mw.wrap_tool_call(_make_request(tool_name="bash", outputs_path=tmpdir), lambda _: _bash_tm(content))
+
+            assert str(result.content).rstrip().endswith("Exit Code: 1")
+            cmd = "pytest -q"
+            ai = AIMessage(
+                content="",
+                tool_calls=[{"name": "bash", "args": {"command": cmd}, "id": "tc-1", "type": "tool_call"}],
+            )
+            state = {"messages": [HumanMessage(content="task"), ai, result]}
+            executions = module._harvest_bash_executions(state)
+            assert executions, "harvest returned no bash executions"
+            for entry in executions:
+                entry["shell_persistent"] = False
+            latest = executions[-1]
+            assert latest["status"] == "error"
+            assert latest["status_marker"] == "Exit Code: 1"
+            leaf = acceptance_checks._check_tests_passed_leaf(cmd, executions)
+            assert leaf["checked"] is True
+            assert leaf["holds"] is False
+        finally:
+            sys.modules.pop(spec.name, None)
+            # Absent when exec_module failed part-way; don't mask that error.
+            shutdown = getattr(module, "_shutdown_isolated_subagent_loop", None)
+            if shutdown is not None:
+                shutdown()
+
+
+# ===========================================================================
+# Middleware integration tests — wrap_tool_call
+# ===========================================================================
+
+
+class TestWrapToolCallPassThrough:
+    def test_small_output_passes_through(self):
+        mw = ToolOutputBudgetMiddleware(config=ToolOutputConfig(externalize_min_chars=1000))
+        msg = _tm("small output", name="bash")
+        result = mw.wrap_tool_call(_make_request(), lambda _: msg)
+        assert result is msg
+
+    def test_disabled_middleware_passes_through(self):
+        mw = ToolOutputBudgetMiddleware(config=ToolOutputConfig(enabled=False, externalize_min_chars=10, fallback_max_chars=20))
+        msg = _tm("x" * 50000, name="bash")
+        result = mw.wrap_tool_call(_make_request(), lambda _: msg)
+        assert result is msg
+
+
+class TestWrapToolCallExternalize:
+    def test_oversized_output_externalized_to_disk(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = ToolOutputConfig(externalize_min_chars=100, preview_head_chars=50, preview_tail_chars=30)
+            mw = ToolOutputBudgetMiddleware(config=config)
+            content = "x" * 500
+            msg = _tm(content, name="remote_executor")
+            req = _make_request(outputs_path=tmpdir)
+
+            result = mw.wrap_tool_call(req, lambda _: msg)
+
+            assert isinstance(result, ToolMessage)
+            assert result is not msg
+            assert "Full remote_executor output saved to" in result.content
+            assert "read_file" in result.content
+            assert result.tool_call_id == "tc-1"
+            assert TOOL_OUTPUT_BLOB_KEY not in result.additional_kwargs
+
+            # Verify file was written
+            storage_dir = os.path.join(tmpdir, ".tool-results")
+            assert os.path.isdir(storage_dir)
+            files = os.listdir(storage_dir)
+            assert len(files) == 1
+            with open(os.path.join(storage_dir, files[0]), encoding="utf-8") as f:
+                assert f.read() == content
+
+
+class TestToolOutputBlobPersistence:
+    def test_host_externalization_stamps_durable_blob_ref(self, monkeypatch, tmp_path):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        content = "跨节点工具输出" * 80
+        calls: list[dict] = []
+
+        class RecordingStore:
+            def put_bytes(self, data: bytes, **kwargs) -> BlobRef:
+                calls.append({"data": data, **kwargs})
+                return BlobRef(
+                    sha256=hashlib.sha256(data).hexdigest(),
+                    size=len(data),
+                    kind=kwargs["kind"],
+                    content_type=kwargs["content_type"],
+                )
+
+        monkeypatch.setattr(mod, "get_blob_store_if_enabled", lambda: RecordingStore())
+        config = ToolOutputConfig(externalize_min_chars=50, preview_head_chars=20, preview_tail_chars=10)
+        result = ToolOutputBudgetMiddleware(config=config).wrap_tool_call(
+            _make_request(outputs_path=str(tmp_path)),
+            lambda _: _tm(content, name="remote_executor"),
+        )
+
+        payload = result.additional_kwargs[TOOL_OUTPUT_BLOB_KEY]
+        assert payload["version"] == 1
+        assert payload["virtual_path"].startswith("/mnt/user-data/outputs/.tool-results/")
+        assert payload["storage_subdir"] == ".tool-results"
+        assert payload["encoding"] == "utf-8"
+        assert payload["ref"] == {
+            "sha256": hashlib.sha256(content.encode()).hexdigest(),
+            "size": len(content.encode()),
+            "kind": "tool-output",
+            "content_type": "text/plain; charset=utf-8",
+        }
+        assert calls == [
+            {
+                "data": content.encode(),
+                "kind": "tool-output",
+                "content_type": "text/plain; charset=utf-8",
+                "thread_id": "thread-1",
+            }
+        ]
+
+    def test_host_externalized_file_keeps_its_blob_ref_bytes_under_windows_newlines(self, monkeypatch, tmp_path):
+        # Windows text mode wrote "\n" as "\r\n", so the file no longer matched
+        # the ref stamped from content.encode() and the next model call on this
+        # Gateway deleted it as a mismatch when no blob store was configured.
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        content = "first line\nsecond line\n" * 20
+        builtin_open = open
+
+        def windows_open(file, mode="r", *args, **kwargs):
+            if "b" not in mode and any(flag in mode for flag in "wax+"):
+                kwargs.setdefault("newline", "\r\n")
+            return builtin_open(file, mode, *args, **kwargs)
+
+        class RecordingStore:
+            def put_bytes(self, data: bytes, **kwargs) -> BlobRef:
+                return BlobRef(sha256=hashlib.sha256(data).hexdigest(), size=len(data), kind=kwargs["kind"], content_type=kwargs["content_type"])
+
+        monkeypatch.setattr(mod, "open", windows_open, raising=False)
+        monkeypatch.setattr(mod, "get_blob_store_if_enabled", lambda: RecordingStore())
+        mw = ToolOutputBudgetMiddleware(config=ToolOutputConfig(externalize_min_chars=50, preview_head_chars=20, preview_tail_chars=10))
+        result = mw.wrap_tool_call(_make_request(outputs_path=str(tmp_path)), lambda _: _tm(content, name="remote_executor"))
+        saved = tmp_path / ".tool-results" / os.path.basename(result.additional_kwargs[TOOL_OUTPUT_BLOB_KEY]["virtual_path"])
+        assert saved.read_bytes() == content.encode()
+
+        monkeypatch.setattr(mod, "get_blob_store_if_enabled", lambda: None)
+        request = ModelRequest(model=None, messages=[result], tools=[], state={"thread_data": {"outputs_path": str(tmp_path)}})
+        mw.wrap_model_call(request, lambda prepared: [])
+
+        assert saved.read_bytes() == content.encode()
+
+    def test_configured_blob_write_failure_falls_back_inline(self, monkeypatch, tmp_path):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        class FailingStore:
+            def put_bytes(self, data: bytes, **kwargs) -> BlobRef:
+                raise BlobWriteError("backend detail")
+
+        monkeypatch.setattr(mod, "get_blob_store_if_enabled", lambda: FailingStore())
+        config = ToolOutputConfig(
+            externalize_min_chars=50,
+            fallback_max_chars=200,
+            fallback_head_chars=80,
+            fallback_tail_chars=40,
+        )
+        result = ToolOutputBudgetMiddleware(config=config).wrap_tool_call(
+            _make_request(outputs_path=str(tmp_path)),
+            lambda _: _tm("x" * 500, name="remote_executor"),
+        )
+
+        assert "Persistent storage unavailable" in result.content
+        assert TOOL_OUTPUT_BLOB_KEY not in result.additional_kwargs
+        published = list((tmp_path / ".tool-results").glob("remote_executor-*"))
+        assert len(published) == 1
+        assert published[0].read_text(encoding="utf-8") == "x" * 500
+
+    def test_blob_write_failure_stays_bounded_when_regular_fallback_is_disabled(self, monkeypatch, tmp_path):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        class FailingStore:
+            def put_bytes(self, data: bytes, **kwargs) -> BlobRef:
+                raise BlobWriteError("backend detail")
+
+        monkeypatch.setattr(mod, "get_blob_store_if_enabled", lambda: FailingStore())
+        monkeypatch.setattr(mod, "_DURABLE_FAILURE_FALLBACK_MAX_CHARS", 80)
+        config = ToolOutputConfig(
+            externalize_min_chars=10,
+            fallback_max_chars=0,
+            fallback_head_chars=20,
+            fallback_tail_chars=10,
+        )
+
+        result = ToolOutputBudgetMiddleware(config=config).wrap_tool_call(
+            _make_request(outputs_path=str(tmp_path)),
+            lambda _: _tm("x" * 500, name="remote_executor"),
+        )
+
+        assert len(result.content) == 80
+        assert result.additional_kwargs["deerflow_tool_transforms"][-1]["kind"] == "truncated"
+        assert TOOL_OUTPUT_BLOB_KEY not in result.additional_kwargs
+
+    def test_blob_producer_cap_falls_back_without_writing(self, monkeypatch, tmp_path):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        class StoreMustNotBeWritten:
+            def put_bytes(self, data: bytes, **kwargs) -> BlobRef:
+                raise AssertionError("oversized content must not reach the blob backend")
+
+        monkeypatch.setattr(mod, "get_blob_store_if_enabled", lambda: StoreMustNotBeWritten())
+        monkeypatch.setattr(mod, "_MAX_TOOL_OUTPUT_BLOB_BYTES", 32)
+        config = ToolOutputConfig(
+            externalize_min_chars=10,
+            fallback_max_chars=80,
+            fallback_head_chars=20,
+            fallback_tail_chars=10,
+        )
+        result = ToolOutputBudgetMiddleware(config=config).wrap_tool_call(
+            _make_request(outputs_path=str(tmp_path)),
+            lambda _: _tm("x" * 100, name="remote_executor"),
+        )
+
+        assert len(result.content) == 80
+        assert result.additional_kwargs["deerflow_tool_transforms"][-1]["kind"] == "truncated"
+        assert TOOL_OUTPUT_BLOB_KEY not in result.additional_kwargs
+        assert not (tmp_path / ".tool-results").exists()
+
+    def test_blob_producer_cap_stays_bounded_when_regular_fallback_is_disabled(self, monkeypatch, tmp_path):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        class StoreMustNotBeWritten:
+            def put_bytes(self, data: bytes, **kwargs) -> BlobRef:
+                raise AssertionError("oversized content must not reach the blob backend")
+
+        monkeypatch.setattr(mod, "get_blob_store_if_enabled", lambda: StoreMustNotBeWritten())
+        monkeypatch.setattr(mod, "_MAX_TOOL_OUTPUT_BLOB_BYTES", 32)
+        monkeypatch.setattr(mod, "_DURABLE_FAILURE_FALLBACK_MAX_CHARS", 80)
+        config = ToolOutputConfig(
+            externalize_min_chars=10,
+            fallback_max_chars=0,
+            fallback_head_chars=20,
+            fallback_tail_chars=10,
+        )
+
+        result = ToolOutputBudgetMiddleware(config=config).wrap_tool_call(
+            _make_request(outputs_path=str(tmp_path)),
+            lambda _: _tm("x" * 100, name="remote_executor"),
+        )
+
+        assert len(result.content) == 80
+        assert result.additional_kwargs["deerflow_tool_transforms"][-1]["kind"] == "truncated"
+        assert TOOL_OUTPUT_BLOB_KEY not in result.additional_kwargs
+        assert not (tmp_path / ".tool-results").exists()
+
+    def test_preview_contains_typed_summary(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = ToolOutputConfig(externalize_min_chars=50, preview_head_chars=20, preview_tail_chars=10)
+            mw = ToolOutputBudgetMiddleware(config=config)
+            content = "HEADPART_" + "m" * 200 + "_TAILPART"
+            msg = _tm(content, name="web_search")
+            req = _make_request(outputs_path=tmpdir)
+
+            result = mw.wrap_tool_call(req, lambda _: msg)
+
+            assert result.content.startswith("[Full web_search output saved to")
+            assert "Preview kind: text" in result.content
+            assert "Text output" in result.content
+            assert "HEADPART_" in result.content
+
+
+class TestWrapToolCallFallback:
+    def test_fallback_when_no_outputs_path(self):
+        config = ToolOutputConfig(
+            externalize_min_chars=50,
+            fallback_max_chars=200,
+            fallback_head_chars=80,
+            fallback_tail_chars=40,
+        )
+        mw = ToolOutputBudgetMiddleware(config=config)
+        content = "x" * 500
+        msg = _tm(content, name="mcp_tool")
+        req = _make_request(outputs_path=None)
+
+        result = mw.wrap_tool_call(req, lambda _: msg)
+
+        assert isinstance(result, ToolMessage)
+        assert result is not msg
+        assert "omitted from mcp_tool output" in result.content
+        assert "Persistent storage unavailable" in result.content
+        assert len(result.content) < len(content)
+
+    def test_fallback_when_disk_write_fails(self):
+        config = ToolOutputConfig(
+            externalize_min_chars=50,
+            fallback_max_chars=200,
+            fallback_head_chars=80,
+            fallback_tail_chars=40,
+        )
+        mw = ToolOutputBudgetMiddleware(config=config)
+        content = "x" * 500
+        msg = _tm(content, name="tool")
+
+        with _unwritable_outputs_path() as outputs_path:
+            req = _make_request(outputs_path=outputs_path)
+            result = mw.wrap_tool_call(req, lambda _: msg)
+
+        assert isinstance(result, ToolMessage)
+        assert "omitted from tool output" in result.content
+
+    def test_structured_json_output_budgeted_before_provider(self):
+        # Review feedback on #6208: the MindIE adapter serializes {"type": "json"}
+        # blocks to text, so a large structured result must hit the budget here,
+        # not sail through to provider normalization at full size.
+        config = ToolOutputConfig(
+            externalize_min_chars=50,
+            fallback_max_chars=200,
+            fallback_head_chars=80,
+            fallback_tail_chars=40,
+        )
+        mw = ToolOutputBudgetMiddleware(config=config)
+        msg = ToolMessage(
+            content=[{"type": "json", "json": {"rows": ["x" * 500]}}],
+            name="query_rows",
+            tool_call_id="tc-1",
+        )
+        req = _make_request(outputs_path=None)
+
+        result = mw.wrap_tool_call(req, lambda _: msg)
+
+        assert isinstance(result, ToolMessage)
+        assert result is not msg
+        assert isinstance(result.content, str)
+        assert "omitted from query_rows output" in result.content
+        assert len(result.content) <= 200
+
+
+class TestWrapToolCallExemption:
+    def test_read_file_exempt(self):
+        config = ToolOutputConfig(externalize_min_chars=10, fallback_max_chars=50)
+        mw = ToolOutputBudgetMiddleware(config=config)
+        content = "x" * 100
+        msg = _tm(content, name="read_file")
+
+        result = mw.wrap_tool_call(_make_request(tool_name="read_file"), lambda _: msg)
+
+        assert result is msg
+
+    def test_read_file_tool_exempt(self):
+        config = ToolOutputConfig(externalize_min_chars=10, fallback_max_chars=50)
+        mw = ToolOutputBudgetMiddleware(config=config)
+        content = "x" * 100
+        msg = _tm(content, name="read_file_tool")
+
+        result = mw.wrap_tool_call(_make_request(tool_name="read_file_tool"), lambda _: msg)
+
+        assert result is msg
+
+    def test_custom_exempt_tool(self):
+        config = ToolOutputConfig(externalize_min_chars=10, fallback_max_chars=50, exempt_tools=["my_tool"])
+        mw = ToolOutputBudgetMiddleware(config=config)
+        content = "x" * 100
+        msg = _tm(content, name="my_tool")
+
+        result = mw.wrap_tool_call(_make_request(tool_name="my_tool"), lambda _: msg)
+
+        assert result is msg
+
+
+class TestWrapToolCallPerToolOverride:
+    def test_per_tool_threshold(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = ToolOutputConfig(
+                externalize_min_chars=50000,  # global: high
+                tool_overrides={"sensitive_tool": 100},  # override: low
+            )
+            mw = ToolOutputBudgetMiddleware(config=config)
+            content = "x" * 500
+            msg = _tm(content, name="sensitive_tool")
+            req = _make_request(tool_name="sensitive_tool", outputs_path=tmpdir)
+
+            result = mw.wrap_tool_call(req, lambda _: msg)
+
+            assert result is not msg
+            assert "Full sensitive_tool output saved to" in result.content
+
+    def test_per_tool_zero_disables_externalization(self):
+        config = ToolOutputConfig(
+            externalize_min_chars=50,
+            tool_overrides={"bash": 0},
+            fallback_max_chars=200,
+            fallback_head_chars=80,
+            fallback_tail_chars=40,
+        )
+        mw = ToolOutputBudgetMiddleware(config=config)
+        content = "x" * 500
+        msg = _tm(content, name="bash")
+        # Even with outputs_path, externalization disabled for bash
+        req = _make_request(tool_name="bash", outputs_path="/tmp/test")
+
+        result = mw.wrap_tool_call(req, lambda _: msg)
+
+        assert isinstance(result, ToolMessage)
+        # Should use fallback instead of externalization
+        assert "Persistent storage unavailable" in result.content or "omitted" in result.content
+
+
+class TestWrapToolCallCommand:
+    def test_command_messages_are_patched(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = ToolOutputConfig(externalize_min_chars=50, preview_head_chars=20, preview_tail_chars=10)
+            mw = ToolOutputBudgetMiddleware(config=config)
+            tool_msg = _tm("x" * 200, name="present_files")
+            command = Command(update={"messages": [tool_msg], "artifacts": ["/mnt/report.html"]})
+            req = _make_request(tool_name="present_files", outputs_path=tmpdir)
+
+            result = mw.wrap_tool_call(req, lambda _: command)
+
+            assert isinstance(result, Command)
+            assert result is not command
+            assert result.update["artifacts"] == ["/mnt/report.html"]
+            new_msg = result.update["messages"][0]
+            assert isinstance(new_msg, ToolMessage)
+            assert "Full present_files output saved to" in new_msg.content
+
+    def test_command_without_messages_unchanged(self):
+        config = ToolOutputConfig(externalize_min_chars=10)
+        mw = ToolOutputBudgetMiddleware(config=config)
+        command = Command(update={"key": "value"})
+        result = mw.wrap_tool_call(_make_request(), lambda _: command)
+        assert result is command
+
+
+class TestWrapToolCallEdgeCases:
+    def test_none_content_passes_through(self):
+        config = ToolOutputConfig(externalize_min_chars=10, fallback_max_chars=20)
+        mw = ToolOutputBudgetMiddleware(config=config)
+        msg = ToolMessage(content=None, name="tool", tool_call_id="tc-1")
+
+        result = mw.wrap_tool_call(_make_request(), lambda _: msg)
+
+        assert result is msg
+
+    def test_empty_string_passes_through(self):
+        config = ToolOutputConfig(externalize_min_chars=10, fallback_max_chars=20)
+        mw = ToolOutputBudgetMiddleware(config=config)
+        msg = _tm("", name="tool")
+
+        result = mw.wrap_tool_call(_make_request(), lambda _: msg)
+
+        assert result is msg
+
+    def test_multimodal_content_skipped(self):
+        config = ToolOutputConfig(externalize_min_chars=10, fallback_max_chars=20)
+        mw = ToolOutputBudgetMiddleware(config=config)
+        content = [{"type": "image", "data": "x" * 100}]
+        msg = ToolMessage(content=content, name="tool", tool_call_id="tc-1")
+
+        result = mw.wrap_tool_call(_make_request(), lambda _: msg)
+
+        assert result is msg
+
+    def test_exactly_at_threshold_passes_through(self):
+        config = ToolOutputConfig(externalize_min_chars=100, fallback_max_chars=100)
+        mw = ToolOutputBudgetMiddleware(config=config)
+        msg = _tm("x" * 100, name="tool")
+
+        result = mw.wrap_tool_call(_make_request(), lambda _: msg)
+
+        assert result is msg
+
+    def test_one_char_over_threshold_triggers(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = ToolOutputConfig(externalize_min_chars=100)
+            mw = ToolOutputBudgetMiddleware(config=config)
+            msg = _tm("x" * 101, name="tool")
+            req = _make_request(outputs_path=tmpdir)
+
+            result = mw.wrap_tool_call(req, lambda _: msg)
+
+            assert result is not msg
+
+    def test_chinese_content_preserved(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = ToolOutputConfig(externalize_min_chars=50, preview_head_chars=20, preview_tail_chars=10)
+            mw = ToolOutputBudgetMiddleware(config=config)
+            content = "你好世界" * 50
+            msg = _tm(content, name="tool")
+            req = _make_request(outputs_path=tmpdir)
+
+            result = mw.wrap_tool_call(req, lambda _: msg)
+
+            assert isinstance(result, ToolMessage)
+            # File should contain the full Chinese content
+            storage_dir = os.path.join(tmpdir, ".tool-results")
+            files = os.listdir(storage_dir)
+            with open(os.path.join(storage_dir, files[0]), encoding="utf-8") as f:
+                assert f.read() == content
+
+    def test_no_runtime_state_uses_fallback(self):
+        config = ToolOutputConfig(
+            externalize_min_chars=50,
+            fallback_max_chars=500,
+            fallback_head_chars=100,
+            fallback_tail_chars=50,
+        )
+        mw = ToolOutputBudgetMiddleware(config=config)
+        content = "x" * 1000
+        msg = _tm(content, name="tool")
+        req = SimpleNamespace(
+            tool_call={"name": "tool", "id": "tc-1"},
+            runtime=None,
+        )
+
+        result = mw.wrap_tool_call(req, lambda _: msg)
+
+        assert isinstance(result, ToolMessage)
+        assert "omitted" in result.content
+        assert len(result.content) <= 500
+
+
+# ===========================================================================
+# MCP content_and_artifact format tests
+# ===========================================================================
+
+
+class TestMCPContentAndArtifact:
+    """MCP tools return content as list of content blocks, not plain strings."""
+
+    def test_text_content_blocks_are_budgeted(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = ToolOutputConfig(externalize_min_chars=50, preview_head_chars=20, preview_tail_chars=10)
+            mw = ToolOutputBudgetMiddleware(config=config)
+            content = [{"type": "text", "text": "x" * 200}]
+            msg = ToolMessage(content=content, name="mcp_tool", tool_call_id="tc-mcp")
+            req = _make_request(tool_name="mcp_tool", outputs_path=tmpdir)
+
+            result = mw.wrap_tool_call(req, lambda _: msg)
+
+            assert result is not msg
+            assert isinstance(result.content, str)
+            assert "Full mcp_tool output saved to" in result.content
+            assert result.tool_call_id == "tc-mcp"
+
+    def test_multiple_text_blocks_joined_and_budgeted(self):
+        config = ToolOutputConfig(externalize_min_chars=50, fallback_max_chars=500, fallback_head_chars=100, fallback_tail_chars=50)
+        mw = ToolOutputBudgetMiddleware(config=config)
+        content = [{"type": "text", "text": "a" * 300}, {"type": "text", "text": "b" * 300}]
+        msg = ToolMessage(content=content, name="mcp_tool", tool_call_id="tc-mcp2")
+        req = _make_request(tool_name="mcp_tool")
+
+        result = mw.wrap_tool_call(req, lambda _: msg)
+
+        assert result is not msg
+        assert "omitted" in result.content
+
+    def test_image_content_blocks_are_skipped(self):
+        config = ToolOutputConfig(externalize_min_chars=10, fallback_max_chars=20)
+        mw = ToolOutputBudgetMiddleware(config=config)
+        content = [{"type": "image", "data": "base64data" * 100}]
+        msg = ToolMessage(content=content, name="mcp_tool", tool_call_id="tc-img")
+        req = _make_request(tool_name="mcp_tool")
+
+        result = mw.wrap_tool_call(req, lambda _: msg)
+
+        assert result is msg
+
+    def test_mixed_text_and_image_blocks_are_skipped(self):
+        config = ToolOutputConfig(externalize_min_chars=10)
+        mw = ToolOutputBudgetMiddleware(config=config)
+        content = [{"type": "text", "text": "x" * 100}, {"type": "image", "data": "base64"}]
+        msg = ToolMessage(content=content, name="mcp_tool", tool_call_id="tc-mix")
+        req = _make_request(tool_name="mcp_tool")
+
+        result = mw.wrap_tool_call(req, lambda _: msg)
+
+        assert result is msg
+
+    def test_small_text_blocks_pass_through(self):
+        config = ToolOutputConfig(externalize_min_chars=1000)
+        mw = ToolOutputBudgetMiddleware(config=config)
+        content = [{"type": "text", "text": "small result"}]
+        msg = ToolMessage(content=content, name="mcp_tool", tool_call_id="tc-sm")
+        req = _make_request(tool_name="mcp_tool")
+
+        result = mw.wrap_tool_call(req, lambda _: msg)
+
+        assert result is msg
+
+
+# ===========================================================================
+# Async path tests
+# ===========================================================================
+
+
+class TestAsyncPaths:
+    @pytest.mark.anyio
+    async def test_async_tool_call_externalized(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = ToolOutputConfig(externalize_min_chars=50, preview_head_chars=20, preview_tail_chars=10)
+            mw = ToolOutputBudgetMiddleware(config=config)
+            content = "x" * 200
+            msg = _tm(content, name="async_tool")
+            req = _make_request(tool_name="async_tool", outputs_path=tmpdir)
+
+            async def handler(_):
+                return msg
+
+            result = await mw.awrap_tool_call(req, handler)
+
+            assert isinstance(result, ToolMessage)
+            assert result is not msg
+            assert "Full async_tool output saved to" in result.content
+
+    @pytest.mark.anyio
+    async def test_async_model_call_patches_history(self):
+        config = ToolOutputConfig(fallback_max_chars=500, fallback_head_chars=100, fallback_tail_chars=50)
+        mw = ToolOutputBudgetMiddleware(config=config)
+        oversized = _tm("h" * 1000, name="tool", tool_call_id="tc-h")
+        request = ModelRequest(model=None, messages=[oversized], tools=[], state={})
+        captured: dict[str, ModelRequest] = {}
+
+        async def handler(req):
+            captured["request"] = req
+            return []
+
+        await mw.awrap_model_call(request, handler)
+
+        forwarded = captured["request"]
+        assert forwarded is not request
+        msg = forwarded.messages[0]
+        assert isinstance(msg, ToolMessage)
+        assert "omitted" in msg.content
+
+
+# ===========================================================================
+# wrap_model_call — historical message patching
+# ===========================================================================
+
+
+class TestWrapModelCall:
+    def test_oversized_historical_messages_truncated(self):
+        config = ToolOutputConfig(fallback_max_chars=500, fallback_head_chars=100, fallback_tail_chars=50)
+        mw = ToolOutputBudgetMiddleware(config=config)
+        oversized = _tm("q" * 1000, name="tool", tool_call_id="tc-q")
+        request = ModelRequest(model=None, messages=[oversized], tools=[], state={})
+        captured: dict[str, ModelRequest] = {}
+
+        def handler(req):
+            captured["request"] = req
+            return []
+
+        mw.wrap_model_call(request, handler)
+
+        forwarded = captured["request"]
+        assert forwarded is not request
+        msg = forwarded.messages[0]
+        assert isinstance(msg, ToolMessage)
+        assert "omitted" in msg.content
+        assert len(msg.content) < len(oversized.content) + 150
+
+    def test_small_historical_messages_unchanged(self):
+        config = ToolOutputConfig(fallback_max_chars=1000)
+        mw = ToolOutputBudgetMiddleware(config=config)
+        small = _tm("small", name="tool")
+        request = ModelRequest(model=None, messages=[small], tools=[], state={})
+        captured: dict[str, ModelRequest] = {}
+
+        def handler(req):
+            captured["request"] = req
+            return []
+
+        mw.wrap_model_call(request, handler)
+
+        assert captured["request"] is request
+
+    def test_exempt_tools_in_history_unchanged(self):
+        config = ToolOutputConfig(fallback_max_chars=50)
+        mw = ToolOutputBudgetMiddleware(config=config)
+        read_msg = _tm("x" * 200, name="read_file", tool_call_id="tc-r")
+        request = ModelRequest(model=None, messages=[read_msg], tools=[], state={})
+        captured: dict[str, ModelRequest] = {}
+
+        def handler(req):
+            captured["request"] = req
+            return []
+
+        mw.wrap_model_call(request, handler)
+
+        assert captured["request"] is request
+
+    def test_non_tool_messages_preserved(self):
+        config = ToolOutputConfig(fallback_max_chars=500, fallback_head_chars=100, fallback_tail_chars=50)
+        mw = ToolOutputBudgetMiddleware(config=config)
+        human = HumanMessage(content="x" * 200)
+        ai = AIMessage(content="y" * 200)
+        oversized_tool = _tm("z" * 1000, name="tool")
+        request = ModelRequest(model=None, messages=[human, ai, oversized_tool], tools=[], state={})
+        captured: dict[str, ModelRequest] = {}
+
+        def handler(req):
+            captured["request"] = req
+            return []
+
+        mw.wrap_model_call(request, handler)
+
+        msgs = captured["request"].messages
+        assert msgs[0] is human
+        assert msgs[1] is ai
+        assert isinstance(msgs[2], ToolMessage)
+        assert "omitted" in msgs[2].content
+
+
+class TestToolOutputBlobRestore:
+    @staticmethod
+    def _request(tmp_path, data: bytes, *, virtual_path: str | None = None) -> tuple[ModelRequest, BlobRef]:
+        ref = BlobRef(
+            sha256=hashlib.sha256(data).hexdigest(),
+            size=len(data),
+            kind="tool-output",
+            content_type="text/plain; charset=utf-8",
+        )
+        path = virtual_path or "/mnt/user-data/outputs/.tool-results/remote_executor-tc-1.txt"
+        message = ToolMessage(
+            content=f"[Full remote_executor output saved to {path}]",
+            name="remote_executor",
+            tool_call_id="tc-1",
+            additional_kwargs={
+                TOOL_OUTPUT_BLOB_KEY: {
+                    "version": 1,
+                    "ref": ref.model_dump(mode="json", exclude_none=True),
+                    "virtual_path": path,
+                    "storage_subdir": ".tool-results",
+                    "encoding": "utf-8",
+                }
+            },
+        )
+        request = ModelRequest(
+            model=None,
+            messages=[message],
+            tools=[],
+            state={"thread_data": {"outputs_path": str(tmp_path)}},
+        )
+        return request, ref
+
+    def test_model_call_restores_exact_bytes_on_another_gateway(self, monkeypatch, tmp_path):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        data = "跨节点完整输出\nsecond line".encode()
+        request, ref = self._request(tmp_path, data)
+        reads: list[BlobRef] = []
+
+        class SharedStore:
+            def get_bytes(self, requested: BlobRef) -> bytes:
+                reads.append(requested)
+                return data
+
+        monkeypatch.setattr(mod, "get_blob_store_if_enabled", lambda: SharedStore())
+        destination = tmp_path / ".tool-results" / "remote_executor-tc-1.txt"
+
+        def handler(prepared):
+            assert prepared is request
+            assert destination.read_bytes() == data
+            return []
+
+        ToolOutputBudgetMiddleware().wrap_model_call(request, handler)
+
+        assert reads == [ref]
+
+    def test_digest_matching_local_file_avoids_blob_store(self, monkeypatch, tmp_path):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        data = b"already materialized"
+        request, _ = self._request(tmp_path, data)
+        destination = tmp_path / ".tool-results" / "remote_executor-tc-1.txt"
+        destination.parent.mkdir()
+        destination.write_bytes(data)
+
+        def store_must_not_be_resolved():
+            raise AssertionError("matching local bytes should stay on the fast path")
+
+        monkeypatch.setattr(mod, "get_blob_store_if_enabled", store_must_not_be_resolved)
+
+        ToolOutputBudgetMiddleware().wrap_model_call(request, lambda prepared: [])
+
+        assert destination.read_bytes() == data
+
+    def test_wrong_size_local_file_skips_read_before_restore(self, monkeypatch, tmp_path):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        data = b"restored shared output"
+        request, _ = self._request(tmp_path, data)
+        destination = tmp_path / ".tool-results" / "remote_executor-tc-1.txt"
+        destination.parent.mkdir()
+        destination.write_bytes(b"wrong size")
+        builtin_open = open
+
+        def fail_if_stale_file_is_read(file, mode="r", *args, **kwargs):
+            if os.fspath(file) == os.fspath(destination) and mode == "rb":
+                raise AssertionError("wrong-size local file should not be read")
+            return builtin_open(file, mode, *args, **kwargs)
+
+        class SharedStore:
+            def get_bytes(self, requested: BlobRef) -> bytes:
+                return data
+
+        monkeypatch.setattr(mod, "open", fail_if_stale_file_is_read, raising=False)
+        monkeypatch.setattr(mod, "get_blob_store_if_enabled", lambda: SharedStore())
+
+        ToolOutputBudgetMiddleware().wrap_model_call(request, lambda prepared: [])
+
+        assert destination.read_bytes() == data
+
+    def test_invalid_virtual_path_is_ignored_without_blob_read(self, monkeypatch, tmp_path):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        request, _ = self._request(
+            tmp_path,
+            b"must-not-escape",
+            virtual_path="/mnt/user-data/outputs/.tool-results/../escape.txt",
+        )
+
+        class StoreMustNotBeRead:
+            def get_bytes(self, requested: BlobRef) -> bytes:
+                raise AssertionError(f"untrusted path triggered a blob read: {requested}")
+
+        monkeypatch.setattr(mod, "get_blob_store_if_enabled", lambda: StoreMustNotBeRead())
+
+        ToolOutputBudgetMiddleware().wrap_model_call(request, lambda prepared: [])
+
+        assert not (tmp_path / "escape.txt").exists()
+
+    def test_blob_read_failure_does_not_block_model_call(self, monkeypatch, tmp_path):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        request, _ = self._request(tmp_path, b"missing")
+
+        class FailingStore:
+            def get_bytes(self, requested: BlobRef) -> bytes:
+                raise BlobReadError("temporarily unavailable")
+
+        monkeypatch.setattr(mod, "get_blob_store_if_enabled", lambda: FailingStore())
+        called = []
+        destination = tmp_path / ".tool-results" / "remote_executor-tc-1.txt"
+        destination.parent.mkdir()
+        destination.write_bytes(b"corrupt local copy")
+
+        ToolOutputBudgetMiddleware().wrap_model_call(request, lambda prepared: called.append(prepared) or [])
+
+        assert called == [request]
+        assert not destination.exists()
+
+    @pytest.mark.anyio
+    async def test_async_model_call_restores_before_handler(self, monkeypatch, tmp_path):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        data = b"async shared output"
+        request, _ = self._request(tmp_path, data)
+
+        class SharedStore:
+            def get_bytes(self, requested: BlobRef) -> bytes:
+                return data
+
+        monkeypatch.setattr(mod, "get_blob_store_if_enabled", lambda: SharedStore())
+        destination = tmp_path / ".tool-results" / "remote_executor-tc-1.txt"
+
+        async def handler(prepared):
+            assert destination.read_bytes() == data
+            return []
+
+        await ToolOutputBudgetMiddleware().awrap_model_call(request, handler)
+
+
+# ===========================================================================
+# Config integration
+# ===========================================================================
+
+
+class TestFromAppConfig:
+    def test_from_app_config_with_tool_output(self):
+        config = AppConfig(
+            sandbox=SandboxConfig(use="test"),
+            tool_output={"externalize_min_chars": 5000, "preview_head_chars": 500},
+        )
+        mw = ToolOutputBudgetMiddleware.from_app_config(config)
+        assert mw._config.externalize_min_chars == 5000
+        assert mw._config.preview_head_chars == 500
+
+    def test_from_app_config_defaults(self):
+        config = AppConfig(sandbox=SandboxConfig(use="test"))
+        mw = ToolOutputBudgetMiddleware.from_app_config(config)
+        assert mw._config.externalize_min_chars == 12000
+
+
+class TestPatchModelMessages:
+    def test_returns_none_when_no_changes(self):
+        config = ToolOutputConfig(fallback_max_chars=1000)
+        messages = [_tm("short", name="tool")]
+        assert _patch_model_messages(messages, config) is None
+
+    def test_patches_oversized_messages(self):
+        config = ToolOutputConfig(fallback_max_chars=500, fallback_head_chars=100, fallback_tail_chars=50)
+        messages = [_tm("x" * 1000, name="tool")]
+        result = _patch_model_messages(messages, config)
+        assert result is not None
+        assert len(result) == 1
+        assert "omitted" in result[0].content
+
+    def test_patches_oversized_structured_json_history(self):
+        config = ToolOutputConfig(fallback_max_chars=500, fallback_head_chars=100, fallback_tail_chars=50)
+        messages = [ToolMessage(content=[{"type": "json", "json": {"rows": ["x" * 1000]}}], name="query_rows", tool_call_id="tc-1")]
+        result = _patch_model_messages(messages, config)
+        assert result is not None
+        assert isinstance(result[0].content, str)
+        assert "omitted" in result[0].content
+
+
+# ===========================================================================
+# Pre-scan helpers (_effective_trigger / _tool_message_over_budget / _needs_budget)
+# These guard the fast-path optimization — a false negative here is a real bug
+# (budgeting silently skipped), so per-tool overrides must be honored.
+# ===========================================================================
+
+
+class TestPreScanHelpers:
+    def test_effective_trigger_uses_global_externalize(self):
+        config = ToolOutputConfig(externalize_min_chars=12000, fallback_max_chars=30000)
+        # smallest of the two thresholds wins
+        assert _effective_trigger("any_tool", config) == 12000
+
+    def test_effective_trigger_respects_per_tool_override(self):
+        config = ToolOutputConfig(externalize_min_chars=50000, fallback_max_chars=0, tool_overrides={"sensitive": 100})
+        assert _effective_trigger("sensitive", config) == 100
+        # other tools fall back to the (high) global
+        assert _effective_trigger("other", config) == 50000
+
+    def test_effective_trigger_per_tool_zero_falls_to_fallback(self):
+        config = ToolOutputConfig(externalize_min_chars=50, tool_overrides={"bash": 0}, fallback_max_chars=200)
+        # externalize disabled for bash → only fallback can trigger
+        assert _effective_trigger("bash", config) == 200
+
+    def test_effective_trigger_returns_negative_when_fully_disabled(self):
+        config = ToolOutputConfig(externalize_min_chars=0, fallback_max_chars=0)
+        assert _effective_trigger("any", config) == -1
+
+    def test_pre_scan_does_not_short_circuit_per_tool_override(self):
+        """Regression: pre-scan must honor per-tool overrides, not just global threshold."""
+        config = ToolOutputConfig(externalize_min_chars=50000, fallback_max_chars=0, tool_overrides={"sensitive": 100})
+        msg = _tm("x" * 500, name="sensitive")
+        # 500 < global 50000 but > per-tool 100 → must still be flagged
+        assert _tool_message_over_budget(msg, config) is True
+        assert _needs_budget(msg, config) is True
+
+    def test_exempt_tool_never_over_budget(self):
+        config = ToolOutputConfig(externalize_min_chars=10, fallback_max_chars=20, exempt_tools=["read_file"])
+        msg = _tm("x" * 1000, name="read_file")
+        assert _tool_message_over_budget(msg, config) is False
+
+    def test_model_call_pre_scan_skips_when_nothing_oversized(self):
+        """_patch_model_messages returns None (no list rebuild) when all messages are small."""
+        config = ToolOutputConfig(externalize_min_chars=12000, fallback_max_chars=30000)
+        messages = [_tm("small", name="tool"), HumanMessage(content="hi"), _tm("also small", name="bash")]
+        assert _patch_model_messages(messages, config) is None
+
+
+# ===========================================================================
+# Middleware ordering in the chain
+# ===========================================================================
+
+
+class TestMiddlewareChainIntegration:
+    def test_budget_middleware_is_first_in_chain(self):
+        from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
+
+        app_config = AppConfig(sandbox=SandboxConfig(use="test"))
+        middlewares = build_subagent_runtime_middlewares(app_config=app_config, lazy_init=False)
+
+        # InputSanitizationMiddleware is the outermost wrap_model_call wrapper;
+        # KnowledgeScopeMiddleware cleans model input immediately inside it;
+        # ToolOutputBudgetMiddleware remains immediately inside the scope guard.
+        from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
+        from deerflow.agents.middlewares.knowledge_scope_middleware import KnowledgeScopeMiddleware
+
+        assert isinstance(middlewares[0], InputSanitizationMiddleware)
+        assert isinstance(middlewares[1], KnowledgeScopeMiddleware)
+        assert isinstance(middlewares[2], ToolOutputBudgetMiddleware)
+
+    def test_budget_middleware_in_lead_chain(self):
+        from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
+
+        app_config = AppConfig(sandbox=SandboxConfig(use="test"))
+        middlewares = build_lead_runtime_middlewares(app_config=app_config, lazy_init=False)
+
+        from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
+        from deerflow.agents.middlewares.knowledge_scope_middleware import KnowledgeScopeMiddleware
+
+        assert isinstance(middlewares[0], InputSanitizationMiddleware)
+        assert isinstance(middlewares[1], KnowledgeScopeMiddleware)
+        assert isinstance(middlewares[2], ToolOutputBudgetMiddleware)
+
+
+# ===========================================================================
+# Config version bump
+# ===========================================================================
+
+
+class TestConfigVersion:
+    def test_config_version_bumped(self):
+        import yaml
+
+        example_path = os.path.join(os.path.dirname(__file__), "..", "..", "config.example.yaml")
+        if os.path.exists(example_path):
+            with open(example_path, encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+            assert data.get("config_version", 0) >= 11
+
+    def test_config_example_has_tool_output_section(self):
+        import yaml
+
+        example_path = os.path.join(os.path.dirname(__file__), "..", "..", "config.example.yaml")
+        if os.path.exists(example_path):
+            with open(example_path, encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+            assert "tool_output" in data
+            tool_output = data["tool_output"]
+            assert tool_output["enabled"] is True
+            assert tool_output["externalize_min_chars"] == 12000
+            assert "read_file" in tool_output["exempt_tools"]
+
+
+# ===========================================================================
+# externalize into sandbox for non-mounted (remote) sandboxes
+# ===========================================================================
+
+
+class _FakeSandbox:
+    """In-memory stand-in for a Sandbox. Records calls and supports failure injection."""
+
+    def __init__(self, *, write_ok: bool = True, check_result: str | None = None) -> None:
+        self.commands: list[str] = []
+        self.writes: list[tuple[str, str]] = []
+        self.files: dict[str, str] = {}
+        self._write_ok = write_ok
+        self._check_result = check_result
+
+    def execute_command(
+        self,
+        command: str,
+        env: dict[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> str:
+        del env, timeout
+        self.commands.append(command)
+        if self._check_result is not None:
+            return self._check_result
+        # Simulate shell execution of:
+        # test -f <path> && test "$(wc -c < <path>)" -eq <expected> && echo OK || echo MISSING
+        match = re.search(r'test -f (\S+) && test "\$\(wc -c < \S+\)" -eq (\d+)', command)
+        if match:
+            path, expected_bytes = match.group(1), int(match.group(2))
+            if path in self.files:
+                actual_bytes = len(self.files[path].encode("utf-8"))
+                if actual_bytes == expected_bytes:
+                    return "OK"
+            return "MISSING"
+        return ""
+
+    def write_file(self, path: str, content: str, append: bool = False) -> None:
+        if not self._write_ok:
+            raise RuntimeError("simulated write failure")
+        self.writes.append((path, content))
+        if append and path in self.files:
+            self.files[path] += content
+        else:
+            self.files[path] = content
+
+
+class _FakeProvider:
+    """Minimal SandboxProvider stand-in for monkeypatching get_sandbox_provider."""
+
+    def __init__(self, *, uses_thread_data_mounts: bool, sandbox: _FakeSandbox | None = None) -> None:
+        self.uses_thread_data_mounts = uses_thread_data_mounts
+        self._sandbox = sandbox
+
+    def get(self, sandbox_id: str):
+        return self._sandbox
+
+
+class TestExternalizeToSandbox:
+    def test_writes_and_returns_virtual_path(self):
+        from deerflow.agents.middlewares.tool_output_budget_middleware import (
+            _externalize_to_sandbox,
+        )
+
+        sb = _FakeSandbox()
+        result = _externalize_to_sandbox(
+            "x" * 100,
+            tool_name="bash",
+            tool_call_id="tc-1",
+            storage_subdir=".tool-results",
+            sandbox=sb,
+        )
+        assert result is not None
+        assert result.startswith("/mnt/user-data/outputs/.tool-results/bash-")
+        assert result.endswith(".log")
+        assert any(c.startswith("mkdir -p ") for c in sb.commands)
+        assert any("wc -c" in c for c in sb.commands)
+        assert any("-eq 100" in c for c in sb.commands)
+        assert sb.writes and sb.writes[0][0] == result
+        assert sb.writes[0][1] == "x" * 100
+
+    def test_returns_none_when_write_raises(self):
+        from deerflow.agents.middlewares.tool_output_budget_middleware import (
+            _externalize_to_sandbox,
+        )
+
+        result = _externalize_to_sandbox(
+            "x" * 100,
+            tool_name="web_fetch",
+            tool_call_id="tc-2",
+            storage_subdir=".tool-results",
+            sandbox=_FakeSandbox(write_ok=False),
+        )
+        assert result is None
+
+    def test_returns_none_when_validation_fails(self):
+        from deerflow.agents.middlewares.tool_output_budget_middleware import (
+            _externalize_to_sandbox,
+        )
+
+        result = _externalize_to_sandbox(
+            "x" * 100,
+            tool_name="bash",
+            tool_call_id="tc-3",
+            storage_subdir=".tool-results",
+            sandbox=_FakeSandbox(check_result="MISSING"),
+        )
+        assert result is None
+
+    def test_returns_none_when_byte_size_is_mismatched(self):
+        """A truncated write (fewer bytes than expected) fails validation and returns None."""
+        from deerflow.agents.middlewares.tool_output_budget_middleware import (
+            _externalize_to_sandbox,
+        )
+
+        class _TruncatingSandbox(_FakeSandbox):
+            def write_file(self, path: str, content: str, append: bool = False) -> None:
+                # Simulate a truncated write (e.g. disk full / broken pipe) where only half lands
+                super().write_file(path, content[: len(content) // 2], append=append)
+
+        sb = _TruncatingSandbox()
+        result = _externalize_to_sandbox(
+            "x" * 100,
+            tool_name="bash",
+            tool_call_id="tc-3-truncated",
+            storage_subdir=".tool-results",
+            sandbox=sb,
+        )
+        assert result is None
+        assert any("-eq 100" in c for c in sb.commands)
+        # Confirm the file was actually written with half size, triggering the real byte mismatch
+        assert sb.writes and len(sb.writes[0][1]) == 50
+        assert any(len(content) == 50 for content in sb.files.values())
+
+    def test_rejects_unsafe_storage_subdir(self):
+        from deerflow.agents.middlewares.tool_output_budget_middleware import (
+            _externalize_to_sandbox,
+        )
+
+        sb = _FakeSandbox()
+        assert (
+            _externalize_to_sandbox(
+                "x" * 100,
+                tool_name="bash",
+                tool_call_id="tc-4",
+                storage_subdir="../escape",
+                sandbox=sb,
+            )
+            is None
+        )
+        assert (
+            _externalize_to_sandbox(
+                "x" * 100,
+                tool_name="bash",
+                tool_call_id="tc-5",
+                storage_subdir="/abs/path",
+                sandbox=sb,
+            )
+            is None
+        )
+        # Sandbox must not be touched when the subdir is rejected up-front.
+        assert sb.commands == []
+        assert sb.writes == []
+
+    def test_default_extension_for_unknown_tool(self):
+        from deerflow.agents.middlewares.tool_output_budget_middleware import (
+            _externalize_to_sandbox,
+        )
+
+        result = _externalize_to_sandbox(
+            "data",
+            tool_name="unknown_tool",
+            tool_call_id="tc-6",
+            storage_subdir=".tool-results",
+            sandbox=_FakeSandbox(),
+        )
+        assert result is not None and result.endswith(".txt")
+
+
+class TestBudgetContentSandboxDispatch:
+    """_budget_content must branch on uses_thread_data_mounts (issue #3416)."""
+
+    def test_mounted_sandbox_uses_host_disk(self, monkeypatch, tmp_path):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        sb = _FakeSandbox()
+        monkeypatch.setattr(
+            mod,
+            "get_sandbox_provider",
+            lambda: _FakeProvider(uses_thread_data_mounts=True, sandbox=sb),
+        )
+        config = ToolOutputConfig(externalize_min_chars=50, preview_head_chars=20, preview_tail_chars=10)
+        result = mod._budget_content(
+            "x" * 500,
+            tool_name="remote_executor",
+            tool_call_id="tc-m",
+            outputs_path=str(tmp_path),
+            config=config,
+            sandbox=sb,
+        )
+        assert result is not None
+        assert "Full remote_executor output saved to /mnt/user-data/outputs/" in result[0]
+        assert result[1] == "externalized"
+        # Mounted path must NOT touch the sandbox.
+        assert sb.commands == []
+        assert sb.writes == []
+        # And the host file must exist.
+        storage_dir = tmp_path / ".tool-results"
+        assert storage_dir.is_dir()
+        assert len(list(storage_dir.iterdir())) == 1
+
+    def test_non_mounted_sandbox_writes_to_sandbox(self, monkeypatch, tmp_path):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        sb = _FakeSandbox()
+        blob_calls = {"count": 0}
+
+        def blob_store_must_not_be_resolved():
+            blob_calls["count"] += 1
+            raise AssertionError("sandbox-resident output is outside the host blob migration")
+
+        monkeypatch.setattr(
+            mod,
+            "get_sandbox_provider",
+            lambda: _FakeProvider(uses_thread_data_mounts=False, sandbox=sb),
+        )
+        monkeypatch.setattr(mod, "get_blob_store_if_enabled", blob_store_must_not_be_resolved)
+        config = ToolOutputConfig(externalize_min_chars=50, preview_head_chars=20, preview_tail_chars=10)
+        result = mod._budget_content(
+            "x" * 500,
+            tool_name="remote_executor",
+            tool_call_id="tc-n",
+            outputs_path=str(tmp_path),  # present, but ignored on non-mounted path
+            config=config,
+            sandbox=sb,
+        )
+        assert result is not None
+        assert "Full remote_executor output saved to /mnt/user-data/outputs/" in result[0]
+        assert result[1] == "externalized"
+        # Non-mounted path MUST write into the sandbox.
+        assert sb.writes and sb.writes[0][1] == "x" * 500
+        # And MUST NOT touch the host.
+        assert not (tmp_path / ".tool-results").exists()
+        assert blob_calls["count"] == 0
+
+    def test_non_mounted_without_sandbox_falls_back(self, monkeypatch):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        monkeypatch.setattr(
+            mod,
+            "get_sandbox_provider",
+            lambda: _FakeProvider(uses_thread_data_mounts=False, sandbox=None),
+        )
+        config = ToolOutputConfig(
+            externalize_min_chars=50,
+            fallback_max_chars=500,
+            fallback_head_chars=100,
+            fallback_tail_chars=50,
+        )
+        result = mod._budget_content(
+            "x" * 5000,
+            tool_name="web_search",
+            tool_call_id="tc-fb",
+            outputs_path=None,
+            config=config,
+            sandbox=None,
+        )
+        assert result is not None
+        assert "Persistent storage unavailable" in result[0]
+        assert result[1] == "truncated"
+
+
+class TestResolveSandbox:
+    def test_returns_none_when_no_state(self):
+        from deerflow.agents.middlewares.tool_output_budget_middleware import _resolve_sandbox
+
+        req = SimpleNamespace(runtime=None)
+        assert _resolve_sandbox(req) is None
+
+    def test_returns_none_when_state_has_no_sandbox(self):
+        from deerflow.agents.middlewares.tool_output_budget_middleware import _resolve_sandbox
+
+        req = SimpleNamespace(runtime=SimpleNamespace(state={}))
+        assert _resolve_sandbox(req) is None
+
+    def test_returns_none_when_sandbox_id_missing(self):
+        from deerflow.agents.middlewares.tool_output_budget_middleware import _resolve_sandbox
+
+        req = SimpleNamespace(runtime=SimpleNamespace(state={"sandbox": {}}))
+        assert _resolve_sandbox(req) is None
+
+    def test_returns_sandbox_from_provider(self, monkeypatch):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        sb = _FakeSandbox()
+        monkeypatch.setattr(
+            mod,
+            "get_sandbox_provider",
+            lambda: _FakeProvider(uses_thread_data_mounts=False, sandbox=sb),
+        )
+        req = SimpleNamespace(runtime=SimpleNamespace(state={"sandbox": {"sandbox_id": "sb-1"}}))
+        assert mod._resolve_sandbox(req) is sb
+
+    def test_returns_sandbox_from_provider_when_overwrite_wrapped(self, monkeypatch):
+        from langgraph.types import Overwrite
+
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        sb = _FakeSandbox()
+        monkeypatch.setattr(
+            mod,
+            "get_sandbox_provider",
+            lambda: _FakeProvider(uses_thread_data_mounts=False, sandbox=sb),
+        )
+        # Fork-restored state delivers sandbox wrapped in Overwrite
+        req = SimpleNamespace(runtime=SimpleNamespace(state={"sandbox": Overwrite({"sandbox_id": "sb-fork"})}))
+        assert mod._resolve_sandbox(req) is sb
+
+    def test_returns_none_on_provider_exception(self, monkeypatch):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        class _Boom:
+            def get(self, sandbox_id):
+                raise RuntimeError("boom")
+
+        monkeypatch.setattr(mod, "get_sandbox_provider", lambda: _Boom())
+        req = SimpleNamespace(runtime=SimpleNamespace(state={"sandbox": {"sandbox_id": "sb-x"}}))
+        assert mod._resolve_sandbox(req) is None
+
+
+class TestWrapToolCallSandboxIntegration:
+    """End-to-end via wrap_tool_call for the non-mounted path (issue #3416)."""
+
+    def test_oversized_output_lands_in_sandbox_not_host(self, monkeypatch, tmp_path):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        sb = _FakeSandbox()
+        monkeypatch.setattr(
+            mod,
+            "get_sandbox_provider",
+            lambda: _FakeProvider(uses_thread_data_mounts=False, sandbox=sb),
+        )
+
+        config = ToolOutputConfig(externalize_min_chars=50, preview_head_chars=20, preview_tail_chars=10)
+        mw = ToolOutputBudgetMiddleware(config=config)
+        content = "x" * 500
+        msg = _tm(content, name="remote_executor")
+        # Request carries BOTH outputs_path (host) AND a sandbox_id; the
+        # non-mounted branch must ignore outputs_path and write into sandbox.
+        req = SimpleNamespace(
+            tool_call={"name": "remote_executor", "id": "tc-1"},
+            runtime=SimpleNamespace(
+                state={
+                    "thread_data": {"outputs_path": str(tmp_path)},
+                    "sandbox": {"sandbox_id": "sb-1"},
+                }
+            ),
+        )
+
+        result = mw.wrap_tool_call(req, lambda _: msg)
+
+        assert isinstance(result, ToolMessage)
+        assert "Full remote_executor output saved to /mnt/user-data/outputs/" in result.content
+        assert sb.writes and sb.writes[0][1] == content
+        # Host disk must not have been written.
+        assert not (tmp_path / ".tool-results").exists()
+
+
+class TestBudgetContentNoSandboxNoProviderCall:
+    """Without a sandbox, _budget_content must NOT call get_sandbox_provider.
+
+    This is the legacy host-disk path (and the CI-without-config.yaml path):
+    touching the provider would raise and force inline fallback, regressing
+    issue #3416's fix and breaking environments that never opt into sandbox.
+    """
+
+    def test_no_provider_call_when_sandbox_absent(self, monkeypatch, tmp_path):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        called = {"n": 0}
+
+        def boom():
+            called["n"] += 1
+            raise RuntimeError("provider must not be called on the legacy path")
+
+        monkeypatch.setattr(mod, "get_sandbox_provider", boom)
+        config = ToolOutputConfig(externalize_min_chars=50, preview_head_chars=20, preview_tail_chars=10)
+        result = mod._budget_content(
+            "x" * 500,
+            tool_name="remote_executor",
+            tool_call_id="tc-legacy",
+            outputs_path=str(tmp_path),
+            config=config,
+            sandbox=None,
+        )
+        assert result is not None
+        assert "Full remote_executor output saved to /mnt/user-data/outputs/" in result[0]
+        assert result[1] == "externalized"
+        assert called["n"] == 0
+        assert (tmp_path / ".tool-results").is_dir()
+
+
+# ===========================================================================
+# Superseded write payload elision (issue #5328, step 2)
+# ===========================================================================
+
+
+def _meta_result(name: str, tool_call_id: str, content: str = "OK", *, status: str | None = "success") -> ToolMessage:
+    """A ToolMessage stamped the way ToolErrorHandlingMiddleware stamps it; ``status=None`` leaves it unstamped."""
+    msg = ToolMessage(content=content, name=name, tool_call_id=tool_call_id, status="error" if status == "error" else "success")
+    if status is not None:
+        msg.additional_kwargs["deerflow_tool_meta"] = {
+            "status": status,
+            "error_type": None,
+            "recoverable_by_model": True,
+            "recommended_next_action": "continue",
+            "source": "content_analysis",
+        }
+    return msg
+
+
+def _write(tool_call_id: str, path: str, content: str, *, append: bool = False, status: str | None = "success") -> tuple[AIMessage, ToolMessage]:
+    args = {"description": "d", "path": path, "content": content, "append": append}
+    ai = AIMessage(content="", tool_calls=[{"name": "write_file", "id": tool_call_id, "args": args}])
+    return ai, _meta_result("write_file", tool_call_id, "Error: boom" if status == "error" else "OK", status=status)
+
+
+def _read(tool_call_id: str, path: str, *, status: str | None = "success") -> tuple[AIMessage, ToolMessage]:
+    ai = AIMessage(content="", tool_calls=[{"name": "read_file", "id": tool_call_id, "args": {"path": path}}])
+    return ai, _meta_result("read_file", tool_call_id, "Error: File not found" if status == "error" else "file text", status=status)
+
+
+def _str_replace(tool_call_id: str, path: str, *, new_str: str = "n", status: str | None = "success") -> tuple[AIMessage, ToolMessage]:
+    ai = AIMessage(content="", tool_calls=[{"name": "str_replace", "id": tool_call_id, "args": {"path": path, "old_str": "o", "new_str": new_str}}])
+    return ai, _meta_result("str_replace", tool_call_id, "Error: boom" if status == "error" else "OK", status=status)
+
+
+class TestSupersededWriteElision:
+    """Model-bound requests drop the content of successful write_file calls superseded by a later read or write of the same path."""
+
+    PATH = "/mnt/user-data/outputs/report.md"
+    OTHER = "/mnt/user-data/outputs/other.md"
+
+    @staticmethod
+    def _middleware(**overrides) -> ToolOutputBudgetMiddleware:
+        return ToolOutputBudgetMiddleware(config=ToolOutputConfig(**overrides))
+
+    @staticmethod
+    def _model_request(messages) -> ModelRequest:
+        return ModelRequest(model=None, messages=list(messages), tools=[], state={"messages": list(messages)})
+
+    def _forward(self, mw: ToolOutputBudgetMiddleware, messages) -> tuple[ModelRequest, ModelRequest]:
+        """Run ``wrap_model_call`` and return ``(original request, request the handler received)``."""
+        captured: dict[str, ModelRequest] = {}
+
+        def handler(req):
+            captured["request"] = req
+            return AIMessage(content="ok")
+
+        request = self._model_request(messages)
+        mw.wrap_model_call(request, handler)
+        return request, captured["request"]
+
+    @staticmethod
+    def _content(forwarded: ModelRequest, index: int) -> str:
+        return forwarded.messages[index].tool_calls[0]["args"]["content"]
+
+    # -- policy ------------------------------------------------------------
+
+    def test_superseded_write_is_elided_and_newest_write_is_kept(self):
+        mw = self._middleware()
+        payload = "x" * 5000
+        human = HumanMessage(content="go")
+        w1, r1 = _write("call-1", self.PATH, payload)
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.PATH, "y" * 5000, append=True)
+
+        request, forwarded = self._forward(mw, [human, w1, r1, rd, rr, w2, r2])
+
+        assert forwarded is not request
+        elided = forwarded.messages[1].tool_calls[0]["args"]
+        assert elided["content"].startswith("[content elided: 5000 chars")
+        assert "read_file" in elided["content"]
+        assert payload not in elided["content"]
+        assert elided["path"] == self.PATH
+        assert elided["description"] == "d"
+        assert elided["append"] is False
+        # The newest successful write stays visible (keep_recent_writes=1).
+        assert forwarded.messages[5] is w2
+        # Untouched neighbours pass through by identity; state and stored history keep the original.
+        assert forwarded.messages[0] is human
+        assert forwarded.messages[2] is r1
+        assert forwarded.messages[3] is rd
+        assert request.messages[1] is w1
+        assert request.state["messages"][1] is w1
+        assert w1.tool_calls[0]["args"]["content"] == payload
+
+    def test_write_without_a_later_touch_of_the_path_is_kept(self):
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        w2, r2 = _write("call-2", self.OTHER, "y" * 5000)
+        w3, r3 = _write("call-3", "/mnt/user-data/outputs/third.md", "z" * 5000)
+
+        request, forwarded = self._forward(mw, [w1, r1, w2, r2, w3, r3])
+
+        assert forwarded is request
+
+    def test_newest_write_is_kept_even_when_superseded(self):
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        rd, rr = _read("call-2", self.PATH)
+
+        request, forwarded = self._forward(self._middleware(), [w1, r1, rd, rr])
+        assert forwarded is request
+
+        _request, forwarded = self._forward(self._middleware(keep_recent_writes=0), [w1, r1, rd, rr])
+        assert self._content(forwarded, 0).startswith("[content elided: 5000 chars")
+
+    def test_keep_recent_counts_successful_writes_across_paths(self):
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+        w3, r3 = _write("call-4", "/mnt/user-data/outputs/third.md", "tiny")
+        history = [w1, r1, rd, rr, w2, r2, w3, r3]
+
+        _request, forwarded = self._forward(self._middleware(keep_recent_writes=2), history)
+        assert self._content(forwarded, 0).startswith("[content elided")
+
+        request, forwarded = self._forward(self._middleware(keep_recent_writes=3), history)
+        assert forwarded is request
+
+    def test_later_successful_write_of_the_same_path_supersedes(self):
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        w2, r2 = _write("call-2", self.PATH, "y" * 5000)
+        w3, r3 = _write("call-3", self.OTHER, "z" * 5000)
+
+        _request, forwarded = self._forward(mw, [w1, r1, w2, r2, w3, r3])
+
+        assert self._content(forwarded, 0).startswith("[content elided: 5000 chars")
+        assert forwarded.messages[2] is w2  # not superseded, and older than the newest write
+        assert forwarded.messages[4] is w3
+
+    def test_later_successful_str_replace_supersedes(self):
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        sr, srr = _str_replace("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        _request, forwarded = self._forward(mw, [w1, r1, sr, srr, w2, r2])
+
+        assert self._content(forwarded, 0).startswith("[content elided")
+        assert forwarded.messages[2] is sr
+
+    @pytest.mark.parametrize("status", ["error", "partial_success", None], ids=["error", "partial", "unstamped"])
+    def test_later_write_that_did_not_succeed_does_not_supersede(self, status):
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        w2, r2 = _write("call-2", self.PATH, "y" * 5000, status=status)
+        w3, r3 = _write("call-3", self.OTHER, "tiny")
+
+        request, forwarded = self._forward(mw, [w1, r1, w2, r2, w3, r3])
+
+        assert forwarded is request
+
+    def test_gate_blocked_later_write_does_not_supersede(self):
+        from deerflow.agents.middlewares.read_before_write_middleware import WRITE_BLOCK_KEY
+
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        w2, r2 = _write("call-2", self.PATH, "y" * 5000, status="error")
+        r2.additional_kwargs[WRITE_BLOCK_KEY] = {"path": self.PATH, "tool": "write_file"}
+        w3, r3 = _write("call-3", self.OTHER, "tiny")
+
+        request, forwarded = self._forward(mw, [w1, r1, w2, r2, w3, r3])
+
+        assert forwarded is request
+
+    @pytest.mark.parametrize("status", ["error", None], ids=["error", "unstamped"])
+    def test_read_that_did_not_succeed_does_not_supersede(self, status):
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        rd, rr = _read("call-2", self.PATH, status=status)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        request, forwarded = self._forward(mw, [w1, r1, rd, rr, w2, r2])
+
+        assert forwarded is request
+
+    def test_partial_read_still_supersedes(self):
+        """A truncated or ranged read still showed the model the on-disk file."""
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        rd, rr = _read("call-2", self.PATH, status="partial_success")
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        _request, forwarded = self._forward(mw, [w1, r1, rd, rr, w2, r2])
+
+        assert self._content(forwarded, 0).startswith("[content elided")
+
+    @pytest.mark.parametrize("status", ["error", "partial_success", None], ids=["error", "partial", "unstamped"])
+    def test_write_that_did_not_succeed_is_never_a_candidate(self, status):
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000, status=status)
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        request, forwarded = self._forward(mw, [w1, r1, rd, rr, w2, r2])
+
+        assert forwarded is request
+
+    def test_unanswered_write_is_never_a_candidate(self):
+        mw = self._middleware()
+        w1, _unused = _write("call-1", self.PATH, "x" * 5000)
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        request, forwarded = self._forward(mw, [w1, rd, rr, w2, r2])
+
+        assert forwarded is request
+
+    def test_same_turn_read_does_not_supersede(self):
+        """Parallel calls in one AIMessage run in no fixed order, so the read may predate the write."""
+        mw = self._middleware()
+        payload = "x" * 5000
+        ai = AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "write_file", "id": "call-1", "args": {"description": "d", "path": self.PATH, "content": payload}},
+                {"name": "read_file", "id": "call-2", "args": {"path": self.PATH}},
+            ],
+        )
+        results = [_meta_result("write_file", "call-1"), _meta_result("read_file", "call-2", "file text")]
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        request, forwarded = self._forward(mw, [ai, *results, w2, r2])
+
+        assert forwarded is request
+
+    def test_paths_are_normalized_before_matching(self):
+        mw = self._middleware()
+        w1, r1 = _write("call-1", "/mnt/user-data/outputs/./report.md", "x" * 5000)
+        rd, rr = _read("call-2", "/mnt/user-data/outputs/sub/../report.md")
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        _request, forwarded = self._forward(mw, [w1, r1, rd, rr, w2, r2])
+
+        assert self._content(forwarded, 0).startswith("[content elided")
+
+    def test_different_path_does_not_supersede(self):
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        rd, rr = _read("call-2", self.OTHER)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        request, forwarded = self._forward(mw, [w1, r1, rd, rr, w2, r2])
+
+        assert forwarded is request
+
+    def test_str_replace_payloads_are_never_elided(self):
+        mw = self._middleware()
+        sr, srr = _str_replace("call-1", self.PATH, new_str="n" * 5000)
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        request, forwarded = self._forward(mw, [sr, srr, rd, rr, w2, r2])
+
+        assert forwarded is request
+
+    # -- thresholds and config ---------------------------------------------
+
+    def test_content_below_min_chars_stays_visible(self):
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "short " * 20)
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        request, forwarded = self._forward(mw, [w1, r1, rd, rr, w2, r2])
+
+        assert forwarded is request
+
+    def test_min_chars_zero_elides_any_non_empty_content(self):
+        mw = self._middleware(superseded_write_min_chars=0)
+        w1, r1 = _write("call-1", self.PATH, "v1")
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "")
+        rd2, rr2 = _read("call-4", self.OTHER)
+        w3, r3 = _write("call-5", "/mnt/user-data/outputs/third.md", "tiny")
+
+        _request, forwarded = self._forward(mw, [w1, r1, rd, rr, w2, r2, rd2, rr2, w3, r3])
+
+        assert self._content(forwarded, 0).startswith("[content elided: 2 chars")
+        assert forwarded.messages[4] is w2
+
+    def test_non_string_content_is_left_alone(self):
+        mw = self._middleware(superseded_write_min_chars=0)
+        ai = AIMessage(content="", tool_calls=[{"name": "write_file", "id": "call-1", "args": {"path": self.PATH, "content": ["not", "a", "string"]}}])
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        request, forwarded = self._forward(mw, [ai, _meta_result("write_file", "call-1"), rd, rr, w2, r2])
+
+        assert forwarded is request
+
+    def test_disabled_by_config_passes_request_through(self):
+        mw = self._middleware(elide_superseded_writes=False)
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        request, forwarded = self._forward(mw, [w1, r1, rd, rr, w2, r2])
+
+        assert forwarded is request
+
+    def test_middleware_disabled_passes_request_through(self):
+        mw = self._middleware(enabled=False)
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        request, forwarded = self._forward(mw, [w1, r1, rd, rr, w2, r2])
+
+        assert forwarded is request
+
+    def test_config_defaults(self):
+        config = ToolOutputConfig()
+        assert config.elide_superseded_writes is True
+        assert config.superseded_write_min_chars == 2000
+        assert config.keep_recent_writes == 1
+
+    def test_release_policy_declares_config(self):
+        params = self._middleware(keep_recent_writes=3, superseded_write_min_chars=123).release_policy_parameters()
+        assert params["config"]["elide_superseded_writes"] is True
+        assert params["config"]["superseded_write_min_chars"] == 123
+        assert params["config"]["keep_recent_writes"] == 3
+
+    def test_from_app_config_passes_the_keys(self):
+        config = AppConfig(sandbox=SandboxConfig(use="test"), tool_output={"superseded_write_min_chars": 10, "keep_recent_writes": 0})
+        mw = ToolOutputBudgetMiddleware.from_app_config(config)
+        assert mw._config.superseded_write_min_chars == 10
+        assert mw._config.keep_recent_writes == 0
+
+    def test_config_example_documents_the_keys(self):
+        import yaml
+
+        example_path = os.path.join(os.path.dirname(__file__), "..", "..", "config.example.yaml")
+        with open(example_path, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        tool_output = data["tool_output"]
+        assert tool_output["elide_superseded_writes"] is True
+        assert tool_output["superseded_write_min_chars"] == 2000
+        assert tool_output["keep_recent_writes"] == 1
+        # New user-settable keys are a schema change: the outdated-config warning must fire.
+        assert data["config_version"] >= 42
+
+    # -- surfaces, pairing, determinism, composition ------------------------
+
+    def test_rewrites_every_provider_surface_together(self):
+        mw = self._middleware()
+        payload = "y" * 5000
+        args = {"description": "d", "path": self.PATH, "content": payload}
+        ai = AIMessage(
+            content=[
+                {"type": "text", "text": "writing"},
+                {"type": "tool_use", "id": "call-1", "name": "write_file", "input": dict(args), "partial_json": json.dumps(args)},
+            ],
+            tool_calls=[{"name": "write_file", "id": "call-1", "args": dict(args)}],
+            additional_kwargs={"tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "write_file", "arguments": json.dumps(args)}}]},
+        )
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        _request, forwarded = self._forward(mw, [ai, _meta_result("write_file", "call-1"), rd, rr, w2, r2])
+
+        rewritten = forwarded.messages[0]
+        structured = rewritten.tool_calls[0]["args"]
+        assert structured["content"].startswith("[content elided: 5000 chars")
+        raw = json.loads(rewritten.additional_kwargs["tool_calls"][0]["function"]["arguments"])
+        assert raw == structured
+        block = rewritten.content[1]
+        assert block["input"] == structured
+        assert "partial_json" not in block
+        assert rewritten.content[0] == {"type": "text", "text": "writing"}
+        assert payload not in json.dumps(rewritten.model_dump(), ensure_ascii=False)
+        # Original objects are untouched.
+        assert ai.content[1]["input"]["content"] == payload
+        assert payload in ai.additional_kwargs["tool_calls"][0]["function"]["arguments"]
+
+    def test_reused_call_ids_pair_per_occurrence(self):
+        """A failed write and a later successful one may share a tool-call id; the failed one must not inherit success."""
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000, status="error")
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-1", self.OTHER, "y" * 5000)
+        w3, r3 = _write("call-3", "/mnt/user-data/outputs/third.md", "tiny")
+
+        request, forwarded = self._forward(mw, [w1, r1, rd, rr, w2, r2, w3, r3])
+
+        assert forwarded is request
+
+    def test_elision_is_deterministic_across_model_calls(self):
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+        history = [w1, r1, rd, rr, w2, r2]
+
+        _request, first = self._forward(mw, history)
+        _request, second = self._forward(mw, history)
+
+        assert first.messages[0].tool_calls == second.messages[0].tool_calls
+
+    def test_elision_is_monotonic_as_history_grows(self):
+        """Once a write is elided, appending more history never brings its content back."""
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+        history = [w1, r1, rd, rr, w2, r2]
+        _request, before = self._forward(mw, history)
+        assert self._content(before, 0).startswith("[content elided")
+
+        w3, r3 = _write("call-4", "/mnt/user-data/outputs/third.md", "z" * 5000)
+        _request, after = self._forward(mw, [*history, HumanMessage(content="more"), w3, r3])
+
+        assert after.messages[0].tool_calls == before.messages[0].tool_calls
+
+    def test_rewritten_history_drops_openai_response_chain_ids(self):
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        w1.response_metadata = {"id": "resp_write", "output_version": "responses/v1"}
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+        w2.response_metadata = {"id": "resp_latest"}
+
+        _request, forwarded = self._forward(mw, [w1, r1, rd, rr, w2, r2])
+
+        assert "id" not in forwarded.messages[0].response_metadata
+        assert "id" not in forwarded.messages[4].response_metadata
+
+    def test_applies_alongside_historical_output_truncation(self):
+        mw = self._middleware(fallback_max_chars=500, fallback_head_chars=100, fallback_tail_chars=50)
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        rd, rr = _read("call-2", self.PATH)
+        oversized = _tm("q" * 1000, name="tool", tool_call_id="tc-q")
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        _request, forwarded = self._forward(mw, [w1, r1, rd, rr, oversized, w2, r2])
+
+        assert self._content(forwarded, 0).startswith("[content elided")
+        assert "omitted" in forwarded.messages[4].content
+        assert forwarded.messages[5] is w2
+
+    def test_async_model_call_elides(self):
+        import asyncio
+
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+        request = self._model_request([w1, r1, rd, rr, w2, r2])
+        seen: dict[str, ModelRequest] = {}
+
+        async def handler(req):
+            seen["request"] = req
+            return AIMessage(content="ok")
+
+        asyncio.run(mw.awrap_model_call(request, handler))
+
+        assert seen["request"] is not request
+        assert self._content(seen["request"], 0).startswith("[content elided")
+
+    def test_no_write_calls_in_history_is_a_cheap_no_op(self):
+        mw = self._middleware()
+        history = [HumanMessage(content="go"), AIMessage(content="", tool_calls=[{"name": "bash", "id": "call-1", "args": {"command": "ls"}}]), _meta_result("bash", "call-1", "files")]
+
+        request, forwarded = self._forward(mw, history)
+
+        assert forwarded is request
+
+    def test_chat_completions_payload_uses_the_placeholder(self):
+        """End to end against the OpenAI chat-completions message converter."""
+        from langchain_openai.chat_models.base import _convert_message_to_dict
+
+        mw = self._middleware()
+        payload = "x" * 5000
+        w1, r1 = _write("call-1", self.PATH, payload)
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        _request, forwarded = self._forward(mw, [w1, r1, rd, rr, w2, r2])
+
+        wire = json.loads(_convert_message_to_dict(forwarded.messages[0])["tool_calls"][0]["function"]["arguments"])
+        assert wire["content"].startswith("[content elided: 5000 chars")
+        assert payload not in json.dumps(wire)
+
+    def test_unanswered_write_with_a_reused_id_is_never_treated_as_successful(self):
+        """Review on #5374: an interrupted write must not inherit the success of a later call that reused its id."""
+        mw = self._middleware()
+        draft = "d" * 5000
+        interrupted, _never_delivered = _write("reused", self.PATH, draft)
+        rd, rr = _read("call-2", self.PATH)
+        later, later_ok = _write("reused", self.OTHER, "n" * 5000)
+        last, last_ok = _write("call-4", "/mnt/user-data/outputs/last.md", "l" * 5000)
+
+        request, forwarded = self._forward(mw, [interrupted, rd, rr, later, later_ok, last, last_ok])
+
+        assert forwarded is request
+        assert interrupted.tool_calls[0]["args"]["content"] == draft
+
+    def test_duplicate_ids_in_one_turn_are_never_rewritten(self):
+        """Review on #5374: a failed sibling sharing the id of a superseded successful write must not be rewritten into it."""
+        mw = self._middleware()
+        turn = AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "write_file", "id": "dup", "args": {"path": self.PATH, "content": "a" * 5000}},
+                {"name": "write_file", "id": "dup", "args": {"path": self.OTHER, "content": "b" * 5000}},
+            ],
+        )
+        results = [_meta_result("write_file", "dup"), _meta_result("write_file", "dup", "Error: boom", status="error")]
+        rd, rr = _read("call-2", self.PATH)
+        last, last_ok = _write("call-3", "/mnt/user-data/outputs/last.md", "l" * 5000)
+
+        request, forwarded = self._forward(mw, [turn, *results, rd, rr, last, last_ok])
+
+        assert forwarded is request
+        assert [call["args"]["path"] for call in turn.tool_calls] == [self.PATH, self.OTHER]
+        assert turn.tool_calls[1]["args"]["content"] == "b" * 5000
+
+    def test_unhashable_sibling_id_does_not_crash_the_model_call(self):
+        """Review on #5374 (round 3): a malformed sibling id next to an elision candidate must be skipped, not hashed."""
+        mw = self._middleware(keep_recent_writes=0)
+        payload = "x" * 5000
+        turn, ok = _write("call-1", self.PATH, payload)
+        turn.tool_calls.append({"name": "bash", "id": ["not", "a", "string"], "args": {"command": "ls"}})
+        rd, rr = _read("call-2", self.PATH)
+
+        _request, forwarded = self._forward(mw, [turn, ok, rd, rr])
+
+        assert self._content(forwarded, 0).startswith("[content elided: 5000 chars")
+        assert forwarded.messages[0].tool_calls[1] == turn.tool_calls[1]

@@ -1,12 +1,20 @@
+import { usePathname } from "next/navigation";
 import {
   createContext,
+  type Dispatch,
   useCallback,
   useContext,
+  useEffect,
+  useRef,
   useState,
   type ReactNode,
+  type SetStateAction,
 } from "react";
 
 import { useSidebar } from "@/components/ui/sidebar";
+import { useArtifactDrafts } from "@/core/artifacts/draft-context";
+import type { ArtifactDraftState } from "@/core/artifacts/editing";
+import { useAuth } from "@/core/auth/AuthProvider";
 import { env } from "@/env";
 
 export interface ArtifactsContextType {
@@ -21,11 +29,56 @@ export interface ArtifactsContextType {
   open: boolean;
   autoOpen: boolean;
   setOpen: (open: boolean) => void;
+
+  drafts: Record<string, ArtifactDraftState>;
+  setDrafts: Dispatch<SetStateAction<Record<string, ArtifactDraftState>>>;
+  editingPath: string | null;
+  setEditingPath: Dispatch<SetStateAction<string | null>>;
 }
 
 const ArtifactsContext = createContext<ArtifactsContextType | undefined>(
   undefined,
 );
+
+const ARTIFACTS_STORAGE_PREFIX = "deerflow:artifacts:v1";
+
+type PersistedArtifactsState = {
+  artifacts: string[];
+  selectedArtifact: string | null;
+  open: boolean;
+};
+
+function storageKey(pathname: string) {
+  return `${ARTIFACTS_STORAGE_PREFIX}:${encodeURIComponent(pathname)}`;
+}
+
+function readPersistedState(pathname: string): PersistedArtifactsState | null {
+  try {
+    const raw = window.sessionStorage.getItem(storageKey(pathname));
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw) as Partial<PersistedArtifactsState>;
+    if (
+      !Array.isArray(parsed.artifacts) ||
+      !parsed.artifacts.every((artifact) => typeof artifact === "string") ||
+      !(
+        parsed.selectedArtifact === null ||
+        typeof parsed.selectedArtifact === "string"
+      ) ||
+      typeof parsed.open !== "boolean"
+    ) {
+      return null;
+    }
+    return {
+      artifacts: parsed.artifacts,
+      selectedArtifact: parsed.selectedArtifact,
+      open: parsed.open,
+    };
+  } catch {
+    return null;
+  }
+}
 
 interface ArtifactsProviderProps {
   children: ReactNode;
@@ -39,7 +92,44 @@ export function ArtifactsProvider({ children }: ArtifactsProviderProps) {
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true",
   );
   const [autoOpen, setAutoOpen] = useState(true);
+  const [editingPath, setEditingPath] = useState<string | null>(null);
   const { setOpen: setSidebarOpen } = useSidebar();
+  const pathname = usePathname();
+  const { user } = useAuth();
+  const { drafts, setDrafts } = useArtifactDrafts(
+    pathname ?? "",
+    user?.id ?? null,
+  );
+  const hydratedPathRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!pathname) {
+      return;
+    }
+
+    const persisted = readPersistedState(pathname);
+    setArtifacts(persisted?.artifacts ?? []);
+    setSelectedArtifact(persisted?.selectedArtifact ?? null);
+    setOpen(persisted?.open ?? env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true");
+    setAutoOpen(true);
+    setAutoSelect(!persisted?.selectedArtifact);
+    setEditingPath(null);
+    hydratedPathRef.current = pathname;
+  }, [pathname]);
+
+  useEffect(() => {
+    if (!pathname || hydratedPathRef.current !== pathname) {
+      return;
+    }
+    try {
+      window.sessionStorage.setItem(
+        storageKey(pathname),
+        JSON.stringify({ artifacts, selectedArtifact, open }),
+      );
+    } catch {
+      // Browser storage can be disabled or full; panel state must keep working.
+    }
+  }, [artifacts, open, pathname, selectedArtifact]);
 
   const select = useCallback(
     (artifact: string, autoSelect = false) => {
@@ -78,6 +168,11 @@ export function ArtifactsProvider({ children }: ArtifactsProviderProps) {
     selectedArtifact,
     select,
     deselect,
+
+    drafts,
+    setDrafts,
+    editingPath,
+    setEditingPath,
   };
 
   return (

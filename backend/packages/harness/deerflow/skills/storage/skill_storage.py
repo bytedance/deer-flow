@@ -2,17 +2,60 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
+import os
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from pathlib import Path
 
+from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
+from deerflow.skills.diagnostics import SkillLoadDiagnostic
 from deerflow.skills.types import SKILL_MD_FILE, Skill, SkillCategory  # noqa: F401
+from deerflow.utils.host_paths import windows_incompatible_segment
 
 logger = logging.getLogger(__name__)
 
 _SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+
+def walk_skill_directories(root: Path) -> Iterable[tuple[str, list[str], list[str]]]:
+    """Follow directory links, but prune links back to the current ancestors.
+
+    Keep os.walk's mutable directory list so callers retain their namespace,
+    hidden-directory and package-boundary rules. Track only the current branch:
+    two independent aliases of an external skill tree must both be discoverable.
+    """
+    ancestors: list[tuple[Path, Path]] = []
+    for current_root, dir_names, file_names in os.walk(root, followlinks=True):
+        current_path = Path(current_root)
+        while ancestors and ancestors[-1][0] != current_path.parent:
+            ancestors.pop()
+        try:
+            resolved = current_path.resolve(strict=True)
+        except (OSError, RuntimeError):
+            # The directory may have disappeared or its link changed mid-scan.
+            dir_names.clear()
+            continue
+        if any(resolved == real_path for _, real_path in ancestors):
+            dir_names.clear()
+            continue
+        ancestors.append((current_path, resolved))
+        yield current_root, dir_names, file_names
+
+
+def read_text_or_none(path: Path) -> str | None:
+    """Return *path*'s content as UTF-8 text, or ``None`` when it is not text.
+
+    For history records only: a skill's support files may be binary (the
+    installer rejects executable binaries, not images or other assets), and
+    recording "no previous text" must never abort the mutation being logged.
+    """
+    try:
+        return path.read_bytes().decode("utf-8")
+    except UnicodeDecodeError:
+        return None
 
 
 class SkillStorage(ABC):
@@ -24,8 +67,12 @@ class SkillStorage(ABC):
     compose them with protocol-level helpers.
     """
 
-    def __init__(self, container_path: str = "/mnt/skills") -> None:
+    def __init__(self, container_path: str = DEFAULT_SKILLS_CONTAINER_PATH) -> None:
         self._container_root = container_path
+
+    def load_custom_skill_diagnostics(self) -> list[SkillLoadDiagnostic]:
+        """No diagnostics unless storage explicitly establishes caller ownership."""
+        return []
 
     # ------------------------------------------------------------------
     # Static protocol helpers (not storage-specific)
@@ -76,8 +123,34 @@ class SkillStorage(ABC):
             if parsed_name != name:
                 raise ValueError(f"Frontmatter name '{parsed_name}' must match requested skill name '{name}'.")
 
-    def ensure_safe_support_path(self, name: str, relative_path: str) -> Path:
-        """Validate and return the resolved absolute path for a support file."""
+    @staticmethod
+    def _is_external_skill_directory_symlink(skill_file: Path, custom_root: Path) -> bool:
+        """Allow one-level package-directory links without allowing file links.
+
+        The storage contract permits an externally managed skill package to be
+        linked directly below the supplied custom-skill category root. Preserve
+        that compatibility while rejecting arbitrary path escapes and symlinked
+        ``SKILL.md`` files.
+        """
+        if skill_file.is_symlink() or not skill_file.parent.is_symlink():
+            return False
+        try:
+            relative_parent = skill_file.parent.relative_to(custom_root)
+        except ValueError:
+            return False
+        return len(relative_parent.parts) == 1 and skill_file.parent.resolve().is_dir()
+
+    def ensure_safe_support_path(self, name: str, relative_path: str, *, enforce_portability: bool = True) -> Path:
+        """Validate and return the resolved absolute path for a support file.
+
+        The path must name a file *inside* one of the support directories: a
+        bare ``assets`` resolves to its own allowed root and would otherwise
+        pass the containment check, letting callers try to remove or overwrite
+        a directory.
+
+        ``enforce_portability`` is False only for removal, so a support file
+        stored before this check can still be deleted. Traversal checks stay.
+        """
         _ALLOWED_SUPPORT_SUBDIRS = {"references", "templates", "scripts", "assets"}
         skill_dir = self.get_custom_skill_dir(self.validate_skill_name(name)).resolve()
         if not relative_path or relative_path.endswith("/"):
@@ -87,9 +160,16 @@ class SkillStorage(ABC):
             raise ValueError("Supporting file path must be relative.")
         if any(part in {"..", ""} for part in relative.parts):
             raise ValueError("Supporting file path must not contain parent-directory traversal.")
+        if enforce_portability:
+            for part in relative.parts:
+                reason = windows_incompatible_segment(part)
+                if reason:
+                    raise ValueError(f"Supporting file path is not portable to Windows: {relative_path!r} ({reason})")
         top_level = relative.parts[0] if relative.parts else ""
         if top_level not in _ALLOWED_SUPPORT_SUBDIRS:
             raise ValueError(f"Supporting files must live under one of: {', '.join(sorted(_ALLOWED_SUPPORT_SUBDIRS))}.")
+        if len(relative.parts) < 2:
+            raise ValueError(f"Supporting file path must name a file inside '{top_level}/'.")
         target = (skill_dir / relative).resolve()
         allowed_root = (skill_dir / top_level).resolve()
         try:
@@ -108,6 +188,37 @@ class SkillStorage(ABC):
 
         Origin: ``deerflow.skills.loader.get_skills_root_path``.
         """
+
+    def validate_skill_file_path(self, skill_file: Path) -> Path:
+        """Validate that *skill_file* is within an allowed root and return its resolved path.
+
+        The default implementation checks that ``skill_file`` is under
+        ``get_skills_root_path()`` — sufficient for :class:`LocalSkillStorage`
+        where both public and custom skills live under the same root.
+
+        :class:`UserScopedSkillStorage` overrides this to also accept files
+        under the per-user custom root, because custom skills are stored in a
+        separate directory tree that is not a sub-path of the global root.
+
+        A one-level symlinked package directory directly below the configured
+        custom-skill category root is also accepted for operator-managed
+        external skills; the final ``SKILL.md`` file itself must not be a
+        symlink.
+
+        Raises:
+            ValueError: if the resolved path escapes all allowed roots.
+        """
+        if skill_file.is_symlink():
+            raise ValueError("Resolved skill file must stay within the configured skills root.")
+        resolved_file = skill_file.resolve()
+        resolved_root = self.get_skills_root_path().resolve()
+        try:
+            resolved_file.relative_to(resolved_root)
+        except ValueError as exc:
+            if self._is_external_skill_directory_symlink(skill_file, self.get_skills_root_path() / SkillCategory.CUSTOM.value):
+                return resolved_file
+            raise ValueError("Resolved skill file must stay within the configured skills root.") from exc
+        return resolved_file
 
     @abstractmethod
     def _iter_skill_files(self) -> Iterable[tuple[SkillCategory, Path, Path]]:
@@ -130,6 +241,23 @@ class SkillStorage(ABC):
 
         Origin: ``deerflow.skills.manager.atomic_write``.
         """
+
+    def remove_custom_skill_file(self, name: str, relative_path: str) -> str | None:
+        """Remove a supporting file and return its previous text content.
+
+        Returns ``None`` when the file was not UTF-8 text (a binary asset such
+        as ``assets/logo.png`` from a ``.skill`` archive): the previous content
+        only feeds the history record, so it must never block the removal.
+        A directory is rejected rather than removed.
+        """
+        target = self.ensure_safe_support_path(name, relative_path, enforce_portability=False)
+        if target.is_dir():
+            raise ValueError(f"Supporting file path '{relative_path}' is a directory, not a file.")
+        if not target.exists():
+            raise FileNotFoundError(f"Supporting file '{relative_path}' not found for skill '{name}'.")
+        previous_content = read_text_or_none(target)
+        target.unlink()
+        return previous_content
 
     @abstractmethod
     async def ainstall_skill_from_archive(self, archive_path: str | Path) -> dict:
@@ -200,6 +328,12 @@ class SkillStorage(ABC):
     def get_skill_history_file(self, name: str) -> Path:
         """Path to ``custom/.history/<name>.jsonl``. Does not create parents.
 
+        **Note:** This default implementation returns a path under the global
+        skills root, which is correct for :class:`LocalSkillStorage` but
+        **incorrect** for :class:`UserScopedSkillStorage`. Subclasses that
+        redirect custom skill paths must override this method (as
+        ``UserScopedSkillStorage`` already does).
+
         Origin: ``deerflow.skills.manager.get_skill_history_file``.
         """
         normalized_name = self.validate_skill_name(name)
@@ -230,12 +364,15 @@ class SkillStorage(ABC):
 
         # Merge enabled state from extensions config (re-read every call so
         # changes made by another process are picked up immediately).
+        # All skill categories (PUBLIC, LEGACY, CUSTOM) respect the
+        # extensions_config enabled/disabled state.  CUSTOM skills default
+        # to enabled when no explicit config entry exists (so newly
+        # installed skills appear active without requiring a manual toggle).
         try:
             from deerflow.config.extensions_config import ExtensionsConfig
 
             extensions_config = ExtensionsConfig.from_file()
-            for skill in skills:
-                skill.enabled = extensions_config.is_skill_enabled(skill.name, skill.category)
+            skills = [dataclasses.replace(s, enabled=extensions_config.is_skill_enabled(s.name, s.category)) for s in skills]
         except Exception as e:
             logger.warning("Failed to load extensions config: %s", e)
 
@@ -246,7 +383,12 @@ class SkillStorage(ABC):
         return skills
 
     def ensure_custom_skill_is_editable(self, name: str) -> None:
-        """Origin: ``deerflow.skills.manager.ensure_custom_skill_is_editable``."""
+        """Origin: ``deerflow.skills.manager.ensure_custom_skill_is_editable``.
+
+        Only CUSTOM-category skills are editable. PUBLIC (built-in) and
+        LEGACY (shared pre-migration) skills are read-only; attempting to
+        edit them raises ``ValueError`` with a helpful suggestion.
+        """
         if self.custom_skill_exists(name):
             return
         if self.public_skill_exists(name):

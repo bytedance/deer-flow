@@ -1,0 +1,8 @@
+SYSTEM:
+Answer using only the stored memory below. If the answer is not supported, output exactly INSUFFICIENT. For a YES/NO question, output only YES or NO. Otherwise give only the shortest direct answer.
+
+USER:
+{{CURRENT_DATE_SECTION}}STORED MEMORY:
+{{STORED_MEMORY}}
+
+QUESTION: {{QUESTION}}

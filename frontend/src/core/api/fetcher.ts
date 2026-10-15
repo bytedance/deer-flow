@@ -1,4 +1,13 @@
-import { buildLoginUrl } from "@/core/auth/types";
+import {
+  ACCOUNT_DISABLED_LOGIN_URL,
+  buildLoginUrl,
+  currentReturnPath,
+  parseAuthError,
+} from "@/core/auth/types";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
+
+import { UnauthorizedError } from "./errors";
+import { staticApiResponse } from "./static-response";
 
 /** HTTP methods that the gateway's CSRFMiddleware checks. */
 export type StateChangingMethod = "POST" | "PUT" | "DELETE" | "PATCH";
@@ -59,6 +68,17 @@ export async function fetch(
 ): Promise<Response> {
   const url = typeof input === "string" ? input : input.url;
 
+  // Static demos have no Gateway. Resolve REST calls before credentials,
+  // CSRF, or redirects; demo assets and explicit mock routes still use HTTP.
+  if (isStaticWebsiteOnly()) {
+    const response = await staticApiResponse(url, {
+      ...init,
+      method:
+        init?.method ?? (typeof input === "string" ? "GET" : input.method),
+    });
+    if (response) return response;
+  }
+
   // Inject CSRF for state-changing methods. GET/HEAD/OPTIONS/TRACE skip
   // it to mirror the gateway's ``should_check_csrf`` logic exactly.
   let headers = init?.headers;
@@ -81,8 +101,23 @@ export async function fetch(
   });
 
   if (res.status === 401) {
-    window.location.href = buildLoginUrl(window.location.pathname);
-    throw new Error("Unauthorized");
+    // An operator-disabled account (#4063 gap 3) gets a distinct code on the
+    // session surface; it cannot sign back in, so skip the `next` round-trip
+    // and land on a login page that states the reason.
+    // Body-consumption contract: the JSON body is consumed for the code and
+    // must never be read again below this line — every branch exits by
+    // throwing UnauthorizedError, so a future fall-through (e.g. telemetry)
+    // must not re-read `res`.
+    const code = await res
+      .json()
+      .then((data) => parseAuthError(data).code)
+      .catch(() => null);
+    if (code === "account_disabled") {
+      window.location.href = ACCOUNT_DISABLED_LOGIN_URL;
+      throw new UnauthorizedError();
+    }
+    window.location.href = buildLoginUrl(currentReturnPath());
+    throw new UnauthorizedError();
   }
 
   return res;

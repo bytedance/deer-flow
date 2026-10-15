@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "protocol_id": "deermem-scope-isolation-v1",
+  "semantic_cases": [
+    {
+      "id": "durable-preference",
+      "category": "durable_preference",
+      "messages": [
+        {"role": "user", "content": "Across projects, I prefer explanations that start with the conclusion. Canary: SI-DURABLE-AMBER-5199."}
+      ],
+      "offline_output": {
+        "user": {},
+        "history": {},
+        "newFacts": [
+          {"content": "The user prefers conclusion-first explanations (SI-DURABLE-AMBER-5199).", "category": "preference", "confidence": 0.99, "scope": "user", "durability": "durable", "authority": "descriptive"}
+        ],
+        "factsToRemove": []
+      },
+      "expected_persisted_canaries": ["SI-DURABLE-AMBER-5199"],
+      "expected_rejected_canaries": [],
+      "expected_removed_canaries": [],
+      "seed_facts": []
+    },
+    {
+      "id": "project-constraint",
+      "category": "project_constraint",
+      "messages": [
+        {"role": "user", "content": "Only in the current repository, keep the legacy serializer. Canary: SI-PROJECT-COBALT-5199."}
+      ],
+      "offline_output": {
+        "user": {},
+        "history": {},
+        "newFacts": [
+          {"content": "Keep the legacy serializer (SI-PROJECT-COBALT-5199).", "category": "constraint", "confidence": 0.99, "scope": "project", "durability": "durable", "authority": "descriptive"}
+        ],
+        "factsToRemove": []
+      },
+      "expected_persisted_canaries": [],
+      "expected_rejected_canaries": ["SI-PROJECT-COBALT-5199"],
+      "expected_removed_canaries": [],
+      "seed_facts": []
+    },
+    {
+      "id": "one-run-authorization",
+      "category": "transactional_authorization",
+      "messages": [
+        {"role": "user", "content": "For this run only, you may publish the result. Canary: SI-AUTH-CORAL-5199."}
+      ],
+      "offline_output": {
+        "user": {},
+        "history": {},
+        "newFacts": [
+          {"content": "The user authorized publishing (SI-AUTH-CORAL-5199).", "category": "context", "confidence": 0.99, "scope": "user", "durability": "temporary", "authority": "transactional"}
+        ],
+        "factsToRemove": []
+      },
+      "expected_persisted_canaries": [],
+      "expected_rejected_canaries": ["SI-AUTH-CORAL-5199"],
+      "expected_removed_canaries": [],
+      "seed_facts": []
+    },
+    {
+      "id": "file-local-correction",
+      "category": "file_local_correction",
+      "messages": [
+        {"role": "user", "content": "In parser.py only, the sentinel is blue, not green. Canary: SI-FILE-INDIGO-5199."}
+      ],
+      "offline_output": {
+        "user": {},
+        "history": {},
+        "newFacts": [
+          {"content": "parser.py uses a blue sentinel (SI-FILE-INDIGO-5199).", "category": "correction", "confidence": 0.99, "scope": "thread", "durability": "temporary", "authority": "descriptive"}
+        ],
+        "factsToRemove": []
+      },
+      "expected_persisted_canaries": [],
+      "expected_rejected_canaries": ["SI-FILE-INDIGO-5199"],
+      "expected_removed_canaries": [],
+      "seed_facts": []
+    },
+    {
+      "id": "durable-correction",
+      "category": "atomic_correction",
+      "messages": [
+        {"role": "user", "content": "Correction for future work: I now use Helix instead of Vim. Canary: SI-NEW-HELIX-5199."}
+      ],
+      "offline_output": {
+        "user": {},
+        "history": {},
+        "newFacts": [
+          {"content": "The user now prefers Helix (SI-NEW-HELIX-5199).", "category": "correction", "confidence": 0.99, "scope": "user", "durability": "durable", "authority": "descriptive"}
+        ],
+        "factsToRemove": [
+          {"id": "fact_old_editor", "scope": "user", "reason": "The user explicitly changed their durable editor preference", "replacementFactIndex": 0}
+        ]
+      },
+      "expected_persisted_canaries": ["SI-NEW-HELIX-5199"],
+      "expected_rejected_canaries": [],
+      "expected_removed_canaries": ["SI-OLD-VIM-5199"],
+      "seed_facts": [
+        {"id": "fact_old_editor", "content": "The user prefers Vim (SI-OLD-VIM-5199).", "category": "preference", "confidence": 0.99, "createdAt": "2026-01-01T00:00:00Z", "source": "benchmark-seed"}
+      ]
+    },
+    {
+      "id": "mixed-admission",
+      "category": "mixed_durable_transient",
+      "messages": [
+        {"role": "user", "content": "I generally want typed Python, but today this draft should stay untyped. Canaries: SI-MIXED-GOLD-5199 and SI-MIXED-GRAY-5199."}
+      ],
+      "offline_output": {
+        "user": {},
+        "history": {},
+        "newFacts": [
+          {"content": "The user generally prefers typed Python (SI-MIXED-GOLD-5199).", "category": "preference", "confidence": 0.99, "scope": "user", "durability": "durable", "authority": "descriptive"},
+          {"content": "The current draft should stay untyped (SI-MIXED-GRAY-5199).", "category": "constraint", "confidence": 0.99, "scope": "thread", "durability": "temporary", "authority": "descriptive"}
+        ],
+        "factsToRemove": []
+      },
+      "expected_persisted_canaries": ["SI-MIXED-GOLD-5199"],
+      "expected_rejected_canaries": ["SI-MIXED-GRAY-5199"],
+      "expected_removed_canaries": [],
+      "seed_facts": []
+    }
+  ],
+  "routing_case": {
+    "id": "custom-agent-bootstrap",
+    "canary": "SI-ROUTE-JADE-5199",
+    "selected": {"user_id": "scope-user-a", "agent_name": "scope-researcher"},
+    "other_agent": {"user_id": "scope-user-a", "agent_name": "scope-writer"},
+    "other_user": {"user_id": "scope-user-b", "agent_name": "scope-researcher"}
+  }
+}

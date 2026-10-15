@@ -1,5 +1,6 @@
 """Built-in tool for invoking external ACP-compatible agents."""
 
+import asyncio
 import logging
 import os
 import shutil
@@ -124,6 +125,66 @@ def _build_permission_response(options: list[Any], *, auto_approve: bool) -> Any
     return RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
 
 
+def _agent_path(env: dict[str, str] | None) -> str | None:
+    """Return the ``PATH`` the ACP SDK will give the agent subprocess.
+
+    The SDK builds the child environment by inheriting a trimmed copy of the
+    Gateway's environment and then applying ``acp_agents.<name>.env`` on top, so
+    a configured ``PATH`` -- not the Gateway's -- decides which launcher the
+    agent actually finds. ``None`` means the agent does not override ``PATH``,
+    which lets ``shutil.which`` fall back to the Gateway's own.
+
+    The lookup is case-insensitive because environment variable names are on
+    Windows, where ``Path`` and ``PATH`` name the same variable.
+    """
+    if not env:
+        return None
+    return next((value for key, value in env.items() if key.upper() == "PATH"), None)
+
+
+def _resolve_agent_command(command: str, path: str | None = None) -> str:
+    r"""Return the host path to spawn for a configured ACP agent command.
+
+    ``asyncio.create_subprocess_exec``, which the ACP SDK's stdio transport
+    uses, does not apply ``PATHEXT`` on Windows: a bare ``npx`` or ``mcode``
+    raises ``FileNotFoundError`` even though the npm shim (``npx.cmd``) is on
+    ``PATH``, and an absolute ``C:\npm\mcode`` spawns npm's extensionless shell
+    script instead of ``mcode.CMD`` and dies with ``WinError 193``. Resolve
+    the command the way the MCP Python SDK normalizes stdio commands, and keep
+    the configured value when nothing matches so the not-found remediation
+    still fires.
+
+    Bare names and absolute paths are resolved. A relative configured path is
+    handed to the spawn unchanged: it refers to the ACP workspace the spawn
+    runs in, not to the Gateway's cwd. An absolute path keeps its own
+    directory -- ``shutil.which`` searches that directory and probes
+    ``PATHEXT`` there.
+
+    ``path`` is the ``PATH`` the agent subprocess will actually see (see
+    ``_agent_path``); the Gateway's own is only the fallback. A successful
+    lookup is returned absolute: for a relative ``PATH`` entry ``shutil.which``
+    yields a result relative to the Gateway's cwd, while the spawn runs with
+    ``cwd`` set to the ACP workspace, where that path resolves elsewhere -- or
+    not at all.
+
+    An already-absolute result is returned unchanged: a lexical ``abspath``
+    would collapse a ``..`` that follows a symlink, changing which file the
+    spawn actually runs.
+
+    The lookup stats the filesystem (``shutil.which`` -> ``os.access``), so
+    callers must run it off the event loop.
+    """
+    if os.path.dirname(command) and not os.path.isabs(command):
+        return command
+    try:
+        resolved = shutil.which(command, path=path)
+    except OSError:
+        return command
+    if not resolved:
+        return command
+    return resolved if os.path.isabs(resolved) else os.path.abspath(resolved)
+
+
 def _format_invocation_error(agent: str, cmd: str, exc: Exception) -> str:
     """Return a user-facing ACP invocation error with actionable remediation."""
     if not isinstance(exc, FileNotFoundError):
@@ -133,6 +194,11 @@ def _format_invocation_error(agent: str, cmd: str, exc: Exception) -> str:
     if cmd == "codex-acp" and shutil.which("codex"):
         return f"{message} The installed `codex` CLI does not speak ACP directly. Install a Codex ACP adapter (for example `npx @zed-industries/codex-acp`) or update `acp_agents.codex.command` and `args` in config.yaml."
 
+    if agent == "mcode":
+        return (
+            f"{message} Install it with `npm install --global @minimax-ai/code`, run `mcode login`, and restart DeerFlow so it inherits the updated PATH. "
+            "If the Gateway runs in Docker, ensure `mcode` is installed and authenticated inside the Gateway container/image."
+        )
     return f"{message} Install the agent binary or update `acp_agents.{agent}.command` in config.yaml."
 
 
@@ -192,7 +258,7 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
                 try:
                     from acp.schema import TextContentBlock
 
-                    if hasattr(update, "content") and isinstance(update.content, TextContentBlock):
+                    if getattr(update, "session_update", None) == "agent_message_chunk" and isinstance(update.content, TextContentBlock):
                         self._chunks.append(update.content.text)
                 except Exception:
                     pass
@@ -207,11 +273,18 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
                 return response
 
         client = _CollectingClient()
-        cmd = agent_config.command
+        agent_env: dict[str, str] | None = None
+        if agent_config.env:
+            # $VARS in config.yaml are already resolved by AppConfig.resolve_env_variables;
+            # resolving again would rewrite a secret that itself starts with $.
+            agent_env = dict(agent_config.env)
+        # Resolve against the PATH the agent subprocess will see, not the Gateway's:
+        # the SDK merges agent_env over its inherited environment at spawn time.
+        cmd = await asyncio.to_thread(_resolve_agent_command, agent_config.command, _agent_path(agent_env))
         args = agent_config.args or []
-        physical_cwd = _get_work_dir(thread_id)
+        physical_cwd = await asyncio.to_thread(_get_work_dir, thread_id)
         try:
-            mcp_servers = _build_acp_mcp_servers()
+            mcp_servers = await asyncio.to_thread(_build_acp_mcp_servers)
         except ValueError as exc:
             logger.warning(
                 "Invalid MCP server configuration for ACP agent '%s'; continuing without MCP servers: %s",
@@ -219,35 +292,49 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
                 exc,
             )
             mcp_servers = []
-        agent_env: dict[str, str] | None = None
-        if agent_config.env:
-            agent_env = {k: (os.environ.get(v[1:], "") if v.startswith("$") else v) for k, v in agent_config.env.items()}
 
         try:
             from acp import spawn_agent_process
 
             async with spawn_agent_process(client, cmd, *args, env=agent_env, cwd=physical_cwd) as (conn, proc):
                 logger.info("Spawning ACP agent '%s' with command '%s' and args %s in cwd %s", agent, cmd, args, physical_cwd)
-                await conn.initialize(
-                    protocol_version=PROTOCOL_VERSION,
-                    client_capabilities=ClientCapabilities(),
-                    client_info=Implementation(name="deerflow", title="DeerFlow", version="0.1.0"),
-                )
-                session_kwargs: dict[str, Any] = {"cwd": physical_cwd, "mcp_servers": mcp_servers}
-                if agent_config.model:
-                    session_kwargs["model"] = agent_config.model
-                session = await conn.new_session(**session_kwargs)
-                await conn.prompt(
-                    session_id=session.session_id,
-                    prompt=[text_block(prompt)],
-                )
+                try:
+                    async with asyncio.timeout(agent_config.timeout_seconds) as deadline:
+                        await conn.initialize(
+                            protocol_version=PROTOCOL_VERSION,
+                            client_capabilities=ClientCapabilities(),
+                            client_info=Implementation(name="deerflow", title="DeerFlow", version="0.1.0"),
+                        )
+                        session_kwargs: dict[str, Any] = {"cwd": physical_cwd, "mcp_servers": mcp_servers}
+                        if agent_config.model:
+                            session_kwargs["model"] = agent_config.model
+                        session = await conn.new_session(**session_kwargs)
+                        await conn.prompt(
+                            session_id=session.session_id,
+                            prompt=[text_block(prompt)],
+                        )
+                except TimeoutError:
+                    if not deadline.expired():
+                        raise
+                    logger.error(
+                        "ACP agent '%s' timed out after %s seconds during initialization, session creation, or prompt; terminating subprocess",
+                        agent,
+                        agent_config.timeout_seconds,
+                    )
+                    return (
+                        f"Error: ACP agent '{agent}' timed out after {agent_config.timeout_seconds} seconds "
+                        "without completing the ACP invocation. The agent subprocess has been terminated. If this agent handles "
+                        f"long-running tasks, increase acp_agents.{agent}.timeout_seconds in config.yaml."
+                    )
             result = client.collected_text
             logger.info("ACP agent '%s' returned %s", agent, result[:1000])
             logger.info("ACP agent '%s' returned %d characters", agent, len(result))
             return result or "(no response)"
         except Exception as e:
             logger.error("ACP agent '%s' invocation failed: %s", agent, e)
-            return _format_invocation_error(agent, cmd, e)
+            # Report the configured command, not the resolved path: remediation
+            # text has to match what the operator wrote in config.yaml.
+            return await asyncio.to_thread(_format_invocation_error, agent, agent_config.command, e)
 
     return StructuredTool.from_function(
         name="invoke_acp_agent",

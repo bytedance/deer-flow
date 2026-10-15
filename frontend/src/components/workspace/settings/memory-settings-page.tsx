@@ -10,7 +10,6 @@ import {
 import Link from "next/link";
 import { useDeferredValue, useId, useRef, useState } from "react";
 import { toast } from "sonner";
-import { Streamdown } from "streamdown";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -24,6 +23,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { createMarkdownLinkComponent } from "@/components/workspace/messages/markdown-link";
 import { useI18n } from "@/core/i18n/hooks";
 import { exportMemory } from "@/core/memory/api";
 import {
@@ -34,11 +34,16 @@ import {
   useMemory,
   useUpdateMemoryFact,
 } from "@/core/memory/hooks";
+import { normalizeMemoryPayload } from "@/core/memory/import-memory";
 import type {
   MemoryFactInput,
   MemoryFactPatchInput,
   UserMemory,
 } from "@/core/memory/types";
+import {
+  SafeStreamdown,
+  toStreamdownComponents,
+} from "@/core/streamdown/components";
 import { streamdownPlugins } from "@/core/streamdown/plugins";
 import { pathOfThread } from "@/core/threads/utils";
 import { formatTimeAgo } from "@/core/utils/datetime";
@@ -63,60 +68,6 @@ type PendingImport = {
   fileName: string;
   memory: UserMemory;
 };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function isMemorySection(value: unknown): value is {
-  summary: string;
-  updatedAt: string;
-} {
-  return (
-    isRecord(value) &&
-    typeof value.summary === "string" &&
-    typeof value.updatedAt === "string"
-  );
-}
-
-function isMemoryFact(value: unknown): value is UserMemory["facts"][number] {
-  return (
-    isRecord(value) &&
-    typeof value.id === "string" &&
-    typeof value.content === "string" &&
-    typeof value.category === "string" &&
-    typeof value.confidence === "number" &&
-    Number.isFinite(value.confidence) &&
-    typeof value.createdAt === "string" &&
-    typeof value.source === "string"
-  );
-}
-
-function isImportedMemory(value: unknown): value is UserMemory {
-  if (!isRecord(value)) {
-    return false;
-  }
-
-  if (
-    typeof value.version !== "string" ||
-    typeof value.lastUpdated !== "string" ||
-    !isRecord(value.user) ||
-    !isRecord(value.history) ||
-    !Array.isArray(value.facts)
-  ) {
-    return false;
-  }
-
-  return (
-    isMemorySection(value.user.workContext) &&
-    isMemorySection(value.user.personalContext) &&
-    isMemorySection(value.user.topOfMind) &&
-    isMemorySection(value.history.recentMonths) &&
-    isMemorySection(value.history.earlierContext) &&
-    isMemorySection(value.history.longTermBackground) &&
-    value.facts.every(isMemoryFact)
-  );
-}
 
 type FactFormState = {
   content: string;
@@ -185,6 +136,11 @@ function buildMemorySectionGroups(
           summary: memory.user.topOfMind.summary,
           updatedAt: memory.user.topOfMind.updatedAt,
         },
+        {
+          title: t.settings.memory.markdown.cognitiveStyle,
+          summary: memory.user.cognitiveStyle.summary,
+          updatedAt: memory.user.cognitiveStyle.updatedAt,
+        },
       ],
     },
     {
@@ -251,6 +207,7 @@ function isMemorySummaryEmpty(memory: UserMemory) {
     memory.user.workContext.summary.trim() === "" &&
     memory.user.personalContext.summary.trim() === "" &&
     memory.user.topOfMind.summary.trim() === "" &&
+    memory.user.cognitiveStyle.summary.trim() === "" &&
     memory.history.recentMonths.summary.trim() === "" &&
     memory.history.earlierContext.summary.trim() === "" &&
     memory.history.longTermBackground.summary.trim() === ""
@@ -271,6 +228,13 @@ function truncateFactPreview(content: string, maxLength = 140) {
 
 function upperFirst(str: string) {
   return str.charAt(0).toUpperCase() + str.slice(1);
+}
+
+function formatFactCreatedAt(createdAt: string, unknownLabel: string) {
+  if (!createdAt || Number.isNaN(Date.parse(createdAt))) {
+    return unknownLabel;
+  }
+  return formatTimeAgo(createdAt);
 }
 
 export function MemorySettingsPage() {
@@ -420,13 +384,14 @@ export function MemorySettingsPage() {
 
     try {
       const parsed: unknown = JSON.parse(await file.text());
-      if (!isImportedMemory(parsed)) {
+      const memory = normalizeMemoryPayload(parsed);
+      if (!memory) {
         toast.error(t.settings.memory.importInvalidFile);
         return;
       }
       setPendingImport({
         fileName: file.name,
-        memory: parsed,
+        memory,
       });
     } catch {
       toast.error(t.settings.memory.importInvalidFile);
@@ -542,7 +507,9 @@ export function MemorySettingsPage() {
             {t.common.loading}
           </div>
         ) : error ? (
-          <div>Error: {error.message}</div>
+          <div>
+            {t.common.error} {error.message}
+          </div>
         ) : !memory ? (
           <div className="text-muted-foreground text-sm">
             {t.settings.memory.empty}
@@ -555,13 +522,14 @@ export function MemorySettingsPage() {
               </div>
             ) : null}
 
-            <div className="flex min-w-0 flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-              <div className="flex min-w-0 flex-1 flex-col gap-3 sm:flex-row sm:items-center">
+            <div className="flex flex-col gap-3">
+              {/* Row 1: search + filter tabs */}
+              <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center">
                 <Input
                   value={query}
                   onChange={(event) => setQuery(event.target.value)}
                   placeholder={searchPlaceholder}
-                  className="sm:max-w-xs"
+                  className="min-w-0 flex-1 sm:max-w-md"
                 />
                 <ToggleGroup
                   type="single"
@@ -570,16 +538,25 @@ export function MemorySettingsPage() {
                     if (value) setFilter(value as MemoryViewFilter);
                   }}
                   variant="outline"
+                  className="shrink-0 self-start sm:ml-auto sm:self-auto"
                 >
-                  <ToggleGroupItem value="all">{filterAll}</ToggleGroupItem>
-                  <ToggleGroupItem value="facts">{filterFacts}</ToggleGroupItem>
-                  <ToggleGroupItem value="summaries">
+                  <ToggleGroupItem value="all" className="whitespace-nowrap">
+                    {filterAll}
+                  </ToggleGroupItem>
+                  <ToggleGroupItem value="facts" className="whitespace-nowrap">
+                    {filterFacts}
+                  </ToggleGroupItem>
+                  <ToggleGroupItem
+                    value="summaries"
+                    className="whitespace-nowrap"
+                  >
                     {filterSummaries}
                   </ToggleGroupItem>
                 </ToggleGroup>
               </div>
 
-              <div className="flex min-w-0 flex-wrap gap-2 xl:justify-end">
+              {/* Row 2: actions — constructive group on the left, destructive separated to the right */}
+              <div className="flex flex-wrap items-center gap-2">
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -609,6 +586,7 @@ export function MemorySettingsPage() {
                 </Button>
                 <Button
                   variant="destructive"
+                  className="ml-auto"
                   onClick={() => setClearDialogOpen(true)}
                   disabled={clearMemory.isPending}
                 >
@@ -628,12 +606,19 @@ export function MemorySettingsPage() {
                 <div className="text-muted-foreground mb-4 text-sm">
                   {summaryReadOnly}
                 </div>
-                <Streamdown
+                <SafeStreamdown
                   className="size-full min-w-0 [overflow-wrap:anywhere] [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
                   {...streamdownPlugins}
+                  components={toStreamdownComponents({
+                    // Defense in depth on top of the rehype-sanitize step in
+                    // streamdownPlugins: memory summaries are LLM/stored
+                    // content, so never render an unsafe href (javascript:,
+                    // data:, …) as a clickable anchor.
+                    a: createMarkdownLinkComponent(),
+                  })}
                 >
                   {summariesToMarkdown(memory, filteredSectionGroups, t)}
-                </Streamdown>
+                </SafeStreamdown>
               </div>
             ) : null}
 
@@ -679,7 +664,10 @@ export function MemorySettingsPage() {
                                 <span className="text-muted-foreground">
                                   {t.settings.memory.markdown.table.createdAt}:
                                 </span>{" "}
-                                {formatTimeAgo(fact.createdAt)}
+                                {formatFactCreatedAt(
+                                  fact.createdAt,
+                                  t.settings.memory.markdown.table.unknown,
+                                )}
                               </span>
                               <span>
                                 <span className="text-muted-foreground">
@@ -687,13 +675,15 @@ export function MemorySettingsPage() {
                                 </span>{" "}
                                 {fact.source === "manual" ? (
                                   t.settings.memory.manualFactSource
-                                ) : (
+                                ) : fact.source && fact.source !== "unknown" ? (
                                   <Link
                                     href={pathOfThread(fact.source)}
                                     className="text-primary underline-offset-4 hover:underline"
                                   >
                                     {t.settings.memory.markdown.table.view}
                                   </Link>
+                                ) : (
+                                  t.settings.memory.markdown.table.unknown
                                 )}
                               </span>
                             </div>

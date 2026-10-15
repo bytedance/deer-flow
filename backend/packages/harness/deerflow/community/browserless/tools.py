@@ -1,0 +1,452 @@
+import asyncio
+import logging
+import os
+import re
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Annotated
+from urllib.parse import urlparse
+
+from langchain.tools import InjectedToolCallId, tool
+from langchain_core.messages import ToolMessage
+from langgraph.types import Command
+
+from deerflow.community.url_safety import resolve_host_addresses as _resolve_host_addresses
+from deerflow.community.url_safety import validate_delegated_backend_url, validate_public_http_url
+from deerflow.config import get_app_config
+from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.tools.types import Runtime
+from deerflow.utils.atomic_write import publish_bytes_atomically as _publish_bytes_atomically
+from deerflow.utils.readability import ReadabilityExtractor
+
+from .browserless_client import BrowserlessClient, BrowserlessFetchResult, BrowserlessScreenshotResult
+
+logger = logging.getLogger(__name__)
+
+# readability_extractor runs CPU-bound parsing; always call via asyncio.to_thread
+_readability_extractor = ReadabilityExtractor()
+_OUTPUTS_VIRTUAL_PREFIX = f"{VIRTUAL_PATH_PREFIX}/outputs"
+_OUTPUT_FORMAT_TO_EXTENSION = {
+    "png": "png",
+    "jpeg": "jpeg",
+    "webp": "webp",
+}
+_SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+# Cap collision-suffix probing so a saturated outputs directory cannot spin forever.
+_MAX_FILENAME_COLLISION_PROBES = 1000
+# Retry bound for the timestamped fallback: the microseconds stamp can only repeat
+# when another writer claimed that exact name within the same microsecond.
+_MAX_TIMESTAMP_CLAIM_ATTEMPTS = 5
+DEFAULT_BASE_URL = "http://localhost:3032"
+_UNSET = object()
+
+
+def _get_tool_config(tool_name: str) -> dict | None:
+    """Get tool config extras safely, returning None if not configured."""
+    config = get_app_config().get_tool_config(tool_name)
+    if config is None:
+        return None
+    extras = config.model_extra
+    return extras if extras is not None else {}
+
+
+def _coerce_timeout(value: object, default: float) -> float:
+    """Coerce a config timeout into seconds, falling back to ``default`` on bad input.
+
+    Mirrors ``crawl4ai._coerce_timeout`` / ``jina_ai._coerce_timeout``: booleans and
+    non-numeric strings fall back to the default, so ``timeout_s: off`` (YAML ``False``)
+    does not become ``0.0`` and time out every request against a healthy server, and a
+    typo'd value does not raise out of tool construction.
+    """
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            logger.warning("Browserless: invalid timeout %r in config; using %ss", value, default)
+    return default
+
+
+def _resolve_timeout(cfg: dict, default: float) -> float:
+    """Read the timeout, accepting this provider's key and the sibling providers' key.
+
+    ``browserless`` documents ``timeout_s`` while ``crawl4ai`` and ``jina_ai`` read
+    ``timeout``. An unrecognised key is dropped silently by the extra-fields tool config,
+    so someone adapting another provider's snippet got the default with no diagnostic.
+    Accept both, preferring the documented ``timeout_s`` when both are present.
+    """
+    if "timeout_s" in cfg:
+        return _coerce_timeout(cfg["timeout_s"], default)
+    if "timeout" in cfg:
+        return _coerce_timeout(cfg["timeout"], default)
+    return default
+
+
+def _get_browserless_client(tool_name: str = "web_fetch", cfg: dict | None = _UNSET) -> BrowserlessClient:
+    if cfg is _UNSET:
+        cfg = _get_tool_config(tool_name)
+    base_url = DEFAULT_BASE_URL
+    token = os.getenv("BROWSERLESS_TOKEN", "")
+    timeout_s = 30.0
+    if cfg is not None:
+        base_url = cfg.get("base_url", base_url)
+        token = cfg.get("token", token)
+        timeout_s = _resolve_timeout(cfg, timeout_s)
+    return BrowserlessClient(base_url=base_url, token=token, timeout_s=timeout_s)
+
+
+def _as_bool(value: object, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
+def _validate_backend_base_url(cfg: dict | None) -> str | None:
+    """Refuse delegation to a self-hosted backend unless its egress is isolated.
+
+    Browserless resolves the target URL, follows redirects, and loads subresources
+    in the Browserless service's own network namespace, so the target-URL screen
+    cannot be enforced end-to-end. Delegation is only safe when the backend's
+    outbound network is isolated from private and metadata networks, which the
+    operator confirms via ``network_isolation_confirmed``. A public backend
+    (Browserless Cloud) needs no confirmation. Blocking; call via
+    ``asyncio.to_thread``.
+    """
+    cfg = cfg or {}
+    base_url = cfg.get("base_url", DEFAULT_BASE_URL)
+    network_isolation_confirmed = _as_bool(cfg.get("network_isolation_confirmed"), False)
+    return validate_delegated_backend_url(
+        base_url,
+        network_isolation_confirmed=network_isolation_confirmed,
+        resolver=_resolve_host_addresses,
+    )
+
+
+def _as_int(value: object, default: int) -> int:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return default
+    return default
+
+
+def _as_str_list(value: object) -> list[str] | None:
+    """Coerce a config value into a non-empty list of strings, or ``None``.
+
+    Accepts a list of strings and a comma-separated string, since YAML makes
+    both spellings natural. Non-string sequence items are ignored. Unsupported
+    top-level values, an empty list, or a blank string yield ``None`` so the
+    parameter stays out of the payload instead of reaching Browserless as an
+    unusable value.
+    """
+    if isinstance(value, str):
+        parts = value.split(",")
+    elif isinstance(value, (list, tuple)):
+        parts = [part for part in value if isinstance(part, str)]
+    else:
+        return None
+
+    items = [part.strip() for part in parts if part.strip()]
+    return items or None
+
+
+def _as_optional_quality(value: object, output_format: str) -> int | None:
+    if output_format not in {"jpeg", "webp"}:
+        return None
+    quality = _as_int(value, -1)
+    return quality if 0 <= quality <= 100 else None
+
+
+def _normalize_output_format(value: object) -> str:
+    output_format = str(value or "png").strip().lower()
+    return output_format if output_format in _OUTPUT_FORMAT_TO_EXTENSION else "png"
+
+
+def _validate_capture_url(url: str, allow_private_addresses: bool = False) -> str | None:
+    """Validate a capture URL for scheme and (unless opted out) SSRF safety.
+
+    Blocks requests that resolve to loopback, private, link-local (incl. the
+    169.254.169.254 cloud-metadata endpoint), reserved, multicast, or
+    unspecified addresses. Operators who intentionally point the tool at an
+    internal Browserless target can opt out via ``allow_private_addresses``.
+    """
+    return validate_public_http_url(
+        url,
+        allow_private_addresses=allow_private_addresses,
+        action="capture",
+        resolver=_resolve_host_addresses,
+    )
+
+
+def _default_capture_stem(url: str) -> str:
+    parsed = urlparse(url)
+    parts = [parsed.netloc, *[part for part in parsed.path.split("/") if part]]
+    raw = "-".join(parts) or "web-capture"
+    return raw[:80]
+
+
+def _safe_capture_filename(filename: str | None, url: str, output_format: str) -> str:
+    extension = _OUTPUT_FORMAT_TO_EXTENSION[output_format]
+    if filename:
+        raw_name = Path(filename).name
+        stem = Path(raw_name).stem or "web-capture"
+    else:
+        timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+        stem = f"{_default_capture_stem(url)}-{timestamp}"
+
+    safe_stem = _SAFE_FILENAME_RE.sub("_", stem).strip("._-") or "web-capture"
+    return f"{safe_stem[:100]}.{extension}"
+
+
+def _thread_outputs_path(runtime: Runtime) -> Path | str:
+    if runtime.state is None:
+        return "Error: Thread runtime state is not available"
+    thread_data = runtime.state.get("thread_data") or {}
+    outputs_path = thread_data.get("outputs_path")
+    if not outputs_path:
+        return "Error: Thread outputs path is not available"
+    return Path(outputs_path)
+
+
+def _tool_message(content: str, tool_call_id: str) -> Command:
+    return Command(update={"messages": [ToolMessage(content, tool_call_id=tool_call_id)]})
+
+
+def _reserve_output_name(outputs_path: Path, name: str) -> bool:
+    """Claim ``name`` for this capture, returning False when it is already held.
+
+    The claim is an ``O_CREAT | O_EXCL`` open that leaves an empty placeholder
+    behind, not an existence check: two writers that merely *observe* a free name
+    would both go on to publish to it, and the second ``os.replace`` would
+    silently replace the first capture (#6883). ``0o666`` is passed explicitly
+    because ``publish_bytes_atomically`` preserves an existing file's mode, and
+    ``os.open`` would otherwise default the placeholder to ``0o777 & ~umask`` and
+    make every capture executable instead of the ``0o666 & ~umask`` a new file
+    gets from ``Path.write_bytes``.
+    """
+    try:
+        descriptor = os.open(outputs_path / name, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+    except FileExistsError:
+        return False
+    os.close(descriptor)
+    return True
+
+
+def _dedupe_output_name(outputs_path: Path, output_name: str) -> str:
+    """Reserve and return a non-colliding filename under ``outputs_path``.
+
+    Keeps the original name when it can be claimed, otherwise appends ``-1``,
+    ``-2``, ... before the extension so an explicit filename never silently
+    overwrites an earlier capture. Falls back to a timestamp suffix if the
+    directory is saturated with the bounded probe range.
+
+    Raises:
+        RuntimeError: when even the timestamped names cannot be claimed, which
+            means another writer is holding them; returning a name anyway would
+            reintroduce the silent overwrite this function exists to prevent.
+    """
+    stem = Path(output_name).stem
+    suffix = Path(output_name).suffix
+    if _reserve_output_name(outputs_path, output_name):
+        return output_name
+
+    for index in range(1, _MAX_FILENAME_COLLISION_PROBES + 1):
+        probe = f"{stem}-{index}{suffix}"
+        if _reserve_output_name(outputs_path, probe):
+            return probe
+
+    for _ in range(_MAX_TIMESTAMP_CLAIM_ATTEMPTS):
+        timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S-%f")
+        fallback = f"{stem}-{timestamp}{suffix}"
+        if _reserve_output_name(outputs_path, fallback):
+            return fallback
+
+    raise RuntimeError(f"could not reserve an output filename for {output_name!r} in {outputs_path}")
+
+
+def _write_capture_output(outputs_path: Path, output_name: str, content: bytes) -> str:
+    """Write ``content`` into ``outputs_path`` and return the actual filename used."""
+    outputs_path.mkdir(parents=True, exist_ok=True)
+    final_name = _dedupe_output_name(outputs_path, output_name)
+    destination = outputs_path / final_name
+    try:
+        _publish_bytes_atomically(destination, content)
+    except BaseException:
+        try:
+            destination.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Could not release the reserved capture name %s", destination, exc_info=True)
+        raise
+    return final_name
+
+
+def _target_status_warning(result: BrowserlessScreenshotResult | BrowserlessFetchResult) -> str:
+    """Return a human-readable warning when the fetched/captured page itself errored.
+
+    Browserless returns HTTP 200 for the render request even when the target
+    page responded with a 4xx/5xx (or was an error/anti-bot page), so the raw
+    content alone cannot be trusted as a normal successful response. The
+    target's real status is surfaced via the X-Response-Code header.
+    """
+    code = result.target_status_code.strip()
+    if not code or code.startswith(("2", "3")):
+        return ""
+    status = result.target_status.strip()
+    detail = f"{code} {status}".strip()
+    return f" (warning: target page responded {detail})"
+
+
+@tool("web_fetch", parse_docstring=True)
+async def web_fetch_tool(url: str) -> str:
+    """Fetch the contents of a web page at a given URL using Browserless (headless Chrome).
+    Only fetch EXACT URLs that have been provided directly by the user or have been returned in results from the web_search and web_fetch tools.
+    This tool can NOT access content that requires authentication, such as private Google Docs or pages behind login walls.
+    Do NOT add www. to URLs that do NOT have them.
+    URLs must include the schema: https://example.com is a valid URL while example.com is an invalid URL.
+
+    Args:
+        url: The URL to fetch the contents of.
+    """
+    try:
+        cfg = _get_tool_config("web_fetch") or {}
+        allow_private_addresses = _as_bool(cfg.get("allow_private_addresses"), False)
+        url_error = await asyncio.to_thread(
+            validate_public_http_url,
+            url,
+            allow_private_addresses=allow_private_addresses,
+            resolver=_resolve_host_addresses,
+        )
+        if url_error:
+            return url_error
+
+        backend_error = await asyncio.to_thread(_validate_backend_base_url, cfg)
+        if backend_error:
+            return backend_error
+
+        wait_for_event = ""
+        wait_for_timeout_ms = 0
+        wait_for_selector = ""
+        wait_for_selector_timeout_ms = 5000
+        reject_resource_types = _as_str_list(cfg.get("reject_resource_types"))
+        reject_request_pattern = _as_str_list(cfg.get("reject_request_pattern"))
+
+        wait_for_event = cfg.get("wait_for_event", wait_for_event)
+        wait_for_timeout_ms = _as_int(cfg.get("wait_for_timeout_ms"), wait_for_timeout_ms)
+        wait_for_selector = cfg.get("wait_for_selector", wait_for_selector)
+        wait_for_selector_timeout_ms = _as_int(cfg.get("wait_for_selector_timeout_ms"), wait_for_selector_timeout_ms)
+
+        client = _get_browserless_client("web_fetch", cfg)
+        result = await client.fetch_html_with_status(
+            url=url,
+            wait_for_event=wait_for_event,
+            wait_for_timeout_ms=wait_for_timeout_ms,
+            wait_for_selector=wait_for_selector,
+            wait_for_selector_timeout_ms=wait_for_selector_timeout_ms,
+            reject_resource_types=reject_resource_types,
+            reject_request_pattern=reject_request_pattern,
+        )
+
+        if isinstance(result, str):
+            return result
+
+        article = await asyncio.to_thread(_readability_extractor.extract_article, result.html, url=url)
+        return f"{article.to_markdown()[:4096]}{_target_status_warning(result)}"
+
+    except Exception as e:
+        logger.error(f"Error in web_fetch_tool: {e}")
+        return f"Error: {str(e)}"
+
+
+@tool("web_capture", parse_docstring=True)
+async def web_capture_tool(
+    runtime: Runtime,
+    url: str,
+    tool_call_id: Annotated[str, InjectedToolCallId],
+    filename: str | None = None,
+    full_page: bool | None = None,
+    output_format: str | None = None,
+    viewport_width: int | None = None,
+    viewport_height: int | None = None,
+) -> Command:
+    """Capture a rendered webpage screenshot and present it as an artifact.
+
+    Use this tool when you need a visual capture of a public webpage, especially JavaScript-heavy pages, UI states, dashboards, or visual evidence for a report.
+    Only capture exact URLs provided by the user or discovered through other tools. Do not use this for private pages behind login unless the user has explicitly configured Browserless outside DeerFlow.
+    URLs must include the schema: https://example.com is valid while example.com is invalid.
+
+    Args:
+        url: The http(s) URL to capture.
+        filename: Optional output filename. Directories are ignored and the extension is determined by output_format.
+        full_page: Optional override for full-page capture.
+        output_format: Optional image format: png, jpeg, or webp.
+        viewport_width: Optional viewport width in pixels.
+        viewport_height: Optional viewport height in pixels.
+    """
+    try:
+        cfg = _get_tool_config("web_capture") or {}
+        allow_private_addresses = _as_bool(cfg.get("allow_private_addresses"), False)
+
+        url_error = await asyncio.to_thread(_validate_capture_url, url, allow_private_addresses=allow_private_addresses)
+        if url_error:
+            return _tool_message(url_error, tool_call_id)
+
+        backend_error = await asyncio.to_thread(_validate_backend_base_url, cfg)
+        if backend_error:
+            return _tool_message(backend_error, tool_call_id)
+
+        outputs_path = _thread_outputs_path(runtime)
+        if isinstance(outputs_path, str):
+            return _tool_message(outputs_path, tool_call_id)
+
+        final_format = _normalize_output_format(output_format or cfg.get("output_format", "png"))
+        final_full_page = full_page if full_page is not None else _as_bool(cfg.get("full_page"), True)
+        final_width = viewport_width if viewport_width is not None else _as_int(cfg.get("viewport_width"), 1280)
+        final_height = viewport_height if viewport_height is not None else _as_int(cfg.get("viewport_height"), 720)
+        quality = _as_optional_quality(cfg.get("quality"), final_format)
+        wait_for_selector = str(cfg.get("wait_for_selector") or "")
+        wait_for_selector_timeout_ms = _as_int(cfg.get("wait_for_selector_timeout_ms"), 5000)
+        wait_for_timeout_ms = _as_int(cfg.get("wait_for_timeout_ms"), 0)
+        best_attempt = _as_bool(cfg.get("best_attempt"), False)
+
+        output_name = _safe_capture_filename(filename, url, final_format)
+
+        client = _get_browserless_client("web_capture", cfg)
+        result = await client.capture_screenshot(
+            url=url,
+            full_page=final_full_page,
+            output_format=final_format,
+            quality=quality,
+            viewport={"width": final_width, "height": final_height},
+            wait_for_selector=wait_for_selector,
+            wait_for_selector_timeout_ms=wait_for_selector_timeout_ms,
+            wait_for_timeout_ms=wait_for_timeout_ms,
+            best_attempt=best_attempt,
+        )
+        if isinstance(result, str):
+            return _tool_message(result, tool_call_id)
+
+        final_name = await asyncio.to_thread(_write_capture_output, outputs_path, output_name, result.content)
+        virtual_path = f"{_OUTPUTS_VIRTUAL_PREFIX}/{final_name}"
+        message = f"Captured screenshot: {virtual_path}{_target_status_warning(result)}"
+        return Command(
+            update={
+                "artifacts": [virtual_path],
+                "messages": [ToolMessage(message, tool_call_id=tool_call_id)],
+            }
+        )
+
+    except Exception as e:
+        logger.error(f"Error in web_capture_tool: {e}")
+        return _tool_message(f"Error: {str(e)}", tool_call_id)

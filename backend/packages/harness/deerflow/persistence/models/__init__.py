@@ -14,10 +14,64 @@ its storage implementation lives in ``deerflow.runtime.events.store.db`` and
 there is no matching entity directory.
 """
 
+from deerflow.persistence.agents.model import AgentRow
+from deerflow.persistence.channel_connections.model import (
+    ChannelConnectionRow,
+    ChannelConversationRow,
+    ChannelCredentialRow,
+    ChannelOAuthStateRow,
+)
+from deerflow.persistence.channel_leases.model import ChannelLeaseRow
+from deerflow.persistence.channel_thread_bindings.model import ChannelThreadBindingRow
 from deerflow.persistence.feedback.model import FeedbackRow
-from deerflow.persistence.models.run_event import RunEventRow
-from deerflow.persistence.run.model import RunRow
+from deerflow.persistence.login_throttle.model import LoginThrottleRow
+from deerflow.persistence.managed_subagents.model import ManagedSubagentRow
+from deerflow.persistence.mcp_tasks.model import McpTaskRow
+from deerflow.persistence.models.run_event import RunEventRow, RunEventThreadSeqRow
+from deerflow.persistence.notification_deliveries.model import NotificationDeliveryRow
+from deerflow.persistence.personal_access_tokens.model import PersonalAccessTokenRow
+from deerflow.persistence.projects.model import ProjectDocumentRow, ProjectRow
+from deerflow.persistence.run.model import RunChangeClockRow, RunRow
+from deerflow.persistence.scheduled_task_events.model import ScheduledTaskEventRow
+from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
+from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
+from deerflow.persistence.subagent_batches.model import SubagentBatchItemRow, SubagentBatchRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
-from deerflow.persistence.user.model import UserRow
+from deerflow.persistence.thread_reads.model import ThreadReadMarkerRow, ThreadReadVersionRow
+from deerflow.persistence.user.im_notifications import ImNotificationPreferenceRow
+from deerflow.persistence.user.model import UserPreferenceRow, UserRow
+from deerflow.persistence.webhook_delivery.model import WebhookDeliveryRow
 
-__all__ = ["FeedbackRow", "RunEventRow", "RunRow", "ThreadMetaRow", "UserRow"]
+__all__ = [
+    "AgentRow",
+    "ChannelConnectionRow",
+    "ChannelConversationRow",
+    "ChannelCredentialRow",
+    "ChannelLeaseRow",
+    "ChannelOAuthStateRow",
+    "ChannelThreadBindingRow",
+    "FeedbackRow",
+    "LoginThrottleRow",
+    "McpTaskRow",
+    "ManagedSubagentRow",
+    "NotificationDeliveryRow",
+    "PersonalAccessTokenRow",
+    "ProjectDocumentRow",
+    "ProjectRow",
+    "RunEventRow",
+    "RunEventThreadSeqRow",
+    "RunChangeClockRow",
+    "RunRow",
+    "ScheduledTaskEventRow",
+    "ScheduledTaskRow",
+    "ScheduledTaskRunRow",
+    "SubagentBatchRow",
+    "SubagentBatchItemRow",
+    "ThreadMetaRow",
+    "ThreadReadMarkerRow",
+    "ThreadReadVersionRow",
+    "UserPreferenceRow",
+    "ImNotificationPreferenceRow",
+    "UserRow",
+    "WebhookDeliveryRow",
+]

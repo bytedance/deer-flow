@@ -65,7 +65,7 @@ if ! command -v lsof >/dev/null 2>&1; then
     echo "  Install lsof and rerun this check"
     all_passed=false
 else
-    for port in 2026 3000 8001 2024; do
+    for port in 2026 3000 8001; do
         if lsof -i :$port >/dev/null 2>&1; then
             echo "⚠  Port $port is already in use:"
             lsof -i :$port | head -2

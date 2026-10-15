@@ -1,0 +1,43 @@
+[
+  {
+    "event": "scheduler_resume",
+    "time_utc": "2026-09-11T20:09:58.885812+00:00",
+    "reason": "increase public batch throughput",
+    "old_case_concurrency": 6,
+    "new_case_concurrency": 12,
+    "old_client_concurrency": 12,
+    "new_client_concurrency": 24,
+    "protocol_changed": false,
+    "retained_log": "run-public-test.log",
+    "new_log": "run-public-test-expanded.log",
+    "preserved": "all successful cached responses and per-case memory/results",
+    "limitation": "Canceled in-flight provider work has no token usage response and is not in logical product costs."
+  },
+  {
+    "event": "continuation_loop_guard_refinement",
+    "time_utc": "2026-09-11T20:19:15.395651+00:00",
+    "reason": "Changing unsupported guesses is not new evidence. Stop on four failed validations without a new history result. No continued case had completed before this refinement. Existing API responses remain cached."
+  },
+  {
+    "event": "recover_new_provider_failures",
+    "time_utc": "2026-09-11T21:01:03.852190+00:00",
+    "ids": [
+      "60472f9c",
+      "6cb6f249"
+    ],
+    "request_concurrency": 2,
+    "case_concurrency": 1,
+    "reason": "RemoteProtocolError exhausted three tries; preserve protocol and resume only missing calls. Both task evaluation jobs are now finished, reducing total provider load."
+  },
+  {
+    "event": "final_low_load_recovery",
+    "time_utc": "2026-09-11T21:08:29.212631+00:00",
+    "ids": [
+      "60d45044",
+      "60472f9c"
+    ],
+    "request_concurrency": 2,
+    "case_concurrency": 2,
+    "reason": "Primary 42-case job has finished. Recovery of 6cb6f249 is now advancing; try remaining failed payloads once more under low load, retaining all prior failure records."
+  }
+]

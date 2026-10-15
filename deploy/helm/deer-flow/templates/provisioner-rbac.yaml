@@ -1,0 +1,76 @@
+{{- if .Values.provisioner.enabled -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "deer-flow.fullname" . }}-provisioner
+  namespace: {{ include "deer-flow.namespace" . }}
+  labels:
+    {{- include "deer-flow.labels" . | nindent 4 }}
+    app.kubernetes.io/component: provisioner
+---
+# Namespaced permissions: manage sandbox Pods + Services in this namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "deer-flow.fullname" . }}-provisioner
+  namespace: {{ include "deer-flow.namespace" . }}
+  labels:
+    {{- include "deer-flow.labels" . | nindent 4 }}
+    app.kubernetes.io/component: provisioner
+rules:
+  # Verbs mirror docker/provisioner/app.py, which only calls get/create/delete
+  # on pods and get/list/create/delete on services. update/patch, pods/exec,
+  # and events were unused and dropped (least privilege). These verbs still
+  # apply to *all* Pods in the namespace - scoping to sandbox Pods is deferred
+  # (see README "Not yet enforced").
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "services"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "deer-flow.fullname" . }}-provisioner
+  namespace: {{ include "deer-flow.namespace" . }}
+  labels:
+    {{- include "deer-flow.labels" . | nindent 4 }}
+    app.kubernetes.io/component: provisioner
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "deer-flow.fullname" . }}-provisioner
+    namespace: {{ include "deer-flow.namespace" . }}
+roleRef:
+  kind: Role
+  name: {{ include "deer-flow.fullname" . }}-provisioner
+  apiGroup: rbac.authorization.k8s.io
+---
+# Cluster-scoped: read/create Namespaces so the provisioner can ensure the
+# sandbox namespace exists (mirrors docker/provisioner/README.md:202-206).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "deer-flow.fullname" . }}-provisioner-ns
+  labels:
+    {{- include "deer-flow.labels" . | nindent 4 }}
+    app.kubernetes.io/component: provisioner
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "deer-flow.fullname" . }}-provisioner-ns
+  labels:
+    {{- include "deer-flow.labels" . | nindent 4 }}
+    app.kubernetes.io/component: provisioner
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "deer-flow.fullname" . }}-provisioner
+    namespace: {{ include "deer-flow.namespace" . }}
+roleRef:
+  kind: ClusterRole
+  name: {{ include "deer-flow.fullname" . }}-provisioner-ns
+  apiGroup: rbac.authorization.k8s.io
+{{- end -}}

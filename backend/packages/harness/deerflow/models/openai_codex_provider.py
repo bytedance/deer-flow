@@ -29,6 +29,36 @@ logger = logging.getLogger(__name__)
 CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 
 
+def _is_valid_call_id(call_id: Any) -> bool:
+    """Check call/result correlation IDs without rewriting non-blank values."""
+    return isinstance(call_id, str) and bool(call_id.strip())
+
+
+def _convert_tool_choice(tool_choice: str | dict | bool | None) -> str | dict | None:
+    """Normalize LangChain function selection to the Responses API format."""
+    if tool_choice is None or tool_choice is False:
+        return None
+    if tool_choice is True or tool_choice == "any":
+        return "required"
+    if isinstance(tool_choice, str) and tool_choice:
+        if tool_choice in ("auto", "none", "required"):
+            return tool_choice
+        return {"type": "function", "name": tool_choice}
+    if isinstance(tool_choice, dict) and tool_choice.get("type") == "function":
+        function = tool_choice.get("function", tool_choice)
+        if isinstance(function, dict) and isinstance(function.get("name"), str) and function["name"]:
+            return {"type": "function", "name": function["name"]}
+    raise ValueError("tool_choice must be auto, none, required, any, a function name/selection, a boolean, or None")
+
+
+def _validate_tool_choice(tool_choice: str | dict | None, tools: list[dict]) -> None:
+    """Check forced choices against the function tools that will be sent."""
+    if tool_choice == "required" and not tools:
+        raise ValueError("tool_choice='required' needs at least one function tool")
+    if isinstance(tool_choice, dict) and not any(tool["name"] == tool_choice["name"] for tool in tools):
+        raise ValueError("tool_choice must select a function present in tools")
+
+
 def _build_usage_metadata(oai_usage: dict) -> dict:
     """Convert Codex/Responses API usage dict to LangChain usage_metadata format.
 
@@ -90,7 +120,15 @@ class CodexChatModel(BaseChatModel):
 
     def model_post_init(self, __context: Any) -> None:
         """Auto-load Codex CLI credentials."""
+        from deerflow.models.request_admission import RequestAdmission
+
         self._validate_retry_config()
+        if isinstance(self.rate_limiter, RequestAdmission):
+            # Wrapper retries bypass BaseChatModel's admission hook. Leave
+            # paced retries to the LLM middleware.
+            if self.retry_max_attempts != 1:
+                logger.warning("Request admission enabled; ignoring configured retry_max_attempts=%d; provider retries are handled by middleware", self.retry_max_attempts)
+            self.retry_max_attempts = 1
 
         cred = self._load_codex_auth()
         if cred:
@@ -154,22 +192,44 @@ class CodexChatModel(BaseChatModel):
                 if msg.content:
                     content = self._normalize_content(msg.content)
                     input_items.append({"role": "assistant", "content": content})
-                if msg.tool_calls:
-                    for tc in msg.tool_calls:
-                        input_items.append(
-                            {
-                                "type": "function_call",
-                                "name": tc["name"],
-                                "arguments": json.dumps(tc["args"]) if isinstance(tc["args"], dict) else tc["args"],
-                                "call_id": tc["id"],
-                            }
-                        )
+                # Malformed calls are parked on ``invalid_tool_calls``, but
+                # DanglingToolCallMiddleware answers them with a placeholder ToolMessage;
+                # Responses rejects that function_call_output unless its function_call
+                # item is in the request too.
+                #
+                # A function_call item needs both a name and a call_id, and every
+                # InvalidToolCall field is nullable, so a call missing either is dropped
+                # rather than serialized as a schema-invalid item. Dropping one cannot
+                # orphan a placeholder ToolMessage: the middleware mints a synthetic id
+                # and a fallback name for exactly these calls before serialization, so a
+                # call still missing them here has no placeholder to pair with.
+                for tc in [*msg.tool_calls, *(msg.invalid_tool_calls or [])]:
+                    name = tc.get("name")
+                    call_id = tc.get("id")
+                    if not (isinstance(name, str) and name):
+                        continue
+                    if not _is_valid_call_id(call_id):
+                        continue
+                    args = tc.get("args")
+                    input_items.append(
+                        {
+                            "type": "function_call",
+                            "name": name,
+                            "arguments": json.dumps(args) if isinstance(args, dict) else (args or "{}"),
+                            "call_id": call_id,
+                        }
+                    )
             elif isinstance(msg, ToolMessage):
+                content = self._normalize_content(msg.content)
+                # A blank ID cannot identify the call this result answers.
+                if not _is_valid_call_id(msg.tool_call_id):
+                    logger.warning("Dropping tool result with blank call_id (content %d chars)", len(content))
+                    continue
                 input_items.append(
                     {
                         "type": "function_call_output",
                         "call_id": msg.tool_call_id,
-                        "output": self._normalize_content(msg.content),
+                        "output": content,
                     }
                 )
 
@@ -183,26 +243,23 @@ class CodexChatModel(BaseChatModel):
         for tool in tools:
             if tool.get("type") == "function" and "function" in tool:
                 fn = tool["function"]
-                responses_tools.append(
-                    {
-                        "type": "function",
-                        "name": fn["name"],
-                        "description": fn.get("description", ""),
-                        "parameters": fn.get("parameters", {}),
-                    }
-                )
             elif "name" in tool:
-                responses_tools.append(
-                    {
-                        "type": "function",
-                        "name": tool["name"],
-                        "description": tool.get("description", ""),
-                        "parameters": tool.get("parameters", {}),
-                    }
-                )
+                fn = tool
+            else:
+                continue
+            converted = {
+                "type": "function",
+                "name": fn["name"],
+                "description": fn.get("description", ""),
+                "parameters": fn.get("parameters", {}),
+            }
+            # Omitting strict is not equivalent to the caller's explicit False.
+            if fn.get("strict") is not None:
+                converted["strict"] = fn["strict"]
+            responses_tools.append(converted)
         return responses_tools
 
-    def _call_codex_api(self, messages: list[BaseMessage], tools: list[dict] | None = None) -> dict:
+    def _call_codex_api(self, messages: list[BaseMessage], tools: list[dict] | None = None, tool_choice: str | dict | bool | None = None) -> dict:
         """Call the Codex Responses API and return the completed response."""
         instructions, input_items = self._convert_messages(messages)
 
@@ -215,8 +272,13 @@ class CodexChatModel(BaseChatModel):
             "reasoning": {"effort": self.reasoning_effort, "summary": "detailed"} if self.reasoning_effort != "none" else {"effort": "none"},
         }
 
-        if tools:
-            payload["tools"] = self._convert_tools(tools)
+        converted_tools = self._convert_tools(tools or [])
+        converted_choice = _convert_tool_choice(tool_choice)
+        _validate_tool_choice(converted_choice, converted_tools)
+        if converted_tools:
+            payload["tools"] = converted_tools
+        if converted_choice is not None:
+            payload["tool_choice"] = converted_choice
 
         headers = {
             "Authorization": f"Bearer {self._access_token}",
@@ -266,6 +328,27 @@ class CodexChatModel(BaseChatModel):
                             streamed_output_items[output_index] = output_item
                     elif event_type == "response.completed":
                         completed_response = data["response"]
+                        # A terminal event completes the request even if the server
+                        # keeps the connection open. Do not let a later read timeout
+                        # replace the completed output with a transport error.
+                        break
+                    elif event_type in ("response.failed", "response.incomplete", "error"):
+                        response = data.get("response") or {}
+                        if event_type == "error":
+                            details = data.get("error") or data
+                        elif not isinstance(response, dict):
+                            details = response
+                        elif event_type == "response.failed":
+                            details = response.get("error") or {}
+                        else:
+                            details = response.get("incomplete_details") or {}
+
+                        if not isinstance(details, dict):
+                            details = {"message": str(details)}
+                        code = details.get("code")
+                        reason = details.get("message") or details.get("reason") or "No details provided"
+                        code_suffix = f" ({code})" if code else ""
+                        raise RuntimeError(f"Codex API {event_type}{code_suffix}: {reason}")
 
         if not completed_response:
             raise RuntimeError("Codex API stream ended without response.completed event")
@@ -373,7 +456,7 @@ class CodexChatModel(BaseChatModel):
                     }
                 )
 
-        usage = response.get("usage", {})
+        usage = response.get("usage") or {}
         usage_metadata = _build_usage_metadata(usage) if usage else None
         additional_kwargs = {}
         if reasoning_content:
@@ -412,28 +495,22 @@ class CodexChatModel(BaseChatModel):
     ) -> ChatResult:
         """Generate a response using Codex Responses API."""
         tools = kwargs.get("tools", None)
-        response = self._call_codex_api(messages, tools=tools)
+        response = self._call_codex_api(messages, tools=tools, tool_choice=kwargs.get("tool_choice"))
         return self._parse_response(response)
 
-    def bind_tools(self, tools: list, **kwargs: Any) -> Any:
-        """Bind tools for function calling."""
+    def bind_tools(self, tools: list, *, tool_choice: str | dict | bool | None = None, **kwargs: Any) -> Any:
+        """Bind function tools and their selection policy."""
         from langchain_core.runnables import RunnableBinding
         from langchain_core.tools import BaseTool
         from langchain_core.utils.function_calling import convert_to_openai_function
 
+        converted_choice = _convert_tool_choice(tool_choice)
         formatted_tools = []
         for tool in tools:
             if isinstance(tool, BaseTool):
                 try:
                     fn = convert_to_openai_function(tool)
-                    formatted_tools.append(
-                        {
-                            "type": "function",
-                            "name": fn["name"],
-                            "description": fn.get("description", ""),
-                            "parameters": fn.get("parameters", {}),
-                        }
-                    )
+                    formatted_tools.extend(self._convert_tools([fn]))
                 except Exception:
                     formatted_tools.append(
                         {
@@ -445,16 +522,9 @@ class CodexChatModel(BaseChatModel):
                     )
             elif isinstance(tool, dict):
                 if "function" in tool:
-                    fn = tool["function"]
-                    formatted_tools.append(
-                        {
-                            "type": "function",
-                            "name": fn["name"],
-                            "description": fn.get("description", ""),
-                            "parameters": fn.get("parameters", {}),
-                        }
-                    )
+                    formatted_tools.extend(self._convert_tools([{"type": "function", "function": tool["function"]}]))
                 else:
                     formatted_tools.append(tool)
 
-        return RunnableBinding(bound=self, kwargs={"tools": formatted_tools}, **kwargs)
+        _validate_tool_choice(converted_choice, self._convert_tools(formatted_tools))
+        return RunnableBinding(bound=self, kwargs={"tools": formatted_tools, "tool_choice": converted_choice}, **kwargs)

@@ -1,0 +1,28 @@
+# Dedicated ignore-file for the lark-cli-broker image.
+#
+# BuildKit uses this instead of the repo-root .dockerignore for builds that pass
+# `-f docker/lark-cli-broker/Dockerfile` (docker/build-push-action, `docker build`).
+# The root .dockerignore excludes the whole `docker/` tree, but this image builds
+# from a repo-root context and must COPY:
+#   - docker/lark-cli-init/build-runtime.sh
+#   - docker/lark-cli-broker/entrypoint.sh
+#   - backend/packages/harness/deerflow/integrations/lark_broker.py
+# so `docker/` and `backend/` must NOT be excluded here. Patterns are relative to
+# the build context root (the repo root).
+
+.git
+*.log
+
+# Python noise (keep backend sources; only drop build artifacts)
+**/__pycache__/
+*.py[cod]
+.venv/
+backend/.venv/
+backend/htmlcov/
+backend/.coverage
+
+# Components this image never needs
+frontend/
+docs/
+skills/
+**/node_modules/

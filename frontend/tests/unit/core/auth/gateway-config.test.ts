@@ -1,4 +1,11 @@
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  test,
+  rs,
+} from "@rstest/core";
 
 const ENV_KEYS = [
   "NODE_ENV",
@@ -36,7 +43,7 @@ function restoreEnv(snapshot: EnvSnapshot) {
 }
 
 async function loadFreshConfig() {
-  vi.resetModules();
+  rs.resetModules();
   return await import("@/core/auth/gateway-config");
 }
 
