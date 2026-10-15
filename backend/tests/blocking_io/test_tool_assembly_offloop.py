@@ -235,7 +235,7 @@ async def test_batch_item_assembles_off_loop(monkeypatch, tmp_path):
         },
     }
 
-    await service._execute_item(item)
+    await service._execute_item(item, lease_owner="assembly-claim")
 
     assert len(finalize_calls) == 1
     assert finalize_calls[0]["item_id"] == "item-1"
