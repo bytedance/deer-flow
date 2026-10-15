@@ -96,7 +96,7 @@ function fixture() {
     method: string;
     body?: BodyInit | null;
   }[] = [];
-  let delay: "upload" | "blob" | null = null;
+  let delay: "upload" | "blob" | "replay" | null = null;
   let release: (() => void) | undefined;
   rs.stubGlobal(
     "fetch",
@@ -163,6 +163,25 @@ function fixture() {
           thread_id: "thread-1",
           total_tokens: workspace === P ? 11 : workspace === T ? 22 : 0,
         });
+      if (path.endsWith("/prepare")) {
+        const body = {
+          input: {
+            messages: [{ type: "human", id: "replacement", content: "Edited" }],
+          },
+          checkpoint: { checkpoint_ns: "", checkpoint_id: "checkpoint" },
+          metadata: {},
+          target_run_id: "history",
+          replacement_human_message_id: "replacement",
+          source_message_ids: ["history"],
+        };
+        const response = Response.json(body);
+        if (delay === "replay")
+          response.json = () =>
+            new Promise((resolve) => {
+              release = () => resolve(body);
+            });
+        return response;
+      }
       if (path.endsWith("/runs/stream"))
         return new Response("event: end\ndata: null\n\n", {
           headers: { "Content-Type": "text/event-stream" },
@@ -443,4 +462,77 @@ it("fences file conversion and scopes the actual React SDK reconnect storage ada
         row.path.endsWith("/uploads") || row.path.endsWith("/runs/stream"),
     ),
   ).toBe(false);
+});
+
+it("prepares regenerate and edit replay in the confirmed space before submitting", async () => {
+  const server = fixture();
+  const { view, select } = mount();
+  await waitFor(() =>
+    expect(view.result.current.metadata.isSuccess).toBe(true),
+  );
+  await act(async () => {
+    expect(
+      await view.result.current.chat.regenerateMessage("thread-1", "history"),
+    ).toBe(true);
+  });
+  await select();
+  await waitFor(() =>
+    expect(view.result.current.metadata.data?.values.title).toBe(T),
+  );
+  await act(async () => {
+    expect(
+      await view.result.current.chat.editAndRegenerateMessage(
+        "thread-1",
+        "history",
+        "Edited",
+      ),
+    ).toBe(true);
+  });
+  expect(
+    server.seen
+      .filter((row) => row.path.endsWith("/prepare"))
+      .map((row) => row.workspace),
+  ).toEqual([P, T]);
+  expect(
+    server.seen
+      .filter((row) => row.path.endsWith("/runs/stream"))
+      .map((row) => row.workspace),
+  ).toEqual([P, T]);
+});
+
+it("discards a decoded replay after switching and refuses retained replay callbacks quietly", async () => {
+  const server = fixture();
+  const { view, select } = mount();
+  await waitFor(() =>
+    expect(view.result.current.metadata.isSuccess).toBe(true),
+  );
+  const retained = view.result.current.chat;
+  server.delay("replay");
+  let pending!: Promise<boolean>;
+  act(() => {
+    pending = retained.regenerateMessage("thread-1", "history");
+  });
+  await waitFor(() => expect(server.getRelease()).toBeDefined());
+  await select();
+  mocks.error.mockClear();
+  mocks.start.mockClear();
+  await act(async () => {
+    server.getRelease()!();
+    expect(await pending).toBe(false);
+  });
+  server.delay(null);
+  const before = server.seen.length;
+  await act(async () => {
+    expect(await retained.regenerateMessage("thread-1", "history")).toBe(false);
+    expect(
+      await retained.editAndRegenerateMessage("thread-1", "history", "Stale"),
+    ).toBe(false);
+  });
+  expect(server.seen).toHaveLength(before);
+  expect(server.seen.some((row) => row.path.endsWith("/runs/stream"))).toBe(
+    false,
+  );
+  expect(mocks.error).not.toHaveBeenCalled();
+  expect(mocks.start).not.toHaveBeenCalled();
+  expect(view.result.current.metadata.data?.values.title).toBe(T);
 });

@@ -338,3 +338,19 @@ resource clients, artifact/thread UI storage, actual shell/selector and backend
 browser two-tab acceptance still remain. M3 and all M4-M11 gates remain open;
 activation stays closed, no deployment/push/local application runtime/model calls.
 The earlier user-pause section is historical; the user has explicitly resumed.
+
+
+M3 replay checkpoint (2026-10-15): frontend #36 RED found missing prepare
+selectors; its retained-callback fixture also held a later request and timed out.
+#37 fixes that fixture delay and independently reproduces null selectors and
+retained callback dispatch. #38 SUCCESS (20 tests), then formatted final source
+#39 SUCCESS (same 20 tests, two-file formatting, zero-warning target ESLint and
+full pnpm check). Regenerate/edit prepare uses captured REST with full native
+success/error decoding fenced; replay checks entry, prepare return and submit
+boundaries. Expired callbacks return the native false result quietly, without
+starting Runs or publishing cache/toast effects. Exact source hashes and archive
+receipt are in tenant-workspaces-progress.json; #36-#39 and formatter inventories
+are empty. These are real hooks with network doubles, not browser/backend proof.
+Next: compact/project creation and actual page callbacks, sidecar coalescing,
+remaining clients/stores/shell integration. M3 and M4-M11 remain incomplete;
+activation stays closed. No remote push, deployment or local runtime testing.

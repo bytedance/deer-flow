@@ -471,3 +471,11 @@ cancellation must not fall through to best-effort parent deletion. Scoped delete
 uses the canonical Gateway REST endpoint once per normally enumerated thread;
 retain SDK-plus-local-cleanup only for native unscoped compatibility. The 50 hook/network tests and full frontend check pass in #35. Actual
 backend/browser acceptance remains pending; tenant activation stays closed.
+
+
+Regenerate/edit replay now captures the confirmed REST client and fences the
+whole native prepare success/error decoder plus entry/prepare/submit boundaries.
+Expired replay callbacks return false quietly; existing replay masks and native
+ordering remain intact. Shanghai frontend #39 verifies 20 hook/network tests and
+full pnpm check. Compact/project creation, page callbacks and remaining resource/
+storage/shell integration still precede activation and actual browser acceptance.

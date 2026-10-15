@@ -110,3 +110,9 @@ callbacks. Scoped canonical deletion avoids a second SDK+REST delete. Native
 compatibility regressions pass. Page callers, replay/compact/create, sidecar's
 global parent-keyed in-flight map and other resources/stores still require
 integration; actual browser/backend/physical acceptance is not supplied here.
+
+
+Replay frontend (#39): regenerate/edit prepare and submission use the fixed
+confirmed lifetime; decoded late responses and retained callbacks cannot dispatch
+or publish after switching. Native replay ordering regressions retained. Compact,
+project creation, page callbacks and other resource/storage paths remain open.

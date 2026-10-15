@@ -2115,7 +2115,7 @@
     "evidence_limits": "Only the external React SDK useStream adapter is doubled in new tests; real source hooks, Context, native REST/SDK clients and stream parser run with network doubles. Does not prove actual browser/SDK automatic reconnect or backend authorization.",
     "cleanup": "#28-#32 terminal; exact owned container/network, chat-format and SDK source probe inventories independently empty; private dependency cache retained",
     "remaining": [
-      "Sidebar/thread-action hooks now covered by frontend_thread_actions; replay prepare/compact and actual UI caller publication remain pending",
+      "Sidebar/thread actions and replay hooks verified; compact/project creation and actual UI caller publication pending",
       "project-thread creation and remaining project/artifact/resource clients and storage namespaces",
       "actual app capability bootstrap, native selector and browser/backend two-tab acceptance",
       "credential/principal consistency, active revocation, physical runtime and all M4-M11 gates; no tenant activation"
@@ -2210,10 +2210,43 @@
     "evidence_limits": "real source hooks/Context/SDK/REST with network doubles, not browser/backend authorization or physical filesystem evidence",
     "cleanup": "#33-#35 terminal and exact owned container/network inventories empty; formatter probe empty; private dependency cache retained",
     "remaining": [
-      "replay prepare/compact/project-thread creation and UI caller after-await toast/router/callback fences",
+      "Replay prepare now verified by frontend_replay; compact/project creation and UI caller after-await toast/router/callback fences remain",
       "sidecar creation global in-flight map must be scoped by lifetime; other resource clients and stored UI state",
       "app capability bootstrap/native selector plus actual backend/browser two-tab acceptance",
       "principal/session/revocation and physical isolation; all remaining M4-M11 gates, activation closed"
+    ]
+  },
+  "frontend_replay": {
+    "job": "deerflow-tenant-frontend",
+    "status": "regenerate/edit replay hooks verified with opt-in confirmed Context; M3 incomplete",
+    "history": {
+      "36": "RED: prepare selectors null; late callback test hung because its subsequent request was also held",
+      "37": "RED after fixing fixture delay: selectors still null and retained callbacks dispatched extra requests",
+      "38": "SUCCESS: 20 tests before formatting"
+    },
+    "green": {
+      "build": 39,
+      "result": "SUCCESS",
+      "tests_passed": 20,
+      "tests_added": 2,
+      "test_seconds": [
+        11.8
+      ],
+      "build_seconds": 413.042,
+      "archive_sha256": "c5a7291fc5943f73c71b55a9163be8412c03ecd393136ca9fc98cb0336031b12",
+      "checks": "20 actual hook/Context/SDK/REST and native ordering tests; two-file Prettier; target ESLint max-warnings 0; full pnpm check"
+    },
+    "source_sha256": {
+      "frontend/src/core/threads/hooks.ts": "eea020c8cce92168d8eb91be13619320cadb7226bbdb789471c4c9cdcc1b7f7e",
+      "frontend/tests/unit/core/threads/workspace-chat.dom.test.tsx": "fb5be33822b077e4dab336f68b714825ab456c4f950541c20877f42f4f84d76c"
+    },
+    "scope": "regenerate/edit prepare captured REST and full success/error decoder fence; entry, post-prepare, pre-submit and post-submit lifetime checks; expired callbacks return native false without dispatch/toast/cache publication",
+    "limits": "network doubles; no actual browser/backend, revocation or physical isolation proof; activation closed",
+    "cleanup": "#36-#39 terminal and exact owned containers/networks empty; formatter empty; dependency cache retained",
+    "remaining": [
+      "compact/project create and actual page toast/router/callback guards",
+      "sidecar scoped coalescing, other clients/stores, actual shell/selector/browser two-tab acceptance",
+      "principal/session/revocation and remaining M4-M11 gates"
     ]
   }
 }

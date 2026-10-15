@@ -2818,7 +2818,11 @@ export function useThreadStream({
       getSupersededMessageIds: (prepared: TPrepared) => string[];
       getOptimisticMessages?: (prepared: TPrepared) => Message[];
     }) => {
-      if (sendInFlightRef.current || !threadId) {
+      if (
+        lifetime?.scope.signal.aborted ||
+        sendInFlightRef.current ||
+        !threadId
+      ) {
         return false;
       }
       sendInFlightRef.current = true;
@@ -2856,6 +2860,7 @@ export function useThreadStream({
 
       try {
         const prepared = await prepare();
+        lifetime?.scope.signal.throwIfAborted();
         preparedSupersededRunId = prepared.target_run_id;
         preparedSupersededMessageIds = getSupersededMessageIds(prepared);
         prevHumanMsgCountRef.current = countHumanMessagesExcludingSuperseded(
@@ -2902,6 +2907,7 @@ export function useThreadStream({
           setOptimisticMessages(nextOptimisticMessages);
         }
 
+        lifetime?.scope.signal.throwIfAborted();
         await thread.submit(prepared.input, {
           threadId,
           checkpoint: prepared.checkpoint,
@@ -2916,6 +2922,7 @@ export function useThreadStream({
           // user attaches them again.
           context: buildRunContext({ settings: context, threadId }),
         });
+        lifetime?.scope.signal.throwIfAborted();
         void queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
         void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
         void queryClient.invalidateQueries({
@@ -2929,6 +2936,7 @@ export function useThreadStream({
         });
         return true;
       } catch (error) {
+        if (lifetime?.scope.signal.aborted) return false;
         setOptimisticMessages([]);
         setOptimisticThreadId(null);
         setLiveMessagesThreadId(null);
@@ -2952,6 +2960,7 @@ export function useThreadStream({
     [
       context,
       humanMessageCount,
+      lifetime,
       persistedMessages,
       queryClient,
       thread,
@@ -2971,7 +2980,7 @@ export function useThreadStream({
       return submitPreparedReplay({
         threadId,
         prepare: async () => {
-          const response = await fetch(
+          const response = await (lifetime?.rest.fetch ?? fetch)(
             `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
               threadId,
             )}/runs/regenerate/prepare`,
@@ -2984,15 +2993,20 @@ export function useThreadStream({
               body: JSON.stringify({ message_id: messageId }),
             },
           );
-          if (!response.ok) {
-            throw new Error(await readResponseErrorMessage(response));
-          }
-          return (await response.json()) as RegeneratePrepareResponse;
+          const read = async (response: Response) => {
+            if (!response.ok) {
+              throw new Error(await readResponseErrorMessage(response));
+            }
+            return (await response.json()) as RegeneratePrepareResponse;
+          };
+          return lifetime
+            ? lifetime.rest.consume(response, read)
+            : read(response);
         },
         getSupersededMessageIds: () => supersededMessageIds,
       });
     },
-    [submitPreparedReplay],
+    [lifetime, submitPreparedReplay],
   );
 
   const editAndRegenerateMessage = useCallback(
@@ -3008,7 +3022,7 @@ export function useThreadStream({
       return submitPreparedReplay<EditRegeneratePrepareResponse>({
         threadId,
         prepare: async () => {
-          const response = await fetch(
+          const response = await (lifetime?.rest.fetch ?? fetch)(
             `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
               threadId,
             )}/runs/edit-regenerate/prepare`,
@@ -3024,11 +3038,15 @@ export function useThreadStream({
               }),
             },
           );
-          if (!response.ok) {
-            throw new Error(await readResponseErrorMessage(response));
-          }
-          const prepared =
-            (await response.json()) as EditRegeneratePrepareResponse;
+          const read = async (response: Response) => {
+            if (!response.ok) {
+              throw new Error(await readResponseErrorMessage(response));
+            }
+            return (await response.json()) as EditRegeneratePrepareResponse;
+          };
+          const prepared = await (lifetime
+            ? lifetime.rest.consume(response, read)
+            : read(response));
           if (!additionalKwargs || !Array.isArray(prepared.input.messages)) {
             return prepared;
           }
@@ -3051,7 +3069,7 @@ export function useThreadStream({
         getOptimisticMessages: (prepared) => prepared.input.messages ?? [],
       });
     },
-    [submitPreparedReplay],
+    [lifetime, submitPreparedReplay],
   );
 
   // Cache the latest thread messages in a ref to compare against incoming history messages for deduplication,
