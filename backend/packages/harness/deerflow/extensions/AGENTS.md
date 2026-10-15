@@ -1,5 +1,16 @@
 ### Python Extension System (Runtime and Distribution)
 
+`registry.knowledge_provider(name, provider)` (extension-api 0.2.7) adds an
+operator-installed read-only `deerflow.knowledge.RetrievalProvider`. The host
+validates advertised async operations, attributes entries and rolls them back
+positionally with every other contribution. Provider configuration, API calls
+and response mapping stay in extensions; core owns capabilities, Scope
+admission and source validation. Catalog and execution resolve the same loaded
+snapshot, with run-bound snapshots taking precedence over the singleton.
+See [the contract](../../../../docs/KNOWLEDGE.md) and the packaged
+`examples/deerflow-extension-knowledge` sample. Older registry implementations
+return False; never silently ignore unsupported registration.
+
 Third-party Python packages can expose an `install(registry, config)` function and be
 loaded, in deterministic order, from the startup-only top-level `plugins:` list in
 `config.yaml`. Keep this list out of `extensions_config.json`: the latter is writable

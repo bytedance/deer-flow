@@ -1,10 +1,131 @@
-# Read-only knowledge contract (#6269, phase 1)
+# Read-only knowledge contract (#6269, phases 1–2)
 
 `deerflow.knowledge` owns `RetrievalResult`, `RetrievalHit`, `KnowledgeSource`,
 `KnowledgeCapabilities`, and the search-only `RetrievalProvider` protocol.
-These depend on no knowledge management service, resource store, or catalog.
-Existing RAGFlow scope admission and selection UI remain authoritative.
-The shared contract does not add scope selection or WeKnora support to LightRAG.
+Search-only providers need no knowledge management service, resource store,
+catalog, or scope-filter implementation. Scope admission, the read-only catalog
+and selection UI consume the same operation-level capabilities. LightRAG still
+does not advertise dataset/document filters; WeKnora remains phase 3.
+
+## Provider registration and optional operations
+
+An operator-installed extension calls
+`registry.knowledge_provider(name, provider)` during `install()`. The method
+returns `False` on older hosts and is supported by extension-api **0.2.7**.
+The provider implements the existing `RetrievalProvider.search(query)` and
+advertises `KnowledgeCapabilities`. Registration validates each advertised
+operation, rejects duplicate/reserved names, and participates in source
+attribution and positional install rollback. Connection settings, response
+mapping and credentials belong to that extension's `plugins[].config`.
+The contract package remains dependency-free; providers use the published
+`deerflow.knowledge` models from the harness.
+
+| Operation | Optional interface | Behavior |
+| --- | --- | --- |
+| `search` | `RetrievalProvider.search` | Required; returns `RetrievalResult` |
+| `sources` | Existing result/source models | Advertises attributable evidence |
+| `catalog` | `RetrievalCatalogProvider.catalog` | Paginated accessible datasets |
+| `documents` | `RetrievalDocumentsProvider.documents` | Paginated documents in an accessible dataset |
+| `dataset_filter` | `ScopedRetrievalProvider.search_scoped` | Enforces selected dataset IDs |
+| `document_filter` | `ScopedRetrievalProvider.search_scoped` | Enforces document IDs within selected datasets |
+
+Both catalog methods receive `context`, `page`, `page_size` and `search`, and
+return `RetrievalCatalogPage` with `{id, name, selectable}` items. IDs are opaque
+provider identifiers, including non-UUID identifiers. Gateway validates this
+bounded public projection and never returns raw provider payloads.
+Dataset and document IDs are limited to **256 Unicode code points** throughout
+catalog output, URL parameters and scope snapshots. Overlong IDs are rejected,
+never truncated. A phase 3 WeKnora adapter must map space-qualified resources
+to stable, unambiguous IDs within this bound and resolve them inside the
+provider; the earlier `ks1_` encoding allowing 512 characters is not the public
+contract. Reuse provider API/mapping logic without adding a second discovery
+protocol or a DeerFlow ACL store.
+
+`KnowledgeRequestContext` supplies the host user ID, Agent name and optional
+execution-only scope. A provider implementing `search_scoped` receives context
+on every search, including unrestricted searches. A search-only implementation
+may retain `search(query)` when it uses an operator-owned connection with a
+fixed resource visibility. User/tenant mappings and resource authorization
+remain provider responsibilities; DeerFlow does not infer tenants from client
+metadata or create a second ACL store.
+`agent_name` identifies the current executor: the selected assistant name,
+defaulting to `lead_agent`, or the executing subagent's configured name from
+its server runtime `agent_id`. It does not identify the parent assistant.
+Runtime context takes precedence over legacy `configurable.agent_name` for
+primary runs, matching Agent assembly. Public Gateway and standalone LangGraph
+run admission discard caller-supplied `is_subagent` and `agent_id`; only the
+internal executor can assign child identity.
+Standalone primary-run admission explicitly overrides persisted assistant
+child-identity defaults, and assistant writes discard these reserved fields.
+Catalog requests use the selected assistant name under the same convention;
+direct provider callers outside the host runtime may omit it. Delegation
+preserves the parent user identity and execution scope, while the provider
+must enforce access for the executing agent on every call.
+
+The Agent tool entry for registered providers is:
+
+```yaml
+knowledge_base:
+  enabled: true
+  scope_selection_enabled: true
+tools:
+  - name: knowledge_search
+    group: knowledge
+    use: deerflow.knowledge.tools:knowledge_search_tool
+    provider: my-provider
+```
+
+`provider` selects an already registered operator-controlled name. The core tool
+validates normalized results and uses phase 1's source formatter/budget. The
+run's AppConfig and immutable extension snapshot take precedence over global
+configuration and the global registry;
+ordinary and batch subagents retain their inherited execution scope. Existing
+RAGFlow and LightRAG tool paths remain valid. RAGFlow's compatibility adapter
+owns its API calls, operator allowlist, searchable-document checks and catalog
+mapping; native citation writers and direct text APIs remain unchanged.
+Its HTTP client accepts only ASCII letters, digits, underscores and hyphens
+in dataset IDs used as path segments. Traversal and encoded URL delimiters
+are rejected before any document-list request, for both browsing and scope
+validation. Other providers retain their own opaque-ID syntax.
+
+See [the packaged synthetic Provider example](../../examples/deerflow-extension-knowledge/README.md)
+for an offline catalog → selected document → retrieval → captured source flow.
+The existing `ModelTool(response_format="content_and_artifact")` and
+`PluginToolResult` channel from #6861 is unchanged. Custom ModelTools can still
+emit the phase 1 envelope; artifact evidence must pass core validation.
+
+## Scope admission and selection
+
+`GET /api/knowledge/capabilities?agent_name=...` returns supported operations for
+the exact assistant and whether selection UI is enabled. `/api/features` enables
+the shared selector only when `knowledge_base.enabled` and
+`scope_selection_enabled` are true and the provider supports both `catalog` and
+`dataset_filter`. The selector exposes files only with both `documents` and
+`document_filter`. It preserves older selected documents and blocks Apply if
+the current provider cannot enforce them. Capability failures do not enable
+catalog queries. Historical scope labels remain display-only.
+
+The existing authenticated endpoints remain:
+
+- `GET /api/knowledge/retrieval-catalog/datasets`
+- `GET /api/knowledge/retrieval-catalog/datasets/{dataset_id}/documents`
+
+Catalog operations require `threads:read`, the assistant's knowledge tool
+access, the operator UI flag and the advertised operation. Providers return
+only resources accessible to their connection/current user. A denied resource
+returns 403; missing datasets return 404; unsupported operations return 409;
+unconfigured retrieval returns 503; invalid provider output/failures return 502.
+Errors do not disclose provider credentials or raw exception messages.
+
+Scope stays in the existing version-one HumanMessage snapshot and server-owned
+runtime key. Admission rejects unsupported dataset/document filters with 422,
+independently of UI availability. Execution checks capabilities again before
+calling the provider. Selected IDs constrain retrieval but never grant access;
+missing/inaccessible resources fail the complete constrained request, with no
+unrestricted retry. `all` means the provider's accessible operator scope and
+`disabled` blocks knowledge search. Search-only providers can accept these
+nonfiltering modes without catalog support. Regeneration and resume recover
+the original server snapshot; they do not adopt a changed Agent default.
 
 ## Sources and citations
 

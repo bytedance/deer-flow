@@ -59,6 +59,15 @@ verdicts through queries and JSONL exports: absent criteria, checker errors,
 legacy rows, and failed executions are never implicitly accepted. Acceptance
 does not change retry policy.
 
+**Batch lease supervision**: `batch_lease.py` owns one drained heartbeat across tool
+assembly, execution and acceptance. Capture a fresh bounded claim owner each pass;
+exclude locally active IDs from recovery. Execution requires that explicit token.
+Promotion/claim writes fence item and parent status; worker writes fence owner and
+active status in SQL. Renewal reports cancellation only for explicit cancel state.
+Expiry recovery compares expiry. Keep PostgreSQL locks parent-first and polling bounded
+by lease/3. `tests/test_batch_lease_lifecycle.py` covers real SQLite interleavings,
+threaded initialization, peer cancellation and renewal drain.
+
 **Built-in Agents**: `general-purpose` (all tools except `task`) and `bash` (command specialist)
 **Registry and managed definitions**: Runtime resolution is built-in → `config.yaml custom_agents` → enabled administrator-managed definitions, followed by explicit `subagents.agents.<name>` overrides. Managed definitions are deployment-wide, persist through the same `agent_storage.backend` selection as Custom Agent definitions, and remain stored but are excluded from runtime when a built-in or later-added config definition owns the same name. The default Lead Agent sees the whole enabled catalog. A Custom Agent's `allowed_subagents` is snapshotted into run metadata (`None` = all, `[]` = hard deny, list = allowlist) and must filter both prompt discovery and `task` execution; never reload caller policy from mutable agent config inside the tool.
 **Benefit-based routing policy**: Direct execution is the default. Permit `task` when parallel latency, specialist skill, or context isolation clearly outweighs startup, duplicate discovery, synthesis, state conflicts, and side effects. Parallel scopes need independent outputs and disjoint mutable state; use the fewest useful agents and reassess each batch. A bounded sequential subagent is allowed for strong specialist/context benefit. With a per-response limit of 1, prompts omit parallel and multi-batch benefits and allow only material specialist/context benefit. Keep `lead_agent/prompt.py`, the `task` description, and built-in roles aligned; see `tests/test_subagent_routing_prompt.py`, `tests/test_subagent_prompt_security.py`, and `tests/test_lead_agent_prompt.py`.
@@ -81,17 +90,66 @@ empty/all-skipped modules contribute no proof but do not veto tested modules.
 These summaries also participate in the command/output attribution guard.
 
 Cargo: complete positive siblings permit empty targets. All-empty/ignored or bare banners stay UNVERIFIED; failures win.
+Unittest needs complete counts with ordinary passes; uppercase OK is not Go output. Failures win.
 
 **Events**: `task_started`, `task_running`, `task_completed`/`task_failed`/`task_timed_out`
 **Handled LLM failures**: `LLMErrorHandlingMiddleware` deliberately converts provider/model exceptions into an `AIMessage` so the graph can end cleanly, stamping `additional_kwargs.deerflow_error_fallback=true` plus error metadata. Clean graph termination does not imply subagent success: `SubagentExecutor` inspects the last assistant message at terminalization and maps a marked fallback to `SubagentStatus.FAILED`, which then emits `task_failed` and the existing structured `subagent_error`. Only the marker is authoritative — error-looking assistant prose without it remains a normal completed result, so neither the executor nor frontend parses display text as a status protocol.
-**Guardrail caps & `stop_reason` (#3875)**: Three independent limits share an additive reason field; retain the normal status enum for v1 compatibility.
-- Turns: `turn_budget.py::resolve_recursion_limit` scales `max_turns` by assembled graph depth (super-steps include middleware hooks); pin against the real graph in `test_subagent_turn_budget.py`. `_aexecute` catches `GraphRecursionError` before generic exceptions.
-- Tokens: `build_subagent_runtime_middlewares` installs `TokenBudgetMiddleware` from `subagents.token_budget`. Default `max_tokens` is 1,000,000 with summarization enabled, 2,000,000 otherwise; explicit budgets override either. Warn at 0.7, stop at 1.0. At the cap, strip pending tool calls, force `finish_reason="stop"`, and allow a final answer without raising.
-- Loops: `LoopDetectionMiddleware` detects repeated identical call sets or repeated tool types with varying arguments; its hard stop strips calls, forces a final answer, and records `loop_capped`.
-Each guard exposes per-run `consume_stop_reason(run_id)`. `_aexecute` queries every middleware exposing it and uses the first non-None reason, without importing guard classes. Usable final/partial output yields `completed` plus `token_capped|turn_capped|loop_capped`; an exhausted turn budget without usable output yields `failed` plus `turn_capped`. Do not restore the removed `MAX_TURNS_REACHED` status.
-Carry `SubagentResult.stop_reason` through `_task_result_command`, result text and `additional_kwargs.subagent_stop_reason`, alongside ordinary status. Keep `contracts/subagent_status_contract.json` v2, Python/TypeScript consumers, and status/reason contract tests aligned. The durable ledger retains the reason and tells the lead to reuse partial work, retry a tighter task, or raise `max_turns`/`token_budget`; capped completion must not appear uncapped.
-**Context compaction (#3875 Phase 3, #4039)**: subagents inherit `DeerFlowSummarizationMiddleware` via `build_subagent_runtime_middlewares`, gated on the **same** `summarization.enabled` switch the lead reads (one config covers both chains; trigger/keep/model/prompt come from the shared `summarization` config so they cannot drift). The subagent builder attaches `DurableContextMiddleware` immediately before summarization, using the same skills path/read-tool settings as the lead chain. Compaction stores the generated summary in `ThreadState.summary_text` rather than as a `messages` item; the durable-context wrapper therefore projects it into the next model request as guarded hidden human data. This is required when a message-count keep policy preserves only an assistant tool-call plus its tool results: without the injected summary the next request begins with assistant/tool history and strict OpenAI-compatible providers can reject it. Because `DurableContextMiddleware` inserts a second `SystemMessage(authority_contract)` after the subagent's leading system prompt, the builder also appends `SystemMessageCoalescingMiddleware` innermost (mirroring the lead chain, appended after the optional summarization middleware so it is unconditionally last) to merge every `SystemMessage` into one leading `system_message` — otherwise the durable fix would trade #4039's assistant-first HTTP 400 for a duplicate-system 400 on the same strict backends (#4040). The factory is called with `skip_memory_flush=True` on the subagent path: the lead's `memory_flush_hook` (attached when `memory.enabled`) flushes pre-compaction messages into durable memory keyed by `thread_id`, and subagents share the parent's `thread_id`, so without skipping the hook a subagent's internal turns would pollute the **parent** thread's durable memory. Placement differs from the lead chain (lead appends summarization *before* the guard trio; subagent appends it *after*) — benign because the middleware implements only `before_model` (compaction) with no `after_model`/`consume_stop_reason`, so it cannot disturb the Phase 2 guard-cap stop-reason channel. Compaction rewrites the messages channel via `RemoveMessage(id=REMOVE_ALL_MESSAGES)`, which shrinks `len(messages)` below the step-capture cursor mid-run; `capture_new_step_messages` (see Step capture below) resets the cursor to the new tail on contraction so steps appended after the compaction point are not silently dropped.
-**Step capture & persistence (#3779)**: `executor.py` uses `step_events.py::capture_new_step_messages` to capture every new `AIMessage` and `ToolMessage` in each `stream_mode="values"` tail, including all outputs of a multi-call `ToolNode` step. `runtime/runs/worker.py::_SubagentEventBuffer` persists `task_*` events as `subagent.start`/`subagent.step`/`subagent.end` in `RunEventStore` (`category="subagent"`, `task_id` in `metadata`). Use `put_batch`, flushing at terminal `subagent.end`, `FLUSH_THRESHOLD`, and worker `finally`; per-step `put()` incurs a per-thread advisory lock on the hot stream loop. `subagent_run_event` rejects malformed chunks that lack a non-empty `task_id`; running chunks additionally require a non-negative integer `message_index` and a message object, so persisted records always satisfy the required lifecycle envelope. `build_subagent_step` caps both the per-step `text` and each tool call's serialized `args` at `SUBAGENT_STEP_MAX_CHARS` (flagged `truncated` / `args_truncated`) so a large `write_file`/`bash` payload can't produce an unbounded row. The dedicated category keeps them out of `list_messages` (the thread feed) while `list_events` returns them for the frontend's fetch-on-expand backfill. `list_events` accepts `task_id` (filters on `metadata["task_id"]` — SQL-side in `DbRunEventStore` via `event_metadata["task_id"].as_string()`, in-memory in the JSONL/memory stores) plus an `after_seq` forward cursor, so the card pages through one subagent's steps without the run-wide `limit` truncating the tail (no schema migration: the filter rides the existing run-scoped index). `step_events.py` is a pure, unit-tested layer (`build_subagent_step` / `subagent_run_event`). **History contraction (#3875 Phase 3)**: `capture_new_step_messages` assumes append-only growth, but `DeerFlowSummarizationMiddleware` rewrites the messages channel via `RemoveMessage(id=REMOVE_ALL_MESSAGES)`, shrinking `len(messages)` below the cursor mid-run. On contraction (`total < processed_count`) the cursor resets to the new tail; `capture_step_message`'s id/content dedup prevents re-emitting pre-compaction steps, so steps appended after the compaction point are still captured instead of being dropped until `total` overtakes the stale cursor.
+**Guardrail caps & `stop_reason` (#3875)**: Keep normal statuses and expose caps
+through additive `stop_reason`, never a new status enum.
+- `turn_budget.py::resolve_recursion_limit` scales `max_turns` by the assembled
+  graph depth; `test_subagent_turn_budget.py` checks the compiled graph.
+  `_aexecute` catches `GraphRecursionError` before generic exceptions.
+- `build_subagent_runtime_middlewares` installs `TokenBudgetMiddleware` from
+  `subagents.token_budget`: default 1,000,000 tokens with summarization enabled,
+  2,000,000 otherwise; explicit budgets win. Warn at 0.7, stop at 1.0.
+- `LoopDetectionMiddleware` detects repeated identical call sets or repeated
+  tool types with varying arguments. Token/loop hard stops strip tool calls,
+  force `finish_reason="stop"`, and request a final answer without raising.
+
+`_aexecute` duck-types every middleware's per-run `consume_stop_reason(run_id)`
+and uses the first non-`None` reason. Usable final answers or turn-cap partials
+remain `completed` with `token_capped|turn_capped|loop_capped`; a turn cap without
+usable work is `failed` with `turn_capped`. `SubagentResult.stop_reason` flows
+through `_task_result_command`, `format_subagent_result_message` (capped labels),
+and `make_subagent_additional_kwargs` (`subagent_stop_reason` alongside status).
+The durable ledger retains the reason and tells the lead to reuse partial work,
+retry tighter, or raise `max_turns`/`token_budget`.
+Keep `contracts/subagent_status_contract.json` v2, `subagents/status_contract.py`
+and frontend `subtask-result.ts` aligned; `test_status_values_match_contract` and
+`test_stop_reason_values_match_contract` pin compatibility. Older consumers ignore
+the additive field; do not restore `MAX_TURNS_REACHED`/`max_turns_reached`.
+
+**Context compaction (#3875, #4039, #4040)**: `build_subagent_runtime_middlewares`
+uses the lead's shared `summarization` switch, trigger, keep, model and prompt.
+Place `DurableContextMiddleware` immediately before `DeerFlowSummarizationMiddleware`
+with the lead's skills path/read-tool settings. Project `ThreadState.summary_text`
+into the next request as guarded hidden human data, not a persisted message; this
+prevents assistant/tool-only retained history from breaking strict providers.
+Always place `SystemMessageCoalescingMiddleware` last/innermost, even without
+summarization, merging the static prompt and durable authority contract into one
+leading system message. Use `skip_memory_flush=True`: subagents share the parent's
+thread ID and must not flush their internal turns into its durable memory.
+Subagent summarization follows the guard trio (the lead's precedes it); its
+`before_model`-only hook must not disturb `after_model`/`consume_stop_reason`.
+
+**Step capture & persistence (#3779, #3875)**: `step_events.py::capture_new_step_messages`
+captures every new AI/ToolMessage in each values tail, including multi-call ToolNode
+outputs. When compaction uses `RemoveMessage(id=REMOVE_ALL_MESSAGES)` and
+`total < processed_count`, reset the cursor to the new tail; `capture_step_message`
+deduplicates by ID/content so later steps survive without replaying old ones.
+`runtime/runs/worker.py::_SubagentEventBuffer` stores `task_*` as
+`subagent.start|step|end` in `RunEventStore`, category `subagent`, task ID in metadata.
+Use `put_batch` at terminal end, `FLUSH_THRESHOLD`, and worker `finally`; per-step
+`put()` takes a per-thread advisory lock on the hot loop. `subagent_run_event`
+requires a nonempty task ID; running events also need a nonnegative integer
+message index and a message object. `build_subagent_step` caps text and serialized
+tool arguments at `SUBAGENT_STEP_MAX_CHARS`, with `truncated`/`args_truncated` flags.
+Keep these events out of `list_messages`. Backfill via `list_events(task_id,
+after_seq)`: filter `metadata["task_id"]` in SQL with
+`event_metadata["task_id"].as_string()` or in memory for JSONL/memory stores,
+using the existing run index. This pages one task without a run-wide limit
+truncating its tail. Keep `step_events.py` pure and unit-tested.
+
 **Deferred MCP tools** (if `tool_search.enabled`): `SubagentExecutor._build_initial_state` applies the subagent name allow/deny list and assembly-time authorization before calling the shared `assemble_deferred_tools`, appends the `tool_search` tool, injects the `<available-deferred-tools>` section into the subagent's `SystemMessage`, and threads the setup to `_create_agent`, which attaches `McpRoutingMiddleware` (when PR1 routing metadata matches deferred tools) before `DeferredToolFilterMiddleware` through `build_subagent_runtime_middlewares(...)`. Runtime skill policy is intentionally later and dynamic: `tool_search` may disclose/promote catalog metadata, but `SkillToolPolicyMiddleware` still removes or blocks any promoted business tool omitted by the active skill. Subagents thus withhold full MCP schemas until promotion, same as the lead agent; each task run gets a fresh `ThreadState` so promotion is isolated per run
 **Checkpointer isolation**: Subagent graphs are compiled with `checkpointer=False` to avoid inheriting the parent run's checkpointer, since subagents are one-shot and never resume.
 **Checkpoint lineage / stream isolation**: `_aexecute` deliberately omits checkpoint-coordinate keys (`thread_id`, `checkpoint_ns`, `checkpoint_id`, `checkpoint_map`) from the child `RunnableConfig`. LangGraph must inherit those coordinates from the copied parent ContextVar so the delegated graph retains a non-root subgraph namespace; explicitly re-supplying even the same parent `thread_id` starts a new root lineage on LangGraph 1.2.6+ and can route child AI/tool frames into the parent `messages` stream. DeerFlow business components still receive the parent `thread_id` through `runtime.context`, which is the preferred lookup path for sandbox, middleware, and attribution code. Regression coverage in `tests/test_subagent_executor.py::TestSubagentCheckpointLineage` keeps the invocation-contract assertion active on every supported version and version-gates the production-shaped parent-stream test to LangGraph 1.2.6+, where the leak exists.

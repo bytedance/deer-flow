@@ -80,6 +80,11 @@ export const enUS: Translations = {
         description:
           "Demonstrate read-only retrieval and structured tool results using fixed sample documents, without an external knowledge service.",
       },
+      knowledge: {
+        title: "Knowledge scope example",
+        description:
+          "Search sample documents within selected knowledge bases or files and inspect source citations.",
+      },
     },
     pageUnavailable: "Extension page unavailable",
     pageUnavailableHint:
