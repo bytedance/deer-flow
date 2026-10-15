@@ -51,6 +51,14 @@ def _convert_tool_choice(tool_choice: str | dict | bool | None) -> str | dict | 
     raise ValueError("tool_choice must be auto, none, required, any, a function name/selection, a boolean, or None")
 
 
+def _validate_tool_choice(tool_choice: str | dict | None, tools: list[dict]) -> None:
+    """Check forced choices against the function tools that will be sent."""
+    if tool_choice == "required" and not tools:
+        raise ValueError("tool_choice='required' needs at least one function tool")
+    if isinstance(tool_choice, dict) and not any(tool["name"] == tool_choice["name"] for tool in tools):
+        raise ValueError("tool_choice must select a function present in tools")
+
+
 def _build_usage_metadata(oai_usage: dict) -> dict:
     """Convert Codex/Responses API usage dict to LangChain usage_metadata format.
 
@@ -264,9 +272,11 @@ class CodexChatModel(BaseChatModel):
             "reasoning": {"effort": self.reasoning_effort, "summary": "detailed"} if self.reasoning_effort != "none" else {"effort": "none"},
         }
 
-        if tools:
-            payload["tools"] = self._convert_tools(tools)
+        converted_tools = self._convert_tools(tools or [])
         converted_choice = _convert_tool_choice(tool_choice)
+        _validate_tool_choice(converted_choice, converted_tools)
+        if converted_tools:
+            payload["tools"] = converted_tools
         if converted_choice is not None:
             payload["tool_choice"] = converted_choice
 
@@ -494,6 +504,7 @@ class CodexChatModel(BaseChatModel):
         from langchain_core.tools import BaseTool
         from langchain_core.utils.function_calling import convert_to_openai_function
 
+        converted_choice = _convert_tool_choice(tool_choice)
         formatted_tools = []
         for tool in tools:
             if isinstance(tool, BaseTool):
@@ -515,4 +526,5 @@ class CodexChatModel(BaseChatModel):
                 else:
                     formatted_tools.append(tool)
 
-        return RunnableBinding(bound=self, kwargs={"tools": formatted_tools, "tool_choice": tool_choice}, **kwargs)
+        _validate_tool_choice(converted_choice, self._convert_tools(formatted_tools))
+        return RunnableBinding(bound=self, kwargs={"tools": formatted_tools, "tool_choice": converted_choice}, **kwargs)

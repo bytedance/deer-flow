@@ -228,7 +228,7 @@ YAML 同名模型优先，已有任务保留原配置快照。托管模型使用
    ```
 
    - Codex CLI 会读取 `~/.codex/auth.json`
-   - Codex 的 `bind_tools` 和直接调用支持 `tool_choice`：`auto`、`none`、`required` 或指定函数名称/对象。`any` 和 `True` 表示 `required`；`None` 和 `False` 保留服务端默认策略。单次调用可覆盖绑定策略；格式错误的选择会在 HTTP 请求前报错。
+   - Codex 的 `bind_tools` 和直接调用支持 `tool_choice`：`auto`、`none`、`required` 或指定函数名称/对象。`any` 和 `True` 表示 `required`；`None` 和 `False` 保留服务端默认策略。单次调用可覆盖绑定策略。绑定时校验绑定策略；直接调用及覆盖参数在 HTTP 请求前校验。`required` 至少需要一个函数工具，指定函数必须存在于工具列表中。无工具时仍支持 `auto` 和 `none`。
    - Claude Code 支持 `CLAUDE_CODE_OAUTH_TOKEN`、`ANTHROPIC_AUTH_TOKEN`、`CLAUDE_CODE_CREDENTIALS_PATH`，或 `~/.claude/.credentials.json`
    - ACP agent 条目与 model provider 是分开配置的——如果你配置了 `acp_agents.codex`，请把它指向一个 Codex ACP 适配器，例如 `npx -y @zed-industries/codex-acp`
    - MiniMax Code 原生支持 ACP，不需要额外适配器。先安装并登录，再把它配置成 ACP agent：

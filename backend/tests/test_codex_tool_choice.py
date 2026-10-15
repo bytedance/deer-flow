@@ -102,17 +102,94 @@ def test_tool_choice_survives_request_and_tool_followup(monkeypatch, tool_choice
 
 
 @pytest.mark.parametrize("tool_choice", [123, [], "", {"type": "file_search"}, {"type": "function"}, {"type": "function", "function": "read_report"}])
-@pytest.mark.parametrize("binding", ["direct", "bound"])
-def test_invalid_tool_choice_fails_before_http(monkeypatch, tool_choice, binding):
+def test_invalid_tool_choice_fails_before_http(monkeypatch, tool_choice):
     monkeypatch.setattr(provider, "load_codex_cli_credential", lambda: CodexCliCredential("fake-token", "fake-account"))
     model = provider.CodexChatModel(retry_max_attempts=1)
     definition = {"name": "read_report", "parameters": {"type": "object", "properties": {}}}
-    runnable = model.bind_tools([definition], tool_choice=tool_choice) if binding == "bound" else model
 
     def unexpected_http(**options):
         pytest.fail("Invalid tool_choice must fail before creating an HTTP client")
 
     monkeypatch.setattr(provider.httpx, "Client", unexpected_http)
-    kwargs = {} if binding == "bound" else {"tools": [definition], "tool_choice": tool_choice}
     with pytest.raises(ValueError, match="tool_choice"):
-        runnable.invoke([HumanMessage(content="Read the report.")], **kwargs)
+        model.invoke([HumanMessage(content="Read the report.")], tools=[definition], tool_choice=tool_choice)
+
+
+@pytest.mark.parametrize("tool_choice", [123, [], "", {"type": "file_search"}, {"type": "function"}, {"type": "function", "function": "read_report"}])
+def test_invalid_bound_choice_fails_at_bind_time(monkeypatch, tool_choice):
+    monkeypatch.setattr(provider, "load_codex_cli_credential", lambda: CodexCliCredential("fake-token", "fake-account"))
+    model = provider.CodexChatModel(retry_max_attempts=1)
+    with pytest.raises(ValueError, match="tool_choice"):
+        model.bind_tools([{"name": "read_report"}], tool_choice=tool_choice)
+
+
+@pytest.mark.parametrize(
+    "tools,tool_choice",
+    [
+        (None, "required"),
+        ([], "any"),
+        ([], "read_report"),
+        ([{"type": "web_search"}], True),
+        ([{"type": "web_search"}], {"type": "function", "function": {"name": "read_report"}}),
+        ([{"name": "other_function"}], "read_report"),
+        ([{"name": "other_function"}], {"type": "function", "name": "read_report"}),
+    ],
+)
+@pytest.mark.parametrize("invocation", ["invoke", "ainvoke", "bind_tools"])
+def test_forced_selection_needs_available_function(monkeypatch, tools, tool_choice, invocation):
+    monkeypatch.setattr(provider, "load_codex_cli_credential", lambda: CodexCliCredential("fake-token", "fake-account"))
+    model = provider.CodexChatModel(retry_max_attempts=1)
+
+    def unexpected_http(**options):
+        pytest.fail("Invalid selection must be rejected before creating an HTTP client")
+
+    monkeypatch.setattr(provider.httpx, "Client", unexpected_http)
+    with pytest.raises(ValueError, match="tool_choice"):
+        if invocation == "bind_tools":
+            model.bind_tools(tools or [], tool_choice=tool_choice)
+        elif invocation == "ainvoke":
+            asyncio.run(model.ainvoke([HumanMessage(content="Read the report.")], tools=tools, tool_choice=tool_choice))
+        else:
+            model.invoke([HumanMessage(content="Read the report.")], tools=tools, tool_choice=tool_choice)
+
+
+@pytest.mark.parametrize("override", [{"tools": []}, {"tool_choice": "missing_function"}, {"tool_choice": {"type": "function"}}])
+def test_bound_call_revalidates_invocation_overrides(monkeypatch, override):
+    monkeypatch.setattr(provider, "load_codex_cli_credential", lambda: CodexCliCredential("fake-token", "fake-account"))
+    model = provider.CodexChatModel(retry_max_attempts=1)
+    runnable = model.bind_tools([{"name": "read_report"}], tool_choice="required")
+
+    def unexpected_http(**options):
+        pytest.fail("Invocation overrides must be validated before creating an HTTP client")
+
+    monkeypatch.setattr(provider.httpx, "Client", unexpected_http)
+    with pytest.raises(ValueError, match="tool_choice"):
+        runnable.invoke([HumanMessage(content="Read the report.")], **override)
+
+
+@pytest.mark.parametrize(
+    "tools,tool_choice,invocation",
+    [(None, None, "invoke"), ([], False, "ainvoke"), ([], "auto", "bound_invoke"), ([], "none", "bound_ainvoke"), ([{"type": "web_search"}], "none", "invoke"), ([{"type": "web_search"}], "auto", "bound_invoke")],
+)
+def test_no_function_tools_preserves_nonforcing_choices(monkeypatch, tools, tool_choice, invocation):
+    monkeypatch.setattr(provider, "load_codex_cli_credential", lambda: CodexCliCredential("fake-token", "fake-account"))
+    model = provider.CodexChatModel(retry_max_attempts=1)
+    payloads = []
+    client_class = httpx.Client
+
+    def handle(request):
+        payloads.append(json.loads(request.content))
+        event = {"type": "response.completed", "response": {"output": [{"type": "message", "content": [{"type": "output_text", "text": "OK"}]}]}}
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=f"data: {json.dumps(event)}\n\n".encode())
+
+    monkeypatch.setattr(provider.httpx, "Client", lambda **options: client_class(transport=httpx.MockTransport(handle), **options))
+    runnable = model.bind_tools(tools or [], tool_choice=tool_choice) if invocation.startswith("bound_") else model
+    kwargs = {} if invocation.startswith("bound_") else {"tools": tools, "tool_choice": tool_choice}
+    answer = asyncio.run(runnable.ainvoke([HumanMessage(content="Say OK.")], **kwargs)) if invocation.endswith("ainvoke") else runnable.invoke([HumanMessage(content="Say OK.")], **kwargs)
+    assert answer.content == "OK"
+    assert len(payloads) == 1
+    assert not payloads[0].get("tools")
+    if tool_choice in ("auto", "none"):
+        assert payloads[0]["tool_choice"] == tool_choice
+    else:
+        assert "tool_choice" not in payloads[0]
