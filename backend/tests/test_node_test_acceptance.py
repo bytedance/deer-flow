@@ -10,14 +10,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
-from deerflow.subagents.acceptance_checks import check_acceptance_criteria, render_acceptance_section
+from deerflow.subagents.acceptance_checks import _carries_summary_shape, check_acceptance_criteria, render_acceptance_section
 
 
 def _summary(prefix="#", *, passed=1, failed=0, cancelled=0, skipped=0, todo=0, total=None):
@@ -132,6 +132,12 @@ def test_test_names_cannot_supply_failure_or_zero_evidence(label):
     assert verdict["all_hold"] is True
 
 
+def test_color_codes_are_normalized_for_counts_and_output_admission():
+    output = "\x1b[90m﹣ all tests passed\x1b[39m\n" + "\n".join(f"\x1b[34m{line}\x1b[39m" for line in _summary("ℹ", passed=0, skipped=1).splitlines())
+    assert _verdict(output)["leaves"][0]["checked"] is False
+    assert _carries_summary_shape(output) is True
+
+
 @pytest.fixture
 def executor_module(monkeypatch):
     path = Path(__file__).parents[1] / "packages/harness/deerflow/subagents/executor.py"
@@ -146,9 +152,21 @@ class SandboxMessages(MessagesState):
     sandbox: dict
 
 
+@pytest.mark.parametrize("label", ["all tests passed", "1 failed", "0 passed"])
+def test_harvest_drops_a_partial_label_before_interpreting_counts(executor_module, monkeypatch, label):
+    output = "ok 1 - " + "x" * 1500 + " " + label + " # SKIP\n" + _summary(passed=0, skipped=1)
+    messages = [AIMessage(content="", tool_calls=[{"name": "bash", "id": "long-name", "args": {"command": "node --test"}}]), ToolMessage(content=output, tool_call_id="long-name")]
+    monkeypatch.setattr(executor_module, "_harvest_shell_persistence", lambda state: False)
+    executions = executor_module._harvest_bash_executions({"messages": messages})
+    assert executions[0]["output_tail"] == _summary(passed=0, skipped=1)
+    assert messages[-1].content == output
+    verdict = check_acceptance_criteria(["tests_passed:node --test"], bash_executions=executions)
+    assert (verdict["leaves"][0]["checked"], verdict["all_hold"]) == (False, False)
+
+
 @pytest.mark.skipif(os.name == "nt" or shutil.which("node") is None, reason="Requires POSIX LocalSandbox and Node.js")
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reporter", ["tap", "spec"])
+@pytest.mark.parametrize("reporter", ["tap", "spec", "color-spec"])
 @pytest.mark.parametrize(
     "body,expected",
     [
@@ -156,6 +174,9 @@ class SandboxMessages(MessagesState):
         ("test('0 passed', () => {}); test('1 failed', () => {});", (True, True)),
         ("test('sample', () => {}); test.skip('optional', () => {});", (True, True)),
         ("test.skip('all tests passed', () => {});", (False, False)),
+        ("test.skip('x'.repeat(1500) + ' all tests passed', () => {});", (False, False)),
+        ("test('x'.repeat(1500) + ' 1 failed', () => {});", (True, True)),
+        ("test('x'.repeat(1500) + ' 0 passed', () => {});", (True, True)),
         ("test.todo('pending');", (False, False)),
         ("describe('empty suite', () => {});", (False, False)),
         ("describe('all tests passed', () => { test.skip('optional', () => {}); });", (False, False)),
@@ -164,7 +185,7 @@ class SandboxMessages(MessagesState):
         ("test('sample', () => { throw Error('fixture'); });", (True, False)),
         ("test('pending', { timeout: 20 }, () => new Promise(() => {}));", (True, False)),
     ],
-    ids=["pass", "summary-like-names", "pass-and-skip", "all-skipped", "all-todo", "empty-suite", "skipped-suite", "todo-suite", "summary-like-suite", "failure", "cancelled"],
+    ids=["pass", "summary-like-names", "pass-and-skip", "all-skipped", "long-skipped", "long-failure-name", "long-zero-name", "all-todo", "empty-suite", "skipped-suite", "todo-suite", "summary-like-suite", "failure", "cancelled"],
 )
 async def test_real_node_results_reach_parent_acceptance(tmp_path, monkeypatch, executor_module, reporter, body, expected):
     (tmp_path / "sample.test.cjs").write_text("const { test, describe } = require('node:test');\n" + body, encoding="utf-8")
@@ -182,7 +203,9 @@ async def test_real_node_results_reach_parent_acceptance(tmp_path, monkeypatch, 
     graph.add_node("tools", ToolNode([tool], awrap_tool_call=ToolErrorHandlingMiddleware().awrap_tool_call))
     graph.add_edge(START, "tools")
     graph.add_edge("tools", END)
-    command = f"{shlex.quote(shutil.which('node'))} --test --test-reporter={reporter} /mnt/user-data/workspace/sample.test.cjs"
+    color = "FORCE_COLOR=1 " if reporter == "color-spec" else ""
+    reporter = reporter.removeprefix("color-")
+    command = f"{color}{shlex.quote(shutil.which('node'))} --test --test-reporter={reporter} /mnt/user-data/workspace/sample.test.cjs"
     state = await graph.compile().ainvoke({"sandbox": {"sandbox_id": sandbox.id}, "messages": [AIMessage(content="", tool_calls=[{"name": "bash", "id": "node-call", "args": {"command": command}}])]})
     assert len(outputs) == 1 and "duration_ms" in outputs[0], outputs
     executions = executor_module._harvest_bash_executions(state)
