@@ -82,9 +82,25 @@ answers for paginated history. See `docs/skill-usage-ui.md`.
 **Deferred terminal commit:** With an event store, the worker stages its terminal
 status locally and commits it only after finalization's receipt and duration
 writes. `RunRecord.terminal_commit_pending` keeps `_renew_leases()` renewing that
-still-active row until the commit is attempted; a renewal rejected by the worker's
-own commit is confirmed by re-reading the row, while a peer claim fences the run.
-Never select runs for renewal by local status alone. Shutdown's drain treats the
+still-active row until its own terminal write is acknowledged or ownership is
+lost. Manager-owned attempts register separate futures before Store I/O and
+publish an immutable outcome proof only on explicit successful commit results;
+matching row fields and legacy `None` results cannot confirm a commit. A rejected
+CAS never falls back to another terminal writer. In heartbeat mode completion
+updates require that proof and an atomic matching terminal status/owner in Store;
+they only enrich metadata. Single-worker completion retains its recovery fallback.
+Never select runs for renewal by local status alone. Each run has a single-flight
+renewal check and supervised I/O, bounded by its last confirmed durable lease and
+a monotonic wait budget. Heartbeat ticks do not join slow checks; cancellation
+signals are delivered per run as results arrive. Timeout requests cancellation
+without joining cancellation-resistant I/O, whose late results are observed but
+cannot restore local authority. Shutdown drains within its shared budget and
+reports outstanding I/O rather than claiming it stopped. SQL/Memory reject expired
+renewals; owned terminal writes require a live owner lease (Postgres checks DB time
+after its row lock). These guards do not fence every RunStore mutation or provide
+a persistent attempt identity. Permanently missing ACKs may conservatively fence
+a committed run. R2 does not guarantee continuation of the worker's full finalizer
+across host cancellation. Shutdown's drain treats the
 same state as active: such runs are awaited (never cancelled — cancellation would
 skip their terminal tail) so the duration checkpoint and terminal commit land
 before checkpointer teardown. A drain timeout leaves staged statuses and commit

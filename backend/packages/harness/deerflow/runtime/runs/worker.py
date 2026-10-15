@@ -1785,10 +1785,10 @@ async def run_agent(
                     # let lease recovery rewrite it as an error with a synthetic
                     # zero receipt.
                     if record.abort_event.is_set():
-                        if scheduled_goal is not None:
-                            # A cancel may arrive while scheduled cleanup was
-                            # awaiting its saver. The local status may still be
-                            # staged success; apply the accepted action, including
+                        if scheduled_goal is not None or record.status == RunStatus.success:
+                            # A cancel may arrive while receipt or scheduled
+                            # cleanup is awaiting I/O. Apply the accepted action
+                            # to a still-staged success, including
                             # rollback, before committing any terminal outcome.
                             await _finish_cancellation(record.abort_action, restore_checkpoint=not checkpoint_rollback_completed)
                         await run_manager.persist_current_status(run_id)
@@ -1805,9 +1805,11 @@ async def run_agent(
                             await run_manager.persist_current_status(run_id)
                 except Exception:
                     logger.warning("Failed to persist terminal status for run %s after delivery receipt attempts", run_id, exc_info=True)
-            # The deferred commit has been attempted. A failed write is left to
-            # completion fallback or lease recovery, as before.
-            record.terminal_commit_pending = False
+            # Only a confirmed terminal write or ownership loss releases the
+            # renewal barrier in multi-worker mode. A returned/aborted call is
+            # not evidence that this worker committed its terminal outcome.
+            if record.terminal_commit_pending and run_manager.can_release_terminal_barrier(record):
+                record.terminal_commit_pending = False
 
             if not record.ownership_lost and journal is not None and persist_completion:
                 try:

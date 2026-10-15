@@ -30,3 +30,19 @@ Scheduled-task lifecycle rules live in one place each. `ScheduledTaskRepository.
 The per-owner run cap `scheduler.max_concurrent_runs_per_user` is effective `min(per_user, max_concurrent_runs)` (0 = off) and is checked in `claim_queued_run` right after the global count, under the same budget lock. `list_queued_runs` ranks same-thread FIFO heads per owner (`ROW_NUMBER() OVER (PARTITION BY owner)`) and orders the batch by that rank, so the drain is owner-fair even with the cap off; owners at their cap drop out before the batch limit, and orphan rows (task deleted while queued) are never held back by the cap. Scheduled-task repository boundaries coerce serialized timestamps before SQL `DateTime` binding.
 
 Recovery locks task/run pairs in task-id/run-id order and restores `run_id`, `started_at` and live errors before releasing launch claims. Launch/failure/timeout updates use one parent-first transaction to prevent interleaved claims. Queue timeout fails the occurrence and advances scheduled work to prevent immediate requeue.
+
+## Run terminal authority and lease expiry
+
+`RunRepository.update_status(..., owner_worker_id=...)` and
+`finalize_if_not_cancelled(..., owner_worker_id=...)` require that owner and a
+live lease. Increment the change clock before taking the run row lock to retain
+the existing clock/row lock order. PostgreSQL checks `clock_timestamp()` after
+`SELECT FOR UPDATE`, rather than transaction-start `now()`; SQLite evaluates its
+database clock in the conditional UPDATE after acquiring its writer lock.
+`renew_lease` and legacy `update_lease` also reject expired existing leases and
+already-expired target leases. Success returns only after transaction commit.
+`update_run_completion(require_terminal=True, owner_worker_id=...)` requires the
+exact terminal status/owner atomically and leaves outcome fields unchanged;
+it cannot transition an active row. These are scoped guards, not a generation
+protocol covering every mutation. Contract/lock-wait tests live in
+`tests/test_terminal_store_contract.py` (Postgres uses `TEST_POSTGRES_URI`).
