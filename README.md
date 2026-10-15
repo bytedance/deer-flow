@@ -182,6 +182,8 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
 
    Tencent Cloud WSA web search contains malformed HTTP-success payloads the same way: a `Pages` container that is not a list, or a non-empty container holding no usable page, returns the provider's format error, while malformed page entries in an otherwise valid container are skipped so the valid rows survive. Missing, null, or empty `Pages` keep the existing "No results found" response.
 
+   Serply web search contains malformed HTTP-success payloads the same way in every vertical: a `results`/`entries`/`articles` container that is not a list, or a non-empty list with no object entries, returns the provider's format error, while non-object entries in an otherwise valid list are skipped in order. Missing, null, or empty containers keep the existing "No results found" response.
+
    Jina, Browserless, and InfoQuest web fetches resolve relative links and image sources using the requested page URL (or a usable HTML base URL), so returned Markdown includes complete destinations. Link resolution preserves the surrounding HTML source, including malformed-page formatting.
 
    Self-hosted Browserless, Crawl4AI, Firecrawl, and fastCRW fetch backends require outbound isolation from private, loopback, link-local, and cloud-metadata networks before setting `network_isolation_confirmed: true` on each tool. DeerFlow rejects private or unverifiable backends by default because those services handle redirects, DNS resolution, and subresources themselves. `allow_private_addresses` permits intentional internal target URLs and does not bypass the backend check. See [delegated fetch deployment](backend/docs/CONFIGURATION.md#delegated-fetch-backend-isolation); `make doctor` reports backend configurations that would be refused.
@@ -496,7 +498,9 @@ caches materialized checkpoint histories: `type` is `memory` (default) or
 Gateway/async-only; the sync TUI/embedded path supports `memory` only. The
 cache is performance-only — results are identical with it disabled — so it is
 never frozen and workers sharing one checkpoint database may safely run
-different cache settings.
+different cache settings. Redis thread cleanup treats a configured `key_prefix`
+as literal text, including glob metacharacters, so deletion stays within that
+namespace and thread.
 
 > [!TIP]
 > On Linux, if Docker-based commands fail with `permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock`, add your user to the `docker` group and re-login before retrying. See [CONTRIBUTING.md](CONTRIBUTING.md#linux-docker-daemon-permission-denied) for the full fix.
@@ -835,7 +839,7 @@ already received by the browser, without an additional secret-redaction layer.
 
 In plan mode, malformed TODO statuses return normal tool-validation errors without aborting token attribution, so the agent can correct the call.
 
-Tool-produced paths and URLs can be retained as short artifact handles across context compaction (`tool_artifacts` in `config.yaml`). Handles distinguish separate tool-result occurrences, even when a provider reuses call IDs. Detected file URLs preserve their query strings and fragments. When PII redaction is enabled, model-visible artifact labels follow that policy; internal references stay intact for tool argument resolution. The configured registry limit retains the newest artifacts, while checkpointed processing identities prevent evicted results from being recaptured after restart. Resolution runs before authorization and write-safety checks; unknown or expired handles return an error without executing the tool. Small unknown structured results may be retained as complete JSON up to 4096 UTF-8 bytes; empty or oversized payloads are skipped. Handles are agent-local: task arguments resolve parent handles to concrete references, and delegated reports must return concrete references rather than child-local handles. A truncated model projection reports how many handles are omitted.
+Tool-produced paths and URLs can be retained as short artifact handles across context compaction (`tool_artifacts` in `config.yaml`). Handles distinguish separate tool-result occurrences, even when a provider reuses call IDs. Standard MCP image URLs are captured alongside file references, including results from stdio and HTTP servers. Detected file URLs preserve their query strings and fragments. When PII redaction is enabled, model-visible artifact labels follow that policy; internal references stay intact for tool argument resolution. The configured registry limit retains the newest artifacts, while checkpointed processing identities prevent evicted results from being recaptured after restart. Resolution runs before authorization and write-safety checks; unknown or expired handles return an error without executing the tool. Small unknown structured results may be retained as complete JSON up to 4096 UTF-8 bytes; empty or oversized payloads are skipped. Handles are agent-local: task arguments resolve parent handles to concrete references, and delegated reports must return concrete references rather than child-local handles. A truncated model projection reports how many handles are omitted.
 
 DeerFlow supports configurable MCP servers and skills to extend its capabilities.
 When durable MCP background tasks are enabled, agents can use `list_background_tasks(status="failed")` or `status="input_required"` to find failed tasks or tasks awaiting input in the current chat. Other supported statuses are `submitted`, `working`, `completed`, and `cancelled`; omitting the status preserves existing behavior. The database applies the filter before limiting results to the 20 most recent matching tasks. When combined with `active_only=true`, both filters apply: active statuses are `submitted`, `working`, and `input_required`, so terminal statuses return an empty list. `GET /api/threads/{thread_id}/mcp-tasks` supports the same `status` and `active_only` filters before its `limit` (default 50, range 1–100); for example, `?status=failed&limit=20`. Unknown statuses return 422, and omitting the filters preserves the existing response.
@@ -843,6 +847,7 @@ For HTTP/SSE MCP servers, OAuth token flows are supported (`client_credentials`,
 Missing, malformed, or out-of-range token response `expires_in` values use a one-hour default lifetime. This includes lifetimes that cannot be added to the current time without overflowing the expiry timestamp.
 Durable HTTP/SSE task status and cancellation calls select configured `user_auth` credentials using the persisted task owner, including after restart; per-request secrets are not retained for background calls. If a request-scoped credential overrides submit authentication, both credentials must authorize access to the same remote task.
 For stdio MCP servers, per-tool call timeouts can be configured with `tool_call_timeout`; durable background-task calls honor the same setting for HTTP/SSE servers as well.
+The persistent stdio session pool evicts only idle sessions at capacity. If every pooled session is executing a tool, a new session request fails with a capacity error and can be retried after a call finishes.
 For stdio file outputs, a bare filename is linked to a uniquely matching file created or changed by that call. Filenames embedded in unrelated paths, including Windows backslash paths, are left intact.
 For HTTP/SSE background-task calls, `session_init_timeout` separately bounds connection setup (including the SSE endpoint event) and MCP initialization together; it stops applying once the tool call begins. Initialization deadline errors identify the server and configured time limit.
 Ordinary `task` subagents retain the parent run's captured thread incarnation for MCP calls, including legacy threads, so delegation preserves the same lifecycle scope.
@@ -950,6 +955,9 @@ configured value yielding no valid ID denies every guild and logs an error.
 `allowed_channels` accepts one channel ID (quoted or unquoted) or a YAML list
 of IDs exempt from `mention_only`, within allowed guilds. An empty value gives
 no exemptions, so `mention_only` applies everywhere when enabled.
+
+Discord inbound attachments have a 25 MiB download limit. Oversized-file notices
+show the enforced limit so senders can resize or compress the attachment.
 
 ```yaml
 channels:
@@ -1451,6 +1459,8 @@ OAuth data remain isolated under
 `{DEER_FLOW_HOME}/users/{user_id}/integrations/lark-cli/{config,data}`. These
 secret directories are restricted to `0700`, regular credential files to
 `0600`, and symlinks are rejected.
+On Windows, waiting for another process's integration file lock retries for up
+to 15 minutes; other file-lock errors are reported immediately.
 
 After installation, users can click **Connect Lark** to open a browser
 authorization link; no terminal authorization is required. The same UI can
@@ -1826,6 +1836,14 @@ authenticated backend operations and model tools through the
 [plugin APIs](docs/full-stack-plugins.md). The independent
 [bookmarks example](examples/deerflow-extension-bookmarks/README.md) demonstrates
 one package with persistent user data, its own sidebar page and a read-only search tool.
+Model tools can opt into separate structured artifacts with
+`response_format="content_and_artifact"` and `PluginToolResult` (extension-api
+0.2.6). Artifact object keys must be strings at every depth. Existing tools keep
+their JSON text output. The
+[local retrieval example](examples/deerflow-extension-retrieval/README.md)
+demonstrates bounded, read-only results and checkpoint replay without an external
+knowledge service; artifacts do not automatically enable citations. It also appears
+in the extension catalog with localized installation-guide metadata.
 Reopening a bookmark resolves the conversation's current agent through the host, so
 custom-agent conversations retain their original chat entry point, including older bookmarks.
 The independent [Agent teams example](examples/deerflow-extension-agent-teams/README.md)
@@ -2131,6 +2149,19 @@ result text does not turn an unknown status into success or failure.
 Cancelled or timed-out background sub-agent executions retain provider-reported token usage from completed model calls, including responses received before their next progress update. Final usage delivery to the parent run does not count earlier progress snapshots twice.
 
 For `tests_passed:go test ./...`, packages marked `[no test files]` or `[no tests to run]` do not veto a passing summary from another package. Runs with only zero-test package summaries remain `UNVERIFIED`; failures still take precedence. This checks recorded execution evidence, not claim correctness.
+
+For `tests_passed:cargo test`, a complete passing target summary can coexist with
+empty unit, integration or documentation targets. Complete zero-pass successful
+summaries do not veto that sibling evidence. All-empty or all-ignored runs and
+bare `test result: ok` banners remain `UNVERIFIED`; incomplete zero-test summaries
+are kept as vetoes, and failures still take precedence.
+
+For Maven and Gradle test acceptance, a `BUILD SUCCESS` / `BUILD SUCCESSFUL`
+banner alone remains `UNVERIFIED`: builds can succeed without running tests.
+Complete `Tests run: N, Failures: F, Errors: E, Skipped: S` or `N tests completed`
+summaries establish a hold only when at least one test ran without a reported
+failure. Zero-test or all-skipped modules do not supply positive evidence;
+failures in any module take precedence over passing counts.
 
 For file acceptance criteria, an empty regular file in the shared workspace can satisfy `file:<path> exists` and `file_written:<path>`, including on remote sandboxes. It fails `file:<path> non-empty` with a deterministic empty-file result.
 
@@ -2922,6 +2953,7 @@ Current MVP capabilities:
 
 - Manage tasks at `/workspace/scheduled-tasks`
 - One-time task forms reject local times skipped by daylight-saving transitions; select another time before creating or saving the task.
+- Existing one-time tasks display the scheduler's execution time even when a conversation or API saved a local time skipped by daylight saving. Local times without an explicit offset use the first occurrence of a repeated hour.
 - Choose whether each scheduled task reuses a thread and its conversation history or creates a fresh thread per run
 - Pin each task to `lead_agent` (default) or a custom agent the owner already has; unknown names are rejected
 - Sending `assistant_id: null` in a scheduled-task PATCH resets the task to `lead_agent`; omitting `assistant_id` preserves the current agent, including when that custom agent has since been deleted
@@ -3268,6 +3300,18 @@ perf:check`. The command measures `/login` from a normal production build, then
 performs a production static-demo build for the fixture-backed workspace routes.
 It measures the unique JavaScript and CSS referenced by representative routes
 and writes the detailed result to `.next/performance-results.json`.
+
+### Script workflows (optional extension)
+
+The [script workflows extension](examples/deerflow-extension-workflows/README.md)
+adds inspectable JavaScript orchestration through full AgentRuns, background launch,
+bounded parallel execution, progress, retained results and cancellation. It is
+disabled by default and requires a POSIX Gateway and operator-authorized Agent
+references. Phase 1 does not support resume, human output approval, restart replay
+or a hard monetary budget. Workflow deadlines and child-observation timeouts are
+reported separately from uncertain admission. Accepted launches retain their request
+identity across inspection refresh failures, with a separate inspection retry action. A runnable example, installation steps
+and QuickJS source-build prerequisites for other Python/CPU combinations are included.
 
 ## License
 

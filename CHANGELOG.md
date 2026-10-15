@@ -1247,6 +1247,26 @@ This release closes that milestone with **621 merged pull requests**.
 
 ### Fixed
 
+- **channels:** Runs started from an IM channel no longer die with the Gateway
+  instance that received the message. The manager holds `runs.wait` /
+  `runs.stream` open for the whole run, and the Gateway cancels a run whose
+  creating request disconnects unless that request asked for
+  `on_disconnect: continue`; a leader hand-off, a rolling restart or a crash
+  of the receiving instance therefore cancelled every IM run in flight.
+  Channel runs now ask for `continue`, so the run finishes on the Gateway
+  executing it and its thread state is persisted — the answer stays readable
+  in the web UI even though the IM reply is lost with the old transport. The
+  same policy covers the SDK's 300s read timeout on a Slack/Discord
+  `runs.wait`: the chat still gets the error reply, but the run finishes in
+  the background instead of being cancelled. Because the run survives, the
+  manager now keeps the inbound dedupe key once the run request has left it
+  (a cancelled worker, a read timeout, a dropped connection): the provider's
+  redelivery on the new holder is dropped instead of executing the turn a
+  second time, while a request the Gateway rejected or a failure before
+  sending still releases the key for a retry. Fire-and-forget channels
+  (GitHub) are unchanged: `runs.create` returns as soon as the run is pending.
+  ([#6876])
+
 - **deploy:** The Gateway container now shuts down gracefully. The production
   compose `command`, both `CMD`s in `backend/Dockerfile` and the Helm chart
   started it as `sh -c "cd backend && … uv run … uvicorn …"`, which leaves `sh`
@@ -5917,6 +5937,15 @@ This release closes that milestone with **621 merged pull requests**.
   80 such requests failed. The same race in IM conversation binding, such as
   a first message arriving together with `/new`, no longer fails the message.
   The losing write now updates the row the other one created. ([#6852])
+- **persistence:** Startup schema upgrades no longer log a false
+  `safe_add_column ... drifts from the model definition` warning for columns
+  that already match the model. The check compared the model's generic type
+  and default names (`STRING`, `BIGINTEGER`, `DefaultClause('0')`) with the
+  database's own (`VARCHAR`, `BIGINT`, `'0'`), so every Postgres or SQLite
+  database created before revision 0023 logged one on upgrade, and a schema
+  whose head stamp was lost logged 29 (SQLite) or 36 (Postgres), burying the
+  real type mismatch the warning exists to catch. Both sides are now compared
+  as the connected database spells them. ([#6865])
 
 ### Security
 
@@ -11701,3 +11730,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6843]: https://github.com/bytedance/deer-flow/pull/6843
 [#6844]: https://github.com/bytedance/deer-flow/pull/6844
 [#6852]: https://github.com/bytedance/deer-flow/pull/6852
+[#6865]: https://github.com/bytedance/deer-flow/pull/6865
+[#6876]: https://github.com/bytedance/deer-flow/pull/6876

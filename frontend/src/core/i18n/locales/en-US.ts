@@ -40,6 +40,11 @@ export const enUS: Translations = {
       "This entry comes from the repository extension catalog. Ask your deployment administrator to confirm its installation and activation status.",
     installationGuide: "Installation guide",
     catalog: {
+      workflows: {
+        title: "Script workflows",
+        description:
+          "Run inspectable Agent workflows with bounded parallel steps, progress and cancellation. Phase 1 has no resume, human approval or hard monetary budget.",
+      },
       agentTeams: {
         title: "Agent teams",
         description:
@@ -69,6 +74,11 @@ export const enUS: Translations = {
         title: "Extension development example",
         description:
           "Explore middleware, task lifecycle, model observers, services and HTTP route contributions.",
+      },
+      retrieval: {
+        title: "Local retrieval example",
+        description:
+          "Demonstrate read-only retrieval and structured tool results using fixed sample documents, without an external knowledge service.",
       },
     },
     pageUnavailable: "Extension page unavailable",
