@@ -685,6 +685,8 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             return True, "transient"
         if status_less:
             status_code = _extract_in_band_status(exc)
+            if status_code is not None and 500 <= status_code <= 599:
+                return True, "transient"
         if status_code in _RETRIABLE_STATUS_CODES:
             return True, "transient"
         if _matches_any(lowered, _BUSY_PATTERNS):
