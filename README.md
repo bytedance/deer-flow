@@ -178,6 +178,8 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
 
    GroundRoute web search and fetch contain malformed HTTP-success payloads the same way: a non-object payload, a `results` container that is not a list, or a non-empty list with no object entries returns the provider's format error, while non-object entries in an otherwise valid list are skipped in order. Missing, null, or empty results keep the existing "No results found" response.
 
+   DuckDuckGo web search distinguishes execution failures from empty results: rate limits, timeouts, blocked requests, client-setup failures, SDK errors, and a missing `ddgs` dependency return a structured `DuckDuckGo search failed: ...` error instead of "No results found", while a genuinely empty result set keeps the existing "No results found" response. The structured error text lets the harness classify an outage as transient or a configuration problem instead of a query that matched nothing.
+   
    Tavily web search and fetch contain malformed HTTP-success payloads the same way: a non-object payload, or a `results`/`failed_results` container that is not a list, returns the provider's format error, and non-object entries in an otherwise valid list are skipped in order. Missing, null, or empty results keep the existing response (`[]` for search, `Error: No results found` for fetch); missing or null search fields (`title`, `url`, `content`) normalize to empty text, and a non-string fetch `raw_content` is coerced to text before the truncation limit.
 
    Sofya web search and fetch contain malformed HTTP-success payloads the same way: a non-object payload, a `results` container that is not a list, or a non-empty list with no object entries returns the provider's format error, while non-object entries in an otherwise valid list are skipped in order. Missing, null, or empty results keep the existing "No results found" response.
@@ -1388,6 +1390,20 @@ Existing web citations and the text-only Python `knowledge_search(query)` APIs
 remain supported. No knowledge management service or page is required.
 See [the knowledge contract guide](backend/docs/KNOWLEDGE.md).
 
+Knowledge scope selection also works with operator-installed read-only Provider
+extensions. The shared selector shows only the filters a Provider supports:
+knowledge-base selection requires a catalog and dataset filtering; file
+selection additionally requires document listing and document filtering.
+Unsupported or inaccessible filters fail without expanding the search scope.
+Choosing no knowledge search stops retrieval before loading the Provider.
+Provider resource IDs are preserved up to 256 Unicode code points; longer IDs
+are rejected without truncation.
+RAGFlow keeps its existing configuration and citations, and search-only
+Providers remain usable without a catalog or management page. See the
+[offline Provider example](examples/deerflow-extension-knowledge/README.md)
+for extension registration and configuration. WeKnora's adapter is planned for
+the next phase.
+
 Skills are what make DeerFlow do *almost anything*.
 
 A standard Agent Skill is a structured capability module — a Markdown file that defines a workflow, best practices, and references to supporting resources. DeerFlow ships with built-in skills for research, report generation, slide creation, web pages, image and video generation, and more. But the real power is extensibility: add your own skills, replace the built-in ones, or combine them into compound workflows.
@@ -2162,6 +2178,12 @@ empty unit, integration or documentation targets. Complete zero-pass successful
 summaries do not veto that sibling evidence. All-empty or all-ignored runs and
 bare `test result: ok` banners remain `UNVERIFIED`; incomplete zero-test summaries
 are kept as vetoes, and failures still take precedence.
+
+For `tests_passed:python -m unittest`, a complete `Ran N tests in ...s` / `OK`
+summary must include at least one ordinary passing test. Skips and expected
+failures do not count as passes. Successful runs with all-skipped,
+all-expected-failure, empty or incomplete summaries remain `UNVERIFIED`;
+nonzero exits, failures and unexpected successes still take precedence.
 
 For Maven and Gradle test acceptance, a `BUILD SUCCESS` / `BUILD SUCCESSFUL`
 banner alone remains `UNVERIFIED`: builds can succeed without running tests.

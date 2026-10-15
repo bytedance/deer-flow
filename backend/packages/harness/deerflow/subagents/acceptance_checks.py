@@ -116,11 +116,35 @@ _FILE_CONTENT_READ_CAP_BYTES = 50_000
 #: way (UNVERIFIED), and fail shapes win over pass shapes when both appear.
 _TEST_PASS_SHAPE_RE = re.compile(
     r"\b[1-9]\d*\s+passed\b"  # pytest / jest: "5 passed" (zero is not a pass)
-    r"|^OK$"  # unittest: bare OK line
-    r"|^ok\s+\S"  # go test: "ok  \tpkg/path"
     r"|\ball tests passed\b",
     re.IGNORECASE | re.MULTILINE,
 )
+
+# Go's lowercase, same-line prefix must not consume unittest's uppercase OK
+# annotations (or a package name on a later line).
+_GO_TEST_PASS_SHAPE_RE = re.compile(r"^ok[ \t]+\S", re.MULTILINE)
+_UNITTEST_RESULT_LINE_RE = re.compile(r"^OK(?:[ \t]+\([^\r\n]*\))?[ \t]*\r?$", re.MULTILINE)
+_UNITTEST_SUCCESS_SUMMARY_RE = re.compile(
+    r"^Ran (?P<total>0|[1-9][0-9]{0,8}) tests? in [0-9]+(?:\.[0-9]+)?s\r?\n\r?\n"
+    r"OK(?: \((?P<counts>[^\r\n()]*)\))?[ \t]*\r?$",
+    re.MULTILINE,
+)
+
+
+def _unittest_test_summary_holds(text: str) -> bool:
+    """Require at least one ordinary pass in a complete unittest summary."""
+    for match in _UNITTEST_SUCCESS_SUMMARY_RE.finditer(text):
+        counts: dict[str, int] = {}
+        for field in match["counts"].split(", ") if match["counts"] is not None else []:
+            counter = re.fullmatch(r"(skipped|expected failures)=(0|[1-9][0-9]{0,8})", field)
+            if counter is None or counter[1] in counts:
+                break
+            counts[counter[1]] = int(counter[2])
+        else:
+            if int(match["total"]) > sum(counts.values()):
+                return True
+    return False
+
 
 #: Zero-test evidence vetoes the pass shapes the count-bearing alternatives
 #: cannot see: "0 passed", go's no-test markers, unittest "Ran 0 tests".
@@ -846,7 +870,16 @@ def _carries_summary_shape(text: str) -> bool:
     or zero-test veto). The pass shapes match as substrings, so
     subagent-chosen strings — a ``cd`` argument, a ``CDPATH`` value — must
     not be allowed to lend the recorded tail a summary shape."""
-    return bool(_TEST_PASS_SHAPE_RE.search(text) or _TEST_FAIL_SHAPE_RE.search(text) or _TEST_ZERO_SHAPE_RE.search(text) or _MAVEN_TEST_SUMMARY_RE.search(text) or _GRADLE_TEST_SUMMARY_RE.search(text) or _BUILD_SUCCESS_RE.search(text))
+    return bool(
+        _TEST_PASS_SHAPE_RE.search(text)
+        or _GO_TEST_PASS_SHAPE_RE.search(text)
+        or _UNITTEST_RESULT_LINE_RE.search(text)
+        or _TEST_FAIL_SHAPE_RE.search(text)
+        or _TEST_ZERO_SHAPE_RE.search(text)
+        or _MAVEN_TEST_SUMMARY_RE.search(text)
+        or _GRADLE_TEST_SUMMARY_RE.search(text)
+        or _BUILD_SUCCESS_RE.search(text)
+    )
 
 
 def _normalize_cd_scope_path(path: str) -> tuple[str, bool] | None:
@@ -2010,7 +2043,8 @@ def _check_tests_passed_leaf(command: str, bash_executions: list[dict[str, Any]]
         return base
     # Empty packages/targets cannot veto complete positive sibling evidence.
     summary_tail = _without_empty_cargo_targets(_GO_ZERO_TEST_LINE_RE.sub("", output_tail))
-    if (_TEST_PASS_SHAPE_RE.search(summary_tail) or build_summary is True) and not _TEST_ZERO_SHAPE_RE.search(summary_tail):
+    passing = _TEST_PASS_SHAPE_RE.search(summary_tail) or _GO_TEST_PASS_SHAPE_RE.search(summary_tail) or _unittest_test_summary_holds(summary_tail) or build_summary is True
+    if passing and not _TEST_ZERO_SHAPE_RE.search(summary_tail):
         base["checked"] = True
         base["holds"] = True
         base["detail"] = "recorded output carries a passing test summary"
