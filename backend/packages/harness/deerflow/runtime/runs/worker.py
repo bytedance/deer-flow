@@ -272,6 +272,11 @@ def _checkpoint_thread_lock(thread_id: str) -> AbstractAsyncContextManager[None]
 
 _DELIVERY_RECEIPT_RETRY_DELAYS_SECONDS = (0.1, 0.5)
 _EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS = 3.0
+# Upper bound on how long a single terminal-finalization step may defer a host
+# cancellation before the interruption is allowed to win. Kept well below the
+# delayed ``bridge.cleanup`` (60s) and ``RunManager`` record cleanup (300s)
+# fallbacks so a wedged store write cannot stall graceful shutdown indefinitely.
+_TERMINAL_STEP_DEFER_DEADLINE_SECONDS = 30.0
 
 
 def _project_background_tasks(task_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -902,8 +907,15 @@ async def _await_despite_host_cancellation(
     skipped by an early ``CancelledError`` escaping an ``except Exception``
     guard. Returns ``(deferred, result)`` where ``deferred`` is the (possibly
     updated) first pending interruption.
+
+    The deferral is bounded by ``_TERMINAL_STEP_DEFER_DEADLINE_SECONDS``: once
+    the budget is exhausted, a further host cancellation wins instead of being
+    deferred again, so a wedged durable write cannot stall graceful shutdown
+    indefinitely. Store-layer timeouts remain the primary backstop.
     """
     task = asyncio.ensure_future(awaitable)
+    loop = asyncio.get_running_loop()
+    defer_until = loop.time() + _TERMINAL_STEP_DEFER_DEADLINE_SECONDS
     try:
         while True:
             try:
@@ -912,6 +924,9 @@ async def _await_despite_host_cancellation(
                 host = asyncio.current_task()
                 if host is None or not host.cancelling():
                     # The awaited step itself was cancelled rather than the host.
+                    raise
+                if loop.time() >= defer_until:
+                    # Deferral budget exhausted: let this cancellation win.
                     raise
                 deferred = _defer_finalization_interrupt(deferred, exc)
     finally:
@@ -1811,7 +1826,10 @@ async def run_agent(
 
             if scheduled_goal is not None and not record.ownership_lost and checkpointer is not None:
                 if record.abort_event.is_set() and record.abort_action == "rollback" and not checkpoint_rollback_completed:
-                    await _finish_cancellation("rollback")
+                    deferred_finalization_interrupt, _ = await _await_despite_host_cancellation(
+                        _finish_cancellation("rollback"),
+                        deferred_finalization_interrupt,
+                    )
                 # Scheduled goals are occurrence-scoped. Keep the real run slot
                 # active through cleanup so a peer's next user turn cannot
                 # inherit this goal. Ordinary goals retain terminal-first cleanup.
@@ -1837,7 +1855,10 @@ async def run_agent(
                             # awaiting its saver. The local status may still be
                             # staged success; apply the accepted action, including
                             # rollback, before committing any terminal outcome.
-                            await _finish_cancellation(record.abort_action, restore_checkpoint=not checkpoint_rollback_completed)
+                            deferred_finalization_interrupt, _ = await _await_despite_host_cancellation(
+                                _finish_cancellation(record.abort_action, restore_checkpoint=not checkpoint_rollback_completed),
+                                deferred_finalization_interrupt,
+                            )
                         deferred_finalization_interrupt, _ = await _await_despite_host_cancellation(
                             run_manager.persist_current_status(run_id),
                             deferred_finalization_interrupt,
@@ -1854,7 +1875,10 @@ async def run_agent(
                             deferred_finalization_interrupt,
                         )
                         if cancel_action is not None:
-                            await _finish_cancellation(cancel_action)
+                            deferred_finalization_interrupt, _ = await _await_despite_host_cancellation(
+                                _finish_cancellation(cancel_action),
+                                deferred_finalization_interrupt,
+                            )
                             deferred_finalization_interrupt, _ = await _await_despite_host_cancellation(
                                 run_manager.persist_current_status(run_id),
                                 deferred_finalization_interrupt,
@@ -1877,7 +1901,11 @@ async def run_agent(
                     logger.warning("Failed to persist run completion for %s (non-fatal)", run_id, exc_info=True)
 
             if scheduled_goal is not None and not record.ownership_lost:
-                if not await run_manager.persist_current_status(run_id):
+                deferred_finalization_interrupt, status_confirmed = await _await_despite_host_cancellation(
+                    run_manager.persist_current_status(run_id),
+                    deferred_finalization_interrupt,
+                )
+                if not status_confirmed:
                     await run_manager._mark_ownership_lost(record, reason="Scheduled run terminal status could not be confirmed after goal cleanup.", require_active=False)
                 # Late cancellation can still drain a rollback after goal
                 # cleanup. Retain admission/heartbeat protection through that
@@ -1890,7 +1918,11 @@ async def run_agent(
             # existing outcome before deleting recoverable goal state.
             if scheduled_goal is None and goal_completion is not None and record.status == RunStatus.success and not record.abort_event.is_set() and not record.ownership_lost:
                 try:
-                    if await run_manager.persist_current_status(run_id):
+                    deferred_finalization_interrupt, status_confirmed = await _await_despite_host_cancellation(
+                        run_manager.persist_current_status(run_id),
+                        deferred_finalization_interrupt,
+                    )
+                    if status_confirmed:
                         await _clear_completed_goal(
                             candidate=goal_completion,
                             record=record,

@@ -66,3 +66,34 @@ async def test_cancellation_during_delivery_receipt_still_publishes_end(monkeypa
     finally:
         hold_receipt.set()
         await asyncio.gather(worker, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_deferral_deadline_lets_cancellation_win(monkeypatch):
+    """A wedged terminal step stops deferring cancellation once the budget is spent."""
+    import deerflow.runtime.runs.worker as worker_module
+    from deerflow.runtime.runs.worker import _await_despite_host_cancellation
+
+    monkeypatch.setattr(worker_module, "_TERMINAL_STEP_DEFER_DEADLINE_SECONDS", 0.05)
+
+    never = asyncio.get_running_loop().create_future()
+
+    async def run_step():
+        await _await_despite_host_cancellation(asyncio.shield(never), None)
+
+    host = asyncio.create_task(run_step())
+    await asyncio.sleep(0)
+
+    host.cancel()
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert not host.done(), "first cancellation should be deferred within the budget"
+
+    await asyncio.sleep(0.06)  # spend the deferral budget
+    host.cancel()
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+    # Budget exhausted: the later cancellation wins instead of being deferred again.
+    with pytest.raises(asyncio.CancelledError):
+        await host
