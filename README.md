@@ -1,6 +1,6 @@
 # 🦌 DeerFlow - 2.0
 
-English | [中文](./README_zh.md) | [日本語](./README_ja.md) | [Français](./README_fr.md) | [Русский](./README_ru.md) | [Português](./README_pt.md)
+English | [中文](./README_zh.md) | [日本語](./README_ja.md) | [Français](./README_fr.md) | [Русский](./README_ru.md) | [Português](./README_pt.md) | [한국어](./README_ko.md)
 
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](./backend/pyproject.toml)
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](./Makefile)
@@ -133,6 +133,8 @@ That prompt is intended for coding agents. It tells the agent to clone the repo 
 
 ### Configuration
 
+With `run_events.backend: db`, caller-supplied ISO 8601 event timestamps are normalized to UTC before storage, preserving their instant when SQLite drops timezone information. Timestamps without an offset are treated as UTC. Previously stored timestamps are not rewritten.
+
 Operators can extend lead-agent, subagent, and DeerMem extraction prompts with
 literal prepend/append configuration without editing source templates. See
 [prompt overlays](backend/docs/CONFIGURATION.md#prompt-overlays).
@@ -176,9 +178,13 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
 
    GroundRoute web search and fetch contain malformed HTTP-success payloads the same way: a non-object payload, a `results` container that is not a list, or a non-empty list with no object entries returns the provider's format error, while non-object entries in an otherwise valid list are skipped in order. Missing, null, or empty results keep the existing "No results found" response.
 
+   DuckDuckGo web search distinguishes execution failures from empty results: rate limits, timeouts, blocked requests, client-setup failures, SDK errors, and a missing `ddgs` dependency return a structured `DuckDuckGo search failed: ...` error instead of "No results found", while a genuinely empty result set keeps the existing "No results found" response. The structured error text lets the harness classify an outage as transient or a configuration problem instead of a query that matched nothing.
+   
    Tavily web search and fetch contain malformed HTTP-success payloads the same way: a non-object payload, or a `results`/`failed_results` container that is not a list, returns the provider's format error, and non-object entries in an otherwise valid list are skipped in order. Missing, null, or empty results keep the existing response (`[]` for search, `Error: No results found` for fetch); missing or null search fields (`title`, `url`, `content`) normalize to empty text, and a non-string fetch `raw_content` is coerced to text before the truncation limit.
 
    Sofya web search and fetch contain malformed HTTP-success payloads the same way: a non-object payload, a `results` container that is not a list, or a non-empty list with no object entries returns the provider's format error, while non-object entries in an otherwise valid list are skipped in order. Missing, null, or empty results keep the existing "No results found" response.
+
+   Serper web and image search preserve valid entries in mixed result lists. A malformed `organic`/`images` container, or a non-empty list holding no object entries, returns Serper's format error; missing, null, or empty containers keep the existing "No results found" / "No images found" response. Format errors log the container field name only, without queries, credentials, or payload values.
 
    Tencent Cloud WSA web search contains malformed HTTP-success payloads the same way: a `Pages` container that is not a list, or a non-empty container holding no usable page, returns the provider's format error, while malformed page entries in an otherwise valid container are skipped so the valid rows survive. Missing, null, or empty `Pages` keep the existing "No results found" response.
 
@@ -381,6 +387,7 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
 
    - Codex CLI reads `~/.codex/auth.json`
    - Codex function tools preserve explicit `strict: true` or `strict: false` in wrapped or flat dictionary definitions. Missing or null settings keep the provider default. `bind_tools` applies the same conversion to dictionaries and `BaseTool` schemas.
+   - Codex honors `tool_choice` in `bind_tools` and direct calls: `auto`, `none`, `required`, or a function name/selection. `any` and `True` mean `required`; `None` and `False` keep the provider default. Per-call choices override the bound policy. Bound choices are validated when binding; direct calls and overrides are validated before HTTP. `required` needs at least one function tool, and named selections must match a supplied function. `auto` and `none` also work without tools.
    - Completed Codex responses still return their text and tool calls when token usage is null, omitted, or empty; usage metadata remains unavailable.
    - The Codex model provider returns completed responses without waiting for the SSE connection to close. Failed or incomplete responses report the provider's error or reason; partial output is not returned as a successful answer. Non-object error details are reported as text.
    - Claude Code accepts `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_CREDENTIALS_PATH`, or `~/.claude/.credentials.json`
@@ -1377,9 +1384,25 @@ numbers use the selected interface language. New providers use the shared
 envelope; existing RAGFlow citation histories remain supported.
 Expand a completed subtask card to inspect its report's forwarded knowledge
 sources, including when reopening a saved conversation.
+Shortened mixed-provider task reports remove dangling citation fragments
+without flattening retained shared-source links.
 Existing web citations and the text-only Python `knowledge_search(query)` APIs
 remain supported. No knowledge management service or page is required.
 See [the knowledge contract guide](backend/docs/KNOWLEDGE.md).
+
+Knowledge scope selection also works with operator-installed read-only Provider
+extensions. The shared selector shows only the filters a Provider supports:
+knowledge-base selection requires a catalog and dataset filtering; file
+selection additionally requires document listing and document filtering.
+Unsupported or inaccessible filters fail without expanding the search scope.
+Choosing no knowledge search stops retrieval before loading the Provider.
+Provider resource IDs are preserved up to 256 Unicode code points; longer IDs
+are rejected without truncation.
+RAGFlow keeps its existing configuration and citations, and search-only
+Providers remain usable without a catalog or management page. See the
+[offline Provider example](examples/deerflow-extension-knowledge/README.md)
+for extension registration and configuration. WeKnora's adapter is planned for
+the next phase.
 
 Skills are what make DeerFlow do *almost anything*.
 
@@ -2156,6 +2179,12 @@ summaries do not veto that sibling evidence. All-empty or all-ignored runs and
 bare `test result: ok` banners remain `UNVERIFIED`; incomplete zero-test summaries
 are kept as vetoes, and failures still take precedence.
 
+For `tests_passed:python -m unittest`, a complete `Ran N tests in ...s` / `OK`
+summary must include at least one ordinary passing test. Skips and expected
+failures do not count as passes. Successful runs with all-skipped,
+all-expected-failure, empty or incomplete summaries remain `UNVERIFIED`;
+nonzero exits, failures and unexpected successes still take precedence.
+
 For Maven and Gradle test acceptance, a `BUILD SUCCESS` / `BUILD SUCCESSFUL`
 banner alone remains `UNVERIFIED`: builds can succeed without running tests.
 Complete `Tests run: N, Failures: F, Errors: E, Skipped: S` or `N tests completed`
@@ -2251,6 +2280,8 @@ async with runtime:
 ```
 
 `SubagentRuntime.stop()` waits for its owned batch service to finish before propagating caller cancellation, including repeated cancellation. This drain has no timeout; repository operations and child cleanup must terminate. If service shutdown also fails or is cancelled, the first caller cancellation is preserved with the service failure as its cause.
+
+Gateway run finalization also retains ownership through caller cancellation: it finishes terminal persistence, stream completion, and resource cleanup before propagating the interruption. Backend I/O must terminate or enforce its own timeout. Gateway shutdown includes workers still finalizing after their terminal status commits; an expired shutdown drain budget is logged and does not cancel their outstanding writes.
 
 The factory still does not load YAML or create SQL infrastructure: the caller supplies the config snapshot, repository, and lifecycle. Because it accepts a caller-owned `system_prompt`, direct integrations also own any model-visible wording about those limits; the default middleware enforces the runtime limits regardless. The factory does not mount the Gateway owner-scoped HTTP routes or Web UI, so direct applications must expose their own result API/UI if they need those surfaces. For ordinary delegation only, `SubagentRuntime(...)` needs no asynchronous startup.
 
@@ -2412,6 +2443,14 @@ AIO directory listings discard missing shell sessions so the next request can re
 After a dropped connection, directory listings and persistent shell commands report an
 unknown outcome without replaying the operation; later calls use a fresh session.
 
+Current-upload context tolerates malformed attachment metadata: invalid filename
+references and files that cannot be checked are skipped individually, while valid
+attachments in the same message remain available. Unusable or display-overflowing
+file sizes use the existing zero-size display fallback without dropping the file.
+Probe errors are logged at debug level. Sizes of 1 TB or more that can be rendered
+safely display as `>= 1 TB` to keep the prompt compact; stored byte counts remain
+unchanged.
+
 Uploaded Markdown outlines recognize ATX heading syntax, clean closing markers with a linear suffix scan, and skip HTML comment blocks and fenced and indented code examples, so hashtags and code comments do not
 crowd out real document sections from the agent's heading preview. Indented bold examples are also excluded; PDF-style bold headings with up to three leading spaces remain supported.
 Split-bold numeric table rows, including parenthesized years, signed values, and
@@ -2463,6 +2502,18 @@ the entire oversized file into memory.
 CSV and TSV artifacts open as tables in the artifact panel and in a separate window. The preview preserves text values (including leading zeros), supports an optional header row, and pages through up to 200 rows and 50 columns from the initial sample. Long or multiline cells can be opened and copied in full. Switch to source to inspect or edit the file; downloads and separate windows use the saved version.
 
 HTML artifact previews resolve relative assets from the artifact directory unless the document contains a real `<base>` element. Base-tag examples in comments or script text do not change that resolution.
+
+With authentication enabled, static resources in the same thread's artifact route
+(images, responsive images, classic scripts and CSS, including nested imports)
+are fetched by the parent and inlined without weakening the opaque iframe sandbox.
+Preparation has resource, byte, CSS-depth and time limits and reports partial
+previews. Dynamic JavaScript requests, ES module imports, nested iframes and
+navigation remain subject to sandbox restrictions; see the
+[frontend preview notes](frontend/README.md#development-notes) for the supported
+scope and limits.
+Optional resource failures, including 401 responses, keep the conversation open
+with a partial-preview notice. HTML doctypes and doctype-less rendering modes
+are preserved, and CSS references inside inline SVG styles are prepared too.
 
 Markdown report previews in the artifact panel and separate window resolve local
 images from the report's own directory and conversation. Both relative paths
@@ -2565,10 +2616,15 @@ This is the difference between a chatbot with tool access and an agent with an a
 
 ### Agentic Browser Control
 
-Browser screenshots and Browserless capture/fetch outputs are published only
-after the complete file is written. New files use the host's normal creation
-permissions (typically `0644`), and replacements preserve existing permissions,
-so sandbox code can read captures when those permissions allow it.
+Browser screenshots and Browserless captures publish complete content atomically.
+New files use the host's normal creation permissions (typically `0644`), and
+replacements preserve existing permissions, so sandbox code can read captures
+when those permissions allow it.
+
+Browserless reserves capture names with empty placeholders to prevent concurrent
+captures from overwriting one another. Failed publication releases the placeholder;
+if cleanup fails, Gateway logs a warning with its path and preserves the original
+publication error or interruption.
 
 Browser dependency auto-detection accepts `name`, `group`, and `use` in any
 order within a tool entry, with either indented or indentless YAML lists.
@@ -2768,6 +2824,9 @@ text, including when nested in other containers. Dictionary keys and values
 are checked recursively as well.
 
 ## Embedded Python Client
+
+`chat()` and `stream()` preserve text appended by model middleware before the
+first state snapshot, emitting only the suffix after the streamed text.
 
 For `DeerFlowClient(agent_name="researcher")`, the named agent's `mcp_plugins`
 selection applies to both the lead agent and its `task` / `batch_task`
@@ -2984,7 +3043,7 @@ In the task form, switching an hourly, daily, weekly, or monthly schedule to **C
 Open **Settings → Notifications → IM notifications** to turn scheduled-task
 updates on or off for each connected, push-capable app. Existing connections
 keep receiving updates until you opt out. Turning a channel off cancels its
-pending and retrying notices, including an explicitly selected Feishu group;
+pending and retrying notices, including an explicitly selected group;
 turning it on again does not resend the old backlog. Notifications whose
 platform delivery already started may still arrive. Chat replies and scheduled
 execution are unaffected. All Gateway workers must run the upgraded version
@@ -2993,16 +3052,27 @@ for the preference to be enforced.
 WeChat needs a private message after binding to save its current conversation
 context securely; an old binding or changed bot token also needs a fresh private
 message. QQ requires a C2C/private binding and platform permission to send
-proactively. This version does not add WeChat or QQ group destinations.
+proactively. WeChat remains private-only; QQ and WeCom also support explicitly
+selected group destinations.
 See [setup and delivery limits](backend/docs/IM_CHANNEL_CONNECTIONS.md#proactive-notification-settings).
 
-### Optional Feishu group notifications
+The same page offers separate **Task & goal run notifications** for completion,
+terminal failure and requests for input. These ordinary web/background reminders
+are off by default. A pending input request takes precedence over completion;
+unmet goal stand-downs stay silent, and IM-originated chats keep their original
+reply rather than receiving a second proactive notice. Turning an event off
+also cancels its waiting backlog. Messages direct you back to Conversations.
 
-In a task's create or edit form, **Also notify a Feishu group (optional)** adds
+### Optional group notifications
+
+In a task's create or edit form, **Also notify a group (optional)** adds
 one chosen group to the existing personal notifications. Add the app bot to the
-group, use **Bind a Feishu group** to get a command, send it while mentioning the
-bot in that group, then refresh the list and select the group by name. The app
-needs bot-send permission and `im:chat:read` to display its group names.
+group, choose its supported channel in the binding panel, then send the displayed
+`/connect` command while mentioning the bot in that group. QQ and WeCom require
+a name in the binding panel so you can identify the receiving group; the name
+travels with the owner-issued binding code and is saved on the connection.
+Refresh and select the group by name. Feishu additionally needs `im:chat:read`
+to retrieve its group names; every provider needs permission to send proactively.
 
 While the form checks group-notification support, it shows a loading hint and
 retains the saved selection.
@@ -3011,7 +3081,7 @@ No group is selected automatically. Clearing the selection stops new group
 notices; changing it affects future notices, while already queued notices keep
 their original target. A disconnected binding never receives a waiting notice.
 The first version is configured through the task form or REST API; conversation
-schedule tools keep their existing inputs. See the [group delivery guide](backend/docs/IM_CHANNEL_CONNECTIONS.md#feishu-group-notifications).
+schedule tools keep their existing inputs. See the [group delivery guide](backend/docs/IM_CHANNEL_CONNECTIONS.md#group-notifications).
 
 ### Lifecycle, safety caps and stop conditions
 
