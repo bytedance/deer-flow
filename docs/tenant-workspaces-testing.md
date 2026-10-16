@@ -78,10 +78,39 @@ python scripts/render_tenant_physical_pipeline.py "$tenant_phase" "$tenant_sha" 
 - MCP 协议当前使用进程内 ASGI transport；TCP、真实 NAS 和 OS 重启仍待验。
 - CurrentUser/bootstrap 为可信内部 fixture，数据库角色拥有 fixture 库；公开 JWT、
   最小 SQL 权限和真实 Gateway 租户启动未获此测试证明。
-- 单机 B 的物理主干已验证；pool、原生取消/撤权 outbox 与 STOP 控制回执、C 启动/
-  恢复/通知及完整 C→B→C 仍须实施。撤权后的原生 task 控制状态尚未结算时保持原状态，
+- 单机 B 的物理主干已验证；pool、其他资源域撤权、原生 MCP 的完整 HTTP 入口、C 启动/
+  恢复/通知及完整 C→B→C 仍须实施。撤权后的缺少可信 STOP 回执时原生 task 保持原状态，
   不通过被撤销的成员授权写业务结果。
 - 原生权限 fence 会锁 workspace、actor、私有线程、Run 和 task；M10 需要验证实际
   数据库角色的查询/行锁权限，配对备份恢复和镜像/配置清单。
 - 实际资料、研究、带来源报告及持续跟进的模型业务验收属于 M9。
   本测试不调用模型，也不替代完整产品验收。
+
+
+## 原生 MCP 持久取消与停止回执（本轮 M4）
+
+沿用上面的上海物理专属任务与固定镜像。渲染流水线时增加
+`--suite control`，运行 `backend/tests/test_workspace_execution_control.py`。
+默认不设置物理 opt-in 时，在 fixture 创建前跳过。不要在本机 Docker Desktop
+运行，也不需要生产 key 或真实模型。
+
+先跑通主干，再做必要边界。本轮主干是：原生工具持久提交 B，真实容器启动，
+源 Run 结束且 UI 切换空间，原生所有权转移使旧成员版本失效；同一事务写入停止
+意图并阻断旧轮询结果；独立控制服务请求 STOP；worker 真正移除容器后返回签名
+回执，原生 outbox 和原 task 才结算。另一个场景验证排队用户取消、不启动容器、
+缺少服务时拒绝、重复意图、伪造/过期/错用途回执拒绝、租约过期和服务重启。
+
+控制凭据只允许 STOP，不能提交或读输出。回执只携带目标绑定、规格摘要、观察
+时间和停止证据；取消/撤权事务不做远程 IO。根撤权事件仍 pending，不能用 MCP
+子项完成替代 Run、browser、Scheduler、credential 等资源域的撤权验收。
+
+当前链路用 ASGI 与可信内部准入 fixture；真实 Gateway/JWT、网络/NAS、pool、
+远程 C、通知、账号/策略撤权和重启故障仍待实施。总租户门禁保持关闭。执行回执
+追加在 progress JSON 的 `native_mcp_stop_control`，保留失败历史和最终源码摘要。
+
+A historical/ordinary terminal B state without `physical_stopped` remains pending.
+The control request now persists `cleanup_pending` for the existing worker to
+verify exact owned-container absence/removal. Terminal metadata alone cannot
+produce a STOP receipt or settle native cancellation; a running or unobservable
+object still retains uncertainty. The companion test uses actual Docker
+observation after the old ordinary queued-cancel path.

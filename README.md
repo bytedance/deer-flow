@@ -3012,3 +3012,10 @@ now keeps explicit workspace selectors, request bodies and cancellation while
 retaining CSRF behavior. Automatic space selection, SDK streams, cache isolation
 and compiled Next / real-backend UI acceptance remain pending. [Frontend CI notes](docs/tenant-workspaces-frontend-testing.md)
 record the isolated Shanghai validation setup and replay commands.
+
+
+Captured MCP cancellation now has a separate operator STOP service: native
+transactions persist cancellation intents, and only a verified STOP receipt can
+settle the original task. The bounded Shanghai SQL/Docker checks and repeatable
+CI instructions are in [workspace testing](docs/tenant-workspaces-testing.md).
+Other revocation domains, remote C and complete tenant activation remain pending.

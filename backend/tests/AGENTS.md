@@ -309,3 +309,23 @@ Migration coverage reconstructs parent 0039 only in its disposable DB, preserves
 old content/remote handles/leases through repeat upgrade to 0040 and refuses
 downgrade without leaking a Postgres session. Crypto producer checks separately
 prove original-runtime v2 identity and legacy-receiver refusal, not B server auth.
+
+
+`test_workspace_execution_control.py` opts in only under the owned Shanghai
+physical CI flag, before fixture creation. First prove real native ToolNode/MCP,
+SQLite/PostgreSQL and actual running Docker -> member version change -> pending
+SQL outbox -> independent control request -> physical removal -> signed receipt
+-> native cancellation. The finite companion scenario covers queued user cancel,
+missing provider, duplicate intent, wrong-purpose/expired/unauthenticated control,
+false STOP payload, abandoned lease and service restart. ASGI is explicit, as are
+trusted internal admission and the lack of public JWT/TCP/NAS acceptance. False
+transport proof is a rejection injection, never a successful STOP stub. Only
+manifest-owned job/spec Docker objects are cleaned. Other revocation-domain
+parents remain pending. Default SQL runs skip all physical/control cases.
+
+A historical/ordinary terminal B state without `physical_stopped` remains pending.
+The control request now persists `cleanup_pending` for the existing worker to
+verify exact owned-container absence/removal. Terminal metadata alone cannot
+produce a STOP receipt or settle native cancellation; a running or unobservable
+object still retains uncertainty. The companion test uses actual Docker
+observation after the old ordinary queued-cancel path.

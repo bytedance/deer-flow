@@ -534,3 +534,13 @@ and result commit, not request selectors. This does not integrate the MCP HTTP
 router, scoped cancellation/notifications or remote B receiver; full native
 permissions/credential revocation and entrypoint bindings remain acceptance
 requirements. Tenant startup is still compiled closed.
+
+
+McpTaskService receives the app-scoped generic TaskControlRuntime from extension
+storage. A scoped cancellation requires a running provider for its persisted
+server before committing intent; the route maps ControlUnavailable to 503.
+Existing mcp_tasks_available checks remain. The operator ecs-execution-control
+extension owns HTTP STOP delivery and receipt verification; core Gateway imports
+no executor module. This readiness wiring is not complete tenant binding for the
+MCP HTTP router and does not open compiled workspace activation. Full
+Run/browser/Scheduler/credential revocation and notifications remain pending.

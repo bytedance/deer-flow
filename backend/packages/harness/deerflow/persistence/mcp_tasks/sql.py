@@ -594,8 +594,29 @@ class McpTaskRepository:
         requested_at: datetime,
     ) -> dict[str, Any] | None:
         """Persist a user-scoped cancellation request without exposing the remote id."""
-        if self.workspace_scope_required:
-            return None
+        context = resolve_resource_scope(None, user_id, required=self.workspace_scope_required)
+        if context is not None:
+            from deerflow.mcp.tasks.control import TaskControlTarget
+            from deerflow.persistence.workspaces.execution_control import enqueue_task_stop
+
+            async with self._sf() as session:
+                parent = await ThreadMetaRepository(self._sf)._locked_row(session, thread_id, user_id, context)
+                if parent is None or not thread_incarnation or parent.incarnation != thread_incarnation:
+                    return None
+                row = await session.scalar(
+                    select(McpTaskRow)
+                    .where(McpTaskRow.id == task_id, McpTaskRow.workspace_id == context.workspace_id, McpTaskRow.user_id == user_id, McpTaskRow.thread_id == thread_id, McpTaskRow.thread_incarnation == thread_incarnation)
+                    .with_for_update()
+                )
+                if row is None:
+                    return None
+                if row.status not in _TERMINAL_STATUS_VALUES:
+                    target = TaskControlTarget.from_row(row)
+                    if target.workspace_id != context.workspace_id or target.user_id != user_id:
+                        raise WorkspaceAccessDenied("captured cancellation identity differs")
+                    await enqueue_task_stop(session, row, requested_at)
+                    await session.commit()
+                return self._row_to_dict(row)
         async with self._sf() as session:
             if not await _lock_current_thread_incarnation(
                 session,

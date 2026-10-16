@@ -10,7 +10,7 @@ from test_workspace_executor_migration import executor_engine, native_engine  # 
 from test_workspace_mcp import _in_workspace_case
 
 
-def _exercise_native_tool_to_b(native_engine, executor_engine, tmp_path, monkeypatch, *, after_queue=None, execution_image=None, execution_argv=None):  # noqa: F811
+def _exercise_native_tool_to_b(native_engine, executor_engine, tmp_path, monkeypatch, *, after_queue=None, execution_image=None, execution_argv=None, control_secret=None, control_credential=None, control_runtime=None):  # noqa: F811
     import httpx
     from ecs_executor.job_store import JobStore
     from ecs_executor.jobs import ExecutionJobs, ExecutionProfile
@@ -71,7 +71,7 @@ def _exercise_native_tool_to_b(native_engine, executor_engine, tmp_path, monkeyp
         }
     )
     monkeypatch.setattr("ecs_executor.interceptor.get_extensions_config", lambda: config)
-    server = create_server(jobs, user_credentials={"owner": "owner-credential"}, discovery_credential="discovery-only")
+    server = create_server(jobs, user_credentials={"owner": "owner-credential"}, discovery_credential="discovery-only", **({"control_secret": control_secret, "control_credential": control_credential} if control_secret is not None else {}))
     app = server.streamable_http_app()
     original_params = mcp_client.build_server_params
 
@@ -93,7 +93,14 @@ def _exercise_native_tool_to_b(native_engine, executor_engine, tmp_path, monkeyp
         caller = McpTaskToolCaller(config)
         driver = OrdinaryMcpTaskDriver(caller)
         registry.register("ordinary-tools", driver)
-        tasks = McpTaskService(repository=McpTaskRepository(case.sf, workspace_required=True), drivers=registry, poll_interval_seconds=1, lease_seconds=120, max_concurrent_polls=1)
+        tasks = McpTaskService(
+            repository=McpTaskRepository(case.sf, workspace_required=True),
+            drivers=registry,
+            poll_interval_seconds=1,
+            lease_seconds=120,
+            max_concurrent_polls=1,
+            **({"control_runtime": control_runtime} if control_runtime is not None else {}),
+        )
         from deerflow.mcp.tasks import runtime as task_runtime
 
         previous = task_runtime._submitter
@@ -156,7 +163,7 @@ def _exercise_native_tool_to_b(native_engine, executor_engine, tmp_path, monkeyp
                     assert row.status == "working" and row.workspace_context_json == asdict(case.original)
                     assert row.run_id == run.run_id and row.remote_task_id == remote_id
                 if after_queue is not None:
-                    await after_queue(SimpleNamespace(case=case, jobs=jobs, store=store, tasks=tasks, remote_id=remote_id, local_id=local_id, run=run, original=case.original, other=case.other))
+                    await after_queue(SimpleNamespace(case=case, jobs=jobs, store=store, tasks=tasks, remote_id=remote_id, local_id=local_id, run=run, original=case.original, other=case.other, control_app=app))
                     return
                 assert store.claim_queued() is None, "physical launch needs its own integration"
                 assert base64.b64decode(queued["spec"]["input_files"]["program.txt"]) == b"original input"

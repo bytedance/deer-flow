@@ -1,3 +1,4 @@
+<!-- 最新断点：文末 M4 captured MCP STOP checkpoint；此前 M3/B 小步保留为历史。 -->
 > 当前恢复点：M4 单机 B 已真实 Docker 执行报告、原线程发布、原生 MCP 结果回流与撤权 STOP；上海 physical #6（6 passed）、SQL #30（22 passed / 6 default skipped）。下一步直接接原生持久取消/撤权 outbox 与 STOP 控制结算，再接 pool/远端 C/续跑及实际 TCP/NAS C→B→C。全量 M0–M11 保留，租户启动仍关闭。最新详细回执见文末。
 
 # 2026-10-16 暂停与恢复检查点
@@ -441,3 +442,59 @@ least-privilege DB proof. Full M0-M11 parents stay open; compiled activation fal
 and old closed startup schema fence pending final paired candidate/restore audit.
 No deployment/push/PR/models/local app tests. This is focused CI plus serial
 self-review, not independent full audit or complete tenant/runtime acceptance.
+
+M4 captured MCP STOP checkpoint (2026-10-16): physical #7 RED missing control
+module; #8 SUCCESS main (2 cases, 20.16s), #9 SUCCESS bounded companion (4 cases,
+25.49s), #10 SUCCESS final code (4 cases, 28.72s). SQL #31 records eager-package
+Gateway circular import; lazy-load the helper only in member mutations, then
+#32 SUCCESS (17 affected native regressions, 10 default physical/control skips,
+52.90s; eleven Python files Ruff check/format). Existing MCP client deprecation
+warnings remain visible (8 physical / 26 regression), not suppressed.
+
+The native transaction persists captured stop children, fences poll results and
+retains pending full revocation parents. Separate operator STOP credentials,
+HMAC purpose/audience/expiry and immutable original B identity gate the control
+endpoint. Real running Docker must be removed before its signed observation can
+settle native cancellation; untouched queued work records explicit NoStart.
+No result/Agent execution grant is restored through the old member scope.
+The typed native repository checks outbox owner/token/expiry and exact original
+task before settlement; false proof, wrong-purpose/expired/unauthenticated calls,
+duplicate intents, abandoned leases and service restart are verified. Scoped
+user cancellation checks provider readiness before writing intent.
+
+Final fourteen code/config/test/template files match physical #10 and SQL #32.
+Native head remains 0040, executor e0003; no migration or deployment this step.
+Known owned execution containers, fixture containers/networks and recorded
+physical PostgreSQL volumes are confirmed removed. Historical unrecorded volumes
+are not attributed by guess and no global prune is done. Full hashes, images,
+logs and manifests: native_mcp_stop_control in the progress JSON.
+
+Next: extend durable native control to Run/browser/Scheduler/credential domains,
+then pool/remote C and actual C->B->C; retain outstanding M3 and M5-M11 work.
+Parent workspace_revoke rows deliberately stay pending. MCP HTTP uses ASGI and
+trusted internal native admission; public Gateway/JWT, TCP/NAS, OS reboot,
+policy/account-wide revocation, notification delivery and complete product
+acceptance are not proved. Tenant startup remains compiled closed; M0-M11
+parents stay unchecked. No deployment/push/PR/real model or local app runtime.
+This is serial self-review and bounded CI, not independent full audit.
+
+M4 STOP terminal compatibility refinement: #11 RED (two expected missing
+cleanup_pending assertions, four prior cases still pass) exposed old ordinary
+queued cancellation leaving terminal B metadata without physical STOP. The
+control endpoint now persists cleanup_pending for the existing LocalWorker.
+Only actual Docker-owned absence/removal can produce its receipt; the terminal
+state alone remains insufficient. #12 SUCCESS: all six cases, 29.59s, twelve
+existing deprecation warnings. No success/Docker observation stub is used.
+
+Final fourteen code/config/test/template files match #12; twelve also match SQL
+#32. The only later runtime/test differences are the terminal cleanup branch and
+its real native/SQL/Docker case, both locally Ruff check/format clean. SQL #32's
+17-pass/10-default-skip/eleven-file cloud Ruff receipt remains unchanged history.
+No broad repeated regression was needed for that isolated branch. OpenSpec strict
+validation passed. Exact known owned resources and recorded physical fixture
+volumes are absent; no historical volume attribution or global prune.
+
+Continue M4 with native Run and other resource-domain revocation, then pool and
+remote C original authority/continuation/notification and real C->B->C. All M0-M11
+parent gates remain open, tenant activation compiled closed, no deployment or
+remote push. This completes only the captured MCP STOP substep.

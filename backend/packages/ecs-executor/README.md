@@ -83,7 +83,8 @@ source Run completion does not erase task ownership. Single-host scoped B now
 claims through native authority, fences durable start intent/result writes and
 rechecks publication. Scope revocation observed by the worker requests durable
 control-only STOP; only actual removal confirms physical_stopped. Pool scoped
-claims and native control/outbox settlement remain incomplete.
+claims remain incomplete. Captured native MCP cancellation and membership-version
+revocation now have the independent STOP receipt path described below.
 
 Workspace transport preparation (not tenant activation): `mint_execution_scope`
 accepts a trusted immutable `workspace_context` and signs protocol `version: 2`
@@ -649,3 +650,76 @@ suite skips physical tests before fixture setup. CI uses only owned shared temp
 paths and preloaded image IDs; it performs no deployment or model calls. Actual
 NAS/TCP, pool/remote C/continuation/notifications, durable outbox, least-privilege
 DB role and full M0-M11 tenant/restore acceptance remain pending.
+
+
+## Captured native MCP STOP control (partial M4)
+
+`ecs_executor.control:install` contributes a Gateway extension service through the
+existing operator-only `plugins:` mechanism. It consumes native
+`workspace_operation_outbox.kind=mcp_stop`; it does not own Agent runs, introduce
+another task authority, execute Docker centrally or use a withdrawn member grant.
+The native member transaction records pending `workspace_revoke` parents plus
+captured MCP stop children, sets cancellation intent and invalidates poll leases.
+Native user cancellation also enqueues the same idempotent child after fresh
+private-parent authorization. No SQL writer transaction spans remote IO.
+
+The executor has an optional `POST /_internal/execution-control/stop` endpoint.
+It requires a dedicated bearer credential and separate HMAC secret, exact purpose
+(`stop_intent` versus `stop_receipt`), audience, bounded lifetime and original
+task/actor/workspace/thread/incarnation/Run/server/remote handle. The endpoint is
+not an Agent tool and cannot submit work, read artifacts or return business output.
+The private executor ledger independently checks its immutable captured identity.
+Starting/running/uncertain work remains pending until its worker observes actual
+owned-container removal. A still-unassigned staged/queued job with no start intent
+can instead record `not_started`; no worker may subsequently claim it.
+
+Only a verified signed STOP receipt and current native outbox owner/token/lease
+can settle the original native task as cancelled. A bare Boolean, expired or wrong
+purpose token, stale claimant or changed native target cannot settle it. Missing
+historical identity is quarantined, not filled from current membership. Errors
+retain durable retry/uncertainty. Restarted services reclaim expired leases.
+Unsupported/missing providers make scoped service cancellation unavailable.
+
+Example operator configuration (environment variable names, never actual secrets):
+
+```yaml
+plugins:
+  - name: ecs-execution-control
+    package: deerflow-ecs-executor
+    use: ecs_executor.control:install
+    enabled: true
+    required: true
+    config:
+      routes:
+        ecs:
+          url: http://executor.internal:8003
+          audience: B/control
+          credential_env: ECS_EXECUTOR_CONTROL_CREDENTIAL
+          secret_env: ECS_EXECUTOR_CONTROL_SECRET
+```
+
+The executor's private JSON config must set `control_credential_env` and
+`control_secret_env` to the same environment variable names, alongside
+`workspace_required: true` and its existing `native_server_name: ecs` and
+`audience: B`. Use at least 32 secret bytes, distinct from the ordinary scope
+secret, and a credential distinct from user/discovery/worker roles. This is an
+operator development configuration, not permission to activate tenant mode.
+The native schema stays 0040, executor schema e0003; the generic outbox needs no
+new migration. The app-scoped readiness marker is shared with McpTaskService.
+
+The Shanghai main uses real SQL and Docker, with MCP/control HTTP via ASGI and a
+trusted native admission fixture. It proves member-version invalidation after a
+source Run ends, physical STOP and original task settlement, plus queued user
+cancellation, false-proof refusal, lease fencing and service restart. It does not
+prove public Gateway/JWT integration, TCP/NAS, multi-node delivery, OS reboot,
+remote C, notifications, policy/account revocation or all resource-domain cleanup.
+Parent `workspace_revoke` rows deliberately stay pending for those remaining
+handlers; MCP child completion must never mark the whole revocation completed.
+Compiled tenant activation remains closed. See the workspace test instructions.
+
+A historical/ordinary terminal B state without `physical_stopped` remains pending.
+The control request now persists `cleanup_pending` for the existing worker to
+verify exact owned-container absence/removal. Terminal metadata alone cannot
+produce a STOP receipt or settle native cancellation; a running or unobservable
+object still retains uncertainty. The companion test uses actual Docker
+observation after the old ordinary queued-cancel path.

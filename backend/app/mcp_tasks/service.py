@@ -110,7 +110,9 @@ class McpTaskService:
         result_preview_max_chars: int = 2_000,
         launch_notification: Callable[..., Awaitable[dict[str, Any]]] | None = None,
         get_run: Callable[..., Awaitable[Any | None]] | None = None,
+        control_runtime=None,
     ) -> None:
+        self._control_runtime = control_runtime
         self._repository = repository
         self._drivers = drivers
         self._poll_interval_seconds = poll_interval_seconds
@@ -744,6 +746,15 @@ class McpTaskService:
         thread_incarnation: str | None,
         now: datetime | None = None,
     ) -> dict[str, Any] | None:
+        from deerflow.authz.workspace import get_current_workspace
+        from deerflow.mcp.tasks.control import McpTaskControlUnavailable
+
+        if getattr(self._repository, "workspace_scope_required", False) or get_current_workspace() is not None:
+            record = await self._repository.get(task_id, user_id=user_id, thread_id=thread_id, thread_incarnation=thread_incarnation)
+            if record is None:
+                return None
+            if self._control_runtime is None or not self._control_runtime.supports(record["server_name"]):
+                raise McpTaskControlUnavailable("MCP task control worker is not running")
         return await self._repository.request_cancel(
             task_id,
             user_id=user_id,

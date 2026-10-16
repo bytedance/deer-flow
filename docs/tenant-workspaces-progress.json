@@ -9398,5 +9398,359 @@
       "No schema change this step. Current native0040/executor e0003 candidate and older closed native startup fence still require complete paired M10/M11 release/restore evidence.",
       "All M0-M11 parents remain incomplete and Gateway activation compiled false. No deployment/push/PR/model/local application/pytest/browser/Docker runtime or global resource prune."
     ]
+  },
+  "native_mcp_stop_control": {
+    "builds": [
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 33495,
+        "number": 7,
+        "result": "FAILURE",
+        "job": "deerflow-tenant-execution-m4-physical",
+        "phase": "m4-control-red",
+        "source_archive_sha256": "44c4fb6b0a1720e79209cf4ac822113bf570300bcb0300a2e86078060099da51",
+        "log_sha256": "a734635f3580e38f1d14441702d0a8d1b181f2fc393038d6df81dd0ee70fbaa8",
+        "code_sha256": {
+          "backend/packages/harness/deerflow/persistence/workspaces/sql.py": "98768d93b079644229414a01bf32a2afc2e4f91377c7d7fc0b78b1a9fb46073a",
+          "backend/packages/harness/deerflow/persistence/mcp_tasks/sql.py": "c0c3a1d81f0281bf13b85cb27cf00205f5bc5bb55a286afc20d5e43133f805bb",
+          "backend/packages/ecs-executor/ecs_executor/mcp_server.py": "afa0666243745940a0518146465857aefddcde7adfa76824dd6c6b1c4262ae6d",
+          "backend/packages/ecs-executor/pyproject.toml": "68c4c8e399192c94e4957b78d6c84bb483cfb9b3ab969b8172c0f332364b14cf",
+          "backend/app/mcp_tasks/service.py": "45dbc52441de769bf07b9345eed384e17705fdb0f9cc11b5b279dc8c5e4a889c",
+          "backend/app/gateway/routers/mcp_tasks.py": "f76697ac6eaad7acee5eeac0b2b13cf23e15bdbcb5663e2e964a1fed91b49528",
+          "backend/app/gateway/app.py": "e480258d2c72415cdf2f638cc29f75dbe73d008deec7cc53e64ee88a17f102db",
+          "backend/tests/test_workspace_execution_control.py": "b84a5f9753d6a00898c968fcaf3f7ae819416ad50123356061df77be3e1d7e16",
+          "backend/tests/test_workspace_execution_wire.py": "73fba0c96d2dcb5b6aab160e16cf614d094a7f18d21f83b12173d300cbd48ac4",
+          "scripts/render_tenant_physical_pipeline.py": "34a7055480a4e93495c36f7a41f45e26de2ad4d5a9b1533289914f6cab2e4b94",
+          "examples/ecs-native/deploy/Jenkinsfile.tenant-physical.in": "27569250710d2572e0ea949c87aba455a08fd7c43372a10026cf44ea89b52eaf"
+        },
+        "owned_physical_ids": [],
+        "remaining_owned_job_containers": [],
+        "recorded_removed_fixture_volumes": [
+          "d96387b499149b92a984a6dcdb008a18fd3b5b3c016559aced63d1d3809d5eb3"
+        ]
+      },
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 39853,
+        "number": 8,
+        "result": "SUCCESS",
+        "job": "deerflow-tenant-execution-m4-physical",
+        "phase": "m4-control-main",
+        "source_archive_sha256": "3a21baeba5bf17262b35b2eac241aacf86eb3425beadf724df558b96494993ae",
+        "log_sha256": "74417ae24adb1c091006e7d440e34f99104638be393f6a3ab84132054ef72b4b",
+        "code_sha256": {
+          "backend/packages/harness/deerflow/mcp/tasks/control.py": "ffcb5aa968b7762a0bbdcd48e4593d0bc14b0a8c9bd228cd0f26576db5abeb2b",
+          "backend/packages/harness/deerflow/persistence/workspaces/execution_control.py": "cd7c755b8de0b7c2ff7e2461e2db71e8ca3035772f54fe28d62f0155f6e6a36e",
+          "backend/packages/harness/deerflow/persistence/workspaces/sql.py": "b0813a366e219be14a09dcc39de819ded65fc27576b2029832fdd27a95d541f9",
+          "backend/packages/harness/deerflow/persistence/mcp_tasks/sql.py": "d69b049299aa970409f4ef5a4a9400f5eb78a9ebd883498dd84051ed968d0641",
+          "backend/packages/ecs-executor/ecs_executor/control.py": "f7049f5b7d9442c96c08e32c5501cf140f44301ebed35d5d9b6810c86ce3ca0f",
+          "backend/packages/ecs-executor/ecs_executor/mcp_server.py": "5a1fc4a1c1dbe2e9c8b811173861a4581ee8c174b23156c691514e4164f40694",
+          "backend/packages/ecs-executor/pyproject.toml": "68c4c8e399192c94e4957b78d6c84bb483cfb9b3ab969b8172c0f332364b14cf",
+          "backend/app/mcp_tasks/service.py": "8672b451f66ac824c528dd3b27b0abd80ec283c65bd84dc777377800b9877e13",
+          "backend/app/gateway/routers/mcp_tasks.py": "7f4a245e2b34968fe6cb59adfbbcccd1436681891140605484db495ebb8dabd4",
+          "backend/app/gateway/app.py": "69b0f001ad4e93894a6e03eec963ff89980340520b9b69e9513b31f28b6d2fce",
+          "backend/tests/test_workspace_execution_control.py": "b84a5f9753d6a00898c968fcaf3f7ae819416ad50123356061df77be3e1d7e16",
+          "backend/tests/test_workspace_execution_wire.py": "73fba0c96d2dcb5b6aab160e16cf614d094a7f18d21f83b12173d300cbd48ac4",
+          "scripts/render_tenant_physical_pipeline.py": "34a7055480a4e93495c36f7a41f45e26de2ad4d5a9b1533289914f6cab2e4b94",
+          "examples/ecs-native/deploy/Jenkinsfile.tenant-physical.in": "27569250710d2572e0ea949c87aba455a08fd7c43372a10026cf44ea89b52eaf"
+        },
+        "owned_physical_ids": [
+          {
+            "id": "78e5e6b45cd043acb8436defde97957d",
+            "spec_digest": "a4959e67d5827d060374a0405f5ab72148b49e1002492f9461cd8d6676c43f15"
+          },
+          {
+            "id": "e98fefab8f0b4997af19721c22324228",
+            "spec_digest": "a4959e67d5827d060374a0405f5ab72148b49e1002492f9461cd8d6676c43f15"
+          }
+        ],
+        "remaining_owned_job_containers": [],
+        "recorded_removed_fixture_volumes": [
+          "0a088ff57ba6f189be635e6a8e5bae7c8909fb1642410b1a79a80893560c187d"
+        ]
+      },
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 47882,
+        "number": 9,
+        "result": "SUCCESS",
+        "job": "deerflow-tenant-execution-m4-physical",
+        "phase": "m4-control-boundary",
+        "source_archive_sha256": "b36077ce75a3a9454e29d64ed044ebee63effdeffef4ad5dbb8056e0df53f3e7",
+        "log_sha256": "59ec3e9d624455541b33ad505275e618c389860eedf7c4367bd7f7f72f8a48d1",
+        "code_sha256": {
+          "backend/packages/harness/deerflow/mcp/tasks/control.py": "ffcb5aa968b7762a0bbdcd48e4593d0bc14b0a8c9bd228cd0f26576db5abeb2b",
+          "backend/packages/harness/deerflow/persistence/workspaces/execution_control.py": "cd7c755b8de0b7c2ff7e2461e2db71e8ca3035772f54fe28d62f0155f6e6a36e",
+          "backend/packages/harness/deerflow/persistence/workspaces/sql.py": "b0813a366e219be14a09dcc39de819ded65fc27576b2029832fdd27a95d541f9",
+          "backend/packages/harness/deerflow/persistence/mcp_tasks/sql.py": "d69b049299aa970409f4ef5a4a9400f5eb78a9ebd883498dd84051ed968d0641",
+          "backend/packages/ecs-executor/ecs_executor/control.py": "bceb4e82863cbcd112a184fd0d915cb1ded84321ddb0d020ca3673f84828f5b6",
+          "backend/packages/ecs-executor/ecs_executor/mcp_server.py": "5a1fc4a1c1dbe2e9c8b811173861a4581ee8c174b23156c691514e4164f40694",
+          "backend/packages/ecs-executor/pyproject.toml": "cb0402490cae29f5e63723881a07452634a67f9bd62c429e9b46d9ac86ac3969",
+          "backend/app/mcp_tasks/service.py": "8672b451f66ac824c528dd3b27b0abd80ec283c65bd84dc777377800b9877e13",
+          "backend/app/gateway/routers/mcp_tasks.py": "7f4a245e2b34968fe6cb59adfbbcccd1436681891140605484db495ebb8dabd4",
+          "backend/app/gateway/app.py": "69b0f001ad4e93894a6e03eec963ff89980340520b9b69e9513b31f28b6d2fce",
+          "backend/tests/test_workspace_execution_control.py": "dd3b2d640ea7af1b9d40f46f7a35e551f5a76a742dd283e7f0951c0ed2235aaf",
+          "backend/tests/test_workspace_execution_wire.py": "73fba0c96d2dcb5b6aab160e16cf614d094a7f18d21f83b12173d300cbd48ac4",
+          "scripts/render_tenant_physical_pipeline.py": "34a7055480a4e93495c36f7a41f45e26de2ad4d5a9b1533289914f6cab2e4b94",
+          "examples/ecs-native/deploy/Jenkinsfile.tenant-physical.in": "27569250710d2572e0ea949c87aba455a08fd7c43372a10026cf44ea89b52eaf"
+        },
+        "owned_physical_ids": [
+          {
+            "id": "78e590ee653346b99dfa6b154e52c049",
+            "spec_digest": "a4959e67d5827d060374a0405f5ab72148b49e1002492f9461cd8d6676c43f15"
+          },
+          {
+            "id": "5989c078be0c4ba19bca0ce75947fbf8",
+            "spec_digest": "a4959e67d5827d060374a0405f5ab72148b49e1002492f9461cd8d6676c43f15"
+          }
+        ],
+        "remaining_owned_job_containers": [],
+        "recorded_removed_fixture_volumes": [
+          "6191bde857d0631b1a6dc9f85baa53551b87892822eb8b6467f158309965be20"
+        ]
+      },
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 57996,
+        "number": 10,
+        "result": "SUCCESS",
+        "job": "deerflow-tenant-execution-m4-physical",
+        "phase": "m4-control-final",
+        "source_archive_sha256": "b3231bb7bc065cab972426b8717b372135b97cc8aeca74255ca5c8395e1e885a",
+        "log_sha256": "249064812dc6458f7e73167a533a8a685811c47d09ddd7ae1a0d3ccf3f966007",
+        "code_sha256": {
+          "backend/packages/harness/deerflow/mcp/tasks/control.py": "ffcb5aa968b7762a0bbdcd48e4593d0bc14b0a8c9bd228cd0f26576db5abeb2b",
+          "backend/packages/harness/deerflow/persistence/workspaces/execution_control.py": "cd7c755b8de0b7c2ff7e2461e2db71e8ca3035772f54fe28d62f0155f6e6a36e",
+          "backend/packages/harness/deerflow/persistence/workspaces/sql.py": "c262d8d60c3fe1c37f269179a1b94ce7f9ca37cb90cb07684993b68e6a43a073",
+          "backend/packages/harness/deerflow/persistence/mcp_tasks/sql.py": "d69b049299aa970409f4ef5a4a9400f5eb78a9ebd883498dd84051ed968d0641",
+          "backend/packages/ecs-executor/ecs_executor/control.py": "bceb4e82863cbcd112a184fd0d915cb1ded84321ddb0d020ca3673f84828f5b6",
+          "backend/packages/ecs-executor/ecs_executor/mcp_server.py": "5a1fc4a1c1dbe2e9c8b811173861a4581ee8c174b23156c691514e4164f40694",
+          "backend/packages/ecs-executor/pyproject.toml": "cb0402490cae29f5e63723881a07452634a67f9bd62c429e9b46d9ac86ac3969",
+          "backend/app/mcp_tasks/service.py": "8672b451f66ac824c528dd3b27b0abd80ec283c65bd84dc777377800b9877e13",
+          "backend/app/gateway/routers/mcp_tasks.py": "7f4a245e2b34968fe6cb59adfbbcccd1436681891140605484db495ebb8dabd4",
+          "backend/app/gateway/app.py": "69b0f001ad4e93894a6e03eec963ff89980340520b9b69e9513b31f28b6d2fce",
+          "backend/tests/test_workspace_execution_control.py": "dd3b2d640ea7af1b9d40f46f7a35e551f5a76a742dd283e7f0951c0ed2235aaf",
+          "backend/tests/test_workspace_execution_wire.py": "73fba0c96d2dcb5b6aab160e16cf614d094a7f18d21f83b12173d300cbd48ac4",
+          "scripts/render_tenant_physical_pipeline.py": "34a7055480a4e93495c36f7a41f45e26de2ad4d5a9b1533289914f6cab2e4b94",
+          "examples/ecs-native/deploy/Jenkinsfile.tenant-physical.in": "27569250710d2572e0ea949c87aba455a08fd7c43372a10026cf44ea89b52eaf"
+        },
+        "owned_physical_ids": [
+          {
+            "id": "d000c7ed237f4e75ae53e1d2a0773af8",
+            "spec_digest": "a4959e67d5827d060374a0405f5ab72148b49e1002492f9461cd8d6676c43f15"
+          },
+          {
+            "id": "8fd7e2c9d63249d9bf36feaab5ab662c",
+            "spec_digest": "a4959e67d5827d060374a0405f5ab72148b49e1002492f9461cd8d6676c43f15"
+          }
+        ],
+        "remaining_owned_job_containers": [],
+        "recorded_removed_fixture_volumes": [
+          "53a0f47dd34e0fac20de4324aefc5c05d1ff4ef38c807d42a8c02e0b28c69c05"
+        ]
+      },
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 48333,
+        "number": 11,
+        "result": "FAILURE",
+        "job": "deerflow-tenant-execution-m4-physical",
+        "phase": "m4-control-terminal-red",
+        "source_archive_sha256": "3eb6e202609452735660a5575e02f4e2905a65147c170bf19b5bb9daa77fc422",
+        "log_sha256": "45aa43562740719254fff4a0f508a973c1ced8aa0f2dbfdafe186870e09175cc",
+        "code_sha256": {
+          "backend/packages/harness/deerflow/mcp/tasks/control.py": "ffcb5aa968b7762a0bbdcd48e4593d0bc14b0a8c9bd228cd0f26576db5abeb2b",
+          "backend/packages/harness/deerflow/persistence/workspaces/execution_control.py": "cd7c755b8de0b7c2ff7e2461e2db71e8ca3035772f54fe28d62f0155f6e6a36e",
+          "backend/packages/harness/deerflow/persistence/workspaces/sql.py": "c262d8d60c3fe1c37f269179a1b94ce7f9ca37cb90cb07684993b68e6a43a073",
+          "backend/packages/harness/deerflow/persistence/mcp_tasks/sql.py": "d69b049299aa970409f4ef5a4a9400f5eb78a9ebd883498dd84051ed968d0641",
+          "backend/packages/ecs-executor/ecs_executor/control.py": "bceb4e82863cbcd112a184fd0d915cb1ded84321ddb0d020ca3673f84828f5b6",
+          "backend/packages/ecs-executor/ecs_executor/mcp_server.py": "5a1fc4a1c1dbe2e9c8b811173861a4581ee8c174b23156c691514e4164f40694",
+          "backend/packages/ecs-executor/pyproject.toml": "cb0402490cae29f5e63723881a07452634a67f9bd62c429e9b46d9ac86ac3969",
+          "backend/app/mcp_tasks/service.py": "8672b451f66ac824c528dd3b27b0abd80ec283c65bd84dc777377800b9877e13",
+          "backend/app/gateway/routers/mcp_tasks.py": "7f4a245e2b34968fe6cb59adfbbcccd1436681891140605484db495ebb8dabd4",
+          "backend/app/gateway/app.py": "69b0f001ad4e93894a6e03eec963ff89980340520b9b69e9513b31f28b6d2fce",
+          "backend/tests/test_workspace_execution_control.py": "aff33b5ef73eb294147a5348a53f66236eaa524445d7d2a2b5b67d8aa45b9dda",
+          "backend/tests/test_workspace_execution_wire.py": "73fba0c96d2dcb5b6aab160e16cf614d094a7f18d21f83b12173d300cbd48ac4",
+          "scripts/render_tenant_physical_pipeline.py": "34a7055480a4e93495c36f7a41f45e26de2ad4d5a9b1533289914f6cab2e4b94",
+          "examples/ecs-native/deploy/Jenkinsfile.tenant-physical.in": "27569250710d2572e0ea949c87aba455a08fd7c43372a10026cf44ea89b52eaf"
+        },
+        "owned_physical_ids": [
+          {
+            "id": "ffa98efa376040e6a214f557ed85a5f1",
+            "spec_digest": "a4959e67d5827d060374a0405f5ab72148b49e1002492f9461cd8d6676c43f15"
+          },
+          {
+            "id": "088146d5eb2a4fd688db621a1ffd8892",
+            "spec_digest": "a4959e67d5827d060374a0405f5ab72148b49e1002492f9461cd8d6676c43f15"
+          }
+        ],
+        "remaining_owned_job_containers": [],
+        "recorded_removed_fixture_volumes": [
+          "2360960cdfef4813230f168163b3d928dfba25ea4b60f6abdda0eac578787251"
+        ]
+      },
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 47759,
+        "number": 12,
+        "result": "SUCCESS",
+        "job": "deerflow-tenant-execution-m4-physical",
+        "phase": "m4-control-terminal-green",
+        "source_archive_sha256": "4c0e8e7cd1884ffbb93d137f298cf5ae3513cb9bdc3154dccd3ec7c6d2e15be7",
+        "log_sha256": "21113929e7822dfc62b6cfd11845f7ea943b475219b445d20969ce70985d561b",
+        "code_sha256": {
+          "backend/packages/harness/deerflow/mcp/tasks/control.py": "ffcb5aa968b7762a0bbdcd48e4593d0bc14b0a8c9bd228cd0f26576db5abeb2b",
+          "backend/packages/harness/deerflow/persistence/workspaces/execution_control.py": "cd7c755b8de0b7c2ff7e2461e2db71e8ca3035772f54fe28d62f0155f6e6a36e",
+          "backend/packages/harness/deerflow/persistence/workspaces/sql.py": "c262d8d60c3fe1c37f269179a1b94ce7f9ca37cb90cb07684993b68e6a43a073",
+          "backend/packages/harness/deerflow/persistence/mcp_tasks/sql.py": "d69b049299aa970409f4ef5a4a9400f5eb78a9ebd883498dd84051ed968d0641",
+          "backend/packages/ecs-executor/ecs_executor/control.py": "9804922d7bf77ac5952f6feb6ab8f06e8f747a2e5e5b743715abfaa4193d222f",
+          "backend/packages/ecs-executor/ecs_executor/mcp_server.py": "5a1fc4a1c1dbe2e9c8b811173861a4581ee8c174b23156c691514e4164f40694",
+          "backend/packages/ecs-executor/pyproject.toml": "cb0402490cae29f5e63723881a07452634a67f9bd62c429e9b46d9ac86ac3969",
+          "backend/app/mcp_tasks/service.py": "8672b451f66ac824c528dd3b27b0abd80ec283c65bd84dc777377800b9877e13",
+          "backend/app/gateway/routers/mcp_tasks.py": "7f4a245e2b34968fe6cb59adfbbcccd1436681891140605484db495ebb8dabd4",
+          "backend/app/gateway/app.py": "69b0f001ad4e93894a6e03eec963ff89980340520b9b69e9513b31f28b6d2fce",
+          "backend/tests/test_workspace_execution_control.py": "aff33b5ef73eb294147a5348a53f66236eaa524445d7d2a2b5b67d8aa45b9dda",
+          "backend/tests/test_workspace_execution_wire.py": "73fba0c96d2dcb5b6aab160e16cf614d094a7f18d21f83b12173d300cbd48ac4",
+          "scripts/render_tenant_physical_pipeline.py": "34a7055480a4e93495c36f7a41f45e26de2ad4d5a9b1533289914f6cab2e4b94",
+          "examples/ecs-native/deploy/Jenkinsfile.tenant-physical.in": "27569250710d2572e0ea949c87aba455a08fd7c43372a10026cf44ea89b52eaf"
+        },
+        "owned_physical_ids": [
+          {
+            "id": "4a3130b3625f45ae9284786c71ce729d",
+            "spec_digest": "a4959e67d5827d060374a0405f5ab72148b49e1002492f9461cd8d6676c43f15"
+          },
+          {
+            "id": "a1e20af7a2ae4ff4abcd76cb286a103e",
+            "spec_digest": "a4959e67d5827d060374a0405f5ab72148b49e1002492f9461cd8d6676c43f15"
+          }
+        ],
+        "remaining_owned_job_containers": [],
+        "recorded_removed_fixture_volumes": [
+          "86c29013c26f24a6f6d839ef297c1d047eea153baceb1251372a668cacc57b56"
+        ]
+      },
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 33252,
+        "number": 31,
+        "result": "FAILURE",
+        "job": "deerflow-tenant-execution-m4-sql",
+        "phase": "m4-control-regression",
+        "source_archive_sha256": "50eb41085dafa1d0c90ac6b8eb9ad55847604e681c5543dbb9e8328b7de949fc",
+        "log_sha256": "79604f303d50f5684a8aec61d5beadaa4f22d61d156aa236d10017665a2c175c",
+        "code_sha256": {
+          "backend/packages/harness/deerflow/mcp/tasks/control.py": "ffcb5aa968b7762a0bbdcd48e4593d0bc14b0a8c9bd228cd0f26576db5abeb2b",
+          "backend/packages/harness/deerflow/persistence/workspaces/execution_control.py": "cd7c755b8de0b7c2ff7e2461e2db71e8ca3035772f54fe28d62f0155f6e6a36e",
+          "backend/packages/harness/deerflow/persistence/workspaces/sql.py": "b0813a366e219be14a09dcc39de819ded65fc27576b2029832fdd27a95d541f9",
+          "backend/packages/harness/deerflow/persistence/mcp_tasks/sql.py": "d69b049299aa970409f4ef5a4a9400f5eb78a9ebd883498dd84051ed968d0641",
+          "backend/packages/ecs-executor/ecs_executor/control.py": "bceb4e82863cbcd112a184fd0d915cb1ded84321ddb0d020ca3673f84828f5b6",
+          "backend/packages/ecs-executor/ecs_executor/mcp_server.py": "5a1fc4a1c1dbe2e9c8b811173861a4581ee8c174b23156c691514e4164f40694",
+          "backend/packages/ecs-executor/pyproject.toml": "cb0402490cae29f5e63723881a07452634a67f9bd62c429e9b46d9ac86ac3969",
+          "backend/app/mcp_tasks/service.py": "8672b451f66ac824c528dd3b27b0abd80ec283c65bd84dc777377800b9877e13",
+          "backend/app/gateway/routers/mcp_tasks.py": "7f4a245e2b34968fe6cb59adfbbcccd1436681891140605484db495ebb8dabd4",
+          "backend/app/gateway/app.py": "69b0f001ad4e93894a6e03eec963ff89980340520b9b69e9513b31f28b6d2fce",
+          "backend/tests/test_workspace_execution_control.py": "dd3b2d640ea7af1b9d40f46f7a35e551f5a76a742dd283e7f0951c0ed2235aaf",
+          "backend/tests/test_workspace_execution_wire.py": "73fba0c96d2dcb5b6aab160e16cf614d094a7f18d21f83b12173d300cbd48ac4",
+          "scripts/render_tenant_physical_pipeline.py": "34a7055480a4e93495c36f7a41f45e26de2ad4d5a9b1533289914f6cab2e4b94",
+          "examples/ecs-native/deploy/Jenkinsfile.tenant-physical.in": "27569250710d2572e0ea949c87aba455a08fd7c43372a10026cf44ea89b52eaf"
+        }
+      },
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 82929,
+        "number": 32,
+        "result": "SUCCESS",
+        "job": "deerflow-tenant-execution-m4-sql",
+        "phase": "m4-control-import-fix",
+        "source_archive_sha256": "784acaa4f370739b268991d12c8bdbce91b6362c05cb58c38ad85a32d6eacf7e",
+        "log_sha256": "8ab9f23b7d1e122b9c307c9a7be8c6c5b5d36316b27f82cb1de6bea38dfef725",
+        "code_sha256": {
+          "backend/packages/harness/deerflow/mcp/tasks/control.py": "ffcb5aa968b7762a0bbdcd48e4593d0bc14b0a8c9bd228cd0f26576db5abeb2b",
+          "backend/packages/harness/deerflow/persistence/workspaces/execution_control.py": "cd7c755b8de0b7c2ff7e2461e2db71e8ca3035772f54fe28d62f0155f6e6a36e",
+          "backend/packages/harness/deerflow/persistence/workspaces/sql.py": "c262d8d60c3fe1c37f269179a1b94ce7f9ca37cb90cb07684993b68e6a43a073",
+          "backend/packages/harness/deerflow/persistence/mcp_tasks/sql.py": "d69b049299aa970409f4ef5a4a9400f5eb78a9ebd883498dd84051ed968d0641",
+          "backend/packages/ecs-executor/ecs_executor/control.py": "bceb4e82863cbcd112a184fd0d915cb1ded84321ddb0d020ca3673f84828f5b6",
+          "backend/packages/ecs-executor/ecs_executor/mcp_server.py": "5a1fc4a1c1dbe2e9c8b811173861a4581ee8c174b23156c691514e4164f40694",
+          "backend/packages/ecs-executor/pyproject.toml": "cb0402490cae29f5e63723881a07452634a67f9bd62c429e9b46d9ac86ac3969",
+          "backend/app/mcp_tasks/service.py": "8672b451f66ac824c528dd3b27b0abd80ec283c65bd84dc777377800b9877e13",
+          "backend/app/gateway/routers/mcp_tasks.py": "7f4a245e2b34968fe6cb59adfbbcccd1436681891140605484db495ebb8dabd4",
+          "backend/app/gateway/app.py": "69b0f001ad4e93894a6e03eec963ff89980340520b9b69e9513b31f28b6d2fce",
+          "backend/tests/test_workspace_execution_control.py": "dd3b2d640ea7af1b9d40f46f7a35e551f5a76a742dd283e7f0951c0ed2235aaf",
+          "backend/tests/test_workspace_execution_wire.py": "73fba0c96d2dcb5b6aab160e16cf614d094a7f18d21f83b12173d300cbd48ac4",
+          "scripts/render_tenant_physical_pipeline.py": "34a7055480a4e93495c36f7a41f45e26de2ad4d5a9b1533289914f6cab2e4b94",
+          "examples/ecs-native/deploy/Jenkinsfile.tenant-physical.in": "27569250710d2572e0ea949c87aba455a08fd7c43372a10026cf44ea89b52eaf"
+        }
+      }
+    ],
+    "images": [
+      {
+        "id": "sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01",
+        "declared_volumes": []
+      },
+      {
+        "id": "sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea",
+        "declared_volumes": [
+          "/var/lib/postgresql/data"
+        ]
+      }
+    ],
+    "remaining_owned_resources": {
+      "container": [],
+      "network": []
+    },
+    "historical_volume_limit": "Only recorded exact fixture volumes are confirmed removed; no ownership is inferred for old unrecorded volumes and no global prune is performed.",
+    "status": "partial_m4_captured_mcp_control_verified",
+    "main": {
+      "job": "deerflow-tenant-execution-m4-physical",
+      "build": 8,
+      "passed": 2,
+      "seconds": 20.16
+    },
+    "final": {
+      "job": "deerflow-tenant-execution-m4-physical",
+      "build": 12,
+      "passed": 6,
+      "seconds": 29.59,
+      "warnings": 12
+    },
+    "regression": {
+      "job": "deerflow-tenant-execution-m4-sql",
+      "build": 32,
+      "passed": 17,
+      "skipped_physical": 10,
+      "seconds": 52.9,
+      "warnings": 26,
+      "ruff_files": 11
+    },
+    "verified": [
+      "native ToolNode -> durable MCP -> SQL -> actual Docker running -> native member-version invalidation -> transactional outbox and poll fence -> independent STOP request -> actual owned object removal -> signed receipt -> original native task cancellation",
+      "queued user cancellation via fresh native private-parent scope; no container start",
+      "unavailable provider does not acknowledge cancellation; duplicate intent idempotency",
+      "wrong-purpose, expired, unauthenticated and unsigned false STOP refusal",
+      "120-second durable lease recovery; old token cannot defer or settle; service stop/restart; other resource-domain parents stay pending",
+      "Final fourteen code/config/test/template files match physical #12; twelve unchanged files match SQL #32. Only control.py and its test differ for the terminal cleanup refinement, proven RED #11 -> GREEN #12 and local Ruff check/format.",
+      "Existing ordinary terminal B without physical STOP persists cleanup_pending; actual LocalWorker Docker observation precedes signed receipt and native settlement. No ledger-only STOP inference."
+    ],
+    "not_verified": [
+      "public Gateway JWT/HTTP tenant MCP cancellation and complete tenant startup",
+      "TCP/NAS/OS reboot/least-privilege SQL roles",
+      "pool and remote C admission/continuation/notification; complete C->B->C",
+      "Run/browser/Scheduler/credential/policy/account revocation, full workspace lifecycle",
+      "M0-M11 product/release and real model business acceptance"
+    ],
+    "next": "Extend native durable revocation to Run and other resource domains, then pool/remote C with captured original authority and real C->B->C. Keep full M0-M11 objective and compiled activation closed.",
+    "local_runtime_used": false,
+    "deployed": false,
+    "pushed": false,
+    "review": "Serial self-review plus bounded Shanghai acceptance; not an independent full audit.",
+    "openspec_validation": "tenant-workspaces-self-service --strict --no-interactive passed"
   }
 }

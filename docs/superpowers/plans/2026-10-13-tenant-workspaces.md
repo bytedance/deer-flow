@@ -329,6 +329,14 @@ python -m pytest tests/test_workspace_execution.py tests/test_workspace_revocati
 - [x] 将物理 CI 固化到仓库模板/渲染器，完成上海重跑、受影响旧 worker/文件回归和静态检查，保存测试文档与回执并本地提交。
 - [ ] 原生撤权/取消 outbox 到 STOP 回执、native task 控制结算、pool 远端 worker、C 启动/续跑/通知、实际 NAS/TCP 和完整 C→B→C 仍须继续。单机轮询发现撤权不代替持久 outbox；启动意图前后与撤权的线性化边界必须保留，SQL 权限锁不得跨 Docker/HTTP 调用。
 
+#### M4 第九小步：持久 MCP 停止意图与可信 STOP 结算（2026-10-16）
+
+- [x] 复用原生通用 outbox；成员版本变更与 MCP cancel fence 同事务；根撤权事件保留未完成资源域，原始目标缺失时隔离而不补授权。
+- [x] 通过现有 Gateway 扩展服务读取任务停止意图；独立凭据/签名用途的 STOP 端点只核原始物理目标，不执行工具、不读结果、不复活旧成员权限。
+- [x] 先在上海跑通真实运行容器的停止主干，再验证排队用户取消、服务缺失、重复、伪回执/过期/错用途、旧租约和重启；只有已观察的停止/明确 NoStart 可结算原生 task。
+- [x] 修复 Gateway 包导入回归；保存代码/镜像/日志/资源回执、部署配置说明和复测文档，本地提交本小步。物理 #12 六项通过（含旧终态经实际观测才结算）；SQL #32 十七项通过，十项当时的物理默认跳过。
+- [ ] 持续接通 Run/browser/Scheduler/credential 的原生撤权处理、pool/远程 C/续跑/通知和真实 C→B→C；总门禁保持关闭，M4 父项未完成。原生 MCP 的完整公共 HTTP/JWT 入口、真实 TCP/NAS 和 OS 重启也未获此小步证明。
+
 ### M5：记忆、知识检索与工具凭据隔离
 
 **修改接点：**

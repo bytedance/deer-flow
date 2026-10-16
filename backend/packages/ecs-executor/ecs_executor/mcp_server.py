@@ -19,11 +19,20 @@ from ecs_executor.scope import SCOPE_HEADER
 from ecs_executor.worker import LocalWorker
 
 
-def create_server(jobs: ExecutionJobs, *, user_credentials: dict[str, str], discovery_credential: str, artifact_base_url: str = "http://127.0.0.1:8003") -> FastMCP:
+def create_server(jobs: ExecutionJobs, *, user_credentials: dict[str, str], discovery_credential: str, artifact_base_url: str = "http://127.0.0.1:8003", control_secret: bytes | None = None, control_credential: str | None = None) -> FastMCP:
     credentials = list(user_credentials.values())
     if not discovery_credential or any(not token for token in credentials) or len(set(credentials + [discovery_credential])) != len(credentials) + 1:
         raise ValueError("Separate nonempty user and discovery credentials are required")
+    if (control_secret is None) != (control_credential is None):
+        raise ValueError("control secret and credential must be configured together")
+    if control_credential is not None and control_credential in credentials + [discovery_credential]:
+        raise ValueError("control role must be separate from user and discovery roles")
     server = FastMCP("DeerFlow local execution", stateless_http=True, json_response=True)
+
+    if control_secret is not None:
+        from ecs_executor.control import install_stop_route
+
+        install_stop_route(server, jobs, credential=control_credential, secret=control_secret)
 
     def owner(headers):
         authorization = headers.get("authorization", "")
@@ -91,7 +100,7 @@ def create_app(jobs: ExecutionJobs, *, pool=None, worker_credentials=None, **kwa
     if pool is not None:
         from ecs_executor.dispatch import install_dispatch
 
-        if set((worker_credentials or {}).values()) & (set(kwargs["user_credentials"].values()) | {kwargs["discovery_credential"]}):
+        if set((worker_credentials or {}).values()) & (set(kwargs["user_credentials"].values()) | {kwargs["discovery_credential"], kwargs.get("control_credential")}):
             raise ValueError("Worker credentials must be separate from MCP credentials")
         install_dispatch(app, pool, worker_credentials or {}, jobs.artifact_root)
 
@@ -168,6 +177,8 @@ def main():
         user_credentials={user: os.environ[variable] for user, variable in config["user_credential_env"].items()},
         discovery_credential=os.environ[config["discovery_credential_env"]],
         artifact_base_url=config["artifact_base_url"],
+        control_secret=os.environ[config["control_secret_env"]].encode() if "control_secret_env" in config else None,
+        control_credential=os.environ[config["control_credential_env"]] if "control_credential_env" in config else None,
     )
     uvicorn.run(app, host=config.get("bind_host", "127.0.0.1"), port=config.get("port", 8003))
 

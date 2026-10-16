@@ -237,3 +237,19 @@ legacy rows; unsupported scoped cancellation/notification cannot use legacy
 claims. Releasing retry diagnostics is not permission to publish a result.
 Native backfill/export and executor import require 0040/e0002; release/schema
 startup alignment and full M4 control/publication/physical evidence stay pending.
+
+
+Captured MCP cleanup uses `workspaces/execution_control.py`, the existing native
+outbox and a generic typed stop target/receipt; harness never imports executor.
+Membership version changes enqueue revocation parents and active task stop
+children under the existing workspace lock, before version mutation, in one
+transaction. Scoped user cancellation uses fresh private-parent authorization
+but preserves the task's original stored identity. Poll leases are fenced at
+intent commit. Missing/future snapshots quarantine; no current-scope backfill.
+Only verified operator control receipts plus unexpired outbox owner/token and
+exact original native target settle cancellation. This cleanup transaction does
+not need live membership or parent; it cannot publish results, recreate a missing
+task or retarget a replacement. Parent revocations remain pending for other
+domains. Keep the member helper import inside business mutation methods: eager
+import through mcp_tasks/run/thread_meta package roots creates a Gateway cycle.
+Native head stays 0040; no outbox migration or tenant activation is implied.

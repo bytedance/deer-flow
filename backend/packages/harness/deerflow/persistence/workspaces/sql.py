@@ -160,10 +160,12 @@ class WorkspaceRepository:
         return workspace, actor
 
     async def add_member(self, workspace_id, actor_user_id, user_id, *, role):
+        from deerflow.persistence.workspaces.execution_control import enqueue_membership_revocation
+
         if role not in ("admin", "member"):
             raise ValueError("member role must be admin or member")
         async with self._sf() as session:
-            _, actor = await self._locked_team(session, workspace_id, actor_user_id)
+            workspace, actor = await self._locked_team(session, workspace_id, actor_user_id)
             if actor.role != "owner" and not (actor.role == "admin" and role == "member"):
                 raise WorkspaceAccessDenied("member activation is not permitted")
             await self._user(session, user_id)
@@ -176,39 +178,48 @@ class WorkspaceRepository:
                 member = WorkspaceMembershipRow(workspace_id=workspace_id, user_id=user_id, role=role, status="active", version=1)
                 session.add(member)
             else:
+                await enqueue_membership_revocation(session, workspace, member)
                 member.role, member.status, member.version = role, "active", member.version + 1
             await session.commit()
             return member.to_dict()
 
     async def change_role(self, workspace_id, actor_user_id, user_id, *, role, expected_context=None):
+        from deerflow.persistence.workspaces.execution_control import enqueue_membership_revocation
+
         if role not in ("admin", "member"):
             raise ValueError("member role must be admin or member")
         async with self._sf() as session:
-            _, actor = await self._locked_team(session, workspace_id, actor_user_id, expected_context)
+            workspace, actor = await self._locked_team(session, workspace_id, actor_user_id, expected_context)
             member = await session.get(WorkspaceMembershipRow, (workspace_id, user_id))
             if actor.role != "owner" or member is None or member.status != "active" or member.role == "owner":
                 raise WorkspaceAccessDenied("role transition is not permitted")
             if member.role != role:
+                await enqueue_membership_revocation(session, workspace, member)
                 member.role, member.version = role, member.version + 1
             await session.commit()
             return member.to_dict()
 
     async def remove_member(self, workspace_id, actor_user_id, user_id, *, expected_context=None):
+        from deerflow.persistence.workspaces.execution_control import enqueue_membership_revocation
+
         async with self._sf() as session:
-            _, actor = await self._locked_team(session, workspace_id, actor_user_id, expected_context)
+            workspace, actor = await self._locked_team(session, workspace_id, actor_user_id, expected_context)
             member = await session.get(WorkspaceMembershipRow, (workspace_id, user_id))
             if member is None or member.status != "active":
                 raise WorkspaceAccessDenied("active target membership required")
             allowed = actor.user_id == user_id or actor.role == "owner" or (actor.role == "admin" and member.role == "member")
             if member.role == "owner" or not allowed:
                 raise WorkspaceAccessDenied("last owner or protected membership cannot be removed")
+            await enqueue_membership_revocation(session, workspace, member)
             member.status, member.version = "removed", member.version + 1
             await session.commit()
             return member.to_dict()
 
     async def transfer_owner(self, workspace_id, actor_user_id, user_id, *, expected_context=None, expected_token_version=None, expected_password_hash=None):
+        from deerflow.persistence.workspaces.execution_control import enqueue_membership_revocation
+
         async with self._sf() as session:
-            _, actor = await self._locked_team(session, workspace_id, actor_user_id, expected_context)
+            workspace, actor = await self._locked_team(session, workspace_id, actor_user_id, expected_context)
             if expected_token_version is not None or expected_password_hash is not None:
                 # Serialize proof validation with native credential updates.
                 # A plain SELECT could read the old proof while a reset owns
@@ -220,6 +231,8 @@ class WorkspaceRepository:
             target = await session.get(WorkspaceMembershipRow, (workspace_id, user_id))
             if actor.role != "owner" or user_id == actor_user_id or target is None or target.status != "active":
                 raise WorkspaceAccessDenied("ownership transfer requires current owner and active target")
+            await enqueue_membership_revocation(session, workspace, actor)
+            await enqueue_membership_revocation(session, workspace, target)
             actor.role, actor.version = "admin", actor.version + 1
             # Avoid the unique active-owner index while keeping both changes in
             # one transaction; readers never observe a committed ownerless team.

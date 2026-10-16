@@ -125,3 +125,17 @@ publication. On observed member withdrawal the executor stops its exact owned
 object and withholds business results; native task cancellation/notification and
 revocation outbox/control receipts are still separate pending work. Do not mark a
 revoked task completed/cancelled by reusing its withdrawn member context.
+
+
+M4 STOP refinement: scoped native cancellation now writes an idempotent captured
+`mcp_stop` child in the generic native outbox, fencing in-flight polling in the
+same transaction. Member version mutations enqueue children plus still-pending
+`workspace_revoke` parents. A separately configured operator extension handles
+STOP and returns a verified typed receipt; only current outbox leases can settle
+the original task without any withdrawn member grant or business result write.
+The app-scoped TaskControlRuntime reports supported servers and live service
+readiness; absent support refuses user cancellation. Legacy cancel/notification
+claims still exclude scoped rows. Earlier notes about missing scoped cancellation
+are historical checkpoints: captured MCP control is now implemented, while
+notification delivery, full HTTP tenant binding, other revocation domains,
+pool/remote C and full tenant activation remain incomplete.

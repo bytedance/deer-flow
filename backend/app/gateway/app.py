@@ -770,8 +770,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 ORDINARY_MCP_TASK_DRIVER,
                 OrdinaryMcpTaskDriver(McpTaskToolCaller(task_extensions_config)),
             )
+            from deerflow.mcp.tasks.control import TaskControlRuntime
+
+            extension_store = getattr(getattr(app.state, "extensions", None), "app_store", None)
+            control_runtime = extension_store.get_or_init(TaskControlRuntime, TaskControlRuntime) if extension_store is not None else None
             mcp_task_service = McpTaskService(
                 repository=mcp_task_repo,
+                control_runtime=control_runtime,
                 drivers=mcp_task_drivers,
                 poll_interval_seconds=mcp_tasks_config.poll_interval_seconds,
                 lease_seconds=mcp_tasks_config.lease_seconds,
