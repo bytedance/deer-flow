@@ -30,3 +30,10 @@ Scheduled-task lifecycle rules live in one place each. `ScheduledTaskRepository.
 The per-owner run cap `scheduler.max_concurrent_runs_per_user` is effective `min(per_user, max_concurrent_runs)` (0 = off) and is checked in `claim_queued_run` right after the global count, under the same budget lock. `list_queued_runs` ranks same-thread FIFO heads per owner (`ROW_NUMBER() OVER (PARTITION BY owner)`) and orders the batch by that rank, so the drain is owner-fair even with the cap off; owners at their cap drop out before the batch limit, and orphan rows (task deleted while queued) are never held back by the cap. Scheduled-task repository boundaries coerce serialized timestamps before SQL `DateTime` binding.
 
 Recovery locks task/run pairs in task-id/run-id order and restores `run_id`, `started_at` and live errors before releasing launch claims. Launch/failure/timeout updates use one parent-first transaction to prevent interleaved claims. Queue timeout fails the occurrence and advances scheduled work to prevent immediate requeue.
+
+Expired-launch scans select candidates, not ownership. After taking the parent
+and occurrence locks, recheck launch status and lease expiry before recovery.
+A busy launch may have requeued and a manual trigger reclaimed the same row
+while recovery waited; the new claim can have the same process owner. Preserve
+its full row and execution-budget slot. A lease equal to scan time is still live;
+missing or strictly older leases remain recoverable.
