@@ -1,5 +1,5 @@
-<!-- 最新断点：文末 M4 原生直接模型生命周期与目标停止信号（2026-10-17）。 -->
-> 当前恢复点：上海 SQL #83 固定 114 项与 27 文件 Ruff 通过；普通 lead/title/summary/goal 的命名异步调用点接通按 Run 的实际工作等待，goal STOP 保留。下一步复用原生 sandbox 已有 drain，贯通 Run/私有空间工具绑定与发布效应，再接其他撤权域和 signed dispatcher/recovery。完整 M0–M11 未完成，租户启用关闭。
+<!-- 当前状态：用户于 2026-10-17 明确暂停；参见文末 sandbox dispatch WIP 暂停检查点。 -->
+> **已暂停，不自动继续。** 本轮 WIP 已完成真实沙箱就绪/执行前权限保护及 read-before-write STOP 修复，上海 #87 定向 12 项与 30 文件 Ruff 通过。最后一轮回归在暂停前已提交（队列 976，预期 #88），结果未核验；暂停后的状态查询被自动审批拒绝，不得绕过。完整 M0–M11 仍保留，租户启动关闭。
 
 # 2026-10-16 暂停与恢复检查点
 
@@ -866,3 +866,36 @@ scoped goal continuation/recovery 验收。确定性同步线程模型证明已�
 实际同步线程，sandbox.tools 的异步原生工具也在使用它。下一步先复用、验收原始
 Run/私有空间绑定、延迟调用准入和输出效应，不重写沙箱执行器。该阅读结论不算
 scoped 工具业务验收。
+
+
+## 2026-10-17 sandbox dispatch WIP 暂停检查点
+
+用户明确要求暂停并保存；目标状态已设置为 paused，不再启动开发或测试。
+
+当前改动：原生 sandbox tools 在就绪/复用返回及同步线程实际执行前重新检查私有
+Run guard；复用既有 run_sync_lifecycle_operation drain 与执行租约；工具错误
+归一化和 read-before-write 检查/读标记保留 GraphBubbleUp。新测试复用真实 Run/
+SQL 成员版本变更、原生 write_file、实际文件及完整 create_agent 共享 middleware。
+
+- #84：2 failed / 2 passed，真实就绪等待后迟到写文件 RED。
+- #85：4 passed（20.84s），29 文件 Ruff；增加原生 owner/租约释放断言。
+- #86：2 failed / 6 passed，read-before-write 吞掉 WorkerInvocationDenied 的实际 RED。
+- #87：12 passed（36.83s），30 文件 Ruff，涵盖两种数据库和完整 SDK 工具链。
+- 最后固定回归 sandbox-final 在暂停前提交，确认队列 976，预期 build #88，
+  phase=m4-sandbox-dispatch-final；**结果尚未核验，不能称 134 项已通过**。
+  归档 SHA256：1ea76044aef8e18c7526c307b4c35b4df3514a7c37655690675a8f61c65b18cb。
+- 暂停后的 SSH/Jenkins 状态查询被自动审批拒绝（理由：超出暂停授权）；没有重试
+  或绕过。当前提交仅 WIP，最后完整已验证提交仍为 56cf0c0cd（#83：114 项）。
+
+恢复时先检查同一个构建/队列及现有日志，不能直接重启。回执收集脚本为本机
+/private/tmp/m4-sandbox-receipt.py；其预置历史为 #84–#88，须按真实状态核验后再用。
+成功后收集源码/归档/日志哈希及精确容器/网络/临时卷清理证据，再完成本轮
+OpenSpec、计划、测试文档和模块指南。当前尚未追加本轮“已验证”子步。
+
+下一步先审计 sandbox provider 的 workspace/thread-incarnation 身份绑定与缓存
+复用（LocalSandboxProvider._thread_key 当前只含 user/thread，尚未完成实际复用
+边界验收），再接外部效应/发布、其他撤权域、signed dispatcher/recovery 和完整
+M0–M11。LocalSandbox 测试不代表主机隔离或远端 C 停止；启动开关保持 false。
+
+详细代码哈希、构建状态和限制见 progress.json -> sandbox_dispatch_pause_checkpoint。
+本轮无新增表/部署/推送，没有本机应用、pytest、Docker Desktop 测试。

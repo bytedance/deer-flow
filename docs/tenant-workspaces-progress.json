@@ -1560,7 +1560,10 @@
     "native_candidate_schema": "0040_mcp_workspace_identity",
     "last_verified_database_job": "deerflow-tenant-execution-m4-sql",
     "last_verified_database_build": 83,
-    "executor_candidate_schema": "e0003_execution_identity"
+    "executor_candidate_schema": "e0003_execution_identity",
+    "execution_status": "paused_by_user",
+    "paused_at": "2026-10-17",
+    "paused_wip": "sandbox_dispatch_pause_checkpoint"
   },
   "workspace_feedback": {
     "status": "partial_M3_verified_repository_and_HTTP_main",
@@ -12037,5 +12040,80 @@
     "activation": "closed",
     "deployment": "none",
     "review": "Serial source self-review and focused Shanghai execution; no independent full audit."
+  },
+  "sandbox_dispatch_pause_checkpoint": {
+    "status": "paused_by_user",
+    "date": "2026-10-17",
+    "base_commit": "56cf0c0cd",
+    "worktree": "/Users/wenbinwang/.codex/worktrees/ecs-native-reuse/deerflow2",
+    "branch": "codex/tenant-workspaces-plan",
+    "work_package": "partial M4; complete M0-M11 scope preserved",
+    "changes": "Native sandbox readiness/reuse/thread-dispatch reauthorization; preserve GraphBubbleUp through sandbox tool normalization and read-before-write checks/marks; reuse native lifecycle drain and execution leases.",
+    "observed_builds": [
+      {
+        "build": 84,
+        "phase": "m4-sandbox-dispatch-red",
+        "result": "FAILURE",
+        "summary": "2 failed, 2 passed in 21.23s; real write_file wrote after membership-version revocation during readiness",
+        "archive_sha256": "b7284671d70c4d800060eb291c49202c94471253320e26cf0d6ed89fc4938704"
+      },
+      {
+        "build": 85,
+        "phase": "m4-sandbox-dispatch-main",
+        "result": "SUCCESS",
+        "summary": "4 passed in 20.84s; 29-file Ruff; native lease owner and actual binding cleanup included",
+        "archive_sha256": "1155902a55f7fdff9a99d56d581f43e99e38566b073e0dae10bec742a3236806"
+      },
+      {
+        "build": 86,
+        "phase": "m4-sandbox-read-gate-red",
+        "result": "FAILURE",
+        "summary": "2 failed, 6 passed in 28.93s; actual read-before-write reader swallowed WorkerInvocationDenied",
+        "archive_sha256": "496040cf93bd797d588efce11c180300e32a82be200721c7605708107d20d297"
+      },
+      {
+        "build": 87,
+        "phase": "m4-sandbox-dispatch-boundary",
+        "result": "SUCCESS",
+        "summary": "12 passed in 36.83s; 30-file Ruff; both metadata dialects, real tools and files, normal/member, async readiness/direct read gate/full native SDK chain",
+        "archive_sha256": "c7ae6e0f822416b245a26b610b11af2075e7972b1cdf163a417da38f6dadafca"
+      }
+    ],
+    "submitted_regression": {
+      "job": "deerflow-tenant-execution-m4-sql",
+      "expected_build": 88,
+      "confirmed_queue_item": 976,
+      "phase": "m4-sandbox-dispatch-final",
+      "suite": "sandbox-final",
+      "expected_cases": 134,
+      "archive_sha256": "1ea76044aef8e18c7526c307b4c35b4df3514a7c37655690675a8f61c65b18cb",
+      "state": "submitted before pause; terminal state NOT checked",
+      "query_limit": "Automatic approval rejected the post-pause Jenkins evidence query as outside pause authorization; do not retry until user resumes."
+    },
+    "code_sha256": {
+      "backend/packages/harness/deerflow/sandbox/tools.py": "e32ebdbfce3f09df31be61c2007b645994b8a5bc220c612a50d2bc54f58c7471",
+      "backend/packages/harness/deerflow/agents/middlewares/read_before_write_middleware.py": "1fa173212f8e7da576c7d500d7163653938355e18ce7988317e7d225893f26f2",
+      "backend/tests/test_workspace_sandbox_dispatch.py": "bd103f8ec544b25a4e1904b64f474335d7c9865f47a2fe116b0d5942e74ff870",
+      "scripts/render_tenant_run_control_pipeline.py": "e36b62dad26f6bb9a2484721ebb1d05f15c8131416da4666e77a1ff2a2beab31",
+      "examples/ecs-native/deploy/Jenkinsfile.tenant-run-control.in": "71184ca57dcad37c2d67732930fbc10c1bcf7470e11d7199e54c7ae45028e48d"
+    },
+    "resume_steps": [
+      "Only after explicit user resume, query the SAME submitted Jenkins build/queue and artifacts; never restart merely because observation was interrupted.",
+      "If final regression passed, gather existing build/archive/source/log/resource evidence with /private/tmp/m4-sandbox-receipt.py; verify current source hashes. If failed, diagnose its actual result first.",
+      "Finish OpenSpec/plan/testing/README/module-guide updates and normal verified commit; this pause commit is WIP, not M4 acceptance.",
+      "Next audit original workspace/thread-incarnation binding in sandbox provider caches/reuse, then remaining external effects/publication, actor/account/token/policy domains, signed dispatcher/recovery and full M0-M11."
+    ],
+    "limits": [
+      "Last fully verified committed baseline remains 56cf0c0cd (#83:114 passed). Current focused 12 passed is NOT the full final regression result.",
+      "Deterministic SDK model plus actual LocalSandbox/file IO; not external model, host sandbox security boundary, remote container STOP, full persistent publication/physical C or full tenant product acceptance.",
+      "Do not enable tenant startup; _WORKSPACE_RUNTIME_INTEGRATED remains false; no schema change/push/deployment/local app or pytest/Docker runtime.",
+      "Resource cleanup for the final submitted build has NOT been independently collected; inspect its exact recorded fixtures when resumed, no global prune."
+    ],
+    "helpers": [
+      "/private/tmp/prepare-run-control-ci.py",
+      "/private/tmp/m4-sandbox-receipt.py",
+      "/tmp/tenant-m4-sql-evidence.py on Shanghai Jenkins"
+    ],
+    "goal_status": "paused"
   }
 }

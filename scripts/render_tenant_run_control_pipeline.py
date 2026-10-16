@@ -28,6 +28,8 @@ def main():
             "direct-main",
             "goal-stop",
             "direct-final",
+            "sandbox-main",
+            "sandbox-final",
         ),
         default="revocation",
     )
@@ -71,19 +73,23 @@ def main():
         tests = "tests/test_workspace_invocation_gate.py"
     if args.suite == "invocation-red":
         tests = "tests/test_workspace_invocation_gate.py tests/test_workspace_worker_effects.py"
-    if args.suite in ("invocation-final", "service-final", "direct-final"):
+    if args.suite in ("invocation-final", "service-final", "direct-final", "sandbox-final"):
         tests += " tests/test_workspace_run_lifetime.py tests/test_workspace_worker_context.py tests/test_workspace_run_checkpoints.py tests/test_workspace_event_reads.py tests/test_workspace_worker_effects.py tests/test_workspace_invocation_gate.py"
         tests += " tests/test_tool_error_handling_middleware.py::test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware tests/test_tool_error_handling_middleware.py::test_build_lead_runtime_middlewares_chain_order_matches_agents_md tests/test_model_factory.py::test_uses_first_model_when_name_is_none tests/test_model_factory.py::test_appends_all_tracing_callbacks tests/test_model_request_admission.py::test_fifo_cancellation_and_queue_capacity tests/test_extension_ordering.py::test_core_constraints_are_declared"
     if args.suite == "service-lifetime":
         tests = "tests/test_workspace_model_service_lifetime.py"
-    if args.suite in ("service-final", "direct-final"):
+    if args.suite in ("service-final", "direct-final", "sandbox-final"):
         tests += " tests/test_workspace_model_service_lifetime.py tests/test_extension_model_invocation.py::test_provider_errors_do_not_expose_credentials tests/test_extension_model_invocation.py::test_host_timeout_caps_request_and_preserves_running_provider tests/test_extension_model_invocation.py::test_sync_provider_retains_slot_until_thread_finishes tests/test_extension_system_model_calls.py::test_zero_observer_path_only_invokes_the_original_call tests/test_extension_system_model_calls.py::test_async_summarization_observes_each_provider_attempt_and_live_store tests/test_extension_system_model_calls.py::test_title_middleware_uses_build_bound_snapshot_and_live_task_store"
     if args.suite == "direct-main":
         tests = "tests/test_workspace_model_service_lifetime.py::test_native_direct_model_retains_actual_provider"
     if args.suite == "goal-stop":
         tests = "tests/test_workspace_model_service_lifetime.py::test_native_system_model_stop_is_not_an_ordinary_fallback"
-    if args.suite == "direct-final":
+    if args.suite in ("direct-final", "sandbox-final"):
         tests += " tests/test_goal_worker.py::test_goal_worker_records_a_failed_evaluator_call tests/test_goal_worker.py::test_goal_worker_returns_hidden_continuation_when_goal_is_unmet tests/test_goal_worker.py::test_goal_worker_defers_satisfied_goal_completion_until_run_finalization tests/test_extension_system_model_calls.py::test_goal_evaluator_observes_success_and_failure_with_explicit_snapshot"
+    if args.suite == "sandbox-main":
+        tests = "tests/test_workspace_sandbox_dispatch.py"
+    if args.suite == "sandbox-final":
+        tests += " tests/test_workspace_sandbox_dispatch.py tests/test_ensure_sandbox_initialized.py::test_post_acquire_lookup_failure_unwinds_async_execution_lease tests/test_ensure_sandbox_initialized.py::test_async_fork_restored_owner_holds_non_releasing_scope_lease tests/test_ensure_sandbox_initialized.py::test_async_reuse_replaces_stale_checkpoint_and_owner_binding tests/test_sandbox_authorization.py::test_async_sandbox_tool_authorizes_once_via_async_provider tests/test_sandbox_authorization.py::test_composed_write_authorization_deny_is_not_swallowed tests/test_read_before_write_middleware.py::TestWriteGate::test_new_file_write_allowed tests/test_read_before_write_middleware.py::TestWriteGate::test_overwrite_existing_without_read_blocked"
     rendered = rendered.replace("@@TEST_PATHS@@", tests)
     if "@@" in rendered:
         parser.error("unresolved pipeline marker")

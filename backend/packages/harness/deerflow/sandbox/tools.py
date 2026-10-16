@@ -13,6 +13,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from langchain.tools import tool
+from langgraph.errors import GraphBubbleUp
 
 from deerflow.agents.thread_state import ThreadDataState
 from deerflow.authz.sandbox_authz import (
@@ -24,6 +25,7 @@ from deerflow.authz.sandbox_authz import (
 from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
+from deerflow.runtime.invocation import check_invocation, check_invocation_sync
 from deerflow.runtime.secret_context import read_active_secrets
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.exceptions import (
@@ -1740,6 +1742,7 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
                 if sandbox is not None:
                     if runtime.context is not None:
                         runtime.context["sandbox_id"] = sandbox_id  # Ensure sandbox_id is in context for releasing in after_agent
+                    check_invocation_sync()
                     return sandbox
             # Missing thread scope or released sandbox: use the lazy path below.
 
@@ -1771,6 +1774,7 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
 
     if runtime.context is not None:
         runtime.context["sandbox_id"] = sandbox_id  # Ensure sandbox_id is in context for releasing in after_agent
+    check_invocation_sync()
     return sandbox
 
 
@@ -1837,6 +1841,7 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
                 if sandbox is not None:
                     if runtime.context is not None:
                         runtime.context["sandbox_id"] = sandbox_id
+                    await check_invocation()
                     return sandbox
 
     thread_id = _resolve_runtime_thread_id(runtime)
@@ -1864,6 +1869,7 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
 
     if runtime.context is not None:
         runtime.context["sandbox_id"] = sandbox_id
+    await check_invocation()
     return sandbox
 
 
@@ -1880,9 +1886,17 @@ async def _run_sync_tool_after_async_sandbox_init(
             if func is None:
                 return "Error: Tool implementation not available"
 
-            return await run_sync_lifecycle_operation(func, runtime, *args)
+            def dispatch():
+                # Queueing the executor can outlive async readiness authority.
+                # Recheck in the worker thread before entering the real tool.
+                check_invocation_sync()
+                return func(runtime, *args)
+
+            return await run_sync_lifecycle_operation(dispatch)
     except SandboxError as e:
         return f"Error: {e}"
+    except GraphBubbleUp:
+        raise
     except Exception as e:
         return f"Error: Unexpected error initializing sandbox: {_sanitize_error(e, runtime)}"
 
@@ -2484,6 +2498,8 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
         return f"Error: {e}"
     except PermissionError as e:
         return f"Error: {e}"
+    except GraphBubbleUp:
+        raise
     except Exception as e:
         return f"Error: Unexpected error executing command: {_sanitize_error(e, runtime)}"
 
@@ -2552,6 +2568,8 @@ def ls_tool(runtime: Runtime, path: str, description: str = "") -> str:
         return f"Error: Directory not found: {requested_path}"
     except PermissionError:
         return f"Error: Permission denied: {requested_path}"
+    except GraphBubbleUp:
+        raise
     except Exception as e:
         return f"Error: Unexpected error listing directory: {_sanitize_error(e, runtime)}"
 
@@ -2617,6 +2635,8 @@ def glob_tool(
         return f"Error: Path is not a directory: {requested_path}"
     except PermissionError:
         return f"Error: Permission denied: {requested_path}"
+    except GraphBubbleUp:
+        raise
     except Exception as e:
         return f"Error: Unexpected error searching paths: {_sanitize_error(e, runtime)}"
 
@@ -2718,6 +2738,8 @@ def grep_tool(
         return f"Error: Invalid regex pattern: {e}"
     except PermissionError:
         return f"Error: Permission denied: {requested_path}"
+    except GraphBubbleUp:
+        raise
     except Exception as e:
         return f"Error: Unexpected error searching file contents: {_sanitize_error(e, runtime)}"
 
@@ -2852,6 +2874,8 @@ def read_file_tool(
             "(e.g. .xlsx, .pdf, or an image). read_file only supports UTF-8 text. Use bash with a "
             "suitable library instead (pandas/openpyxl for spreadsheets), or view_image for images."
         )
+    except GraphBubbleUp:
+        raise
     except Exception as e:
         return f"Error: Unexpected error reading file: {_sanitize_error(e, runtime)}"
 
@@ -2968,6 +2992,8 @@ def write_file_tool(
         )
     except OSError as e:
         return _format_write_file_error(requested_path, e, runtime)
+    except GraphBubbleUp:
+        raise
     except Exception as e:
         return _format_write_file_error(requested_path, e, runtime)
 
@@ -3059,6 +3085,8 @@ def str_replace_tool(
         return f"Error: File not found: {requested_path}"
     except PermissionError:
         return f"Error: Permission denied accessing file: {requested_path}"
+    except GraphBubbleUp:
+        raise
     except Exception as e:
         return f"Error: Unexpected error replacing string: {_sanitize_error(e, runtime)}"
 
