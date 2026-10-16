@@ -205,7 +205,12 @@ def _normalize_memory_update_fact(fact: Any) -> dict[str, Any] | None:
     else:
         return None
 
-    if not math.isfinite(raw_confidence):
+    if not math.isfinite(raw_confidence) or not 0.0 <= raw_confidence <= 1.0:
+        # Out-of-range confidence (for example a model emitting 95 or 1.5) is
+        # malformed like every other shape above: drop this item instead of
+        # letting the storage layer reject the whole update. A rejected batch
+        # never advances the extraction watermark, so the same paid call would
+        # otherwise repeat on every turn.
         return None
 
     normalized_fact = {
