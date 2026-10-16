@@ -84,9 +84,14 @@ not a Gateway HTTP/SSE or live-model latency measurement. Each A/B pair has the
 same prompt and predetermined tool intent, randomized variant order, fresh thread
 IDs, and exact-resource destruction between batches. Output paths must be new.
 
-`first_tool_wait_ms` spans tool initialization (including fresh authorization)
-until the sandbox is usable; `elapsed_ms` also includes graph construction and
-terminal cleanup. `unused_active_ms` ends when an unused acquisition is parked:
+`first_tool_wait_ms` spans the sandbox initialization entry until it is usable;
+the bash tool's preceding authorization scope and graph dispatch are outside
+that interval. Derive response-to-ready wait from `events_ms.tool_ready -
+events_ms.model_first_response` to include them. `elapsed_ms` also includes graph
+construction and terminal cleanup. A reused prewarm is not necessarily model
+overlap: compare acquire/model event timestamps, especially in the zero-delay
+control, and do not attribute startup jitter to prewarming.
+`unused_active_ms` ends when an unused acquisition is parked:
 it excludes subsequent warm-pool residency. Lease cleanup does not imply physical
 container destruction; ordinary idle eviction still applies. `replicas` and the
 speculative budget do not enforce deployment-wide admission or user fairness.
