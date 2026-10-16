@@ -153,7 +153,7 @@ test("catalog navigation, search, details, and migrated settings", async ({
   await expect(
     page.getByRole("heading", { name: "能力中心", exact: true }),
   ).toBeVisible();
-  await expect(page.locator("article")).toHaveCount(17);
+  await expect(page.locator("article")).toHaveCount(18);
   await expect(page.locator("a[href='/workspace/capabilities']")).toBeVisible();
   await screenshot(page, "capability-center-plugins.png");
 
@@ -282,7 +282,7 @@ test("plugin filters remain usable after an MCP refetch fails", async ({
     return route.fallback();
   });
   await page.goto("/workspace/capabilities");
-  await expect(page.locator("article")).toHaveCount(17);
+  await expect(page.locator("article")).toHaveCount(18);
   const installed = page.getByRole("tab", { name: "Installed", exact: true });
   await installed.click();
   await expect(page.locator("article")).toHaveCount(5);
@@ -320,7 +320,7 @@ test("plugin categories, setup guides, and installed state remain distinct", asy
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.goto("/workspace/capabilities");
-  await expect(page.locator("article")).toHaveCount(17);
+  await expect(page.locator("article")).toHaveCount(18);
   for (const name of [
     "办公协作",
     "文档与知识",
@@ -381,8 +381,75 @@ test("English plugin catalog preview", async ({ page }) => {
   await page.setViewportSize({ width: 1512, height: 1850 });
   await mockCatalog(page);
   await page.goto("/workspace/capabilities");
-  await expect(page.locator("article")).toHaveCount(17);
+  await expect(page.locator("article")).toHaveCount(18);
+  await expect(
+    page.locator("article").filter({ hasText: "Baizhi Cloud Browser" }),
+  ).toHaveCount(1);
   await screenshot(page, "capability-catalog-en.png");
+});
+
+test("百智云云浏览器 catalog search opens the existing masked HTTP MCP form", async ({
+  page,
+  baseURL,
+}) => {
+  await page.setViewportSize({ width: 1512, height: 1060 });
+  await page
+    .context()
+    .addCookies([{ name: "locale", value: "zh-CN", url: baseURL! }]);
+  await mockCatalog(page, "zh-CN");
+  let submission: Record<string, unknown> | null = null;
+  await page.route("**/api/capabilities/installations", (route) => {
+    submission = route.request().postDataJSON() as Record<string, unknown>;
+    return route.fulfill({ json: { items: [], can_manage: true } });
+  });
+  await page.goto("/workspace/capabilities");
+  await page
+    .getByRole("textbox", { name: "搜索插件名称或用途" })
+    .fill("百智云云浏览器");
+  const card = page.locator("article").filter({ hasText: "百智云云浏览器" });
+  await expect(card).toHaveCount(1);
+  await expect(card).toContainText("百智云云浏览器");
+  await expect(card).not.toContainText("CapyBrowser");
+  await expect(card).toContainText("CDP 客户端");
+  await screenshot(page, "deerflow-baizhi-cloud-browser-card.png");
+  await card.getByRole("button", { name: "配置 百智云云浏览器" }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toContainText(
+    "https://capybrowser.app.baizhi.cloud/mcp",
+  );
+  await expect(dialog).toContainText("只填写 Bearer <自己的 API Key>");
+  await expect(dialog).not.toContainText("Authorization: Bearer");
+  await expect(dialog.getByRole("link")).toHaveAttribute(
+    "href",
+    "https://capybrowser.app.baizhi.cloud/docs/installation.md",
+  );
+  await expect(
+    dialog.getByLabel("授权请求头", { exact: true }),
+  ).toHaveAttribute("type", "password");
+  await expect(
+    dialog.getByLabel("授权请求头", { exact: true }),
+  ).toHaveAttribute("required", "");
+  await dialog.getByLabel("连接名称").fill("baizhi-cloud-browser");
+  await dialog
+    .getByLabel("服务地址")
+    .fill("https://capybrowser.app.baizhi.cloud/mcp");
+  await dialog
+    .getByLabel("授权请求头", { exact: true })
+    .fill("Bearer fixture-only-capy-key");
+  await page.waitForTimeout(300); // Let the dialog transition finish before the review screenshot.
+  await screenshot(page, "deerflow-baizhi-cloud-browser-form.png");
+  await dialog.getByRole("button", { name: "保存配置" }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(submission).toMatchObject({
+    plugin_id: "capybrowser",
+    name: "baizhi-cloud-browser",
+    scope: "user",
+    configuration: {
+      type: "http",
+      url: "https://capybrowser.app.baizhi.cloud/mcp",
+      headers: { Authorization: "Bearer fixture-only-capy-key" },
+    },
+  });
 });
 
 test("manifest installation saves through the adapter and refreshes the catalog", async ({
