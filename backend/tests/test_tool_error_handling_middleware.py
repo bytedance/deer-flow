@@ -229,11 +229,13 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
     from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
+    from deerflow.agents.middlewares.workspace_execution_middleware import WorkspaceExecutionMiddleware
 
-    assert len(middlewares) == 22
-    assert isinstance(middlewares[0], FakeMiddleware)  # InputSanitizationMiddleware stub
-    assert isinstance(middlewares[1], KnowledgeScopeMiddleware)
-    assert isinstance(middlewares[2], ToolOutputBudgetMiddleware)
+    assert len(middlewares) == 23
+    assert isinstance(middlewares[0], WorkspaceExecutionMiddleware)
+    assert isinstance(middlewares[1], FakeMiddleware)  # InputSanitizationMiddleware stub
+    assert isinstance(middlewares[2], KnowledgeScopeMiddleware)
+    assert isinstance(middlewares[3], ToolOutputBudgetMiddleware)
     assert any(isinstance(m, ToolErrorHandlingMiddleware) for m in middlewares)
     # The receipt layer wraps ToolErrorHandlingMiddleware so receipts read the
     # deerflow_tool_meta status it stamps (guard-enforced, like ToolProgress).
@@ -524,6 +526,7 @@ def test_build_lead_runtime_middlewares_chain_order_matches_agents_md():
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
     from deerflow.agents.middlewares.tool_result_sanitization_middleware import ToolResultSanitizationMiddleware
     from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
+    from deerflow.agents.middlewares.workspace_execution_middleware import WorkspaceExecutionMiddleware
     from deerflow.sandbox.middleware import SandboxMiddleware
 
     app_config = _make_app_config()
@@ -537,6 +540,7 @@ def test_build_lead_runtime_middlewares_chain_order_matches_agents_md():
 
     # Mirrors AGENTS.md "Shared runtime base" items 1-10 (non-optional spine).
     expected_order: list[tuple[str, type]] = [
+        ("WorkspaceExecutionMiddleware", WorkspaceExecutionMiddleware),
         ("InputSanitizationMiddleware", InputSanitizationMiddleware),
         ("ToolOutputBudgetMiddleware", ToolOutputBudgetMiddleware),
         ("ToolResultSanitizationMiddleware", ToolResultSanitizationMiddleware),

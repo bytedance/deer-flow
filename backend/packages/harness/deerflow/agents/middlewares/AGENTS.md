@@ -143,3 +143,19 @@ Resolve the whole batch through user storage, enabled state and agent allowlist
 before activation; reject any invalid entry. Keep bodies in escaped HumanMessage
 context with task text once. Authenticated paths feed secrets/tool policy; record usage per skill.
 Legacy slash syntax is unchanged.
+
+Outer host execution admission now encloses the numbered request-rewrite chain:
+WorkspaceExecutionMiddleware is first in the shared lead/subagent runtime base.
+InputSanitization remains the first content-rewriting wrapper. The host gate
+checks before-agent/model hooks and model/tool handlers from a private bound
+worker guard; no guard leaves legacy behavior unchanged, never infers authority
+from a selected workspace. Declarative ordering in extensions/ordering.py keeps
+it outside native IO, receipt and ordinary error normalization. Revocation
+raises GraphBubbleUp through the existing ToolErrorHandling/LLMErrorHandling
+control path; it is not an ordinary error ToolMessage or retry prompt.
+
+Actual full native chain/Agent/report-file tests verify tool admission and the
+next model after legitimate work. Model-local callback/queue protection also
+covers independent factory model calls. Preserve system title/summary/goal
+fallback stop propagation and actual extension provider-task lifetimes as open
+integration work; admission is not physical isolation or rollback of prior IO.

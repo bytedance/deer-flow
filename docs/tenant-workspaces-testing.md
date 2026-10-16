@@ -308,3 +308,45 @@ python scripts/render_tenant_run_control_pipeline.py tenant-worker-stream <归�
 socket、跨进程 generation、背压/故障/重启或跨库未知结果验收。模型/工具调用
 发生前的权限、文件/发布/网络等外部效应、scoped dispatch/recovery/active rollback
 和远端 C 仍待完成。不得把丢弃输出当成已阻止工具副作用或开启租户的依据。
+
+## 普通异步原生模型与工具的调用前检查
+
+本轮用真正的 `run_agent`、`create_agent`、完整共享 lead runtime middleware、模型
+工厂、BaseTool 以及实际临时文件，检查调用发生前的权限。provider 为确定性夹具，
+没有调用外部模型服务。#67 RED 两项撤权用例显示排队 handler 仍执行；#68 进一步
+用实际文件存在断言复现副作用，并抓到上一轮流 view 拒绝全部 cleanup 的回归。
+#69 主干 14 passed（42.48s）；主干通过后再补三个直接模型边界，#70 共
+26 passed（66.74s）；#71 最终固定 63 passed（133.41s），22 文件云端 Ruff。
+
+四个调用点都检查正常/成员版本撤销及两种元数据库：排队工具、合法工具完成后的
+第二次模型、显式 callbacks=[] 的独立工厂模型、限流队列放行。被拒绝的新 handler
+和 provider 不进入，工具不会新写文件；第二次模型场景保留先前合法生成的文件。
+正常业务仍完成。模型工厂保留 provider 类型及原 limiter，暴露的 max_retries
+字段归零，避免 SDK 隐式 retry 绕过 native 调用准入。缓存 worker 模型在没有
+当前 worker 的情况下也拒绝调用。此处不是实际 DeepSeek/429/SDK 网络重试证据。
+
+十个既有流/元数据用例新增精确 cleanup 断言：completed 原 Run 可清理本 lane，
+open/失去 owner/过期生命周期保留，foreign lane 拒绝。旧版生产者直接拒绝延迟
+cleanup 的后台异常现已修复。延迟在 SQL 锁之外，延迟后再检查回执和原绑定。
+六项相关旧检查覆盖原生 lead/subagent 顺序、模型默认选择/追踪、FIFO 及声明式
+排序。现有 middleware 数量/索引断言同步到新的最外层门禁，没有放宽控制/权限。
+
+复跑仍使用同一固定 SQL job/镜像/internal PG/RO 归档和精确 label/匿名卷清理：
+
+```bash
+python scripts/render_tenant_run_control_pipeline.py tenant-invocation <归档SHA256> \
+  --suite invocation > /private/tmp/Jenkinsfile.tenant-invocation
+python scripts/render_tenant_run_control_pipeline.py tenant-invocation-final <归档SHA256> \
+  --suite invocation-final > /private/tmp/Jenkinsfile.tenant-invocation-final
+```
+
+phase/source tar/SHA 必须一一对应；凭据仍仅 Jenkins 本机使用，不挂生产/NAS/
+模型密钥。完整构建、归档/日志/源码哈希和已清理精确资源：
+`native_invocation_admission_fence`。本机没有执行应用或测试。
+
+SQL 检查完成后才进入 handler/provider，模型与工具 IO 不持 SQL 锁。当前仅验证
+普通 async run_agent 主体；已准入 IO、HostModelInvoker 的 shielded 实际 provider
+任务、title/summary/goal 的 fallback 控制信号、非 Run/嵌入/同步模型入口及各类
+SDK/transport/cache 仍须审计。Scoped callback 要求原生所属 async loop；不能
+用缺少上下文推导出权限。账户/token/policy 等撤权域、外部效应、scoped dispatch/
+recovery、真实 HTTP/JWT/browser/Redis/NAS/C、计费配额和完整租户验收继续保留。

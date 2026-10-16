@@ -91,6 +91,7 @@ from deerflow.runtime.goal import (
     visible_conversation_signature,
     write_thread_goal,
 )
+from deerflow.runtime.invocation import WorkerInvocationDenied
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.runtime.runs.stream_cleanup import close_agent_stream
 from deerflow.runtime.serialization import serialize
@@ -221,6 +222,7 @@ def _release_run_scoped_references(
     configs: list[dict[str, Any]],
     runtime_context: dict[str, Any] | None,
     journal: Any | None,
+    invocation_callback: Any | None = None,
 ) -> None:
     """Remove worker-owned graph references once durable finalization is done."""
     internal_context_keys = {
@@ -244,7 +246,7 @@ def _release_run_scoped_references(
         pass
 
     seen_configs: set[int] = set()
-    handlers = [journal] if journal is not None else []
+    handlers = [handler for handler in (journal, invocation_callback) if handler is not None]
     for runnable_config in configs:
         if not isinstance(runnable_config, dict) or id(runnable_config) in seen_configs:
             continue
@@ -1054,6 +1056,9 @@ async def run_agent(
             logger.info("Run %s was cancelled", run_id)
 
     workspace_token = None
+    invocation_guard = None
+    invocation_token = None
+    invocation_callback = None
     try:
         workspace_context = ctx.workspace_context
         if record.workspace_id is not None or record.workspace_context is not None or workspace_context is not None:
@@ -1076,6 +1081,13 @@ async def run_agent(
             from deerflow.runtime.stream_bridge.scoped_worker import ScopedWorkerBridge
 
             target = NativeRunStopTarget.from_record(record)
+            from deerflow.runtime.invocation import WorkerInvocationGuard, bind_invocation_guard, install_invocation_callback
+
+            if not callable(getattr(run_manager._store, "check_worker_invocation", None)):
+                raise RuntimeError("workspace invocation requires native execution admission")
+            invocation_guard = WorkerInvocationGuard(run_manager._store, target)
+            invocation_token = bind_invocation_guard(invocation_guard)
+            invocation_callback = install_invocation_callback(config)
             if not callable(getattr(run_manager._store, "commit_worker_io", None)) or not callable(getattr(run_manager._store, "signal_worker_stream_end", None)):
                 raise RuntimeError("workspace stream requires native execution fencing")
             bridge = ScopedWorkerBridge(bridge, run_manager._store, target)
@@ -1701,7 +1713,7 @@ async def run_agent(
     except asyncio.CancelledError:
         await _finish_cancellation(record.abort_action)
 
-    except WorkspaceAccessDenied:
+    except (WorkspaceAccessDenied, WorkerInvocationDenied):
         # Known effect refusal is not a model error payload. Stop through the
         # original native control path while still draining actual execution.
         record.abort_action = "interrupt"
@@ -2076,8 +2088,15 @@ async def run_agent(
                             runnable_configs,
                             runtime_ctx,
                             journal,
+                            invocation_callback,
                         )
                     finally:
+                        if invocation_guard is not None:
+                            invocation_guard.close()
+                        if invocation_token is not None:
+                            from deerflow.runtime.invocation import reset_invocation_guard
+
+                            reset_invocation_guard(invocation_token)
                         if workspace_token is not None:
                             reset_current_workspace(workspace_token)
                 # Drop graph and per-run payload references before the terminal

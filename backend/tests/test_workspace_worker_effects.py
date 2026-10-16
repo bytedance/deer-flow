@@ -27,9 +27,11 @@ def test_native_journal_and_completion_keep_execution_authority(native_engine, t
     from deerflow.persistence.thread_meta.model import ThreadMetaRow
     from deerflow.persistence.user.model import UserRow
     from deerflow.persistence.workspaces.model import WorkspaceOperationOutboxRow
+    from deerflow.persistence.workspaces.run_control import NativeRunStopTarget
     from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied, WorkspaceRepository
     from deerflow.runtime import MemoryStreamBridge, RunContext, RunManager, run_agent
     from deerflow.runtime.events.store.db import DbRunEventStore
+    from deerflow.runtime.stream_bridge.scoped_worker import ScopedWorkerBridge
     from deerflow.runtime.user_context import reset_current_user, set_current_user
 
     async def scenario(case):
@@ -164,6 +166,14 @@ def test_native_journal_and_completion_keep_execution_authority(native_engine, t
                 assert parent.status == ("idle" if trigger in ("normal", "lease", "owner") else "interrupted"), "old worker overwrote current thread status"
                 if trigger in ("lease", "owner"):
                     assert parent.display_name == "replacement-owner-title"
+            producer = ScopedWorkerBridge(bridge, repository, NativeRunStopTarget.from_record(record))
+            await producer.cleanup(record.run_id)
+            assert await bridge.stream_exists(record.run_id) == (trigger in ("lease", "owner")), "cleanup did not require the original closed execution receipt"
+            if trigger == "normal":
+                await bridge.publish("foreign-lane", "values", {"preserve": True})
+                with pytest.raises(WorkspaceAccessDenied):
+                    await producer.cleanup("foreign-lane")
+                assert await bridge.stream_exists("foreign-lane")
             assert get_current_workspace() == case.other
         finally:
             release.set()

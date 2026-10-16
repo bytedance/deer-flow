@@ -235,7 +235,7 @@ async def mark_owner_interrupted(session_factory, target):
         return True
 
 
-async def signal_owned_stream_end(session_factory, target, *, signal):
+async def signal_owned_stream_end(session_factory, target, *, signal, closed_only=False):
     """Signal the owner's closed producer lane; never publish result data.
 
     No live member privilege is needed to end its own lane, but a replaced or
@@ -258,6 +258,8 @@ async def signal_owned_stream_end(session_factory, target, *, signal):
                 return False
             lifetime = await execution_lifetime(session, target, open_only=False)
         except ValueError:
+            return False
+        if closed_only and lifetime.state != "completed":
             return False
         if lifetime.state != "completed" and (row.lease_expires_at is None or _aware(row.lease_expires_at) <= datetime.now(UTC)):
             return False

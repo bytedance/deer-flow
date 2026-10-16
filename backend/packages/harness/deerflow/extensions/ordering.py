@@ -77,6 +77,7 @@ def core_ordering_constraints() -> tuple[OrderingConstraint, ...]:
     Deferring the call instead of faking the value keeps one answer.
     """
     from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
+    from deerflow.agents.middlewares.llm_error_handling_middleware import LLMErrorHandlingMiddleware
     from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
     from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
     from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
@@ -84,9 +85,14 @@ def core_ordering_constraints() -> tuple[OrderingConstraint, ...]:
     from deerflow.agents.middlewares.tool_progress_middleware import ToolProgressMiddleware
     from deerflow.agents.middlewares.tool_promotion_audit_middleware import DeferredToolPromotionAuditMiddleware
     from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
+    from deerflow.agents.middlewares.workspace_execution_middleware import WorkspaceExecutionMiddleware
     from deerflow.guardrails.middleware import GuardrailMiddleware
 
     return (
+        *(
+            OrderingConstraint(outer=WorkspaceExecutionMiddleware, inner=wrapper, reason="Native execution admission must precede tool IO, receipts and ordinary model/tool error normalization")
+            for wrapper in (ToolReceiptMiddleware, ArtifactResolutionMiddleware, GuardrailMiddleware, SandboxAuditMiddleware, ReadBeforeWriteMiddleware, ToolErrorHandlingMiddleware, LLMErrorHandlingMiddleware)
+        ),
         OrderingConstraint(
             outer=DeferredToolPromotionAuditMiddleware,
             inner=SkillToolPolicyMiddleware,

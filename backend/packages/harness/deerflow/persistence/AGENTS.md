@@ -361,3 +361,15 @@ parent incarnation before clock/Run and may update its status/time. It must not
 resurrect deleting or replaced parents, overwrite a replacement owner's state,
 set a title/result, or treat this as remote C physical STOP. Producer lease/owner
 refusal leaves durable lifetime cleanup pending for trusted recovery.
+
+RunRepository.check_worker_invocation reuses lock_worker_effect only as a short
+admission transaction, then commits/releases BEFORE invoking models or tools.
+The captured native target is not an authorization grant by itself. Existing
+current member/parent/owner/lease/lifetime/cancel fences remain authority.
+
+cleanup_worker_stream invokes the same original-owner control helper with
+closed_only=True. It may remove only this exact Run lane after a completed
+native lifetime; no member grant is reused and an open lifetime never qualifies.
+The bridge delay occurs outside SQL; Run identity/creation/owner and durable
+receipt are rechecked after the delay. This does not acknowledge physical C STOP
+or permit deletion of a foreign lane.

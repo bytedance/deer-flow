@@ -380,6 +380,15 @@ python -m pytest tests/test_workspace_execution.py tests/test_workspace_revocati
 - [x] 正常/撤权主干后，仅跑原有固定 46 项组合与十五文件格式检查；证据、计划、恢复点和本地提交保存。
 - [ ] 继续实际模型/工具调用前检查、发布/文件/网络效应；Redis/HTTP/JWT/browser/背压/故障/generation/restart、held title/UI 和完整 dispatcher/recovery/remote C 仍待验收。流输出保护不是阻止外部副作用的替代方案，M4 父项保持未完成。
 
+#### M4 第十五小步：普通异步原生模型/工具调用前保护（本轮主干已验证）
+
+- [x] 先用完整原生共享 middleware/Agent/模型工厂和真实临时文件复现排队工具撤权后仍执行；主干通过后才补第二次模型、独立模型和限流排队边界。
+- [x] 仅 host 绑定私有 task-local guard；复用同一原始 Run SQL fence，门禁位于普通错误处理/IO 之外，模型本地回调和排队后二次检查保护 callbacks=[] 路径。
+- [x] Scoped worker 模型保留原 provider 类型及既有 limiter，禁用暴露的 SDK 隐式 retry；模型/工具 IO 不持 SQL 锁，缓存回调不保存旧 Run/loop。
+- [x] 修复上一轮 private bridge 禁止一切 cleanup 的实际回归：只凭原 Run 精确关闭回执清理本 lane，保留 open/失去 owner 和 foreign lane，延迟不持锁。
+- [x] 主干 14、必要边界 26、最终固定 63 项通过；二十二文件云端格式检查、回执、文档、恢复点与本地提交。
+- [ ] 系统 title/summary/goal fallback 与扩展模型服务须保留控制信号并跟踪/drain 真实 provider 生命周期；继续已准入 IO/发布/FS/网络效应、actor/account/token 域、非普通 Run/同步嵌入入口、scoped dispatcher/recovery 和远端 C。M4 父项保持未完成，不能据此启用租户。
+
 ### M5：记忆、知识检索与工具凭据隔离
 
 **修改接点：**

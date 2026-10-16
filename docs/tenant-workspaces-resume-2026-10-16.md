@@ -1,5 +1,5 @@
-<!-- 最新断点：文末 M4 native stream/thread producer checkpoint；之前小步保留为历史。 -->
-> 当前恢复点：M4 流输出生产与线程状态保护已接上；SQL #66 原有固定 46 项通过。下一步接实际模型/工具调用前检查及各类外部效应、dispatcher/recovery；全量 M0–M11 保留，租户启动关闭。详细回执见文末。
+<!-- 最新断点：文末 M4 native invocation admission checkpoint；之前小步保留为历史。 -->
+> 当前恢复点：M4 普通异步原生 Agent 的模型/工具调用前保护已验证；SQL #71 最终 63 项通过，并修复了上一轮流延迟清理拒绝。下一步贯通系统模型/扩展服务的停止信号与实际 provider 生命周期，再接外部效应、账户撤权和 dispatcher/recovery。全量 M0–M11 保留，租户启动关闭。
 
 # 2026-10-16 暂停与恢复检查点
 
@@ -733,3 +733,56 @@ No real model, active rollback, quotas/NAS/TCP/remote C or full M0-M11 acceptanc
 All parent gates remain open; compiled tenant activation false and schema startup
 fence unchanged. No deployment/push/PR or local app/Node/browser/pytest/Docker.
 Serial self-review; preserve full scope and continue actual invocation effects.
+
+M4 native invocation admission checkpoint (2026-10-16): SQL #67 RED
+(two failed/two passed, 21.47s) showed a waiting native tool entering after member
+withdrawal. #68 RED (12 failed/two passed, 42.45s) explicitly observed its real
+report file and ten existing producer-cleanup refusals. The latter was a real
+regression from the preceding producer view, not a fixture exception: worker
+teardown calls delayed cleanup but the view rejected every call. Fixed with an
+exact completed-lifetime same-lane control path, retaining unknown/foreign lanes.
+#69 main fourteen passed (42.48s), #70 necessary boundaries twenty-six passed
+(66.74s), #71 final sixty-three passed (133.41s), twenty-two-file cloud Ruff.
+Source/archive/log hashes and exact removed containers/networks/recorded PG
+volumes: native_invocation_admission_fence. Pinned images/native 0040/executor
+e0003 unchanged; no migrations, live model calls, deployment, push or PR.
+
+Tests use actual run_agent, model factory, create_agent and the COMPLETE shared
+lead runtime middleware chain, real BaseTool and a temporary report file. No
+permission/store mocks. Four held boundaries: waiting tool, second model after a
+legitimate tool file, independent factory model with callbacks=[], and model
+admission queue. Both metadata dialects, normal and member-version withdrawal.
+The normal paths complete; denied tools create no file, denied providers never
+enter, and already-legitimate first work remains. Worker-built cached model
+cannot become an unbound capability after Run closure. Ten existing stream/
+metadata cases now also assert closed-lane cleanup, open/lost retention and
+foreign-lane refusal; six directly related legacy checks reused, not a broad
+new suite. Existing structural middleware count/index assertions updated for
+the new outer guard and real-class relative ordering retained.
+
+Only validated run_agent binds a private task-local guard from its captured
+NativeRunStopTarget. Shared lead/subagent middleware gates before-agent/model and
+model/tool wrappers; declarative ordering preserves the gate outside IO/receipts/
+ordinary error normalization. GraphBubbleUp stop propagates to owning worker.
+Root callbacks and stateless model-local callbacks cover normal and independent
+calls; factory composes the existing limiter and rechecks AFTER its queue. Scoped
+worker models disable exposed SDK max_retries so native retry attempts re-enter
+admission. Model type and legacy unscoped construction/pacing remain intact.
+No Run/loop reference is cached on the model callback/limiter. Guard closes and
+context resets through teardown; locks are released BEFORE model/tool IO.
+
+Next preserve native stop through title/summary/goal fallback and HostModelInvoker
+service boundaries, track/drain real shielded provider task lifetimes, then
+publication/FS/network protocols, actor/account/token revocation, scoped dispatch/
+recovery/APIs, other domains and signed pool/remote C C->B->C. This admission
+step is not a guarantee over already-admitted IO or arbitrary provider/extension
+transports. Native scoped model execution requires its owning async loop;
+embedded/non-run/sync capability entrypoints and all model caches still need
+explicit audit. Do not manufacture authority from ambient selected workspace.
+
+No real DeepSeek/429/network, HTTP/JWT/browser, Redis, physical C, quota/billing,
+NAS/TCP or complete product acceptance. All M0-M11 parents remain open, compiled
+activation false and startup schema fence unchanged. Root revocations remain
+pending. No local app/Node/browser/pytest/Docker runtime; local Git/OpenSpec/
+stdlib packaging/static formatting only. Serial self-review, not independent
+full audit. Continue actual service lifetimes and external effect boundaries.

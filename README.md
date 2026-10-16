@@ -3051,3 +3051,9 @@ the same captured execution identity. Late output is refused, and an expired
 or replaced worker cannot end a successor's stream. [Validation limits](docs/tenant-workspaces-testing.md)
 separate this producer integration from pending model/tool, Redis and full tenant
 activation work.
+
+Ordinary scoped async Agents now recheck execution authority before native model
+and tool calls, including model queue waits and independent worker-built models.
+The shared middleware and model factory remain native; an expired capability
+cannot start a new report handler. [Validation and remaining boundaries](docs/tenant-workspaces-testing.md)
+keep service lifetimes, external effects and full tenant activation separate.

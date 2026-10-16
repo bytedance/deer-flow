@@ -364,7 +364,6 @@ def _build_runtime_middlewares(
     from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
     from deerflow.agents.middlewares.tool_result_sanitization_middleware import ToolResultSanitizationMiddleware
-    from deerflow.sandbox.middleware import SandboxMiddleware
 
     # Layer 1 — outermost wrap_model_call wrappers (listed outer→inner).
     # InputSanitizationMiddleware is first so it becomes the outermost
@@ -375,7 +374,11 @@ def _build_runtime_middlewares(
     # inner of ToolOutputBudgetMiddleware (listed after it) so it neutralizes
     # the raw tool output first; the budget wrapper then truncates the already
     # neutralized text.
+    from deerflow.agents.middlewares.workspace_execution_middleware import WorkspaceExecutionMiddleware
+    from deerflow.sandbox.middleware import SandboxMiddleware
+
     outer_wrappers: list[AgentMiddleware] = [
+        WorkspaceExecutionMiddleware(),
         InputSanitizationMiddleware(),
         KnowledgeScopeMiddleware(),
         ToolOutputBudgetMiddleware.from_app_config(app_config),

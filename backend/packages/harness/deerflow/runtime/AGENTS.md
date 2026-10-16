@@ -483,3 +483,34 @@ Full held-title publication/UI, Redis/generation/fault/backpressure, real
 HTTP/JWT/browser sockets, model/tool invocation guards and effect-specific
 publication/IO protocols remain pending. Never infer external-effect safety
 from output refusal; keep the compiled tenant gate false.
+
+Native invocation admission lives in runtime/invocation.py. Only validated
+run_agent binds WorkerInvocationGuard from its captured Run and native async
+loop. It is a private ContextVar, never a client context/config key. Every check
+uses RunRepository.check_worker_invocation and releases SQL locks before model/
+handler IO. Close/reset this guard through worker teardown, detach its root
+callback, and never cache a guard/Run/loop reference on model callbacks/limiters.
+WorkerInvocationDenied is GraphBubbleUp; ordinary LLM/tool error normalizers must
+not convert it into retry/fallback execution. Shared lead/subagent middleware
+and model-local callbacks are complementary, not new Agent loops.
+
+Scoped worker-built models preserve provider type, compose existing rate policy,
+recheck after its queue and disable exposed SDK max_retries. Stateless callbacks
+also cover independent model calls with callbacks=[]; a cached worker model
+fails closed without a current worker. Scoped model callbacks require their
+owning async loop; legacy unscoped calls retain prior behavior. Direct/non-run/
+embedded/sync entrypoints and arbitrary external provider transports are not
+silently granted worker authority.
+
+Producer cleanup correction: native teardown schedules delayed cleanup on the
+private bridge, so rejecting EVERY cleanup caused a real background exception.
+The view now delays outside SQL then removes only the same lane with an exact
+completed-lifetime control receipt. Open/unknown/lost ownership and foreign
+lanes remain intact; subscribe/global deletion authority is still absent.
+
+Actual native create_agent + full shared runtime middleware/model factory +
+real report-file main proves tool/second-model/independent-model/queue admission
+on both SQL engines. Native provider is deterministic. This does not settle
+already-admitted IO, shielded HostModelInvoker provider-task lifetimes, all system
+fallback signal propagation, actor/token revocation, physical C or full tenant
+activation. Keep these explicit follow-ups and the compiled gate false.

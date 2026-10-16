@@ -20,6 +20,9 @@ def main():
             "effects-regression",
             "effects-final",
             "stream-main",
+            "invocation",
+            "invocation-red",
+            "invocation-final",
         ),
         default="revocation",
     )
@@ -59,6 +62,13 @@ def main():
             for dialect in ("sqlite", "postgres")
             for trigger in ("normal", "member")
         )
+    if args.suite == "invocation":
+        tests = "tests/test_workspace_invocation_gate.py"
+    if args.suite == "invocation-red":
+        tests = "tests/test_workspace_invocation_gate.py tests/test_workspace_worker_effects.py"
+    if args.suite == "invocation-final":
+        tests += " tests/test_workspace_run_lifetime.py tests/test_workspace_worker_context.py tests/test_workspace_run_checkpoints.py tests/test_workspace_event_reads.py tests/test_workspace_worker_effects.py tests/test_workspace_invocation_gate.py"
+        tests += " tests/test_tool_error_handling_middleware.py::test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware tests/test_tool_error_handling_middleware.py::test_build_lead_runtime_middlewares_chain_order_matches_agents_md tests/test_model_factory.py::test_uses_first_model_when_name_is_none tests/test_model_factory.py::test_appends_all_tracing_callbacks tests/test_model_request_admission.py::test_fifo_cancellation_and_queue_capacity tests/test_extension_ordering.py::test_core_constraints_are_declared"
     rendered = rendered.replace("@@TEST_PATHS@@", tests)
     if "@@" in rendered:
         parser.error("unresolved pipeline marker")

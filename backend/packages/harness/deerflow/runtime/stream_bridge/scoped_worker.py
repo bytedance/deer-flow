@@ -5,6 +5,8 @@ subscriber authorization or a distributed SQL/Redis transaction. End carries
 no result payload and uses original live-owner control authority.
 """
 
+import asyncio
+
 from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 from deerflow.runtime.stream_bridge.base import StreamBridge
 
@@ -35,4 +37,9 @@ class ScopedWorkerBridge(StreamBridge):
         raise WorkspaceAccessDenied("worker producer does not grant subscription authority")
 
     async def cleanup(self, run_id, *, delay=0):
-        raise WorkspaceAccessDenied("worker producer does not grant bridge deletion authority")
+        self._run(run_id)
+        if delay > 0:
+            await asyncio.sleep(delay)
+        # Delay occurs outside SQL. Delete only this lane with an exact durable
+        # completed lifetime; unknown/lost ownership retains it for recovery.
+        await self._repository.cleanup_worker_stream(self._target, cleanup=lambda: self._inner.cleanup(run_id))

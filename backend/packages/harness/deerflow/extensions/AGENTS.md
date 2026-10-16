@@ -436,3 +436,13 @@ and revoked before host shutdown; PAT/internal grants remain unsupported.
 Unstamped internal launches receive no handle and must still start normally.
 Action/tool dispatch scopes handles to each registered plugin namespace for
 idempotency isolation; request-resolved handles use `for_plugin` explicitly.
+
+Native invocation admission is host policy outside extension error isolation.
+core_ordering_constraints keeps WorkspaceExecutionMiddleware outside native
+model/tool error handling, receipt and IO-related wrappers. It is not a system
+model observer: observer failures remain observational and cannot grant or revoke
+execution. The private worker guard checks fresh native SQL before invocation.
+HostModelInvoker currently retains shielded provider tasks by service budget;
+its per-Run stop-signal/drain integration remains required before tenant
+activation. Never claim a caller's completion proves that retained provider work
+or a remote C instance has stopped.
