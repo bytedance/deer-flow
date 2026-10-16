@@ -552,7 +552,7 @@ _DOCKER_NO_SUCH_CONTAINER_RE = re.compile(
     re.IGNORECASE,
 )
 _DOCKER_NO_SUCH_NETWORK_RE = re.compile(
-    r"(?:error(?: response from daemon)?: )?(?:no such network: (?P<named>.+)|network (?P<embedded>.+) not found)",
+    r"(?:error(?: response from daemon)?: )?(?:no such network: (?P<named>.+)|network (?P<embedded>.+) not found)(?:\nexit status 1)?",
     re.IGNORECASE,
 )
 
@@ -585,7 +585,8 @@ def _is_no_such_network_error(stderr: str, network_name: str) -> bool:
     """Accept Docker's complete missing-network response for this exact name.
 
     Same contract as ``_is_no_such_container_error``: case-insensitive
-    scaffolding, byte-exact network name, full-message match.
+    scaffolding, byte-exact network name, full-message match. Docker CLI v29
+    may append exactly one ``exit status 1`` line; other diagnostics still fail.
     """
     message = (stderr or "").strip()
     match = _DOCKER_NO_SUCH_NETWORK_RE.fullmatch(message)

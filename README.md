@@ -816,6 +816,10 @@ Local AIO sandbox port allocation stops at TCP port 65535. If the remaining
 ports from the configured starting port are occupied, allocation reports
 that no port is available instead of attempting an out-of-range bind.
 
+AIO teardown failures retain a generation-bound cleanup record. Partial shutdown
+reports failure and can be retried; retries verify the runtime identity and absence
+before completing cleanup, preserving a replacement with the same logical ID.
+
 See the [Sandbox Configuration Guide](backend/docs/CONFIGURATION.md#sandbox) to configure your preferred mode.
 
 Remote directory listings report traversal failures (for example, unreadable

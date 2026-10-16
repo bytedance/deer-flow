@@ -253,11 +253,11 @@ def reset_sandbox_provider() -> None:
 
 
 def shutdown_sandbox_provider() -> None:
-    """Shutdown and reset the sandbox provider.
+    """Shutdown the provider, keeping failed cleanup reachable for retry.
 
-    This properly shuts down the provider (releasing all sandboxes)
-    before clearing the singleton. Call this when the application
-    is shutting down or when you need to completely reset the sandbox system.
+    A provider installed concurrently takes precedence over a failed instance.
+    Provider callbacks run outside the registry lock; discard execution leases
+    only after successful shutdown.
     """
     global _default_sandbox_provider
     # Detach the reference under the lock, then run the (potentially slow)
@@ -268,8 +268,17 @@ def shutdown_sandbox_provider() -> None:
     if provider is not None and hasattr(provider, "shutdown"):
         from deerflow.sandbox.lease import discard_sandbox_lease_manager
 
-        discard_sandbox_lease_manager(provider)
-        provider.shutdown()
+        try:
+            provider.shutdown()
+        except BaseException:
+            # Keep a failed cleanup reachable for a later shutdown call, without
+            # replacing a new provider installed while this callback ran.
+            with _provider_lock:
+                if _default_sandbox_provider is None:
+                    _default_sandbox_provider = provider
+            raise
+        else:
+            discard_sandbox_lease_manager(provider)
 
 
 def set_sandbox_provider(provider: SandboxProvider) -> None:
