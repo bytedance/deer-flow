@@ -590,13 +590,18 @@ def _harvest_bash_executions(
             meta_status = str(meta.get("status") or getattr(message, "status", "success") or "success")
             content = message.content if isinstance(message.content, str) else json.dumps(message.content, sort_keys=True, default=str)
             status, status_marker = _bash_evidence_status(content, meta_status)
+            output_tail = content[-_BASH_EVIDENCE_OUTPUT_TAIL_CHARS:]
+            if len(content) > _BASH_EVIDENCE_OUTPUT_TAIL_CHARS and content[-_BASH_EVIDENCE_OUTPUT_TAIL_CHARS - 1] != "\n":
+                # A clipped test name/log line can look like a summary after
+                # losing its reporter prefix. Retain only complete lines.
+                output_tail = output_tail.partition("\n")[2]
             executions.append(
                 {
                     "tool_call_id": tool_call_id,
                     "tool_name": name,
                     "command": command,
                     "command_truncated": command_truncated,
-                    "output_tail": content[-_BASH_EVIDENCE_OUTPUT_TAIL_CHARS:],
+                    "output_tail": output_tail,
                     "status": status,
                     "status_marker": status_marker,
                 }
