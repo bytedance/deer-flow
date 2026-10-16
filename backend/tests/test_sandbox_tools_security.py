@@ -1036,6 +1036,14 @@ def test_validate_local_bash_command_paths_blocks_brace_expansion_host_paths(com
         ("cat $1/etc/passwd", "$1/etc/passwd"),
         ('cat "$2/etc/passwd"', "$2/etc/passwd"),
         ("ls $0/", "$0/"),
+        # Skipping ``$1/`` as arithmetic must not hide the ``$2/`` after it.
+        ("cat $1/$2/etc/passwd", "$2/etc/passwd"),
+        # Non-ASCII after a variable prefix is still a host path.
+        ("cat $HOME/文档/marker", "$HOME/文档/marker"),
+        # ``~name`` expands to that user's home.
+        ("cat ~root/.ssh/id_rsa", "~root/.ssh/id_rsa"),
+        ("ls ~deploy/", "~deploy/"),
+        ("make --directory=~deploy/app", "~deploy/app"),
     ],
 )
 def test_validate_local_bash_command_paths_blocks_variable_prefixed_host_paths(command: str, rejected: str) -> None:
@@ -1054,8 +1062,9 @@ def test_validate_local_bash_command_paths_blocks_variable_prefixed_host_paths(c
         "echo $((total/2))",
         # A variable inside a URL is a URL segment, not a host path.
         "curl https://api.github.com/repos/$OWNER/$REPO/issues",
-        # Non-ASCII text after the slash is prose, same as ``/端口``.
-        'echo "价格 $PRICE/件"',
+        "curl https://example.com/~alice/index.html",
+        # ``~`` mid-word is not tilde expansion.
+        "cat drafts~v2/notes.md",
         # ``$PWD/x`` names the same file as the relative ``x``, which the guard
         # already accepts (``$PWD/../x`` is rejected like ``../x``).
         "cat $PWD/notes.txt",
@@ -1063,6 +1072,7 @@ def test_validate_local_bash_command_paths_blocks_variable_prefixed_host_paths(c
         "cd /mnt/user-data/uploads && cat $PWD/report.pdf",
         # awk field arithmetic is not a path.
         "du -k /mnt/user-data/workspace | awk '{print $1/1024}'",
+        "awk -F, '{print $1/$2}' /mnt/user-data/uploads/data.csv",
     ],
 )
 def test_validate_local_bash_command_paths_allows_non_path_variable_uses(command: str) -> None:
@@ -1113,6 +1123,7 @@ def test_bash_tool_rejects_variable_prefixed_host_path_before_execution(monkeypa
     [
         ('cat "$HOME/.ssh/id_rsa"', "Unsafe absolute paths in command: $HOME/.ssh/id_rsa"),
         ('CDPATH="$HOME" cd .ssh && cat $PWD/id_rsa', "Unsafe working directory change via CDPATH"),
+        ('cat "$HOME/文档/id_rsa"', "Unsafe absolute paths in command: $HOME/文档/id_rsa"),
     ],
 )
 def test_local_bash_tool_does_not_read_variable_prefixed_host_file(tmp_path: Path, monkeypatch, command: str, rejected: str) -> None:
@@ -1121,6 +1132,8 @@ def test_local_bash_tool_does_not_read_variable_prefixed_host_file(tmp_path: Pat
     home = tmp_path / "home"
     (home / ".ssh").mkdir(parents=True)
     (home / ".ssh" / "id_rsa").write_text("host-private-key")
+    (home / "文档").mkdir()
+    (home / "文档" / "id_rsa").write_text("host-private-key")
     monkeypatch.setenv("HOME", str(home))
     thread_root = tmp_path / "threads" / "t1" / "user-data"
     thread_data = {f"{name}_path": str(thread_root / name) for name in ("workspace", "uploads", "outputs")}

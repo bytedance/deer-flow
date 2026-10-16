@@ -5974,12 +5974,14 @@ This release closes that milestone with **621 merged pull requests**.
   absolute-path scan skips a `/` that follows a word character, so the
   bare `$HOME/...` form (quoted or not) reached the host. Positional
   parameters are covered too: `bash -c` gets none, so `$1/etc/passwd`
-  opens `/etc/passwd`; awk-style `$1/1024` stays allowed. Commands that
-  mention `CDPATH` are rejected, because it moves a relative `cd` outside
-  the workspace. `$PWD/...` stays allowed because it names the same file as
-  the equivalent relative path, unless the command rebinds `PWD` itself.
-  Variables inside URLs are unaffected. The guard remains best-effort and
-  is not an isolation boundary. ([#6930])
+  opens `/etc/passwd`; awk-style `$1/1024` and `$1/$2` stay allowed. A
+  named home such as `~root/.ssh/id_rsa` is rejected the same way, and a
+  non-ASCII segment after a variable (`$HOME/文档`) is treated as a path,
+  not prose. Commands that mention `CDPATH` are rejected, because it moves
+  a relative `cd` outside the workspace. `$PWD/...` stays allowed because it
+  names the same file as the equivalent relative path, unless the command
+  rebinds `PWD` itself. Variables inside URLs are unaffected. The guard
+  remains best-effort and is not an isolation boundary. ([#6930])
 
 ### Security
 

@@ -75,8 +75,13 @@ _ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![:\w])(?<!:/)/(?:[^\s\"'`;&|<>()]+)")
 # same way, and ``bash -c`` gets no positionals, so it expands to ``/etc/passwd``.
 # ``${NAME}/``, ``~/`` and special parameters (``$@/``, ``$?/``) already surface
 # through the absolute-path regex because ``}``, ``~``, ``@`` and ``?`` are not
-# word chars.
-_SHELL_VARIABLE_PATH_PATTERN = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*|[0-9])/[^\s\"'`;&|<>()]*")
+# word chars. The remainder is captured in a lookahead so a skipped prefix does
+# not hide a later one (``$1/$2/etc/passwd``).
+_SHELL_VARIABLE_PATH_PATTERN = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*|[0-9])/(?=([^\s\"'`;&|<>()]*))")
+# ``~name/`` expands to that user's home (``~root/.ssh/id_rsa``) and slips the
+# absolute-path regex for the same reason. Tilde expansion only applies at the
+# start of a word or after ``=``/``:``, so ``HEAD~1/`` stays out of scope.
+_NAMED_TILDE_PATH_PATTERN = re.compile(r"(?<![^\s=:;&|<>()\"'`])~[A-Za-z0-9._-]+/[^\s\"'`;&|<>()]*")
 # ``PWD`` written anywhere except as a ``$PWD`` expansion (``PWD=/``,
 # ``read PWD``, ``for PWD in``) may rebind it away from the workspace.
 _PWD_REBIND_PATTERN = re.compile(r"(?<!\$)\bPWD\b")
@@ -1432,8 +1437,9 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
     A small allowlist of common system path prefixes is kept for executable
     and device references (e.g. /bin/sh, /dev/null). Quoted shell words are
     validated whole, so a space inside quotes is not treated as a new segment.
-    A shell variable used as a path prefix (``$HOME/...``, ``$1/...``) is rejected like
-    ``${HOME}/...`` and ``~/...``, since its runtime value is unknown here;
+    A shell variable used as a path prefix (``$HOME/...``, ``$1/...``) or a named
+    home (``~root/...``) is rejected like ``${HOME}/...`` and ``~/...``, since its
+    runtime value is unknown here;
     ``$PWD/...`` is checked like the relative path it is equivalent to.
     A windows-incompatible segment still rejects a path that is not already
     stored on the host; an existing host file may be read or renamed.
@@ -1471,17 +1477,24 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
     # exception is ``$PWD``: ``$PWD/.venv/bin`` names the same file as the
     # relative ``.venv/bin``, which this guard already accepts, unless the
     # command rebinds ``PWD`` itself.
+    # The prose exemption used above does not apply: ``$HOME/文档`` is a real
+    # host directory.
     pwd_is_workspace = not _PWD_REBIND_PATTERN.search(command)
     for match in _SHELL_VARIABLE_PATH_PATTERN.finditer(command):
         if _is_in_spans(match.start(), url_spans):
             continue
-        if _is_non_path_literal_fragment(match.group()):
+        name, remainder = match.group(1), match.group(2)
+        if name == "PWD" and pwd_is_workspace:
             continue
-        if match.group(1) == "PWD" and pwd_is_workspace:
+        # ``$1/1024`` and ``$1/$2`` are awk-style field arithmetic
+        # (``awk '{print $1/$2}'``), not paths: standard top-level host
+        # directories do not start with a digit.
+        if name.isdigit() and remainder.removeprefix("$")[:1].isdigit():
             continue
-        # ``$1/1024`` is awk-style arithmetic (``awk '{print $1/1024}'``), not a
-        # path: standard top-level host directories do not start with a digit.
-        if match.group(1).isdigit() and command[match.end(1) + 1 : match.end(1) + 2].isdigit():
+        unsafe_paths.append(match.group() + remainder)
+
+    for match in _NAMED_TILDE_PATH_PATTERN.finditer(command):
+        if _is_in_spans(match.start(), url_spans):
             continue
         unsafe_paths.append(match.group())
 
