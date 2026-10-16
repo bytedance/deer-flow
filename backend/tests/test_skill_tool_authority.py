@@ -8,7 +8,12 @@ permission ceiling.
 These regressions drive the real `build_middlewares` (lead) and
 `build_subagent_runtime_middlewares` chains through `create_agent`, activate a
 synthetic skill via a real slash command, and assert both model binding and
-actual ToolNode execution on sync and async paths.
+actual ToolNode execution on sync and async paths. The synthetic skill lives in
+a real on-disk skills tree served through the configured storage provider, and
+the block under test is taken structurally between the live
+`SkillActivationMiddleware` and `DurableContextMiddleware` anchors, so
+whatever middleware the builder actually installs between those anchors
+reaches `create_agent`.
 """
 
 from __future__ import annotations
@@ -26,6 +31,7 @@ from langchain_core.tools import tool
 from pydantic import Field
 
 from deerflow.agents.lead_agent import agent as lead_agent_module
+from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
 from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 from deerflow.agents.thread_state import ThreadState
@@ -34,8 +40,11 @@ from deerflow.config.app_config import AppConfig
 from deerflow.config.authorization_config import AuthorizationConfig, AuthorizationProviderConfig
 from deerflow.config.loop_detection_config import LoopDetectionConfig
 from deerflow.config.model_config import ModelConfig
+from deerflow.config.safety_finish_reason_config import SafetyFinishReasonConfig
 from deerflow.config.sandbox_config import SandboxConfig
-from deerflow.skills.types import Skill, SkillCategory
+from deerflow.config.skills_config import SkillsConfig
+from deerflow.config.subagents_config import SubagentsAppConfig
+from deerflow.config.token_budget_config import TokenBudgetConfig
 
 _PARSE_CALLS: list[str] = []
 _WRITE_CALLS: list[str] = []
@@ -77,7 +86,7 @@ class _NoopMiddleware:
         return "<noop-test-middleware>"
 
 
-def _make_app_config() -> AppConfig:
+def _make_app_config(skills_root: Path) -> AppConfig:
     return AppConfig(
         models=[
             ModelConfig(
@@ -92,12 +101,20 @@ def _make_app_config() -> AppConfig:
         ],
         sandbox=SandboxConfig(use="test"),
         loop_detection=LoopDetectionConfig(enabled=False),
+        # The synthetic skills tree is served through the real configured
+        # storage provider, so every middleware in the block under test
+        # resolves skills through the common production seam.
+        skills=SkillsConfig(path=str(skills_root)),
+        # Keep the activation→durable-context block free of unrelated guards.
+        safety_finish_reason=SafetyFinishReasonConfig(enabled=False),
+        subagents=SubagentsAppConfig(token_budget=TokenBudgetConfig(enabled=False)),
     )
 
 
-def _make_skill(tmp_path: Path, name: str, allowed_tools: list[str] | None) -> Skill:
-    skill_dir = tmp_path / name
-    skill_dir.mkdir(exist_ok=True)
+def _make_skill(skills_root: Path, name: str, allowed_tools: list[str] | None) -> None:
+    """Write one real custom skill into the per-test skills tree."""
+    skill_dir = skills_root / "custom" / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
     lines = [
         "---",
         f"name: {name}",
@@ -115,35 +132,6 @@ def _make_skill(tmp_path: Path, name: str, allowed_tools: list[str] | None) -> S
     lines.extend(["---", "", "# Demo", "", "Use the parser."])
     skill_file = skill_dir / "SKILL.md"
     skill_file.write_text("\n".join(lines), encoding="utf-8")
-    return Skill(
-        name=name,
-        description="Demo skill for tool authority regressions",
-        license="MIT",
-        skill_dir=skill_dir,
-        skill_file=skill_file,
-        relative_path=Path(name),
-        category=SkillCategory.CUSTOM,
-        allowed_tools=None if allowed_tools is None else tuple(allowed_tools),
-        enabled=True,
-    )
-
-
-def _make_storage(tmp_path: Path, skills: list[Skill]):
-    def _validate_skill_file_path(skill_file: Path) -> Path:
-        resolved = skill_file.resolve()
-        root = tmp_path.resolve()
-        try:
-            resolved.relative_to(root)
-        except ValueError:
-            raise ValueError("Resolved skill file must stay within the configured skills root.")
-        return resolved
-
-    return SimpleNamespace(
-        load_skills=lambda *, enabled_only: [skill for skill in skills if skill.enabled] if enabled_only else skills,
-        get_container_root=lambda: "/mnt/skills",
-        get_skills_root_path=lambda: tmp_path,
-        validate_skill_file_path=_validate_skill_file_path,
-    )
 
 
 def _lead_middlewares(monkeypatch, app_config: AppConfig) -> list:
@@ -164,25 +152,20 @@ def _subagent_middlewares(app_config: AppConfig) -> list:
 
 
 def _skill_authority_slice(middlewares: list) -> list:
-    """The contiguous skill-activation block the builder installs.
+    """The contiguous skill block the builder installs, taken structurally.
 
-    Before the obsolete Skill tool policy was removed this was
-    [SkillActivationMiddleware, SkillToolPolicyMiddleware]; after removal it is
-    just [SkillActivationMiddleware]. Slicing by the builder's own output keeps
-    the regression meaningful against either assembly.
+    The block starts at the live ``SkillActivationMiddleware`` anchor and ends
+    just before the live ``DurableContextMiddleware`` anchor — both types
+    exist in every real builder output. Whatever middleware the builder
+    actually places between those anchors is included positionally, so the
+    block stays meaningful against any assembly without recognizing class
+    names that a later revision may delete. Adjacent placement on the current
+    chain is pinned separately by
+    ``test_build_middlewares_orders_skill_activation_before_durable_context``.
     """
     start = next(i for i, middleware in enumerate(middlewares) if isinstance(middleware, SkillActivationMiddleware))
-    end = start + 1
-    while end < len(middlewares) and type(middlewares[end]).__name__ == "SkillToolPolicyMiddleware":
-        end += 1
+    end = next(i for i in range(start + 1, len(middlewares)) if isinstance(middlewares[i], DurableContextMiddleware))
     return middlewares[start:end]
-
-
-def _patch_skill_storages(middlewares: list, storage) -> None:
-    for middleware in middlewares:
-        module_name = type(middleware).__module__
-        if module_name.endswith("skill_activation_middleware") or module_name.endswith("skill_tool_policy_middleware"):
-            middleware._storage = lambda: storage
 
 
 def _scripted_model() -> _RecordingModel:
@@ -244,15 +227,13 @@ def test_active_skill_allowed_tools_does_not_remove_authorized_tools(monkeypatch
     the scripted model executes `parse_document`: an Agent-authorized tool
     OMITTED by the restrictive metadata must still run.
     """
-    skill = _make_skill(tmp_path, "demo-skill", allowed_tools)
-    storage = _make_storage(tmp_path, [skill])
-    app_config = _make_app_config()
+    _make_skill(tmp_path, "demo-skill", allowed_tools)
+    app_config = _make_app_config(tmp_path)
     if builder == "lead":
         middlewares = _lead_middlewares(monkeypatch, app_config)
     else:
         middlewares = _subagent_middlewares(app_config)
     slice_ = _skill_authority_slice(middlewares)
-    _patch_skill_storages(slice_, storage)
     assert slice_, "builder must install SkillActivationMiddleware"
 
     model = _scripted_model()
@@ -284,9 +265,8 @@ def test_allowed_tools_metadata_cannot_grant_rbac_denied_tool(monkeypatch, tmp_p
     from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
 
     provider = RbacAuthorizationProvider(roles={"guest": {"tools": {"allow": ["read_file", "parse_document"]}}})
-    skill = _make_skill(tmp_path, "demo-skill", ["write_file"])
-    storage = _make_storage(tmp_path, [skill])
-    app_config = _make_app_config()
+    _make_skill(tmp_path, "demo-skill", ["write_file"])
+    app_config = _make_app_config(tmp_path)
     app_config.authorization = AuthorizationConfig(
         enabled=True,
         provider=AuthorizationProviderConfig(use="unused:Provider"),
@@ -303,7 +283,6 @@ def test_allowed_tools_metadata_cannot_grant_rbac_denied_tool(monkeypatch, tmp_p
     )
     full_chain = _lead_middlewares(monkeypatch, app_config)
     slice_ = _skill_authority_slice(full_chain)
-    _patch_skill_storages(slice_, storage)
 
     model = _RecordingModel(
         [
@@ -346,12 +325,3 @@ def test_allowed_tools_metadata_cannot_grant_rbac_denied_tool(monkeypatch, tmp_p
     # The denial must be visible in the ToolMessage content itself, not only
     # via the status error flag.
     assert "authz.denied" in blocked[0].content
-
-
-def test_skill_authority_slice_covers_real_builders(monkeypatch):
-    """Both builders keep producing real middleware chains for the regressions."""
-    app_config = _make_app_config()
-    lead = _skill_authority_slice(_lead_middlewares(monkeypatch, app_config))
-    subagent = _skill_authority_slice(_subagent_middlewares(app_config))
-    assert all(isinstance(middleware, SkillActivationMiddleware) or "SkillToolPolicyMiddleware" in type(middleware).__name__ for middleware in lead)
-    assert all(isinstance(middleware, SkillActivationMiddleware) or "SkillToolPolicyMiddleware" in type(middleware).__name__ for middleware in subagent)
