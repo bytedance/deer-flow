@@ -202,6 +202,20 @@ def update_agent(
     if tool_groups is not None and tool_groups != existing_cfg.tool_groups:
         updated_fields.append("tool_groups")
 
+    # A tool-group change that drops knowledge access must also clear the saved
+    # knowledge default in the same update (mirrors Agent settings, #6630).
+    # Otherwise the next unscoped turn inherits an incompatible default and
+    # fails admission with HTTP 422. Unrelated updates preserve the binding.
+    if (
+        tool_groups is not None
+        and tool_groups != existing_cfg.tool_groups
+        and new_tool_groups is not None
+        and "knowledge" not in new_tool_groups
+        and existing_cfg.knowledge_scope is not None
+    ):
+        config_data["knowledge_scope"] = None
+        updated_fields.append("knowledge_scope")
+
     new_skills = skills if skills is not None else existing_cfg.skills
     if new_skills is not None:
         config_data["skills"] = new_skills

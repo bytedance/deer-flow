@@ -591,3 +591,45 @@ def test_update_agent_proceeds_on_non_webhook_channel(tmp_path, patched_paths, s
 
     cfg = yaml.safe_load((seeded / "config.yaml").read_text())
     assert cfg["description"] == "bumped"
+
+
+def _seed_agent_with_scope(tmp_path, name: str = "test-agent", user_id: str = DEFAULT_USER) -> Path:
+    """Seed an agent carrying tool_groups plus a saved knowledge default."""
+    agent_dir = _user_agent_dir(tmp_path, name, user_id=user_id)
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": name,
+                "description": "old",
+                "tool_groups": ["web", "knowledge"],
+                "knowledge_scope": {"version": 1, "mode": "selected", "dataset_ids": ["policies"]},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    (agent_dir / "SOUL.md").write_text("soul", encoding="utf-8")
+    return agent_dir
+
+
+def test_update_agent_clears_knowledge_scope_when_knowledge_group_removed(tmp_path, patched_paths):
+    """Issue #6994: dropping the knowledge tool group clears the saved default in the same update."""
+    agent_dir = _seed_agent_with_scope(tmp_path)
+
+    result = update_agent.func(runtime=_runtime(), tool_groups=["web"])
+
+    cfg = yaml.safe_load((agent_dir / "config.yaml").read_text())
+    assert cfg["tool_groups"] == ["web"]
+    assert cfg.get("knowledge_scope") is None, "removing knowledge access must clear the saved default"
+    assert "knowledge_scope" in result.update["messages"][0].content
+
+
+def test_update_agent_preserves_knowledge_scope_on_unrelated_change(tmp_path, patched_paths):
+    """Unrelated self-updates must preserve the saved knowledge binding."""
+    agent_dir = _seed_agent_with_scope(tmp_path)
+
+    update_agent.func(runtime=_runtime(), description="bumped")
+
+    cfg = yaml.safe_load((agent_dir / "config.yaml").read_text())
+    assert cfg["knowledge_scope"] == {"version": 1, "mode": "selected", "dataset_ids": ["policies"]}
