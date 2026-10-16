@@ -149,7 +149,7 @@ def _unittest_test_summary_holds(text: str) -> bool:
 # Node's TAP/spec reporters share the same ordered counters. Individual TAP
 # points (including skipped/todo tests) are not a complete run summary and
 # must not be mistaken for Go's package-level `ok` record above.
-_NODE_TEST_POINT_RE = re.compile(r"^[ \t]*(?:\#[ \t]+Subtest:[^\r\n]*|(?:not )?ok[ \t]+[0-9]+(?:[ \t]+[-#][^\r\n]*|[ \t]*)|[✔✖﹣▶][ \t]+[^\r\n]*)\r?$", re.MULTILINE)
+_NODE_TEST_POINT_RE = re.compile(r"^[ \t]*(?:\#[ \t]+Subtest:[^\r\n]*|(?:not )?ok[ \t]+[0-9]+(?:[ \t]+[-#][^\r\n]*|[ \t]*)|[✔✖﹣▶⚠][ \t]+[^\r\n]*)\r?$", re.MULTILINE)
 _ANSI_SGR_RE = re.compile(r"\x1b\[[0-9;:]*m")
 _NODE_TEST_SUMMARY_RE = re.compile(
     r"^(?P<prefix>\#|ℹ)[ \t]+tests (?P<total>[0-9]{1,9})\r?\n"
@@ -2100,12 +2100,8 @@ def _check_tests_passed_leaf(command: str, bash_executions: list[dict[str, Any]]
         return base
     # Empty packages/targets cannot veto complete positive sibling evidence.
     summary_tail = _without_empty_cargo_targets(_GO_ZERO_TEST_LINE_RE.sub("", output_tail))
-<<<<<<< HEAD
-    passing = _TEST_PASS_SHAPE_RE.search(summary_tail) or _GO_TEST_PASS_SHAPE_RE.search(summary_tail) or _unittest_test_summary_holds(summary_tail) or build_summary is True or node_summary is True
-=======
     go_ok = _GO_TEST_PASS_SHAPE_RE.search(summary_tail) and _go_package_summary_is_evidence(summary_tail)
-    passing = _TEST_PASS_SHAPE_RE.search(summary_tail) or go_ok or _unittest_test_summary_holds(summary_tail) or build_summary is True
->>>>>>> origin/main
+    passing = _TEST_PASS_SHAPE_RE.search(summary_tail) or go_ok or _unittest_test_summary_holds(summary_tail) or build_summary is True or node_summary is True
     if passing and not _TEST_ZERO_SHAPE_RE.search(summary_tail):
         base["checked"] = True
         base["holds"] = True
