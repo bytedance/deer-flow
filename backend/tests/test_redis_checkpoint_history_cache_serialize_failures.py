@@ -35,9 +35,7 @@ class _Redis:
 
 
 @pytest.mark.anyio
-async def test_redis_cache_skips_unserializable_entry_but_writes_other_entries(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
+async def test_redis_cache_skips_unserializable_entry_but_writes_other_entries(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     fake = _Redis()
     monkeypatch.setattr(redis_mod, "_create_client", lambda *_args, **_kwargs: fake)
     cache = redis_mod.RedisCheckpointHistoryCache(
@@ -55,8 +53,8 @@ async def test_redis_cache_skips_unserializable_entry_but_writes_other_entries(
 
     assert fake.pipe.executed
     assert fake.pipe.writes == [
-        ("before", b"json\x00encoded", 60),
-        ("after", b"json\x00encoded", 60),
+        ("before", b"json\\x00encoded", 60),
+        ("after", b"json\\x00encoded", 60),
     ]
     assert "broken" in caplog.text
     assert "TypeError" in caplog.text
