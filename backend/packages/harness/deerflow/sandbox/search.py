@@ -1,3 +1,4 @@
+import errno
 import fnmatch
 import os
 import re
@@ -151,11 +152,8 @@ def truncate_line(line: str, max_chars: int = DEFAULT_LINE_SUMMARY_LENGTH) -> st
 
 
 def is_binary_file(path: Path, sample_size: int = 8192) -> bool:
-    try:
-        with path.open("rb") as handle:
-            return b"\0" in handle.read(sample_size)
-    except OSError:
-        return True
+    with path.open("rb") as handle:
+        return b"\0" in handle.read(sample_size)
 
 
 def find_glob_matches(root: Path, pattern: str, *, include_dirs: bool = False, max_results: int = 200) -> tuple[list[str], bool]:
@@ -270,7 +268,11 @@ def find_grep_matches(
                         if len(matches) >= max_results:
                             truncated = True
                             return matches, truncated
-        except OSError:
-            continue
+        except OSError as exc:
+            # A candidate may disappear after enumeration. Other failures leave
+            # the search incomplete and must not become a false no-match result.
+            if exc.errno in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
+                continue
+            raise
 
     return matches, truncated

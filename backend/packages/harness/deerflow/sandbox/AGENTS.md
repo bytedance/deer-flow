@@ -2,6 +2,8 @@
 
 Sandbox restore requires a thread ID, even forks.
 
+Local `grep` propagates file read errors; only `ENOENT`/`ENOTDIR`/`ELOOP` races are skipped.
+
 **Network approval policy**: `SandboxMiddleware` uses
 `resolve_run_interaction_policy()`. Autonomous, webhook, scheduled, legacy
 unattended and GitHub-fallback runs auto-deny; explicit interactive overrides
