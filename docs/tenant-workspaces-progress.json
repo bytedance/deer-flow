@@ -1549,17 +1549,17 @@
   },
   "latest_checkpoint": {
     "work_package": "M4",
-    "status": "partial M4; native MCP scope/driver/result and v2 submit producer verified",
-    "last_verified_job": "deerflow-tenant-execution-m4",
-    "last_verified_build": 6,
-    "next": "Implement B v2 authoritative receiver and management/control scope, immutable physical ledger/activation and actual native ToolNode-to-B proof; then scoped cancel/notifications, Scheduler and remaining runtime/revocation gates, retaining M3/M0-M11 scope",
+    "status": "partial M4: native SQL B submission preflight verified; HTTP/ledger/physical integration pending",
+    "last_verified_job": "deerflow-tenant-execution-m4-sql",
+    "last_verified_build": 19,
+    "next": "Integrate immutable B ledger identity and old-worker schema fencing, native MCP commit confirmation and v2 management; reauthorize physical start/adopt/publication, then actual ToolNode-to-B and C-to-B-to-C main. Retain all M3/M0-M11 requirements.",
     "tenant_activation": "closed",
     "deployment": "none",
     "previous_backend_job": "deerflow-tenant-m1-postgres",
     "previous_backend_build": 89,
     "native_candidate_schema": "0040_mcp_workspace_identity",
     "last_verified_database_job": "deerflow-tenant-execution-m4-sql",
-    "last_verified_database_build": 16
+    "last_verified_database_build": 19
   },
   "workspace_feedback": {
     "status": "partial_M3_verified_repository_and_HTTP_main",
@@ -8701,6 +8701,81 @@
       "Full MCP HTTP/native permission/credential binding and native ToolNode-to-real-B wire proof remain required; no startup gate bypass or public tenant activation",
       "Current native candidate is 0040/e0002; existing closed startup schema fence is older and must match the complete M10/M11 candidate/manifest before activation",
       "All M0-M11 parent gates remain incomplete; no deployment, push, PR, live model calls or local app runtime"
+    ]
+  },
+  "native_b_submission_preflight": {
+    "builds": [
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 39895,
+        "number": 17,
+        "result": "FAILURE",
+        "job": "deerflow-tenant-execution-m4-sql",
+        "phase": "m4-b-receiver-red",
+        "source_archive_sha256": "faccbeca86fea4b2b964e19eac76ce7fd205d2197e02c5e5c75addff9cffe700",
+        "log_sha256": "3bd86f57aef3e3500ab53cd905ab9e9cdf0590a2458a05954614b570bce4044f",
+        "code_sha256": {
+          "backend/packages/ecs-executor/ecs_executor/scope.py": "76a48748e9a206d11f08de01dc7c550165c7e70bdd861501c28e0aa8c9c9f736",
+          "backend/tests/test_workspace_execution_authority.py": "b70f7bb5fd889b9e031f6797813a9c17d41cb2e62014e195704ca27673a4aefd"
+        }
+      },
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 33599,
+        "number": 18,
+        "result": "SUCCESS",
+        "job": "deerflow-tenant-execution-m4-sql",
+        "phase": "m4-b-receiver-main",
+        "source_archive_sha256": "163cfa5a59068381d318217a1ae778bab8f81f3bca577bd727fcdd116bd7dd9d",
+        "log_sha256": "9c56d324838cda70755ce2df3947d30d56676cc69d117f534c9de1afd7e9c142",
+        "code_sha256": {
+          "backend/packages/ecs-executor/ecs_executor/scope.py": "de3e90afc4e710326b20334fa2e22af09c0ceb1cf3c13771ce0f94d3e59f78c1",
+          "backend/packages/ecs-executor/ecs_executor/native_authority.py": "732f1400814079f52eaec05377493a30ec2871ddd85d6f2b1e3f69dd61ae3fe1",
+          "backend/tests/test_workspace_execution_authority.py": "7fcdf7274905a5916bed70d719cd27712d3ce07c16443bb2a33804d8ff4d5680"
+        }
+      },
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 39757,
+        "number": 19,
+        "result": "SUCCESS",
+        "job": "deerflow-tenant-execution-m4-sql",
+        "phase": "m4-b-receiver-verified",
+        "source_archive_sha256": "0784d3f94515a0d28215b8b0666f618d73f6da1b7dea1b20fd508de3de2fd140",
+        "log_sha256": "adc4dd0a652d18613873fc242abebebf9fe344bcb19a9ba8bedefe07b4ccecdc",
+        "code_sha256": {
+          "backend/packages/ecs-executor/ecs_executor/scope.py": "de3e90afc4e710326b20334fa2e22af09c0ceb1cf3c13771ce0f94d3e59f78c1",
+          "backend/packages/ecs-executor/ecs_executor/native_authority.py": "732f1400814079f52eaec05377493a30ec2871ddd85d6f2b1e3f69dd61ae3fe1",
+          "backend/tests/test_workspace_execution_authority.py": "4ba3a82f8827ea6ba7de934eeaa33f40dd79ed5615ebf1c63580e21421dcc2d2"
+        }
+      }
+    ],
+    "tools_image_id": "sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01",
+    "postgres_image_id": "sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea",
+    "remaining_owned_resources": {
+      "container": [],
+      "network": []
+    },
+    "base_commit": "742d85c4c",
+    "status": "partial M4: native SQL B submission preflight verified; HTTP/ledger/physical integration pending",
+    "tests_passed": 15,
+    "new_database_cases": 4,
+    "reused_signature_cases": 11,
+    "test_seconds": 20.67,
+    "main_build": 18,
+    "main_tests": 2,
+    "main_seconds": 16.37,
+    "native_revision": "0040_mcp_workspace_identity",
+    "executor_revision": "e0002_workspace_scope",
+    "limits": [
+      "Read-only native SQL preflight only. ExecutionJobs and worker do not use it yet; existing unintegrated endpoints still reject scoped v2.",
+      "No native MCP commit receipt, immutable physical identity, v2 management, start/adopt/publish fence, scoped control/outbox or full C-to-B-to-C proof yet.",
+      "This point-in-time check holds no lock across physical actions and cannot be reused as a later start/publication grant.",
+      "No schema migration or activation. Startup remains compiled false. Historical NULL scope gains no permission.",
+      "Full M0-M11 parent gates remain incomplete; no deployment, push, PR, model calls, local application/pytest/Docker runtime."
     ]
   }
 }

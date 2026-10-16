@@ -12,7 +12,8 @@ import hmac
 import json
 import re
 import time
-from dataclasses import asdict
+from collections.abc import Callable
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from deerflow.authz.workspace import WorkspaceContext
@@ -157,14 +158,35 @@ def mint_execution_scope(
     return token
 
 
+@dataclass(frozen=True, slots=True)
+class ExecutionIdentity:
+    """Authenticated locators only; contains no token-asserted workspace grant."""
+
+    user_id: str
+    thread_id: str
+    incarnation: str | None
+    run_id: str
+
+
 def verify_execution_scope(
-    token: str, *, secret: bytes, authenticated_user_id: str, arguments: dict[str, Any], expected_audience: str, expected_operation: str, expected_workspace_context: WorkspaceContext | None = None, now: int | None = None
+    token: str,
+    *,
+    secret: bytes,
+    authenticated_user_id: str,
+    arguments: dict[str, Any],
+    expected_audience: str,
+    expected_operation: str,
+    expected_workspace_context: WorkspaceContext | None = None,
+    workspace_resolver: Callable[[ExecutionIdentity], WorkspaceContext] | None = None,
+    now: int | None = None,
 ) -> dict[str, Any]:
     """Verify before execution, binding separate authenticated owner and arguments.
 
     expected_workspace_context must be independently authorized by the receiver,
     never reconstructed from this token or the browser's current selection.
-    Version 2 is refused by callers without that explicit expectation; callers
+    A resolver receives only authenticated locators after all cryptographic and
+    argument checks, and must return independently authorized native identity.
+    Version 2 is refused by callers without that expectation or resolver; callers
     with one refuse legacy signatures. Matching versions do not prove live membership.
 
     Never return or log the token on failure. Remote task creation must persist
@@ -192,14 +214,36 @@ def verify_execution_scope(
         raise ValueError("Execution scope is expired or not yet valid")
     if claims["aud"] != expected_audience or claims["operation"] != expected_operation or claims["user_id"] != authenticated_user_id:
         raise ValueError("Execution scope authority mismatch")
+    if not hmac.compare_digest(claims["args_sha256"], arguments_sha256(arguments)):
+        raise ValueError("Execution scope arguments mismatch")
+    if workspace_resolver is not None:
+        if expected_workspace_context is not None or "workspace_context" not in claims:
+            raise ValueError("Execution scope requires one workspace authorization source")
+        expected_workspace_context = workspace_resolver(ExecutionIdentity(claims["user_id"], claims["thread_id"], claims["incarnation"], claims["run_id"]))
+        if type(expected_workspace_context) is not WorkspaceContext:
+            raise ValueError("Execution scope resolver requires workspace authorization")
     if expected_workspace_context is None:
         if "workspace_context" in claims:
             raise ValueError("Execution scope workspace authorization is required")
     elif claims.get("workspace_context") != _workspace_claims(expected_workspace_context, authenticated_user_id):
         raise ValueError("Execution scope workspace mismatch")
-    if not hmac.compare_digest(claims["args_sha256"], arguments_sha256(arguments)):
-        raise ValueError("Execution scope arguments mismatch")
     return claims
+
+
+def verify_native_execution_scope(token: str, *, engine, secret: bytes, authenticated_user_id: str, arguments: dict[str, Any], expected_audience: str, expected_operation: str) -> dict[str, Any]:
+    """Native SQL submission preflight; not a worker start/publication grant.
+
+    Accepts only v2 submit intent. Callers must fence native task commitment,
+    ledger identity, physical launch and publication separately. No HTTP endpoint
+    is enabled by this function and no database row or ambient scope is mutated.
+    """
+    from ecs_executor.native_authority import NativeSubmissionAuthority
+
+    if expected_operation != "submit":
+        raise ValueError("Native execution preflight only accepts submit")
+    return verify_execution_scope(
+        token, secret=secret, authenticated_user_id=authenticated_user_id, arguments=arguments, expected_audience=expected_audience, expected_operation=expected_operation, workspace_resolver=NativeSubmissionAuthority(engine).resolve
+    )
 
 
 def mint_management_scope(*, secret: bytes, audience: str, user_id: str, task_id: str, operation: str, now: int | None = None, ttl_seconds: int = 60) -> str:

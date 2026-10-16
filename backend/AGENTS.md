@@ -380,3 +380,10 @@ and after remote submission and before polling/result commit. Native schema is
 now 0040; independent executor schema remains e0002. Scoped submit signing uses
 v2 and does not fall back to legacy; B receiver/management, scoped control queues,
 remote publication/physical execution and full tenant activation remain pending.
+
+The executor's `verify_native_execution_scope` is a read-only SQL submission
+preflight. It verifies cryptographic intent before native lookup, reuses native
+membership/account policy and checks the original running Run/private parent and
+snapshot. It is not a durable physical start/publication grant; HTTP B receivers
+remain closed to v2 until ledger, MCP commitment, management and worker fences are
+integrated. Never enable the tenant startup gate on the strength of this helper.

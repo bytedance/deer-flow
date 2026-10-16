@@ -65,6 +65,18 @@ not invent a thread/run context after the Agent run ends. Scope lifetime default
 to 60 seconds, with a 300-second maximum; keep host clocks synchronized. JSON
 arguments are bounded to 256 KiB and nesting 32; tokens are bounded to 8 KiB.
 
+Native SQL submission preflight is available as `verify_native_execution_scope`.
+After HMAC, owner, audience, expiry and argument checks, it resolves only the
+signed Run/thread/incarnation locators against native SQL. One SQL statement
+checks the admitted Run snapshot, active verified account, live membership and
+policy versions, private parent/project, running state, cancellation and lease.
+It does not read the caller's selected workspace or use token workspace JSON to
+construct an authorization grant. This is a read-only preflight; it does not
+hold a lock or authorize a later physical start/publication. HTTP `ExecutionJobs`
+remains unintegrated and refuses v2 until immutable ledger identity, native MCP
+commit confirmation, management and physical fences are wired together. No tenant
+activation or additional deployment option is introduced by this helper.
+
 Workspace transport preparation (not tenant activation): `mint_execution_scope`
 accepts a trusted immutable `workspace_context` and signs protocol `version: 2`
 alongside the existing Run identity and argument digest. `verify_execution_scope`

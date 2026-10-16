@@ -1138,3 +1138,30 @@ Startup remains compiled false; align the old schema fence and complete paired
 0040 candidate/manifest only after M10/M11. No deployment/push/PR/live model or
 local application runtime tests. This is serial self-review plus bounded CI,
 not a full independent production/security audit or complete M4 acceptance.
+
+
+M4 B receiver preflight checkpoint (2026-10-16): `deerflow-tenant-execution-m4-sql`
+#17 RED missing native SQL verifier; #18 SUCCESS two SQLite/PostgreSQL main
+cases (16.37s); #19 SUCCESS 15 checks (20.67s), four new DB cases plus eleven
+reused signature checks. Actual native admission Run/private parent/member SQL
+resolves original immutable scope after caller selection changes. Verify HMAC,
+authenticated owner, expiry, audience/operation and argument digest before any
+SQL lookup. Deny legacy/retargeted scope, ended/cancelled/expired or ownerless Run,
+removed/stale membership/policy/account, unverified actor, deleting/replaced
+private parent and absent captured scope. Query reuses native membership/account
+policy and checks Run snapshot against independently read live versions in one
+statement. No ORM/auth-success mocks; mutation boundaries use real SQL transactions.
+
+`verify_native_execution_scope` is a read-only point-in-time submission preflight.
+It does not enable ExecutionJobs/HTTP or grant later physical start/publication;
+those unintegrated receivers continue refusing v2. No schema changes. Next wire
+immutable ledger identity and old-worker schema floor, native MCP commit receipt,
+v2 management and start/adopt/publish live fences, followed by actual ToolNode-to-B
+and C-to-B-to-C proof. Scoped cancellation/outbox/notifications, Scheduler and
+remaining runtime/credentials/physical STOP/restore still required. All M0-M11
+parents remain unchecked; compiled startup gate stays false. Serial self-review,
+three-file Ruff check/format, strict OpenSpec and diff checks passed. Current
+three Python files exactly match #19 source; build/log/source/image/empty owned
+resource receipts are `native_b_submission_preflight` in progress JSON. No deployment,
+push/PR, live model calls, local application/pytest/Docker runtime or broad test
+rerun. Previous evidence remains historical and unchanged.
