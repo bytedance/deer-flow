@@ -307,7 +307,12 @@ async def _skill_manage_impl(
             from deerflow.skills.mutations.guard import read_optional_text
 
             prev_content = await _to_thread(read_optional_text, skill_storage, target)
-            executable = "scripts/" in path or path.startswith("scripts/")
+            # Executable content is a file under the skill's top-level ``scripts/``
+            # directory (the ``scripts/`` member rule in skills/package_files.py);
+            # the storage layer already parsed this path with the same Path
+            # semantics. A substring test here also caught support files such as
+            # references/scripts/overview.md and templates/my-scripts/setup.md.
+            executable = Path(path).parts[:1] == ("scripts",)
             static_findings = await _scan_static_candidate_or_raise(name, {path: content}, skill_storage)
             scan = await _scan_or_raise(content, executable=executable, location=f"{name}/{path}", static_findings=static_findings)
             scan["static_findings"] = static_findings
