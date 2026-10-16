@@ -30,7 +30,10 @@ make the command fail; inspect row counts and semantic results as well as timing
 
 `replica_pressure` holds simultaneous active clients behind barriers before running
 commands. `barrier_wait_ms` is test synchronization overhead, so its `total_ms` is
-not a user-facing latency measurement. The provider's `replicas` is a soft cap;
+not a user-facing latency measurement. Turn timing starts inside the worker after
+it acquires its scope lock: executor-queue and scope-lock waits are excluded.
+Pressure batches are submitted sequentially; later batches do not represent
+requests already waiting in an admission queue. The provider's `replicas` is a soft cap;
 protecting active work can exceed it. `--users` distributes independent scopes
 across synthetic users, not real accounts.
 

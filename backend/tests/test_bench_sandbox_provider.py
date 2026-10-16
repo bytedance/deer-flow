@@ -387,6 +387,71 @@ def test_deferred_destroy_is_failed_measurement():
     assert provider._warm_pool  # retain metadata so final shutdown can still clean it
 
 
+@pytest.mark.parametrize("command_raises", [False, True])
+@pytest.mark.parametrize("destroy_raises", [False, True])
+def test_failed_turn_separates_execution_release_and_cleanup_times(monkeypatch, command_raises, destroy_raises):
+    clock = [0.0]
+    monkeypatch.setattr(bench.time, "perf_counter", lambda: clock[0])
+    provider = _FakeAioProvider()
+    original_acquire = provider.acquire
+    original_release = provider.release
+    original_destroy = provider.destroy
+
+    def acquire(*args, **kwargs):
+        clock[0] += 0.010
+        return original_acquire(*args, **kwargs)
+
+    def execute(command, timeout=None):
+        clock[0] += 0.020
+        if command_raises:
+            raise RuntimeError("command failed")
+        return "Error: command failed"
+
+    def release(sid):
+        clock[0] += 0.030
+        return original_release(sid)
+
+    def destroy(sid):
+        clock[0] += 0.040
+        if destroy_raises:
+            raise RuntimeError("destroy failed")
+        return original_destroy(sid)
+
+    monkeypatch.setattr(provider, "acquire", acquire)
+    monkeypatch.setattr(provider._sandbox, "execute_command", execute)
+    monkeypatch.setattr(provider, "release", release)
+    monkeypatch.setattr(provider, "destroy", destroy)
+
+    result = bench._run_one_turn(provider, "aio-docker", "cold_unique_thread", "noop", "true", 0, 1, "user", "thread", True)
+
+    assert not result.success
+    assert "command failed" in result.error
+    assert ("destroy failed" in result.error) is destroy_raises
+    assert result.acquire_ms == pytest.approx(10)
+    assert result.run_ms == pytest.approx(20)
+    assert result.release_ms == pytest.approx(30)
+    assert result.cleanup_ms == pytest.approx(40)
+    assert result.total_ms == pytest.approx(100)
+
+
+def test_failed_acquire_records_elapsed_time_without_fabricating_later_stages(monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(bench.time, "perf_counter", lambda: clock[0])
+    provider = _FakeAioProvider()
+
+    def acquire(*args, **kwargs):
+        clock[0] += 0.125
+        raise RuntimeError("acquire failed")
+
+    monkeypatch.setattr(provider, "acquire", acquire)
+    result = bench._run_one_turn(provider, "aio-docker", "cold_unique_thread", "noop", "true", 0, 1, "user", "thread", True)
+    assert not result.success
+    assert result.acquire_ms == pytest.approx(125)
+    assert result.total_ms == pytest.approx(125)
+    assert result.run_ms == result.release_ms == result.cleanup_ms == 0
+    assert provider.destroyed == []
+
+
 def test_fault_injection_uses_returned_aio_identity(tmp_path):
     provider = _FakeAioProvider()
     rows = bench._run_scenario(provider, "aio-docker", "warm_same_thread", "noop", 1, 1, tmp_path / "out.jsonl", False, {}, fault_inject_after=0)

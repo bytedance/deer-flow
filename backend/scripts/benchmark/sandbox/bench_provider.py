@@ -373,11 +373,12 @@ def _run_one_turn(
         tracked_warm_hit = getattr(provider, "_bench_warm_hit_tracking_installed", False)
         _reset_warm_hit_tracking()
         t_a = time.perf_counter()
-        sid = provider.acquire(thread_id, user_id=user_id)
-        t_b = time.perf_counter()
+        try:
+            sid = provider.acquire(thread_id, user_id=user_id)
+        finally:
+            acquire_ms = (time.perf_counter() - t_a) * 1000
         if tracked_warm_hit:
             warm_hit = _warm_hit_from_acquire()
-        acquire_ms = (t_b - t_a) * 1000
         release_needed = True
 
         if acquired_barrier is not None:
@@ -400,9 +401,10 @@ def _run_one_turn(
             cmd = _STATE_READ
 
         t_c = time.perf_counter()
-        output = sandbox.execute_command(cmd, timeout=30)
-        t_d = time.perf_counter()
-        run_ms = (t_d - t_c) * 1000
+        try:
+            output = sandbox.execute_command(cmd, timeout=30)
+        finally:
+            run_ms = (time.perf_counter() - t_c) * 1000
         # Sandbox.execute_command is a text API. Both adapters render nonzero
         # exits in-band; AIO also reports indeterminate/terminated sessions.
         if output.startswith("Error:") or re.search(r"(?:Exit Code:|Command exited with code)\s*-?[1-9]\d*", output) or "command outcome is unknown" in output.casefold() or "command was terminated" in output.casefold():
@@ -413,15 +415,18 @@ def _run_one_turn(
                 raise RuntimeError(f"State reuse failed: expected {expected_state!r} in output, got {output.strip()!r}")
 
         t_e = time.perf_counter()
-        provider.release(sid)
+        try:
+            provider.release(sid)
+        finally:
+            release_ms += (time.perf_counter() - t_e) * 1000
         release_needed = False
-        t_f = time.perf_counter()
-        release_ms = (t_f - t_e) * 1000
 
         if no_warmpool:
             t_cleanup = time.perf_counter()
-            _evict_from_warm(provider, sid)
-            cleanup_ms = (time.perf_counter() - t_cleanup) * 1000
+            try:
+                _evict_from_warm(provider, sid)
+            finally:
+                cleanup_ms += (time.perf_counter() - t_cleanup) * 1000
 
         return BenchResult(
             provider=provider_name,
@@ -450,15 +455,20 @@ def _run_one_turn(
             acquired_barrier.abort()
         release_error: str | None = None
         if sid is not None and release_needed:
-            t_release = time.perf_counter()
             try:
-                provider.release(sid)
+                t_release = time.perf_counter()
+                try:
+                    provider.release(sid)
+                finally:
+                    release_ms += (time.perf_counter() - t_release) * 1000
                 if no_warmpool:
-                    _evict_from_warm(provider, sid)
+                    t_cleanup = time.perf_counter()
+                    try:
+                        _evict_from_warm(provider, sid)
+                    finally:
+                        cleanup_ms += (time.perf_counter() - t_cleanup) * 1000
             except Exception as release_exc:
                 release_error = repr(release_exc)
-            finally:
-                release_ms = (time.perf_counter() - t_release) * 1000
         error = str(exc) if str(exc).startswith("Error:") else repr(exc)
         if release_error is not None:
             error = f"{error}; release_error={release_error}"
