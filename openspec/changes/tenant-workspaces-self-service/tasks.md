@@ -990,3 +990,29 @@ Next preserve workspace/resource URI in server login redirects, then run compile
 Next and real backend upload/chat/download. Remaining UI/global stores/private
 clients/HTML/M4-M11 stay required. All parent gates remain unchecked; M3 partial,
 activation false; no deployment/push/model calls or local application runtime.
+
+
+M3 SSR/native Next checkpoint (2026-10-16, #128 SUCCESS): native Proxy records
+the actual request path/query in an overwritten private request header, never an
+auth grant. Workspace unauthenticated redirect retains next; authenticated login
+entry follows native safe local next and avoids auth-entry loops. Duplicate and
+invalid workspace locators remain intact for refusal; _rsc alone is stripped.
+#124 actual lost-return RED -> #125 one layout main GREEN. #126 builds the entire
+real Next 16.3.6 app, then native HTTP returns both expected 307s. #127 restores
+the same compiled artifact without rebuilding after input/version/port/SHA/BUILD_ID
+checks: actual main and forged-header/external-next/generated-demo-route/header-
+leak observations pass. #128 nine focused checks (only two new; seven reused),
+six-file format and complete pnpm check pass; driver Ruff/static format pass.
+Final complete production input digest matches the native build/restoration.
+Exact sources, artifacts, HTTP, terminal and empty resources: frontend_ssr_return
+in progress JSON. Cloud-only procedure: docs/tenant-workspaces-next-testing.md.
+
+Native Next auth projection is served by a synthetic Gateway; not real JWT/SQL/
+NAS/model/task/business proof. No browser hydration/form/RSC/two-tab/principal
+claim. Cold build no-cache/Nextra i18n/Git-config diagnostics are recorded; runtime
+artifact is fixture-only and not deployable. Next prioritize M4's trusted native
+Run/MCP/Scheduler/B/C attribution and execution main; retain all remaining M3 and
+M4-M11 requirements. Never bypass startup to fake a tenant Run. Current startup
+schema fence remains 0037 while actual read-clock revision is 0038; align with
+the complete candidate/release manifest before activation. All parent gates stay
+unchecked; activation false, no deployment/push/model/local application tests.

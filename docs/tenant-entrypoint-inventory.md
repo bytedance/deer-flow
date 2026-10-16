@@ -269,3 +269,12 @@ Source inventory has no direct workspace view Link/router/history bypass.
 Root and server entry use deterministic Next/leaf/metadata doubles. SSR auth
 return, compiled Next and actual private/backend/principal/physical proof remain
 required. Existing activation guard stays false.
+
+
+Native server return/Proxy (#128): overwrite the actual request URI for workspace/
+auth layouts, preserving navigation intent but never creating an actor/workspace
+grant. Full real Next build plus native HTTP and restored artifact verify proper
+307s, forged-header refusal, unsafe-next fallback, generated-route auth return
+and no request-header leak. Gateway is synthetic; JWT/SQL/browser/task/physical
+acceptance remain required. Prioritize M4 native execution scope, retain M3 final
+gates and align the currently stale schema fence before release; activation false.

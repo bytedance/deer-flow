@@ -709,3 +709,30 @@ retaining native history for stream-created thread URLs. Sign-in retains route
 intent. Verify the root main first, then only necessary locator/navigation
 boundaries and affected native workflows in Shanghai. Actual Next/hydration and
 real backend acceptance remain open until separately exercised.
+
+
+M3 SSR return refinement (2026-10-16): use native Next 16 Proxy only to overwrite
+a private request header with the actual path/query before workspace/auth layouts
+render. Strip Next's transient _rsc cache key, preserve all user locators (including
+invalid/duplicate workspace_id for later refusal). Never forward the header as a
+public response header, fetch auth in Proxy, or grant workspace authority from it.
+Existing Gateway authentication remains unchanged. Workspace unauthenticated
+redirects retain next; already-authenticated login visits resolve the same native
+safe local next policy and avoid auth-entry loops. Missing/unsafe metadata retains
+the legacy safe destination. First prove the existing layout main RED->GREEN,
+then run the actual full Next build and HTTP redirect main on Shanghai with an
+explicit synthetic Gateway auth service. That proves Next integration, not real
+JWT/membership/business; keep those separate gates open. Only afterward add the
+necessary forged-header/unsafe-next boundary checks. No local app runtime.
+
+
+Runtime dependency clarification from source inspection: the production Gateway
+workspace startup fence remains false until the M3-M11 runtime/release work is
+implemented. Do not add a test/operator bypass to claim a full live tenant Run
+main early. After this native Next return-address checkpoint, prioritize M4's
+trusted Run/MCP/Scheduler/B/C attribution and execution main; retain all remaining
+M3 browser/global-store/physical acceptance. The final full-Gateway/business test
+will run with its runtime dependencies, not replace them with fake success.
+Also retain the release audit item: startup.py currently expects 0037 while the
+read-clock migration head is 0038; align the candidate's schema fence and paired
+release evidence before activation, rather than opening the current guard.

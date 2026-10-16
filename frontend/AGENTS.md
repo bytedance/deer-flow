@@ -756,3 +756,26 @@ principal/two-tab/physical/global-store checks remain open; activation stays fal
 The client mount gates do not prevent server/RSC children from evaluating. All
 server-side private reads still require trusted backend workspace authorization;
 never treat WorkspaceContentBoundary or a URL locator as that authorization.
+
+
+SSR return-address integration (#126/#127 native Next): src/proxy.ts overwrites
+x-deerflow-request-route with the actual request path/query for workspace and
+auth entry routes, stripping only Next's transient _rsc parameter. It sets a
+request header through NextResponse.next({ request: { headers } }), never public
+response metadata, authentication, workspace context or a Gateway lookup. Keep
+its matcher literal and exclude public/assets. The workspace unauthenticated
+layout now carries next; the authenticated login layout follows the existing
+safe local next policy and refuses auth-entry loops. Other auth branches retain
+their native behavior. No caller-supplied header may override the actual URI.
+
+The full production Next 16.3.6 build and native HTTP main pass against an explicit
+synthetic Gateway. Restoring the same compiled archive is allowed only after
+matching production inputs, Node/Next versions, fixture ports, archive SHA and
+BUILD_ID; malformed archive entries fail rather than rebuilding silently. HTTP
+checks include forged header, external next, a generateStaticParams chat route
+and no request-metadata response leak. This does not prove real JWT, membership,
+browser hydration or task business. The exported artifact has a synthetic
+Gateway destination and is never a release artifact. See
+docs/tenant-workspaces-next-testing.md for the cloud-only driver and limits.
+Earlier notes identifying the server redirect gap are historical; actual account
+registration/OIDC/step-up flows and full tenant runtime remain separate gates.

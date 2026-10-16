@@ -1549,10 +1549,10 @@
   },
   "latest_checkpoint": {
     "work_package": "M3",
-    "status": "partial M3; resumed",
+    "status": "partial M3; native SSR return verified",
     "last_verified_job": "deerflow-tenant-frontend",
-    "last_verified_build": 123,
-    "next": "Preserve SSR auth return intent, then compiled Next and real Gateway business main; retain all remaining M0-M11 gates",
+    "last_verified_build": 128,
+    "next": "Prioritize M4 trusted Run/MCP/Scheduler/B/C scope and deterministic execution main, retaining remaining M3 and full M0-M11 release gates",
     "tenant_activation": "closed",
     "deployment": "none",
     "previous_backend_job": "deerflow-tenant-m1-postgres",
@@ -2122,7 +2122,7 @@
     ]
   },
   "user_pause_checkpoint": {
-    "status": "resumed at explicit user request; latest native route checkpoint frontend_workspace_routes/#123; previous pause historical",
+    "status": "resumed; latest SSR/native Next checkpoint frontend_ssr_return/#128; earlier pause historical",
     "date": "2026-10-16",
     "reason": "今天先到这里了，保存下进度",
     "last_fully_verified_commit": "3fb8ed75",
@@ -7704,6 +7704,335 @@
       "Workspace layout unauthenticated server redirect and authenticated auth-layout next handling must preserve the original workspace/resource address; source still shows the gap.",
       "Compiled Next browser hydration/native history/refresh/back/forward/new-tab and real Gateway personal/team upload/chat/download main.",
       "Actual private clients/global stores/dialog/settings/title/focus/live WSS, principal/two-tab/remaining HTML/physical and M4-M11 gates."
+    ],
+    "runtime_activation": false,
+    "deployment": "none",
+    "remote_push": "none",
+    "followup": "Server return-address gap is resolved specifically by frontend_ssr_return/#128; full browser/Gateway/business/runtime acceptance remains open."
+  },
+  "frontend_ssr_return": {
+    "status": "partial M3; server return-address feature, full native Next build/HTTP and restored artifact boundaries verified; not complete tenant/browser/business acceptance",
+    "date": "2026-10-16",
+    "base_commit": "680cc59c",
+    "job": "deerflow-tenant-frontend",
+    "history": {
+      "124": "One domain RED: actual workspace layout redirects to /login and loses the copied team/resource URI.",
+      "125": "Same layout main passes: unauthenticated login carries next and already-authenticated login entry returns to that URI. Only then compile the full native Next app.",
+      "126": "Full native Next 16.3.6 production webpack build succeeds, including route types and registered Proxy. Two real HTTP main requests return expected 307s against synthetic Gateway auth. Build takes 569.09 seconds; retain fixture-only compiled artifact and matching input digest.",
+      "127": "Restore exactly that compiled artifact after input/Node/Next/port/SHA/BUILD_ID checks; no rebuild. Main and forged-header/external-next/generated-demo-route/header-leak observations pass in native HTTP. Five node checks (only two new total) pass.",
+      "128": "Final nine checks/four files, six-file Prettier and required full pnpm check pass. No repeat cold Next build: final production input digest and five production source bytes match #126/#127. Static Ruff/format pass for the cloud driver."
+    },
+    "contract": "Native Next Proxy captures the actual workspace/auth request URI in an overwritten private request header, stripping only transient _rsc query. It neither fetches auth nor creates workspace authority, and it passes request headers via NextResponse.next({request:{headers}}), not public response headers. Workspace unauthenticated layout retains next; authenticated login entries use native safe-local-next validation and avoid auth-entry loops. Preserve duplicate/invalid workspace locators for later refusal. Existing Gateway auth and all other auth branches remain unchanged. Driver builds the complete real frontend, starts native production Next and probes document HTTP redirects with an explicit synthetic Gateway. Compiled reuse must match complete production inputs, tool versions, fixture ports, archive SHA and BUILD_ID; malformed/stale artifacts fail instead of silently rebuilding.",
+    "verification": {
+      "new_rstest_cases": 2,
+      "reused_cases": 7,
+      "rstest_total": 9,
+      "rstest_files": 4,
+      "formatted_files": 6,
+      "native_build": "Whole actual frontend next build --webpack, Node v22.23.3, Next 16.3.6, no source/runtime auth mocks inside Next. Synthetic loopback Gateway provides session projection only. Proxy appears in the build and is exercised through native HTTP.",
+      "native_http_main": "Both unauthenticated team/resource -> login?next and authenticated login -> same team/resource return actual 307s.",
+      "native_boundaries": [
+        "Forged x-deerflow-request-route cannot change the actual target.",
+        "External unsafe next remains on native local fallback.",
+        "A real generateStaticParams demo chat still retains request-dependent auth return.",
+        "Internal request metadata and Cookie headers are not exposed in the actual HTTP response."
+      ],
+      "artifact_restore": "Same production input digest, Node/Next versions, ports, BUILD_ID and SHA-256; build_reused=true/build_seconds=0. Runtime archive excludes webpack cache and is not a release image.",
+      "checks": [
+        "nine focused node/DOM checks",
+        "full native Next production build and route types",
+        "native HTTP main and four boundary observations",
+        "verified compiled artifact restore",
+        "six-file cloud format/target lint, final Prettier",
+        "required full pnpm check",
+        "Ruff static driver check/format",
+        "source/archive and all production-input digest equality",
+        "exact owned-resource cleanup",
+        "OpenSpec strict and git whitespace checks"
+      ]
+    },
+    "proof_limits": "Gateway auth is synthetic; no real JWT, membership SQL, models, NAS or task dispatch is verified. Native HTTP is document navigation; browser hydration/form sign-in/RSC transitions/back-forward/two tabs/principal and other M3 UI/global-store/HTML gates remain open. Build/runtime contains only fixture endpoints with no published ports and no real credentials. First cold build logs expected no-cache, existing Nextra i18n and missing Git-config diagnostics; neither warnings nor the build table alone prove auth. Existing native schema/runtime activation fences stay closed. No tenant deployment or remote Git push.",
+    "evidence": {
+      "frontend": [
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 19204,
+          "number": 124,
+          "result": "FAILURE",
+          "owned_resources": {
+            "containers": [],
+            "networks": []
+          },
+          "file_counts": [],
+          "passed_counts": [],
+          "failed_counts": [
+            "1"
+          ],
+          "format_passed": false,
+          "full_check_invoked": false,
+          "type_errors": [],
+          "archive_sha256": "a11563ad1b5fbd1cca0a7c882723281c224e3d1ecae65c37c9aa3451787ad4d6"
+        },
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 16071,
+          "number": 125,
+          "result": "SUCCESS",
+          "owned_resources": {
+            "containers": [],
+            "networks": []
+          },
+          "file_counts": [
+            "1"
+          ],
+          "passed_counts": [
+            "1"
+          ],
+          "failed_counts": [],
+          "format_passed": false,
+          "full_check_invoked": false,
+          "type_errors": [],
+          "archive_sha256": "6b5164fdc3b1b5fba9f6806d2140bf823c38c5269fd5fba56da0faea96d61629"
+        },
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 612807,
+          "number": 126,
+          "result": "SUCCESS",
+          "owned_resources": {
+            "containers": [],
+            "networks": []
+          },
+          "file_counts": [
+            "1"
+          ],
+          "passed_counts": [
+            "1"
+          ],
+          "failed_counts": [],
+          "format_passed": false,
+          "full_check_invoked": false,
+          "type_errors": [],
+          "archive_sha256": "3ceca01af30fde4a1bf36c8e52e53811505f7e7f7d220f2917c5bacd22ac2fe8",
+          "next": {
+            "status": "main_passed",
+            "scope": "full native Next production build and HTTP SSR against synthetic loopback Gateway auth; not real JWT/workspace/business acceptance",
+            "models_called": false,
+            "artifact_usage": "compiled Next test fixture only; synthetic Gateway destination, not a release artifact",
+            "gateway_port": 8001,
+            "next_port": 3000,
+            "production_inputs_sha256": "578248f20a8d78b2841a67fd40e882a708038007845db1a127d771e3e8b4ec8d",
+            "node": "v22.23.3",
+            "next": "16.3.6",
+            "rows": [
+              {
+                "request": "/workspace/chats/private?workspace_id=22222222-2222-2222-2222-222222222222&tab=files",
+                "authenticated": false,
+                "status": 307,
+                "redirect_kind": "location",
+                "target": "/login?next=%2Fworkspace%2Fchats%2Fprivate%3Fworkspace_id%3D22222222-2222-2222-2222-222222222222%26tab%3Dfiles",
+                "body_bytes": 10598
+              },
+              {
+                "request": "/login?next=%2Fworkspace%2Fchats%2Fprivate%3Fworkspace_id%3D22222222-2222-2222-2222-222222222222%26tab%3Dfiles",
+                "authenticated": true,
+                "status": 307,
+                "redirect_kind": "location",
+                "target": "/workspace/chats/private?workspace_id=22222222-2222-2222-2222-222222222222&tab=files",
+                "body_bytes": 6247
+              }
+            ],
+            "gateway_requests": [
+              {
+                "path": "/api/v1/auth/setup-status",
+                "cookie_present": false,
+                "fixture_session_accepted": false
+              },
+              {
+                "path": "/api/v1/auth/me",
+                "cookie_present": true,
+                "fixture_session_accepted": true
+              }
+            ],
+            "failure": null,
+            "build_exit": 0,
+            "build_seconds": 569.09,
+            "build_id": "B1Yrgiz13L3kifc31S9j_",
+            "compiled_archive_sha256": "bf77d7b63526f9d1191ce1dfba5f69744c810406d1a75d696c2221962b25a8d3",
+            "compiled_archive_bytes": 24463456
+          },
+          "next_artifact": "job/deerflow-tenant-frontend/126/artifact/m3-native-next-ssr-main-next-evidence/",
+          "compiled_sha256": "bf77d7b63526f9d1191ce1dfba5f69744c810406d1a75d696c2221962b25a8d3",
+          "compiled_bytes": 24463456
+        },
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 33455,
+          "number": 127,
+          "result": "SUCCESS",
+          "owned_resources": {
+            "containers": [],
+            "networks": []
+          },
+          "file_counts": [
+            "2"
+          ],
+          "passed_counts": [
+            "5"
+          ],
+          "failed_counts": [],
+          "format_passed": false,
+          "full_check_invoked": false,
+          "type_errors": [],
+          "archive_sha256": "fe1d4348dfe339955e65ac88d0da9b36def6e80e9f297f6b95f3e6b47b21b8c9",
+          "next": {
+            "status": "main_passed",
+            "scope": "full native Next production build and HTTP SSR against synthetic loopback Gateway auth; not real JWT/workspace/business acceptance",
+            "models_called": false,
+            "artifact_usage": "compiled Next test fixture only; synthetic Gateway destination, not a release artifact",
+            "gateway_port": 8001,
+            "next_port": 3000,
+            "production_inputs_sha256": "578248f20a8d78b2841a67fd40e882a708038007845db1a127d771e3e8b4ec8d",
+            "node": "v22.23.3",
+            "next": "16.3.6",
+            "rows": [
+              {
+                "request": "/workspace/chats/private?workspace_id=22222222-2222-2222-2222-222222222222&tab=files",
+                "authenticated": false,
+                "status": 307,
+                "redirect_kind": "location",
+                "target": "/login?next=%2Fworkspace%2Fchats%2Fprivate%3Fworkspace_id%3D22222222-2222-2222-2222-222222222222%26tab%3Dfiles",
+                "body_bytes": 10598
+              },
+              {
+                "request": "/login?next=%2Fworkspace%2Fchats%2Fprivate%3Fworkspace_id%3D22222222-2222-2222-2222-222222222222%26tab%3Dfiles",
+                "authenticated": true,
+                "status": 307,
+                "redirect_kind": "location",
+                "target": "/workspace/chats/private?workspace_id=22222222-2222-2222-2222-222222222222&tab=files",
+                "body_bytes": 6247
+              },
+              {
+                "request": "/workspace/chats/private?workspace_id=22222222-2222-2222-2222-222222222222&tab=files",
+                "authenticated": false,
+                "status": 307,
+                "redirect_kind": "location",
+                "target": "/login?next=%2Fworkspace%2Fchats%2Fprivate%3Fworkspace_id%3D22222222-2222-2222-2222-222222222222%26tab%3Dfiles",
+                "body_bytes": 10598
+              },
+              {
+                "request": "/login?next=https%3A%2F%2Foutside.invalid%2Fworkspace",
+                "authenticated": true,
+                "status": 307,
+                "redirect_kind": "location",
+                "target": "/workspace",
+                "body_bytes": 5942
+              },
+              {
+                "request": "/workspace/chats/21cfea46-34bd-4aa6-9e1f-3009452fbeb9?workspace_id=22222222-2222-2222-2222-222222222222",
+                "authenticated": false,
+                "status": 307,
+                "redirect_kind": "location",
+                "target": "/login?next=%2Fworkspace%2Fchats%2F21cfea46-34bd-4aa6-9e1f-3009452fbeb9%3Fworkspace_id%3D22222222-2222-2222-2222-222222222222",
+                "body_bytes": 10615
+              }
+            ],
+            "boundaries": {
+              "forged_header_overwritten": true,
+              "unsafe_next_stays_local": true,
+              "generated_route_keeps_auth_return": true,
+              "no_request_header_leak": true
+            },
+            "build_reused": true,
+            "gateway_requests": [
+              {
+                "path": "/api/v1/auth/setup-status",
+                "cookie_present": false,
+                "fixture_session_accepted": false
+              },
+              {
+                "path": "/api/v1/auth/me",
+                "cookie_present": true,
+                "fixture_session_accepted": true
+              },
+              {
+                "path": "/api/v1/auth/setup-status",
+                "cookie_present": false,
+                "fixture_session_accepted": false
+              },
+              {
+                "path": "/api/v1/auth/me",
+                "cookie_present": true,
+                "fixture_session_accepted": true
+              },
+              {
+                "path": "/api/v1/auth/setup-status",
+                "cookie_present": false,
+                "fixture_session_accepted": false
+              }
+            ],
+            "failure": null,
+            "build_exit": 0,
+            "build_seconds": 0,
+            "build_id": "B1Yrgiz13L3kifc31S9j_",
+            "compiled_archive_sha256": "bf77d7b63526f9d1191ce1dfba5f69744c810406d1a75d696c2221962b25a8d3",
+            "compiled_archive_bytes": 24463456
+          },
+          "next_artifact": "job/deerflow-tenant-frontend/127/artifact/m3-next-ssr-boundaries-next-evidence/"
+        },
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 367855,
+          "number": 128,
+          "result": "SUCCESS",
+          "owned_resources": {
+            "containers": [],
+            "networks": []
+          },
+          "file_counts": [
+            "4"
+          ],
+          "passed_counts": [
+            "9"
+          ],
+          "failed_counts": [],
+          "format_passed": true,
+          "full_check_invoked": true,
+          "type_errors": [],
+          "archive_sha256": "bb9f7e2ad97481f1d458fae7eb5272c7637c825e6109ef6494825766770ba0f8"
+        }
+      ],
+      "formatter_resources": {
+        "frontend-ssr-return-format": {
+          "containers": [],
+          "networks": []
+        },
+        "frontend-ssr-return-test-format": {
+          "containers": [],
+          "networks": []
+        }
+      },
+      "ci_image": "sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01"
+    },
+    "source_sha256": {
+      "frontend/src/app/workspace/layout.tsx": "084be394be082d2b2ab157be429413aadf67eeb379887574dbf8d89fb150501d",
+      "frontend/src/app/(auth)/layout.tsx": "c414ad158b172709da9e8197a4a6411c312ea971b03982299bc57e8591adbc1f",
+      "frontend/src/core/auth/return-path.ts": "0b5e4161110803782459d77f0bb00c23170ba6bdb23f4399e7ada82ec456349e",
+      "frontend/src/core/auth/return-path-server.ts": "c5c275300e56527724eda650e06398e31d22e800576f0525b41a182114a1b37f",
+      "frontend/src/proxy.ts": "5c09c952f9d5cd2a06d4b86e8456c8235c3588e97ff5fd47dbb1f069f4bbdbab",
+      "frontend/tests/unit/app/workspace/server-auth-return.test.tsx": "3f8e5b96a5d97d8b037220f8d48aaa831ed9a81a04bbd6dbc4a4a372c64c74ee",
+      "scripts/tenant_next_ssr_probe.py": "814715826d2027c11376bc461f16ebd60c1b9decf8ae47f29748db329d3dbf75"
+    },
+    "native_production_inputs_sha256": "578248f20a8d78b2841a67fd40e882a708038007845db1a127d771e3e8b4ec8d",
+    "remaining": [
+      "Prioritize M4 trusted native Run/MCP/Scheduler/B/C scope propagation, admission/revalidation/publication/cancellation and UI-independent execution main. Do not bypass the production startup fence for an early fake full-tenant Run acceptance.",
+      "Retain remaining M3 browser hydration/global stores/title/focus/live WSS/principal/two-tab/HTML/physical requirements and actual full-Gateway/business test when runtime dependencies exist.",
+      "Release audit must align startup schema fence (currently 0037_project_visibility) with actual migration head 0038_workspace_read_clocks and later heads before activation; all M0-M11 parent gates remain required."
     ],
     "runtime_activation": false,
     "deployment": "none",
