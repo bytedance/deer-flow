@@ -108,6 +108,26 @@ class LlmCallConfig(BaseModel):
     which is what a provider burst-rate (``limit_burst_rate``) limit fires on.
     """
 
+    @field_validator(
+        "max_concurrent_calls",
+        "retry_max_attempts",
+        "retry_base_delay_ms",
+        "retry_cap_delay_ms",
+        "burst_retry_base_delay_ms",
+        mode="before",
+    )
+    @classmethod
+    def _reject_boolean_numeric_settings(cls, value: object) -> object:
+        """Pydantic coerces ``true`` to ``1`` before ``ge=`` sees it.
+
+        config.yaml mixes booleans with integer knobs on neighbouring lines, so a
+        typo like ``retry_max_attempts: true`` would otherwise silently mean one
+        attempt (no retry) and 1 ms backoff delays.
+        """
+        if isinstance(value, bool):
+            raise ValueError("must be a number, not a boolean")
+        return value
+
     max_concurrent_calls: int = Field(
         default=0,
         ge=0,
@@ -254,6 +274,14 @@ class AppConfig(BaseModel):
             ),
         ),
     )
+    @field_validator("recursion_limit", "max_recursion_limit", mode="before")
+    @classmethod
+    def _reject_boolean_recursion_limits(cls, value: object) -> object:
+        """A boolean here means ``recursion_limit: true`` -> 1 super-step, not "unlimited"."""
+        if isinstance(value, bool):
+            raise ValueError("must be a number, not a boolean")
+        return value
+
     recursion_limit: int = Field(
         default=100,
         ge=1,
