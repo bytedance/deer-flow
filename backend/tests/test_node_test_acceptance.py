@@ -128,8 +128,9 @@ def test_empty_node_sibling_does_not_veto_another_runner():
 
 
 @pytest.mark.parametrize("label", ["0 passed", "1 failed", "1 error"])
-def test_test_names_cannot_supply_failure_or_zero_evidence(label):
-    verdict = _verdict(f"# Subtest: {label}\n    ok 1 - {label}\n" + _summary())
+@pytest.mark.parametrize("point", ["# Subtest: {label}\n    ok 1 - {label}", "⚠ {label} # TODO"])
+def test_test_names_cannot_supply_failure_or_zero_evidence(label, point):
+    verdict = _verdict(point.format(label=label) + "\n" + _summary())
     assert verdict["all_hold"] is True
 
 
@@ -179,6 +180,8 @@ def test_harvest_drops_a_partial_label_before_interpreting_counts(executor_modul
         ("test('x'.repeat(1500) + ' 1 failed', () => {});", (True, True)),
         ("test('x'.repeat(1500) + ' 0 passed', () => {});", (True, True)),
         ("test.todo('pending');", (False, False)),
+        ("test('all tests passed', { todo: true }, () => { throw Error('fixture'); });", (False, False)),
+        ("test('sample', () => {}); test('1 failed', { todo: true }, () => { throw Error('fixture'); });", (True, True)),
         ("describe('empty suite', () => {});", (False, False)),
         ("describe('all tests passed', () => { test.skip('optional', () => {}); });", (False, False)),
         ("describe('all tests passed', () => { test.todo('pending'); });", (False, False)),
@@ -186,7 +189,24 @@ def test_harvest_drops_a_partial_label_before_interpreting_counts(executor_modul
         ("test('sample', () => { throw Error('fixture'); });", (True, False)),
         ("test('pending', { timeout: 20 }, () => new Promise(() => {}));", (True, False)),
     ],
-    ids=["pass", "summary-like-names", "pass-and-skip", "all-skipped", "long-skipped", "long-failure-name", "long-zero-name", "all-todo", "empty-suite", "skipped-suite", "todo-suite", "summary-like-suite", "failure", "cancelled"],
+    ids=[
+        "pass",
+        "summary-like-names",
+        "pass-and-skip",
+        "all-skipped",
+        "long-skipped",
+        "long-failure-name",
+        "long-zero-name",
+        "all-todo",
+        "failing-todo-pass-name",
+        "failing-todo-failure-name",
+        "empty-suite",
+        "skipped-suite",
+        "todo-suite",
+        "summary-like-suite",
+        "failure",
+        "cancelled",
+    ],
 )
 async def test_real_node_results_reach_parent_acceptance(tmp_path, monkeypatch, executor_module, reporter, body, expected):
     (tmp_path / "sample.test.cjs").write_text("const { test, describe } = require('node:test');\n" + body, encoding="utf-8")
