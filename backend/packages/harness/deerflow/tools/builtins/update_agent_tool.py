@@ -97,6 +97,9 @@ def update_agent(
     ``"null"`` / ``"none"`` / ``"undefined"`` for unchanged fields; omit those
     fields instead.
 
+    Changing ``tool_groups`` to a list without ``knowledge`` also clears the
+    saved default knowledge selection, so subsequent turns remain usable.
+
     Args:
         soul: Optional full replacement SOUL.md content.
         description: Optional new one-line description.
@@ -234,6 +237,11 @@ def update_agent(
     preserved = preserve_non_managed_fields(existing_cfg)
     for key, value in preserved.items():
         config_data.setdefault(key, value)
+
+    # Match Agent settings: an inherited scope is invalid without knowledge access.
+    if "tool_groups" in updated_fields and tool_groups is not None and "knowledge" not in tool_groups and existing_cfg.knowledge_scope is not None:
+        config_data["knowledge_scope"] = None
+        updated_fields.append("knowledge_scope")
 
     config_changed = bool({"description", "model", "tool_groups", "skills"} & set(updated_fields))
     if soul is not None:
