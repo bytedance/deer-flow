@@ -21,6 +21,7 @@ import errno
 import logging
 import os
 import re
+import stat
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -471,8 +472,11 @@ def _publish_screenshot_no_overwrite(outputs_path: Path, name: str, content: byt
 
     The sandbox can write ``outputs/`` too, so it could swap the staged name for
     a symlink to a host file before the link. The link does not follow symlinks
-    where supported, and the published name must be the inode written here;
-    anything else is removed and the capture fails.
+    where supported, and the published name must be the regular-file inode
+    written here; anything else is removed and the capture fails. The staged
+    descriptor stays open until that check: an unlinked but open inode cannot be
+    freed, so a swapped-in file can never reuse its number (Linux filesystems
+    reuse a freed inode number at once) and pass as the capture.
     """
     outputs_path.mkdir(parents=True, exist_ok=True)
     staged = outputs_path / f".{name}.{uuid4().hex}.tmp"
@@ -480,29 +484,28 @@ def _publish_screenshot_no_overwrite(outputs_path: Path, name: str, content: byt
     try:
         try:
             handle = os.fdopen(fd, "wb")
-            fd = None  # The file object now owns the descriptor.
-            with handle:
-                handle.write(content)
-                handle.flush()
-                os.fsync(handle.fileno())
-                staged_stat = os.fstat(handle.fileno())
         except BaseException:
-            if fd is not None:
-                os.close(fd)
+            os.close(fd)
             raise
-        for candidate in _screenshot_name_candidates(name):
-            destination = outputs_path / candidate
-            try:
-                if _LINK_CAN_SKIP_SYMLINKS:
-                    os.link(staged, destination, follow_symlinks=False)
-                else:
-                    os.link(staged, destination)
-            except FileExistsError:
-                continue
-            if not os.path.samestat(os.lstat(destination), staged_stat):
-                destination.unlink(missing_ok=True)
-                raise OSError(f"Staged browser screenshot changed before publication: {staged.name}")
-            return candidate
+        with handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+            staged_stat = os.fstat(handle.fileno())
+            for candidate in _screenshot_name_candidates(name):
+                destination = outputs_path / candidate
+                try:
+                    if _LINK_CAN_SKIP_SYMLINKS:
+                        os.link(staged, destination, follow_symlinks=False)
+                    else:
+                        os.link(staged, destination)
+                except FileExistsError:
+                    continue
+                published = os.lstat(destination)
+                if not stat.S_ISREG(published.st_mode) or not os.path.samestat(published, staged_stat):
+                    destination.unlink(missing_ok=True)
+                    raise OSError(f"Staged browser screenshot changed before publication: {staged.name}")
+                return candidate
         raise FileExistsError(errno.EEXIST, "No free screenshot name", str(outputs_path / name))
     finally:
         try:

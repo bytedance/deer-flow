@@ -158,6 +158,39 @@ async def test_a_staged_capture_swapped_for_another_file_is_not_published(tmp_pa
     assert list(tmp_path.iterdir()) == []
 
 
+def _open_descriptors_for(target: os.stat_result) -> list[int]:
+    descriptors = []
+    for entry in os.listdir("/dev/fd"):
+        try:
+            if os.path.samestat(os.fstat(int(entry)), target):
+                descriptors.append(int(entry))
+        except OSError:
+            continue
+    return descriptors
+
+
+@pytest.mark.skipif(not os.path.isdir("/dev/fd"), reason="needs /dev/fd to list open descriptors")
+@pytest.mark.asyncio
+async def test_the_staged_capture_stays_open_while_it_is_linked(tmp_path, monkeypatch):
+    # Linux filesystems hand a freed inode number to the next file at once, so
+    # a capture whose descriptor is closed before the link lets a swapped-in
+    # file reuse its number and pass the identity check. macOS rarely reuses
+    # numbers, so the swap tests above only catch that there; pin the guard
+    # itself: an open descriptor keeps the staged inode allocated.
+    link = os.link
+    open_at_link: list[list[int]] = []
+
+    def observing_link(source, destination, *args, **kwargs):
+        open_at_link.append(_open_descriptors_for(os.lstat(source)))
+        return link(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(os, "link", observing_link)
+    result = await _screenshot(tmp_path)
+
+    assert _artifact(result) == "/mnt/user-data/outputs/report.png"
+    assert open_at_link and all(open_at_link)
+
+
 @pytest.mark.asyncio
 async def test_a_failed_staging_write_leaves_no_files(tmp_path, monkeypatch):
     def fail(*args):
