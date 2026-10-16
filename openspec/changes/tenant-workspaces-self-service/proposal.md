@@ -10,7 +10,7 @@ The user requires one release covering operator-created tenants and customer sel
 - Add basic quotas, usage, audit, account/workspace closure, migration/recovery and one research-follow-up workflow.
 
 ## Scope
-Implementation is in progress at partial M3 resource/file integration; complete work-package acceptance remains pending. Evidence is recorded in docs/tenant-workspaces-progress.json. Implementation runs M0 through M11 sequentially on Shanghai Jenkins. No local Docker/pytest or tenant deployment has occurred. Billing, new enterprise SSO, custom role builders and dedicated tenant deployments are excluded.
+Implementation is in progress at partial M3 and M4 native Run/MCP/B HTTP integration; complete work-package acceptance remains pending. Evidence is recorded in docs/tenant-workspaces-progress.json. Implementation runs M0 through M11 sequentially on Shanghai Jenkins. No local Docker/pytest or tenant deployment has occurred. Billing, new enterprise SSO, custom role builders and dedicated tenant deployments are excluded.
 
 ## Capabilities
 ### New Capabilities

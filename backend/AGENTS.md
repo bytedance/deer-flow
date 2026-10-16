@@ -377,21 +377,35 @@ M4 MCP metadata/driver foundation: scoped native task requests/references retain
 the source Run's immutable workspace; source execution owner is copied from a
 server-owned runtime key. SQL validates source/current membership/nonce before
 and after remote submission and before polling/result commit. Native schema is
-now 0040; independent executor schema remains e0002. Scoped submit signing uses
-v2 and does not fall back to legacy; B receiver/management, scoped control queues,
-remote publication/physical execution and full tenant activation remain pending.
+now 0040; independent executor schema is e0003. Scoped submit signing uses v2
+without legacy fallback. The B HTTP component verifies native source/task/live
+member receipts for submission and management; scoped control queues, physical
+execution/publication and full tenant activation remain pending.
 
 The executor's `verify_native_execution_scope` is a read-only SQL submission
 preflight. It verifies cryptographic intent before native lookup, reuses native
 membership/account policy and checks the original running Run/private parent and
-snapshot. It is not a durable physical start/publication grant; HTTP B receivers
-remain closed to v2 until ledger, MCP commitment, management and worker fences are
-integrated. Never enable the tenant startup gate on the strength of this helper.
+snapshot. It is not a durable physical start/publication grant. Opt-in scoped B
+HTTP submission and v2 management now verify original native MCP commitment and
+snapshot identity; unintegrated physical worker claims still refuse scoped work.
+Never enable the tenant startup gate on this component evidence.
 
 Executor schema `e0003_execution_identity` appends a nullable immutable B intent
 snapshot/hash. Native ownership attribution leaves it NULL; it does not create a
 launch grant. JobStore validates captured identity on reads/mutations/retries.
 Unintegrated local and pool queued claims exclude workspace-attributed jobs;
 pool filtering precedes limit. All old processes must stop before offline upgrade.
-Do not interpret this schema floor or claim refusal as completed scoped B/C launch,
-management, publication or tenant runtime activation.
+Do not interpret this schema floor or HTTP management as completed scoped B/C
+physical launch/publication, native cancellation delivery or tenant activation.
+
+Scoped B receiver configuration is operator-only (`workspace_required` plus exact
+`native_server_name`); it requires native 0040/executor e0003, and existing native
+team data refuses legacy receiver startup. Native `mcp_tasks` remains lifecycle
+authority: B reads its committed remote/server/source/private-parent snapshot for
+authorization only. The normal task-local service binding signs v2 management
+without making up a live Run. Native cancel/notification queues remain withheld;
+remote cancellation of an unstarted B job is not physical STOP acceptance.
+Staging expiry only mutates staged rows and leaves unknown history/reservations
+untouched. Scoped file snapshots/publication recheck live scope under native
+workspace/actor/private-parent locks. Full physical start/adopt/result/control
+and M0-M11 evidence are still required; activation stays compiled false.

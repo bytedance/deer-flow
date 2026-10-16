@@ -288,3 +288,17 @@ refuse it. This is not complete MCP HTTP permission/credential binding, B receiv
 management, cancellation, notifications or physical execution acceptance; those
 entrypoints remain required. See native_mcp_scope in progress JSON. Tenant
 startup remains closed; no header or metadata object activates authority.
+
+
+M4 actual B HTTP component: the native durable ToolNode wrapper and ordinary
+MCP driver now reach B through real MCP HTTP serialization/authentication. B
+persists original v2 intent; source Run may finish and caller may switch spaces,
+but background v2 status resolves the original native MCP receipt and independent
+live scope before queueing. Exact native server/remote handle/source/private
+parent/incarnation and Run/task/job snapshots must match. Orphan staged work,
+legacy downgrade, wrong/stale/cancelled/revoked receipt is refused. Shared file
+snapshots recheck live native scope; old receiver mode refuses existing team data.
+Direct B cancellation before physical start can return through native polling;
+this does not enable native scoped cancel/outbox/notification queues or prove
+physical STOP. B worker scoped claims, full C→B→C, publication/continuation,
+credential revocation and M0-M11 remain pending. Global activation stays closed.

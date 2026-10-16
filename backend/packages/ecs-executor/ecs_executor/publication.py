@@ -12,8 +12,12 @@ from pathlib import Path
 
 from sqlalchemy import create_engine, select
 
+from deerflow.authz.workspace import WorkspaceContext
 from deerflow.config.paths import Paths, make_safe_user_id
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
+from deerflow.persistence.user.model import UserRow
+from deerflow.persistence.workspaces.model import WorkspaceRow
 from ecs_executor.files import relative_file
 
 
@@ -116,7 +120,22 @@ class WorkspacePublication:
             else:
                 connection.begin()
             try:
-                query = select(ThreadMetaRow.user_id, ThreadMetaRow.incarnation).where(ThreadMetaRow.thread_id == job["thread_id"])
+                query = select(ThreadMetaRow.user_id, ThreadMetaRow.incarnation, ThreadMetaRow.workspace_id).where(ThreadMetaRow.thread_id == job["thread_id"])
+                captured = job.get("workspace_context")
+                if captured is not None:
+                    try:
+                        context = WorkspaceContext(**captured)
+                    except (TypeError, ValueError):
+                        raise ValueError("Native file scope is invalid") from None
+                    if context.actor_user_id != job["user_id"] or context.workspace_id != job.get("workspace_id"):
+                        raise ValueError("Native file scope owner mismatch")
+                    connection.execute(select(WorkspaceRow.id).where(WorkspaceRow.id == context.workspace_id).with_for_update()).first()
+                    connection.execute(select(UserRow.id).where(UserRow.id == context.actor_user_id).with_for_update()).first()
+                    query = ThreadMetaRepository._owned_scope(query, job["user_id"], context)
+                else:
+                    query = query.where(ThreadMetaRow.workspace_id.is_(None))
+                    if job.get("workspace_id") is not None:
+                        raise ValueError("Native file access requires original workspace snapshot")
                 if self.engine.dialect.name == "postgresql":
                     query = query.with_for_update()
                 owner = connection.execute(query).first()

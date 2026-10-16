@@ -40,7 +40,7 @@ def create_server(jobs: ExecutionJobs, *, user_credentials: dict[str, str], disc
             if "result_artifact" in result and result["result_artifact"]["uri"].startswith("/artifacts/"):
                 result["result_artifact"]["uri"] = artifact_base_url.rstrip("/") + result["result_artifact"]["uri"]
             return CallToolResult(content=[TextContent(type="text", text=json.dumps(result))], structuredContent=result)
-        except (ValueError, RuntimeError):
+        except (ValueError, RuntimeError, PermissionError):
             # Error remains retryable to the native ordinary driver. No failure
             # claims or cancellation success until the physical outcome is known.
             return CallToolResult(isError=True, content=[TextContent(type="text", text="Execution request denied or physical operation pending; retry management calls")])
@@ -71,7 +71,7 @@ def create_server(jobs: ExecutionJobs, *, user_credentials: dict[str, str], disc
             user_id = owner(request.headers)
             payload = await asyncio.to_thread(jobs.read_artifact, user_id, request.path_params["job_id"])
             return JSONResponse(payload, headers={"Cache-Control": "private, no-store"})
-        except ValueError:
+        except (ValueError, PermissionError):
             return Response(status_code=404)
         except RuntimeError:
             return Response(status_code=409)
@@ -145,6 +145,8 @@ def main():
         workspace_root=Path(config["workspace_root"]) if config.get("workspace_root") else None,
         metadata_database_url=os.environ[config["metadata_database_url_env"]] if "metadata_database_url_env" in config else config.get("metadata_database_url"),
         max_input_bytes=config.get("max_input_bytes", 8 * 1024 * 1024),
+        workspace_required=config.get("workspace_required", False),
+        native_server_name=config.get("native_server_name"),
     )
     pool = None
     credentials = None

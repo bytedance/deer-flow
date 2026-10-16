@@ -1549,17 +1549,17 @@
   },
   "latest_checkpoint": {
     "work_package": "M4",
-    "status": "partial M4: immutable B ledger intent and unintegrated local/pool claim fences verified; HTTP/management/native task commitment and physical main still pending",
+    "status": "partial M4: actual native ToolNode/MCP HTTP B staging, native commitment, v2 status/cancel and original-scope polling verified; physical start/adopt/publish/control pending",
     "last_verified_job": "deerflow-tenant-execution-m4-sql",
-    "last_verified_build": 23,
-    "next": "Directly wire B submit/management to authoritative native MCP commitment and immutable ledger; reauthorize actual start/adopt/publication and cleanup before actual native ToolNode-to-B/C-to-B-to-C main. Do not replace the main with more unintegrated preparation or broad tests; retain full M3/M0-M11 requirements.",
+    "last_verified_build": 29,
+    "next": "Directly integrate scoped physical worker start/adopt/publication with current native task authority and durable cancellation/revocation control; then actual Docker/NAS/TCP native C-to-B-to-C. Retain remaining M3/M0-M11 gates and keep tenant startup closed.",
     "tenant_activation": "closed",
     "deployment": "none",
     "previous_backend_job": "deerflow-tenant-m1-postgres",
     "previous_backend_build": 89,
     "native_candidate_schema": "0040_mcp_workspace_identity",
     "last_verified_database_job": "deerflow-tenant-execution-m4-sql",
-    "last_verified_database_build": 23,
+    "last_verified_database_build": 29,
     "executor_candidate_schema": "e0003_execution_identity"
   },
   "workspace_feedback": {
@@ -8891,6 +8891,176 @@
       "All old dispatchers/workers must stop before offline upgrade. Revision/shape and worker wire guards reject mismatches; no full old-binary restart or rolling/live upgrade acceptance is claimed.",
       "Current native startup schema fence remains older and compiled runtime integration stays false; align full candidate and paired restore manifests at M10/M11.",
       "All M0-M11 parent gates remain incomplete. No deployment/push/PR, model, local pytest/app/browser/Docker runtime or physical capacity release inferred from metadata."
+    ]
+  },
+  "native_b_mcp_http": {
+    "builds": [
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 33286,
+        "number": 24,
+        "result": "FAILURE",
+        "job": "deerflow-tenant-execution-m4-sql",
+        "phase": "m4-b-wire-red",
+        "source_archive_sha256": "e81d8403212b31356e76ec66001e1dc5e84292d823b5f3d91fabd5a9e2314f87",
+        "log_sha256": "4e0523ffabc85b5ae6683643afebbb44dc85f43e9ec97bceeb1948b7ad896373",
+        "code_sha256": {
+          "backend/packages/ecs-executor/ecs_executor/scope.py": "de3e90afc4e710326b20334fa2e22af09c0ceb1cf3c13771ce0f94d3e59f78c1",
+          "backend/packages/ecs-executor/ecs_executor/interceptor.py": "16b9c4f1f1a3fbb88bc3818060820822cfc6f17a190e90c67f11c2c68dcdcd56",
+          "backend/packages/ecs-executor/ecs_executor/native_authority.py": "732f1400814079f52eaec05377493a30ec2871ddd85d6f2b1e3f69dd61ae3fe1",
+          "backend/packages/ecs-executor/ecs_executor/jobs.py": "0552e040d74de64afc8965f822e181a6b0280401b0f57b4e8136b6a7cc0ef4c2",
+          "backend/packages/ecs-executor/ecs_executor/mcp_server.py": "8238c9ecacccd95639bfce87eae349313717b7e65244c1b2a9046219911e5c18",
+          "backend/packages/ecs-executor/ecs_executor/publication.py": "0fd2f696b27846d849410057a50626c7e0eab3bea82c40d382a7376414c994b2",
+          "backend/packages/ecs-executor/ecs_executor/job_store.py": "a4fb1349a166ff5cd390d2093bda9126df678f00a03088bf5bd7d300e747f73c",
+          "backend/tests/test_workspace_execution_wire.py": "13464afc937f9e11c9484b7f778138a2e74694713a4156655795294e5e6659a3"
+        }
+      },
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 33391,
+        "number": 25,
+        "result": "FAILURE",
+        "job": "deerflow-tenant-execution-m4-sql",
+        "phase": "m4-b-wire-main",
+        "source_archive_sha256": "dbeda33026eb4e979d0e99e228bc4776d92292728721986ab432c5a3b4047db5",
+        "log_sha256": "f79403e6cf13058999b82cc51d64982ecdb0385f31975a5382298f4cd6e10751",
+        "code_sha256": {
+          "backend/packages/ecs-executor/ecs_executor/scope.py": "9a1db617b7e036364f8bc3cb613c723db2de4b9721ef6cf366e3c56c12d56cfd",
+          "backend/packages/ecs-executor/ecs_executor/interceptor.py": "59f99e85e92d94a9bb7d8ef58b5da670cf123ef93827acf529bdaa4688c70b1c",
+          "backend/packages/ecs-executor/ecs_executor/native_authority.py": "3deb8324105777cf631e7f94afd531126f26c8cfd71fd91c7edb7928ac4fb6c2",
+          "backend/packages/ecs-executor/ecs_executor/jobs.py": "680311714e3ef480c1774fa3f4950d981ad261897950e3f761da5b15141d1ab0",
+          "backend/packages/ecs-executor/ecs_executor/mcp_server.py": "afa0666243745940a0518146465857aefddcde7adfa76824dd6c6b1c4262ae6d",
+          "backend/packages/ecs-executor/ecs_executor/publication.py": "1db851891cefe0c4d2c236df545c7af4984bab534d2d4b2138582ecacc50c760",
+          "backend/packages/ecs-executor/ecs_executor/job_store.py": "a4fb1349a166ff5cd390d2093bda9126df678f00a03088bf5bd7d300e747f73c",
+          "backend/tests/test_workspace_execution_wire.py": "13464afc937f9e11c9484b7f778138a2e74694713a4156655795294e5e6659a3"
+        }
+      },
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 33069,
+        "number": 26,
+        "result": "SUCCESS",
+        "job": "deerflow-tenant-execution-m4-sql",
+        "phase": "m4-b-wire-main-host",
+        "source_archive_sha256": "39a490f0385a3db45808164e7a515109b152ae4fd9c905517f88e70fe888e86c",
+        "log_sha256": "d6ff2287de884e58bbe5af84b8b82d9460a11b9a65e1850f68843b98303f3c4f",
+        "code_sha256": {
+          "backend/packages/ecs-executor/ecs_executor/scope.py": "9a1db617b7e036364f8bc3cb613c723db2de4b9721ef6cf366e3c56c12d56cfd",
+          "backend/packages/ecs-executor/ecs_executor/interceptor.py": "59f99e85e92d94a9bb7d8ef58b5da670cf123ef93827acf529bdaa4688c70b1c",
+          "backend/packages/ecs-executor/ecs_executor/native_authority.py": "3deb8324105777cf631e7f94afd531126f26c8cfd71fd91c7edb7928ac4fb6c2",
+          "backend/packages/ecs-executor/ecs_executor/jobs.py": "680311714e3ef480c1774fa3f4950d981ad261897950e3f761da5b15141d1ab0",
+          "backend/packages/ecs-executor/ecs_executor/mcp_server.py": "afa0666243745940a0518146465857aefddcde7adfa76824dd6c6b1c4262ae6d",
+          "backend/packages/ecs-executor/ecs_executor/publication.py": "1db851891cefe0c4d2c236df545c7af4984bab534d2d4b2138582ecacc50c760",
+          "backend/packages/ecs-executor/ecs_executor/job_store.py": "a4fb1349a166ff5cd390d2093bda9126df678f00a03088bf5bd7d300e747f73c",
+          "backend/tests/test_workspace_execution_wire.py": "2a64d9060fd15243572d70d9650ded82a2a3a49751e33c24c75bce348a420879"
+        }
+      },
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 39874,
+        "number": 27,
+        "result": "FAILURE",
+        "job": "deerflow-tenant-execution-m4-sql",
+        "phase": "m4-b-wire-boundaries-red",
+        "source_archive_sha256": "67696309db86f466c339bafdb5d9959d00d68f1b24ba06497b970d857619e69a",
+        "log_sha256": "038c6e4b86ffbc68037b9b90ae382bae3da443d44da7f71e6ecd86b7e34d9625",
+        "code_sha256": {
+          "backend/packages/ecs-executor/ecs_executor/scope.py": "9a1db617b7e036364f8bc3cb613c723db2de4b9721ef6cf366e3c56c12d56cfd",
+          "backend/packages/ecs-executor/ecs_executor/interceptor.py": "59f99e85e92d94a9bb7d8ef58b5da670cf123ef93827acf529bdaa4688c70b1c",
+          "backend/packages/ecs-executor/ecs_executor/native_authority.py": "3deb8324105777cf631e7f94afd531126f26c8cfd71fd91c7edb7928ac4fb6c2",
+          "backend/packages/ecs-executor/ecs_executor/jobs.py": "680311714e3ef480c1774fa3f4950d981ad261897950e3f761da5b15141d1ab0",
+          "backend/packages/ecs-executor/ecs_executor/mcp_server.py": "afa0666243745940a0518146465857aefddcde7adfa76824dd6c6b1c4262ae6d",
+          "backend/packages/ecs-executor/ecs_executor/publication.py": "1db851891cefe0c4d2c236df545c7af4984bab534d2d4b2138582ecacc50c760",
+          "backend/packages/ecs-executor/ecs_executor/job_store.py": "a4fb1349a166ff5cd390d2093bda9126df678f00a03088bf5bd7d300e747f73c",
+          "backend/tests/test_workspace_execution_wire.py": "04f2386b18565362229242eabf8382d7c0473e345ebffa4cca1b69d80983edbf"
+        }
+      },
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 33241,
+        "number": 28,
+        "result": "FAILURE",
+        "job": "deerflow-tenant-execution-m4-sql",
+        "phase": "m4-b-wire-mode-red",
+        "source_archive_sha256": "36a2c6b0c52da4cfdd75b0626475da890e01d413b3e75a99c69a912f3913b18a",
+        "log_sha256": "c978f446f54f1edbb92aadaf0ad9af5b18260632516ba60088701106fd7211b1",
+        "code_sha256": {
+          "backend/packages/ecs-executor/ecs_executor/scope.py": "9a1db617b7e036364f8bc3cb613c723db2de4b9721ef6cf366e3c56c12d56cfd",
+          "backend/packages/ecs-executor/ecs_executor/interceptor.py": "59f99e85e92d94a9bb7d8ef58b5da670cf123ef93827acf529bdaa4688c70b1c",
+          "backend/packages/ecs-executor/ecs_executor/native_authority.py": "3deb8324105777cf631e7f94afd531126f26c8cfd71fd91c7edb7928ac4fb6c2",
+          "backend/packages/ecs-executor/ecs_executor/jobs.py": "680311714e3ef480c1774fa3f4950d981ad261897950e3f761da5b15141d1ab0",
+          "backend/packages/ecs-executor/ecs_executor/mcp_server.py": "afa0666243745940a0518146465857aefddcde7adfa76824dd6c6b1c4262ae6d",
+          "backend/packages/ecs-executor/ecs_executor/publication.py": "1db851891cefe0c4d2c236df545c7af4984bab534d2d4b2138582ecacc50c760",
+          "backend/packages/ecs-executor/ecs_executor/job_store.py": "a4fb1349a166ff5cd390d2093bda9126df678f00a03088bf5bd7d300e747f73c",
+          "backend/tests/test_workspace_execution_wire.py": "25de4f12625126b5b1723597baab94eef9a6b75e0eadd6eaa8ee444953b995c5"
+        }
+      },
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 47914,
+        "number": 29,
+        "result": "SUCCESS",
+        "job": "deerflow-tenant-execution-m4-sql",
+        "phase": "m4-b-wire-verified",
+        "source_archive_sha256": "a0fda4451da265fa2b93741a4044dedf037d5d8cda264c0736766a06ff672f94",
+        "log_sha256": "d566c2989c12a067e709e459a8b49673ab05715783e6f80de50548d8f984b19a",
+        "code_sha256": {
+          "backend/packages/ecs-executor/ecs_executor/scope.py": "9a1db617b7e036364f8bc3cb613c723db2de4b9721ef6cf366e3c56c12d56cfd",
+          "backend/packages/ecs-executor/ecs_executor/interceptor.py": "59f99e85e92d94a9bb7d8ef58b5da670cf123ef93827acf529bdaa4688c70b1c",
+          "backend/packages/ecs-executor/ecs_executor/native_authority.py": "a8fd263fec0e65b5d0d5d3cdecdbeec770adf4510a5d9cd4ac8a7dadd0245d10",
+          "backend/packages/ecs-executor/ecs_executor/jobs.py": "63442c13a6acdc20f944c740a3647fe453bde075078b57b207838a8ef51a7c0b",
+          "backend/packages/ecs-executor/ecs_executor/mcp_server.py": "afa0666243745940a0518146465857aefddcde7adfa76824dd6c6b1c4262ae6d",
+          "backend/packages/ecs-executor/ecs_executor/publication.py": "1db851891cefe0c4d2c236df545c7af4984bab534d2d4b2138582ecacc50c760",
+          "backend/packages/ecs-executor/ecs_executor/job_store.py": "8596d707346dbbe22ab22ec24b4cc7051c5194364217ad4d591dc5152101eeee",
+          "backend/tests/test_workspace_execution_wire.py": "25de4f12625126b5b1723597baab94eef9a6b75e0eadd6eaa8ee444953b995c5"
+        }
+      }
+    ],
+    "tools_image_id": "sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01",
+    "postgres_image_id": "sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea",
+    "remaining_owned_resources": {
+      "container": [],
+      "network": []
+    },
+    "base_commit": "8c4932768",
+    "status": "partial M4: actual native ToolNode/MCP HTTP B staging, native commitment, v2 status/cancel and original-scope polling verified; physical start/adopt/publish/control pending",
+    "native_revision": "0040_mcp_workspace_identity",
+    "executor_revision": "e0003_execution_identity",
+    "tests_passed": 25,
+    "new_database_cases": 2,
+    "reused_cases": 23,
+    "test_seconds": 29.62,
+    "main_build": 26,
+    "main_cases": 2,
+    "main_seconds": 17.38,
+    "static_python_files": 8,
+    "known_warnings": "27 existing langchain-mcp-adapters DeprecationWarnings for streamablehttp_client; not suppressed, no dependency change",
+    "red_reasons": {
+      "24": "ExecutionJobs lacks explicit scoped receiver configuration",
+      "25": "Fixture Host tenant-b refused by actual FastMCP transport security (421); only fixture URL changed to allowed loopback",
+      "27": "Management refusals, input snapshot and cancellation round-trip reached staging expiry; malformed historical uncertain fixture has no JSON id and expire_staged incorrectly mutates all active B rows",
+      "28": "Existing team metadata accepts legacy receiver startup; explicit mode downgrade assertion fails in both dialects"
+    },
+    "verification": [
+      "#26 actual native durable wrapper/ToolNode -> service -> ordinary driver -> MCP HTTP client/server -> B ledger -> native SQL receipt; after source Run success and UI selection switch, original-scope background status queues same job.",
+      "#29: same main plus original input snapshot retained after source edit; valid orphan signed job has no native receipt and cannot activate; it expires without touching historical uncertain state/version.",
+      "Actual MCP management HTTP rejects wrong selection and task receipt snapshot/run/remote-id/server/nonce/cancel/status/member withdrawal. Withdrawal also denies native file access before digest reading. Restore fixture state explicitly after each real SQL mutation.",
+      "Actual remote cancellation of an unstarted queued job returns through native background status to the original native task; no physical STOP success inferred. Native scoped cancel queue itself stays disabled.",
+      "Scoped receiver requires native0040/executor e0003 and exact native server binding. Legacy receiver refuses existing native team data; unintegrated verifiers reject v2, scoped mode rejects v1.",
+      "Twenty-three reused preflight/scope/legacy B and file/UID regressions passed, eight-file cloud Ruff check/format passed, exact code hashes match final source, owned containers/networks empty."
+    ],
+    "limits": [
+      "HTTP protocol/auth is real MCP client/server over in-process ASGI transport, not TCP/network deployment; SQL and shared-file fixture are real isolated cloud resources. No auth-success/SQL mocks. Fixture CurrentUser/bootstrap is trusted internal context, not public JWT/Gateway tenant activation.",
+      "No actual scoped Docker execution, NAS/publication, remote C/continuation or C-to-B-to-C proof; physical scoped claims remain withheld.",
+      "Native scoped cancellation/notification queues and revocation outbox/control remain incomplete. Direct B cancellation before launch does not establish native control delivery or physical STOP.",
+      "Metadata test role owns fixture databases; least-privilege SQL role/mount/network and full paired restore/old-binary restart remain M10/M11.",
+      "Global tenant startup remains compiled false with older closed schema fence. All M0-M11 parent gates remain incomplete; no deployment/push/PR, model or local application/Docker/pytest runtime."
     ]
   }
 }

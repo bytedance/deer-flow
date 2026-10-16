@@ -246,7 +246,7 @@ def verify_native_execution_scope(token: str, *, engine, secret: bytes, authenti
     )
 
 
-def mint_management_scope(*, secret: bytes, audience: str, user_id: str, task_id: str, operation: str, now: int | None = None, ttl_seconds: int = 60) -> str:
+def mint_management_scope(*, secret: bytes, audience: str, user_id: str, task_id: str, operation: str, workspace_context: WorkspaceContext | None = None, now: int | None = None, ttl_seconds: int = 60) -> str:
     """Owner/task capability for the native poller, which has no active run."""
     _secret(secret)
     issued = int(time.time()) if now is None else now
@@ -256,11 +256,30 @@ def mint_management_scope(*, secret: bytes, audience: str, user_id: str, task_id
     if operation not in {"status", "cancel"} or type(ttl_seconds) is not int or not 1 <= ttl_seconds <= MAX_TTL_SECONDS:
         raise ValueError("Invalid management scope")
     claims = {"aud": audience, "user_id": user_id, "task_id": task_id, "operation": operation, "iat": issued, "exp": issued + ttl_seconds, "args_sha256": arguments_sha256({"task_id": task_id})}
+    if workspace_context is not None:
+        claims.update(version=WORKSPACE_SCOPE_VERSION, workspace_context=_workspace_claims(workspace_context, user_id))
     payload = _encode(_json(claims))
     return payload + "." + _encode(hmac.digest(secret, payload.encode("ascii"), "sha256"))
 
 
-def verify_management_scope(token: str, *, secret: bytes, authenticated_user_id: str, arguments: dict[str, Any], expected_audience: str, expected_operation: str, now: int | None = None) -> dict[str, Any]:
+@dataclass(frozen=True, slots=True)
+class ManagementIdentity:
+    user_id: str
+    task_id: str
+
+
+def verify_management_scope(
+    token: str,
+    *,
+    secret: bytes,
+    authenticated_user_id: str,
+    arguments: dict[str, Any],
+    expected_audience: str,
+    expected_operation: str,
+    expected_workspace_context: WorkspaceContext | None = None,
+    workspace_resolver: Callable[[ManagementIdentity], WorkspaceContext] | None = None,
+    now: int | None = None,
+) -> dict[str, Any]:
     _secret(secret)
     if not isinstance(token, str) or not 1 <= len(token) <= MAX_TOKEN_BYTES or token.count(".") != 1:
         raise ValueError("Invalid management scope")
@@ -272,8 +291,16 @@ def verify_management_scope(token: str, *, secret: bytes, authenticated_user_id:
         claims = json.loads(encoded)
     except (ValueError, UnicodeError, RecursionError):
         raise ValueError("Invalid management claims") from None
-    if not isinstance(claims, dict) or set(claims) != {"aud", "user_id", "task_id", "operation", "iat", "exp", "args_sha256"} or _json(claims) != encoded:
+    fields = {"aud", "user_id", "task_id", "operation", "iat", "exp", "args_sha256"}
+    if not isinstance(claims, dict) or set(claims) not in (fields, fields | {"version", "workspace_context"}) or _json(claims) != encoded:
         raise ValueError("Invalid management claims")
+    if "workspace_context" in claims:
+        try:
+            if type(claims["version"]) is not int or claims["version"] != WORKSPACE_SCOPE_VERSION:
+                raise ValueError("Unsupported management version")
+            _workspace_claims(WorkspaceContext(**claims["workspace_context"]), claims["user_id"])
+        except (TypeError, ValueError):
+            raise ValueError("Invalid management workspace claims") from None
     for name in ("aud", "user_id", "task_id"):
         _identifier(claims[name])
     _integer(claims["iat"])
@@ -286,4 +313,15 @@ def verify_management_scope(token: str, *, secret: bytes, authenticated_user_id:
         raise ValueError("Management authority mismatch")
     if arguments != {"task_id": claims["task_id"]} or claims["args_sha256"] != arguments_sha256(arguments):
         raise ValueError("Management arguments mismatch")
+    if workspace_resolver is not None:
+        if expected_workspace_context is not None or "workspace_context" not in claims:
+            raise ValueError("Management requires one workspace authorization source")
+        expected_workspace_context = workspace_resolver(ManagementIdentity(claims["user_id"], claims["task_id"]))
+        if type(expected_workspace_context) is not WorkspaceContext:
+            raise ValueError("Management resolver requires workspace authorization")
+    if expected_workspace_context is None:
+        if "workspace_context" in claims:
+            raise ValueError("Management workspace authorization is required")
+    elif claims.get("workspace_context") != _workspace_claims(expected_workspace_context, authenticated_user_id):
+        raise ValueError("Management workspace mismatch")
     return claims

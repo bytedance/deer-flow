@@ -102,7 +102,18 @@ Mandatory workspace mode skips unattributed legacy poll rows and refuses their
 references. Scoped cancel/notification queues are not integrated yet: they are
 not claimed through legacy code, and mandatory mode disables those legacy queue
 paths entirely. Do not present this as working tenant cancellation or delivery.
-Next implement their native control/launch authority and B v2 receiver/management
-protocol, publication and physical Stop proof. The global tenant startup gate
+B now has an opt-in scoped HTTP receiver/management component: native task-local
+scope signs v2, while B independently verifies original native task commitment
+and live scope. This does not integrate the native cancel/notification queues.
+Next implement native control/launch authority, physical start/adopt/publication
+and Stop proof. The global tenant startup gate
 remains closed. Deterministic remote IO fixtures prove metadata/driver boundaries,
 not actual external service authorization or physical B execution.
+
+The real ToolNode/durable-wrapper/ordinary-driver/MCP HTTP B component is verified
+against native SQLite/PostgreSQL, including source Run completion and selected
+space changes. Native metadata owns the task lifecycle; the physical ledger is
+not a replacement. Direct remote cancellation of a staged/queued B job can flow
+back through ordinary polling, but scoped native cancel queue/outbox/delivery
+and physical execution/Stop are still incomplete. Global tenant activation stays
+closed; no model or public Gateway tenant startup is proved by component tests.

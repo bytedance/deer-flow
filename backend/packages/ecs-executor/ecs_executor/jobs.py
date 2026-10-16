@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ecs_executor.files import decode_inputs
 from ecs_executor.job_store import TERMINAL, JobStore
-from ecs_executor.scope import arguments_sha256, verify_execution_scope, verify_management_scope
+from ecs_executor.scope import arguments_sha256, verify_execution_scope, verify_management_scope, verify_native_execution_scope
 
 
 class ExecutionProfile(BaseModel):
@@ -54,6 +54,8 @@ class ExecutionJobs:
         workspace_root: Path | None = None,
         metadata_database_url: str | None = None,
         max_input_bytes: int = 8 * 1024 * 1024,
+        workspace_required: bool = False,
+        native_server_name: str | None = None,
     ):
         if len(secret) < 32 or not audience or not 1 <= staged_ttl_seconds <= 3600:
             raise ValueError("Invalid executor configuration")
@@ -71,12 +73,28 @@ class ExecutionJobs:
         from ecs_executor.publication import WorkspacePublication
 
         self.publication = WorkspacePublication(workspace_root=workspace_root, metadata_database_url=metadata_database_url) if workspace_root else None
+        if type(workspace_required) is not bool or (workspace_required and (self.publication is None or not isinstance(native_server_name, str) or not native_server_name.strip() or len(native_server_name) > 128)):
+            raise ValueError("Scoped B requires fixed native metadata, workspace root and native MCP server binding")
+        if self.publication is not None:
+            from ecs_executor.native_authority import NativeSubmissionAuthority
+            from ecs_executor.schema import require_schema
+
+            try:
+                if workspace_required:
+                    require_schema(store.engine)
+                NativeSubmissionAuthority(self.publication.engine).validate_mode(workspace_required=workspace_required)
+            except BaseException:
+                self.publication.engine.dispose()
+                raise
+        self.workspace_required, self.native_server_name = workspace_required, native_server_name
         self.store, self.secret, self.audience = store, secret, audience
         self.profiles, self.user_profiles = profiles, user_profiles
         self.artifact_root = Path(artifact_root)
         self.staged_ttl_seconds = staged_ttl_seconds
 
     def verify(self, user_id, token, operation, args):
+        if self.workspace_required:
+            return verify_native_execution_scope(token, engine=self.publication.engine, secret=self.secret, authenticated_user_id=user_id, arguments=args, expected_audience=self.audience, expected_operation=operation)
         return verify_execution_scope(token, secret=self.secret, authenticated_user_id=user_id, arguments=args, expected_audience=self.audience, expected_operation=operation)
 
     def submit(self, user_id, token, args):
@@ -94,6 +112,8 @@ class ExecutionJobs:
         # A retry in the same trusted run/request namespace returns the same
         # handle. A new run gets a new handle, avoiding native remote-ID aliasing.
         identity = {key: claims[key] for key in ("user_id", "thread_id", "incarnation", "run_id")}
+        if self.workspace_required:
+            identity.update(workspace_id=claims["workspace_context"]["workspace_id"], workspace_context=claims["workspace_context"])
         namespace = arguments_sha256(identity)
         previous = self.store.find_request(namespace=namespace, request_key=spec.request_key, spec_digest=arguments_sha256(args))
         if previous:
@@ -110,19 +130,36 @@ class ExecutionJobs:
         return {"task_id": job["id"], "status": "running"}
 
     def _authorize(self, user_id, token, operation, args):
-        claims = verify_management_scope(token, secret=self.secret, authenticated_user_id=user_id, arguments=args, expected_audience=self.audience, expected_operation=operation)
+        def resolve(identity):
+            job = self.store.get(identity.task_id)
+            if job["user_id"] != identity.user_id:
+                raise ValueError("Execution owner/scope mismatch")
+            return self.task_authority(job, require_active=operation == "status" and job["state"] not in TERMINAL)
+
+        claims = verify_management_scope(
+            token, secret=self.secret, authenticated_user_id=user_id, arguments=args, expected_audience=self.audience, expected_operation=operation, workspace_resolver=resolve if self.workspace_required else None
+        )
         if set(args) != {"task_id"} or not isinstance(args["task_id"], str):
             raise ValueError("Invalid task arguments")
         job = self.store.get(args["task_id"])
-        if job["user_id"] != claims["user_id"]:
+        if job["user_id"] != claims["user_id"] or (not self.workspace_required and job.get("workspace_id") is not None):
             raise ValueError("Execution owner/scope mismatch")
         return job
+
+    def task_authority(self, job, *, require_active=False):
+        from ecs_executor.native_authority import NativeSubmissionAuthority
+
+        if not self.workspace_required or not job.get("workspace_context"):
+            raise PermissionError("Scoped B execution authority is unavailable")
+        return NativeSubmissionAuthority(self.publication.engine).resolve_task(job, self.native_server_name, require_active=require_active)
 
     def status(self, user_id, token, args):
         job = self._authorize(user_id, token, "status", args)
 
         def activate(record):
             if record["state"] == "staged":
+                if self.workspace_required:
+                    self.task_authority(record, require_active=True)
                 if record["staged_deadline"] <= time.time():
                     record.update(state="failed", error="Submission staging expired")
                 else:
@@ -159,6 +196,10 @@ class ExecutionJobs:
         job = self.store.get(job_id)
         if job["user_id"] != user_id or "artifact" not in job:
             raise ValueError("Artifact not found")
+        if self.workspace_required:
+            self.task_authority(job)
+        elif job.get("workspace_id") is not None:
+            raise ValueError("Artifact requires workspace authorization")
         payload = (self.artifact_root / job_id / "result.json").read_bytes()
         if len(payload) != job["artifact"]["bytes"] or hashlib.sha256(payload).hexdigest() != job["artifact"]["sha256"]:
             raise RuntimeError("Artifact integrity verification failed")

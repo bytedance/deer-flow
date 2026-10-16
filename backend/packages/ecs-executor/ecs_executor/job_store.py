@@ -195,6 +195,8 @@ class JobStore:
     def expire_staged(self, *, now: float | None = None):
         current = time.time() if now is None else now
         for job in self.list_active(kind="B"):
+            if job.get("state") != "staged":
+                continue
 
             def expire(record):
                 if record["state"] == "staged" and record["staged_deadline"] <= current:

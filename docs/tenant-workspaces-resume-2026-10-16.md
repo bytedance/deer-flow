@@ -1,4 +1,4 @@
-> 用户已于 2026-10-16 明确要求继续，当前已恢复，最新验证见文末 #128。下面暂停段为历史记录；完整 M0–M11 目标继续保留。
+> 当前恢复点：M4 原生工具/MCP HTTP → B 入账、原生任务确认、v2 管理与原身份后台轮询；上海 SQL #29 SUCCESS（25 tests）。下一步直接接物理 worker 启动/接管/发布与撤权控制，再跑真实 C→B→C；全量 M0–M11 保留，租户启动仍关闭。历史暂停段与旧回执见下文，最新详细回执见文末。
 
 # 2026-10-16 暂停与恢复检查点
 
@@ -352,3 +352,47 @@ flow. C identity, Scheduler/continuation/control/outbox/notification/credential
 revocation and M3/M5-M11 remain. Every M0-M11 parent stays incomplete; no tenant
 activation/deployment/push/PR/model/local runtime occurred. Review is serial
 self-review plus focused CI, not a full independent audit.
+
+
+M4 native MCP HTTP B checkpoint (2026-10-16): SQL job
+`deerflow-tenant-execution-m4-sql` #24 RED missing scoped receiver configuration;
+#25 fixture-only 421 invalid Host, preserve FastMCP security and change test URL
+to loopback; #26 SUCCESS actual native durable ToolNode wrapper -> service ->
+ordinary driver -> MCP HTTP -> B ledger -> native SQL commitment -> background
+status after original Run ends and selected space changes (two DB cases, 17.38s).
+#27 reaches input/refusal/cancel round-trip but finds expiry mutating a historical
+uncertain record with no JSON id; #28 independently proves team data permits
+legacy B startup. Fix expiry to staged-only and add native schema/mode downgrade
+fence. #29 SUCCESS: 25 tests (two new DB main cases, 23 reused), 29.62s, eight
+Python files Ruff check/format. 27 pre-existing adapter deprecation warnings are
+retained, not hidden or addressed through an unrelated dependency upgrade.
+
+Scoped B captures immutable original intent, requires committed exact native
+server/remote-id/source-Run/private-parent/incarnation and Run/task/job/live
+member snapshots before activation. V2 management signs original task-local
+workspace with authenticated owner/task/operation/expiry/argument digest; it
+never invents a new active Run. File snapshot uses native scope/actor/parent
+locks, retains original bytes after edits and refuses revoked access. A valid
+orphan signed job remains staged and expires, while unknown history/state/version
+stays intact. Wrong scope/legacy/receipt snapshot/source/server/remote/nonce/
+cancel/status/revoked member are rejected through real MCP calls. Remote cancel
+of unstarted work flows back via native polling; native scoped cancellation
+queue/outbox/delivery and physical STOP remain unimplemented.
+
+Real MCP serialization/auth uses in-process ASGI transport, not TCP; real native
+SQLite/PostgreSQL and shared-file fixtures run in Shanghai. No SQL/authorization
+success mocks; trusted internal CurrentUser/bootstrap is fixture context, not
+public JWT/Gateway tenant startup evidence. Fixture database-owner roles do not
+prove restricted SQL grants; M10 must check SELECT and scope/actor/parent row-lock
+privileges and actual mounts/network. No actual scoped Docker/NAS publication or
+C-to-B-to-C proof. Next directly integrate worker start/adopt/publication and
+native cancellation/revocation control, then actual physical main. Never mark
+staged/queued or a fixture cancellation as physical STOP/capacity release.
+
+Exact eight current Python files match #29 source; source/log/image/build and
+empty own container/network receipts: native_b_mcp_http in progress JSON. Native
+0040/executor e0003 unchanged; previous receipts remain historical. Every M0-M11
+parent is incomplete, Gateway activation stays compiled false with its old
+closed schema fence pending the complete M10/M11 candidate. No deployment,
+push/PR/model/local runtime. Review remains serial self-review plus focused CI,
+not a complete independent audit or full tenant/runtime acceptance.

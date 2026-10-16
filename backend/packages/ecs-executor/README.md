@@ -3,8 +3,9 @@
 This optional package uses DeerFlow's existing HTTP MCP interceptor and
 `McpTaskService` ordinary-tools driver. The Agent submits once; native SQL
 `mcp_tasks` owns background polling, cancellation and delivery. A separate
-`ecs_execution_jobs` ledger owns physical Docker execution. The executor never
-reads or writes `mcp_tasks`, creates threads, or starts another Agent loop.
+`ecs_execution_jobs` ledger owns physical Docker execution. The physical JobStore never reads or writes `mcp_tasks`. The optional scoped
+HTTP receiver reads original native Run/task/member records for authorization;
+it does not own or mutate their lifecycle, create threads or start an Agent loop.
 
 Install alongside the matching local harness in the Gateway environment and on
 the execution host:
@@ -60,8 +61,9 @@ so mandatory server verification remains the final fail-closed boundary.
 Submission scopes bind current trusted user, thread, incarnation, run,
 operation, audience, expiry and canonical argument digest. Runtime identity never
 comes from model arguments or a default user. Management scopes bind only the
-persisted authenticated owner, task ID, operation, audience and expiry; they do
-not invent a thread/run context after the Agent run ends. Scope lifetime defaults
+persisted authenticated owner, task ID, operation, audience and expiry. Version 2
+also signs the original task-local workspace snapshot; it does not invent an
+active thread/run context after the Agent run ends. Scope lifetime defaults
 to 60 seconds, with a 300-second maximum; keep host clocks synchronized. JSON
 arguments are bounded to 256 KiB and nesting 32; tokens are bounded to 8 KiB.
 
@@ -72,10 +74,13 @@ checks the admitted Run snapshot, active verified account, live membership and
 policy versions, private parent/project, running state, cancellation and lease.
 It does not read the caller's selected workspace or use token workspace JSON to
 construct an authorization grant. This is a read-only preflight; it does not
-hold a lock or authorize a later physical start/publication. HTTP `ExecutionJobs`
-remains unintegrated and refuses v2 until immutable ledger identity, native MCP
-commit confirmation, management and physical fences are wired together. No tenant
-activation or additional deployment option is introduced by this helper.
+hold a lock or authorize a later physical start/publication. Scoped HTTP
+`ExecutionJobs` now consumes this preflight and captures immutable ledger intent.
+V2 status/cancel verify a separately resolved native MCP receipt with exact server,
+remote ID, source Run, private thread/incarnation and independent live snapshots.
+Status can queue staged work only with an uncancelled pollable native task;
+source Run completion does not erase task ownership. Physical scoped claims are
+still withheld pending start/adopt/publication/control integration.
 
 Workspace transport preparation (not tenant activation): `mint_execution_scope`
 accepts a trusted immutable `workspace_context` and signs protocol `version: 2`
@@ -87,15 +92,22 @@ resolve membership or authorize parent/child resources. The submit interceptor
 now signs version 2 from the original typed runtime snapshot and refuses missing
 or forged workspace identity instead of degrading to legacy. A different ambient
 selection never supplies submission authority. Unscoped legacy submits retain
-the prior protocol. Native MCP metadata and polling retain original scope, but
-ExecutionJobs/remote launch/browser receivers and the management status/cancel
-protocol still need independent tenant authorization. They must refuse scoped
-work until integrated. Do not enable tenant execution from the signing or
-metadata proofs; the global startup gate remains closed.
+the prior protocol. `mint_management_scope`/`verify_management_scope` support the
+same v2 snapshot. Only the native service's captured task binding supplies it;
+receiver lookup is independent of the token's asserted workspace. Unintegrated
+remote C launch/browser receivers still refuse v2. Do not enable tenant execution
+from these component proofs; the global startup gate remains closed.
+
+The private executor config accepts `workspace_required` (default false) and
+`native_server_name` (exact native MCP server binding). Scoped mode requires fixed
+metadata/shared-root settings and the matched native 0040/executor e0003 schema.
+Existing team data refuses legacy B startup. The example keeps scoped mode off;
+these flags do not enable physical tenant execution or bypass Gateway activation.
 
 A submit response durably stages the job without execution. Only the first
-signed native background status poll activates it, after native submission SQL
-has committed. Staging expires after 300 seconds by default. The run/request key
+signed native background status poll queues it. In scoped mode the receiver
+independently confirms native submission SQL commitment first; an orphan staged
+job cannot activate from a valid signature alone. Staging expires after 300 seconds by default. The run/request key
 namespace returns the same immutable job on retry. A changed spec for an existing
 request key fails. Jobs with a persisted start intent and unknown physical outcome
 are inspected and never automatically started again. Cancellation reports a
@@ -139,7 +151,10 @@ Paths are bounded to 512 UTF-8 bytes total and 255 bytes per component; empty
 or dot components, backslashes and control characters are rejected. Absolute
 host paths, traversal, symlinks, special files and hard links are rejected. Under a native `threads_meta` owner/incarnation row lock, the executor
 checks the supplied digest and persists an immutable snapshot before admission.
-Later source changes do not alter retries or execution. The operator's combined
+Scoped file operations also lock workspace and actor before the private parent,
+then recheck live membership/policy and the original captured scope. Unscoped
+file operations cannot access attributed parents. Later source changes do not
+alter retries or execution. The operator's combined
 input budget defaults to 8 MiB (`max_input_bytes`, 128 KiB–64 MiB). At most 64
 input names are accepted; use distinct inline/reference target names.
 

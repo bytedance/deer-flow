@@ -315,6 +315,13 @@ python -m pytest tests/test_workspace_execution.py tests/test_workspace_revocati
 - [x] 实际 LocalWorker 和 Scheduling 领取入口均不能抢跑尚未接入权限的空间工作；池过滤先于 limit，已有未知物理占用继续计入容量。
 - [x] 上海定向主干/必要边界与迁移回归、静态检查通过后保存回执并本地提交。接下来直接接 B HTTP/v2 管理和真实原生 MCP 提交确认，随后启动/接管/发布与实际 C→B→C；不以账本测试代替这条业务主干。
 
+#### M4 第七小步：原生工具到 B HTTP/任务确认（2026-10-16）
+
+- [x] 先跑实际原生 `_make_background_submit_tool`/ToolNode → McpTaskService → ordinary driver → MCP HTTP → B 接收/账本 → native MCP 行持久化主干，Run 结束、切换空间后用原始身份后台 status 入队。
+- [x] v2 管理令牌只携带原始空间快照与 owner/task/operation/expiry/args digest，不伪造活跃 Run；接收端由原生 MCP 的 server/remote id/source Run/线程代次及两端独立快照核实实时权限。无原生持久 receipt 不激活。
+- [x] 主干通过后验证孤儿 staged、版本/legacy 降级、错空间/server/代次/撤权/取消等必要边界，验证 scoped 输入文件访问与旧主干兼容，保留测试/源码回执并本地提交。
+- [ ] 随后直接接实际 worker 的启动、接管和发布重验，撤权清理只经控制协议确认 STOP 才释放占用，再跑原生 C→B→C；本步骤不以 staged/queued 代替物理业务验收，也不绕过 Gateway 启动门禁。
+
 ### M5：记忆、知识检索与工具凭据隔离
 
 **修改接点：**

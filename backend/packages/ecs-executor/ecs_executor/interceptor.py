@@ -67,7 +67,7 @@ def build_execution_scope_interceptor() -> Any:
             try:
                 if set(request.args) != {"task_id"}:
                     raise ValueError("Invalid task identity")
-                token = mint_management_scope(secret=secret, audience=audience, user_id=require_current_user().id, task_id=request.args["task_id"], operation=management[request.name])
+                token = mint_management_scope(secret=secret, audience=audience, user_id=require_current_user().id, task_id=request.args["task_id"], operation=management[request.name], workspace_context=get_current_workspace())
             except (ValueError, RuntimeError, TypeError):
                 raise ToolException("MCP management requires a valid authenticated task owner") from None
             headers = {name: value for name, value in (request.headers or {}).items() if name.lower() != SCOPE_HEADER.lower()}
