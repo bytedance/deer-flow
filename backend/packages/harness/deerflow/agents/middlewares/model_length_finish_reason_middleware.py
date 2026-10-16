@@ -28,13 +28,14 @@ from deerflow.agents.middlewares.model_length_termination_detectors import (
     default_detectors,
 )
 from deerflow.agents.middlewares.model_response import append_visible_text, has_tool_call_intent, has_visible_content
+from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_tool_calls
 
 MODEL_LENGTH_CAPPED_STOP_REASON = "model_length_capped"
 _MODEL_LENGTH_CAPPED_CONTENT = "The model reached its output limit before producing a complete final response. Please continue the conversation to resume."
 logger = logging.getLogger(__name__)
 
 
-def _tool_call_summary(message: AIMessage) -> tuple[int, list[str]]:
+def _tool_call_summary(message: AIMessage, cleaned_content: Any) -> tuple[int, list[str]]:
     """Count suppressed tool calls and return their deduplicated names."""
     names: list[str] = []
     structured_calls: list[Any] = [*(message.tool_calls or []), *(getattr(message, "invalid_tool_calls", None) or [])]
@@ -47,8 +48,11 @@ def _tool_call_summary(message: AIMessage) -> tuple[int, list[str]]:
         function_call = additional_kwargs.get("function_call")
         if not calls and isinstance(function_call, dict):
             calls.append(function_call)
-        if not calls:
-            calls = _anthropic_tool_use_blocks(message)
+        if not calls and isinstance(message.content, list) and isinstance(cleaned_content, list):
+            # The shared cleanup keeps non-call blocks by identity. Summarize
+            # the removed blocks without duplicating its provider type list.
+            kept_blocks = {id(block) for block in cleaned_content}
+            calls = [block for block in message.content if id(block) not in kept_blocks]
 
     for call in calls:
         if not isinstance(call, dict):
@@ -60,20 +64,6 @@ def _tool_call_summary(message: AIMessage) -> tuple[int, list[str]]:
         if isinstance(name, str) and name and name not in names:
             names.append(name)
     return len(calls), names
-
-
-def _anthropic_tool_use_blocks(message: AIMessage) -> list[dict[str, Any]]:
-    """Extract native Anthropic tool-use blocks retained in message content."""
-    if not isinstance(message.content, list):
-        return []
-    return [block for block in message.content if isinstance(block, dict) and block.get("type") == "tool_use"]
-
-
-def _without_anthropic_tool_use_blocks(content: Any) -> Any:
-    """Remove native tool calls that cannot receive a matching tool result."""
-    if not isinstance(content, list):
-        return content
-    return [block for block in content if not (isinstance(block, dict) and block.get("type") == "tool_use")]
 
 
 class ModelLengthFinishReasonMiddleware(AgentMiddleware[AgentState]):
@@ -134,15 +124,16 @@ class ModelLengthFinishReasonMiddleware(AgentMiddleware[AgentState]):
             },
         )
 
-        contains_tool_call = has_tool_call_intent(last) or bool(_anthropic_tool_use_blocks(last))
-        cleaned_content = _without_anthropic_tool_use_blocks(last.content) if contains_tool_call else last.content
-        content_source = last.model_copy(update={"content": cleaned_content})
+        # Unlike dangling-call repair, a length stop must also suppress invalid
+        # calls, so clear them before syncing the native provider content.
+        content_source = clone_ai_message_with_tool_calls(last.model_copy(update={"invalid_tool_calls": []}), [])
+        contains_tool_call = has_tool_call_intent(last) or content_source.content is not last.content
         contains_visible_content = has_visible_content(content_source)
         if not contains_tool_call and contains_visible_content:
             return None
 
         additional_kwargs = dict(last.additional_kwargs or {})
-        suppressed_count, suppressed_names = _tool_call_summary(last) if contains_tool_call else (0, [])
+        suppressed_count, suppressed_names = _tool_call_summary(last, content_source.content) if contains_tool_call else (0, [])
         if contains_tool_call:
             # Tool arguments may be incomplete at a max-token boundary.
             additional_kwargs.pop("tool_calls", None)
@@ -154,12 +145,14 @@ class ModelLengthFinishReasonMiddleware(AgentMiddleware[AgentState]):
             "suppressed_tool_call_count": suppressed_count,
             "suppressed_tool_call_names": suppressed_names,
         }
-        replacement = last.model_copy(
+        replacement = content_source.model_copy(
             update={
                 "content": append_visible_text(content_source, _MODEL_LENGTH_CAPPED_CONTENT),
                 "tool_calls": [],
                 "invalid_tool_calls": [],
                 "additional_kwargs": additional_kwargs,
+                # Keep the provider's termination evidence unchanged.
+                "response_metadata": last.response_metadata,
             }
         )
         return {"messages": [replacement]}

@@ -207,7 +207,7 @@ def test_get_providers_uses_existing_channels_config(tmp_path):
         "discord": False,
         "feishu": True,
         "dingtalk": False,
-        "wechat": False,
+        "wechat": True,
         "wecom": True,
     }
 
@@ -599,6 +599,48 @@ def test_connect_existing_binding_code_channels_return_command_and_persist_state
     anyio.run(repo.close)
 
 
+@pytest.mark.parametrize("provider", ["qq", "wecom"])
+def test_browser_group_names_survive_state_consumption_and_bind_two_groups(tmp_path, monkeypatch, provider):
+    import anyio
+
+    from app.channels.message_bus import MessageBus
+    from app.channels.qq import QQChannel
+    from app.channels.wecom import WeComChannel
+
+    monkeypatch.setattr(channel_connections, "_ensure_runtime_channel_ready_if_available", AsyncMock())
+    repo = anyio.run(_make_repo, tmp_path)
+    config = ChannelConnectionsConfig.model_validate({"enabled": True, provider: {"enabled": True}})
+    runtime = {"qq": {"enabled": True, "app_id": "app-1", "client_secret": "offline"}, "wecom": {"enabled": True, "bot_id": "bot-1", "bot_secret": "offline"}}
+    app = _make_app(config, repo, runtime)
+    try:
+        with TestClient(app) as client:
+            responses = [client.post(f"/api/channels/{provider}/connect", json={"group_name": name}) for name in ("Release team", "Support team")]
+        assert all(response.status_code == 200 for response in responses), [response.text for response in responses]
+
+        async def bind_groups():
+            if provider == "qq":
+                channel = QQChannel(MessageBus(), {"app_id": "app-1", "connection_repo": repo})
+                channel.send = AsyncMock()
+            else:
+                channel = WeComChannel(MessageBus(), {"connection_repo": repo})
+                channel._send_connection_reply = AsyncMock()
+            for index, response in enumerate(responses):
+                code = response.json()["code"]
+                if provider == "qq":
+                    await channel._handle_inbound({"t": "GROUP_AT_MESSAGE_CREATE", "d": {"id": f"message-{index}", "author": {"member_openid": "alice"}, "group_openid": f"group-{index}", "content": f"/connect {code}"}})
+                else:
+                    await channel._bind_connection_from_connect_code(frame={"body": {"aibotid": "bot-1", "chattype": "group", "chatid": f"wr-group-{index}"}}, user_id="alice", code=code)
+            return await repo.list_connections(str(_user().id))
+
+        rows = anyio.run(bind_groups)
+        assert len(rows) == 2
+        assert len({row["id"] for row in rows}) == 2
+        assert len({row["workspace_id"] for row in rows}) == 2
+        assert {row["workspace_name"] for row in rows} == {"Release team", "Support team"}
+    finally:
+        anyio.run(repo.close)
+
+
 def test_connect_unconfigured_runtime_channel_returns_400(tmp_path):
     import anyio
 
@@ -832,6 +874,66 @@ def test_configure_provider_runtime_credentials_survive_local_restart(tmp_path):
         "bot_token": "xoxb-ui",
         "app_token": "xapp-ui",
     }
+
+    anyio.run(repo.close)
+
+
+def test_runtime_config_saved_on_peer_workers_both_survive_restart(tmp_path):
+    """Each Gateway worker keeps its own store; a save must not drop a peer's provider."""
+    import anyio
+
+    repo = anyio.run(_make_repo, tmp_path)
+    config = _enabled_connections_config()
+    runtime_config_path = tmp_path / "channels" / "runtime-config.json"
+    # Both workers load the (empty) file before either one saves.
+    worker_a = _make_app(config, repo, {}, runtime_config_store=ChannelRuntimeConfigStore(runtime_config_path))
+    worker_b = _make_app(config, repo, {}, runtime_config_store=ChannelRuntimeConfigStore(runtime_config_path))
+
+    with TestClient(worker_a) as client:
+        telegram_response = client.post(
+            "/api/channels/telegram/runtime-config",
+            json={"values": {"bot_token": "tg-token", "bot_username": "ui_bot"}},
+        )
+    with TestClient(worker_b) as client:
+        slack_response = client.post(
+            "/api/channels/slack/runtime-config",
+            json={"values": {"bot_token": "xoxb-ui", "app_token": "xapp-ui"}},
+        )
+
+    assert telegram_response.status_code == 200
+    assert slack_response.status_code == 200
+    assert ChannelRuntimeConfigStore(runtime_config_path).load_all() == {
+        "telegram": {"enabled": True, "bot_token": "tg-token", "bot_username": "ui_bot"},
+        "slack": {"enabled": True, "bot_token": "xoxb-ui", "app_token": "xapp-ui"},
+    }
+
+    anyio.run(repo.close)
+
+
+def test_runtime_disconnect_on_one_worker_is_not_undone_by_a_peer_save(tmp_path):
+    import anyio
+
+    repo = anyio.run(_make_repo, tmp_path)
+    config = _enabled_connections_config()
+    runtime_config_path = tmp_path / "channels" / "runtime-config.json"
+    slack_config = {"enabled": True, "bot_token": "xoxb-ui", "app_token": "xapp-ui"}
+    ChannelRuntimeConfigStore(runtime_config_path).set_provider_config("slack", slack_config)
+    worker_a = _make_app(config, repo, {"slack": dict(slack_config)}, runtime_config_store=ChannelRuntimeConfigStore(runtime_config_path))
+    worker_b = _make_app(config, repo, {"slack": dict(slack_config)}, runtime_config_store=ChannelRuntimeConfigStore(runtime_config_path))
+
+    with TestClient(worker_a) as client:
+        disconnect_response = client.delete("/api/channels/slack/runtime-config")
+    with TestClient(worker_b) as client:
+        telegram_response = client.post(
+            "/api/channels/telegram/runtime-config",
+            json={"values": {"bot_token": "tg-token", "bot_username": "ui_bot"}},
+        )
+
+    assert disconnect_response.status_code == 200
+    assert telegram_response.status_code == 200
+    persisted = ChannelRuntimeConfigStore(runtime_config_path).load_all()
+    assert persisted["slack"] == {"enabled": False, "_runtime_disabled": True}
+    assert persisted["telegram"]["bot_token"] == "tg-token"
 
     anyio.run(repo.close)
 
@@ -1534,7 +1636,7 @@ def test_qq_provider_exposes_binding_flow_and_masks_secret(tmp_path):
             assert provider["auth_mode"] == "binding_code"
             assert provider["configured"] is True
             assert provider["connectable"] is True
-            assert provider["proactive_notifications"] is False
+            assert provider["proactive_notifications"] is True
             assert "fixture-private-secret" not in response.text
             fields = {field["name"]: field for field in provider["credential_fields"]}
             assert fields["app_id"]["type"] == "text"

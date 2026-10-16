@@ -14,6 +14,45 @@ The summarization feature uses LangChain's `SummarizationMiddleware` to monitor 
 4. Maintains AI/Tool message pairs together for context continuity
 5. Stores the summary in `ThreadState.summary_text` and projects it ephemerally through durable context data
 
+Selected history is processed from oldest to newest in bounded text chunks.
+Each call receives the preceding summary plus the next source fragment. Already
+generated summaries, including legacy stored summaries and final model output,
+use at most half the raw-input budget. Oversized summaries retain their head and
+tail with an explicit `[summary shortened]` marker; selected raw history is never
+shortened this way. Unused carry capacity is available to source text. A single oversized
+message is split into contiguous fragments, including its middle. Input is
+PII-redacted before splitting, then escaped before insertion into prompt blocks.
+No human-anchor filter or successful "too long" placeholder can discard selected
+source. Recent-message retention and AI/Tool partition boundaries stay unchanged.
+
+Only after all chunks succeed are hooks, the compaction event, history capture
+and message replacement committed once. Any failed chunk leaves active history
+unchanged; manual `/compact` reports generation failure. A pass processes at most
+64 chunks, including cached chunks; hitting the limit also keeps original history.
+For a stable thread identity, a cap breach starts a five-minute cooldown keyed
+by user, thread, executor, opening source-message ID, prior summary and policy.
+Further automatic or manual attempts make no summary-model calls during that
+cooldown, even as history grows or middleware is rebuilt. A smaller source window,
+new summary/window or changed policy (including a larger input budget) allows an
+immediate retry. Warnings give the remaining delay and suggest increasing
+`trim_tokens_to_summarize` within model capacity or reducing selected history.
+The shared, locked cache keeps at most 128 hashed entries per process; eviction,
+process restart or another worker can permit an independent attempt. It is not a
+durable or distributed cost budget. Callers without a thread ID keep only the
+per-pass limit. Other generation failures retain their existing retry behavior.
+Configured/run-model fallback may make two candidate attempts per chunk, and SDK
+retries are separate. This bounds middleware steps, not a monetary bill or deadline.
+For legitimate histories beyond this limit, increase the existing per-call budget
+within the model's capacity or compact earlier. There is no new configuration.
+Impossibly small budgets that cannot fit a nonempty marked carry or source fail
+without eviction. `null` uses one unbounded input step and does not shorten carry.
+This guarantees new source input coverage, not lossless summaries: bounding
+already-compressed carry can omit earlier summarized facts.
+
+Prefix selection expands a local window and then searches within it using the
+actual token counter, avoiding repeated processing of the entire remaining source.
+Warning diagnostics include numeric budget, carry and progress values, never text.
+
 ## Reuse and telemetry
 
 The middleware keeps a bounded cache of exact rendered summary prompts and ordered
@@ -29,11 +68,11 @@ Each successful summary result emits a `middleware:summarize` journal event with
 `action="summary_result"`. Its `changes` include:
 
 - `noop`: the result is byte-identical to the previous summary.
-- `llm_call_skipped`: this result came from the no-op cache.
+- `llm_call_skipped`: every chunk in this pass came from the no-op cache.
 - `summary_chars`: length of the new summary.
 - `previous_summary_chars`: length of the previous summary, or `null` when there was none.
 - `summarized_message_count`: messages folded into this summary.
-- `call_count`: completed summary results, including cache reuse and canned results.
+- `call_count`: completed compaction passes, including cache reuse.
 - `noop_count`: completed results identical to the previous summary.
 - `skip_count`: completed results reused from the no-op cache.
 
@@ -43,8 +82,8 @@ Event counter snapshots include their own result and remain consistent during
 concurrent compactions. Counters are cumulative across runs sharing that middleware
 instance; concurrent journal events may arrive in a different order.
 
-`call_count` is not an LLM request count: a compaction can try multiple candidates
-or produce a canned result without invoking a model. Use per-call LLM journal events
+`call_count` is not an LLM request count: a pass can process multiple chunks and
+try multiple candidates. Use per-call LLM journal events
 for model usage and cost, and `skip_count / call_count` for the cache reuse rate.
 
 ## Todo reminders
@@ -189,7 +228,7 @@ keep:
 #### `trim_tokens_to_summarize`
 - **Type**: Integer or null
 - **Default**: `4000`
-- **Description**: Token budget used to trim the raw input sections for the summarization call. Escaping, wrapper tags, and the summary prompt add overhead beyond this budget; it is not a hard limit on the final model request. When preserving the current user request leaves an assistant/tool-only summary window, trimming favors the most recent content in that window. If a mixed window still contains a human message but the human-anchored trim is empty, the existing final-message fallback is preserved. Set to `null` to skip trimming (not recommended for very long conversations).
+- **Description**: Per-step raw-text budget shared by generated carry (at most half) and the next chronological source chunk. Only generated or legacy summaries may be shortened, with a visible marker; raw source is covered without elision. A pass is limited to 64 chunks, retaining original history on failure or limit exhaustion. Escaping, wrapper tags, prompt overhead and SDK retries remain outside this budget. Set to `null` for one unbounded input step with no carry shortening (not recommended for very long conversations).
 
 #### `summary_prompt`
 - **Type**: String or null

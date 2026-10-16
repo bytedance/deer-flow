@@ -27,6 +27,10 @@ import {
 import { Button } from "@/components/ui/button";
 import { KnowledgeSourcesProvider } from "@/components/workspace/citations/knowledge-source";
 import { extractArtifactsFromThread } from "@/core/artifacts/utils";
+import {
+  createKnowledgeSourceReader,
+  type RetrievalSource,
+} from "@/core/citations/sources";
 import { useI18n } from "@/core/i18n/hooks";
 import { getArtifactArchiveCandidatesByGroupIndex } from "@/core/messages/artifact-archive";
 import {
@@ -88,7 +92,10 @@ import {
 } from "@/core/skills/usage";
 import type { Subtask } from "@/core/tasks";
 import { useUpdateSubtask } from "@/core/tasks/context";
-import { collectRenderedSubtasks } from "@/core/tasks/subtask-render";
+import {
+  collectRenderedSubtasks,
+  findSubtaskResultMessage,
+} from "@/core/tasks/subtask-render";
 import type { AgentThreadState } from "@/core/threads";
 import { cn } from "@/lib/utils";
 
@@ -382,6 +389,33 @@ export function MessageList({
   const [selectionToolbar, setSelectionToolbar] =
     useState<SelectionToolbarState | null>(null);
   const messages = thread.messages;
+  const previousKnowledgeSnapshotsRef = useRef(
+    new Map<string | Message, RetrievalSource[]>(),
+  );
+  const readMessageKnowledgeSources = useMemo(createKnowledgeSourceReader, []);
+  const knowledgeSourcesByMessage = useMemo(() => {
+    const byMessage = new Map<Message, RetrievalSource[]>();
+    const nextSnapshots = new Map<string | Message, RetrievalSource[]>();
+    const evidence = new Map<string, RetrievalSource>();
+    for (const message of messages) {
+      for (const source of readMessageKnowledgeSources(message))
+        evidence.set(source.id, source);
+      if (message.type === "ai") {
+        const key = message.id ?? message;
+        const next = [...evidence.values()];
+        const previous = previousKnowledgeSnapshotsRef.current.get(key);
+        const snapshot =
+          previous?.length === next.length &&
+          previous.every((source, index) => source.id === next[index]?.id)
+            ? previous
+            : next;
+        byMessage.set(message, snapshot);
+        nextSnapshots.set(key, snapshot);
+      }
+    }
+    previousKnowledgeSnapshotsRef.current = nextSnapshots;
+    return byMessage;
+  }, [messages, readMessageKnowledgeSources]);
   const groupedMessages = useStableMessageGroups(messages, thread.isLoading);
   // Schedule event lines sit at the end of the turn they followed.
   const placedTaskEvents = useMemo(
@@ -1272,6 +1306,7 @@ export function MessageList({
                       const item = (
                         <MessageListItem
                           message={msg}
+                          knowledgeSources={knowledgeSourcesByMessage.get(msg)}
                           isLoading={
                             thread.isLoading &&
                             groupIndex === groupedMessages.length - 1
@@ -1548,6 +1583,7 @@ export function MessageList({
                         runId={(message as { run_id?: string }).run_id}
                         isLoading={groupIsLoading}
                         fallbackTask={fallbackTask}
+                        resultMessage={findSubtaskResultMessage(group, taskId)}
                       />,
                     );
                   }

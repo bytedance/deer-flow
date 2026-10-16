@@ -40,6 +40,11 @@ export const enUS: Translations = {
       "This entry comes from the repository extension catalog. Ask your deployment administrator to confirm its installation and activation status.",
     installationGuide: "Installation guide",
     catalog: {
+      workflows: {
+        title: "Script workflows",
+        description:
+          "Run inspectable Agent workflows with bounded parallel steps, progress and cancellation. Phase 1 has no resume, human approval or hard monetary budget.",
+      },
       agentTeams: {
         title: "Agent teams",
         description:
@@ -69,6 +74,16 @@ export const enUS: Translations = {
         title: "Extension development example",
         description:
           "Explore middleware, task lifecycle, model observers, services and HTTP route contributions.",
+      },
+      retrieval: {
+        title: "Local retrieval example",
+        description:
+          "Demonstrate read-only retrieval and structured tool results using fixed sample documents, without an external knowledge service.",
+      },
+      knowledge: {
+        title: "Knowledge scope example",
+        description:
+          "Search sample documents within selected knowledge bases or files and inspect source citations.",
       },
     },
     pageUnavailable: "Extension page unavailable",
@@ -287,6 +302,9 @@ export const enUS: Translations = {
   },
 
   artifactPreview: {
+    loadingPreview: "Preparing preview...",
+    resourcesUnavailable:
+      "Some preview resources could not be loaded. View the source or download the files for the complete content.",
     limited: (previewSize, totalSize) =>
       totalSize
         ? `Showing the first ${previewSize} of ${totalSize}.`
@@ -1024,6 +1042,11 @@ export const enUS: Translations = {
         "This task has a saved group destination, but group notifications are unavailable on this server.",
       clearSaved: "Clear group notification",
       bind: "Bind a Feishu group",
+      bindWecom: "Bind a WeCom group",
+      bindQq: "Bind a QQ group",
+      name: "Group name",
+      nameHint:
+        "Name this group so you can recognize it when choosing a notification destination. Rebind a group to change its name.",
       refresh: "Refresh group list",
       bindInstructions:
         "Add the bot to the group, then mention the bot and send this command in that group. Refresh the group list after binding.",
@@ -1036,19 +1059,19 @@ export const enUS: Translations = {
       copyFailed: "Could not copy. Select and copy the command above.",
       newCode: "Generate a new code",
       close: "Close binding instructions",
-      label: "Also notify a Feishu group (optional)",
-      detailLabel: "Additional Feishu group",
+      label: "Also notify a group (optional)",
+      detailLabel: "Additional group",
       none: "No additional group",
       personalHint:
         "Your personal notifications stay unchanged. The selected group also receives task updates.",
-      emptyHint: "Bind a Feishu group below, then refresh the list.",
+      emptyHint: "Bind a group below, then refresh the list.",
       loading: "Loading groups…",
       unavailable: "Selected group unavailable",
       unavailableHint:
         "The selected group is no longer available. Keep it, remove it, or choose another group.",
       unnamed: "Group name unavailable",
       unnamedHint:
-        "Check the app's group-information permission, then bind the group again to load its name.",
+        "Bind the group again with a recognizable name before selecting it.",
       loadFailed:
         "Could not load groups. Your selection is kept; you can save other changes or remove it.",
     },
@@ -1644,9 +1667,10 @@ export const enUS: Translations = {
     },
     connectedAs: (name: string) => `Connected as ${name}.`,
     scheduledUpdates: {
-      supported: "Scheduled task updates: sent here",
+      supported:
+        "Scheduled task updates: supported; manage in Notification settings",
       supportedAfterConnect:
-        "Scheduled task updates: available after you connect",
+        "Scheduled task updates: supported; connect to manage notifications",
       unsupported: "Scheduled task updates: not available for this app yet",
     },
   },
@@ -2388,6 +2412,39 @@ export const enUS: Translations = {
       testBody: "This is a test notification.",
       notSupported: "Your browser does not support notifications.",
       disableNotification: "Disable notification",
+      channels: {
+        title: "Scheduled task notifications",
+        description:
+          "Choose which connected apps receive scheduled task updates. Turning these off does not affect chatting. Pending notifications and retries are cancelled, and turning them back on does not resend old updates. Notifications already being delivered may still arrive.",
+        providers: {
+          feishu: "Feishu / Lark",
+          wecom: "WeCom",
+          wechat: "WeChat",
+          qq: "QQ",
+        },
+        toggleLabel: (provider: string) =>
+          `${provider} scheduled task notifications`,
+        eventsTitle: "Task & goal run notifications",
+        eventsDescription:
+          "Optional IM reminders for ordinary web or background task runs and goals on your enabled apps above (off by default).",
+        events: {
+          run_completed: "Task or goal completed",
+          run_failed: "Task or goal failed",
+          human_input_requested: "Needs your input",
+        },
+        eventToggleLabel: (event: string) => `${event} notifications`,
+        loading: "Loading notification preferences…",
+        saving: "Saving…",
+        loadFailed:
+          "Could not load notification preferences. Please try again.",
+        saveFailed:
+          "Could not save this change. The previous setting is still shown; please try again.",
+        unavailable:
+          "This service does not support notification preferences yet.",
+        empty:
+          "Connect an app that supports scheduled task notifications in Settings → Channels.",
+        retry: "Retry",
+      },
     },
     account: {
       profileTitle: "Profile",

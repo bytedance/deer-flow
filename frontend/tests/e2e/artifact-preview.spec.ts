@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { expect, test } from "@playwright/test";
 
 import { mockLangGraphAPI } from "./utils/mock-api";
@@ -89,6 +91,259 @@ function presentFilesMessages(path = PRESENTED_ARTIFACT_PATH) {
 }
 
 test.describe("Artifact preview stability", () => {
+  for (const [index, fixture] of [
+    {
+      name: "fragment",
+      declaration: "",
+      mode: "BackCompat",
+      publicId: "",
+      systemId: "",
+    },
+    {
+      name: "HTML5",
+      declaration: "<!doctype html>",
+      mode: "CSS1Compat",
+      publicId: "",
+      systemId: "",
+    },
+    {
+      name: "legacy quirks",
+      declaration:
+        '<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">',
+      mode: "BackCompat",
+      publicId: "-//W3C//DTD HTML 4.01 Transitional//EN",
+      systemId: "",
+    },
+    {
+      name: "XHTML transitional",
+      declaration:
+        '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">',
+      mode: "CSS1Compat",
+      publicId: "-//W3C//DTD XHTML 1.0 Transitional//EN",
+      systemId: "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd",
+    },
+  ].entries()) {
+    test(`keeps a ${fixture.name} report open after resource 401 and rewrites SVG styles`, async ({
+      page,
+      context,
+      baseURL,
+    }) => {
+      const threadId = `00000000-0000-0000-0000-00000000315${index}`;
+      const filepath = "/mnt/user-data/outputs/partial-report.html";
+      const content = `<!--before-->${fixture.declaration}<html><body><h1>Partial report</h1><img src="expired.png"><svg xmlns="http://www.w3.org/2000/svg"><style>.chart{filter:url(filters.svg#blur)}</style><rect class="chart" style="fill:url(paint.svg#paint)" width="40" height="40"/></svg></body></html><!--after-->`;
+      mockLangGraphAPI(page, {
+        threads: [
+          {
+            thread_id: threadId,
+            messages: presentFilesMessages(filepath),
+            artifacts: [filepath],
+          },
+        ],
+      });
+      await context.addCookies([
+        {
+          name: "access_token",
+          value: "preview-session",
+          url: baseURL!,
+          httpOnly: true,
+          sameSite: "Lax",
+        },
+      ]);
+      const resources: Array<{ filename: string; authenticated: boolean }> = [];
+      await page.route(
+        `**/api/threads/${threadId}/artifacts/mnt/user-data/outputs/*`,
+        async (route) => {
+          const filename = new URL(route.request().url()).pathname
+            .split("/")
+            .pop()!;
+          const headers = await route.request().allHeaders();
+          const authenticated =
+            headers.cookie?.includes("access_token=preview-session") ?? false;
+          if (filename !== "partial-report.html")
+            resources.push({ filename, authenticated });
+          if (!authenticated || filename === "expired.png")
+            return route.fulfill({
+              status: 401,
+              contentType: "application/json",
+              body: '{"detail":"Unauthorized"}',
+            });
+          if (filename === "partial-report.html")
+            return route.fulfill({ contentType: "text/html", body: content });
+          await route.fulfill({
+            contentType: "image/svg+xml",
+            body: '<svg xmlns="http://www.w3.org/2000/svg"><defs><filter id="blur"><feGaussianBlur stdDeviation="1"/></filter><linearGradient id="paint"><stop stop-color="blue"/></linearGradient></defs></svg>',
+          });
+        },
+      );
+      await page.goto(`/workspace/chats/${threadId}`);
+      await page
+        .getByText("partial-report.html", { exact: true })
+        .first()
+        .click();
+      const panel = page.locator("#artifacts");
+      await expect(panel.getByRole("status")).toContainText(
+        "Some preview resources could not be loaded",
+      );
+      const iframe = panel.locator('iframe[title="Artifact preview"]');
+      await expect(iframe).toHaveAttribute(
+        "sandbox",
+        "allow-scripts allow-forms",
+      );
+      const frame = iframe.contentFrame();
+      await expect(frame.locator("h1")).toHaveText("Partial report");
+      const result = await frame.locator("body").evaluate(() => ({
+        mode: document.compatMode,
+        doctype: document.doctype
+          ? {
+              publicId: document.doctype.publicId,
+              systemId: document.doctype.systemId,
+            }
+          : null,
+        stylesheet: document.querySelector("svg style")?.textContent,
+        inline: document.querySelector("svg rect")?.getAttribute("style"),
+        comments: Array.from(document.childNodes)
+          .filter((node) => node.nodeType === Node.COMMENT_NODE)
+          .map((node) => node.textContent),
+      }));
+      expect(result.mode).toBe(fixture.mode);
+      expect(result.doctype).toEqual(
+        fixture.declaration
+          ? { publicId: fixture.publicId, systemId: fixture.systemId }
+          : null,
+      );
+      expect(result.stylesheet).toContain("data:image/svg+xml;base64,");
+      expect(result.inline).toContain("data:image/svg+xml;base64,");
+      expect(result.stylesheet).toContain("#blur");
+      expect(result.inline).toContain("#paint");
+      expect(result.comments).toEqual(["before", "after"]);
+      expect(resources).toHaveLength(3);
+      expect(resources.every((resource) => resource.authenticated)).toBe(true);
+      await expect(page).toHaveURL(new RegExp(`/workspace/chats/${threadId}$`));
+    });
+  }
+
+  test("loads protected HTML sibling resources while retaining an opaque sandbox", async ({
+    page,
+    context,
+    baseURL,
+  }, testInfo) => {
+    const threadId = "00000000-0000-0000-0000-000000003140";
+    const filepath = "/mnt/user-data/outputs/authenticated-report.html";
+    const stylesheet =
+      '@import "nested.css"; h1{background-image:url(chart.png)}';
+    const integrity = `sha256-${createHash("sha256").update(stylesheet).digest("base64")}`;
+    const content = `<link rel="stylesheet" href="style.css" integrity="${integrity}"><script src="app.js"></script><h1>Authenticated report</h1><img id="chart" src="chart.png">`;
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: threadId,
+          messages: presentFilesMessages(filepath),
+          artifacts: [filepath],
+        },
+      ],
+    });
+    await context.addCookies([
+      {
+        name: "access_token",
+        value: "preview-session",
+        url: baseURL!,
+        httpOnly: true,
+        sameSite: "Lax",
+      },
+    ]);
+    const resources: Array<{ filename: string; authenticated: boolean }> = [];
+    await page.route(
+      `**/api/threads/${threadId}/artifacts/mnt/user-data/outputs/*`,
+      async (route) => {
+        const filename = new URL(route.request().url()).pathname
+          .split("/")
+          .pop()!;
+        const headers = await route.request().allHeaders();
+        const authenticated =
+          headers.cookie?.includes("access_token=preview-session") ?? false;
+        if (filename !== "authenticated-report.html")
+          resources.push({ filename, authenticated });
+        if (!authenticated)
+          return route.fulfill({ status: 401, body: "unauthorized" });
+        const bodies: Record<
+          string,
+          { contentType: string; body: string | Buffer }
+        > = {
+          "authenticated-report.html": {
+            contentType: "text/html",
+            body: content,
+          },
+          "style.css": {
+            contentType: "text/css",
+            body: stylesheet,
+          },
+          "nested.css": {
+            contentType: "text/css",
+            body: "h1{color:rgb(1,2,3)}",
+          },
+          "app.js": {
+            contentType: "application/javascript",
+            body: "window.addEventListener('DOMContentLoaded',()=>{document.body.dataset.scriptLoaded='true'})",
+          },
+          "chart.png": {
+            contentType: "image/png",
+            body: Buffer.from(
+              "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+yA1kAAAAASUVORK5CYII=",
+              "base64",
+            ),
+          },
+        };
+        const response = bodies[filename];
+        if (!response) return route.fulfill({ status: 404 });
+        await route.fulfill(response);
+      },
+    );
+    await page.goto(`/workspace/chats/${threadId}`);
+    await page
+      .getByText("authenticated-report.html", { exact: true })
+      .first()
+      .click();
+    const iframe = page.locator('#artifacts iframe[title="Artifact preview"]');
+    await expect(iframe).toHaveAttribute(
+      "sandbox",
+      "allow-scripts allow-forms",
+    );
+    const frame = iframe.contentFrame();
+    await expect(frame.locator("body")).toHaveAttribute(
+      "data-script-loaded",
+      "true",
+    );
+    await expect(frame.locator("h1")).toHaveCSS("color", "rgb(1, 2, 3)");
+    await expect
+      .poll(() =>
+        frame
+          .locator("#chart")
+          .evaluate((image) => (image as HTMLImageElement).naturalWidth),
+      )
+      .toBe(1);
+    expect(resources).toHaveLength(4);
+    expect(resources.every((resource) => resource.authenticated)).toBe(true);
+    expect(
+      await frame.locator("body").evaluate(() => {
+        try {
+          return !!window.parent.document;
+        } catch {
+          return false;
+        }
+      }),
+    ).toBe(false);
+    expect(
+      await frame.locator("body").evaluate(() => {
+        try {
+          return document.cookie;
+        } catch {
+          return "blocked";
+        }
+      }),
+    ).toBe("blocked");
+    await iframe.screenshot({ path: testInfo.outputPath("html-preview.png") });
+  });
+
   for (const [index, filename] of ["constructor", "data.__proto__"].entries()) {
     test(`keeps ${filename} artifacts on the download fallback`, async ({
       page,

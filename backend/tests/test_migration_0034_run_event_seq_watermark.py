@@ -24,7 +24,7 @@ IDEMPOTENCY = "0036_run_idempotency_request"
 DOCUMENT_SUMMARIES = "0037_project_document_summaries"
 CHANNEL_BINDINGS = "0038_channel_thread_bindings"
 USER_DISABLED = "0039_user_disabled"
-CURRENT_HEAD = "0040_scheduled_group_notice"
+CURRENT_HEAD = "0043_runtime_im_notices"
 TABLE = "run_event_thread_seq"
 pytestmark = pytest.mark.asyncio
 

@@ -183,3 +183,23 @@ async def test_group_selection_requires_enabled_channel_connections(env):
     response = await env.client.post("/api/scheduled-tasks", json=_body(**{FIELD: group["id"]}))
     assert response.status_code == 422, response.text
     assert response.json()["detail"]["code"] == "invalid_notification_group"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "workspace_id", "metadata", "allowed"),
+    [
+        ("qq", "app1:group:group-openid", {"chat_type": "group", "group_openid": "group-openid"}, True),
+        ("wecom", "bot1:group:wr_chat_1", {"aibotid": "bot1", "chattype": "group", "chatid": "wr_chat_1"}, True),
+        ("wechat", "group:wx_chat_1", {"chat_type": "group", "chat_id": "group:wx_chat_1"}, False),
+    ],
+)
+async def test_qq_and_wecom_group_destinations_round_trip_and_wechat_is_rejected(env, provider, workspace_id, metadata, allowed):
+    group = await _bind(env, provider=provider, workspace_id=workspace_id, metadata=metadata)
+    response = await env.client.post("/api/scheduled-tasks", json=_body(**{FIELD: group["id"]}))
+    if allowed:
+        assert response.status_code == 200, response.text
+        assert response.json()[FIELD] == group["id"]
+    else:
+        assert response.status_code == 422, response.text
+        assert response.json()["detail"]["code"] == "invalid_notification_group"
