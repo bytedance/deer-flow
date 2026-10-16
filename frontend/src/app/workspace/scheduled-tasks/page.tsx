@@ -1,7 +1,7 @@
 "use client";
 
 import { X } from "lucide-react";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -41,6 +41,7 @@ import {
 } from "@/core/scheduled-tasks/hooks";
 import { matchesScheduledTaskQuery } from "@/core/scheduled-tasks/search";
 import type { ScheduledTask } from "@/core/scheduled-tasks/types";
+import { useWorkspaceRouter as useRouter } from "@/core/workspaces/navigation";
 
 const TABS: StatusTab[] = ["all", "active", "paused", "finished"];
 

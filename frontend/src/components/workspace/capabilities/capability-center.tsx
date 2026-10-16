@@ -2,13 +2,14 @@
 
 import { BlocksIcon, SearchIcon, SparklesIcon } from "lucide-react";
 import dynamic from "next/dynamic";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 import { useState, useSyncExternalStore } from "react";
 
 import { Input } from "@/components/ui/input";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useI18n } from "@/core/i18n/hooks";
+import { useWorkspaceRouter as useRouter } from "@/core/workspaces/navigation";
 
 const PluginGallery = dynamic(() =>
   import("./plugin-gallery").then((module) => module.PluginGallery),

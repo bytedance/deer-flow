@@ -1,7 +1,6 @@
 "use client";
 
 import { ArrowUpRight, CalendarClock, ChevronRight } from "lucide-react";
-import Link from "next/link";
 import { useState } from "react";
 
 import {
@@ -10,6 +9,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { fill } from "@/components/workspace/scheduled-tasks/shared";
+import Link from "@/components/workspace/workspace-link";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   browserTimeZone,

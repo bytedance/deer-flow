@@ -7,7 +7,6 @@ import {
   Settings2Icon,
   Trash2Icon,
 } from "lucide-react";
-import { useRouter } from "next/navigation";
 import { type ComponentProps, type ReactElement, useState } from "react";
 import { toast } from "sonner";
 
@@ -37,6 +36,7 @@ import {
 import { exportAgentPackage, useDeleteAgent } from "@/core/agents";
 import type { Agent } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
+import { useWorkspaceRouter as useRouter } from "@/core/workspaces/navigation";
 import { cn } from "@/lib/utils";
 
 import { AgentSettingsDialog } from "./agent-settings-dialog";

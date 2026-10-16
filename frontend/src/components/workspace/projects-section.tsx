@@ -9,7 +9,6 @@ import {
   Plus,
   Trash2,
 } from "lucide-react";
-import Link from "next/link";
 import { useParams, usePathname } from "next/navigation";
 import { useCallback, useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -37,6 +36,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
+import Link from "@/components/workspace/workspace-link";
 import { useI18n } from "@/core/i18n/hooks";
 import { useCreateProject, useProjects, type Project } from "@/core/projects";
 import { useLocalSettings } from "@/core/settings";

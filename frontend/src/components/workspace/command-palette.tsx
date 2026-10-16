@@ -5,7 +5,6 @@ import {
   MessageSquarePlusIcon,
   SettingsIcon,
 } from "lucide-react";
-import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import {
@@ -25,6 +24,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useI18n } from "@/core/i18n/hooks";
+import { useWorkspaceRouter as useRouter } from "@/core/workspaces/navigation";
 import { useGlobalShortcuts } from "@/hooks/use-global-shortcuts";
 
 import { useSettingsDialog } from "./settings";

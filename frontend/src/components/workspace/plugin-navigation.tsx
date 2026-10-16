@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 import {
@@ -10,6 +9,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
+import Link from "@/components/workspace/workspace-link";
 import { useFrontendExtensions } from "@/core/extensions/hooks";
 import { pluginPages, pluginPageTitle } from "@/core/extensions/pages";
 import { extensionIcon } from "@/core/extensions/registry";

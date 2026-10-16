@@ -6,7 +6,6 @@ import {
   HomeIcon,
   LayersIcon,
 } from "lucide-react";
-import Link from "next/link";
 
 import {
   DropdownMenu,
@@ -21,6 +20,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
+import Link from "@/components/workspace/workspace-link";
 import { useI18n } from "@/core/i18n/hooks";
 import { useWorkspaceContext } from "@/core/workspaces/context";
 
@@ -117,7 +117,7 @@ export function WorkspaceSwitcher() {
             {words.personalAction}
           </SidebarMenuButton>
           <SidebarMenuButton asChild>
-            <Link href="/login" prefetch={false}>
+            <Link href={controls.signInHref ?? "/login"} prefetch={false}>
               {t.login.signIn}
             </Link>
           </SidebarMenuButton>

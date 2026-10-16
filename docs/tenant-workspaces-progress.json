@@ -1551,8 +1551,8 @@
     "work_package": "M3",
     "status": "partial M3; resumed",
     "last_verified_job": "deerflow-tenant-frontend",
-    "last_verified_build": 116,
-    "next": "Workspace route/deep-link semantics, compiled Next and actual backend business main; retain remaining M0-M11 gates",
+    "last_verified_build": 123,
+    "next": "Preserve SSR auth return intent, then compiled Next and real Gateway business main; retain all remaining M0-M11 gates",
     "tenant_activation": "closed",
     "deployment": "none",
     "previous_backend_job": "deerflow-tenant-m1-postgres",
@@ -2122,7 +2122,7 @@
     ]
   },
   "user_pause_checkpoint": {
-    "status": "resumed at explicit user request on 2026-10-16; latest native shell checkpoint frontend_native_shell/#116; prior pause historical",
+    "status": "resumed at explicit user request; latest native route checkpoint frontend_workspace_routes/#123; previous pause historical",
     "date": "2026-10-16",
     "reason": "今天先到这里了，保存下进度",
     "last_fully_verified_commit": "3fb8ed75",
@@ -7126,6 +7126,584 @@
       "Copied workspace route locators, private thread URL transition/sign-in return intent and actual compiled Next browser hydration.",
       "Audit actual private feature clients/global settings/dialog/store/title/focus/live WSS; do not confuse unmount probes with real-backend read authorization.",
       "Real Gateway same-user personal/team upload/chat/download business main, principal/two-tab/remaining HTML/physical and M4-M11 requirements."
+    ],
+    "runtime_activation": false,
+    "deployment": "none",
+    "remote_push": "none",
+    "followup": "Native route refinement receipts in frontend_workspace_routes; server auth return and compiled Next/backend acceptance remain open."
+  },
+  "frontend_workspace_routes": {
+    "status": "partial M3; native route composition/navigation and client login return verified with fixtures; SSR auth return, compiled Next and actual backend business pending",
+    "date": "2026-10-16",
+    "base_commit": "1d75881a",
+    "job": "deerflow-tenant-frontend",
+    "history": {
+      "117": "Two domain REDs: copied team locator renders personal, and explicit locator on disabled legacy installation mounts private legacy content.",
+      "118": "Existing root main and Context/cache eight regressions pass before adding navigation boundaries or wiring all other views.",
+      "119": "Two necessary domain boundary REDs among four checks: backslash authority URL is rewritten as local workspace; native AuthProvider client refresh/login guard loses workspace/query/anchor. Both repaired without changing backend authorization.",
+      "120": "Nineteen checks/seven files pass after binding existing workspace links, routers and history to the shared thin adapters. Native branch/delete regressions retained. Root main now covers same-space cache preservation, route changes, duplicate-selector refusal and explicit personal recovery/canonicalization.",
+      "121": "One domain RED: native /workspace server entry drops the selected query before redirecting to new chat. Preserve all query entries, including invalid/duplicate locators for the shell to reject.",
+      "formatter": "Cloud target lint finds test rejection reason has unknown type. Replace fixture abort rejection with Error; no production behavior change. Format/lint all affected files in Shanghai.",
+      "122": "Twenty-two checks and format/browser pass, but required full tsc detects TS2304: custom Agent chat onStart guard refers to lifetime without acquiring it. Preserve this FAILURE; add the same existing useWorkspaceLifetime accessor used by native default chat, never remove the stale-callback guard.",
+      "123": "After that two-line correction, same twenty-two checks/nine files, forty-eight-file Prettier and complete pnpm check pass. No duplicate separate full tsc or duplicate target-lint gate. Retained native control/report pinned Chromium main and twelve observations pass."
+    },
+    "contract": "URL workspace_id is a locator only; only server capability enables mode and WorkspaceSession confirms actor/membership/version. Root keys provider to actor/locator, and WorkspaceRouteBoundary masks ready state until confirmed scope matches URL. Selector-free entry confirms personal and canonicalizes before mounting private consumers, preventing a new-thread history update from changing provider identity. Invalid/duplicate selectors remain errors and explicit scoped routes on a legacy instance fail closed. Switch select immediately aborts/detaches old lifetime, then native Next replace opens a new chat, clearing old resource query IDs. Confirmation during route handoff is masked; a short aborted metadata read may precede the new provider confirmation, never a transferred authority. Native WorkspaceLink/useWorkspaceRouter decorate only local workspace paths with no explicit locator; preserve object href/query/fragment/options/native refs and modified-click behavior. Never append a locator to foreign/protocol-relative/backslash-authority/API/public/auth URLs. Stream-created thread IDs keep native history via replaceHistory(pathOfThread(...)); captured aborted lifetimes cannot navigate. The server /workspace entry preserves invalid/duplicate query entries rather than converting them to absence. Root error sign-in links and native client session/login guards retain route intent.",
+    "verification": {
+      "new_rstest_cases": 5,
+      "reused_or_strengthened_cases": 17,
+      "rstest_total": 22,
+      "rstest_files": 9,
+      "source_files_formatted": 48,
+      "main": "Actual root/native Header/Sidebar/Auth/Workspace/cache under Happy DOM and router/capability/metadata/leaf doubles: copied T route confirms T; scoped New chat anchor; T->P detachment and new-chat route; same-space URL changes keep cache and avoid new metadata; back-to-T re-confirms; duplicates deny private content; explicit personal recovery canonicalizes before private mounts; every captured private leaf scope matches URL locator. Existing native page workflow also checks scoped history without Next replace; stale branch/deletion behavior retained.",
+      "boundaries": [
+        "String/object URLs preserve queries/fragment without input mutation; explicit locator is preserved; absent/invalid/duplicate distinct.",
+        "Foreign/authority/API/public/auth targets never receive a locator.",
+        "Native client 401/require-auth redirects retain workspace/resource query/anchor.",
+        "Native server entry retains selected, repeated and empty locators through redirect."
+      ],
+      "retained_browser": "Existing actual Header/Sidebar/Dropdown/rich report twelve observations. It does not mount the new root routing or real Next history.",
+      "checks": [
+        "22 focused node/DOM checks",
+        "48-file cloud format/target lint fix",
+        "48-file final Prettier check",
+        "required full pnpm check (full ESLint and tsc)",
+        "retained pinned Chromium native control/report main",
+        "source/archive equality",
+        "exact owned-resource cleanup",
+        "raw navigation ingress source inventory",
+        "OpenSpec strict and Git whitespace checks"
+      ]
+    },
+    "proof_limits": "Root/server-entry tests mock Next navigation/cookies/server capability and private feature leaves; metadata HTTP is stubbed. Auth return uses native AuthProvider against synthetic 401. Native history is spied while preserving native API selection; not production Next integration/hydration, server auth redirects, actual browser back/forward/new-tab, real feature traffic/JWT/SQL/NAS/model business/principal/two-tab or physical execution. Retained report browser uses synthetic HTTP Cookie/scope/env/navigation and does not prove root routes. Existing expected MIME/revoked-Blob and Streamdown/KaTeX diagnostics remain, browser page errors empty. No deployment/push/model/local app tests.",
+    "evidence": {
+      "frontend": [
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 23210,
+          "number": 117,
+          "result": "FAILURE",
+          "owned_resources": {
+            "containers": [],
+            "networks": []
+          },
+          "file_counts": [],
+          "passed_counts": [],
+          "failed_counts": [
+            "2"
+          ],
+          "format_passed": false,
+          "full_check_invoked": false,
+          "type_errors": [],
+          "archive_sha256": "6d7cc21d0f21fe1c52c4ae5694a127096cee7aa9c091b8d409ba3e46b6be9468"
+        },
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 27532,
+          "number": 118,
+          "result": "SUCCESS",
+          "owned_resources": {
+            "containers": [],
+            "networks": []
+          },
+          "file_counts": [
+            "3"
+          ],
+          "passed_counts": [
+            "8"
+          ],
+          "failed_counts": [],
+          "format_passed": false,
+          "full_check_invoked": false,
+          "type_errors": [],
+          "archive_sha256": "325b9f6884a065ea6401e6804357b5ebf2a8aa0c33fd6edea62cb977a49adbc4"
+        },
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 15968,
+          "number": 119,
+          "result": "FAILURE",
+          "owned_resources": {
+            "containers": [],
+            "networks": []
+          },
+          "file_counts": [],
+          "passed_counts": [
+            "2"
+          ],
+          "failed_counts": [
+            "2"
+          ],
+          "format_passed": false,
+          "full_check_invoked": false,
+          "type_errors": [],
+          "archive_sha256": "538e9c19dc34e5a36b38ed223b4a8eb430fe322f4b9179d859090e6e01409eeb"
+        },
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 57302,
+          "number": 120,
+          "result": "SUCCESS",
+          "owned_resources": {
+            "containers": [],
+            "networks": []
+          },
+          "file_counts": [
+            "7"
+          ],
+          "passed_counts": [
+            "19"
+          ],
+          "failed_counts": [],
+          "format_passed": false,
+          "full_check_invoked": false,
+          "type_errors": [],
+          "archive_sha256": "e1a25e45967ccd1244596dd29ea2f8dc4b4a8fa29c6859d47c8b413def3ff900"
+        },
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 13263,
+          "number": 121,
+          "result": "FAILURE",
+          "owned_resources": {
+            "containers": [],
+            "networks": []
+          },
+          "file_counts": [],
+          "passed_counts": [],
+          "failed_counts": [
+            "1"
+          ],
+          "format_passed": false,
+          "full_check_invoked": false,
+          "type_errors": [],
+          "archive_sha256": "60c989e444bd6dc8ce268b7bf1f67604f0a71e03246fa386490ecdf6cc15b56a"
+        },
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 473250,
+          "number": 122,
+          "result": "FAILURE",
+          "owned_resources": {
+            "containers": [],
+            "networks": []
+          },
+          "file_counts": [
+            "9"
+          ],
+          "passed_counts": [
+            "22"
+          ],
+          "failed_counts": [],
+          "format_passed": true,
+          "full_check_invoked": true,
+          "type_errors": [
+            "TS2304"
+          ],
+          "browser": {
+            "status": "main_passed",
+            "browser_version": "149.0.7827.55",
+            "rows": [
+              {
+                "imageWidth": 1,
+                "color": "rgb(12, 34, 56)",
+                "background": "url(\"blob:null/4b5dac5d-b915-4574-bf31-98197030c002\")",
+                "script": "script:11111111-1111-1111-1111-111111111111",
+                "data": "11111111-1111-1111-1111-111111111111:1",
+                "isolated": true,
+                "external": "https://example.test/source",
+                "workspace": "11111111-1111-1111-1111-111111111111",
+                "parent_control_width": 1,
+                "modules": {
+                  "main": "module:11111111-1111-1111-1111-111111111111:ab",
+                  "inline": "inline:11111111-1111-1111-1111-111111111111",
+                  "literal": "literal:11111111-1111-1111-1111-111111111111",
+                  "json": "11111111-1111-1111-1111-111111111111",
+                  "meta": "11111111-1111-1111-1111-111111111111",
+                  "dynamic": "dynamic:11111111-1111-1111-1111-111111111111:1:1"
+                },
+                "refreshed": true
+              },
+              {
+                "imageWidth": 1,
+                "color": "rgb(12, 34, 56)",
+                "background": "url(\"blob:null/5884d163-4b8d-4534-b734-7e3d2ccf209f\")",
+                "script": "script:22222222-2222-2222-2222-222222222222",
+                "data": "22222222-2222-2222-2222-222222222222:1",
+                "isolated": true,
+                "external": "https://example.test/source",
+                "workspace": "22222222-2222-2222-2222-222222222222",
+                "parent_control_width": 1,
+                "modules": {
+                  "main": "module:22222222-2222-2222-2222-222222222222:ab",
+                  "inline": "inline:22222222-2222-2222-2222-222222222222",
+                  "literal": "literal:22222222-2222-2222-2222-222222222222",
+                  "json": "22222222-2222-2222-2222-222222222222",
+                  "meta": "22222222-2222-2222-2222-222222222222",
+                  "dynamic": "dynamic:22222222-2222-2222-2222-222222222222:1:1"
+                },
+                "refreshed": true
+              }
+            ],
+            "boundaries": {
+              "read_only_thread_route": true,
+              "module_refusal_and_mime": true,
+              "retired_bootstrap_revoked": true,
+              "held_transport_aborted": true,
+              "held_module_transport_aborted": true,
+              "new_module_document_survives": true,
+              "new_document_survives": true,
+              "pending_switch_hides_content": true,
+              "pending_controls_remain_available": true,
+              "denied_switch_has_no_fallback": true,
+              "retry_keeps_requested_space": true,
+              "explicit_personal_recovery": true
+            },
+            "pending_snapshot": {
+              "charset": "UTF-8",
+              "iframeCount": 0,
+              "buttons": [
+                {
+                  "label": null,
+                  "busy": null,
+                  "text": "Toggle Sidebar"
+                },
+                {
+                  "label": "Switch workspace: Switching workspace…",
+                  "busy": "true",
+                  "text": "Switching workspace…"
+                }
+              ]
+            },
+            "forbidden_hits": [],
+            "control_requests": [
+              {
+                "path": "/api/workspaces",
+                "workspace": null
+              },
+              {
+                "path": "/api/workspaces/current",
+                "workspace": "11111111-1111-1111-1111-111111111111"
+              },
+              {
+                "path": "/api/workspaces",
+                "workspace": null
+              },
+              {
+                "path": "/api/workspaces/current",
+                "workspace": "22222222-2222-2222-2222-222222222222"
+              },
+              {
+                "path": "/api/workspaces",
+                "workspace": null
+              },
+              {
+                "path": "/api/workspaces/current",
+                "workspace": "11111111-1111-1111-1111-111111111111"
+              },
+              {
+                "path": "/api/workspaces",
+                "workspace": null
+              },
+              {
+                "path": "/api/workspaces/current",
+                "workspace": "22222222-2222-2222-2222-222222222222"
+              },
+              {
+                "path": "/api/workspaces",
+                "workspace": null
+              },
+              {
+                "path": "/api/workspaces/current",
+                "workspace": "22222222-2222-2222-2222-222222222222"
+              },
+              {
+                "path": "/api/workspaces",
+                "workspace": null
+              },
+              {
+                "path": "/api/workspaces/current",
+                "workspace": "11111111-1111-1111-1111-111111111111"
+              }
+            ],
+            "errors": [],
+            "console_errors": [
+              "Failed to load module script: Expected a JavaScript-or-Wasm module script but the server responded with a MIME type of \"text/plain\". Strict MIME type checking is enforced for module scripts per HTML spec.",
+              "Failed to load resource: net::ERR_FILE_NOT_FOUND",
+              "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+              "Failed to load resource: the server responded with a status of 403 (Forbidden)"
+            ],
+            "inflight": [],
+            "failure": null,
+            "scope": "actual native React Header/Sidebar/ArtifactFilePreview/Auth/Workspace/REST against cookie/scope HTTP fixtures and navigation/env build doubles; not Next/Gateway/SQL acceptance",
+            "network": "none",
+            "models_called": false,
+            "native_source_sha256": "0eee3ee8f64c3a2fc3dadeff3de28fe7139dfe759127454c59d61ef54585384f",
+            "module_sha256": "518782743937e172f605ca44cf34ff522ba61e185b94812b9eef368293e0ff6e",
+            "images": {
+              "compiler": "sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01",
+              "browser": "sha256:52ce23272ed5c945389367eb92f97fdd6754aa93d1c369bb01d7a44d45c5f47e"
+            },
+            "request_summary": {
+              "total": 81,
+              "allowed": 81,
+              "cookie_present": 81,
+              "workspace_header_present": 77,
+              "workspaces": [
+                "11111111-1111-1111-1111-111111111111",
+                "22222222-2222-2222-2222-222222222222"
+              ]
+            }
+          },
+          "browser_exit": "0",
+          "archive_sha256": "bef46ec5f1d2f485985f389be240b7820b0435fbabef0a20cdcf4a860f6c5936",
+          "browser_artifact": "job/deerflow-tenant-frontend/122/artifact/m3-workspace-routes-verified-html.json"
+        },
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 472894,
+          "number": 123,
+          "result": "SUCCESS",
+          "owned_resources": {
+            "containers": [],
+            "networks": []
+          },
+          "file_counts": [
+            "9"
+          ],
+          "passed_counts": [
+            "22"
+          ],
+          "failed_counts": [],
+          "format_passed": true,
+          "full_check_invoked": true,
+          "type_errors": [],
+          "browser": {
+            "status": "main_passed",
+            "browser_version": "149.0.7827.55",
+            "rows": [
+              {
+                "imageWidth": 1,
+                "color": "rgb(12, 34, 56)",
+                "background": "url(\"blob:null/e3605724-d775-4aaf-98bb-33467dd4b738\")",
+                "script": "script:11111111-1111-1111-1111-111111111111",
+                "data": "11111111-1111-1111-1111-111111111111:1",
+                "isolated": true,
+                "external": "https://example.test/source",
+                "workspace": "11111111-1111-1111-1111-111111111111",
+                "parent_control_width": 1,
+                "modules": {
+                  "main": "module:11111111-1111-1111-1111-111111111111:ab",
+                  "inline": "inline:11111111-1111-1111-1111-111111111111",
+                  "literal": "literal:11111111-1111-1111-1111-111111111111",
+                  "json": "11111111-1111-1111-1111-111111111111",
+                  "meta": "11111111-1111-1111-1111-111111111111",
+                  "dynamic": "dynamic:11111111-1111-1111-1111-111111111111:1:1"
+                },
+                "refreshed": true
+              },
+              {
+                "imageWidth": 1,
+                "color": "rgb(12, 34, 56)",
+                "background": "url(\"blob:null/71e375e2-7213-46e8-a7e1-ba9eb757c6ea\")",
+                "script": "script:22222222-2222-2222-2222-222222222222",
+                "data": "22222222-2222-2222-2222-222222222222:1",
+                "isolated": true,
+                "external": "https://example.test/source",
+                "workspace": "22222222-2222-2222-2222-222222222222",
+                "parent_control_width": 1,
+                "modules": {
+                  "main": "module:22222222-2222-2222-2222-222222222222:ab",
+                  "inline": "inline:22222222-2222-2222-2222-222222222222",
+                  "literal": "literal:22222222-2222-2222-2222-222222222222",
+                  "json": "22222222-2222-2222-2222-222222222222",
+                  "meta": "22222222-2222-2222-2222-222222222222",
+                  "dynamic": "dynamic:22222222-2222-2222-2222-222222222222:1:1"
+                },
+                "refreshed": true
+              }
+            ],
+            "boundaries": {
+              "read_only_thread_route": true,
+              "module_refusal_and_mime": true,
+              "retired_bootstrap_revoked": true,
+              "held_transport_aborted": true,
+              "held_module_transport_aborted": true,
+              "new_module_document_survives": true,
+              "new_document_survives": true,
+              "pending_switch_hides_content": true,
+              "pending_controls_remain_available": true,
+              "denied_switch_has_no_fallback": true,
+              "retry_keeps_requested_space": true,
+              "explicit_personal_recovery": true
+            },
+            "pending_snapshot": {
+              "charset": "UTF-8",
+              "iframeCount": 0,
+              "buttons": [
+                {
+                  "label": null,
+                  "busy": null,
+                  "text": "Toggle Sidebar"
+                },
+                {
+                  "label": "Switch workspace: Switching workspace…",
+                  "busy": "true",
+                  "text": "Switching workspace…"
+                }
+              ]
+            },
+            "forbidden_hits": [],
+            "control_requests": [
+              {
+                "path": "/api/workspaces",
+                "workspace": null
+              },
+              {
+                "path": "/api/workspaces/current",
+                "workspace": "11111111-1111-1111-1111-111111111111"
+              },
+              {
+                "path": "/api/workspaces",
+                "workspace": null
+              },
+              {
+                "path": "/api/workspaces/current",
+                "workspace": "22222222-2222-2222-2222-222222222222"
+              },
+              {
+                "path": "/api/workspaces",
+                "workspace": null
+              },
+              {
+                "path": "/api/workspaces/current",
+                "workspace": "11111111-1111-1111-1111-111111111111"
+              },
+              {
+                "path": "/api/workspaces",
+                "workspace": null
+              },
+              {
+                "path": "/api/workspaces/current",
+                "workspace": "22222222-2222-2222-2222-222222222222"
+              },
+              {
+                "path": "/api/workspaces",
+                "workspace": null
+              },
+              {
+                "path": "/api/workspaces/current",
+                "workspace": "22222222-2222-2222-2222-222222222222"
+              },
+              {
+                "path": "/api/workspaces",
+                "workspace": null
+              },
+              {
+                "path": "/api/workspaces/current",
+                "workspace": "11111111-1111-1111-1111-111111111111"
+              }
+            ],
+            "errors": [],
+            "console_errors": [
+              "Failed to load module script: Expected a JavaScript-or-Wasm module script but the server responded with a MIME type of \"text/plain\". Strict MIME type checking is enforced for module scripts per HTML spec.",
+              "Failed to load resource: net::ERR_FILE_NOT_FOUND",
+              "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+              "Failed to load resource: the server responded with a status of 403 (Forbidden)"
+            ],
+            "inflight": [],
+            "failure": null,
+            "scope": "actual native React Header/Sidebar/ArtifactFilePreview/Auth/Workspace/REST against cookie/scope HTTP fixtures and navigation/env build doubles; not Next/Gateway/SQL acceptance",
+            "network": "none",
+            "models_called": false,
+            "native_source_sha256": "0eee3ee8f64c3a2fc3dadeff3de28fe7139dfe759127454c59d61ef54585384f",
+            "module_sha256": "518782743937e172f605ca44cf34ff522ba61e185b94812b9eef368293e0ff6e",
+            "images": {
+              "compiler": "sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01",
+              "browser": "sha256:52ce23272ed5c945389367eb92f97fdd6754aa93d1c369bb01d7a44d45c5f47e"
+            },
+            "request_summary": {
+              "total": 81,
+              "allowed": 81,
+              "cookie_present": 81,
+              "workspace_header_present": 77,
+              "workspaces": [
+                "11111111-1111-1111-1111-111111111111",
+                "22222222-2222-2222-2222-222222222222"
+              ]
+            }
+          },
+          "browser_exit": "0",
+          "archive_sha256": "d323e6f4f731495a2b2943118c614a328677b455cc0f719a3eb40ff13a7441ec",
+          "browser_artifact": "job/deerflow-tenant-frontend/123/artifact/m3-workspace-routes-verified-fix-html.json"
+        }
+      ],
+      "formatter_resources": {
+        "containers": [],
+        "networks": []
+      },
+      "ci_image": "sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01"
+    },
+    "source_sha256": {
+      "frontend/src/app/workspace/agents/[agent_name]/chats/[thread_id]/page.tsx": "bae5264e14ed659e0e9f637136d158437b84cf4d8a39115554005b0553315991",
+      "frontend/src/app/workspace/agents/new/page.tsx": "ab01d3ea0be124b16ef8b3dfa6290d91d80444e306e80ad5334958a1bd2f2542",
+      "frontend/src/app/workspace/chats/page.tsx": "f8d918963fd7f73309f02a0c70a1ef902857e9d7873e4dc8630a324085ddd0b5",
+      "frontend/src/app/workspace/page.tsx": "937e6374517d67b1439512574e7ee1f8c8c81eebdd23dbc63623d5d8fc7ef902",
+      "frontend/src/app/workspace/projects/[id]/page.tsx": "cba1f50f1f8abb87eda4592e001a1eef16ac1a66f22764f17146e0a91bf54726",
+      "frontend/src/app/workspace/scheduled-tasks/page.tsx": "0b620524a6bd741966b2250fa350b2bc772fd41d5e3d7f1982faf32181eeaaab",
+      "frontend/src/components/workspace/agents/agent-card.tsx": "f2c596c88db062f2f90f58e566b676710ad18330896b40896f9bdb4c1beb3543",
+      "frontend/src/components/workspace/agents/agent-gallery.tsx": "e3b71397bc3a4c40657b0718dc9ff19ca17bb65a7f5d4caa84890c490d2ee549",
+      "frontend/src/components/workspace/capabilities/capability-center.tsx": "25cffeb997c3ecbc0d0bf40231f9f03fe96b7710000cb139d7924bee0befc0b3",
+      "frontend/src/components/workspace/capabilities/extension-gallery.tsx": "38b7e903e19274298c90d883039223c0a410eb04c207d6e44e2a202264e53201",
+      "frontend/src/components/workspace/capabilities/plugin-gallery.tsx": "6e9ed9191d933d220160232e123813c3a1beed1f43ba81fb207a329ef64bef11",
+      "frontend/src/components/workspace/capabilities/skill-gallery.tsx": "dd78089af5a22ec485c936e18a5c0a14b6b1d86a3cbbcdaa37882b58ff2c8c4a",
+      "frontend/src/components/workspace/chats/chat-page.tsx": "117a51afa125ff1ed90913ccee134a871433ed6cbf7acef19083dcb7f2b8aa5e",
+      "frontend/src/components/workspace/command-palette.tsx": "c51b847ff78761278412f855851b8cc58683be27096764c4c4b00f060a070c0d",
+      "frontend/src/components/workspace/conversation-references/conversation-reference-chip.tsx": "da5f77792d69397f92e570ae8a9cbe21516231368caa2477047a294d4ede3a2e",
+      "frontend/src/components/workspace/messages/scheduled-run-prompt.tsx": "91b4b35fa2df3cc19add2be1c8e37624c44f384efe79e3dad55f761880690272",
+      "frontend/src/components/workspace/messages/scheduled-task-card.tsx": "b4e94a6c4129a167173303a6a3cbcb36cdcbe17ae1f3429c550fe9abdfbd2bb3",
+      "frontend/src/components/workspace/messages/scheduled-task-event-line.tsx": "c9df2fddc0cfe5df8efdc697908524425c00584555f86a471befdae793cb44bc",
+      "frontend/src/components/workspace/plugin-navigation.tsx": "90defdf4a65ea7038aff67e6bac877b81a3c97ae742541f4dfacf0f43bf943a4",
+      "frontend/src/components/workspace/plugin-page.tsx": "e39f2343a68acf835ee71944193ae86fe6af46230ca0282498bd0f33b1fe3763",
+      "frontend/src/components/workspace/plugin-surfaces.tsx": "5f83500206ddb250f8dc4be52c2195db01bfa554e427b278916e60da12c8517b",
+      "frontend/src/components/workspace/projects-section.tsx": "969df7152712303610aece02bf70c7b6450d7e6efe404f859ae48ee35addf6b3",
+      "frontend/src/components/workspace/projects/project-documents-section.tsx": "315196339bca79402bacaeaf1515e4b342446290d853cfcf4a64600e652ae50e",
+      "frontend/src/components/workspace/projects/project-threads-section.tsx": "a427f1f29846dd52c77403866f95a5dc86c99d3debea5ed7291cf18ff39503dd",
+      "frontend/src/components/workspace/recent-chat-list.tsx": "7eb00fe4689af80d5b94bf08c5886b1ad61a52464cfe8d6e966253053a7f2f33",
+      "frontend/src/components/workspace/scheduled-tasks/run-row.tsx": "730a3fefbc1061c9af32a3de9cf37942577a32aea5d9be3f34423b61abd375de",
+      "frontend/src/components/workspace/scheduled-tasks/task-detail.tsx": "3828a383dcaa203e4fb04b2130be600a004a6ef3dd59ea8b37a5108d87297052",
+      "frontend/src/components/workspace/scheduled-tasks/task-outcome-notice.tsx": "18bbd112037e2e9befb1d7025dfc06b60fd30886c53f0debfce6405ad1487049",
+      "frontend/src/components/workspace/settings/memory-settings-page.tsx": "2f9a39f7c8b191fa348d808f21f129c48713e366ada5671e75b374b10d7c8fd1",
+      "frontend/src/components/workspace/thread-delete-dialog.tsx": "c90de70a1339fbe8f48afc0486a80df20c5d0bc53c31a288db31c85220f628eb",
+      "frontend/src/components/workspace/thread-scheduled-tasks-button.tsx": "e7106d70d7540a5c4a34de51e8ebc98b9285abb48d1328f12462f12900913478",
+      "frontend/src/components/workspace/workspace-container.tsx": "996f3895f2e84f340fa57d274b4bd454b4304e77fc51110927b4a4603915196e",
+      "frontend/src/components/workspace/workspace-header.tsx": "1964b483bd07ffa4cd0f5fc6e78becd803562db015c7d82ee0ce4fb4fe2c2464",
+      "frontend/src/components/workspace/workspace-link.tsx": "53b685684bb83de52c0377a079a8b3daa49e47361c673de6ce8ce3017b67b7ea",
+      "frontend/src/components/workspace/workspace-nav-chat-list.tsx": "842bf6c9e5346e88e452b3c639316f4e8d1d77712a00a78be9e44277e082503e",
+      "frontend/src/components/workspace/workspace-settings-deep-link.tsx": "744dfc52707ad8056ea55e3bb9a816b5631eb551c8b03988493f55a49cde0be3",
+      "frontend/src/components/workspace/workspace-shell.tsx": "91a16f5abe54c52ba3f365056596c16645f48320678c3758eb8de06dd4ff2066",
+      "frontend/src/components/workspace/workspace-switcher.tsx": "ebff11afd6c27a487ed8b78f19257fde26a26599a49b47bd9ddfb22b3d27b393",
+      "frontend/src/core/auth/AuthProvider.tsx": "d1cca0f56c1eace7b0a419dd898d984502892e3dc904bd729a45ccb4a25d44a8",
+      "frontend/src/core/workspaces/context.tsx": "5d9e468c4c109684e00a4690f51346ad4fe52c83c4e765e09a31582dacf16e8b",
+      "frontend/src/core/workspaces/navigation.ts": "0777de5dfefa371ba318e069bbb7688cfecab15b72d5b34614c1dce08129d37b",
+      "frontend/src/core/workspaces/session.ts": "39abb4af9a78e5f10e9b37a0b665e134944e2f9ad580fee81c1409b9da84adac",
+      "frontend/src/core/workspaces/urls.ts": "3b03c42a830be5d516f0cfa4dc763a14b138d4b1efed7dd3e27ec516dc98c4da",
+      "frontend/tests/unit/app/workspace/workspace-content.dom.test.tsx": "5cf4322db01565885884d63d48168e03a0c867d8ad40296aab66dd2b1699d936",
+      "frontend/tests/unit/app/workspace/workspace-entry.test.ts": "25036fa66d9c9e85ea7e31de01428c74dd5c60ba14e68ac5edc6374de500fc21",
+      "frontend/tests/unit/components/workspace/chats/workspace-page-actions.dom.test.tsx": "2dc8878298c78867da2459c63f1d1cc6af9671d8e0521f9a0e3599f7c302f29b",
+      "frontend/tests/unit/core/auth/return-route.dom.test.tsx": "54a81443caa7466ddca69d54b09ee36c629ff57575bbeef49ef7fa72d66bcc9e",
+      "frontend/tests/unit/core/workspaces/urls.test.ts": "bb13f9e047386972007e66b4d4d090a2c18a5fe1f343c5ae085cdffe6daa5ded"
+    },
+    "remaining": [
+      "Workspace layout unauthenticated server redirect and authenticated auth-layout next handling must preserve the original workspace/resource address; source still shows the gap.",
+      "Compiled Next browser hydration/native history/refresh/back/forward/new-tab and real Gateway personal/team upload/chat/download main.",
+      "Actual private clients/global stores/dialog/settings/title/focus/live WSS, principal/two-tab/remaining HTML/physical and M4-M11 gates."
     ],
     "runtime_activation": false,
     "deployment": "none",

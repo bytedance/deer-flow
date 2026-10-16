@@ -63,6 +63,7 @@ export class WorkspaceSession {
   }
 
   getSnapshot = () => this.state;
+  getRequestedSelector = () => this.requestedSelector;
   getServerSnapshot = () => INITIAL;
   subscribe = (listener: () => void) => {
     this.listeners.add(listener);

@@ -258,3 +258,14 @@ with one lifetime cache shared across regions. Native root/sidebar/cache DOM
 proof uses capability/cookie/navigation and leaf-feature doubles; retained
 Chromium browser exercises native control/report, not this shell. Actual Next/
 private HTTP/route locators/principal/global stores and backend main remain open.
+
+
+Native route ingress (#123 frontend): thin Link/router/native-history adapters
+cover workspace view imports. Raw native exceptions are WorkspaceShell's routing
+owner/auth-only link and WorkspaceLink's Next implementation. URLs preserve
+explicit locators; invalid/repeated values are refused, not cleaned into personal
+default. Server entry preserves query; client login return keeps route intent.
+Source inventory has no direct workspace view Link/router/history bypass.
+Root and server entry use deterministic Next/leaf/metadata doubles. SSR auth
+return, compiled Next and actual private/backend/principal/physical proof remain
+required. Existing activation guard stays false.

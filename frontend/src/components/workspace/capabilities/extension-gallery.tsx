@@ -1,13 +1,14 @@
 "use client";
 
 import { ArrowLeftIcon, ChevronRightIcon } from "lucide-react";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 
 import { Button } from "@/components/ui/button";
 import { extensionDirectory } from "@/core/extensions/catalog";
 import { useFrontendExtensions } from "@/core/extensions/hooks";
 import { extensionIcon } from "@/core/extensions/registry";
 import { useI18n } from "@/core/i18n/hooks";
+import { useWorkspaceRouter as useRouter } from "@/core/workspaces/navigation";
 
 import { PluginRow } from "./plugin-directory";
 

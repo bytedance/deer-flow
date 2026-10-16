@@ -1,7 +1,14 @@
 import { afterEach, describe, expect, it, rs } from "@rstest/core";
 import { useQueryClient } from "@tanstack/react-query";
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
-import type { ReactNode } from "react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import { useSyncExternalStore, type ReactNode } from "react";
 
 import { WorkspaceContent } from "@/app/workspace/workspace-content";
 import { AuthProvider } from "@/core/auth/AuthProvider";
@@ -19,15 +26,51 @@ const fixture = rs.hoisted(() => ({
   } | null,
   privateRenders: [] as string[],
   clients: [] as unknown[],
+  views: [] as { url: string; workspace: string }[],
   controls: null as ReturnType<typeof useWorkspaceContext>,
   refresh: rs.fn(),
+  url: "/workspace/chats/new",
+  listeners: new Set<() => void>(),
+  replace: rs.fn((href: string) => {
+    fixture.url = href;
+    for (const listener of fixture.listeners) listener();
+  }),
 }));
 rs.mock("next/headers", () => ({
   cookies: async () => ({ get: () => undefined }),
 }));
 rs.mock("next/navigation", () => ({
-  useRouter: () => ({ push: rs.fn(), refresh: fixture.refresh }),
-  usePathname: () => "/workspace/chats/new",
+  useRouter: () => ({
+    push: rs.fn(),
+    replace: fixture.replace,
+    refresh: fixture.refresh,
+  }),
+  usePathname: () =>
+    new URL(
+      useSyncExternalStore(
+        (fn) => {
+          fixture.listeners.add(fn);
+          return () => {
+            fixture.listeners.delete(fn);
+          };
+        },
+        () => fixture.url,
+      ),
+      "http://localhost",
+    ).pathname,
+  useSearchParams: () =>
+    new URL(
+      useSyncExternalStore(
+        (fn) => {
+          fixture.listeners.add(fn);
+          return () => {
+            fixture.listeners.delete(fn);
+          };
+        },
+        () => fixture.url,
+      ),
+      "http://localhost",
+    ).searchParams,
 }));
 rs.mock("@/core/workspaces/server", () => ({
   getServerSideWorkspaceCapability: async () => fixture.capability,
@@ -42,6 +85,10 @@ function PrivateLeaf({ name }: { name: string }) {
     name + ":" + (lifetime?.scope.workspaceId ?? "legacy"),
   );
   fixture.clients.push(client);
+  fixture.views.push({
+    url: fixture.url,
+    workspace: lifetime?.scope.workspaceId ?? "legacy",
+  });
   return (
     <span data-testid={name}>{lifetime?.scope.workspaceId ?? "legacy"}</span>
   );
@@ -123,14 +170,19 @@ afterEach(() => {
   rs.unstubAllGlobals();
   fixture.privateRenders.length = 0;
   fixture.clients.length = 0;
+  fixture.views.length = 0;
   fixture.controls = null;
   fixture.capability = { enabled: true, available: true };
+  fixture.url = "/workspace/chats/new";
+  fixture.replace.mockClear();
 });
 
 describe("native workspace content bootstrap", () => {
   it("keeps controls mounted, confirms scope before private features and shares one fresh cache across sidebar and page", async () => {
+    fixture.url = `/workspace/chats/old-team-chat?workspace_id=${T}`;
     let release!: () => void;
     let started = false;
+    let metadataReads = 0;
     let held = true;
     rs.stubGlobal(
       "fetch",
@@ -171,10 +223,16 @@ describe("native workspace content bootstrap", () => {
             },
           ]);
         if (path === "/api/workspaces/current") {
+          metadataReads += 1;
           if (held) {
             started = true;
-            await new Promise<void>((resolve) => {
+            await new Promise<void>((resolve, reject) => {
               release = resolve;
+              init?.signal?.addEventListener(
+                "abort",
+                () => reject(new Error("Metadata read aborted")),
+                { once: true },
+              );
             });
           }
           return Response.json({
@@ -199,8 +257,13 @@ describe("native workspace content bootstrap", () => {
       held = false;
       release();
     });
-    await waitFor(() => expect(screen.getByTestId("page").textContent).toBe(P));
-    expect(screen.getByTestId("recent").textContent).toBe(P);
+    await waitFor(() => expect(screen.getByTestId("page").textContent).toBe(T));
+    expect(screen.getByTestId("recent").textContent).toBe(T);
+    expect(
+      screen
+        .getByRole("link", { name: enUS.sidebar.newChat })
+        .getAttribute("href"),
+    ).toBe(`/workspace/chats/new?workspace_id=${T}`);
     expect(fixture.privateRenders).toContain("activity");
     expect(new Set(fixture.clients).size).toBe(1);
     const original = fixture.clients[0];
@@ -210,8 +273,11 @@ describe("native workspace content bootstrap", () => {
     started = false;
     let selection!: Promise<boolean>;
     act(() => {
-      selection = fixture.controls!.select(T);
+      selection = fixture.controls!.select(P);
     });
+    expect(fixture.replace).toHaveBeenCalledWith(
+      `/workspace/chats/new?workspace_id=${P}`,
+    );
     expect(screen.queryByTestId("page")).toBeNull();
     expect(screen.queryByTestId("recent")).toBeNull();
     expect(fixture.privateRenders).toEqual([]);
@@ -226,10 +292,55 @@ describe("native workspace content bootstrap", () => {
       release();
       await selection;
     });
-    await waitFor(() => expect(screen.getByTestId("page").textContent).toBe(T));
-    expect(screen.getByTestId("recent").textContent).toBe(T);
+    await waitFor(() => expect(screen.getByTestId("page").textContent).toBe(P));
+    expect(screen.getByTestId("recent").textContent).toBe(P);
     expect(new Set(fixture.clients).size).toBe(1);
     expect(fixture.clients[0]).not.toBe(original);
+    const personalCache = fixture.clients[0];
+    const reads = metadataReads;
+    act(() => {
+      fixture.replace(`/workspace/chats/created?workspace_id=${P}&tab=files`);
+    });
+    expect(screen.getByTestId("page").textContent).toBe(P);
+    expect(metadataReads).toBe(reads);
+    expect(fixture.clients.at(-1)).toBe(personalCache);
+    act(() => {
+      fixture.replace(`/workspace/chats/old-team-chat?workspace_id=${T}`);
+    });
+    await waitFor(() => expect(screen.getByTestId("page").textContent).toBe(T));
+    expect(fixture.clients.at(-1)).not.toBe(personalCache);
+    const invalid = `/workspace/chats/old-team-chat?workspace_id=${T}&workspace_id=${P}`;
+    act(() => {
+      fixture.replace(invalid);
+    });
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", {
+          name: enUS.workspace.spaceSwitcher.personalAction,
+        }),
+      ).toBeTruthy(),
+    );
+    expect(screen.queryByTestId("page")).toBeNull();
+    expect(
+      screen
+        .getByRole("link", { name: enUS.login.signIn })
+        .getAttribute("href"),
+    ).toBe(`/login?next=${encodeURIComponent(invalid)}`);
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: enUS.workspace.spaceSwitcher.personalAction,
+      }),
+    );
+    await waitFor(() => expect(screen.getByTestId("page").textContent).toBe(P));
+    expect(fixture.url).toBe(`/workspace/chats/new?workspace_id=${P}`);
+    expect(
+      fixture.views.every(
+        (view) =>
+          new URL(view.url, "http://localhost").searchParams.get(
+            "workspace_id",
+          ) === view.workspace,
+      ),
+    ).toBe(true);
   });
 
   it("blocks unknown or unavailable capabilities, while an explicitly disabled legacy installation remains usable", async () => {
@@ -245,6 +356,12 @@ describe("native workspace content bootstrap", () => {
       view.unmount();
     }
     fixture.capability = { enabled: false, available: false };
+    fixture.url = `/workspace/chats/private?workspace_id=${T}`;
+    const scoped = await mount();
+    expect(screen.queryByTestId("page")).toBeNull();
+    expect(screen.getByRole("alert")).toBeTruthy();
+    scoped.unmount();
+    fixture.url = "/workspace/chats/new";
     await mount();
     expect(screen.getByTestId("page").textContent).toBe("legacy");
     expect(

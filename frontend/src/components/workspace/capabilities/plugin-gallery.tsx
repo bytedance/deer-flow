@@ -2,7 +2,7 @@
 
 import { useQueries, useQueryClient } from "@tanstack/react-query";
 import { ArrowUpRightIcon } from "lucide-react";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -24,6 +24,7 @@ import type { CapabilityInstallation } from "@/core/capabilities/types";
 import { useI18n } from "@/core/i18n/hooks";
 import type { Translations } from "@/core/i18n/locales/types";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
+import { useWorkspaceRouter as useRouter } from "@/core/workspaces/navigation";
 import { cn } from "@/lib/utils";
 
 import { MCPPluginManager } from "./mcp-plugin-manager";

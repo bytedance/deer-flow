@@ -7,9 +7,9 @@ import {
   PauseCircle,
   type LucideIcon,
 } from "lucide-react";
-import Link from "next/link";
 import { Fragment, useId } from "react";
 
+import Link from "@/components/workspace/workspace-link";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   describeTaskEvent,

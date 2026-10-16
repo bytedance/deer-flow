@@ -1,7 +1,6 @@
 "use client";
 
 import { BotIcon, PlusIcon, UploadIcon } from "lucide-react";
-import { useRouter } from "next/navigation";
 import { type ChangeEvent, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -17,6 +16,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { useAgents, useImportAgentPackage } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
+import { useWorkspaceRouter as useRouter } from "@/core/workspaces/navigation";
 
 import { AgentCard } from "./agent-card";
 

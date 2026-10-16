@@ -690,3 +690,22 @@ with one positive report main before necessary stale/escape boundaries. Preserve
 external reference behavior and original rich report UI. The diagnostic prototype
 is not the production implementation, and full HTML/browser/Gateway acceptance
 remains unchecked together with the main M3 shell/two-tab/physical gates.
+
+
+M3 route refinement (2026-10-16; within approved workspace/session isolation):
+retain native Next Link/router/history and decorate only local /workspace URLs
+with workspace_id. Existing explicit selectors are never overwritten; external,
+API, auth and public URLs stay unchanged. Server capability remains the only mode
+switch. A copied selector is freshly confirmed, including on reload/back; invalid
+or repeated selectors and a scoped link on a legacy instance fail closed.
+Canonicalize a selector-free scoped entry to the confirmed personal locator
+before private content mounts, so native new-thread history updates never change
+the provider identity/remount the live stream. Switch controls detach immediately
+via existing WorkspaceSession.select then navigate to a new chat in the requested
+space; mask private content until URL locator and confirmation match. Core session
+remains the only data authority; no tab-global last-team storage or new runner.
+Use thin navigation adapters for sidebar/project/chat/task links and router calls,
+retaining native history for stream-created thread URLs. Sign-in retains route
+intent. Verify the root main first, then only necessary locator/navigation
+boundaries and affected native workflows in Shanghai. Actual Next/hydration and
+real backend acceptance remain open until separately exercised.

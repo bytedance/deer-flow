@@ -3,6 +3,7 @@
 import {
   createContext,
   useContext,
+  useCallback,
   useEffect,
   useMemo,
   useState,
@@ -23,6 +24,9 @@ import {
 
 export interface WorkspaceContextValue {
   readonly state: WorkspaceState;
+  /** A navigation locator, never an authorization grant. */
+  readonly requestedWorkspaceId?: string;
+  readonly signInHref?: string;
   readonly select: (workspaceId?: string) => Promise<boolean>;
   readonly refresh: () => Promise<boolean>;
 }
@@ -52,7 +56,12 @@ function ActorWorkspaceProvider({
   );
   useEffect(() => session.acquire(), [session]);
   const value = useMemo(
-    () => ({ state, select: session.select, refresh: session.refresh }),
+    () => ({
+      state,
+      requestedWorkspaceId: session.getRequestedSelector(),
+      select: session.select,
+      refresh: session.refresh,
+    }),
     [state, session],
   );
   return (
@@ -134,5 +143,60 @@ export function WorkspaceReadyBoundary({
     <QueryClientProvider key={active.cacheKey} cacheKey={active.cacheKey}>
       {children}
     </QueryClientProvider>
+  );
+}
+
+/** Match the confirmed authority to the URL before mounting any private route. */
+export function WorkspaceRouteBoundary({
+  selector,
+  onSelect,
+  onPersonalConfirmed,
+  signInHref,
+  children,
+}: {
+  selector?: string;
+  onSelect: (selector?: string) => void;
+  onPersonalConfirmed: (workspaceId: string) => void;
+  signInHref: string;
+  children: ReactNode;
+}) {
+  const context = useWorkspaceContext();
+  const active = context?.state.active;
+  useEffect(() => {
+    if (
+      selector === undefined &&
+      context?.requestedWorkspaceId === undefined &&
+      active &&
+      !active.scope.signal.aborted
+    )
+      onPersonalConfirmed(active.scope.workspaceId);
+  }, [selector, context?.requestedWorkspaceId, active, onPersonalConfirmed]);
+  const select = useCallback(
+    (id?: string) => {
+      if (!context || context.state.active?.scope.signal.aborted)
+        return Promise.resolve(false);
+      // Detach old private content synchronously; routing cannot retarget its lifetime.
+      const result = context.select(id);
+      onSelect(id);
+      return result;
+    },
+    [context, onSelect],
+  );
+  const value = useMemo(() => {
+    if (!context) return null;
+    const state =
+      context.state.status === "ready" && active?.scope.workspaceId !== selector
+        ? Object.freeze({
+            ...context.state,
+            status: "loading" as const,
+            active: null,
+          })
+        : context.state;
+    return { ...context, state, select, signInHref };
+  }, [context, active, selector, select, signInHref]);
+  return (
+    <WorkspaceContext.Provider value={value}>
+      {children}
+    </WorkspaceContext.Provider>
   );
 }

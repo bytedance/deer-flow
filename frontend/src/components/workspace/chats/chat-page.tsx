@@ -2,8 +2,7 @@
 
 import { useQueryClient } from "@tanstack/react-query";
 import { Folder } from "lucide-react";
-import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -38,6 +37,7 @@ import { TodoList } from "@/components/workspace/todo-list";
 import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicator";
 import { useActiveGoal } from "@/components/workspace/use-active-goal";
 import { Welcome } from "@/components/workspace/welcome";
+import Link from "@/components/workspace/workspace-link";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { hasPermission, PERMISSIONS } from "@/core/auth/permissions";
 import {
@@ -77,8 +77,13 @@ import {
   selectContextUsage,
   threadTokenUsageToTokenUsage,
 } from "@/core/threads/token-usage";
-import { projectIdOfThread, textOfMessage } from "@/core/threads/utils";
+import {
+  pathOfThread,
+  projectIdOfThread,
+  textOfMessage,
+} from "@/core/threads/utils";
 import { useWorkspaceLifetime } from "@/core/workspaces/context";
+import { useWorkspaceRouter as useRouter } from "@/core/workspaces/navigation";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
@@ -210,8 +215,9 @@ export default function ChatPage() {
       setIsWelcomeMode(false);
     },
     onStart: (createdThreadId) => {
+      if (lifetime?.scope.signal.aborted) return;
       // ! Important: Never use next.js router for navigation in this case, otherwise it will cause the thread to re-mount and lose all states. Use native history API instead.
-      history.replaceState(null, "", `/workspace/chats/${createdThreadId}`);
+      router.replaceHistory(pathOfThread(createdThreadId));
       setThreadId(createdThreadId);
       setIsNewThread(false);
     },
@@ -681,11 +687,7 @@ export default function ChatPage() {
                       onReferenceFileAttached={() => {
                         if (lifetime?.scope.signal.aborted || !isNewThread)
                           return;
-                        history.replaceState(
-                          null,
-                          "",
-                          `/workspace/chats/${threadId}`,
-                        );
+                        router.replaceHistory(pathOfThread(threadId));
                         setThreadId(threadId);
                         setIsNewThread(false);
                       }}

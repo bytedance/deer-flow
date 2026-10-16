@@ -724,3 +724,35 @@ Initial shell scope is the server-confirmed personal workspace; copied workspace
 route locators, switching away from a private thread URL, sign-in return intent
 and compiled Next/real Gateway/two-tab/principal validation remain required.
 Keep the runtime activation guard false until all plan gates are accepted.
+
+
+Workspace routes use workspace_id only as a locator. WorkspaceShell passes it to
+the actor-keyed WorkspaceProvider; WorkspaceRouteBoundary masks a ready lifetime
+unless it matches the URL. An absent selector is explicitly confirmed as personal
+and canonicalized before private consumers mount, preserving the native new-chat
+history no-remount contract. Invalid/duplicate selectors remain errors; an explicit
+selector cannot activate a legacy installation. Switching uses existing session
+select to retire the old scope immediately, then Next replace to a new chat in
+the requested space. Routing can cause a short aborted metadata read before the
+new keyed provider confirms; it does not transfer a lifetime or cancel a Run.
+
+Use WorkspaceLink and useWorkspaceRouter in workspace views rather than raw Next
+navigation. They retain Next behavior while decorating only local /workspace URLs
+that have no explicit selector, preserving query/fragment and object hrefs. Do
+not append locators to foreign/protocol-relative/backslash-authority/API/public/
+auth URLs. No actor/auth grant is serialized. Native stream-created thread IDs
+use router.replaceHistory(pathOfThread(...)), retaining history rather than a
+Next remount. Old captured lifetime callbacks cannot navigate after abort.
+The /workspace server entry preserves query entries, including duplicate/invalid
+selectors, for the shell to reject; never clean an invalid selector into absence.
+
+Root error sign-in links retain route intent. AuthProvider client 401 and auth
+guard redirects read browser pathname/search/hash at redirect time. The workspace
+layout's unauthenticated server redirect and auth layout's already-authenticated
+return handling still require integration before claiming full sign-in/deep-link
+acceptance. Compiled Next/browser history/hydration and real Gateway/business,
+principal/two-tab/physical/global-store checks remain open; activation stays false.
+
+The client mount gates do not prevent server/RSC children from evaluating. All
+server-side private reads still require trusted backend workspace authorization;
+never treat WorkspaceContentBoundary or a URL locator as that authorization.

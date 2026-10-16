@@ -340,6 +340,18 @@ it("prepares project-born threads through each confirmed page client before publ
   expect(
     page.cache().getQueryData(["thread", "metadata", "thread-1", false]),
   ).toMatchObject({ metadata: { marker: T } });
+  const historyWrite = rs
+    .spyOn(history, "replaceState")
+    .mockImplementation(() => undefined);
+  act(() => {
+    mocks.referenceAttached!();
+  });
+  expect(historyWrite).toHaveBeenCalledWith(
+    null,
+    "",
+    `/workspace/chats/thread-1?workspace_id=${T}`,
+  );
+  expect(mocks.replace).not.toHaveBeenCalled();
 });
 
 it("refuses late prepared thread metadata and the retained page callback after switching", async () => {
@@ -414,6 +426,8 @@ it("drops late branch routing and retained branch dispatch from the previous pag
     await mocks.branchTurn!("message", ["message"]);
   });
   expect(mocks.branch).toHaveBeenCalledTimes(2);
-  expect(mocks.push).toHaveBeenCalledWith("/workspace/chats/team-branch");
+  expect(mocks.push).toHaveBeenCalledWith(
+    `/workspace/chats/team-branch?workspace_id=${T}`,
+  );
   expect(mocks.success).toHaveBeenCalledTimes(1);
 });

@@ -8,8 +8,6 @@ import {
   Trash2,
   Upload,
 } from "lucide-react";
-import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -36,6 +34,7 @@ import {
   ArtifactFilePreview,
   formatArtifactBytes,
 } from "@/components/workspace/artifacts/artifact-file-preview";
+import Link from "@/components/workspace/workspace-link";
 import { getTabularDelimiter } from "@/core/artifacts/preview";
 import {
   resolveArtifactOpenURL,
@@ -71,6 +70,7 @@ import {
 import { formatTimeAgo } from "@/core/utils/datetime";
 import { getFileIcon } from "@/core/utils/files";
 import { useWorkspaceLifetime } from "@/core/workspaces/context";
+import { useWorkspaceRouter as useRouter } from "@/core/workspaces/navigation";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 

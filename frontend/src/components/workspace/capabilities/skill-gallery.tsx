@@ -7,7 +7,6 @@ import {
   UploadIcon,
 } from "lucide-react";
 import dynamic from "next/dynamic";
-import { useRouter } from "next/navigation";
 import { type ChangeEvent, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -42,6 +41,7 @@ import {
   useUploadSkillArchive,
 } from "@/core/skills/hooks";
 import type { Skill } from "@/core/skills/type";
+import { useWorkspaceRouter as useRouter } from "@/core/workspaces/navigation";
 import { env } from "@/env";
 
 import { CapabilityCard, CapabilityIcon } from "./capability-card";

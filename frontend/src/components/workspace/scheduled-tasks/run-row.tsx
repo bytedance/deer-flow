@@ -14,9 +14,9 @@ import {
   TriangleAlert,
   type LucideIcon,
 } from "lucide-react";
-import Link from "next/link";
 
 import { Tooltip } from "@/components/workspace/tooltip";
+import Link from "@/components/workspace/workspace-link";
 import { useI18n } from "@/core/i18n/hooks";
 import type { Translations } from "@/core/i18n/locales/types";
 import { formatTokenCount } from "@/core/messages/usage";

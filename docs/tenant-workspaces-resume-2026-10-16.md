@@ -1,4 +1,4 @@
-> 用户已于 2026-10-16 明确要求继续，当前已恢复，最新验证见文末 #116。下面暂停段为历史记录；完整 M0–M11 目标继续保留。
+> 用户已于 2026-10-16 明确要求继续，当前已恢复，最新验证见文末 #123。下面暂停段为历史记录；完整 M0–M11 目标继续保留。
 
 # 2026-10-16 暂停与恢复检查点
 
@@ -112,3 +112,36 @@ switch-from-private-thread semantics, then compiled Next and backend main.
 Actual private clients/global settings/store/title/focus/live WSS, remaining HTML
 and M4-M11 remain required. All parent gates unchecked; M3 partial, activation
 false. No deployment, remote push, model calls or local application tests.
+
+
+M3 native route checkpoint (2026-10-16, #123 SUCCESS): URLs now carry a workspace
+locator through native links/router/new-thread history and the /workspace entry.
+Only server capability enables mode; metadata still confirms actor and scope.
+Mask private content until URL and confirmed scope match; missing selector is
+confirmed personal and canonicalized before private mounts. Invalid/duplicate
+selectors and scoped legacy entry fail closed. Switching retires old content
+immediately and opens a fresh chat, clearing old resource locators. Next Link
+refs/options/modified-click/prefetch behavior remains native; external/API/auth/
+public destinations never get an injected workspace locator. Explicit locators
+are never overwritten. Client 401/login guards and root error sign-in links keep
+route intent. Server auth-layout return handling is still an identified gap.
+
+#117 domain RED -> #118 root main eight checks GREEN, before broader bindings.
+#119 reveals two URL-authority/client-login boundary failures -> #120 nineteen
+checks GREEN. #121 shows native server entry dropping selected query; fix preserves
+query entries, even duplicates for later rejection. #122 detects the missing custom Agent lifetime accessor during full tsc; keep
+the guard and acquire the existing scoped lifetime. #123 final twenty-two checks
+(nine files; only five new cases), forty-eight-file format/full pnpm check and
+retained control/report browser main/twelve observations pass. Existing native
+page workflow additionally checks scoped native history without Next replace.
+No duplicate standalone full tsc/target lint is added to the final check. Exact
+receipts/source/archives/empty owned resources: frontend_workspace_routes JSON.
+
+Root and server-entry proof uses Next/capability/metadata/leaf fixtures; browser
+proof retains native control/report but does not mount the new root routing.
+This is not actual Next hydration/history/back/forward/new-tab, SSR auth return,
+real feature HTTP/JWT/SQL/NAS/model business or principal/physical acceptance.
+Next preserve workspace/resource URI in server login redirects, then run compiled
+Next and real backend upload/chat/download. Remaining UI/global stores/private
+clients/HTML/M4-M11 stay required. All parent gates remain unchecked; M3 partial,
+activation false; no deployment/push/model calls or local application runtime.

@@ -1,6 +1,6 @@
 "use client";
 
-import { useParams, usePathname, useRouter } from "next/navigation";
+import { useParams, usePathname } from "next/navigation";
 import {
   createContext,
   useCallback,
@@ -27,6 +27,7 @@ import { useDeleteThread } from "@/core/threads/hooks";
 import type { AgentThread } from "@/core/threads/types";
 import { pathOfThread, titleOfThread } from "@/core/threads/utils";
 import { useWorkspaceLifetime } from "@/core/workspaces/context";
+import { useWorkspaceRouter as useRouter } from "@/core/workspaces/navigation";
 
 type DeleteTarget = {
   thread: AgentThread;

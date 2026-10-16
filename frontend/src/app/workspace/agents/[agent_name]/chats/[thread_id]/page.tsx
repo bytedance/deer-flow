@@ -1,7 +1,7 @@
 "use client";
 
 import { BotIcon, PlusSquare } from "lucide-react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
@@ -76,7 +76,13 @@ import {
   selectContextUsage,
   threadTokenUsageToTokenUsage,
 } from "@/core/threads/token-usage";
-import { projectIdOfThread, textOfMessage } from "@/core/threads/utils";
+import {
+  pathOfThread,
+  projectIdOfThread,
+  textOfMessage,
+} from "@/core/threads/utils";
+import { useWorkspaceLifetime } from "@/core/workspaces/context";
+import { useWorkspaceRouter as useRouter } from "@/core/workspaces/navigation";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
@@ -86,6 +92,7 @@ export default function AgentChatPage() {
   const canStopStreaming = hasPermission(user, PERMISSIONS.RUNS_CANCEL);
   const canCreateRuns = hasPermission(user, PERMISSIONS.RUNS_CREATE);
   const router = useRouter();
+  const lifetime = useWorkspaceLifetime();
 
   const { agent_name } = useParams<{
     agent_name: string;
@@ -197,12 +204,9 @@ export default function AgentChatPage() {
       setIsWelcomeMode(false);
     },
     onStart: (createdThreadId) => {
+      if (lifetime?.scope.signal.aborted) return;
       // ! Important: Never use next.js router for navigation in this case, otherwise it will cause the thread to re-mount and lose all states. Use native history API instead.
-      history.replaceState(
-        null,
-        "",
-        `/workspace/agents/${agent_name}/chats/${createdThreadId}`,
-      );
+      router.replaceHistory(pathOfThread(createdThreadId, { agent_name }));
       setThreadId(createdThreadId);
       setIsNewThread(false);
     },
