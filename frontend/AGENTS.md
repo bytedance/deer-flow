@@ -214,6 +214,7 @@ round-trip validation must still reject newly entered skipped times.
 
 ## Resources
 
+- [DESIGN.md](DESIGN.md) — tokens, type, components, a11y rules; read before UI work
 - [LangGraph Documentation](https://langchain-ai.github.io/langgraph/)
 - [LangChain Core Concepts](https://js.langchain.com/docs/concepts)
 - [TanStack Query Documentation](https://tanstack.com/query/latest)
@@ -228,6 +229,12 @@ When adding features:
 3. Write unit tests under `tests/unit/` (`pnpm test`) and E2E tests under `tests/e2e/` (`pnpm test:e2e`)
 4. Run `pnpm check` before committing
 5. Update this `AGENTS.md` when architecture, commands, or conventions change
+
+Docs search: `pnpm build` runs `scripts/build-search-index.mjs`, which sets each
+page's `<html lang>` from its route so Pagefind writes one index per language
+(`public/_pagefind/`, gitignored); it works only on a build. `DocsHtmlLang` syncs
+`<html lang>` at runtime. Search renders only via `Header`'s `search` slot
+(`Layout search={null}`). See `tests/unit/app/docs-search.test.ts`.
 
 Route asset budgets are enforced with `pnpm perf:check`. The command measures
 `/login` from a normal production build, then builds in static-demo mode for the

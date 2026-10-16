@@ -203,6 +203,11 @@ export interface Translations {
   home: {
     docs: string;
     blog: string;
+    searchDocs: string;
+    searchDocsLabel: string;
+    searchNoResults: string;
+    searchLoadFailed: string;
+    searchLoading: string;
   };
 
   // Welcome

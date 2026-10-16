@@ -266,6 +266,11 @@ export const enUS: Translations = {
   home: {
     docs: "Docs",
     blog: "Blog",
+    searchDocs: "Search docs…",
+    searchDocsLabel: "Search documentation",
+    searchNoResults: "No results. Try fewer or different words.",
+    searchLoadFailed: "Search is unavailable right now.",
+    searchLoading: "Loading…",
   },
 
   // Welcome

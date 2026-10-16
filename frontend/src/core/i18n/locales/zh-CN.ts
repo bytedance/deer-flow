@@ -253,6 +253,11 @@ export const zhCN: Translations = {
   home: {
     docs: "文档",
     blog: "博客",
+    searchDocs: "搜索文档…",
+    searchDocsLabel: "搜索文档",
+    searchNoResults: "未找到结果，请尝试更少或不同的关键词。",
+    searchLoadFailed: "搜索暂时不可用。",
+    searchLoading: "加载中…",
   },
 
   // Welcome
