@@ -1,5 +1,5 @@
-<!-- 最新断点：文末 M4 native invocation admission checkpoint；之前小步保留为历史。 -->
-> 当前恢复点：M4 普通异步原生 Agent 的模型/工具调用前保护已验证；SQL #71 最终 63 项通过，并修复了上一轮流延迟清理拒绝。下一步贯通系统模型/扩展服务的停止信号与实际 provider 生命周期，再接外部效应、账户撤权和 dispatcher/recovery。全量 M0–M11 保留，租户启动关闭。
+<!-- 最新断点：文末 M4 模型服务实际生命周期与停止信号（2026-10-17）。 -->
+> 当前恢复点：上海 SQL #77 固定 85 项和 26 文件 Ruff 通过；HostModelInvoker 的真实 provider 线程等待与按 Run 清理已接通，title/summary/service 停止信号保留。下一步 goal/直接模型实际生命周期及外部效应、其他撤权域、dispatcher/recovery。完整 M0–M11 未完成，租户启用关闭。
 
 # 2026-10-16 暂停与恢复检查点
 
@@ -786,3 +786,40 @@ activation false and startup schema fence unchanged. Root revocations remain
 pending. No local app/Node/browser/pytest/Docker runtime; local Git/OpenSpec/
 stdlib packaging/static formatting only. Serial self-review, not independent
 full audit. Continue actual service lifetimes and external effect boundaries.
+
+
+## M4 模型服务实际生命周期与停止信号（2026-10-17）
+
+上海 `deerflow-tenant-execution-m4-sql`：#72 是夹具签名错误，不能作为业务 RED；
+修正后 #73 在两种数据库复现四处提前退出，#74 再复现六处停止信号被吞。
+#75 主干先通过 12 项；#76 增加必要边界后 14 项通过；#77 最终 `85 passed, 4 warnings in 166.83s (0:02:46)`，
+二十六文件云端 Ruff check/format 通过。原有 63 项复用，新增本轮 14 项，
+另复用 8 项直接相关的模型服务/标题/摘要旧检查；没有扩展到全套后端测试。
+
+真实 native Run、SQL 成员变更/心跳、HostModelInvoker、模型工厂及 BaseChatModel
+继承的线程执行链：调用者退出后实际线程仍被持有，同线程替代任务被拒绝，lease
+持续续租；不同空间在同一个服务/预算上可独立完成报告。provider Task 被直接
+cancel 也须等真实线程停止；正常 completion hook 仍可调用模型收尾。先 drain
+主体遗留调用，完成钩子后再封住新调用并 drain，最后才清日志/沙箱和确认 native
+生命周期关闭。模型构造/执行不持 SQL 锁，不以全局服务预算阻塞其他 Run。
+
+扩展服务、异步标题 fallback、摘要构造及同步/异步 fallback 保留 GraphBubbleUp；
+撤权不会转成普通 provider failure、None 或本地标题后继续执行。普通失败仍保留
+原有清洗/降级语义。本轮 title/summary 的证明是停止信号，**不是其直接模型调用
+底层线程生命周期的完整验收**；goal fallback、直接 lead/system 模型 lifetime、
+非 Run/同步/嵌入入口和外部传输仍待接通。
+
+固定复跑入口：
+
+```bash
+python scripts/render_tenant_run_control_pipeline.py tenant-service <归档SHA256> \
+  --suite service-lifetime > /private/tmp/Jenkinsfile.tenant-service
+python scripts/render_tenant_run_control_pipeline.py tenant-service-final <归档SHA256> \
+  --suite service-final > /private/tmp/Jenkinsfile.tenant-service-final
+```
+
+同一上海 internal PostgreSQL/RO 归档/固定镜像、专属 job，无生产挂载或模型密钥；
+精确容器/网络/匿名卷清理与源码/日志/归档哈希见 `native_model_service_lifetime`。
+LangChain inline callback 拒绝时存在 `ahandle_event was never awaited` 警告，
+RED/GREEN 均可见，未隐瞒或声称无警告。未调用真实 DeepSeek，也没有 physical C、
+HTTP/JWT/browser/Redis/NAS/计费及完整租户验收；M0–M11 父项保留，启动关闭。

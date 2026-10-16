@@ -389,6 +389,14 @@ python -m pytest tests/test_workspace_execution.py tests/test_workspace_revocati
 - [x] 主干 14、必要边界 26、最终固定 63 项通过；二十二文件云端格式检查、回执、文档、恢复点与本地提交。
 - [ ] 系统 title/summary/goal fallback 与扩展模型服务须保留控制信号并跟踪/drain 真实 provider 生命周期；继续已准入 IO/发布/FS/网络效应、actor/account/token 域、非普通 Run/同步嵌入入口、scoped dispatcher/recovery 和远端 C。M4 父项保持未完成，不能据此启用租户。
 
+#### M4 第十六小步：扩展模型服务实际生命周期与命名系统停止边界（2026-10-17 已验证）
+
+- [x] 先用真实线程/原生 Run/SQL 复现取消与撤权后的提前关闭，保留初始夹具错误记录；再复现 service/title/summary 吞掉停止信号。
+- [x] Guard 逐 Run 持有实际 provider Task，模型构造/执行 drain 真正完成；主体清完后允许合法 completion hook，再 seal/drain 钩子遗留任务，最后关闭 native lifetime。
+- [x] 主干先 12 项通过，再仅加 provider 直接取消/跨空间共享服务独立完成边界，14 项通过；停止前同线程仍拒绝、续租正常。
+- [x] 复用固定旧回归，最终 85 项与二十六文件云端 Ruff 通过；CI/回执/文档/恢复点保存，本地提交，不推送部署。
+- [ ] 继续 goal 控制信号、普通 lead/title/summary 等直接模型真实 lifetime、已准入外部效应、各撤权域和签名 scoped dispatcher/recovery/APIs，再接 pool/remote C。M4 父项及 M0–M11 完整验收不勾选，租户启动保持关闭。
+
 ### M5：记忆、知识检索与工具凭据隔离
 
 **修改接点：**

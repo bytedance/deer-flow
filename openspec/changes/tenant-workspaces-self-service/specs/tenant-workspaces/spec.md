@@ -47,6 +47,19 @@ The system SHALL persist and authenticate workspace scope across native Run, MCP
 - **WHEN** a member is removed while C waits for B
 - **THEN** new claims and continuation SHALL be denied, cancellation SHALL use native lifecycle, and results SHALL not be delivered to the revoked member
 
+#### Scenario: Native caller exits before its host model provider
+- **WHEN** a native Run caller is cancelled or revoked while its host model service still has actual provider work in flight
+- **THEN** the Run SHALL retain its execution lifetime and reject same-thread replacement until that work has stopped, including when the provider task itself is cancelled
+- **AND** a different authorized workspace using the shared service SHALL be able to finish independently within the existing service budget
+
+#### Scenario: Native execution stop reaches a system model boundary
+- **WHEN** native execution authority is denied at the extension model service, title generation or summary generation boundary
+- **THEN** the owning worker SHALL receive the native stop signal without converting it into an ordinary provider failure, local title or summary skip that continues execution
+
+#### Scenario: Legitimate completion model work
+- **WHEN** an authorized native Run completes its body and invokes the host model service from its completion hook
+- **THEN** that work SHALL remain allowed before final sealing, and actual work left by the hook SHALL finish before execution cleanup is confirmed
+
 ### Requirement: Workspace aware user experience
 The interface SHALL support workspace selection, managed and self-service onboarding, membership management and explicit sharing while preserving backend authorization and isolating subscriptions and caches.
 

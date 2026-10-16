@@ -350,3 +350,40 @@ SQL 检查完成后才进入 handler/provider，模型与工具 IO 不持 SQL �
 SDK/transport/cache 仍须审计。Scoped callback 要求原生所属 async loop；不能
 用缺少上下文推导出权限。账户/token/policy 等撤权域、外部效应、scoped dispatch/
 recovery、真实 HTTP/JWT/browser/Redis/NAS/C、计费配额和完整租户验收继续保留。
+
+
+## M4 模型服务实际生命周期与停止信号（2026-10-17）
+
+上海 `deerflow-tenant-execution-m4-sql`：#72 是夹具签名错误，不能作为业务 RED；
+修正后 #73 在两种数据库复现四处提前退出，#74 再复现六处停止信号被吞。
+#75 主干先通过 12 项；#76 增加必要边界后 14 项通过；#77 最终 `85 passed, 4 warnings in 166.83s (0:02:46)`，
+二十六文件云端 Ruff check/format 通过。原有 63 项复用，新增本轮 14 项，
+另复用 8 项直接相关的模型服务/标题/摘要旧检查；没有扩展到全套后端测试。
+
+真实 native Run、SQL 成员变更/心跳、HostModelInvoker、模型工厂及 BaseChatModel
+继承的线程执行链：调用者退出后实际线程仍被持有，同线程替代任务被拒绝，lease
+持续续租；不同空间在同一个服务/预算上可独立完成报告。provider Task 被直接
+cancel 也须等真实线程停止；正常 completion hook 仍可调用模型收尾。先 drain
+主体遗留调用，完成钩子后再封住新调用并 drain，最后才清日志/沙箱和确认 native
+生命周期关闭。模型构造/执行不持 SQL 锁，不以全局服务预算阻塞其他 Run。
+
+扩展服务、异步标题 fallback、摘要构造及同步/异步 fallback 保留 GraphBubbleUp；
+撤权不会转成普通 provider failure、None 或本地标题后继续执行。普通失败仍保留
+原有清洗/降级语义。本轮 title/summary 的证明是停止信号，**不是其直接模型调用
+底层线程生命周期的完整验收**；goal fallback、直接 lead/system 模型 lifetime、
+非 Run/同步/嵌入入口和外部传输仍待接通。
+
+固定复跑入口：
+
+```bash
+python scripts/render_tenant_run_control_pipeline.py tenant-service <归档SHA256> \
+  --suite service-lifetime > /private/tmp/Jenkinsfile.tenant-service
+python scripts/render_tenant_run_control_pipeline.py tenant-service-final <归档SHA256> \
+  --suite service-final > /private/tmp/Jenkinsfile.tenant-service-final
+```
+
+同一上海 internal PostgreSQL/RO 归档/固定镜像、专属 job，无生产挂载或模型密钥；
+精确容器/网络/匿名卷清理与源码/日志/归档哈希见 `native_model_service_lifetime`。
+LangChain inline callback 拒绝时存在 `ahandle_event was never awaited` 警告，
+RED/GREEN 均可见，未隐瞒或声称无警告。未调用真实 DeepSeek，也没有 physical C、
+HTTP/JWT/browser/Redis/NAS/计费及完整租户验收；M0–M11 父项保留，启动关闭。

@@ -159,3 +159,9 @@ next model after legitimate work. Model-local callback/queue protection also
 covers independent factory model calls. Preserve system title/summary/goal
 fallback stop propagation and actual extension provider-task lifetimes as open
 integration work; admission is not physical isolation or rollback of prior IO.
+
+Title async provider fallback and summary construction/sync/async provider fallback
+must rethrow GraphBubbleUp before generic Exception handling. Native STOP is not
+a candidate failure, a local title fallback or an ordinary summary skip. Existing
+provider-failure fallback stays intact; observer failures remain observational.
+This does not prove direct system model provider threads stopped on cancellation.

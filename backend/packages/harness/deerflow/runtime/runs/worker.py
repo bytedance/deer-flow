@@ -1746,6 +1746,14 @@ async def run_agent(
 
     finally:
         try:
+            # Keep the native lifetime and heartbeat until abandoned body calls
+            # stop. Completion hooks may still legitimately invoke models.
+            if invocation_guard is not None:
+                try:
+                    await invocation_guard.drain()
+                except BaseException as exc:
+                    record.workspace_cleanup_uncertain = True
+                    deferred_finalization_interrupt = _defer_finalization_interrupt(deferred_finalization_interrupt, exc)
             if record.ownership_lost:
                 logger.warning(
                     "Skipping durable finalization for run %s because this worker no longer owns its lease",
@@ -2054,6 +2062,15 @@ async def run_agent(
             if deferred_finalization_interrupt is not None:
                 raise deferred_finalization_interrupt
         finally:
+            # Stop new service calls, then drain work left by completion hooks
+            # before any local resource or durable lifetime can be released.
+            provider_cleanup_interrupt = None
+            if invocation_guard is not None:
+                try:
+                    await invocation_guard.aclose()
+                except BaseException as exc:
+                    record.workspace_cleanup_uncertain = True
+                    provider_cleanup_interrupt = exc
             workspace_journal_closed = journal is None
             try:
                 if journal is not None:
@@ -2133,6 +2150,8 @@ async def run_agent(
                     await run_manager._confirm_workspace_execution_closed(record)
                 if lease_cleanup_interrupt is not None:
                     raise lease_cleanup_interrupt
+                if provider_cleanup_interrupt is not None:
+                    raise provider_cleanup_interrupt
 
 
 # ---------------------------------------------------------------------------

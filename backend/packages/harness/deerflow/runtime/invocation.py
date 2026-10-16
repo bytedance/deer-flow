@@ -13,6 +13,7 @@ from langchain_core.rate_limiters import BaseRateLimiter
 from langgraph.errors import GraphBubbleUp
 
 from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
+from deerflow.utils.file_io import await_drained
 
 _current_guard = ContextVar("native_worker_invocation_guard", default=None)
 
@@ -27,6 +28,7 @@ class WorkerInvocationGuard:
         self.target = target
         self.loop = asyncio.get_running_loop()
         self.closed = False
+        self._providers = set()
 
     async def check(self):
         if self.closed or asyncio.get_running_loop() is not self.loop:
@@ -37,6 +39,25 @@ class WorkerInvocationGuard:
             raise WorkerInvocationDenied("Native execution authority is no longer available") from None
         if self.closed:
             raise WorkerInvocationDenied("Native worker has closed")
+
+    def track(self, task):
+        """Retain this Run's actual provider work, including abandoned callers."""
+        if self.closed or asyncio.get_running_loop() is not self.loop:
+            task.cancel()
+            raise WorkerInvocationDenied("Native worker has closed")
+        self._providers.add(task)
+        task.add_done_callback(self._providers.discard)
+
+    async def drain(self):
+        async def join():
+            while self._providers:
+                await asyncio.gather(*tuple(self._providers), return_exceptions=True)
+
+        await await_drained(join())
+
+    async def aclose(self):
+        self.close()
+        await self.drain()
 
     def close(self):
         self.closed = True

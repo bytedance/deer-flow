@@ -1630,3 +1630,6 @@ activation false and startup schema fence unchanged. Root revocations remain
 pending. No local app/Node/browser/pytest/Docker runtime; local Git/OpenSpec/
 stdlib packaging/static formatting only. Serial self-review, not independent
 full audit. Continue actual service lifetimes and external effect boundaries.
+
+
+M4 model service lifetime checkpoint (2026-10-17): #72 fixture-only signature error is not a business RED; corrected #73 reproduced four premature native exits; #74 additionally reproduced six swallowed STOP signals. #75 main twelve passed before #76 fourteen boundary checks; #77 fixed eighty-five passed plus twenty-six-file cloud Ruff. Native model-service tasks are held by their original private Run guard; drain actual construction/provider threads, keep legitimate completion model calls, then seal/drain before actual native closure. Same-thread replacement remains fenced while shared-service work in another space finishes independently. Service/title/summary preserve GraphBubbleUp; ordinary errors retain normalization/fallback. Exact archives, source hashes, logs and resource receipts: native_model_service_lifetime. Direct lead/system-model lifetimes, goal fallback, arbitrary transports, other revocation domains, dispatcher/recovery and full M0-M11 remain pending. No activation/deployment/local runtime; all parent tasks remain open.

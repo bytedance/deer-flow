@@ -11,6 +11,7 @@ from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.config import get_config
 from langgraph.constants import TAG_NOSTREAM
+from langgraph.errors import GraphBubbleUp
 from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
@@ -365,6 +366,8 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
             title = self._parse_title(response.content)
             if title:
                 return {"title": title}
+        except GraphBubbleUp:
+            raise
         except Exception:
             logger.debug("Failed to generate async title; falling back to local title", exc_info=True)
         return {"title": self._fallback_title(user_msg)}

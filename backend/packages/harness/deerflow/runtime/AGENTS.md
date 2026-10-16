@@ -514,3 +514,11 @@ on both SQL engines. Native provider is deterministic. This does not settle
 already-admitted IO, shielded HostModelInvoker provider-task lifetimes, all system
 fallback signal propagation, actor/token revocation, physical C or full tenant
 activation. Keep these explicit follow-ups and the compiled gate false.
+
+Native HostModelInvoker tasks register with their original task-local invocation
+guard, not a global service drain. Construction and invocation shield/drain actual
+work even if the provider task is cancelled. Worker finalization first drains body
+work without sealing (completion hooks can invoke models), then seals/drains hook
+leftovers before journal/sandbox/lifetime close. Cancellation during drain defers
+interrupt and retains uncertain cleanup; it never proves remote physical STOP.
+Direct model-call lifetimes outside this service remain a separate audit.

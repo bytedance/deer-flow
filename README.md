@@ -3057,3 +3057,9 @@ and tool calls, including model queue waits and independent worker-built models.
 The shared middleware and model factory remain native; an expired capability
 cannot start a new report handler. [Validation and remaining boundaries](docs/tenant-workspaces-testing.md)
 keep service lifetimes, external effects and full tenant activation separate.
+
+Native scoped Runs now retain actual host model-service work through cancellation
+and wait before releasing their execution lifetime. Shared services retain per-Run
+cleanup boundaries, and title/summary/service fallbacks preserve native stop signals.
+[Evidence and remaining scope](docs/tenant-workspaces-testing.md) distinguish this
+from direct-model/remote transport cleanup and full tenant deployment.

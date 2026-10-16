@@ -23,6 +23,8 @@ def main():
             "invocation",
             "invocation-red",
             "invocation-final",
+            "service-lifetime",
+            "service-final",
         ),
         default="revocation",
     )
@@ -66,9 +68,13 @@ def main():
         tests = "tests/test_workspace_invocation_gate.py"
     if args.suite == "invocation-red":
         tests = "tests/test_workspace_invocation_gate.py tests/test_workspace_worker_effects.py"
-    if args.suite == "invocation-final":
+    if args.suite in ("invocation-final", "service-final"):
         tests += " tests/test_workspace_run_lifetime.py tests/test_workspace_worker_context.py tests/test_workspace_run_checkpoints.py tests/test_workspace_event_reads.py tests/test_workspace_worker_effects.py tests/test_workspace_invocation_gate.py"
         tests += " tests/test_tool_error_handling_middleware.py::test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware tests/test_tool_error_handling_middleware.py::test_build_lead_runtime_middlewares_chain_order_matches_agents_md tests/test_model_factory.py::test_uses_first_model_when_name_is_none tests/test_model_factory.py::test_appends_all_tracing_callbacks tests/test_model_request_admission.py::test_fifo_cancellation_and_queue_capacity tests/test_extension_ordering.py::test_core_constraints_are_declared"
+    if args.suite == "service-lifetime":
+        tests = "tests/test_workspace_model_service_lifetime.py"
+    if args.suite == "service-final":
+        tests += " tests/test_workspace_model_service_lifetime.py tests/test_extension_model_invocation.py::test_provider_errors_do_not_expose_credentials tests/test_extension_model_invocation.py::test_host_timeout_caps_request_and_preserves_running_provider tests/test_extension_model_invocation.py::test_sync_provider_retains_slot_until_thread_finishes tests/test_extension_system_model_calls.py::test_zero_observer_path_only_invokes_the_original_call tests/test_extension_system_model_calls.py::test_async_summarization_observes_each_provider_attempt_and_live_store tests/test_extension_system_model_calls.py::test_title_middleware_uses_build_bound_snapshot_and_live_task_store"
     rendered = rendered.replace("@@TEST_PATHS@@", tests)
     if "@@" in rendered:
         parser.error("unresolved pipeline marker")
