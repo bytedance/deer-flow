@@ -475,6 +475,51 @@ def test_validate_local_tool_path_rejects_bare_virtual_root() -> None:
         validate_local_tool_path(VIRTUAL_PATH_PREFIX, _THREAD_DATA)
 
 
+def test_validate_local_tool_path_allows_bare_virtual_root_for_reads() -> None:
+    """The local provider maps the aggregate root so it can be listed like AIO."""
+    validate_local_tool_path(VIRTUAL_PATH_PREFIX, _THREAD_DATA, read_only=True)
+
+
+@pytest.mark.parametrize("path", [VIRTUAL_PATH_PREFIX, f"{VIRTUAL_PATH_PREFIX}/"])
+def test_resolve_user_data_root_only_when_allowed(path: str) -> None:
+    root = Path(_THREAD_DATA["workspace_path"]).parent.resolve()
+
+    assert _resolve_and_validate_user_data_path(path, _THREAD_DATA, allow_user_data_root=True) == str(root)
+    with pytest.raises(PermissionError, match="path traversal"):
+        _resolve_and_validate_user_data_path(path, _THREAD_DATA)
+
+
+def test_resolve_user_data_root_does_not_open_root_level_files() -> None:
+    with pytest.raises(PermissionError, match="path traversal"):
+        _resolve_and_validate_user_data_path(f"{VIRTUAL_PATH_PREFIX}/stray.txt", _THREAD_DATA, allow_user_data_root=True)
+
+
+def test_resolve_user_data_root_needs_a_shared_parent() -> None:
+    """Without a common parent there is no host root to list, so stay closed."""
+    thread_data = {
+        "workspace_path": "/tmp/deer-flow/a/workspace",
+        "uploads_path": "/tmp/deer-flow/b/uploads",
+        "outputs_path": "/tmp/deer-flow/c/outputs",
+    }
+
+    with pytest.raises(PermissionError, match="path traversal"):
+        _resolve_and_validate_user_data_path(VIRTUAL_PATH_PREFIX, thread_data, allow_user_data_root=True)
+
+
+@pytest.mark.parametrize("path", [VIRTUAL_PATH_PREFIX, f"{VIRTUAL_PATH_PREFIX}/"])
+def test_write_file_tool_rejects_user_data_root(tmp_path, path: str) -> None:
+    thread_data = {name: str(tmp_path / "user-data" / name.removesuffix("_path")) for name in ("workspace_path", "uploads_path", "outputs_path")}
+    for directory in thread_data.values():
+        Path(directory).mkdir(parents=True)
+    runtime = SimpleNamespace(state={"sandbox": {"sandbox_id": "local"}, "thread_data": thread_data}, context={"thread_id": "thread-1"})
+    sandbox = SimpleNamespace(write_file=lambda *args, **kwargs: pytest.fail("write reached the sandbox"))
+
+    with patch("deerflow.sandbox.tools.ensure_sandbox_initialized", return_value=sandbox):
+        result = write_file_tool.func(runtime=runtime, description="write", path=path, content="x")
+
+    assert result == f"Error: Permission denied writing to file: {path}"
+
+
 def test_validate_local_tool_path_allows_user_data_paths() -> None:
     # Should not raise — user-data paths are always allowed
     validate_local_tool_path(f"{VIRTUAL_PATH_PREFIX}/workspace/file.txt", _THREAD_DATA)

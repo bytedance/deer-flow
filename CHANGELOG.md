@@ -5982,6 +5982,13 @@ This release closes that milestone with **621 merged pull requests**.
   names the same file as the equivalent relative path, unless the command
   rebinds `PWD` itself. Variables inside URLs are unaffected. The guard
   remains best-effort and is not an isolation boundary. ([#6930])
+- **sandbox:** On the local sandbox, `ls`, `glob` and `grep` now accept the
+  `/mnt/user-data` root itself and list or search `workspace`, `uploads` and
+  `outputs` as they do on AIO. The provider maps that root on purpose, but the
+  tool layer allowed only paths below it and answered `Permission denied`
+  (with a trailing slash, from an internal "path traversal detected" check).
+  Writes to the root, and reads of files placed directly in it, are still
+  rejected.
 
 ### Security
 

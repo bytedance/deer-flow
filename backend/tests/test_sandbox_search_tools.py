@@ -790,6 +790,50 @@ def test_ls_tool_filters_upload_staging_files(tmp_path, monkeypatch) -> None:
     assert ".upload-active.part" not in result
 
 
+@pytest.mark.parametrize("path", ["/mnt/user-data", "/mnt/user-data/"])
+def test_ls_tool_lists_user_data_root(tmp_path, monkeypatch, path) -> None:
+    """The local provider maps the aggregate root, so ls must list it like AIO."""
+    runtime = _make_runtime(tmp_path)
+    (tmp_path / "uploads" / "report.txt").write_text("ready\n", encoding="utf-8")
+    (tmp_path / "uploads" / ".upload-active.part").write_text("partial\n", encoding="utf-8")
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(id="local"))
+
+    result = ls_tool.func(runtime=runtime, description="list user data", path=path)
+
+    for name in ("workspace", "uploads", "outputs"):
+        assert f"/mnt/user-data/{name}" in result
+    assert "/mnt/user-data/uploads/report.txt" in result
+    assert ".upload-active.part" not in result
+    assert str(tmp_path) not in result
+
+
+def test_glob_tool_searches_from_user_data_root(tmp_path, monkeypatch) -> None:
+    runtime = _make_runtime(tmp_path)
+    (tmp_path / "workspace" / "app.py").write_text("print('hi')\n", encoding="utf-8")
+    (tmp_path / "outputs" / "chart.py").write_text("print('chart')\n", encoding="utf-8")
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(id="local"))
+
+    result = glob_tool.func(runtime=runtime, description="find python files", pattern="**/*.py", path="/mnt/user-data")
+
+    assert "/mnt/user-data/workspace/app.py" in result
+    assert "/mnt/user-data/outputs/chart.py" in result
+    assert str(tmp_path) not in result
+
+
+def test_grep_tool_searches_from_user_data_root(tmp_path, monkeypatch) -> None:
+    runtime = _make_runtime(tmp_path)
+    (tmp_path / "uploads" / "report.md").write_text("Revenue grew 20%\n", encoding="utf-8")
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(id="local"))
+
+    result = grep_tool.func(runtime=runtime, description="find revenue", pattern="Revenue", path="/mnt/user-data")
+
+    assert "/mnt/user-data/uploads/report.md:1: Revenue grew 20%" in result
+    assert str(tmp_path) not in result
+
+
 def _make_skills_sandbox(tmp_path, monkeypatch, *, disabled: str):
     """Skills tree with one disabled and one enabled public skill.
 

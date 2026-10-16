@@ -143,6 +143,37 @@ def test_execute_command_lists_aggregate_user_data_root(provider):
     assert "outputs" in output
 
 
+@pytest.mark.parametrize("path", ["/mnt/user-data", "/mnt/user-data/"])
+def test_ls_tool_lists_aggregate_user_data_root(provider, path):
+    """The tool layer must not reject the root the provider deliberately maps."""
+    from deerflow.config.paths import get_paths
+    from deerflow.sandbox.tools import ls_tool
+
+    sandbox_id = provider.acquire("alpha", user_id="alice")
+    sbx = provider.get(sandbox_id)
+    sbx.write_file("/mnt/user-data/uploads/report.txt", "ready")
+    paths = get_paths()
+    runtime = SimpleNamespace(
+        state={
+            "sandbox": {"sandbox_id": sandbox_id},
+            "thread_data": {
+                "workspace_path": str(paths.sandbox_work_dir("alpha", user_id="alice")),
+                "uploads_path": str(paths.sandbox_uploads_dir("alpha", user_id="alice")),
+                "outputs_path": str(paths.sandbox_outputs_dir("alpha", user_id="alice")),
+            },
+        },
+        context={"thread_id": "alpha", "user_id": "alice"},
+    )
+
+    with patch("deerflow.sandbox.tools.ensure_sandbox_initialized", return_value=sbx):
+        result = ls_tool.func(runtime=runtime, description="list user data", path=path)
+
+    for name in ("workspace", "uploads", "outputs"):
+        assert f"/mnt/user-data/{name}" in result
+    assert "/mnt/user-data/uploads/report.txt" in result
+    assert str(paths.base_dir) not in result
+
+
 def test_list_dir_on_user_data_root_does_not_duplicate_subdir_mounts(provider):
     """Regression: ``list_dir``'s virtual sub-directory overlay must not
     double-list a mount that the underlying scan already found.

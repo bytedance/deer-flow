@@ -629,7 +629,7 @@ def _resolve_local_read_path(path: str, thread_data: ThreadDataState | None) -> 
         # acquire-time identity and provider state), not by tool-layer host
         # path reconstruction.
         return path
-    return _resolve_and_validate_user_data_path(path, thread_data)
+    return _resolve_and_validate_user_data_path(path, thread_data, allow_user_data_root=True)
 
 
 def _format_glob_results(root_path: str, matches: list[str], truncated: bool) -> str:
@@ -1013,6 +1013,7 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
 
     Allowed virtual-path families:
       - ``/mnt/user-data/*``  — always allowed (read + write)
+      - ``/mnt/user-data``    — the bare root, allowed only when *read_only* is True
       - ``/mnt/skills/*``     — allowed only when *read_only* is True
       - ``/mnt/acp-workspace/*`` — allowed only when *read_only* is True
       - Custom mount paths (from config.yaml) — respects per-mount ``read_only`` flag
@@ -1047,8 +1048,9 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
             raise PermissionError(f"Write access to ACP workspace is not allowed: {path}")
         return
 
-    # User-data paths
-    if path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
+    # User-data paths. The bare root is readable because the local provider
+    # maps it for parity with AIO; nothing is written to it directly.
+    if path.startswith(f"{VIRTUAL_PATH_PREFIX}/") or (read_only and path == VIRTUAL_PATH_PREFIX):
         return
 
     # Custom mount paths — respect read_only config
@@ -1061,8 +1063,11 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
     raise PermissionError(f"Only paths under {VIRTUAL_PATH_PREFIX}/, {_get_skills_container_path()}/, {_ACP_WORKSPACE_VIRTUAL_PATH}/, or configured mount paths are allowed")
 
 
-def _validate_resolved_user_data_path(resolved: Path, thread_data: ThreadDataState) -> None:
+def _validate_resolved_user_data_path(resolved: Path, thread_data: ThreadDataState, *, allow_user_data_root: bool = False) -> None:
     """Verify that a resolved host path stays inside allowed per-thread roots.
+
+    With *allow_user_data_root*, the parent of workspace/uploads/outputs is
+    accepted too, but only that directory itself, not files placed in it.
 
     Raises PermissionError if the path escapes workspace/uploads/outputs.
     """
@@ -1086,17 +1091,22 @@ def _validate_resolved_user_data_path(resolved: Path, thread_data: ThreadDataSta
         except ValueError:
             continue
 
+    if allow_user_data_root:
+        user_data_root = _thread_virtual_to_actual_mappings(thread_data).get(VIRTUAL_PATH_PREFIX)
+        if user_data_root is not None and resolved == Path(user_data_root).resolve():
+            return
+
     raise PermissionError("Access denied: path traversal detected")
 
 
-def _resolve_and_validate_user_data_path(path: str, thread_data: ThreadDataState) -> str:
+def _resolve_and_validate_user_data_path(path: str, thread_data: ThreadDataState, *, allow_user_data_root: bool = False) -> str:
     """Resolve a /mnt/user-data virtual path and validate it stays in bounds.
 
     Returns the resolved host path string.
     """
     resolved_str = replace_virtual_path(path, thread_data)
     resolved = Path(resolved_str).resolve()
-    _validate_resolved_user_data_path(resolved, thread_data)
+    _validate_resolved_user_data_path(resolved, thread_data, allow_user_data_root=allow_user_data_root)
     return str(resolved)
 
 
@@ -2583,7 +2593,7 @@ def ls_tool(runtime: Runtime, path: str, description: str = "") -> str:
                 # from the sandbox mapping's user_id).
                 pass
             elif not _is_custom_mount_path(path):
-                path = _resolve_and_validate_user_data_path(path, thread_data)
+                path = _resolve_and_validate_user_data_path(path, thread_data, allow_user_data_root=True)
             # Custom mount paths and skills/ACP paths are resolved by LocalSandbox._resolve_path()
         children = sandbox.list_dir(path)
         if not children:
