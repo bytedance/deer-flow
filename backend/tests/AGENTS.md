@@ -2,6 +2,11 @@
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+Local nginx path fixtures convert MSYS output through the selected Git Bash's
+PATH and decode both renderer and converter output as UTF-8. POSIX Git-layout
+stubs exercise Windows-style locale decoding and missing/failed/empty converters;
+native Windows keeps the real Git Bash renderer checks, including Unicode paths.
+
 `test_skills_custom_multiprocess.py` starts independent spawn workers sharing a
 temporary custom-skill root. Park edit/rollback before the write and before the
 history append, observe the peer reaching the mutation lock, then check both
@@ -13,6 +18,9 @@ inline integer assignments. Include Exa and SearXNG in the deferred census;
 pin new-provider copies and docstring false positives with source fixtures.
 This pattern gate does not establish arbitrary provider semantics or change
 deferred providers' validation policy.
+Include You.com in the shared-owner provider checks; it applies its 100-result
+cap after shared normalization. Pin invalid-value defaults and positive count
+bounds through the outbound request in `test_youcom_tools.py`.
 
 Mixed-version resume admission in `test_thread_run_idempotency.py` uses a real
 shared SQL repository and an old-column projection. The frozen pre-6499 helper
@@ -21,6 +29,15 @@ to the new identity-aware policy or claim it runs a complete old Gateway.
 Assert both writer formats: old workers reuse conflicting decisions, upgraded
 workers reject conflicts, and identity-less legacy rows fail closed even for
 identical retries. This pins why rollout requires routing to upgraded workers.
+
+Run-store capability tests in that file check keyed input separately from resume
+identity and assert that rejected admissions create no durable or local run.
+An explicit `idempotency_key` parameter must keep supporting keyed input even
+without resume support. For kwargs-only stores, pin the opt-in on the class
+that defines `create_thread_operation_atomic`: replacing an opted-in parent's
+method requires a fresh declaration; a flag-only child or mixin cannot opt in
+another class's implementation. Also cover unchanged inheritance and durable
+retry reuse, so the rejection tests cannot pass by rejecting every custom store.
 
 Upload case-collision coverage uses separate HTTP requests and preserves both
 reported payloads. Observe real filename-claim inputs to pin the disk seed;
@@ -106,6 +123,17 @@ For owner-scoped route assertions, pass a stable `user_factory` and
 `bind_current_user=True` to `make_authed_test_app`. The default stub stamps
 request state but leaves the ambient user context unchanged; the opt-in binding
 uses the stub user during the request and restores the previous context after it.
+
+## Lark skill-pack publication
+
+`test_lark_skill_manifest_atomic.py` injects `os.replace` failures at the actual
+guidance and manifest writes. Assert that existing file bytes survive and
+temporary files disappear. Reinstallation tests use complete ZIP fixtures and
+the real installer: the previous installed tree must stay byte-identical while
+the write is still in staging and after it fails, with no staging or backup
+tree left behind. Do not replace these behavioral checks with assertions about
+source formatting or duplicate the runtime publication control in
+`test_lark_cli_atomic_publish.py`.
 
 ## Lark CLI blocking-I/O fixtures
 
