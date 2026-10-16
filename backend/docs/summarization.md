@@ -29,6 +29,17 @@ Only after all chunks succeed are hooks, the compaction event, history capture
 and message replacement committed once. Any failed chunk leaves active history
 unchanged; manual `/compact` reports generation failure. A pass processes at most
 64 chunks, including cached chunks; hitting the limit also keeps original history.
+For a stable thread identity, a cap breach starts a five-minute cooldown keyed
+by user, thread, executor, opening source-message ID, prior summary and policy.
+Further automatic or manual attempts make no summary-model calls during that
+cooldown, even as history grows or middleware is rebuilt. A smaller source window,
+new summary/window or changed policy (including a larger input budget) allows an
+immediate retry. Warnings give the remaining delay and suggest increasing
+`trim_tokens_to_summarize` within model capacity or reducing selected history.
+The shared, locked cache keeps at most 128 hashed entries per process; eviction,
+process restart or another worker can permit an independent attempt. It is not a
+durable or distributed cost budget. Callers without a thread ID keep only the
+per-pass limit. Other generation failures retain their existing retry behavior.
 Configured/run-model fallback may make two candidate attempts per chunk, and SDK
 retries are separate. This bounds middleware steps, not a monetary bill or deadline.
 For legitimate histories beyond this limit, increase the existing per-call budget

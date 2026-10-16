@@ -2054,7 +2054,10 @@ chunks before replacing it. `summarization.trim_tokens_to_summarize` bounds raw
 input per step; generated summaries use at most half to leave room for source.
 Oversized summaries retain marked head/tail text; raw history is never clipped.
 A pass is limited to 64 chunks and leaves history unchanged on failure or limit
-exhaustion. Model fallback and SDK retries can add calls. See the
+exhaustion. A limit breach starts a five-minute per-process cooldown for the
+same thread/history window and policy, including rebuilt middleware. A larger
+input budget or smaller source window permits an immediate retry. Model fallback
+and SDK retries can add calls. See the
 [summarization guide](backend/docs/summarization.md).
 
 With `task_continuity.enabled`, `history_search` searches the current task's active

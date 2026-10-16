@@ -13,7 +13,9 @@ Keep state `SystemMessage`s; inject transient instructions via request wrappers.
 Skip fully rescued partitions. Fold all raw source in order without human
 anchoring. PII-redact before splitting; budget before escaping. Generated carry:
 marked head/tail within half the raw budget; at most 64 chunks/pass. Commit
-hooks/history/removal only on full success; reject unfittable inputs.
+hooks/history/removal only on success. Cap breaches use a bounded process-local
+5m cooldown across builds for the same user/thread/executor/window/policy;
+smaller source or changed policy retries immediately. See the linked contract.
 `trim_tokens_to_summarize=None` uses one unbounded step.
 
 Todo compaction: [contract](../../../../../docs/summarization.md#todo-reminders).

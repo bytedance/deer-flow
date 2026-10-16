@@ -9,6 +9,7 @@ import threading
 from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass
+from time import monotonic
 from typing import Any, Protocol, override, runtime_checkable
 
 from deerflow_extension_api import CompactionEvent, canonical_hash
@@ -39,6 +40,10 @@ _COMPACTION_TRANSFORM_VERSION = "2"
 _UNSET = object()
 _NOOP_CACHE_MAX_ENTRIES = 128
 _MAX_SUMMARY_CHUNKS = 64
+_SUMMARY_CHUNK_RETRY_SECONDS = 300
+_SUMMARY_CHUNK_RETRY_MAX_ENTRIES = 128
+_SUMMARY_CHUNK_RETRY_CACHE: OrderedDict[str, tuple[float, int]] = OrderedDict()
+_SUMMARY_CHUNK_RETRY_LOCK = threading.Lock()
 _SHORTENED_SUMMARY_MARKER = "\n[summary shortened]\n"
 
 
@@ -195,6 +200,8 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             "trim_tokens_to_summarize": self.trim_tokens_to_summarize,
             "source_coverage": "chronological_chunks",
             "max_summary_chunks": _MAX_SUMMARY_CHUNKS,
+            "chunk_limit_retry_seconds": _SUMMARY_CHUNK_RETRY_SECONDS,
+            "chunk_limit_retry_max_entries": _SUMMARY_CHUNK_RETRY_MAX_ENTRIES,
             "summary_carry_budget_fraction": 0.5,
             "summary_prompt_hash": canonical_hash(self.summary_prompt),
             # Model objects are not JSON-serialisable. Keep generation and context
@@ -292,7 +299,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         # so the chat-message human-anchor filter is neither needed nor safe.
         return redact_text(get_buffer_string(messages), getattr(self._app_config, "pii_redaction", None))
 
-    def _summarize_with(self, messages_to_summarize: list[AnyMessage], previous_summary: str | None = None) -> str | None:
+    def _summarize_with(self, messages_to_summarize: list[AnyMessage], previous_summary: str | None = None, *, runtime: Runtime | None = None) -> str | None:
         """Fold every selected source fragment before committing any removal.
 
         Chunk progress and summaries are local to this call; cached middleware
@@ -302,12 +309,16 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         if not messages_to_summarize:
             return "No previous conversation history."
         source = self._summary_source_text(messages_to_summarize)
+        retry_key = self._summary_retry_key(runtime, messages_to_summarize, previous_summary)
+        if self._summary_retry_blocked(retry_key, len(source)):
+            return None
         summary = self._bound_summary_carry(previous_summary) if previous_summary else None
         if previous_summary and summary is None:
             return None
         cursor, chunks, all_reused = 0, 0, True
         while cursor < len(source):
             if self._summary_chunk_limit_reached(chunks, cursor, len(source), summary):
+                self._remember_summary_chunk_breach(retry_key, len(source))
                 return None
             step = self._next_summary_step(source, cursor, summary)
             if step is None:
@@ -323,17 +334,21 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             return None
         return _ReusedSummary(summary) if all_reused else str(summary)
 
-    async def _asummarize_with(self, messages_to_summarize: list[AnyMessage], previous_summary: str | None = None, *, task_store=None) -> str | None:
+    async def _asummarize_with(self, messages_to_summarize: list[AnyMessage], previous_summary: str | None = None, *, task_store=None, runtime: Runtime | None = None) -> str | None:
         """Async fold; hooks, state replacement and success telemetry stay atomic."""
         if not messages_to_summarize:
             return "No previous conversation history."
         source = self._summary_source_text(messages_to_summarize)
+        retry_key = self._summary_retry_key(runtime, messages_to_summarize, previous_summary)
+        if self._summary_retry_blocked(retry_key, len(source)):
+            return None
         summary = self._bound_summary_carry(previous_summary) if previous_summary else None
         if previous_summary and summary is None:
             return None
         cursor, chunks, all_reused = 0, 0, True
         while cursor < len(source):
             if self._summary_chunk_limit_reached(chunks, cursor, len(source), summary):
+                self._remember_summary_chunk_breach(retry_key, len(source))
                 return None
             step = self._next_summary_step(source, cursor, summary)
             if step is None:
@@ -565,11 +580,60 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             logger.debug("Summary carry shortened: carry_tokens=%d bounded_tokens=%d carry_budget=%d input_budget=%d", tokens, self._summary_text_tokens(bounded), carry_budget, budget)
         return bounded
 
+    def _summary_retry_key(self, runtime: Runtime | None, messages: list[AnyMessage], previous_summary: str | None) -> str | None:
+        """Scope cap failures across builds without retaining history or identifiers.
+
+        The opening source ID survives appended turns, unlike a full-source hash.
+        A new history window, prior summary or effective policy gets a fresh key.
+        Callers without a stable thread identity retain the per-pass limit only.
+        """
+        if runtime is None or not (thread_id := _resolve_thread_id(runtime)):
+            return None
+        from deerflow.runtime.user_context import resolve_runtime_user_id
+
+        context = runtime.context if isinstance(runtime.context, Mapping) else {}
+        is_subagent = context.get("is_subagent") is True
+        agent = context.get("agent_id") if is_subagent else (_resolve_agent_name(runtime) or "lead_agent")
+        # Subagents sharing a parent thread still own separate executions.
+        execution = context.get("sandbox_lease_owner_id") if is_subagent else None
+        return canonical_hash([resolve_runtime_user_id(runtime), str(thread_id), agent, execution, messages[0].id, previous_summary, self.release_policy_parameters()])
+
+    def _summary_retry_blocked(self, key: str | None, source_chars: int) -> bool:
+        if key is None:
+            return False
+        now = monotonic()
+        with _SUMMARY_CHUNK_RETRY_LOCK:
+            blocked = _SUMMARY_CHUNK_RETRY_CACHE.get(key)
+            if blocked is None:
+                return False
+            deadline, failed_source_chars = blocked
+            if now >= deadline or source_chars < failed_source_chars:
+                del _SUMMARY_CHUNK_RETRY_CACHE[key]
+                return False
+            _SUMMARY_CHUNK_RETRY_CACHE.move_to_end(key)
+        logger.warning(
+            "Summary chunk-limit cooldown active; keeping history: retry_after_seconds=%.1f input_budget=%s. Increase summarization.trim_tokens_to_summarize within model capacity or reduce selected history.",
+            deadline - now,
+            self.trim_tokens_to_summarize,
+        )
+        return True
+
+    @staticmethod
+    def _remember_summary_chunk_breach(key: str | None, source_chars: int) -> None:
+        if key is None:
+            return
+        with _SUMMARY_CHUNK_RETRY_LOCK:
+            _SUMMARY_CHUNK_RETRY_CACHE[key] = (monotonic() + _SUMMARY_CHUNK_RETRY_SECONDS, source_chars)
+            _SUMMARY_CHUNK_RETRY_CACHE.move_to_end(key)
+            while len(_SUMMARY_CHUNK_RETRY_CACHE) > _SUMMARY_CHUNK_RETRY_MAX_ENTRIES:
+                _SUMMARY_CHUNK_RETRY_CACHE.popitem(last=False)
+
     def _summary_chunk_limit_reached(self, chunks: int, cursor: int, source_chars: int, summary: str | None) -> bool:
         if chunks < _MAX_SUMMARY_CHUNKS:
             return False
         logger.warning(
-            "Summary chunk limit reached; keeping history: chunks=%d limit=%d processed_chars=%d source_chars=%d carry_tokens=%d input_budget=%s",
+            "Summary chunk limit reached; keeping history: chunks=%d limit=%d processed_chars=%d source_chars=%d carry_tokens=%d input_budget=%s. "
+            "Increase summarization.trim_tokens_to_summarize within model capacity or reduce selected history.",
             chunks,
             _MAX_SUMMARY_CHUNKS,
             cursor,
@@ -807,7 +871,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             return None
         messages_to_summarize, preserved_messages, previous_summary, total_tokens = prepared
         source_content_hashes = self._freeze_compaction_sources(messages_to_summarize)
-        summary = self._summarize_with(messages_to_summarize, previous_summary=previous_summary)
+        summary = self._summarize_with(messages_to_summarize, previous_summary=previous_summary, runtime=runtime)
         if summary is None:
             if raise_on_failure:
                 raise SummaryGenerationError("summary generation failed")
@@ -859,6 +923,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             messages_to_summarize,
             previous_summary=previous_summary,
             task_store=task_store_from_runtime(runtime),
+            runtime=runtime,
         )
         if summary is None:
             if raise_on_failure:
