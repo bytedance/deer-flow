@@ -1,10 +1,9 @@
-"""Regression coverage for the Windows lock follow-up from PR #6888.
+"""Cover the custom-skill mutation and AIO metadata Windows locks.
 
-Several independent Gateway and harness paths used the blocking ``LK_LOCK``
-mode even after the shared retry helper existed.  The blocking mode reports
-contention as ``PermissionError`` after about ten seconds, so these tests run
-each remaining path against a deterministic msvcrt double and verify that
-only contention is retried.
+Both paths retry contention beyond ``LK_LOCK``'s roughly ten-second cap.
+Runtime-config locking is covered separately by PR #6888; extension-config
+and projection locking (including nested skill projection) belong to #6912.
+This module does not claim coverage or conversion of those three paths.
 """
 
 from __future__ import annotations
@@ -51,7 +50,7 @@ def _patch_windows_lock(module, monkeypatch: pytest.MonkeyPatch, fake: _FakeMsvc
 
 
 def _exercise_lock(module_name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake: _FakeMsvcrt) -> Path:
-    """Acquire a remaining lock and return its sidecar path."""
+    """Acquire one of the two scoped locks and return its sidecar path."""
     import importlib
 
     module = importlib.import_module(module_name)
@@ -63,24 +62,6 @@ def _exercise_lock(module_name: str, tmp_path: Path, monkeypatch: pytest.MonkeyP
         with module._custom_skill_mutation(storage):
             pass
         return custom_root.parent / f".{custom_root.name}.mutation.lock"
-
-    if module_name.endswith("runtime_config_store"):
-        target = tmp_path / "runtime-config.json"
-        with module._runtime_config_file_lock(target):
-            pass
-        return target.parent / f".{target.name}.lock"
-
-    if module_name.endswith("extensions_config"):
-        target = tmp_path / "extensions_config.json"
-        with module.extensions_config_file_lock(target):
-            pass
-        return target.parent / f".{target.name}.lock"
-
-    if module_name.endswith("projection"):
-        root = tmp_path / "projection"
-        with module._projection_lock(root):
-            pass
-        return root.parent / f".{root.name}.projection.lock"
 
     if module_name.endswith("aio_sandbox_provider"):
         lock_path = tmp_path / "sandbox.lock"
@@ -95,9 +76,6 @@ def _exercise_lock(module_name: str, tmp_path: Path, monkeypatch: pytest.MonkeyP
 LOCK_MODULES = (
     "app.gateway.routers.skills",
     "deerflow.community.aio_sandbox.aio_sandbox_provider",
-    "app.channels.runtime_config_store",
-    "deerflow.config.extensions_config",
-    "deerflow.skills.projection",
 )
 
 
@@ -133,17 +111,6 @@ def test_remaining_windows_locks_propagate_permanent_errors(
             root = tmp_path / "custom"
             storage = SimpleNamespace(get_user_custom_root=lambda: root)
             with module._custom_skill_mutation(storage):
-                pytest.fail("permanent lock errors must not enter the critical section")
-        elif module_name.endswith("runtime_config_store"):
-            target = tmp_path / "runtime-config.json"
-            with module._runtime_config_file_lock(target):
-                pytest.fail("permanent lock errors must not enter the critical section")
-        elif module_name.endswith("extensions_config"):
-            target = tmp_path / "extensions_config.json"
-            with module.extensions_config_file_lock(target):
-                pytest.fail("permanent lock errors must not enter the critical section")
-        elif module_name.endswith("projection"):
-            with module._projection_lock(tmp_path / "projection"):
                 pytest.fail("permanent lock errors must not enter the critical section")
         else:
             lock_path = tmp_path / "sandbox.lock"
@@ -199,15 +166,6 @@ else:
         storage = SimpleNamespace(get_user_custom_root=lambda: target)
         with module._custom_skill_mutation(storage):
             (signals / "acquired").touch()
-    elif module_name.endswith("runtime_config_store"):
-        with module._runtime_config_file_lock(target):
-            (signals / "acquired").touch()
-    elif module_name.endswith("extensions_config"):
-        with module.extensions_config_file_lock(target):
-            (signals / "acquired").touch()
-    elif module_name.endswith("projection"):
-        with module._projection_lock(target):
-            (signals / "acquired").touch()
     else:
         with target.open("a", encoding="utf-8") as stream:
             module._lock_file_exclusive(stream)
@@ -233,21 +191,8 @@ def _await_signal(path: Path, process: subprocess.Popen[str]) -> None:
 @pytest.mark.parametrize("module_name", LOCK_MODULES)
 def test_native_windows_lock_waits_beyond_blocking_retry_limit(module_name: str, tmp_path: Path) -> None:
     """A real peer holds the byte beyond LK_LOCK's limit, then releases it."""
-    if module_name.endswith("routers.skills"):
-        target = tmp_path / "custom"
-        sidecar = tmp_path / ".custom.mutation.lock"
-    elif module_name.endswith("runtime_config_store"):
-        target = tmp_path / "runtime-config.json"
-        sidecar = tmp_path / ".runtime-config.json.lock"
-    elif module_name.endswith("extensions_config"):
-        target = tmp_path / "extensions_config.json"
-        sidecar = tmp_path / ".extensions_config.json.lock"
-    elif module_name.endswith("projection"):
-        target = tmp_path / "projection"
-        sidecar = tmp_path / ".projection.projection.lock"
-    else:
-        target = tmp_path / "sandbox.lock"
-        sidecar = target
+    target = tmp_path / ("custom" if module_name.endswith("routers.skills") else "sandbox.lock")
+    sidecar = tmp_path / ".custom.mutation.lock" if module_name.endswith("routers.skills") else target
     backend = Path(__file__).resolve().parents[1]
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join((str(backend), str(backend / "packages" / "harness"), env.get("PYTHONPATH", "")))
