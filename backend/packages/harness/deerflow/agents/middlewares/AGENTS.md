@@ -9,12 +9,14 @@ Preserve the recognition sample and 5,000,000 UTF-8-byte guard. Count incrementa
 on parsing or field-limit errors, report an undetermined count rather than a
 physical-line or sample total.
 
-Compaction keeps state `SystemMessage`s; transient instructions use request
-wrappers, and fully rescued partitions skip compaction. If latest-user rescue
-empties an AI/Tool-only window, use `_build_summary_input_text(strategy="last")`;
-mixed windows keep normal anchoring and final-message fallback. Budget raw text
-before escaping/wrapping; pass `trim_tokens_to_summarize=None` to avoid the
-LangChain default.
+Keep state `SystemMessage`s; inject transient instructions via request wrappers.
+Skip fully rescued partitions. Fold all raw source in order without human
+anchoring. PII-redact before splitting; budget before escaping. Generated carry:
+marked head/tail within half the raw budget; at most 64 chunks/pass. Commit
+hooks/history/removal only on success. Cap breaches use a bounded process-local
+5m cooldown across builds for the same user/thread/executor/window/policy;
+smaller source or changed policy retries immediately. See the linked contract.
+`trim_tokens_to_summarize=None` uses one unbounded step.
 
 Todo compaction: [contract](../../../../../docs/summarization.md#todo-reminders).
 
@@ -28,25 +30,23 @@ stay `in_progress`. Never infer status from reply text.
 
 Assembly order: `tool_error_handling_middleware.py::_build_runtime_middlewares` (exposed as `build_lead_runtime_middlewares`), then `../lead_agent/agent.py::build_middlewares`. Optional entries require their config/runtime condition.
 
-**Message provenance.** Stamp injected/rewritten messages with
-`provenance_kwargs()` from `deerflow_extension_api.provenance`: server-owned
-`deerflow_content_kind`, `deerflow_producer_kind`, and optional entity ID, even
+**Message provenance.** Injected/rewritten messages use
+`deerflow_extension_api.provenance.provenance_kwargs()`: server-owned
+`deerflow_content_kind`, `deerflow_producer_kind`, optional entity ID, even
 without observers. Producers: DynamicContext, DurableContext,
 SystemMessageCoalescing, ViewImage, SkillActivation. Summarization/Title use
-`SystemOperationKind.SUMMARIZATION`/`.TITLE`; summaries enter via DurableContext's
-`durable_context_data`, memory recall via DynamicContext's
-`dynamic_context_memory`. Memory only queues extraction.
-Rewrites that only modify the model-bound request view and never enter state do
-not require provenance stamps (precedents: InputSanitizationMiddleware,
-DanglingToolCallMiddleware, ModelContentCompatibilityMiddleware).
+`SystemOperationKind.SUMMARIZATION`/`.TITLE`; summaries enter through
+DurableContext's `durable_context_data`, recall through DynamicContext's
+`dynamic_context_memory`; Memory only queues extraction. Request-only rewrites
+need no stamps (InputSanitization, DanglingToolCall, ModelContentCompatibility).
 
-**Self-description.** Configurable middleware exposes JSON-serialisable
+**Self-description.** Configurable middleware: JSON-safe
 `release_policy_parameters()` (`ReleasePolicyProvider`, duck typed). Update
-`collect_release_policies()` declarations with behavior; use `canonical_hash`
-for long text. Summarization declares enabled task-continuity retention or None;
-DurableContext declares normalized skills root, sorted read tools and continuity
-switch. History readers, including capture failures, validate persisted metadata
-so malformed values cannot abort compaction/model calls.
+`collect_release_policies()` with behavior; hash long text with `canonical_hash`.
+Summarization: enabled task-continuity retention or None. DurableContext:
+normalized skills root, sorted read tools, continuity switch. All history readers,
+including capture failures, validate persisted metadata; malformed values must
+not abort compaction/model calls.
 
 **Removing tool calls.** Use `clone_ai_message_with_tool_calls`, not a bare
 `tool_calls` update: adapters resend stale `content` tool-call blocks, which
@@ -112,7 +112,7 @@ Before changing a later authorization phase, read the [authorization RFC](../../
 17. **DynamicContextMiddleware** - Injects date and optional memory outside the static prompt. Opt-out removes its frozen server memory but retains date/user messages. Date follows server-local time unless `DEER_FLOW_DATE_TIMEZONE` names an IANA zone (invalid values fall back locally).
 18. **SkillActivationMiddleware** - Detects strict `/skill-name task` syntax on the latest real user message, resolves only enabled and runtime-allowed skills, injects the `SKILL.md` body as hidden current-turn context, and records a `middleware:skill_activation` audit event; a retried activation call replays the recorded reminder without re-auditing
 19. **SkillToolPolicyMiddleware** - Applies `allowed-tools` only after real activation; passive enabled skills and a custom agent's configured skill allowlist do not clamp the lead toolset. A run-scoped slash activation is authoritative and suppresses `skill_context` as a policy source, so reading another skill cannot widen the explicit skill's tools; without slash activation, skills captured after configured `read_file` loads retain the existing union semantics. The middleware filters model-visible schemas and blocks unauthorized execution, resolving canonical paths against the live enabled/agent-allowed registry on every model call, then stores a versioned, JSON-safe, middleware-token-bound decision signed by policy source plus active paths in run context for the resulting tool calls to reuse. The next model call always refreshes it, and malformed, foreign, stale, or unmatched decisions fall back to live resolution. `tool_search` and `describe_skill` remain framework-safe discovery tools under a restrictive policy; they may reveal or promote metadata, but a deferred business tool must still be declared by the active policy before its schema or execution can survive the policy middleware. The decision's owner token is authorization-sensitive, so its reserved context key is owned by `runtime.secret_context` and included in `REDACTED_CONTEXT_KEYS` for observable and persisted context copies. Registry load failures and a non-empty active set with no authorized skill fail closed to framework-safe tools; an individual stale path is skipped only when at least one valid active skill remains. This is best-effort behavioral scoping rather than a hard security boundary: alternate loads such as `bash cat` are not captured, and bounded autonomous `skill_context` can evict old entries. `task` is not framework-exempt, so a restricted skill cannot delegate around its policy. The middleware must remain immediately after `SkillActivationMiddleware` (which publishes the slash source through `runtime.secret_context`'s public path helpers authenticated by a required token shared only within the assembled middleware chain) and immediately before `DurableContextMiddleware`; assembly and compiled-graph tests pin ordering, token sharing, schema filtering, and execution blocking.
-20. **DurableContextMiddleware** - Before compaction, captures task dispatches/result summaries in `ThreadState.delegations` and loaded skill name/path/description references (never bodies) in `ThreadState.skill_context`; projects them into each model request. Static authority rules are injected as a `SystemMessage`; untrusted field values (`summary_text`, delegation results, skill descriptions) are injected separately as a hidden `HumanMessage` data block so compressed history, delegated work, and which skills are active stay visible without being stored as `messages` or promoted to system-role instructions. `build_subagent_runtime_middlewares` also attaches this middleware immediately before subagent summarization so a compacted `summary_text` is projected ahead of a preserved assistant/tool tail instead of leaving strict providers with an assistant-first request. See [tool artifacts](TOOL_ARTIFACTS.md) for projection, retry limits and delegation scope.
+20. **DurableContextMiddleware** - Before compaction, captures task dispatch/result summaries in `ThreadState.delegations` and loaded skill name/path/description (never bodies) in `ThreadState.skill_context`; projects them per request. Static authority uses `SystemMessage`; untrusted `summary_text`, delegation results and skill descriptions use a separate hidden `HumanMessage` data block, never persisted as messages or promoted to system instructions. Subagents attach it immediately before summarization: summary precedes preserved AI/tool history for strict providers. See [tool artifacts](TOOL_ARTIFACTS.md) for projection, retry limits and delegation scope.
 21. **SummarizationMiddleware** - *(optional)* Compacts near token limits. Fraction trigger/keep profiles belong to the active run model; an explicit summary model only generates. Memory flush/manual compaction follow runtime/checkpoint agent policy. Preserve the latest user request and DynamicContext reminders; a backward cutoff may retain old AI/tool turns or make first-turn compaction a no-op.
 22. **TodoListMiddleware** - *(optional, if `is_plan_mode`)* Task tracking with `write_todos`. Skips reminders on `model_length_termination` so capped turns end cleanly. A raising model call requeues its reminder, uncounted, for the retry.
 23. **TokenUsageMiddleware** - *(optional, if `token_usage.enabled`)* Records token usage metrics; subagent usage is read from terminal `ToolMessage.additional_kwargs` in the current run and merged back into the dispatching AIMessage by message position. The same state update marks the ToolMessage with `subagent_token_usage_attributed=true`, so checkpoint replay or middleware re-entry cannot add the cumulative snapshot twice; missing/malformed usage or a result with no matching dispatch remains unmarked and retryable.
