@@ -85,14 +85,35 @@ def setup(monkeypatch, tmp_path):
     monkeypatch.setattr("deerflow.sandbox.tools.get_app_config", lambda: config)
     provider = EventProvider()
     set_sandbox_provider(provider)
-    with bench.observe_provider(provider):
-        yield provider, config
+    yield provider, config
     reset_sandbox_provider()
 
 
+@pytest.fixture
+def observed(setup):
+    provider, _ = setup
+    with bench.observe_provider(provider):
+        yield setup
+
+
+async def run_after_prewarm_ready(provider, config, *, case, thread_id):
+    """Release the scripted first response only after the speculative lease exists."""
+    trace, gate = bench.Trace(), asyncio.Event()
+    task = asyncio.create_task(bench.run_case(provider, config, case=case, prewarm=True, model_delay=0, thread_id=thread_id, user_id="alice", trace=trace, model_gate=gate))
+    try:
+        await asyncio.wait_for(trace.model_started.wait(), 2)
+        await asyncio.wait_for(trace.acquire_ready.wait(), 2)
+        gate.set()
+        return await asyncio.wait_for(task, 3)
+    finally:
+        provider.finish.set()
+        gate.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+
 @pytest.mark.anyio
-async def test_real_graph_prewarm_starts_during_model_and_is_claimed_once(setup):
-    provider, config = setup
+async def test_real_graph_prewarm_starts_during_model_and_is_claimed_once(observed):
+    provider, config = observed
     model_gate = asyncio.Event()
     trace = bench.Trace()
     task = asyncio.create_task(bench.run_case(provider, config, case="tool", prewarm=True, model_delay=0, thread_id="overlap", user_id="alice", trace=trace, model_gate=model_gate))
@@ -118,8 +139,8 @@ async def test_real_graph_prewarm_starts_during_model_and_is_claimed_once(setup)
 
 
 @pytest.mark.anyio
-async def test_real_graph_baseline_waits_until_tool_to_start(setup):
-    provider, config = setup
+async def test_real_graph_baseline_waits_until_tool_to_start(observed):
+    provider, config = observed
     model_gate = asyncio.Event()
     trace = bench.Trace()
     task = asyncio.create_task(bench.run_case(provider, config, case="tool", prewarm=False, model_delay=0, thread_id="lazy", user_id="alice", trace=trace, model_gate=model_gate))
@@ -141,10 +162,13 @@ async def test_real_graph_baseline_waits_until_tool_to_start(setup):
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("case,expected_acquires", [("plain", 0), ("fenced_no_tool", 1), ("model_error", 1)])
-async def test_no_tool_and_failure_close_actual_graph_ownership(setup, case, expected_acquires):
-    provider, config = setup
+async def test_no_tool_and_failure_close_actual_graph_ownership(observed, case, expected_acquires):
+    provider, config = observed
     provider.finish.set()
-    row = await bench.run_case(provider, config, case=case, prewarm=True, model_delay=0, thread_id=case, user_id="alice")
+    if expected_acquires:
+        row = await run_after_prewarm_ready(provider, config, case=case, thread_id=case)
+    else:
+        row = await bench.run_case(provider, config, case=case, prewarm=True, model_delay=0, thread_id=case, user_id="alice")
     assert row["success"], json.dumps(row)
     assert row["acquire_calls"] == expected_acquires
     assert row["unused_prewarm"] is bool(expected_acquires)
@@ -154,8 +178,8 @@ async def test_no_tool_and_failure_close_actual_graph_ownership(setup, case, exp
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("prewarm", [False, True])
-async def test_cancelled_graph_drains_started_acquire_before_reporting_cleanup(setup, prewarm):
-    provider, config = setup
+async def test_cancelled_graph_drains_started_acquire_before_reporting_cleanup(observed, prewarm):
+    provider, config = observed
     trace = bench.Trace()
     task = asyncio.create_task(bench.run_case(provider, config, case="cancel", prewarm=prewarm, model_delay=0, thread_id="cancel", user_id="alice", trace=trace))
     try:
@@ -172,8 +196,8 @@ async def test_cancelled_graph_drains_started_acquire_before_reporting_cleanup(s
 
 
 @pytest.mark.anyio
-async def test_tool_semantic_failure_is_not_a_successful_latency_row(setup, monkeypatch):
-    provider, config = setup
+async def test_tool_semantic_failure_is_not_a_successful_latency_row(observed, monkeypatch):
+    provider, config = observed
     provider.finish.set()
     monkeypatch.setattr(FakeSandbox, "execute_command", lambda self, command, **kwargs: "Error: injected command failure")
     row = await bench.run_case(provider, config, case="tool", prewarm=False, model_delay=0, thread_id="bad-tool", user_id="alice")
@@ -183,8 +207,8 @@ async def test_tool_semantic_failure_is_not_a_successful_latency_row(setup, monk
 
 
 @pytest.mark.anyio
-async def test_two_users_keep_trace_and_execution_ownership_separate(setup):
-    provider, config = setup
+async def test_two_users_keep_trace_and_execution_ownership_separate(observed):
+    provider, config = observed
     provider.finish.set()
     rows = await asyncio.gather(*[bench.run_case(provider, config, case="tool", prewarm=True, model_delay=0, thread_id="same-thread", user_id=user) for user in ("alice", "bob")])
     assert all(row["success"] for row in rows), rows
@@ -204,6 +228,7 @@ async def test_matrix_retains_each_variant_and_cleans_exact_batch_resources(setu
     records = [json.loads(line) for line in path.read_text().splitlines()]
     rows = [row for row in records if row["record_type"] == "prewarm_case"]
     assert len(rows) == 4
+    assert all(row["acquire_calls"] == 1 and row["release_calls"] == 1 for row in rows)
     assert {row["prewarm"] for row in rows} == {False, True}
     assert len({row["thread_id"] for row in rows}) == 4
     assert all(row["started_monotonic_s"] < row["finished_monotonic_s"] for row in rows)
@@ -221,15 +246,15 @@ def test_invalid_resource_interval_rejected_before_provider_creation(monkeypatch
 
 
 @pytest.mark.anyio
-async def test_expected_model_failure_cannot_mask_cleanup_failure(setup, monkeypatch):
-    provider, config = setup
+async def test_expected_model_failure_cannot_mask_cleanup_failure(observed, monkeypatch):
+    provider, config = observed
     provider.finish.set()
 
     def fail_release(sid):
         raise OSError("injected cleanup failure")
 
     monkeypatch.setattr(provider, "release", fail_release)
-    row = await bench.run_case(provider, config, case="model_error", prewarm=True, model_delay=0, thread_id="cleanup-error", user_id="alice")
+    row = await run_after_prewarm_ready(provider, config, case="model_error", thread_id="cleanup-error")
     assert row["success"] is False
     assert row["cleanup_error_type"] == "OSError"
 
@@ -282,3 +307,39 @@ def test_non_aio_config_rejected_before_provisioning(monkeypatch, tmp_path):
     with pytest.raises(SystemExit) as exc:
         bench.main(["--output", str(tmp_path / "rows.jsonl")])
     assert exc.value.code == 2
+
+
+def test_shutdown_failure_still_stops_sampler_and_propagates(monkeypatch, tmp_path):
+    events = []
+    config = AppConfig(sandbox=SandboxConfig(use="deerflow.community.aio_sandbox:AioSandboxProvider"))
+    monkeypatch.setattr(bench, "get_app_config", lambda: config)
+    monkeypatch.setattr(bench, "_make_aio_provider", lambda config: (object(), {"image": "offline"}))
+    monkeypatch.setattr(bench, "set_sandbox_provider", lambda provider: None)
+    monkeypatch.setattr(bench.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(stdout="revision" if kwargs.get("text") else b""))
+
+    class Sampler:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            events.append("start")
+
+        def wait_for_first_sample(self, **kwargs):
+            return True
+
+        def stop(self):
+            events.append("stop")
+
+    async def run(*args):
+        return True
+
+    def failed_shutdown():
+        events.append("shutdown")
+        raise OSError("injected shutdown failure")
+
+    monkeypatch.setattr(bench, "DockerResourceSampler", Sampler)
+    monkeypatch.setattr(bench, "run_matrix", run)
+    monkeypatch.setattr(bench, "shutdown_sandbox_provider", failed_shutdown)
+    with pytest.raises(OSError, match="injected shutdown failure"):
+        bench.main(["--output", str(tmp_path / "results.jsonl")])
+    assert events == ["start", "shutdown", "stop"]

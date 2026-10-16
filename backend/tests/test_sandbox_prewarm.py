@@ -469,3 +469,122 @@ async def test_cancel_before_start_creates_no_provider_lease(setup):
     await release_sandbox_execution_lease_async(rt.context)
     assert provider.calls == []
     assert not prewarm._permits
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["disabled", "non-aio", "budget-full"])
+async def test_cancelled_skipped_prewarm_cleanup_still_releases_actual_tool_lease(setup, monkeypatch, mode):
+    provider, config = setup
+    blocker = None
+    if mode == "disabled":
+        config.sandbox.prewarm = False
+    elif mode == "non-aio":
+        config.sandbox.use = "deerflow.sandbox.local:LocalSandboxProvider"
+    else:
+        blocker = runtime("slot-owner")
+        await start(blocker).task
+    rt = runtime()
+    handle = start(rt)
+    assert await handle.task is None
+    await ensure_sandbox_initialized_async(rt)
+    owner = rt.context["sandbox_lease_owner_id"]
+    manager = get_sandbox_lease_manager(provider)
+    assert manager.binding_for(owner) == "alice/thread"
+    entered, finish = asyncio.Event(), asyncio.Event()
+    wait_for_cleanup = handle._wait_for_cleanup
+
+    async def gated_wait():
+        entered.set()
+        await finish.wait()
+        await wait_for_cleanup()
+
+    monkeypatch.setattr(handle, "_wait_for_cleanup", gated_wait)
+    cleanup = asyncio.create_task(release_sandbox_execution_lease_async(rt.context))
+    try:
+        await entered.wait()
+        cleanup.cancel()
+        await asyncio.sleep(0)
+        cleanup.cancel()
+        finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await cleanup
+        assert manager.binding_for(owner) is None
+        assert "alice/thread" in provider.released
+    finally:
+        finish.set()
+        await asyncio.gather(cleanup, return_exceptions=True)
+        await manager.release_async(owner)
+        if blocker is not None:
+            await release_sandbox_execution_lease_async(blocker.context)
+
+
+@pytest.mark.anyio
+async def test_prewarm_close_error_still_releases_actual_tool_lease(setup, monkeypatch):
+    provider, config = setup
+    config.sandbox.prewarm = False
+    rt = runtime()
+    await start(rt).task
+    await ensure_sandbox_initialized_async(rt)
+    manager = get_sandbox_lease_manager(provider)
+    owner = rt.context["sandbox_lease_owner_id"]
+
+    async def fail_close(context):
+        raise RuntimeError("prewarm cleanup failed")
+
+    monkeypatch.setattr(prewarm, "close_sandbox_prewarm_context", fail_close)
+    try:
+        with pytest.raises(RuntimeError, match="prewarm cleanup failed"):
+            await release_sandbox_execution_lease_async(rt.context)
+        assert manager.binding_for(owner) is None
+        assert provider.released == ["alice/thread"]
+    finally:
+        await manager.release_async(owner)
+
+
+@pytest.mark.anyio
+async def test_cancel_after_disabled_prewarm_close_drains_blocked_ordinary_release(setup, monkeypatch):
+    import threading
+
+    provider, config = setup
+    config.sandbox.prewarm = False
+    rt = runtime()
+    handle = start(rt)
+    await handle.task
+    await ensure_sandbox_initialized_async(rt)
+    close_started, finish_close = asyncio.Event(), asyncio.Event()
+    release_started, finish_release = threading.Event(), threading.Event()
+    original_wait = handle._wait_for_cleanup
+    original_release = provider.release
+
+    async def gated_wait():
+        close_started.set()
+        await finish_close.wait()
+        await original_wait()
+
+    def blocking_release(sandbox_id):
+        release_started.set()
+        assert finish_release.wait(5)
+        original_release(sandbox_id)
+
+    monkeypatch.setattr(handle, "_wait_for_cleanup", gated_wait)
+    monkeypatch.setattr(provider, "release", blocking_release)
+    cleanup = asyncio.create_task(release_sandbox_execution_lease_async(rt.context))
+    try:
+        await close_started.wait()
+        cleanup.cancel()
+        finish_close.set()
+        assert await asyncio.to_thread(release_started.wait, 1)
+        cleanup.cancel()
+        await asyncio.sleep(0)
+        cleanup.cancel()
+        await asyncio.sleep(0)
+        assert not cleanup.done()
+        finish_release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await cleanup
+        assert provider.released == ["alice/thread"]
+    finally:
+        finish_close.set()
+        finish_release.set()
+        await asyncio.gather(cleanup, return_exceptions=True)
+        await get_sandbox_lease_manager(provider).release_async(rt.context["sandbox_lease_owner_id"])

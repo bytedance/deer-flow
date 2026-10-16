@@ -794,13 +794,17 @@ async def release_sandbox_execution_lease_async(context: Any) -> None:
     """Drain speculative work before releasing the ordinary execution lease."""
     from deerflow.sandbox.prewarm import close_sandbox_prewarm_context
 
-    await close_sandbox_prewarm_context(context)
-    lease = _sandbox_execution_lease(context)
-    if lease is None:
-        return
+    try:
+        await close_sandbox_prewarm_context(context)
+    finally:
+        # Disabled/skipped speculation may own no lease while a later real tool
+        # does. Its cleanup can re-raise cancellation after draining, or fail;
+        # neither may bypass that ordinary execution's release. Do not return
+        # from this finally: cancellation must survive even without a binding.
+        lease = _sandbox_execution_lease(context)
+        if lease is not None:
+            from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 
-    from deerflow.sandbox.sandbox_provider import get_sandbox_provider
-
-    owner_id, _sandbox_id = lease
-    provider = get_sandbox_provider()
-    await get_sandbox_lease_manager(provider).release_async(owner_id)
+            owner_id, _sandbox_id = lease
+            provider = get_sandbox_provider()
+            await get_sandbox_lease_manager(provider).release_async(owner_id)

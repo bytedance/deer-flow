@@ -370,8 +370,10 @@ def main(argv=None) -> int:
             sampler.wait_for_first_sample(timeout=10)
             success = asyncio.run(run_matrix(provider, config, args, stream))
         finally:
-            shutdown_sandbox_provider()
-            sampler.stop()
+            try:
+                shutdown_sandbox_provider()
+            finally:
+                sampler.stop()
     return 0 if success else 1
 
 
