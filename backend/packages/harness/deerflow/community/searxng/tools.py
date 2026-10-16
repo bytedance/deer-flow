@@ -12,12 +12,16 @@ logger = logging.getLogger(__name__)
 
 
 def _unexpected_format_error(query: str) -> str:
-    """Report a malformed instance payload without echoing it or the query.
+    """Report a malformed instance payload without echoing the payload.
 
     A SearXNG instance that answers HTTP 200 with an error page, a non-list
     ``results`` container, or a non-empty list holding no objects is not an
     empty search: "No results found" would tell the agent the query legitimately
     matched nothing.
+
+    The query is echoed back on purpose, matching the sibling providers, so the
+    agent can tell which search the error belongs to; only the payload is
+    withheld.
     """
     return json.dumps({"error": "SearXNG returned an unexpected response format", "query": query}, ensure_ascii=False)
 

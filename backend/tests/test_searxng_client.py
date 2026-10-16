@@ -210,6 +210,39 @@ class TestSearxngClient:
         assert len(result) == 2
         assert mock_ctx.get.call_count == 2
 
+    async def test_search_drops_collected_rows_when_a_later_page_is_malformed(self):
+        """A malformed page aborts the walk and discards the rows already collected.
+
+        SearXNG is the only contained provider whose ``search()`` paginates, so it
+        is the only one where a multi-request search can fail midway. Pinning the
+        trade-off: a reverse proxy or captive portal that starts failing between
+        pages is assumed to be failing persistently, and returning the short first
+        page would look like a complete search. Raising the format error is the
+        sibling providers' behaviour too (they fail on their single request), so
+        this keeps the family contract at the cost of the already-collected rows.
+        """
+        first_page = [{"title": f"r{i}", "url": f"https://example.com/1/{i}", "content": "c"} for i in range(3)]
+
+        with patch("deerflow.community.searxng.searxng_client.httpx.AsyncClient") as mock_cls:
+            mock_ctx = MagicMock()
+            mock_cls.return_value.__aenter__.return_value = mock_ctx
+
+            def _get(url, params=None, headers=None):
+                mock_resp = MagicMock()
+                mock_resp.status_code = 200
+                # Page 1 parses; page 2 is the proxy/captive-portal HTML page.
+                mock_resp.json.return_value = {"results": first_page} if params["pageno"] == 1 else "upstream maintenance"
+                mock_resp.raise_for_status.return_value = None
+                return mock_resp
+
+            mock_ctx.get = AsyncMock(side_effect=_get)
+
+            client = SearxngClient(base_url="http://searxng:8080")
+            with pytest.raises(SearxngResponseError):
+                await client.search("test query", max_results=20)
+
+        assert [call.kwargs["params"]["pageno"] for call in mock_ctx.get.call_args_list] == [1, 2]
+
     async def test_search_never_sends_the_unsupported_limit_parameter(self):
         """`limit` is not part of the SearXNG search API, so it is not sent."""
         with _searxng_pages({1: [{"title": "t", "url": "https://example.com/1", "content": "c"}]}) as mock_ctx:
