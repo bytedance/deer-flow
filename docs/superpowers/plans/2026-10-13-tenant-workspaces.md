@@ -364,6 +364,14 @@ python -m pytest tests/test_workspace_execution.py tests/test_workspace_revocati
 - [x] 固定 CI、证据、文档和本地提交；无新增数据库迁移、模型调用或租户启用。
 - [ ] Delta/cache/Postgres checkpoint、同 SQLite 文件兼容、真实权限撤销并发/崩溃恢复，以及 journal/status/progress/SSE/发布/工具/goal 其他入口和 active rollback 控制权限仍待完整贯通。随后真实 API、其他撤权资源域、pool/remote C。M4 父项保持未完成。
 
+#### M4 第十三小步：原生日志与普通 Run 元数据效应保护（本轮已验证）
+
+- [x] 先以实际 native graph/异步模型回调/SQL 日志复现正常日志缺少空间及撤权后迟到响应落库；主干通过再补必要边界。
+- [x] 复用原始 Run 身份与 checkpoint 同一执行权检查；普通 Run 状态/进度/完成/模型及日志批次/单例写入在自身事务中核验，正确标记原始空间，不让无上下文旧接口覆盖。
+- [x] 将已知权限拒绝与 IO 未知失败分开；受限 STOP 处理中状态不含业务载荷、不释放清理屏障，只有实际关闭再确认。
+- [x] 保留原有停止状态断言，最终 46 项固定验证与十三文件云端格式检查、可复跑 CI、回执、文档和本地提交；不增加新表或启用租户。
+- [ ] 继续 SSE/发布/cache、ThreadMeta 状态/标题、模型工具效应、scoped dispatcher/recovery/launch 与 active rollback；再接所有撤权域和 pool/remote C。已有日志/元数据保护不是完整 worker 或 M4 验收。
+
 ### M5：记忆、知识检索与工具凭据隔离
 
 **修改接点：**

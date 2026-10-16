@@ -236,3 +236,40 @@ copy/prune/delete 仍拒绝。普通 Run 的 goal/duration 若经过该 saver，
 PostgreSQL checkpoint、delta/cache、同文件 SQLite、跨库事务/崩溃未知结果。
 Journal/SSE/发布、通用 Run 状态/进度、工具和其他权限效应、真实 HTTP/JWT、
 远端 C 与 C→B→C 仍未完成；不能据此开启租户功能或声明整条业务已验收。
+
+## 原生 SQL 日志与普通 Run 元数据写入
+
+这一步用实际 `run_agent`、编译图、异步 `BaseChatModel` 回调和 SQL 日志跑通
+正常报告，再持住生成过程，分别撤权、取消、让 native lease 过期或更换 owner。
+模型输出为确定性夹具，没有调用 DeepSeek 或其他真实服务。两种元数据库都验证
+正常日志保存原 user/workspace，迟到正文和 Run 完成统计被拒绝。失去 owner/lease
+不能确认清理完成；取消/撤权在实际 native 关闭后才解除生命周期屏障。
+
+#59 RED 四项复现缺失空间及撤权后落库；#60 主干四项通过（21.81s），#61 必要
+边界十项通过（33.04s），含空 Context 中旧接口不得覆盖 scoped Run 或写入私人
+日志。#62 原有回归暴露四项逻辑 interrupted 状态被一并拒绝（27 passed）。新增
+仅消费精确 pending STOP 的控制状态通道后，保留原断言；#63 最终 46 passed
+（96.58s），十三文件 Ruff。它复用先前的生命周期、checkpoint、事件读取检查
+及五项直接相关旧路径回归，没有增加其他业务场景。
+
+日志/普通 Run 元数据在各自原生数据库事务内重查原始执行权；只持有短 SQL 锁，
+不会锁住模型或工具。已知权限拒绝会丢弃被拒绝的缓冲并 drain/detach，不把正文
+重新排队；真正 IO 失败仍保留既有重试与未知清理语义。逻辑 interrupted 不能写
+正文/统计/错误/goal，也不能作为 STOP 回执或提前释放准入。
+
+同一固定模板提供两个白名单 suite：`--suite effects` 跑本轮业务主干和边界，
+`--suite effects-final` 跑最终固定组合。示例：
+
+```bash
+python scripts/render_tenant_run_control_pipeline.py tenant-worker-effects <归档SHA256> \
+  --suite effects-final > /private/tmp/Jenkinsfile.tenant-worker-effects
+```
+
+源码包、phase、SHA 对齐，使用同一专属 SQL job、固定镜像、内部 PG 和精确 label/
+匿名卷清理。回执 `native_worker_journal_metadata_fence` 含每次构建、归档/日志哈希、
+最终源码和已移除资源，不猜测旧无记录卷归属，不做全局 prune。
+
+未涵盖 SSE/缓存/发布、ThreadMeta 标题和状态、模型工具调用及外部副作用、scoped
+pending dispatch 和 owner/实例恢复、active rollback、真实 HTTP/JWT/browser、
+quota/billing 或远端 C。被拒绝的 token 统计不能作为完整计费证据。仍需完成所有
+撤权域及真实 C→B→C；启动旗标和 schema fence 不变，不据此启用租户功能。

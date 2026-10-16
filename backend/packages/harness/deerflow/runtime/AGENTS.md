@@ -443,3 +443,25 @@ and pending writes survive refusal. This is not delta/cache/Postgres checkpoint,
 same-file SQLite, crash recovery, complete journal/SSE/status/progress/tool or
 goal permission proof. Other worker effects and active scoped rollback remain
 required. Keep the compiled tenant gate false.
+
+Scoped run_agent binds DbRunEventStore to its captured immutable NativeRunStopTarget
+before constructing RunJournal; unsupported event stores fail closed. Journal
+single/batch/terminal receipt writes share native SQL live execution fencing,
+and RunManager passes captured targets for ordinary Run metadata writes. Local
+ownership_lost alone never authorizes a persistent write. Known workspace
+refusal interrupts normal finalization and does not become an infrastructure
+retry or snapshot recreation grant. Legacy unscoped call signatures remain.
+
+RunJournal treats WorkspaceAccessDenied as a final refusal: do not requeue stale
+batches, accept new buffered events, or retry a delivery receipt. Drain/detach
+its runtime dependencies through existing close(flush=False); genuine IO errors
+still retain the old retry/buffer/uncertain-close behavior. Control-only logical
+interruption uses the exact pending native STOP and never declares actual close.
+The worker still releases its durable barrier only after real final cleanup.
+
+Both SQL engines with actual native model callbacks verify normal journal/
+completion and stale member/cancel/lease/owner refusal. Existing early interrupted
+status and held/failed finalizers remain verified. This is not stream/cache/
+publication, ThreadMeta title/status, model/tool invocation, dispatcher/recovery,
+active rollback, public JWT/browser or remote C proof. Keep full M0-M11 gates
+open and compiled tenant activation false.

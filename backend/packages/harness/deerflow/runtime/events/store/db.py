@@ -7,6 +7,7 @@ at ``max_trace_content`` bytes to avoid bloating the database.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import re
@@ -17,10 +18,15 @@ from typing import Any
 from sqlalchemy import delete, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from deerflow.authz.workspace import get_current_workspace
 from deerflow.persistence.models.run_event import RunEventRow, RunEventThreadSeqRow
+from deerflow.persistence.run.model import RunRow
+from deerflow.persistence.run.sql import RunRepository
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
+from deerflow.persistence.workspaces.run_control import NativeRunStopTarget
 from deerflow.persistence.workspaces.scope import resolve_resource_scope
+from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 from deerflow.runtime.events.message_identity import message_identity
 from deerflow.runtime.events.store.base import RunEventStore
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user, resolve_user_id
@@ -34,6 +40,7 @@ class DbRunEventStore(RunEventStore):
         self._sf = session_factory
         self._max_trace_content = max_trace_content
         self._workspace_required = workspace_required
+        self._worker_target = None
         # Per-thread asyncio locks serialize seq assignment for concurrent
         # in-process writers on the same thread. The DB-level FOR UPDATE /
         # advisory lock guards cross-process races; this guards the common
@@ -47,6 +54,33 @@ class DbRunEventStore(RunEventStore):
         # the generation alive until they drain.
         self._write_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._write_lock_pins: dict[str, asyncio.Lock] = {}
+
+    def bind_worker(self, target):
+        """Private immutable per-Run view; every write rechecks native SQL."""
+        if type(target) is not NativeRunStopTarget:
+            raise WorkspaceAccessDenied("journal requires captured native Run identity")
+        bound = copy.copy(self)
+        bound._worker_target = target
+        return bound
+
+    async def _authorize_worker_write(self, session, events):
+        target = self._worker_target
+        if target is None:
+            if self._workspace_required or get_current_workspace() is not None:
+                raise WorkspaceAccessDenied("workspace journal requires a bound worker")
+            # A legacy/unbound store cannot stamp NULL over private resources.
+            thread_ids = {e["thread_id"] for e in events}
+            run_ids = {e["run_id"] for e in events}
+            private_parent = await session.scalar(select(ThreadMetaRow.thread_id).where(ThreadMetaRow.thread_id.in_(thread_ids), ThreadMetaRow.workspace_id.is_not(None)).limit(1))
+            private_run = await session.scalar(select(RunRow.run_id).where(RunRow.run_id.in_(run_ids), RunRow.workspace_id.is_not(None)).limit(1))
+            if private_parent is not None or private_run is not None:
+                raise WorkspaceAccessDenied("unbound journal cannot write a private Run")
+            return None
+        for event in events:
+            if event["thread_id"] != target.thread_id or event["run_id"] != target.run_id or event.get("user_id", target.user_id) != target.user_id or event.get("workspace_id", target.workspace_id) != target.workspace_id:
+                raise WorkspaceAccessDenied("journal batch differs from captured Run identity")
+        await RunRepository(self._sf).lock_worker_effect(session, target)
+        return target.workspace_id
 
     def _get_write_lock(self, thread_id: str) -> asyncio.Lock:
         """Return (creating if needed) the per-thread seq-assignment lock."""
@@ -216,16 +250,18 @@ class DbRunEventStore(RunEventStore):
         """
         content, metadata = self._truncate_trace(category, content, metadata)
         db_content, metadata = self._content_to_db(content, metadata)
-        user_id = self._user_id_from_context()
+        user_id = self._worker_target.user_id if self._worker_target is not None else self._user_id_from_context()
         async with self._get_write_lock(thread_id):
             async with self._sf() as session:
                 async with session.begin():
+                    workspace_id = await self._authorize_worker_write(session, [{"thread_id": thread_id, "run_id": run_id}])
                     max_seq = await self._max_seq_for_thread(session, thread_id)
                     seq = (max_seq or 0) + 1
                     row = RunEventRow(
                         thread_id=thread_id,
                         run_id=run_id,
                         user_id=user_id,
+                        workspace_id=workspace_id,
                         event_type=event_type,
                         category=category,
                         content=db_content,
@@ -243,12 +279,13 @@ class DbRunEventStore(RunEventStore):
         thread_ids = {e["thread_id"] for e in events}
         if len(thread_ids) > 1:
             raise ValueError(f"put_batch requires all events to belong to the same thread; got {thread_ids!r}")
-        user_id = self._user_id_from_context()
+        user_id = self._worker_target.user_id if self._worker_target is not None else self._user_id_from_context()
         # All events belong to the same thread (validated above).
         thread_id = events[0]["thread_id"]
         async with self._get_write_lock(thread_id):
             async with self._sf() as session:
                 async with session.begin():
+                    workspace_id = await self._authorize_worker_write(session, events)
                     max_seq = await self._max_seq_for_thread(session, thread_id)
                     seq = max_seq or 0
                     rows = []
@@ -262,7 +299,8 @@ class DbRunEventStore(RunEventStore):
                         row = RunEventRow(
                             thread_id=e["thread_id"],
                             run_id=e["run_id"],
-                            user_id=e.get("user_id", user_id),
+                            user_id=user_id if self._worker_target is not None else e.get("user_id", user_id),
+                            workspace_id=workspace_id,
                             event_type=e["event_type"],
                             category=category,
                             content=db_content,
@@ -296,10 +334,11 @@ class DbRunEventStore(RunEventStore):
         """
         content, metadata = self._truncate_trace(category, content, metadata)
         db_content, metadata = self._content_to_db(content, metadata)
-        user_id = self._user_id_from_context()
+        user_id = self._worker_target.user_id if self._worker_target is not None else self._user_id_from_context()
         async with self._get_write_lock(thread_id):
             async with self._sf() as session:
                 async with session.begin():
+                    workspace_id = await self._authorize_worker_write(session, [{"thread_id": thread_id, "run_id": run_id}])
                     max_seq = await self._max_seq_for_thread(session, thread_id)
                     stmt = (
                         select(RunEventRow)
@@ -318,6 +357,7 @@ class DbRunEventStore(RunEventStore):
                         thread_id=thread_id,
                         run_id=run_id,
                         user_id=user_id,
+                        workspace_id=workspace_id,
                         event_type=event_type,
                         category=category,
                         content=db_content,

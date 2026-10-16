@@ -423,6 +423,14 @@ class RunManager:
             self._store_put_payload(record, error=error),
         )
 
+    @staticmethod
+    def _worker_write_kwargs(record):
+        if record is None or record.workspace_context is None:
+            return {}
+        from deerflow.persistence.workspaces.run_control import NativeRunStopTarget
+
+        return {"worker_target": NativeRunStopTarget.from_record(record)}
+
     async def _persist_status(self, record: RunRecord, status: RunStatus, *, error: str | None = None, stop_reason: str | None = None) -> bool:
         """Best-effort persist a status transition to the backing store."""
         if record.ownership_lost:
@@ -436,10 +444,15 @@ class RunManager:
             return True
         row_recovery_payload = self._store_put_payload(record, error=error, stop_reason=stop_reason)
         try:
+            if record.workspace_context is not None and status == RunStatus.interrupted:
+                from deerflow.persistence.workspaces.run_control import NativeRunStopTarget
+
+                if await self._call_store_with_retry("mark_worker_interrupted", record.run_id, lambda: self._store.mark_worker_interrupted(NativeRunStopTarget.from_record(record))):
+                    return True
             updated = await self._call_store_with_retry(
                 "update_status",
                 record.run_id,
-                lambda: self._store.update_status(record.run_id, status.value, error=error, stop_reason=stop_reason, **({"goal_verdict": record.goal_verdict} if record.goal_verdict is not None else {})),
+                lambda: self._store.update_status(record.run_id, status.value, error=error, stop_reason=stop_reason, **self._worker_write_kwargs(record), **({"goal_verdict": record.goal_verdict} if record.goal_verdict is not None else {})),
             )
             if updated is False:
                 # ``update_status`` is now guarded by ``status IN ('pending','running')``.
@@ -578,7 +591,7 @@ class RunManager:
             updated = await self._call_store_with_retry(
                 "update_run_completion",
                 run_id,
-                lambda: self._store.update_run_completion(run_id, **kwargs),
+                lambda: self._store.update_run_completion(run_id, **kwargs, **self._worker_write_kwargs(record)),
             )
             if updated is False:
                 existing = await self._store.get(run_id)
@@ -605,7 +618,7 @@ class RunManager:
                 recovered = await self._call_store_with_retry(
                     "update_run_completion",
                     run_id,
-                    lambda: self._store.update_run_completion(run_id, **kwargs),
+                    lambda: self._store.update_run_completion(run_id, **kwargs, **self._worker_write_kwargs(record)),
                 )
                 if recovered is False:
                     logger.warning("Run completion update for %s affected no rows after row recreation", run_id)
@@ -626,7 +639,7 @@ class RunManager:
                 record.updated_at = _now_iso()
         if should_persist and self._store is not None:
             try:
-                await self._store.update_run_progress(run_id, **kwargs)
+                await self._store.update_run_progress(run_id, **kwargs, **self._worker_write_kwargs(record))
             except Exception:
                 logger.warning("Failed to persist run progress for %s", run_id, exc_info=True)
 
@@ -646,7 +659,7 @@ class RunManager:
             try:
                 # The local status is already staged as terminal, but the store
                 # row intentionally remains running until checkpoint finalization.
-                await self._store.update_run_progress(run_id, **kwargs)
+                await self._store.update_run_progress(run_id, **kwargs, **self._worker_write_kwargs(record))
             except Exception:
                 logger.warning("Failed to persist finalizing progress for %s", run_id, exc_info=True)
 
@@ -1292,6 +1305,8 @@ class RunManager:
             )
             return None
 
+        async with self._lock:
+            record = self._runs.get(run_id)
         try:
             result = await self._call_store_with_retry(
                 "finalize_if_not_cancelled",
@@ -1301,9 +1316,18 @@ class RunManager:
                     status=status.value,
                     error=error,
                     stop_reason=stop_reason,
+                    **self._worker_write_kwargs(record),
                     **({"goal_verdict": goal_verdict} if goal_verdict is not None else {}),
                 ),
             )
+        except WorkspaceAccessDenied:
+            # Known denied business effects are not unknown cleanup. The owning
+            # worker still drains and acknowledges only its actual close boundary.
+            if record is not None and record.workspace_context is not None:
+                record.abort_action = "interrupt"
+                record.abort_event.set()
+                return "interrupt"
+            raise
         except Exception:
             async with self._lock:
                 record = self._runs.get(run_id)
@@ -1428,7 +1452,7 @@ class RunManager:
             await self._call_store_with_retry(
                 "update_model_name",
                 run_id,
-                lambda: self._store.update_model_name(run_id, model_name),
+                lambda: self._store.update_model_name(run_id, model_name, **self._worker_write_kwargs(self._runs.get(run_id))),
             )
         except Exception:
             logger.warning("Failed to persist model_name update for run %s", run_id, exc_info=True)

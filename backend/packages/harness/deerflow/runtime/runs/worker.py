@@ -49,6 +49,7 @@ from deerflow.mcp_scope import (
     THREAD_INCARNATION_CONTEXT_KEY,
     THREAD_INCARNATION_METADATA_GUARD_KEY,
 )
+from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 from deerflow.runtime.checkpoint_mode import (
     aensure_checkpoint_mode_compatible,
     inject_checkpoint_mode,
@@ -314,6 +315,10 @@ async def _persist_delivery_receipt(
                 content=content,
             )
             return True
+        except WorkspaceAccessDenied:
+            # Authorization refusal is final; never retry it as infrastructure
+            # failure or manufacture a zero receipt after revocation.
+            return False
         except Exception:
             if attempt == attempts - 1:
                 logger.warning(
@@ -1074,6 +1079,12 @@ async def run_agent(
                 if not callable(getattr(run_manager._store, "commit_worker_checkpoint", None)):
                     raise RuntimeError("workspace checkpoint execution requires a durable native fence")
                 checkpointer = ScopedRunSaver(checkpointer, run_manager._store, NativeRunStopTarget.from_record(record))
+            if event_store is not None:
+                from deerflow.persistence.workspaces.run_control import NativeRunStopTarget
+
+                if not callable(getattr(event_store, "bind_worker", None)):
+                    raise RuntimeError("workspace journal requires native durable execution fencing")
+                event_store = event_store.bind_worker(NativeRunStopTarget.from_record(record))
         elif get_current_workspace() is not None:
             raise RuntimeError("unscoped Run cannot inherit ambient workspace authority")
         normalized_stream_modes = normalize_stream_modes(stream_modes)

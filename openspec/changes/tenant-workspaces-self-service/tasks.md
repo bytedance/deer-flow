@@ -1493,3 +1493,43 @@ schema gate unchanged. No deployment/push/PR, real-model invocation, local app/
 Node/browser/pytest/Docker runtime or global prune. Continue remaining effects,
 then authenticated launch/cancel/recovery and actual C->B->C. Serial self-review;
 not independent full audit.
+
+M4 native worker journal/Run metadata checkpoint (2026-10-16): SQL #59 RED
+(four failures, 21.61s) reproduced NULL workspace on normal native journal rows
+and real late callback response persistence after member withdrawal. #60 main
+four passed (21.81s), #61 ten normal/member/cancel/lease/owner cases passed
+(33.04s), including no-ambient legacy writer refusal. #62 existing regression
+found four logical interrupted-state failures (27 passed, 77.05s). Fixed with
+an exact STOP control-processing transition, preserving all existing assertions.
+#63 SUCCESS final 46 cases (96.58s), thirteen-file cloud Ruff, source hashes and
+exact fixtures/networks/recorded anonymous volumes verified absent. Evidence:
+native_worker_journal_metadata_fence. Images/native 0040/executor e0003 unchanged.
+
+Actual native run_agent/compiled graph and deterministic async BaseChatModel
+callbacks drive DbRunEventStore and native RunRepository on both metadata
+engines. No real provider/credentials. Ordinary Run status/progress/completion/
+model/finalization and journal single/batch/receipt writes use original captured
+Run/creation/owner/context/parent incarnation, open lifetime, live membership and
+native lease in the same metadata transaction. Checkpoint IO reuses this fence;
+model/tool work does not hold its SQL locks. Bound journal stamps original user/
+workspace and validates batch identity. Unbound legacy writes/lease update
+cannot mutate scoped rows; raw private journal appends are refused.
+
+Known permission refusal drops stale buffered events and drains dependencies,
+without endless receipt retries. Genuine IO failure retains existing retry/
+buffer uncertainty. Control-only mark_worker_interrupted consumes an exact
+captured pending STOP under original live ownership; it writes no response,
+statistics, error payload or goal and closes no lifetime. Actual final close can
+acknowledge an interrupted run even when business writes were denied. Lost owner/
+expired lease remain open. Workspace-first ordering is now in the stop-close
+helper; a prior misplaced duplicate lock was removed from execution close.
+
+Next guard stream/publication/model/tool boundaries, ThreadMeta title/status and
+cache effects; integrate scoped dispatcher and owner/instance recovery, admitted
+APIs and other revocation domains, then signed pool/remote C/continuation and
+real C->B->C. Legacy dispatch pending failure remains an explicit later boundary,
+not evidence of full scoped dispatch. This is not public JWT/browser, real model,
+Postgres/delta checkpoint/shared SQLite, crash/unknown-result, quota/billing,
+NAS/TCP or remote C proof. All M0-M11 parents remain open, activation false,
+startup schema fence unchanged, root revocations pending. No deployment/push/PR
+or local application/test/Docker/Node/browser runtime. Serial self-review only.

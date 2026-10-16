@@ -320,3 +320,27 @@ graph construction or tool/network execution belongs in the callback. This is
 not a distributed transaction across checkpoint and metadata storage, nor a
 cleanup/rollback grant after withdrawal. Generic status/progress/journal and
 external effects remain separately required; tenant activation stays closed.
+
+RunRepository.lock_worker_effect is shared by native saver IO and ordinary
+worker Run/journal mutations. It locks workspace -> actor -> private parent ->
+optional native clock -> Run -> open lifetime, then checks original creation/
+owner/context/incarnation, live membership, pending STOP/cancel and native lease.
+Run metadata and journal rows commit inside that SAME metadata transaction;
+never wrap them in a separate session callback, especially with SQLite.
+Worker target is explicit; ambient UI selection cannot fill missing authority.
+Legacy status/progress/completion/model/finalization and update_lease exclude
+scoped rows. Scoped dispatch failure/recovery remain separate future boundaries.
+
+DbRunEventStore.bind_worker makes a per-Run view sharing lock registries; each
+single/batch/singleton producer validates the complete original Run/actor/thread
+binding before persistence and stamps workspace/user from it. An unbound store
+cannot append private rows even with no ambient scope. No Jsonl/Memory fallback
+is granted to a scoped worker. Special branch/seed/deletion protocols remain
+separate from worker authority.
+
+Control-only mark_owner_interrupted consumes the exact original pending STOP
+and live owner/lease, writes only interrupted/time/change_seq, and leaves every
+cleanup barrier open. It uses workspace -> clock -> Run/lifetime/STOP ordering
+without reusing revoked membership. Actual execution-close acknowledgement can
+terminalize that cancelled row after true cleanup, never a lost owner/expired
+lease. This does not authorize response/token/error/goal data or remote C STOP.

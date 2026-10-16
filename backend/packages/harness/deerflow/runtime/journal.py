@@ -36,6 +36,7 @@ from langgraph.types import Command
 
 from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.middlewares.skill_usage import MAX_SKILL_SNAPSHOT_CHARS, SKILL_USAGES_KEY
+from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 from deerflow.runtime.events.catalog import (
     LLM_AI_RESPONSE_EVENT,
     LLM_ERROR_EVENT,
@@ -336,6 +337,7 @@ class RunJournal(BaseCallbackHandler):
         self._pending_llm_response: _PendingLlmResponse | None = None
         self._pending_flush_tasks: set[asyncio.Task[None]] = set()
         self._explicit_flush_in_progress = False
+        self._effect_denied = False
         self._pending_progress_task: asyncio.Task[None] | None = None
         self._pending_progress_delayed = False
         self._progress_dirty = False
@@ -1042,7 +1044,7 @@ class RunJournal(BaseCallbackHandler):
         # Defer an incomplete copy until the next event or flush.
 
     def _put(self, *, event_type: str, category: str, content: str | dict = "", metadata: dict | None = None) -> None:
-        if self._closed:
+        if self._closed or self._effect_denied:
             return
         self._commit_pending_llm_response()
         self._buffer.append(self._make_event(event_type=event_type, category=category, content=content, metadata=metadata))
@@ -1057,6 +1059,9 @@ class RunJournal(BaseCallbackHandler):
         stay in the buffer and are flushed later by the async ``flush()``
         call in the worker's ``finally`` block.
         """
+        if self._effect_denied:
+            self._buffer.clear()
+            return
         self._commit_pending_llm_response()
         if not self._buffer:
             return
@@ -1082,6 +1087,9 @@ class RunJournal(BaseCallbackHandler):
                 return
             await store.put_batch(batch)
             self._feed_generation += 1
+        except WorkspaceAccessDenied:
+            self._effect_denied = True
+            self._buffer.clear()
         except Exception:
             logger.warning(
                 "Failed to flush %d events for run %s — returning to buffer",
@@ -1354,11 +1362,17 @@ class RunJournal(BaseCallbackHandler):
         """Force flush remaining buffer. Called in worker's finally block."""
         if self._closed:
             return
+        if self._effect_denied:
+            await self.close(flush=False)
+            return
         self._explicit_flush_in_progress = True
         try:
             self._commit_pending_llm_response()
             if self._pending_flush_tasks:
                 await asyncio.gather(*tuple(self._pending_flush_tasks), return_exceptions=True)
+            if self._effect_denied:
+                await self.close(flush=False)
+                return
             while self._pending_progress_task is not None:
                 pending_progress_task = self._pending_progress_task
                 if pending_progress_task.done():
@@ -1386,6 +1400,10 @@ class RunJournal(BaseCallbackHandler):
                         return
                     await store.put_batch(batch)
                     self._feed_generation += 1
+                except WorkspaceAccessDenied:
+                    self._effect_denied = True
+                    await self.close(flush=False)
+                    return
                 except Exception:
                     self._buffer = batch + self._buffer
                     raise

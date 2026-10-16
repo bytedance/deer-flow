@@ -3038,3 +3038,10 @@ Run owner, live membership and lease before saving state. Late results after
 revocation, cancellation or ownership loss cannot update that checkpoint.
 [Validation and limitations](docs/tenant-workspaces-testing.md) describe this
 partial integration; complete tenant activation remains closed.
+
+Scoped native worker SQL journals now retain their original workspace, and
+ordinary Run progress/completion writes recheck live execution ownership.
+Revoked or cancelled workers discard denied buffered responses; their original
+STOP control path can still record interruption without releasing cleanup early.
+[Verification and remaining work](docs/tenant-workspaces-testing.md) keep the
+full tenant integration and activation requirements explicit.

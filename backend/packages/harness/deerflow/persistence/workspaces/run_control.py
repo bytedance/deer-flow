@@ -198,6 +198,43 @@ async def enqueue_membership_run_stops(session, workspace, member):
         row.updated_at, row.change_seq = now, sequence
 
 
+async def mark_owner_interrupted(session_factory, target):
+    """Acknowledge processing of an exact durable STOP, never its completion.
+
+    This control-only transition preserves the open lifetime and stop barrier.
+    No withdrawn member authority, business payload or receipt is consumed.
+    """
+    from deerflow.persistence.run.model import RunRow
+    from deerflow.persistence.run.sql import RunRepository
+
+    if type(target) is not NativeRunStopTarget:
+        raise ValueError("invalid native interrupt processing identity")
+    async with session_factory() as session:
+        if session.get_bind().dialect.name == "sqlite":
+            await session.execute(text("BEGIN IMMEDIATE"))
+        if await session.scalar(select(WorkspaceRow.id).where(WorkspaceRow.id == target.workspace_id).with_for_update()) is None:
+            return False
+        sequence = await RunRepository._next_change_seq(session)
+        row = await session.scalar(select(RunRow).where(RunRow.run_id == target.run_id).with_for_update())
+        try:
+            if row is None or NativeRunStopTarget.from_row(row) != target:
+                return False
+            await execution_lifetime(session, target)
+        except ValueError:
+            return False
+        if row.status not in ("running", "interrupted") or row.cancel_requested_at is None:
+            return False
+        stop = await session.scalar(select(WorkspaceOperationOutboxRow).where(WorkspaceOperationOutboxRow.operation_id == target.operation_id).with_for_update())
+        if stop is None or stop.kind != "run_stop" or stop.state != "pending" or stop.workspace_id != target.workspace_id or stop.user_id != target.user_id or not stop.payload or stop.payload.get("target") != target.as_payload():
+            return False
+        now = datetime.now(UTC)
+        if row.lease_expires_at is None or _aware(row.lease_expires_at) <= now:
+            return False
+        row.status, row.updated_at, row.change_seq = "interrupted", now, sequence
+        await session.commit()
+        return True
+
+
 async def confirm_local_execution(session_factory, target):
     from deerflow.persistence.run.model import RunRow
     from deerflow.persistence.run.sql import RunRepository
@@ -213,11 +250,6 @@ async def confirm_local_execution(session_factory, target):
         # otherwise request a workspace key-share lock after holding clock.
         if await session.scalar(select(WorkspaceRow.id).where(WorkspaceRow.id == target.workspace_id).with_for_update()) is None:
             return None
-        # Cleanup does not authorize from current membership, but it must
-        # honor workspace -> clock -> Run lock order. The audit FK would
-        # otherwise request a workspace key-share lock after holding clock.
-        if await session.scalar(select(WorkspaceRow.id).where(WorkspaceRow.id == target.workspace_id).with_for_update()) is None:
-            return False
         sequence = await RunRepository._next_change_seq(session)
         row = await session.scalar(select(RunRow).where(RunRow.run_id == target.run_id).with_for_update())
         try:
@@ -231,10 +263,12 @@ async def confirm_local_execution(session_factory, target):
         now = datetime.now(UTC)
         if row.lease_expires_at is None or _aware(row.lease_expires_at) <= now:
             return None
-        if row.status not in ("success", "error", "timeout", "interrupted"):
-            return None
         if row.cancel_requested_at is not None and await session.scalar(select(pending_run_stop(run_id=row.run_id, workspace_id=row.workspace_id))):
+            # Actual closed worker acknowledgement has control-only authority:
+            # terminate without storing denied output/tokens/error payloads.
             row.status = "interrupted"
+        elif row.status not in ("success", "error", "timeout", "interrupted"):
+            return None
         lifetime.state = "completed"
         lifetime.payload = {**lifetime.payload, "receipt": {"evidence": "native_worker_closed", "owner_worker_id": target.owner_worker_id, "observed_at": now.isoformat()}}
         row.updated_at, row.change_seq = now, sequence
@@ -254,6 +288,11 @@ async def confirm_local_run_stop(session_factory, target, *, evidence):
     async with session_factory() as session:
         if session.get_bind().dialect.name == "sqlite":
             await session.execute(text("BEGIN IMMEDIATE"))
+        # Cleanup does not authorize from current membership, but it must
+        # honor workspace -> clock -> Run lock order. The audit FK would
+        # otherwise request a workspace key-share lock after holding clock.
+        if await session.scalar(select(WorkspaceRow.id).where(WorkspaceRow.id == target.workspace_id).with_for_update()) is None:
+            return False
         sequence = await RunRepository._next_change_seq(session)
         row = await session.scalar(select(RunRow).where(RunRow.run_id == target.run_id).with_for_update())
         if row is None:
