@@ -17,7 +17,7 @@ from typing import Any
 from sqlalchemy import delete, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from deerflow.persistence.models.run_event import RunEventRow
+from deerflow.persistence.models.run_event import RunEventRow, RunEventThreadSeqRow
 from deerflow.runtime.events.message_identity import message_identity
 from deerflow.runtime.events.store.base import RunEventStore
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user, resolve_user_id
@@ -168,11 +168,12 @@ class DbRunEventStore(RunEventStore):
 
     @staticmethod
     async def _max_seq_for_thread(session: AsyncSession, thread_id: str) -> int | None:
-        """Return the current max seq while serializing writers per thread.
+        """Return the current seq high-water mark while serializing writers.
 
-        Takes the shared thread mutation fence before reading the aggregate, so
+        The row aggregate is the source of truth for existing data, while the
+        durable watermark preserves sequence values after a run is deleted.
+        Takes the shared thread mutation fence before reading either value, so
         the read is ordered against every other mutation of the same thread.
-        Other dialects keep the existing row-locking statement.
         """
         await DbRunEventStore._acquire_thread_mutation_fence(session, thread_id)
 
@@ -181,9 +182,24 @@ class DbRunEventStore(RunEventStore):
         dialect_name = bind.dialect.name if bind is not None else ""
 
         if dialect_name == "postgresql":
-            return await session.scalar(stmt)
+            row_max = await session.scalar(stmt)
+        else:
+            row_max = await session.scalar(stmt.with_for_update())
 
-        return await session.scalar(stmt.with_for_update())
+        watermark = await session.scalar(select(RunEventThreadSeqRow.seq).where(RunEventThreadSeqRow.thread_id == thread_id))
+        values = [value for value in (row_max, watermark) if value is not None]
+        return max(values) if values else None
+
+    @staticmethod
+    async def _raise_seq_watermark(session: AsyncSession, thread_id: str, seq: int) -> None:
+        """Persist *seq* as the thread's new minimum allocation floor."""
+        if seq <= 0:
+            return
+        watermark = await session.get(RunEventThreadSeqRow, thread_id)
+        if watermark is None:
+            session.add(RunEventThreadSeqRow(thread_id=thread_id, seq=seq))
+        elif watermark.seq < seq:
+            watermark.seq = seq
 
     async def put(self, *, thread_id, run_id, event_type, category, content="", metadata=None, created_at=None):  # noqa: D401
         """Write a single event — low-frequency path only.
@@ -214,6 +230,7 @@ class DbRunEventStore(RunEventStore):
                         created_at=datetime.fromisoformat(created_at) if created_at else datetime.now(UTC),
                     )
                     session.add(row)
+                    await self._raise_seq_watermark(session, thread_id, seq)
                 return self._row_to_dict(row)
 
     async def put_batch(self, events):
@@ -251,6 +268,7 @@ class DbRunEventStore(RunEventStore):
                         )
                         session.add(row)
                         rows.append(row)
+                    await self._raise_seq_watermark(session, thread_id, seq)
                 return [self._row_to_dict(r) for r in rows]
 
     async def put_if_absent(
@@ -304,6 +322,7 @@ class DbRunEventStore(RunEventStore):
                         created_at=datetime.fromisoformat(created_at) if created_at else datetime.now(UTC),
                     )
                     session.add(row)
+                    await self._raise_seq_watermark(session, thread_id, row.seq)
                 return self._row_to_dict(row), True
 
     async def list_messages(
@@ -529,6 +548,11 @@ class DbRunEventStore(RunEventStore):
                     count = await session.scalar(count_stmt) or 0
                     if count > 0:
                         await session.execute(delete(RunEventRow).where(*count_conditions))
+                    # Owner-scoped deletion is the Gateway's normal path.
+                    # Reset only an empty thread: surviving events from any
+                    # owner still need the allocation floor for deleted runs.
+                    remaining_events = select(RunEventRow.id).where(RunEventRow.thread_id == thread_id).exists()
+                    await session.execute(delete(RunEventThreadSeqRow).where(RunEventThreadSeqRow.thread_id == thread_id, ~remaining_events))
             # Retire the live-thread pin, but never remove the weak registry
             # entry directly. asyncio.Lock.release() clears ``locked()`` before
             # a queued waiter resumes, so an unlocked check can observe the
@@ -555,7 +579,7 @@ class DbRunEventStore(RunEventStore):
         async with self._get_write_lock(thread_id):
             async with self._sf() as session:
                 async with session.begin():
-                    await self._acquire_thread_mutation_fence(session, thread_id)
+                    max_seq = await self._max_seq_for_thread(session, thread_id)
                     count_conditions = [RunEventRow.thread_id == thread_id, RunEventRow.run_id == run_id]
                     if resolved_user_id is not None:
                         count_conditions.append(RunEventRow.user_id == resolved_user_id)
@@ -563,4 +587,5 @@ class DbRunEventStore(RunEventStore):
                     count = await session.scalar(count_stmt) or 0
                     if count > 0:
                         await session.execute(delete(RunEventRow).where(*count_conditions))
+                        await self._raise_seq_watermark(session, thread_id, max_seq or 0)
         return count

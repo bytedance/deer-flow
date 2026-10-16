@@ -9,5 +9,24 @@ export function extractTitleFromMarkdown(markdown: string) {
   if (!headingPrefix) {
     return undefined;
   }
-  return firstLine.slice(headingPrefix[0].length).trim() || undefined;
+  const title = firstLine.slice(headingPrefix[0].length);
+  // Scan backwards once: a whitespace-search regex can backtrack quadratically
+  // on long fetched titles. Only ASCII spaces/tabs may follow closing hashes.
+  let end = title.endsWith("\r") ? title.length - 1 : title.length;
+  while (end > 0 && (title[end - 1] === " " || title[end - 1] === "\t")) {
+    end--;
+  }
+  let hashStart = end;
+  while (hashStart > 0 && title[hashStart - 1] === "#") {
+    hashStart--;
+  }
+  if (
+    hashStart < end &&
+    (hashStart === 0 ||
+      title[hashStart - 1] === " " ||
+      title[hashStart - 1] === "\t")
+  ) {
+    return title.slice(0, hashStart).trim() || undefined;
+  }
+  return title.trim() || undefined;
 }

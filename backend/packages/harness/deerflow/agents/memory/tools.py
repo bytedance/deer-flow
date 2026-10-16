@@ -1,6 +1,6 @@
 """Memory tools for tool-driven memory mode.
 
-Exposes memory_search, memory_add, memory_update, memory_delete as
+Exposes memory_search, memory_get, memory_add, memory_update, memory_delete as
 LangChain @tool functions the model can call directly.
 
 When memory.mode == "tool", these tools are registered on the agent. Most
@@ -81,6 +81,38 @@ def memory_search_tool(
         return json.dumps({"results": results, "count": len(results)}, ensure_ascii=False)
     except Exception as exc:
         logger.exception("memory_search_tool failed")
+        return json.dumps({"error": str(exc)})
+
+
+@tool("memory_get", parse_docstring=True)
+def memory_get_tool(runtime: Runtime, fact_id: str) -> str:
+    """Read one stored fact by its exact ID in the current user and agent scope.
+
+    Use this to revisit a fact whose ID you already know from memory_search
+    or memory_add. Use memory_search when you do not know the ID.
+
+    Args:
+        fact_id: Exact fact ID returned by memory_search or memory_add.
+
+    Returns:
+        JSON string with "fact" containing the stored fact object.
+        Missing facts and unsupported backends return "error".
+    """
+    agent_name, user_id = _resolve_scope(runtime)
+    try:
+        manager = get_memory_manager()
+        if agent_name is not None and getattr(manager, "supports_agent_scoped_management", False) is not True:
+            return json.dumps({"error": f"memory backend {type(manager).__name__} does not support agent-scoped memory reads"})
+        try:
+            memory = manager.get_memory(user_id=user_id, agent_name=agent_name)
+        except NotImplementedError:
+            return json.dumps({"error": f"memory backend {type(manager).__name__} does not support get_memory"})
+        for fact in memory.get("facts", []):
+            if fact.get("id") == fact_id:
+                return json.dumps({"fact": fact}, ensure_ascii=False)
+        return json.dumps({"error": f"Fact not found: {fact_id}"})
+    except Exception as exc:
+        logger.exception("memory_get_tool failed")
         return json.dumps({"error": str(exc)})
 
 
@@ -244,6 +276,7 @@ def get_memory_tools() -> list:
     """
     return [
         memory_search_tool,
+        memory_get_tool,
         memory_add_tool,
         memory_update_tool,
         memory_delete_tool,

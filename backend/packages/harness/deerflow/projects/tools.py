@@ -89,11 +89,15 @@ def _clamp(value: int, *, default: int, lower: int, upper: int) -> int:
 
 
 def _shelf_entry_json(row: dict) -> dict[str, Any]:
+    summary = row.get("summary")
     return {
         "id": row["id"],
         "name": neutralize_untrusted_tags(str(row.get("name") or "")),
         "size_bytes": int(row.get("size_bytes") or 0),
         "updated_at": str(row.get("updated_at") or ""),
+        # LLM-processed untrusted content: neutralized here exactly like the
+        # name, mirroring the injected index line.
+        "summary": (neutralize_untrusted_tags(str(summary)) if summary else None),
     }
 
 
@@ -167,11 +171,15 @@ async def list_project_documents(
     """List documents on the current project's shelf (metadata only, no content).
 
     Returns JSON: {"total", "offset", "next_offset", "documents": [{"id",
-    "name", "size_bytes", "updated_at"}, ...]} in the shelf's own order
-    (recently updated first). Use this when the <documents> index says the
-    shelf has more entries than it shows, or the user asks what documents the
-    project holds. Each entry's stable "id" is what read_project_document
-    takes. Live data: reflects the shelf as of this call.
+    "name", "size_bytes", "updated_at", "summary"}, ...]} in the shelf's own
+    order (recently updated first). "summary" is an optional one-line
+    description of the document (null while generation is pending/disabled/
+    failed) — use it to decide whether a read_project_document call is worth
+    it before paying for a content slice. Use this tool when the <documents>
+    index says the shelf has more entries than it shows, or the user asks
+    what documents the project holds. Each entry's stable "id" is what
+    read_project_document takes. Live data: reflects the shelf as of this
+    call.
     """
     return await _list_project_documents_impl(runtime, offset=offset, limit=limit)
 

@@ -101,6 +101,7 @@ async def resolve_project_context(thread_store: Any, project_repo: Any, thread_i
                         "name": str(r.get("name") or ""),
                         "size_bytes": int(r.get("size_bytes") or 0),
                         "updated_at": str(r.get("updated_at") or ""),
+                        "summary": (str(r["summary"]) if r.get("summary") else None),
                     }
                     for r in rows
                 ],
@@ -183,20 +184,26 @@ def _format_shelf_size(size_bytes: int) -> str:
 
 
 def _render_shelf_entry(entry: Mapping[str, Any]) -> str:
-    """One line-atomic shelf index entry: ``- id=… | name (size, modified date)``.
+    """One line-atomic shelf index entry: ``- id=… | name (size, modified date)[ — summary]``.
 
-    The document name is untrusted user text and passes through
-    ``neutralize_untrusted_tags`` so it cannot forge framework blocks; the ID
-    is a server-generated content address rendered verbatim so it stays
-    directly usable by ``read_project_document`` (including for same-name
-    documents).
+    The document name is untrusted user text and the summary is
+    LLM-processed untrusted document content; both pass through
+    ``neutralize_untrusted_tags`` so neither can forge framework blocks
+    (the summary is additionally guaranteed single-line by the write-time
+    contract). The ID is a server-generated content address
+    rendered verbatim so it stays directly usable by
+    ``read_project_document`` (including for same-name documents).
     """
     document_id = str(entry.get("id") or "")
     name = neutralize_untrusted_tags(str(entry.get("name") or ""))
     size = _format_shelf_size(int(entry.get("size_bytes") or 0))
     updated_at = str(entry.get("updated_at") or "")
     modified = updated_at[:10] if len(updated_at) >= 10 else updated_at
-    return f"- id={document_id} | {name} ({size}, modified {modified})"
+    line = f"- id={document_id} | {name} ({size}, modified {modified})"
+    summary = entry.get("summary")
+    if summary:
+        line += f" — {neutralize_untrusted_tags(str(summary))}"
+    return line
 
 
 def render_documents_block(snapshot: Mapping[str, Any] | None, *, max_entries: int, max_bytes: int) -> str | None:

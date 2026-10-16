@@ -227,19 +227,31 @@ export function ArtifactFileDetail({
     (draft) => draft.draftContent !== draft.baselineContent,
   );
   const isEditing = editingPath === filepath;
-  const canEdit = canEditOpenedArtifact({
-    filepath,
-    isCodeFile,
-    isWriteFile,
-    isSkillFile,
-    isMock: Boolean(isMock),
-    hasRevision: typeof sha256 === "string" && sha256.length === 64,
-    isStaticWebsite: env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true",
-  });
+  const canEdit =
+    content !== undefined &&
+    !truncated &&
+    !isLoading &&
+    !error &&
+    canEditOpenedArtifact({
+      filepath,
+      isCodeFile,
+      isWriteFile,
+      isSkillFile,
+      isMock: Boolean(isMock),
+      hasRevision: typeof sha256 === "string" && sha256.length === 64,
+      isStaticWebsite: env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true",
+    });
   const editorContent = isDirty ? activeDraft.draftContent : visibleContent;
 
   useEffect(() => {
-    if (content === undefined || sha256 === undefined || isWriteFile) {
+    // A byte-range preview can carry the same full-file ETag as the complete
+    // response. Only complete content can establish an editing baseline.
+    if (
+      content === undefined ||
+      sha256 === undefined ||
+      isWriteFile ||
+      truncated
+    ) {
       return;
     }
     setDrafts((current) => {
@@ -250,7 +262,7 @@ export function ArtifactFileDetail({
       }
       return { ...current, [filepath]: next };
     });
-  }, [content, filepath, isWriteFile, setDrafts, sha256]);
+  }, [content, filepath, isWriteFile, setDrafts, sha256, truncated]);
 
   const [viewMode, setViewMode] = useState<"code" | "preview">(
     artifactViewState.initialViewMode,
@@ -268,8 +280,14 @@ export function ArtifactFileDetail({
   }, [isDirty, t.artifactEditing.discardChanges]);
 
   const discardDraft = useCallback(() => {
-    const latestContent = content ?? activeDraft.baselineContent;
-    const latestSha256 = sha256 ?? activeDraft.baselineSha256;
+    const hasCompleteContent =
+      !truncated && content !== undefined && sha256 !== undefined;
+    const latestContent = hasCompleteContent
+      ? content
+      : activeDraft.baselineContent;
+    const latestSha256 = hasCompleteContent
+      ? sha256
+      : activeDraft.baselineSha256;
     setDrafts((current) => ({
       ...current,
       [filepath]: {
@@ -281,7 +299,15 @@ export function ArtifactFileDetail({
       },
     }));
     setEditingPath(null);
-  }, [activeDraft, content, filepath, setDrafts, setEditingPath, sha256]);
+  }, [
+    activeDraft,
+    content,
+    filepath,
+    setDrafts,
+    setEditingPath,
+    sha256,
+    truncated,
+  ]);
 
   const handleSave = useCallback(async () => {
     if (
@@ -487,47 +513,49 @@ export function ArtifactFileDetail({
               />
             )}
             {canEdit && isEditing && (
-              <>
-                <ArtifactAction
-                  className={cn(
-                    isDirty && !activeDraft.conflict && "text-primary",
-                  )}
-                  icon={isSaving ? LoaderIcon : SaveIcon}
-                  label={t.common.save}
-                  tooltip={
-                    thread.isLoading
-                      ? t.artifactEditing.runInProgress
-                      : activeDraft.conflict
-                        ? t.artifactEditing.conflict
-                        : t.common.save
+              <ArtifactAction
+                className={cn(
+                  isDirty && !activeDraft.conflict && "text-primary",
+                )}
+                icon={isSaving ? LoaderIcon : SaveIcon}
+                label={t.common.save}
+                tooltip={
+                  thread.isLoading
+                    ? t.artifactEditing.runInProgress
+                    : activeDraft.conflict
+                      ? t.artifactEditing.conflict
+                      : t.common.save
+                }
+                disabled={
+                  !isDirty ||
+                  isSaving ||
+                  thread.isLoading ||
+                  activeDraft.conflict
+                }
+                onClick={() => void handleSave()}
+              />
+            )}
+            {isEditing && (
+              <ArtifactAction
+                icon={PencilOffIcon}
+                label={t.artifactEditing.exit}
+                tooltip={t.artifactEditing.exit}
+                disabled={isSaving}
+                onClick={() => setEditingPath(null)}
+              />
+            )}
+            {canEdit && isEditing && (
+              <ArtifactAction
+                icon={RotateCcwIcon}
+                label={t.artifactEditing.discard}
+                tooltip={t.artifactEditing.discard}
+                disabled={isSaving}
+                onClick={() => {
+                  if (confirmDiscard()) {
+                    discardDraft();
                   }
-                  disabled={
-                    !isDirty ||
-                    isSaving ||
-                    thread.isLoading ||
-                    activeDraft.conflict
-                  }
-                  onClick={() => void handleSave()}
-                />
-                <ArtifactAction
-                  icon={PencilOffIcon}
-                  label={t.artifactEditing.exit}
-                  tooltip={t.artifactEditing.exit}
-                  disabled={isSaving}
-                  onClick={() => setEditingPath(null)}
-                />
-                <ArtifactAction
-                  icon={RotateCcwIcon}
-                  label={t.artifactEditing.discard}
-                  tooltip={t.artifactEditing.discard}
-                  disabled={isSaving}
-                  onClick={() => {
-                    if (confirmDiscard()) {
-                      discardDraft();
-                    }
-                  }}
-                />
-              </>
+                }}
+              />
             )}
             {!isEditing &&
               !isWriteFile &&

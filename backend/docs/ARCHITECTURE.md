@@ -83,6 +83,7 @@ FastAPI application providing REST endpoints plus the public LangGraph-compatibl
 
 **Routers**:
 - `models.py` - `/api/models` - Model listing and details
+- `agents.py` - `/api/agents` - User-scoped Custom Agent CRUD and versioned definition import/export
 - `thread_runs.py` / `runs.py` - `/api/threads/{id}/runs`, `/api/runs/*` - LangGraph-compatible runs and streaming
 - `mcp.py` - `/api/mcp` - MCP server configuration
 - `skills.py` - `/api/skills` - Skills management
@@ -102,11 +103,13 @@ The web conversation delete flow first deletes Gateway-managed thread state thro
 
 **Role authority.** Project data rides a user-role request message, never the system prompt: framework rules stay in SystemMessages; user-authored project configuration is data.
 
-**Shelf storage (spec §6.1-6.3).** `project_documents` rows carry a server-generated content address (`stored_relpath` relative to `users/{user_id}/projects/`, embedding the sha256 and the row's own document ID) so rows never share files and re-upload after trash lands in a fresh namespace. Layout: `{sha256[:2]}/{sha256}/{document_id}/original/{name}` plus an optional `derived/converted.md` companion written via temp file and atomic rename on first read. Inserts are atomic with the active-project row lock: stage → hash → dedup among active `(project_id, sha256)` → place bytes → `INSERT` (file-before-row); a dedup hit returns the existing row (first name wins). Document delete and project delete are pure row transitions to a trash tier (`trashed_at`, `trash_origin` snapshot) — no filesystem work; trashed rows are invisible to the index, the tools, and the listing APIs.
+**Shelf storage (spec §6.1-6.3).** `project_documents` rows carry a server-generated content address (`stored_relpath` relative to `users/{user_id}/projects/`, embedding the sha256 and the row's own document ID) so rows never share files and re-upload after trash lands in a fresh namespace. Layout: `{sha256[:2]}/{sha256}/{document_id}/original/{name}` plus an optional `derived/converted.md` companion created on first read: conversion writes into `.staging/` outside any database transaction, then the document-row lock is taken only to revalidate the live row and atomically rename the output into place (a row trashed or purged meanwhile discards it); concurrent first reads of one document share a single conversion. Inserts are atomic with the active-project row lock: stage → hash → dedup among active `(project_id, sha256)` → place bytes → `INSERT` (file-before-row); a dedup hit returns the existing row (first name wins). Document delete and project delete are pure row transitions to a trash tier (`trashed_at`, `trash_origin` snapshot) — no filesystem work; trashed rows are invisible to the index, the tools, and the listing APIs.
 
 **Bounded live reads (spec §7.3).** `list_project_documents` / `read_project_document` (registered only for runs carrying the pinned key) take `project_id` from the pin and read live shelf rows; binaries and conversion-disabled convertibles are declined with an error naming attach-to-thread, and documents trashed mid-run fail with a "no longer on the shelf" error rather than serving stale content.
 
 **Trash tier (spec §8).** Trashed rows are invisible to the shelf index, tools, and listing APIs; they surface only through the `/api/trash` routes with their `trash_origin` display snapshot. Restore is a database re-point — `stored_relpath` is projects-root-relative, so no file ever moves (spec §10.6) — inside one transaction that locks the target active project row, then the source and any merge-candidate rows in ID order; identical active bytes in the target merge (trash row deleted, discarded namespace unlinked best-effort after commit), and a read-only existence/size check under the document lock rejects restores of missing or size-mismatched content with `409 content_missing`, leaving the row trashed. Purge holds the document-row lock continuously across trashed-state revalidation, unlink of the original and `derived/converted.md`, row deletion, and commit: already-absent content counts as removed, any other unlink error rolls back and keeps the row retryable, and retention callers revalidate the selected trash timestamp and cutoff under the lock so a restored-and-re-trashed row is never purged on its former expiry. Empty trash (`POST /api/trash/purge`) runs that same guarded purge once per trashed row of the caller with no age filter — the confirmation covers the whole listing — so the retention cutoff gates only the sweep's candidate selection. The retention sweep runs lazily on `GET /api/trash/documents` and once at gateway startup (no daemon): it purges rows at or past `projects.trash_retention_days` through the same guarded path, then reconciles storage — `.staging/*` entries and unreferenced files older than 24 hours are removed (nothing younger is ever collected; any active or trashed row protects its whole namespace, even after restore to another project) — and detects rows with missing or size-mismatched content, logging them at warning and surfacing them as `content_missing` without ever deleting the row (the row is the user's only record; disposal always starts with the user trashing it).
+
+**Document summaries (opt-in).** `project_documents.summary` is a nullable, best-effort LLM one-liner. The two shelf write routes enqueue a job after row creation (`projects/summaries.py`, off unless `projects.summaries_enabled`); a bounded worker pool (`summary_concurrency` + bounded `summary_queue_size`, full queue drops) resolves text through `read_text_serving_path` (never re-deriving the convertible-first rule), calls the model via `run_oneshot_llm` with a caller-side wait limit (the worker slot is held until the provider call actually finishes; late results are discarded), rejects length-capped output through the shared provider-normalized detectors, and applies a write-time contract (unwrap → single line → empty is NULL → byte cap on a character boundary) before persisting with `updated_at` pinned so a landing summary never reorders the shelf. The summary rides the row's lifecycle (trash/restore/purge need no hooks), renders into the `<documents>` index and `list_project_documents` tag-neutralized at both exits, and is counted through `eligible/success/failed/skipped/queue_dropped/uncapped_accepted` metrics. All failure modes leave `summary = NULL`, which renders exactly like a shelf without the feature.
 
 ### Agent Architecture
 
@@ -178,7 +181,7 @@ class ThreadState(AgentState):
               ▼                                         ▼
 ┌─────────────────────────┐              ┌─────────────────────────┐
 │  LocalSandboxProvider   │              │  AioSandboxProvider     │
-│  (packages/harness/deerflow/sandbox/local.py) │              │  (packages/harness/deerflow/community/)       │
+│  (packages/harness/deerflow/sandbox/local/) │              │  (packages/harness/deerflow/community/)       │
 │                         │              │                         │
 │  - Singleton instance   │              │  - Docker-based         │
 │  - Direct execution     │              │  - Isolated containers  │
@@ -228,7 +231,7 @@ class ThreadState(AgentState):
                                    ▼
                       ┌─────────────────────────┐
                       │   get_available_tools() │
-                      │   (packages/harness/deerflow/tools/__init__)  │
+                      │   (packages/harness/deerflow/tools/__init__.py)  │
                       └─────────────────────────┘
 ```
 
@@ -284,7 +287,7 @@ config.yaml:
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                          MCP Integration                                 │
-│                        (packages/harness/deerflow/mcp/manager.py)                              │
+│                        (packages/harness/deerflow/mcp/)                              │
 └─────────────────────────────────────────────────────────────────────────┘
 
 extensions_config.json:
@@ -322,7 +325,7 @@ extensions_config.json:
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                          Skills System                                   │
-│                       (packages/harness/deerflow/skills/loader.py)                             │
+│                       (packages/harness/deerflow/skills/)                             │
 └─────────────────────────────────────────────────────────────────────────┘
 
 Directory Structure:
@@ -448,9 +451,11 @@ SKILL.md Format:
 
 2. Gateway updates runtime state
    - PUT writes extensions_config.json and reloads configuration
-   - Both endpoints reset the MCP tools cache and persistent sessions
+   - Config mutations reset the handling worker; peer workers detect the config signature
+   - Cache reset writes a shared generation marker, then retires the handling worker
 
 3. MCP Manager reloads on next use
+   - Every worker sharing that config directory compares the reset generation before serving cached tools
    - get_cached_mcp_tools() lazily reinitializes MCP tools
    - Loads current server configurations and tool lists
 

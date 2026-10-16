@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -11,6 +12,8 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, conver
 
 from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
 from deerflow.agents.middlewares.message_utils import is_genuine_user_message
+
+logger = logging.getLogger(__name__)
 
 SNAPSHOT_SYSTEM_NOTE = (
     "## Parent conversation snapshot\n"
@@ -25,7 +28,55 @@ SNAPSHOT_SYSTEM_NOTE = (
 # Keep media as input blocks so vision/audio-capable child models can still use
 # the retained conversation. Provider reasoning/signature and tool-use blocks
 # are deliberately excluded; tool calls are rendered separately as inert text.
-_MEDIA_BLOCK_TYPES = frozenset({"image", "image_url", "audio", "input_audio", "video", "file"})
+# A tuple, not a frozenset: block types are probed by equality because
+# `type: []` / `type: {}` are legal JSON from a provider, and hashing an
+# unhashable value would raise TypeError instead of skipping the block.
+_MEDIA_BLOCK_TYPES = ("image", "image_url", "audio", "input_audio", "video", "file", "document")
+
+
+def _neutralize_document_content_block(block: Any) -> Any:
+    """Neutralize text and citation prose without rewriting media or references."""
+    if not isinstance(block, dict) or block.get("type") != "text":
+        return block
+    block = dict(block)
+    if isinstance(block.get("text"), str):
+        block["text"] = neutralize_untrusted_tags(block["text"])
+    citations = block.get("citations")
+    if isinstance(citations, (list, tuple)):
+        block["citations"] = []
+        for citation in citations:
+            if isinstance(citation, dict):
+                citation = dict(citation)
+                for key in ("cited_text", "document_title", "title"):
+                    if isinstance(citation.get(key), str):
+                        citation[key] = neutralize_untrusted_tags(citation[key])
+            block["citations"].append(citation)
+    return block
+
+
+def _neutralize_document_text(document: dict[str, Any]) -> dict[str, Any]:
+    """Copy native document text as historical data, leaving opaque sources intact.
+
+    Hidden snapshots skip input sanitization, which only scans top-level text
+    blocks anyway. Sanitize the native text fields here without decoding media.
+    """
+    document = dict(document)
+    for key in ("title", "context"):
+        if isinstance(document.get(key), str):
+            document[key] = neutralize_untrusted_tags(document[key])
+    source = document.get("source")
+    if isinstance(source, dict):
+        source = dict(source)
+        if source.get("type") == "text" and isinstance(source.get("data"), str):
+            source["data"] = neutralize_untrusted_tags(source["data"])
+        elif source.get("type") == "content":
+            content = source.get("content")
+            if isinstance(content, str):
+                source["content"] = neutralize_untrusted_tags(content)
+            elif isinstance(content, (list, tuple)):
+                source["content"] = [_neutralize_document_content_block(block) for block in content]
+        document["source"] = source
+    return document
 
 
 def _is_conversation_message(message: Any) -> bool:
@@ -85,7 +136,7 @@ class ParentContextSnapshot:
                 if isinstance(block, str):
                     if block:
                         history.append({"type": "text", "text": neutralize_untrusted_tags(block)})
-                elif block.get("type") in {"text", "output_text"} and isinstance(block.get("text"), str):
+                elif block.get("type") in ("text", "output_text") and isinstance(block.get("text"), str):
                     history.append({"type": "text", "text": neutralize_untrusted_tags(block["text"])})
                 elif block.get("type") in _MEDIA_BLOCK_TYPES:
                     media = {key: value for key, value in block.items() if key != "cache_control"}
@@ -96,7 +147,12 @@ class ParentContextSnapshot:
                         # Omit this block without discarding the conversation.
                         history.append({"type": "text", "text": "[Historical media omitted: content could not be serialized. Do not assume its contents.]"})
                     else:
-                        history.append(media)
+                        history.append(_neutralize_document_text(media) if media["type"] == "document" else media)
+                elif isinstance(block, dict) and not isinstance(block.get("type"), str):
+                    # A non-string type is a malformed block, not one of the
+                    # deliberate exclusions above, so say why it vanished
+                    # instead of degrading the child's history silently.
+                    logger.warning("skipping content block with non-string type %r", block.get("type"))
             if isinstance(message, AIMessage):
                 # Every tool needs a retained result, including ordinary calls
                 # executing alongside the current delegation.

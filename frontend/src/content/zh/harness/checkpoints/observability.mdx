@@ -52,7 +52,9 @@ import { Callout } from "nextra/components";
 | 重新生成无法读取最新检查点 | 日志，随后 HTTP 500 `detail` | `Failed to read latest checkpoint for regenerate thread %s` → `Failed to read latest checkpoint` |
 | 重新生成无法列出检查点历史 | 日志，随后 HTTP 500 `detail` | `Failed to list checkpoints for regenerate thread %s` → `Failed to inspect checkpoint history` |
 
-失败载荷随路由不同。创建 run 在 threads 路由上**不会**提前做门禁：`POST /api/threads/{thread_id}/runs` 返回 `200` run 记录，随后变为 `status: error` 并带上不匹配文本；`POST /runs/stream` 返回 `200 text/event-stream`，随后发出 `event: error` 帧，载荷为 `{"message": ..., "name": "CheckpointModeMismatchError"}`；`POST /runs/wait` 返回 `200` JSON，内容为 `{"status": "error", "error": "<不匹配文本>"}`。例外是 run event 流为空但存在检查点头部的线程：`ensure_checkpoint_history_seeded` 会在 `start_run` 内物化该头部，而那里没有映射模式错误，于是同一个不匹配会在 run 被准入之前返回普通的 `500`。无状态的 `/api/runs/*` 路由共享这条路径。
+失败载荷随路由不同。创建 run 在 threads 路由上**不会**提前做门禁：`POST /api/threads/{thread_id}/runs` 返回 `200` run 记录，随后变为 `status: error` 并带上不匹配文本；`POST /runs/stream` 返回 `200 text/event-stream`，随后发出 `event: error` 帧，载荷为 `{"message": ..., "name": "CheckpointModeMismatchError"}`；`POST /runs/wait` 返回 `200` JSON，内容为 `{"status": "error", "error": "<不匹配文本>", "__error__": {"error": "RunError", "message": "<不匹配文本>"}}`。例外是 run event 流为空但存在检查点头部的线程：`ensure_checkpoint_history_seeded` 会在 `start_run` 内物化该头部，而那里没有映射模式错误，于是同一个不匹配会在 run 被准入之前返回普通的 `500`。无状态的 `/api/runs/*` 路由共享这条路径。
+
+wait 响应仍为 HTTP `200`。Python SDK 默认使用 `raise_error=True`，识别到 `__error__` 后会抛出异常，消息为 `RunError: <不匹配文本>`；传入 `raise_error=False` 才会返回 JSON 响应体，供调用者读取 `status`、`error` 和 `__error__`。
 
 <Callout type="warning">
   模式门自身不记任何日志。`checkpoint_mode.py` 没有 logger，threads

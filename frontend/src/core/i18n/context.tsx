@@ -11,6 +11,7 @@ import {
 
 import type { Locale } from "@/core/i18n";
 import type { Translations } from "@/core/i18n/locales";
+import { useSyncLocalePreference } from "@/core/settings/user-preferences";
 
 import { clientTranslations } from "./client-translations";
 
@@ -42,6 +43,9 @@ export function I18nProvider({
   useEffect(() => {
     document.documentElement.lang = locale;
   }, [locale]);
+
+  // The account's notification language follows the UI language.
+  useSyncLocalePreference(locale);
 
   return (
     <I18nContext.Provider value={{ locale, setLocale: handleSetLocale, t }}>

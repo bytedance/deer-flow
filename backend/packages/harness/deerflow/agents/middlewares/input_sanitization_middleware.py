@@ -96,6 +96,7 @@ _BLOCKED_TAG_NAMES: frozenset[str] = frozenset(
         "mcp_routing_hints",
         "available-deferred-tools",
         "goal_continuation",
+        "active_goal",
         "background_task_event",
         "file_editing_workflow",
         "guidelines",

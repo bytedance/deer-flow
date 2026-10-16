@@ -1,5 +1,9 @@
 import { INTERNAL_MARKER_TAGS } from "@/core/messages/utils";
-import { FENCE_MARKER_RE, INDENTED_CODE_RE } from "@/core/streamdown/fences";
+import {
+  FENCE_MARKER_RE,
+  INDENTED_CODE_RE,
+  isClosingFence,
+} from "@/core/streamdown/fences";
 
 import { normalizeMermaidMarkdown } from "./mermaid";
 
@@ -346,7 +350,8 @@ const _INTERNAL_TAG_RE = new RegExp(
  * Fence tracking is marker-aware (tracking the opening character and run
  * length) so that a tilde-fenced block containing a shorter backtick run, or a
  * 4-backtick block containing a 3-backtick run, does not prematurely close the
- * fence.
+ * fence. A fence line that carries an info string never closes one either, so
+ * a `` ```python `` line inside a plain ``` fence stays sample code.
  */
 export function stripLeakedSystemTags(markdown: string): string {
   const lines = markdown.split("\n");
@@ -360,11 +365,8 @@ export function stripLeakedSystemTags(markdown: string): string {
         if (fenceMarker === null) {
           // Opening a fenced code block
           fenceMarker = marker;
-        } else if (
-          marker.startsWith(fenceMarker.charAt(0)) &&
-          marker.length >= fenceMarker.length
-        ) {
-          // Closing fence: same character and at least as long as opener
+        } else if (isClosingFence(line, fenceMarker)) {
+          // Closing fence: same character, at least as long, no info string
           fenceMarker = null;
         }
         // Otherwise: different fence type or shorter run inside a fence

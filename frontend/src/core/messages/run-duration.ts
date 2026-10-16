@@ -32,8 +32,8 @@ function normalizeDuration(value: unknown): number | undefined {
 /**
  * Locate the single UI position that owns each completed run's wall-clock
  * duration. The backend keeps the value on every AI message for compatibility,
- * but the UI treats it as run-scoped metadata and renders it after the last
- * visible group belonging to that run.
+ * but the UI treats it as run-scoped metadata owned by the last visible
+ * group belonging to that run.
  */
 export function getRunDurationDisplaysByGroupIndex(
   groups: MessageGroup[],

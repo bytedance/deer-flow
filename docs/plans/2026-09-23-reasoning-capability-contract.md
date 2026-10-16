@@ -109,11 +109,13 @@ of adjustment codes for logging.
 `create_chat_model` resolves the contract, resolves the request, and then
 branches on `contract.source`:
 
-- **legacy** keeps the pre-existing code path byte-for-byte: the
+- **legacy** keeps the pre-existing code path: the
   `when_thinking_enabled` guard, the inferred disable payloads, the hard-coded
   `reasoning_effort=minimal` on the OpenAI-compatible disable path, and the
   `supports_reasoning_effort=False` strip. Existing profiles therefore behave
-  exactly as before.
+  as before, with one later correction (#5894): the operator's
+  `when_thinking_enabled` / `when_thinking_disabled` templates deep-merge into
+  the profile's settings instead of replacing whole keys such as `extra_body`.
 - **contract** applies `when_thinking_enabled` / `thinking` / `when_thinking_disabled`
   when present and otherwise synthesizes the on/off payload from the dialect.
   `dialect: auto` infers the dialect from `when_thinking_enabled` the same way

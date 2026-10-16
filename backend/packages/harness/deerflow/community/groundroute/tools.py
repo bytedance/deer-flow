@@ -55,7 +55,7 @@ def _get_api_key(tool_name: str) -> str | None:
 def _coerce_max_results(value: object, *, default: int = _DEFAULT_MAX_RESULTS) -> int:
     try:
         coerced = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         logger.warning("Invalid GroundRoute max_results=%r; using default %s", value, default)
         coerced = default
     return max(1, min(coerced, _MAX_RESULTS_CAP))
@@ -69,6 +69,34 @@ def _missing_key_error(tool_name: str, **context: str) -> str:
             tool_name,
         )
     return json.dumps({"error": "GROUNDROUTE_API_KEY is not configured", **context}, ensure_ascii=False)
+
+
+def _unexpected_format_error(query: str) -> str:
+    return json.dumps({"error": "GroundRoute returned an unexpected response format", "query": query}, ensure_ascii=False)
+
+
+def _response_results(data: object) -> list[dict] | None:
+    """Return the result objects of a GroundRoute response, or None if malformed.
+
+    A missing or null ``results`` is an empty search. A non-list container, or a
+    non-empty list holding no objects, is malformed: the caller reports a format
+    error rather than "No results found", which would tell the agent the query
+    legitimately matched nothing.
+    """
+    if not isinstance(data, dict):
+        logger.error("GroundRoute returned unexpected payload type: %s", type(data).__name__)
+        return None
+    results = data.get("results")
+    if results is None:
+        return []
+    if not isinstance(results, list):
+        logger.error("GroundRoute returned unexpected 'results' payload type: %s", type(results).__name__)
+        return None
+    usable = [item for item in results if isinstance(item, dict)]
+    if results and not usable:
+        logger.error("GroundRoute returned 'results' with no usable result objects")
+        return None
+    return usable
 
 
 def _post_search(api_key: str, body: dict) -> dict:
@@ -116,7 +144,9 @@ def web_search_tool(query: str, max_results: int | None = None) -> str:
         logger.error("GroundRoute search failed: %s: %s", type(e).__name__, e)
         return json.dumps({"error": str(e), "query": query}, ensure_ascii=False)
 
-    results = data.get("results") or []
+    results = _response_results(data)
+    if results is None:
+        return _unexpected_format_error(query)
     if not results:
         return json.dumps({"error": "No results found", "query": query}, ensure_ascii=False)
 
@@ -156,11 +186,14 @@ def web_fetch_tool(url: str) -> str:
         logger.error("GroundRoute fetch failed: %s: %s", type(e).__name__, e)
         return f"Error: {e}"
 
-    results = data.get("results") or []
+    results = _response_results(data)
+    if results is None:
+        return "Error: GroundRoute returned an unexpected response format"
     if not results:
         return "Error: No results found"
 
     result = results[0]
     content = result.get("content") or result.get("snippet") or ""
-    title = result.get("title", "")
+    content = content if isinstance(content, str) else str(content)
+    title = result.get("title") or ""
     return f"# {title}\n\n{content[:_FETCH_SNIPPET_LIMIT]}"

@@ -57,7 +57,7 @@ def validate_agent_name(name: str) -> None:
     """Validate that the agent name is safe to use in filesystem paths."""
     if not name:
         raise ValueError("Agent name must be a non-empty string.")
-    if name != DEFAULT_AGENT_BUCKET and not AGENT_NAME_PATTERN.match(name):
+    if name != DEFAULT_AGENT_BUCKET and not AGENT_NAME_PATTERN.fullmatch(name):
         raise ValueError(f"Invalid agent name {name!r}: names must match {AGENT_NAME_PATTERN.pattern}")
 
 
@@ -67,6 +67,31 @@ def _default_root() -> Path:
     if env:
         return Path(env)
     return Path.home() / ".deermem"
+
+
+RETRIEVAL_INDEX_DIRNAME = ".retrieval"
+
+
+def retrieval_index_directory(storage_path: str | None, retrieval_index_path: str | None = None) -> Path | None:
+    """Return the directory of DeerMem's derived SQLite retrieval index.
+
+    ``retrieval_index_path`` wins when set: an absolute path is used as-is and a
+    relative one is resolved against the data root (``storage_path``, or the
+    default root when that is empty). Otherwise the index lives below
+    ``{storage_path}/.retrieval``, and a DeerMem without a storage root keeps it
+    in memory (``None``). The index is rebuildable derived data, so instances
+    that share ``storage_path`` keep it instance-local through this setting.
+    """
+    configured = str(retrieval_index_path or "")
+    root = Path(storage_path) if storage_path else None
+    if configured:
+        path = Path(configured)
+        if path.is_absolute():
+            return path
+        return (root if root is not None else _default_root()) / path
+    if root is None:
+        return None
+    return root / RETRIEVAL_INDEX_DIRNAME
 
 
 def memory_file_path(

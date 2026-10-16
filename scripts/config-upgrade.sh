@@ -11,16 +11,34 @@ set -e
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXAMPLE="$REPO_ROOT/config.example.yaml"
 
-# Resolve config.yaml location: env var > backend/ > repo root
-if [ -n "$DEER_FLOW_CONFIG_PATH" ] && [ -f "$DEER_FLOW_CONFIG_PATH" ]; then
-    CONFIG="$DEER_FLOW_CONFIG_PATH"
-elif [ -f "$REPO_ROOT/backend/config.yaml" ]; then
-    CONFIG="$REPO_ROOT/backend/config.yaml"
-elif [ -f "$REPO_ROOT/config.yaml" ]; then
-    CONFIG="$REPO_ROOT/config.yaml"
+if command -v cygpath >/dev/null 2>&1; then
+    REPO_ROOT_WIN="$(cygpath -w "$REPO_ROOT")"
 else
-    CONFIG=""
+    REPO_ROOT_WIN="$REPO_ROOT"
 fi
+
+# Upgrade the config.yaml the Gateway loads. Ask the harness resolver rather
+# than copying its order: with both <checkout>/config.yaml and
+# backend/config.yaml present, `make dev` reads the checkout copy. The import
+# loads .env as the Gateway does; DEER_FLOW_PROJECT_ROOT then defaults to the
+# checkout, as in serve.sh. Prints nothing when no config exists yet.
+CONFIG="$(cd "$REPO_ROOT/backend" && REPO_ROOT_WIN_PATH="$REPO_ROOT_WIN" uv run python -c "
+import os
+import sys
+
+from deerflow.config.app_config import AppConfig
+
+os.environ.setdefault('DEER_FLOW_PROJECT_ROOT', os.environ['REPO_ROOT_WIN_PATH'])
+try:
+    sys.stdout.write(str(AppConfig.resolve_config_path()))
+except FileNotFoundError as exc:
+    # An explicit DEER_FLOW_CONFIG_PATH that does not exist stops the Gateway
+    # too; never upgrade a fallback file in its place.
+    if os.environ.get('DEER_FLOW_CONFIG_PATH'):
+        sys.exit(f'ERROR {exc}')
+except ValueError as exc:
+    sys.exit(f'ERROR {exc}')
+")"
 
 if [ ! -f "$EXAMPLE" ]; then
     echo "✗ config.example.yaml not found at $EXAMPLE"

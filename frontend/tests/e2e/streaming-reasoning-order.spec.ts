@@ -220,15 +220,24 @@ function reasoningStreamFrames() {
 }
 
 /** Holds the SSE connection open so the turn stays in its streaming state. */
-async function startHeldOpenStreamServer() {
-  const frames = reasoningStreamFrames();
+async function startHeldOpenStreamServer(
+  getFrames: (url: string) => string[] = reasoningStreamFrames,
+) {
   const server = createServer((_request, response) => {
+    const threadId = new URL(
+      _request.url ?? "/",
+      "http://localhost",
+    ).searchParams.get("threadId");
     response.writeHead(200, {
       "Access-Control-Allow-Origin": "*",
+      "Access-Control-Expose-Headers": "Content-Location",
+      ...(threadId
+        ? { "Content-Location": `/threads/${threadId}/runs/${RUN_ID}` }
+        : {}),
       "Cache-Control": "no-cache",
       "Content-Type": "text/event-stream",
     });
-    response.write(frames.join(""));
+    response.write(getFrames(_request.url ?? "/").join(""));
   });
 
   await new Promise<void>((resolve, reject) => {
@@ -261,6 +270,68 @@ async function expectRenderedAbove(upper: Locator, lower: Locator) {
   expect(lowerBox).not.toBeNull();
   expect(upperBox!.y).toBeLessThan(lowerBox!.y);
 }
+
+test("keeps the first question above reasoning while a new chat streams", async ({
+  page,
+}) => {
+  const streamServer = await startHeldOpenStreamServer((url) => {
+    const threadId = new URL(url, "http://localhost").searchParams.get(
+      "threadId",
+    );
+    return [
+      { event: "metadata", data: { run_id: RUN_ID, thread_id: threadId } },
+      {
+        event: "messages",
+        data: [
+          {
+            type: "AIMessageChunk",
+            id: "first-turn-reasoning",
+            content: ANSWER_TEXT,
+            additional_kwargs: { reasoning_content: REASONING_TEXT },
+            tool_calls: [],
+            tool_call_chunks: [],
+          },
+          { langgraph_node: "agent" },
+        ],
+      },
+    ].map(
+      (event) =>
+        `event: ${event.event}\ndata: ${JSON.stringify(event.data)}\n\n`,
+    );
+  });
+  mockLangGraphAPI(page, {
+    createdThreadMessages: [],
+    honorRequestedThreadId: true,
+  });
+  await page.route("**/api/langgraph/threads/*/runs/stream", (route) => {
+    const threadId = /\/threads\/([^/]+)\/runs\/stream/.exec(
+      route.request().url(),
+    )![1]!;
+    return route.continue({
+      url: `${streamServer.url}?threadId=${encodeURIComponent(threadId)}`,
+    });
+  });
+  try {
+    await page.goto("/workspace/chats/new");
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+    await textarea.fill("Explain your capabilities");
+    await textarea.press("Enter");
+    await expect(page).not.toHaveURL(/\/chats\/new$/);
+    // No human echo or terminal snapshot is sent: the first live frame must
+    // stay below the optimistic question after onStart confirms the thread.
+    await expectRenderedAbove(
+      page.getByText("Explain your capabilities", { exact: true }),
+      page.getByText("Reasoning", { exact: true }),
+    );
+    await expectRenderedAbove(
+      page.getByText("Reasoning", { exact: true }),
+      page.getByText(ANSWER_TEXT),
+    );
+  } finally {
+    await streamServer.close();
+  }
+});
 
 test("renders reasoning above the answer text while the turn is streaming", async ({
   page,

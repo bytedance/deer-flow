@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -28,7 +29,13 @@ def run_command(command: list[str]) -> str | None:
     """Run a command and return trimmed stdout, or None on failure."""
     try:
         result = subprocess.run(
-            command, capture_output=True, text=True, check=True, shell=False
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=True,
+            shell=False,
         )
     except (OSError, subprocess.CalledProcessError):
         return None
@@ -42,6 +49,9 @@ def run_pnpm_version() -> tuple[str | None, bool, str | None]:
             [sys.executable, str(PNPM_SCRIPT_PATH), "-v"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8:backslashreplace"},
             check=False,
             shell=False,
             cwd=FRONTEND_DIR,

@@ -14,8 +14,9 @@ import {
 } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
+import { capabilityCopy } from "@/core/capabilities/copy";
 import { useI18n } from "@/core/i18n/hooks";
-import { MCPConfigRequestError } from "@/core/mcp/api";
+import { MCPConfigRequestError, type MCPScope } from "@/core/mcp/api";
 import {
   useEnableMCPServer,
   useMCPConfig,
@@ -44,6 +45,7 @@ import { PluginIcon } from "./plugin-icon";
 import { PluginIconPicker } from "./plugin-icon-picker";
 
 type MCPPluginManagerProps = {
+  scope?: MCPScope;
   query?: string;
   catalog?: PluginDirectoryEntry[];
   category?: PluginCategory | "all";
@@ -53,7 +55,7 @@ type MCPPluginManagerProps = {
 };
 
 export function MCPPluginManager(props: MCPPluginManagerProps) {
-  const { config, isLoading, error } = useMCPConfig();
+  const { config, isLoading, error } = useMCPConfig(props.scope);
   // Keep the directory mounted while MCP discovery completes. Replacing the
   // entire subtree can swallow a click on an independently available plugin.
   return (
@@ -68,6 +70,7 @@ export function MCPPluginManager(props: MCPPluginManagerProps) {
 
 function MCPServerList({
   servers,
+  scope = "user",
   query = "",
   catalog = [],
   category = "all",
@@ -81,9 +84,13 @@ function MCPServerList({
   isLoading?: boolean;
   error?: Error | null;
 }) {
-  const { t } = useI18n();
-  const { isPending, mutate: enableMCPServer } = useEnableMCPServer();
-  const { isPending: isWriting, mutate: mutateServer } = useMCPServerMutation();
+  const { t, locale } = useI18n();
+  const labels = capabilityCopy(locale);
+  const scopeLabel =
+    scope === "deployment" ? labels.platformTitle : labels.personalTitle;
+  const { isPending, mutate: enableMCPServer } = useEnableMCPServer(scope);
+  const { isPending: isWriting, mutate: mutateServer } =
+    useMCPServerMutation(scope);
   const [editor, setEditor] = useState<
     { mode: "add" } | { mode: "edit"; name: string } | null
   >(null);
@@ -250,6 +257,7 @@ function MCPServerList({
             size="sm"
             variant="outline"
             disabled={readOnly || isMutating}
+            aria-label={`${t.capabilities.addPlugin} (${scopeLabel})`}
             onClick={openAddEditor}
           >
             {t.capabilities.addPlugin}
@@ -308,11 +316,11 @@ function MCPServerList({
                       ? undefined
                       : () => openEditEditor(name, config)
                   }
-                  detailsLabel={`${t.capabilities.details} ${displayName}`}
+                  detailsLabel={`${t.capabilities.details} ${displayName} (${scopeLabel})`}
                 >
                   <Switch
                     checked={config.enabled}
-                    aria-label={`${t.capabilities.enabled} ${displayName}`}
+                    aria-label={`${t.capabilities.enabled} ${displayName} (${scopeLabel})`}
                     disabled={readOnly || isMutating}
                     onCheckedChange={(checked) =>
                       enableMCPServer({ serverName: name, enabled: checked })
@@ -321,7 +329,7 @@ function MCPServerList({
                   <Button
                     size="icon"
                     variant="ghost"
-                    aria-label={`${t.common.edit} ${displayName}`}
+                    aria-label={`${t.common.edit} ${displayName} (${scopeLabel})`}
                     disabled={readOnly || isMutating}
                     onClick={() => openEditEditor(name, config)}
                   >
@@ -330,7 +338,7 @@ function MCPServerList({
                   <Button
                     size="icon"
                     variant="ghost"
-                    aria-label={`${t.common.delete} ${displayName}`}
+                    aria-label={`${t.common.delete} ${displayName} (${scopeLabel})`}
                     disabled={readOnly || isMutating}
                     onClick={() => setPendingRemoval(name)}
                   >

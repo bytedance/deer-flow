@@ -18,6 +18,7 @@ import {
   intervalToSeconds,
   maxIntervalAmount,
   minIntervalAmount,
+  onceRunAtInstant,
   pad2,
   parseCron,
   secondsToInterval,
@@ -32,6 +33,7 @@ import {
   type ScheduleType,
   type Weekday,
 } from "@/core/scheduled-tasks/cron";
+import { browserTimeZone } from "@/core/scheduled-tasks/format";
 
 export type ScheduleValue = {
   schedule_type: ScheduleType;
@@ -70,18 +72,6 @@ const FALLBACK_TIMEZONES = [
   "America/Los_Angeles",
 ];
 
-function detectBrowserTimezone(): string {
-  try {
-    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    if (typeof tz === "string" && tz.length > 0) {
-      return tz;
-    }
-  } catch {
-    // resolvedOptions unavailable
-  }
-  return "UTC";
-}
-
 function timezoneOptions(): string[] {
   const supported = (
     Intl as unknown as {
@@ -100,10 +90,13 @@ export function ScheduledTaskScheduleInput({
   initial,
   onChange,
   scheduleTypeLocked = false,
+  minIntervalSeconds,
 }: {
   initial: ScheduleValue;
   onChange: (value: ScheduleValue) => void;
   scheduleTypeLocked?: boolean;
+  /** Server floor for intervals (`/api/features`); the default when unknown. */
+  minIntervalSeconds?: number;
 }) {
   const { t, locale } = useI18n();
   const schedLocale: ScheduleLocale = locale.startsWith("zh") ? "zh" : "en";
@@ -119,11 +112,14 @@ export function ScheduledTaskScheduleInput({
     () => parseCron(initial.schedule_spec.cron ?? "0 9 * * *").parts,
   );
   const [timezone, setTimezone] = useState<string>(
-    () => initial.timezone || detectBrowserTimezone(),
+    () => initial.timezone || browserTimeZone(),
   );
   const [runAtLocal, setRunAtLocal] = useState<string>(
     initial.schedule_type === "once" && initial.schedule_spec.run_at
-      ? utcToZonedLocalInput(initial.schedule_spec.run_at, timezone)
+      ? utcToZonedLocalInput(
+          onceRunAtInstant(initial.schedule_spec.run_at, timezone),
+          timezone,
+        )
       : "",
   );
 
@@ -182,7 +178,7 @@ export function ScheduledTaskScheduleInput({
       // Preserve their cadence on edit/duplicate until the amount or unit is
       // explicitly changed; the server owns the configurable minimum.
       const amount = intervalEdited
-        ? clampIntervalAmount(intervalAmount, intervalUnit)
+        ? clampIntervalAmount(intervalAmount, intervalUnit, minIntervalSeconds)
         : intervalAmount;
       onChangeRef.current({
         schedule_type: "interval",
@@ -211,6 +207,7 @@ export function ScheduledTaskScheduleInput({
     intervalAmount,
     intervalUnit,
     intervalEdited,
+    minIntervalSeconds,
   ]);
 
   function updateParts(patch: Partial<CronParts>) {
@@ -269,6 +266,7 @@ export function ScheduledTaskScheduleInput({
           <Button
             variant={scheduleType === "cron" ? "default" : "outline"}
             size="sm"
+            aria-pressed={scheduleType === "cron"}
             onClick={() => setScheduleType("cron")}
           >
             {labels.scheduleType.cron}
@@ -276,6 +274,7 @@ export function ScheduledTaskScheduleInput({
           <Button
             variant={scheduleType === "once" ? "default" : "outline"}
             size="sm"
+            aria-pressed={scheduleType === "once"}
             onClick={() => setScheduleType("once")}
           >
             {labels.scheduleType.once}
@@ -283,6 +282,7 @@ export function ScheduledTaskScheduleInput({
           <Button
             variant={scheduleType === "interval" ? "default" : "outline"}
             size="sm"
+            aria-pressed={scheduleType === "interval"}
             onClick={() => setScheduleType("interval")}
           >
             {labels.scheduleType.interval}
@@ -296,7 +296,11 @@ export function ScheduledTaskScheduleInput({
             value={preset}
             onValueChange={(v) => changePreset(v as CronPreset)}
           >
-            <SelectTrigger className="w-full" data-testid="schedule-preset">
+            <SelectTrigger
+              aria-label={labels.preset.label}
+              className="w-full"
+              data-testid="schedule-preset"
+            >
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -391,7 +395,7 @@ export function ScheduledTaskScheduleInput({
         <div className="flex gap-2">
           <Input
             type="number"
-            min={minIntervalAmount(intervalUnit)}
+            min={minIntervalAmount(intervalUnit, minIntervalSeconds)}
             max={maxIntervalAmount(intervalUnit)}
             value={intervalAmountText}
             onChange={(e) => {
@@ -411,6 +415,7 @@ export function ScheduledTaskScheduleInput({
               const next = clampIntervalAmount(
                 Number(intervalAmountText),
                 intervalUnit,
+                minIntervalSeconds,
               );
               setIntervalAmount(next);
               setIntervalAmountText(String(next));
@@ -423,12 +428,17 @@ export function ScheduledTaskScheduleInput({
               const unit = value as IntervalUnit;
               setIntervalEdited(true);
               setIntervalUnit(unit);
-              const next = clampIntervalAmount(intervalAmount, unit);
+              const next = clampIntervalAmount(
+                intervalAmount,
+                unit,
+                minIntervalSeconds,
+              );
               setIntervalAmount(next);
               setIntervalAmountText(String(next));
             }}
           >
             <SelectTrigger
+              aria-label={labels.fields.intervalUnit}
               className="w-36"
               data-testid="schedule-interval-unit"
             >
@@ -458,7 +468,11 @@ export function ScheduledTaskScheduleInput({
       )}
 
       <Select value={timezone} onValueChange={setTimezone}>
-        <SelectTrigger className="w-full" data-testid="schedule-timezone">
+        <SelectTrigger
+          aria-label={labels.fields.timezone}
+          className="w-full"
+          data-testid="schedule-timezone"
+        >
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
@@ -481,14 +495,19 @@ export function ScheduledTaskScheduleInput({
       >
         {preview}
       </div>
-      {scheduleType === "interval" && intervalUnit === "seconds" && (
-        <div
-          className="text-muted-foreground text-xs"
-          data-testid="schedule-interval-min-hint"
-        >
-          {labels.fields.intervalMinHint}
-        </div>
-      )}
+      {scheduleType === "interval" &&
+        (intervalUnit === "seconds" ||
+          minIntervalAmount(intervalUnit, minIntervalSeconds) > 1) && (
+          <div
+            className="text-muted-foreground text-xs"
+            data-testid="schedule-interval-min-hint"
+          >
+            {labels.fields.intervalMinHint.replace(
+              "{n}",
+              String(minIntervalAmount("seconds", minIntervalSeconds)),
+            )}
+          </div>
+        )}
     </div>
   );
 }

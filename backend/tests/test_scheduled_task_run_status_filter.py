@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.gateway.authz import AuthContext
 from app.gateway.routers import scheduled_tasks
+from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs import ScheduledTaskRunRepository
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
@@ -35,6 +36,8 @@ async def history(monkeypatch):
         async with engine.begin() as connection:
             await connection.run_sync(ScheduledTaskRow.__table__.create)
             await connection.run_sync(ScheduledTaskRunRow.__table__.create)
+            # History rows join their durable run for token totals and summaries.
+            await connection.run_sync(RunRow.__table__.create)
         sf = async_sessionmaker(engine, expire_on_commit=False)
         async with sf() as session:
             for task_id, owner in [("task-1", "user-1"), ("task-other", "user-1"), ("task-foreign", "user-2"), ("task-empty", "user-1")]:

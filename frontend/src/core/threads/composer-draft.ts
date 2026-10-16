@@ -1,9 +1,15 @@
+import {
+  readConversationReferences,
+  type ConversationReference,
+} from "@/core/conversation-references";
+
 const COMPOSER_DRAFT_VERSION = 1;
 const COMPOSER_DRAFT_PREFIX = "deerflow:composer-draft:v1";
 
 export type ComposerDraft = {
   text: string;
   skillName: string | null;
+  conversationReferences?: ConversationReference[];
 };
 
 export type ComposerDraftStorage = Pick<
@@ -56,6 +62,7 @@ export function readComposerDraft(
       version?: unknown;
       text?: unknown;
       skillName?: unknown;
+      conversationReferences?: unknown;
     };
     if (
       parsed.version !== COMPOSER_DRAFT_VERSION ||
@@ -65,7 +72,23 @@ export function readComposerDraft(
       return null;
     }
 
+    const references = Array.isArray(parsed.conversationReferences)
+      ? readConversationReferences({
+          conversation_references: parsed.conversationReferences.map(
+            (item: unknown) => {
+              if (!item || typeof item !== "object") return null;
+              const value = item as Record<string, unknown>;
+              return {
+                thread_id: value.threadId,
+                title: value.title,
+                agent_name: value.agentName,
+              };
+            },
+          ),
+        })
+      : [];
     return {
+      ...(references.length ? { conversationReferences: references } : {}),
       text: parsed.text,
       skillName: parsed.skillName,
     };
@@ -83,7 +106,11 @@ export function writeComposerDraft(
     if (!storage) {
       return;
     }
-    if (!draft.text && !draft.skillName) {
+    if (
+      !draft.text &&
+      !draft.skillName &&
+      !draft.conversationReferences?.length
+    ) {
       storage.removeItem(key);
       return;
     }
@@ -94,6 +121,9 @@ export function writeComposerDraft(
         version: COMPOSER_DRAFT_VERSION,
         text: draft.text,
         skillName: draft.skillName,
+        ...(draft.conversationReferences?.length
+          ? { conversationReferences: draft.conversationReferences }
+          : {}),
       }),
     );
   } catch {
@@ -115,6 +145,23 @@ export function clearComposerDraft(
   }
 }
 
+/**
+ * Clear a stored draft only while it still holds the text that was sent.
+ * A send can be dispatched after its composer is gone, by which time another
+ * composer may have saved a different draft under the same key.
+ */
+export function retireSentComposerDraft(
+  storage: ComposerDraftStorage | null | undefined,
+  key: string,
+  sentTexts: readonly string[],
+) {
+  const stored = readComposerDraft(storage, key);
+  if (stored && (stored.skillName || !sentTexts.includes(stored.text))) {
+    return;
+  }
+  clearComposerDraft(storage, key);
+}
+
 export function resolveComposerDraft(
   draft: ComposerDraft,
   enabledSkillNames: ReadonlySet<string>,
@@ -124,6 +171,7 @@ export function resolveComposerDraft(
   }
 
   return {
+    ...draft,
     text: `/${draft.skillName}${draft.text ? ` ${draft.text}` : ""}`,
     skillName: null,
   };

@@ -33,6 +33,17 @@ Installed `lark-shared` guidance points to Capability Center > Plugins > Lark
 (`/workspace/capabilities?tab=plugins&plugin=lark`). Guidance changes bump the
 version marker; reinstalling the managed skill pack refreshes the stored text.
 
+Managed skill-pack installation holds `_lark_install_lock` while preparing a
+private tree. The final `staging_target.rename(target)` publishes the validated
+skill bodies and manifest together; extraction, guidance and manifest writes
+remain private until that boundary. A write failure leaves the previous pack
+unchanged and discards staging. Replacement moves the old target to a backup
+first and restores it on an ordinary publication error. Atomic file writes
+fsync their temporary files, but extraction writes and parent directories are
+not fsynced; this does not guarantee whole-tree durability after power loss.
+Callers own final file modes: runtime artifacts are executable, while installed
+skill bodies and manifests are made read-only for sandbox access.
+
 App registration and direct app switching replace the per-user Lark credential
 tree transactionally. Clear the old OAuth data before running `lark-cli config
 init`: on Linux that command writes the new app secret into the file-backed
@@ -52,10 +63,10 @@ drift.
 
 ### Embedded Client (`packages/harness/deerflow/client.py`)
 
-`DeerFlowClient` provides in-process access without HTTP/FastAPI, sharing Gateway's `deerflow` modules, config, data directories, and response schemas.
+`DeerFlowClient` embeds the harness without HTTP/FastAPI, sharing Gateway modules, config, data directories, and response schemas.
 
 **Agent Conversation**:
-- `chat(message, thread_id)` — synchronous, accumulates streaming deltas per message-id and returns the final AI text
+- `chat(message, thread_id)` — synchronous; returns final AI text.
 - `stream(message, thread_id)` — subscribes to LangGraph `stream_mode=["values", "messages", "custom"]` and yields `StreamEvent`:
   - `"values"` — state snapshot (title, messages, artifacts, summary_text). Always forward `summary_text` (current summary or `None`), including unchanged values/resets. Never re-emit AI text delivered via `messages`; serialized `ToolMessage` entries retain non-`None` native `artifact`
   - `"messages-tuple"` — current-turn AI text **deltas** by `id` and each tool call/result once; excludes resumed history and preserves result `artifact`
@@ -101,6 +112,10 @@ encrypted authority. Discovery and enumeration are read-only, including on a
 policy or network-mode mismatch; only the provider may replace it after the
 orphan grace, local teardown reservation, and cross-instance teardown lease.
 Destroy the sandbox, sidecar, and both networks together.
+
+### Tenki `sticky`
+
+Env values stay strings; parse booleans before SDK calls (`bool("false")` is true).
 
 ### E2B Mount Uploads
 

@@ -28,6 +28,7 @@ import { useAuth } from "@/core/auth/AuthProvider";
 import { writeTextToClipboard } from "@/core/clipboard";
 import { useI18n } from "@/core/i18n/hooks";
 import {
+  cacheLarkMutationStatus,
   larkIntegrationQueryKey,
   LarkIntegrationRequestError,
   type LarkAuthStartRequest,
@@ -303,7 +304,7 @@ function LarkIntegrationCard() {
       {
         onSuccess: (result) => {
           if (!isActiveFlow(generation)) return;
-          queryClient.setQueryData(larkIntegrationQueryKey, result.status);
+          void cacheLarkMutationStatus(queryClient, result.status);
           toast.success(t.settings.integrations.lark.connectionReady);
           setPendingFlow(null);
           startUserAuth(
@@ -381,7 +382,7 @@ function LarkIntegrationCard() {
       {
         onSuccess: (result) => {
           if (!isActiveFlow(generation)) return;
-          queryClient.setQueryData(larkIntegrationQueryKey, result.status);
+          void cacheLarkMutationStatus(queryClient, result.status);
           toast.success(t.settings.integrations.lark.changeAppSwitched);
           setChangeAppSecret("");
           setShowChangeApp(false);
@@ -486,7 +487,7 @@ function LarkIntegrationCard() {
           if (automatic && attemptId !== authAttemptIdRef.current) {
             return;
           }
-          queryClient.setQueryData(larkIntegrationQueryKey, result.status);
+          void cacheLarkMutationStatus(queryClient, result.status);
           if (result.success) {
             clearAuthRetryTimer();
             toast.success(result.message, toastOptions);

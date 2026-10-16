@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import re
+import stat
 import threading
 import time
 from pathlib import Path
@@ -13,7 +14,7 @@ from typing import Any
 
 import httpx
 
-from app.channels.base import Channel
+from app.channels.base import Channel, ChannelStopTimeout
 from app.channels.commands import is_known_channel_command, strip_leading_mentions
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import InboundMessage, InboundMessageType, InboundReservation, MessageBus, OutboundMessage, ResolvedAttachment
@@ -21,7 +22,13 @@ from app.channels.sandbox_files import sync_file_to_thread_sandbox
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
-from deerflow.uploads.manager import UnsafeUploadPathError, claim_unique_filename, normalize_filename, write_upload_file_no_symlink
+from deerflow.uploads.manager import (
+    UnsafeUploadPathError,
+    apply_upload_sandbox_permits,
+    claim_unique_filename,
+    normalize_filename,
+    write_upload_file_no_symlink,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -221,8 +228,14 @@ class DingTalkChannel(Channel):
         self._card_repliers.clear()
         self._card_track_ids.clear()
         if self._thread:
-            self._thread.join(timeout=5)
-            self._thread = None
+            # The SDK thread only returns on a fatal error, so this join
+            # normally waits out its full timeout; keep it off the event loop.
+            thread = self._thread
+            await asyncio.to_thread(thread.join, timeout=5)
+            if thread.is_alive():
+                raise ChannelStopTimeout("DingTalk SDK thread is still running after stop timeout")
+            if self._thread is thread:
+                self._thread = None
         logger.info("DingTalk channel stopped")
 
     def _resolve_routing(self, msg: OutboundMessage) -> tuple[str, str, str]:
@@ -659,25 +672,26 @@ class DingTalkChannel(Channel):
 
         def _persist() -> Path:
             # Directory prep, the uniqueness claim, and the write are blocking
-            # filesystem IO — the whole sequence stays off the event loop. The
-            # claim and the write share one lock because generated names repeat
-            # across messages ("image.png" for every picture message): without a
-            # claim a later attachment silently overwrites an earlier one whose
-            # path was already handed to the agent, and letting the claim and
-            # write interleave would resolve two attachments to the same free name.
+            # filesystem IO — the whole sequence stays off the event loop.
+            # Exclusive creation also protects against publishers outside this
+            # channel instance's lock.
             paths.ensure_thread_dirs(thread_id, user_id=effective_user_id)
             uploads_dir = paths.sandbox_uploads_dir(thread_id, user_id=effective_user_id).resolve()
             with self._file_write_lock:
                 seen = {entry.name for entry in uploads_dir.iterdir()}
-                unique_name = claim_unique_filename(safe_filename, seen)
-                # write_upload_file_no_symlink refuses a symlinked destination:
-                # uploads dirs can be mounted into local sandboxes, so a sandbox
-                # process could otherwise redirect this privileged write outside
-                # the bucket.
-                return write_upload_file_no_symlink(uploads_dir, unique_name, content)
+                while True:
+                    unique_name = claim_unique_filename(safe_filename, seen)
+                    try:
+                        return write_upload_file_no_symlink(uploads_dir, unique_name, content, exclusive=True)
+                    except FileExistsError:
+                        continue
 
         try:
             resolved_target = await asyncio.to_thread(_persist)
+            # Root-written uploads are 0o600, which the non-root sandbox cannot
+            # read on a bind-mounted thread dir; grant group/other read like the
+            # channel manager's inbound-file path and the HTTP upload route.
+            await asyncio.to_thread(apply_upload_sandbox_permits, resolved_target, stat.S_IRGRP | stat.S_IROTH)
         except (OSError, UnsafeUploadPathError):
             logger.exception("[DingTalk] failed to persist downloaded file: %s", safe_filename)
             return ""

@@ -298,3 +298,24 @@ class TestSearxngTools:
             await tools.web_search_tool.ainvoke({"query": "latest release", "time_range": "week"})
 
         mock_client.search.assert_called_once_with("latest release", max_results=5, time_range="week")
+
+    @patch("deerflow.community.searxng.tools._get_searxng_client")
+    async def test_web_search_tool_inf_max_results_falls_back_to_default(self, mock_get_client):
+        """A YAML `.inf` max_results must fall back to the default, not error out."""
+        mock_client = MagicMock()
+        mock_client.search = AsyncMock(
+            return_value=[
+                {"title": "Result 1", "url": "https://example.com/1", "content": "Desc 1"},
+            ]
+        )
+        mock_get_client.return_value = mock_client
+
+        with patch(
+            "deerflow.community.searxng.tools._get_tool_config",
+            return_value={"max_results": float("inf")},
+        ):
+            result = await tools.web_search_tool.ainvoke("test query")
+
+        data = json.loads(result)
+        assert "error" not in data
+        assert mock_client.search.call_args.kwargs["max_results"] == 5

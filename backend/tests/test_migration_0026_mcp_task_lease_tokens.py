@@ -1,9 +1,8 @@
 """Migration tests for 0026_mcp_task_lease_tokens.
 
 Adds the nullable per-claim token columns ``McpTaskRepository`` uses to fence
-poll, cancel, and notification mutations to the exact claim generation. This
-file owns the chain-head pin, moved on from
-``test_migration_0025_repair_run_change_seq`` with this revision.
+poll, cancel, and notification mutations to the exact claim generation. The
+chain-head pin moved on to ``test_migration_0027_0028_notification_outbox``.
 """
 
 from __future__ import annotations
@@ -13,6 +12,7 @@ import asyncio
 import pytest
 import sqlalchemy as sa
 from alembic import command
+from alembic.script import ScriptDirectory
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from deerflow.persistence import bootstrap
@@ -24,8 +24,12 @@ PREVIOUS = "0025_repair_run_change_seq"
 TOKEN_COLUMNS = {"lease_token", "notification_lease_token"}
 
 
-async def test_0026_is_the_chain_head():
-    assert bootstrap._get_head_revision() == REVISION
+async def test_0026_chains_into_the_single_head():
+    script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
+    assert len(script.get_heads()) == 1
+    # Later migrations may advance the head without removing this revision.
+    assert REVISION in {revision.revision for revision in script.walk_revisions()}
+    assert script.get_revision(REVISION).down_revision == PREVIOUS
 
 
 async def test_0026_adds_nullable_claim_tokens_and_downgrades(tmp_path):

@@ -4,8 +4,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from langchain.agents import create_agent
 from langchain.agents.middleware.types import ModelRequest
+from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.runnables import Runnable
+from langchain_core.tools import tool as as_tool
+from pydantic import Field, PrivateAttr
 
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from deerflow.agents.middlewares import skill_activation_middleware as middleware_module
@@ -392,6 +397,118 @@ def test_skill_activation_middleware_activates_once_across_tool_loop(monkeypatch
     # whole multi-call turn.
     assert disk_reads["n"] == 1
     assert sum(1 for kwargs in recorded if kwargs.get("action") == "activate") == 1
+
+
+class _ProviderUnavailable(Exception):
+    def __init__(self) -> None:
+        super().__init__("503 Service Unavailable")
+        self.status_code = 503
+        self.response = SimpleNamespace(status_code=503, headers={})
+
+
+class _ScriptedChatModel(FakeMessagesListChatModel):
+    """Fake chat model that records every request and raises scripted errors in order."""
+
+    failures: list[Exception] = Field(default_factory=list)
+    _seen_messages: list[list] = PrivateAttr(default_factory=list)
+
+    @property
+    def seen_messages(self) -> list[list]:
+        return self._seen_messages
+
+    def bind_tools(self, tools, *, tool_choice=None, **kwargs) -> Runnable:
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self._seen_messages.append(list(messages))
+        if self.failures:
+            raise self.failures.pop(0)
+        return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+
+def _run_retrying_slash_graph(monkeypatch, tmp_path, *, model, asynchronous=False):
+    from deerflow.agents.middlewares.llm_error_handling_middleware import LLMErrorHandlingMiddleware
+    from deerflow.config.app_config import AppConfig, LlmCallConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    skill = _make_skill(tmp_path, "data-analysis", content="# Data Analysis\nUse pandas.")
+    disk_reads = {"n": 0}
+    real_read = SkillActivationMiddleware._read_skill_content
+
+    def counting_read(skill_file, skills_root, *, storage=None):
+        disk_reads["n"] += 1
+        return real_read(skill_file, skills_root, storage=storage)
+
+    monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
+    monkeypatch.setattr(SkillActivationMiddleware, "_read_skill_content", staticmethod(counting_read))
+
+    @as_tool
+    def echo(text: str) -> str:
+        """Echo the text back."""
+        return text
+
+    audits = []
+    usages = []
+    journal = SimpleNamespace(record_middleware=lambda *args, **kwargs: audits.append(kwargs), record_skill_usage=usages.append)
+    app_config = AppConfig(
+        sandbox=SandboxConfig(use="test"),
+        llm_call=LlmCallConfig(retry_max_attempts=3, retry_base_delay_ms=0, retry_cap_delay_ms=0),
+    )
+    # Production order: LLMErrorHandling sits outside SkillActivation, so a retry
+    # runs SkillActivation's wrap again on the same request.
+    graph = create_agent(
+        model=model,
+        tools=[echo],
+        middleware=[LLMErrorHandlingMiddleware(app_config=app_config), SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)],
+    )
+    graph_input = {"messages": [HumanMessage(content="/data-analysis analyze uploads/foo.csv", id="msg-1")]}
+    context = {"__run_journal": journal}
+    config = {"recursion_limit": 20}
+    result = asyncio.run(graph.ainvoke(graph_input, context=context, config=config)) if asynchronous else graph.invoke(graph_input, context=context, config=config)
+    carries_skill = [any(is_slash_skill_activation_reminder(message) and "Use pandas." in message.content for message in messages) for messages in model.seen_messages]
+    return SimpleNamespace(result=result, carries_skill=carries_skill, disk_reads=disk_reads["n"], audits=audits, usages=usages)
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_skill_activation_survives_a_retried_model_call_in_real_agent_graph(monkeypatch, tmp_path, asynchronous):
+    # The run key is recorded before the model call. When the activation call
+    # raises, LLMErrorHandling retries by running this wrap again on the same
+    # request; the retry must still carry SKILL.md, replayed from the recorded
+    # activation without a second disk read, audit event, or usage record.
+    model = _ScriptedChatModel(
+        responses=[
+            AIMessage(content="", tool_calls=[{"name": "echo", "args": {"text": "hi"}, "id": "call-1"}]),
+            AIMessage(content="final answer"),
+        ],
+        failures=[_ProviderUnavailable()],
+    )
+
+    run = _run_retrying_slash_graph(monkeypatch, tmp_path, model=model, asynchronous=asynchronous)
+
+    # Failed activation call, its retry, then the tool loop's follow-up call.
+    assert run.carries_skill == [True, True, False]
+    assert run.result["messages"][-1].content == "final answer"
+    assert run.disk_reads == 1
+    assert sum(1 for kwargs in run.audits if kwargs.get("action") == "activate") == 1
+    assert [usage["name"] for usage in run.usages] == ["data-analysis"]
+    # The failed attempt's stamped response was discarded; the retry's response
+    # is the one that reaches state and must carry the usage evidence.
+    assert run.result["messages"][1].additional_kwargs["skill_usage"]["name"] == "data-analysis"
+
+
+def test_skill_activation_survives_an_empty_response_retry_in_real_agent_graph(monkeypatch, tmp_path):
+    # An empty response is not an exception inside this wrap: the handler returns,
+    # and LLMErrorHandling raises only after it, outside. The retry must still
+    # carry SKILL.md even though nothing failed from this middleware's view.
+    model = _ScriptedChatModel(responses=[AIMessage(content=""), AIMessage(content="final answer")])
+
+    run = _run_retrying_slash_graph(monkeypatch, tmp_path, model=model)
+
+    assert run.carries_skill == [True, True]
+    assert run.result["messages"][-1].content == "final answer"
+    assert run.result["messages"][-1].additional_kwargs["skill_usage"]["name"] == "data-analysis"
+    assert sum(1 for kwargs in run.audits if kwargs.get("action") == "activate") == 1
+    assert len(run.usages) == 1
 
 
 def test_skill_activation_middleware_reactivates_on_new_user_slash_command(monkeypatch, tmp_path):
@@ -864,9 +981,10 @@ def test_slash_usage_snapshot_is_persisted_on_first_model_response_only(monkeypa
     middleware = SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)
     recorded = []
     runtime = SimpleNamespace(context={"__run_journal": SimpleNamespace(record_skill_usage=recorded.append)})
-    request = _make_model_request([HumanMessage(content="/data-analysis analyze", id="user-1")], runtime=runtime)
+    user = HumanMessage(content="/data-analysis analyze", id="user-1")
 
-    def call():
+    def call(messages):
+        request = _make_model_request(messages, runtime=runtime)
         response = ModelResponse(result=[AIMessage(content="Analyzing")])
         if asynchronous:
 
@@ -876,7 +994,7 @@ def test_slash_usage_snapshot_is_persisted_on_first_model_response_only(monkeypa
             return asyncio.run(middleware.awrap_model_call(request, handler))
         return middleware.wrap_model_call(request, lambda _: response)
 
-    first = call()
+    first = call([user])
     snapshot = first.result[0].additional_kwargs["skill_usage"]
     assert recorded == [snapshot]
     assert snapshot["activation"] == "slash"
@@ -886,4 +1004,5 @@ def test_slash_usage_snapshot_is_persisted_on_first_model_response_only(monkeypa
     assert snapshot["path"] == "/mnt/skills/custom/data-analysis/SKILL.md"
     skill.skill_file.write_text("Changed later", encoding="utf-8")
     assert snapshot["content"] == content
-    assert "skill_usage" not in call().result[0].additional_kwargs
+    # The tool loop's next call sees the answered slash message in state.
+    assert "skill_usage" not in call([user, *first.result]).result[0].additional_kwargs

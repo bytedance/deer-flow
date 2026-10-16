@@ -29,6 +29,10 @@ class TestValidateUserId:
         with pytest.raises(ValueError, match="Invalid user_id"):
             paths.user_dir("")
 
+    def test_rejects_trailing_newline(self, paths: Paths):
+        with pytest.raises(ValueError, match="Invalid user_id"):
+            paths.user_dir("alice\n")
+
 
 class TestMakeSafeUserId:
     def test_already_safe_id_is_unchanged(self):
@@ -80,6 +84,12 @@ class TestValidateIntegrationId:
         with pytest.raises(ValueError, match="Invalid integration_id"):
             _validate_integration_id(integration_id)
 
+    def test_rejects_trailing_newline(self):
+        from deerflow.config.paths import _validate_integration_id
+
+        with pytest.raises(ValueError, match="Invalid integration_id"):
+            _validate_integration_id("lark-cli\n")
+
     @pytest.mark.parametrize("integration_id", [".", ".."])
     def test_host_integration_config_dir_rejects_dot_traversal(self, paths: Paths, integration_id):
         with pytest.raises(ValueError, match="Invalid integration_id"):
@@ -89,6 +99,12 @@ class TestValidateIntegrationId:
     def test_host_integration_data_dir_rejects_dot_traversal(self, paths: Paths, integration_id):
         with pytest.raises(ValueError, match="Invalid integration_id"):
             paths.host_user_integration_data_dir("alice", integration_id)
+
+
+class TestValidateProjectId:
+    def test_rejects_trailing_newline(self, paths: Paths):
+        with pytest.raises(ValueError, match="Invalid project_id"):
+            paths.user_project_dir("alice", "project\n")
 
 
 class TestUserDir:

@@ -25,15 +25,17 @@ import pytest
 
 from deerflow.community.tenki.provider import _BOOTSTRAP_TIMEOUT, TenkiSandboxProvider, _import_client
 from deerflow.community.tenki.sandbox import TenkiSandbox
+from deerflow.config.app_config import AppConfig
 
 # ── Fake Tenki SDK ────────────────────────────────────────────────────
 
 
 class _FakeResult:
-    def __init__(self, exit_code: int = 0, stdout: bytes = b"", stderr: bytes = b"") -> None:
+    def __init__(self, exit_code: int = 0, stdout: bytes = b"", stderr: bytes = b"", timed_out: bool = False) -> None:
         self.exit_code = exit_code
         self.stdout = stdout
         self.stderr = stderr
+        self.timed_out = timed_out
 
     @property
     def stdout_text(self) -> str:
@@ -385,6 +387,26 @@ def test_execute_command_appends_exit_marker_when_failure_has_output() -> None:
 def test_execute_command_returns_error_as_text() -> None:
     box = TenkiSandbox("sb", _FakeSandbox(exec_error=RuntimeError("boom")))
     assert box.execute_command("echo hi") == "Error: boom"
+
+
+@pytest.mark.parametrize("exit_code", [0, 143])
+@pytest.mark.parametrize("stdout,stderr", [(b"partial output", b"diagnostic"), (b"", b"")])
+def test_execute_command_reports_timeout_and_preserves_output(monkeypatch, exit_code, stdout, stderr) -> None:
+    fake = _FakeSandbox()
+    monkeypatch.setattr(fake, "_run_script", lambda script: _FakeResult(exit_code=exit_code, stdout=stdout, stderr=stderr, timed_out=True))
+    invalidated = []
+    box = TenkiSandbox("sb", fake, on_terminal_failure=lambda *args: invalidated.append(args))
+
+    output = box.execute_command("sleep 10", timeout=1)
+
+    assert "Error: command timed out" in output
+    assert output.endswith("Exit Code: 124")
+    assert stdout.decode() in output
+    assert stderr.decode() in output
+    assert len(fake.exec_calls) == 1
+    assert fake.exec_calls[0]["timeout"] == 1
+    assert not invalidated
+    assert not box.is_closed
 
 
 def test_execute_command_closed_returns_error() -> None:
@@ -755,6 +777,42 @@ def test_create_waits_client_side_and_configures_lifetime(monkeypatch):
     provider.shutdown()
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("false", False), ("0", False), ("off", False), ("no", False), ("FALSE", False), ("true", True), ("1", True), ("on", True), ("yes", True)],
+)
+def test_create_sticky_from_environment(monkeypatch, tmp_path, value, expected):
+    monkeypatch.setenv("TEST_TENKI_STICKY", value)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("models: []\nsandbox:\n  use: deerflow.community.tenki:TenkiSandboxProvider\n  sticky: $TEST_TENKI_STICKY\n  idle_timeout: 0\n", encoding="utf-8")
+    config = AppConfig.from_file(config_path)
+    client = _FakeClient()
+    monkeypatch.setattr("deerflow.community.tenki.provider.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.community.tenki.provider._import_client", lambda: lambda **kw: client)
+    provider = TenkiSandboxProvider()
+    try:
+        provider.acquire("thread-1", user_id="u1")
+        assert client.create_kwargs[0]["sticky"] is expected
+    finally:
+        provider.shutdown()
+
+
+@pytest.mark.parametrize("value", [False, True, None])
+def test_create_sticky_native_value(monkeypatch, value):
+    client = _FakeClient()
+    provider = _install(monkeypatch, client=client, config_attrs={"sticky": value, "idle_timeout": 0})
+    try:
+        provider.acquire("thread-1", user_id="u1")
+        assert client.create_kwargs[0]["sticky"] is bool(value)
+    finally:
+        provider.shutdown()
+
+
+def test_sticky_rejects_invalid_boolean(monkeypatch):
+    with pytest.raises(ValueError, match="valid boolean"):
+        _install(monkeypatch, config_attrs={"sticky": "not-a-boolean"})
+
+
 def test_create_default_lifetime_is_explicit(monkeypatch):
     client = _FakeClient()
     provider = _install(monkeypatch, client=client)
@@ -806,6 +864,127 @@ def test_bootstrap_is_non_interactive_and_time_bounded(monkeypatch):
     # timeout=0 (no timeout in some SDKs) would slip past an `is not None` check.
     assert bootstrap["timeout"] == _BOOTSTRAP_TIMEOUT
     provider.shutdown()
+
+
+def test_timed_out_bootstrap_warns_even_with_success_marker(monkeypatch, caplog):
+    class _TimedOutBootstrap(_FakeSandbox):
+        def _run_script(self, script: str) -> _FakeResult:
+            if "BOOTSTRAP_OK" in script:
+                return _FakeResult(stdout=b"BOOTSTRAP_OK\n", timed_out=True)
+            return super()._run_script(script)
+
+    provider = _install(monkeypatch, client=_FakeClient(sandbox_factory=_TimedOutBootstrap))
+    try:
+        with caplog.at_level("WARNING"):
+            sid = provider.acquire("thread-1", user_id="u1")
+        assert provider.get(sid) is not None
+        assert any("bootstrap" in r.message and "timed_out=True" in r.message for r in caplog.records)
+    finally:
+        provider.shutdown()
+
+
+@pytest.mark.parametrize("timed_out,exit_code", [(True, 0), (False, 1)])
+def test_warm_pool_rejects_unsuccessful_probe_with_ok_output(monkeypatch, caplog, timed_out, exit_code):
+    client = _FakeClient()
+    provider = _install(monkeypatch, client=client)
+    try:
+        sid = provider.acquire("thread-1", user_id="u1")
+        first = client.last_sandbox
+        provider.release(sid)
+        monkeypatch.setattr(
+            first,
+            "_run_script",
+            lambda script: _FakeResult(stdout=b"ok\n", exit_code=exit_code, timed_out=timed_out),
+        )
+
+        with caplog.at_level(logging.WARNING):
+            assert provider.acquire("thread-1", user_id="u1") == sid
+        assert client.last_sandbox is not first
+        assert first.closed
+        failure = next(record.message for record in caplog.records if "health check failed" in record.message)
+        assert sid in failure
+        assert "ok\n" in failure
+        assert f"Exit Code: {124 if timed_out else exit_code}" in failure
+    finally:
+        provider.shutdown()
+
+
+@pytest.mark.parametrize(
+    "stdout,stderr",
+    [
+        (b"ok\n", b"sh: warning: setlocale: LC_ALL: cannot change locale\n"),
+        (b"profile loaded\nok\n", b""),
+        (
+            b"profile loaded\nok\n",
+            b"sh: warning: setlocale: LC_ALL: cannot change locale\n",
+        ),
+    ],
+)
+def test_warm_pool_reclaims_healthy_probe_with_shell_noise(monkeypatch, caplog, stdout, stderr):
+    client = _FakeClient()
+    provider = _install(monkeypatch, client=client)
+    try:
+        sid = provider.acquire("thread-1", user_id="u1")
+        first = client.last_sandbox
+        provider.release(sid)
+        monkeypatch.setattr(
+            first,
+            "_run_script",
+            lambda script: _FakeResult(stdout=stdout, stderr=stderr),
+        )
+        calls_before = len(first.exec_calls)
+
+        with caplog.at_level(logging.WARNING):
+            assert provider.acquire("thread-1", user_id="u1") == sid
+        assert client.create_count == 1
+        assert client.last_sandbox is first
+        assert not first.closed
+        assert len(first.exec_calls) == calls_before + 1
+        assert first.exec_calls[-1]["argv"] == ("sh", "-lc", "echo ok")
+        assert first.exec_calls[-1]["timeout"] == 10
+        assert not any("health check" in record.message for record in caplog.records)
+    finally:
+        provider.shutdown()
+
+
+@pytest.mark.parametrize("stdout", [b"not ok\n", b"ok-ish\n", b""])
+def test_warm_pool_logs_probe_without_exact_success_line(monkeypatch, caplog, stdout):
+    client = _FakeClient()
+    provider = _install(monkeypatch, client=client)
+    try:
+        sid = provider.acquire("thread-1", user_id="u1")
+        first = client.last_sandbox
+        provider.release(sid)
+        monkeypatch.setattr(first, "_run_script", lambda script: _FakeResult(stdout=stdout))
+
+        with caplog.at_level(logging.WARNING):
+            assert provider.acquire("thread-1", user_id="u1") == sid
+        assert client.create_count == 2
+        assert client.last_sandbox is not first
+        assert first.closed
+        output = stdout.decode() if stdout else "(no output)"
+        assert any(f"Tenki warm-pool sandbox {sid} health check failed: {output}" == record.message for record in caplog.records)
+    finally:
+        provider.shutdown()
+
+
+def test_warm_pool_rejects_probe_error_containing_success_line(monkeypatch, caplog):
+    client = _FakeClient()
+    provider = _install(monkeypatch, client=client)
+    try:
+        sid = provider.acquire("thread-1", user_id="u1")
+        first = client.last_sandbox
+        provider.release(sid)
+        first.exec_error = RuntimeError("probe transport failed\nok")
+
+        with caplog.at_level(logging.WARNING):
+            assert provider.acquire("thread-1", user_id="u1") == sid
+        assert client.create_count == 2
+        assert client.last_sandbox is not first
+        assert first.closed
+        assert any(f"Tenki warm-pool sandbox {sid} health check failed: Error: probe transport failed\nok" == record.message for record in caplog.records)
+    finally:
+        provider.shutdown()
 
 
 def test_release_parks_in_warm_pool(monkeypatch):

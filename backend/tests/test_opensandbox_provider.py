@@ -311,8 +311,6 @@ def test_provider_defers_sdk_import_until_acquire(monkeypatch: pytest.MonkeyPatc
 
 
 def test_create_passes_connection_lifetime_scope_and_environment(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
-    monkeypatch.setenv("OPEN_SANDBOX_TEST_VALUE", "resolved")
-    monkeypatch.delenv("OPEN_SANDBOX_ABSENT_VALUE", raising=False)
     provider, sdk = _install(
         monkeypatch,
         config={
@@ -324,11 +322,9 @@ def test_create_passes_connection_lifetime_scope_and_environment(monkeypatch: py
             "ready_timeout": 18,
             "sandbox_timeout": 7200,
             "use_server_proxy": True,
-            "environment": {
-                "BASE": "1",
-                "FROM_ENV": "$OPEN_SANDBOX_TEST_VALUE",
-                "MISSING_ENV": "$OPEN_SANDBOX_ABSENT_VALUE",
-            },
+            # Already resolved by AppConfig at load time; a value that starts
+            # with $ is the secret itself, not another reference.
+            "environment": {"BASE": "1", "TOKEN": "$2b$12$resolved-secret"},
         },
     )
     provider.acquire("thread-1", user_id="user-1")
@@ -336,7 +332,7 @@ def test_create_passes_connection_lifetime_scope_and_environment(monkeypatch: py
     assert call["image"] == "python:3.12"
     assert call["timeout"] == timedelta(seconds=7200)
     assert call["ready_timeout"] == timedelta(seconds=18)
-    assert call["env"] == {"BASE": "1", "FROM_ENV": "resolved", "MISSING_ENV": ""}
+    assert call["env"] == {"BASE": "1", "TOKEN": "$2b$12$resolved-secret"}
     assert call["metadata"] == {
         "deer_flow_provider": "opensandbox",
         "deer_flow_thread": "thread-1",
@@ -384,6 +380,27 @@ def test_null_sandbox_timeout_uses_default(monkeypatch: pytest.MonkeyPatch) -> N
 
     assert sdk.create_calls[0]["timeout"] == timedelta(hours=4)
     provider.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("config_key", "value", "message"),
+    [
+        ("request_timeout", float("nan"), "sandbox.request_timeout must be positive"),
+        ("request_timeout", float("inf"), "sandbox.request_timeout must be positive"),
+        ("ready_timeout", float("nan"), "sandbox.ready_timeout must be positive"),
+        ("ready_timeout", float("inf"), "sandbox.ready_timeout must be positive"),
+        ("sandbox_timeout", float("nan"), "sandbox.sandbox_timeout must be non-negative"),
+        ("sandbox_timeout", float("inf"), "sandbox.sandbox_timeout must be non-negative"),
+    ],
+)
+def test_provider_rejects_non_finite_timeouts(
+    monkeypatch: pytest.MonkeyPatch,
+    config_key: str,
+    value: float,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        _install(monkeypatch, config={config_key: value})
 
 
 @pytest.mark.parametrize("exit_code", [17, None])

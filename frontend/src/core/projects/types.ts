@@ -63,6 +63,8 @@ export type ProjectDocument = {
   source_name: string | null;
   created_at: string;
   updated_at: string;
+  /** Best-effort LLM-generated one-line description; null when absent. */
+  summary?: string | null;
 };
 
 /**
@@ -82,6 +84,9 @@ export type PromoteThreadFileInput = {
  * the ingested thread upload the composer adds to its attachment list.
  */
 export type AttachProjectDocumentResult = {
+  /** Client draft provenance for deduplicating picker selections. */
+  source_document_id?: string;
+  source_project_id?: string;
   filename: string;
   size_bytes: number;
   virtual_path: string;

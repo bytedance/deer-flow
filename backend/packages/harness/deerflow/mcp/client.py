@@ -36,6 +36,10 @@ def build_server_params(server_name: str, config: McpServerConfig) -> dict[str, 
         if not config.url:
             raise ValueError(f"MCP server '{server_name}' with {transport_type} transport requires 'url' field")
         params["url"] = config.url
+        if (config.model_extra or {}).get("personal_public_network") is True:
+            from deerflow.mcp.personal_network import personal_httpx_client_factory
+
+            params["httpx_client_factory"] = personal_httpx_client_factory
         # Add headers if present
         if config.headers:
             # A statically configured value the transport would refuse gets the

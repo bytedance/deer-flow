@@ -202,6 +202,9 @@ _FRAMEWORK_STRUCTURED_TAGS = [
     # Framework-authored hidden HumanMessage that instructs the agent to keep
     # working (runtime/goal.py::make_goal_continuation_message).
     "goal_continuation",
+    # Element at the start of the hidden durable-context data message that carries
+    # the active /goal objective; the durable contract lets the agent pursue it.
+    "active_goal",
     # Gateway-authored hidden HumanMessage carrying untrusted remote MCP task
     # output as data for a user-facing notification run.
     "background_task_event",

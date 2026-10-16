@@ -434,6 +434,7 @@ def _make_provider_for_reconciliation(tmp_path=None, *, worker_id: str = "worker
     provider._sandbox_infos = {}
     provider._thread_sandboxes = {}
     provider._acquire_serializer = AcquireSerializer(thread_name_prefix="aio-sandbox-lock-wait")
+    provider._acquire_worker_executor = aio_mod.ThreadPoolExecutor(thread_name_prefix="aio-sandbox-owned-worker-test")
     provider._last_activity = {}
     provider._warm_pool = {}
     provider._active_sandbox_identity = {}

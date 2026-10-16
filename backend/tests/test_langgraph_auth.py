@@ -764,6 +764,22 @@ def test_csrf_post_mismatched_token():
     assert "mismatch" in str(exc.value.detail)
 
 
+def test_csrf_post_non_ascii_token_is_a_mismatch():
+    """POST with a non-ASCII CSRF header → 403 mismatch, not TypeError."""
+    with pytest.raises(Auth.exceptions.HTTPException) as exc:
+        asyncio.run(
+            authenticate(
+                _req(
+                    method="POST",
+                    cookies={"access_token": "some-jwt", "csrf_token": "real-token"},
+                    headers={"x-csrf-token": "real-tok\xe9n"},
+                )
+            )
+        )
+    assert exc.value.status_code == 403
+    assert "mismatch" in str(exc.value.detail)
+
+
 def test_csrf_post_matching_token_proceeds_to_jwt():
     """POST with matching CSRF tokens passes CSRF check, then fails on JWT."""
     with pytest.raises(Auth.exceptions.HTTPException) as exc:

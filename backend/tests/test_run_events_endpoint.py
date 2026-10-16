@@ -35,8 +35,8 @@ async def test_list_run_events_forwards_task_id_and_after_seq():
     calls: dict = {}
 
     class FakeStore:
-        async def list_events(self, thread_id, run_id, *, event_types=None, task_id=None, limit=500, after_seq=None):
-            calls.update(thread_id=thread_id, run_id=run_id, event_types=event_types, task_id=task_id, limit=limit, after_seq=after_seq)
+        async def list_events(self, thread_id, run_id, *, event_types=None, task_id=None, limit=500, after_seq=None, user_id=None):
+            calls.update(thread_id=thread_id, run_id=run_id, event_types=event_types, task_id=task_id, limit=limit, after_seq=after_seq, user_id=user_id)
             return [{"seq": 1, "event_type": "subagent.step"}]
 
     class FakeState:
@@ -48,6 +48,7 @@ async def test_list_run_events_forwards_task_id_and_after_seq():
     class FakeRequest:
         app = FakeApp()
         _deerflow_test_bypass_auth = True
+        cookies: dict = {}
 
     result = await list_run_events(
         thread_id="t1",
@@ -63,6 +64,7 @@ async def test_list_run_events_forwards_task_id_and_after_seq():
     assert calls["task_id"] == "task-A"
     assert calls["after_seq"] == 7
     assert calls["event_types"] == ["subagent.start", "subagent.step", "subagent.end"]
+    assert calls["user_id"] is None
 
 
 @pytest.mark.anyio
@@ -80,7 +82,7 @@ async def test_list_run_events_redacts_historical_run_start_metadata():
     }
 
     class FakeStore:
-        async def list_events(self, thread_id, run_id, *, event_types=None, task_id=None, limit=500, after_seq=None):
+        async def list_events(self, thread_id, run_id, *, event_types=None, task_id=None, limit=500, after_seq=None, user_id=None):
             return [stored_row]
 
     class FakeState:
@@ -92,6 +94,7 @@ async def test_list_run_events_redacts_historical_run_start_metadata():
     class FakeRequest:
         app = FakeApp()
         _deerflow_test_bypass_auth = True
+        cookies: dict = {}
 
     events = await list_run_events(
         thread_id="legacy-thread",
@@ -109,6 +112,29 @@ async def test_list_run_events_redacts_historical_run_start_metadata():
     }
     assert stored_row["metadata"]["auth_token"] == "legacy-secret"
     assert events[0] is not stored_row
+
+
+@pytest.mark.parametrize("run_id", ["run.1", "a%20b", "%2e%2e"])
+@pytest.mark.parametrize("route", ["events", "messages", "workspace-changes"])
+def test_run_scoped_reads_of_a_noncanonical_run_id_on_jsonl_match_the_memory_store(tmp_path, route, run_id):
+    """The URL's run_id reaches the event store unvalidated; JSONL must answer it as an unknown run, not a 500."""
+    from _router_auth_helpers import make_authed_test_app
+    from fastapi.testclient import TestClient
+
+    from app.gateway.routers import thread_runs
+    from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
+
+    def get(store):
+        app = make_authed_test_app()
+        app.include_router(thread_runs.router)
+        app.state.run_event_store = store
+        with TestClient(app, raise_server_exceptions=False) as client:
+            return client.get(f"/api/threads/t1/runs/{run_id}/{route}")
+
+    jsonl = get(JsonlRunEventStore(tmp_path))
+    memory = get(MemoryRunEventStore())
+
+    assert (jsonl.status_code, jsonl.json()) == (200, memory.json())
 
 
 @pytest.mark.anyio
@@ -152,6 +178,7 @@ async def test_effective_memory_flows_from_injection_to_the_existing_debug_api()
     class FakeRequest_:
         app = FakeApp()
         _deerflow_test_bypass_auth = True
+        cookies: dict = {}
 
     events = await list_run_events(
         thread_id="t1",

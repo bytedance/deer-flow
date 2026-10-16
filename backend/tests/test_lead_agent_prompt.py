@@ -323,6 +323,34 @@ def test_apply_prompt_template_clamps_subagent_limits_to_enforced_bounds(monkeyp
     assert "MAXIMUM 50 `task` CALLS PER RUN" in prompt
 
 
+def test_apply_prompt_template_uses_configured_subagent_total_when_unset(monkeypatch):
+    explicit_config = SimpleNamespace(
+        sandbox=SimpleNamespace(
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            allow_host_bash=False,
+            mounts=[],
+        ),
+        subagents=SubagentsAppConfig(max_total_per_run=7),
+        subagent_runtime=SimpleNamespace(max_running=4),
+        skills=SimpleNamespace(container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage", get_skills_path=lambda: Path("/tmp/skills")),
+        skill_evolution=SimpleNamespace(enabled=False),
+        tool_search=SimpleNamespace(enabled=False),
+        memory=SimpleNamespace(enabled=False, injection_enabled=True, max_injection_tokens=2000),
+        acp_agents={},
+    )
+
+    monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
+
+    prompt = prompt_module.apply_prompt_template(
+        subagent_enabled=True,
+        max_total_subagents=None,
+        app_config=explicit_config,
+    )
+
+    assert "MAXIMUM 7 `task` CALLS PER RUN" in prompt
+
+
 def test_apply_prompt_template_prefers_startup_execution_capacity_after_reload(monkeypatch):
     explicit_config = SimpleNamespace(
         sandbox=SimpleNamespace(
@@ -710,6 +738,22 @@ def test_system_prompt_template_requires_virtual_paths_for_output_images():
     assert "Call `present_files` for the image before referencing it" in template
 
 
+def test_system_prompt_language_rule_covers_scheduled_runs_and_stored_text():
+    template = prompt_module.SYSTEM_PROMPT_TEMPLATE
+    lines = template.splitlines()
+    start = next(index for index, line in enumerate(lines) if "Language Consistency" in line)
+    end = next(index for index in range(start + 1, len(lines)) if lines[index].startswith("- "))
+    line = " ".join(part.strip() for part in lines[start:end])
+
+    assert "the user's latest message" in line
+    assert "short notes before tool calls" in line
+    assert "task titles, scheduled instructions and notes" in line
+    assert "scheduled run" in line
+    assert "the language the user wrote the task instructions in" in line
+    assert "host-added English lines" in line
+    assert "Keep code, commands, file paths and quoted source text unchanged" in line
+
+
 def test_system_prompt_template_preserves_placeholders():
     """Ensure the chunking-rule edit didn't drop any f-string placeholder
     consumed by apply_prompt_template(). A missing placeholder would
@@ -727,6 +771,7 @@ def test_system_prompt_template_preserves_placeholders():
         "{acp_section}",
         "{subagent_reminder}",
         "{skill_first_reminder}",
+        "{workspace_scripts_guidance}",
     ):
         assert ph in template, f"placeholder {ph} accidentally removed"
 

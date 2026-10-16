@@ -1,6 +1,6 @@
 "use client";
 
-import { type ReactNode } from "react";
+import { type ReactNode, useId } from "react";
 
 import { useI18n } from "@/core/i18n/hooks";
 
@@ -77,6 +77,7 @@ export function PluginDirectory({
 }) {
   const { t } = useI18n();
   const copy = t.capabilities.directory;
+  const groupId = useId();
   const visible = entries.filter(
     (entry) =>
       (!installedOnly || entry.installed) &&
@@ -98,12 +99,9 @@ export function PluginDirectory({
         const items = visible.filter((entry) => entry.category === key);
         if (!items.length) return null;
         return (
-          <section key={key} aria-labelledby={`plugin-group-${key}`}>
+          <section key={key} aria-labelledby={`${groupId}-${key}`}>
             <div className="flex items-baseline gap-3 border-b pb-3">
-              <h2
-                id={`plugin-group-${key}`}
-                className="text-base font-semibold"
-              >
+              <h2 id={`${groupId}-${key}`} className="text-base font-semibold">
                 {copy.categories[key]}
               </h2>
               <span className="text-muted-foreground/70 text-xs">

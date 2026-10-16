@@ -81,7 +81,7 @@ def test_app_config_and_mcp_cache_share_the_same_implementation():
 def test_read_config_with_signature_describes_exactly_the_bytes_it_returns(tmp_path: Path):
     """The returned signature must be derived from the returned bytes, not re-read from disk."""
     cfg = tmp_path / "config.yaml"
-    cfg.write_text("log_level: info\n", encoding="utf-8")
+    cfg.write_bytes(b"log_level: info\n")
 
     data, signature = read_config_with_signature(cfg)
 
@@ -110,7 +110,7 @@ def test_app_config_cache_loader_reads_through_the_shared_reader():
 def test_read_config_with_signature_signs_the_bytes_even_when_stat_is_stale(tmp_path: Path, monkeypatch):
     """Size and digest come from the bytes actually read, not from the stat taken before the read."""
     cfg = tmp_path / "config.yaml"
-    cfg.write_text("log_level: info\n", encoding="utf-8")
+    cfg.write_bytes(b"log_level: info\n")
     original_stat = Path.stat
     fired = False
 
@@ -119,8 +119,8 @@ def test_read_config_with_signature_signs_the_bytes_even_when_stat_is_stale(tmp_
         result = original_stat(self, *args, **kwargs)
         if self == cfg and not fired:  # the file grows between the stat and the read
             fired = True
-            with cfg.open("a", encoding="utf-8") as handle:
-                handle.write("# appended after stat\n")
+            with cfg.open("ab") as handle:
+                handle.write(b"# appended after stat\n")
         return result
 
     monkeypatch.setattr(Path, "stat", stat_then_grow)
@@ -135,7 +135,7 @@ def test_read_config_with_signature_signs_the_bytes_even_when_stat_is_stale(tmp_
 def test_read_config_with_signature_hashes_the_bytes_it_returns_not_a_second_read(tmp_path: Path, monkeypatch):
     """The digest must be computed from the returned bytes; a second read could see a newer revision."""
     cfg = tmp_path / "config.yaml"
-    cfg.write_text("log_level: info\n", encoding="utf-8")
+    cfg.write_bytes(b"log_level: info\n")
     original_read_bytes = Path.read_bytes
     fired = False
 
@@ -144,7 +144,7 @@ def test_read_config_with_signature_hashes_the_bytes_it_returns_not_a_second_rea
         data = original_read_bytes(self)
         if self == cfg and not fired:  # the file is rewritten right after the first read
             fired = True
-            cfg.write_text("log_level: debug\n", encoding="utf-8")
+            cfg.write_bytes(b"log_level: debug\n")
         return data
 
     monkeypatch.setattr(Path, "read_bytes", read_then_rewrite)

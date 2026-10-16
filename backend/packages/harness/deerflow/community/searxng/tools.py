@@ -46,7 +46,7 @@ async def web_search_tool(query: str, time_range: SearchTimeRange | None = None)
             else:
                 try:
                     max_results = int(raw)
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, OverflowError):
                     logger.warning(
                         "Invalid SearXNG max_results=%r; using default %s",
                         raw,

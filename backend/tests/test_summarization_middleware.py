@@ -18,7 +18,7 @@ from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummari
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config.app_config import AppConfig
 from deerflow.config.memory_config import MemoryConfig
-from deerflow.config.model_config import ModelConfig
+from deerflow.config.model_config import ModelConfig, ReasoningCapabilities
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.summarization_config import ContextSize, SummarizationConfig
 
@@ -1206,14 +1206,186 @@ def test_factory_null_case_anchor_is_run_model_not_models0(monkeypatch):
     assert result.summary_text == "from-run-model"
 
 
+@pytest.mark.parametrize(
+    ("run_window", "summary_window", "current_tokens", "expected"),
+    [
+        pytest.param(1_000, 100_000, 900, True, id="small-run-window-triggers"),
+        pytest.param(100_000, 1_000, 900, False, id="large-run-window-does-not-trigger"),
+    ],
+)
+def test_factory_fraction_trigger_uses_run_model_profile_with_explicit_summary(
+    monkeypatch,
+    run_window,
+    summary_window,
+    current_tokens,
+    expected,
+):
+    """An explicit summary model owns generation, not context-budget policy.
+
+    When the summary and active run models have different context windows, the
+    fraction trigger must follow the model that receives the next agent request.
+    Otherwise compaction can happen too late for a small run model or discard useful
+    history prematurely for a large one.
+    """
+    run_model = MagicMock()
+    run_model.profile = {"max_input_tokens": run_window}
+    run_model.with_config.return_value = run_model
+    run_model.invoke.return_value = SimpleNamespace(text="from-run-model")
+    summary_model = MagicMock()
+    summary_model.profile = {"max_input_tokens": summary_window}
+    summary_model.with_config.return_value = summary_model
+    summary_model.invoke.return_value = SimpleNamespace(text="from-summary-model")
+    models = {"run-model": run_model, "summary-model": summary_model}
+
+    monkeypatch.setattr(
+        "deerflow.agents.middlewares.summarization_middleware.create_chat_model",
+        lambda *, name=None, **_kwargs: models[name],
+    )
+    cfg = _factory_app_config(
+        ("run-model", "summary-model"),
+        summary_model_name="summary-model",
+        summarization_kwargs={"trigger": ContextSize(type="fraction", value=0.8)},
+    )
+
+    middleware = create_summarization_middleware(
+        app_config=cfg,
+        run_model_name="run-model",
+        keep=("messages", 2),
+    )
+
+    assert middleware is not None
+    assert middleware.model is run_model
+    assert middleware._get_profile_limits() == run_window
+    assert middleware._should_summarize([], current_tokens) is expected
+
+    # Profile ownership must not change the generation model.
+    result = middleware.compact_state(
+        {"messages": _messages()},
+        _runtime(),
+        force=True,
+    )
+    assert result is not None
+    assert result.summary_text == "from-summary-model"
+    summary_model.invoke.assert_called_once()
+    run_model.invoke.assert_not_called()
+
+    # Release identity records the independently configurable owners.
+    policy = middleware.release_policy_parameters()
+    assert policy["summary_model"] == "summary-model"
+    assert policy["profile_model"] == "run-model"
+
+
+def test_factory_required_thinking_run_model_anchors_explicit_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A required-thinking run model remains the profile owner when a distinct
+    explicit model generates summaries.
+
+    ``on_disable_request: reject`` makes ``thinking_enabled=False`` an invalid
+    constructor request, so the anchor must use the model's accepted mode rather
+    than falling through to the default model or disabling compaction.
+    """
+    run_model = MagicMock()
+    run_model.profile = {"max_input_tokens": 4_096}
+    run_model.with_config.return_value = run_model
+    summary_model = MagicMock()
+    summary_model.profile = {"max_input_tokens": 65_536}
+    summary_model.with_config.return_value = summary_model
+    summary_model.invoke.return_value = SimpleNamespace(text="from-summary-model")
+    models = {"run-model": run_model, "summary-model": summary_model}
+    calls: list[tuple[str | None, bool]] = []
+
+    def _factory(*, name=None, thinking_enabled=False, **_kwargs):
+        calls.append((name, thinking_enabled))
+        if name == "run-model" and not thinking_enabled:
+            raise ValueError("model requires thinking, but the request asked for it to be disabled")
+        return models[name]
+
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", _factory)
+    cfg = _factory_app_config(
+        ("run-model", "summary-model"),
+        summary_model_name="summary-model",
+        summarization_kwargs={"trigger": ContextSize(type="fraction", value=0.8)},
+    )
+    cfg.get_model_config("run-model").reasoning = ReasoningCapabilities(
+        thinking="required",
+        on_disable_request="reject",
+    )
+
+    middleware = create_summarization_middleware(
+        app_config=cfg,
+        run_model_name="run-model",
+        keep=("messages", 2),
+    )
+
+    assert middleware is not None
+    assert middleware.model is run_model
+    assert middleware._get_profile_limits() == 4_096
+    assert calls == [("run-model", True), ("summary-model", False)]
+
+    result = middleware.compact_state({"messages": _messages()}, _runtime(), force=True)
+
+    assert result is not None
+    assert result.summary_text == "from-summary-model"
+    summary_model.invoke.assert_called_once()
+    run_model.invoke.assert_not_called()
+
+
+def test_direct_construction_without_app_config_keeps_run_model_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Direct middleware construction resolves the global config before building
+    the run-model fallback.
+
+    This path has no injected ``app_config``. A failed explicit summary model must
+    still reach the configured run model, including when that model requires
+    thinking and rejects disable requests.
+    """
+    cfg = _factory_app_config(("run-model",))
+    cfg.get_model_config("run-model").reasoning = ReasoningCapabilities(
+        thinking="required",
+        on_disable_request="reject",
+    )
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.get_app_config", lambda: cfg)
+
+    run_model = MagicMock()
+    run_model.with_config.return_value = run_model
+    run_model.invoke.return_value = SimpleNamespace(text="from-run-model")
+    calls: list[tuple[str | None, bool, object]] = []
+
+    def _factory(*, name=None, thinking_enabled=False, app_config=None, **_kwargs):
+        calls.append((name, thinking_enabled, app_config))
+        if not thinking_enabled:
+            raise ValueError("model requires thinking, but the request asked for it to be disabled")
+        return run_model
+
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", _factory)
+
+    explicit_summary_model = MagicMock()
+    explicit_summary_model.with_config.return_value = explicit_summary_model
+    explicit_summary_model.invoke.side_effect = RuntimeError("summary provider down")
+    middleware = DeerFlowSummarizationMiddleware(
+        model=explicit_summary_model,
+        trigger=("messages", 4),
+        keep=("messages", 2),
+        token_counter=len,
+        configured_model_name="summary-model",
+        run_model_name="run-model",
+    )
+
+    result = middleware.before_model({"messages": _messages()}, _runtime())
+
+    assert result is not None
+    assert result["summary_text"] == "from-run-model"
+    assert calls == [("run-model", True, None)]
+
+
 def test_factory_configured_constructor_failure_falls_back_to_run_model(monkeypatch):
     """A configured summary model whose *constructor* raises must not break middleware
-    creation or skip the healthy run model. The anchor falls through the broken
-    constructor to the run model, and generation summarizes with it (the reviewer's
-    ``configured='broken-summary'`` reproduction)."""
+    creation or skip the healthy run model. The run model remains the profile anchor,
+    the failed generation model is cached as unavailable, and generation falls back to
+    the run model (the reviewer's ``configured='broken-summary'`` reproduction)."""
+    attempted: list = []
     built: list = []
 
     def _factory(*, name=None, thinking_enabled=False, app_config=None, attach_tracing=True, **kwargs):
+        attempted.append(name)
         if name == "broken-summary":
             raise RuntimeError("cannot construct summary provider")
         model = MagicMock()
@@ -1233,9 +1405,11 @@ def test_factory_configured_constructor_failure_falls_back_to_run_model(monkeypa
 
     assert middleware is not None  # a broken configured constructor did not break creation
     assert "run-model" in built  # the healthy run model was constructed as the anchor
+    assert attempted == ["run-model", "broken-summary"]
     result = middleware.compact_state({"messages": _messages()}, _runtime(), force=True)
     assert result is not None
     assert result.summary_text == "from-run-model"
+    assert attempted == ["run-model", "broken-summary"]  # failed config is not rebuilt
 
 
 def _profileless_anchor_stub() -> MagicMock:
@@ -1246,6 +1420,52 @@ def _profileless_anchor_stub() -> MagicMock:
     model.invoke.return_value = SimpleNamespace(text="summary")
     model.ainvoke = AsyncMock(return_value=SimpleNamespace(text="summary"))
     return model
+
+
+def test_factory_fraction_trigger_degrades_against_profileless_run_model_not_profiled_summary(
+    monkeypatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A summary model's profile must not make an unsafe run-model trigger valid."""
+    run_model = _profileless_anchor_stub()
+    summary_model = _StaticChatModel(
+        text="from-summary-model",
+        profile={"max_input_tokens": 65_536},
+    )
+    models = {"run-model": run_model, "summary-model": summary_model}
+    monkeypatch.setattr(
+        "deerflow.agents.middlewares.summarization_middleware.create_chat_model",
+        lambda *, name=None, **_kwargs: models[name],
+    )
+    cfg = _factory_app_config(
+        ("run-model", "summary-model"),
+        summary_model_name="summary-model",
+        summarization_kwargs={"trigger": ContextSize(type="fraction", value=0.8)},
+    )
+
+    with caplog.at_level(
+        "WARNING",
+        logger="deerflow.agents.middlewares.summarization_middleware",
+    ):
+        middleware = create_summarization_middleware(
+            app_config=cfg,
+            run_model_name="run-model",
+            keep=("messages", 2),
+        )
+
+    assert middleware is not None
+    assert middleware.model is run_model
+    assert middleware.trigger is None
+    assert "run model" in caplog.text
+
+    # Manual compaction remains available and still uses the explicit summary model.
+    result = middleware.compact_state(
+        {"messages": _messages()},
+        _runtime(),
+        force=True,
+    )
+    assert result is not None
+    assert result.summary_text == "from-summary-model"
 
 
 def test_factory_fraction_only_trigger_degrades_to_manual_compaction_only(monkeypatch, caplog: pytest.LogCaptureFixture) -> None:

@@ -18,6 +18,7 @@ from app.gateway.auth.config import get_auth_config
 from app.gateway.auth.session_cookie_state import SESSION_COOKIE_ISSUED_STATE_ATTR, SESSION_COOKIE_MAX_AGE_STATE_ATTR, SESSION_COOKIE_SECURE_STATE_ATTR, SKIP_AUTH_CSRF_COOKIE_STATE_ATTR
 from app.gateway.auth_disabled import is_auth_disabled
 from app.gateway.request_path import get_request_route_path
+from app.gateway.utils import constant_time_equals
 from deerflow.trace_context import TRACE_ID_HEADER
 
 CSRF_COOKIE_NAME = "csrf_token"
@@ -245,7 +246,7 @@ class CSRFMiddleware(BaseHTTPMiddleware):
                     content={"detail": "CSRF token missing. Include X-CSRF-Token header."},
                 )
 
-            if not secrets.compare_digest(cookie_token, header_token):
+            if not constant_time_equals(cookie_token, header_token):
                 return JSONResponse(
                     status_code=403,
                     content={"detail": "CSRF token mismatch."},

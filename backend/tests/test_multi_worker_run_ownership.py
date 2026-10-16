@@ -8,6 +8,7 @@ Coverage:
 - periodic reconciliation notifies Gateway recovery orchestration
 - Worker reconciliation skips runs with unexpired leases
 - Lease heartbeat renews active run leases
+- Lease heartbeat keeps renewing a staged terminal run until its commit
 - GATEWAY_WORKERS=1 + heartbeat_enabled=false behaviour unchanged
 """
 
@@ -15,14 +16,17 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
 from deerflow.config.run_ownership_config import RunOwnershipConfig
 from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, RunManager, RunStatus, ThreadOperationKind
+from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, _generate_worker_id
 from deerflow.runtime.runs.store.memory import MemoryRunStore
+from deerflow.runtime.runs.worker import RunContext, run_agent
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1115,6 +1119,139 @@ async def test_heartbeat_skips_runs_not_owned_by_this_worker():
 
 
 @pytest.mark.anyio
+async def test_staged_terminal_run_keeps_lease_through_worker_finalization():
+    """A worker finalizing a staged success must keep its lease renewed.
+
+    With an event store the worker stages the terminal status locally and
+    commits it only after its receipt and duration writes. The durable row
+    stays active meanwhile, so an unrenewed lease would let a peer reclaim
+    the successful run as an orphan ``error``.
+    """
+    config = _lease_config(lease_seconds=30, grace_seconds=0, heartbeat_enabled=True)
+    store = MemoryRunStore()
+    owner = _make_manager(store=store, worker_id="worker-a", run_ownership_config=config)
+    peer = _make_manager(store=store, worker_id="worker-b", run_ownership_config=config)
+    record = await owner.create_or_reject("thread-finalize")
+    bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
+    finalizing = asyncio.Event()
+    release = asyncio.Event()
+
+    class SlowReceiptEventStore(MemoryRunEventStore):
+        async def put_if_absent(self, **event):
+            if event["event_type"] == "run.delivery":
+                finalizing.set()
+                await release.wait()
+            return await super().put_if_absent(**event)
+
+    class FinishingAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            del graph_input, config, stream_mode, subgraphs
+            yield {"messages": []}
+
+    task = asyncio.create_task(
+        run_agent(
+            bridge,
+            owner,
+            record,
+            ctx=RunContext(checkpointer=None, event_store=SlowReceiptEventStore()),
+            agent_factory=lambda **_kwargs: FinishingAgent(),
+            graph_input={},
+            config={},
+        )
+    )
+    record.task = task
+
+    try:
+        await asyncio.wait_for(finalizing.wait(), timeout=1)
+        assert record.status == RunStatus.success
+        assert (await store.get(record.run_id))["status"] == "running"
+
+        # Shrink the confirmed lease so it lapses during the test; only a
+        # heartbeat renewal can keep the peer from claiming the row.
+        near_expiry = (datetime.now(UTC) + timedelta(milliseconds=50)).isoformat()
+        record.lease_expires_at = near_expiry
+        store._runs[record.run_id]["lease_expires_at"] = near_expiry
+        await owner._renew_leases()
+        await asyncio.sleep(0.1)
+
+        assert await peer.reconcile_orphaned_inflight_runs(error="orphaned") == []
+    finally:
+        release.set()
+        await asyncio.wait_for(task, timeout=1)
+
+    assert record.ownership_lost is False
+    assert record.terminal_commit_pending is False
+    assert (await store.get(record.run_id))["status"] == "success"
+
+
+@pytest.mark.anyio
+async def test_renewal_rejected_by_own_terminal_commit_releases_barrier():
+    """A renewal racing this worker's terminal commit must not fence the run."""
+    config = _lease_config(lease_seconds=30, heartbeat_enabled=True)
+    store = MemoryRunStore()
+    manager = _make_manager(store=store, worker_id="worker-a", run_ownership_config=config)
+    record = await manager.create_or_reject("thread-1")
+    record.task = asyncio.create_task(asyncio.sleep(3600))
+    record.terminal_commit_pending = True
+    await manager.set_status(record.run_id, RunStatus.success, persist=False)
+    # The terminal write lands before the worker clears its barrier.
+    assert (await store.finalize_if_not_cancelled(record.run_id, status="success")).finalized
+
+    try:
+        await manager._renew_leases()
+
+        assert record.ownership_lost is False
+        assert record.terminal_commit_pending is False
+        assert record.status == RunStatus.success
+    finally:
+        record.task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await record.task
+
+
+@pytest.mark.anyio
+async def test_renewal_rejected_by_peer_fences_staged_terminal_run():
+    """A peer claim during finalization must fence the staged outcome."""
+    config = _lease_config(lease_seconds=30, heartbeat_enabled=True)
+    store = MemoryRunStore()
+    manager = _make_manager(store=store, worker_id="worker-a", run_ownership_config=config)
+    record = await manager.create_or_reject("thread-1")
+    record.task = asyncio.create_task(asyncio.sleep(3600))
+    record.terminal_commit_pending = True
+    await manager.set_status(record.run_id, RunStatus.success, persist=False)
+    store._runs[record.run_id]["owner_worker_id"] = "worker-b"
+
+    await manager._renew_leases()
+    await asyncio.sleep(0)
+
+    assert record.ownership_lost is True
+    assert record.task.cancelled()
+
+
+@pytest.mark.anyio
+async def test_fenced_staged_terminal_run_stops_renewing():
+    """Fencing ends the terminal-commit barrier, so its lease can lapse."""
+    config = _lease_config(lease_seconds=30, heartbeat_enabled=True)
+    store = MemoryRunStore()
+    manager = _make_manager(store=store, worker_id="worker-a", run_ownership_config=config)
+    record = await manager.create_or_reject("thread-1")
+    record.task = asyncio.create_task(asyncio.sleep(3600))
+    record.terminal_commit_pending = True
+    await manager.set_status(record.run_id, RunStatus.success, persist=False)
+    await manager._mark_ownership_lost(record, reason="Test fence", require_active=False)
+    store.update_lease = AsyncMock(wraps=store.update_lease)
+
+    try:
+        await manager._renew_leases()
+
+        store.update_lease.assert_not_awaited()
+        assert record.terminal_commit_pending is False
+    finally:
+        with pytest.raises(asyncio.CancelledError):
+            await record.task
+
+
+@pytest.mark.anyio
 async def test_heartbeat_not_started_when_disabled():
     """When heartbeat_enabled is False, start_heartbeat must be a no-op."""
     config = _lease_config(heartbeat_enabled=False)
@@ -1830,6 +1967,29 @@ async def test_cancel_takeover_from_crashed_worker():
 
 
 @pytest.mark.anyio
+async def test_cancel_takeover_marks_orphan_recovery_for_waiting_consumers():
+    """A crash takeover must carry the orphan-recovery stop reason.
+
+    The owner is presumed dead, so a cross-worker SSE/``wait`` consumer's only
+    liveness edge is the durable row: without the marker its heartbeat fallback
+    never fires and it waits forever for an END that no producer can publish.
+    """
+    store = MemoryRunStore()
+    grace = 10
+    expired_lease = (datetime.now(UTC) - timedelta(seconds=grace + 5)).isoformat()
+    await store.put("run-takeover-liveness", thread_id="t1", status="running", created_at=datetime.now(UTC).isoformat(), owner_worker_id="dead-worker", lease_expires_at=expired_lease)
+
+    manager = _make_manager(store=store, run_ownership_config=_lease_config(heartbeat_enabled=True, grace_seconds=grace))
+    outcome = await manager.cancel("run-takeover-liveness")
+    assert outcome == CancelOutcome.taken_over
+
+    row = await store.get("run-takeover-liveness")
+    assert row is not None
+    assert row["status"] == "error"
+    assert row["stop_reason"] == ORPHAN_RECOVERY_STOP_REASON
+
+
+@pytest.mark.anyio
 async def test_cancel_requests_active_lease_from_other_worker():
     """A cancel routed to a peer must durably notify the live owner."""
     store = MemoryRunStore()
@@ -2035,12 +2195,12 @@ async def test_cancel_takeover_race_owner_renewed_lease():
     # simulate the lease having been renewed.
     original = store.claim_for_takeover
 
-    async def race_lost(run_id, *, grace_seconds, error):
+    async def race_lost(run_id, *, grace_seconds, error, stop_reason=None):
         # Simulate a heartbeat renewal between the read and the write
         run = store._runs.get(run_id)
         if run and run["status"] in ("pending", "running"):
             run["lease_expires_at"] = (datetime.now(UTC) + timedelta(seconds=60)).isoformat()
-        return await original(run_id, grace_seconds=grace_seconds, error=error)
+        return await original(run_id, grace_seconds=grace_seconds, error=error, stop_reason=stop_reason)
 
     store.claim_for_takeover = race_lost
     manager = _make_manager(store=store, run_ownership_config=_lease_config(heartbeat_enabled=True, grace_seconds=grace))
@@ -2553,9 +2713,9 @@ async def test_cancel_claim_lost_to_terminal_returns_not_cancellable():
     # conditional UPDATE so it matches 0 rows.
     original = store.claim_for_takeover
 
-    async def race_claim(run_id, *, grace_seconds, error):
+    async def race_claim(run_id, *, grace_seconds, error, stop_reason=None):
         store._runs[run_id]["status"] = "success"
-        return await original(run_id, grace_seconds=grace_seconds, error=error)
+        return await original(run_id, grace_seconds=grace_seconds, error=error, stop_reason=stop_reason)
 
     store.claim_for_takeover = race_claim
 
@@ -2585,10 +2745,10 @@ async def test_cancel_claim_lost_to_takeover_returns_taken_over():
     # UPDATE so it matches 0 rows (peer already took it over).
     original = store.claim_for_takeover
 
-    async def race_takeover(run_id, *, grace_seconds, error):
+    async def race_takeover(run_id, *, grace_seconds, error, stop_reason=None):
         store._runs[run_id]["status"] = "error"
         store._runs[run_id]["error"] = "peer claim"
-        return await original(run_id, grace_seconds=grace_seconds, error=error)
+        return await original(run_id, grace_seconds=grace_seconds, error=error, stop_reason=stop_reason)
 
     store.claim_for_takeover = race_takeover
 

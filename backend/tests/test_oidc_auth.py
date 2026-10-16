@@ -1,6 +1,9 @@
+import time
 from unittest.mock import AsyncMock
 
+import jwt
 import pytest
+from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import HTTPException
 
 from app.gateway.auth.models import User
@@ -405,3 +408,95 @@ def test_oidc_redirect_uri_fallback_plain_host_when_no_proxy_headers():
     result = _resolve_oidc_redirect_uri(req, "keycloak", cfg)
 
     assert result == "http://localhost:8001/api/v1/auth/callback/keycloak"
+
+
+def test_oidc_callback_rejects_non_ascii_state_as_mismatch(monkeypatch):
+    """A percent-encoded non-ASCII ``state`` is a 403 mismatch, not a 500."""
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    import deerflow.config.app_config as app_config_module
+    from app.gateway.auth.config import AuthConfig, get_auth_config, set_auth_config
+    from app.gateway.auth.oidc_state import OIDCStatePayload, _sign_state_payload
+    from app.gateway.routers import auth as auth_router
+
+    previous_auth_config = get_auth_config()
+    set_auth_config(AuthConfig(jwt_secret="test-secret-key-for-oidc-state-mismatch-min-32"))
+    try:
+        oidc_config = SimpleNamespace(enabled=True, providers={"keycloak": _provider_config()})
+        monkeypatch.setattr(app_config_module, "get_app_config", lambda: SimpleNamespace(auth=SimpleNamespace(oidc=oidc_config)))
+        app = FastAPI()
+        app.include_router(auth_router.router)
+        client = TestClient(app)
+        client.cookies.set("df_oidc_state_keycloak", _sign_state_payload(OIDCStatePayload(provider="keycloak", state="expected-state")))
+
+        response = client.get("/api/v1/auth/callback/keycloak", params={"code": "code", "state": "expected-st\xe4te"})
+    finally:
+        set_auth_config(previous_auth_config)
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "OIDC state mismatch"
+
+
+def _metadata() -> OIDCMetadata:
+    return OIDCMetadata(
+        issuer="https://issuer.example.com",
+        authorization_endpoint="https://issuer.example.com/auth",
+        token_endpoint="https://issuer.example.com/token",
+        userinfo_endpoint=None,
+        jwks_uri="https://issuer.example.com/jwks",
+    )
+
+
+def _service_with_signing_key() -> tuple[OIDCService, object]:
+    service = OIDCService()
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    service._load_jwks = AsyncMock(return_value={})
+    service._resolve_signing_key = AsyncMock(return_value=private_key.public_key())
+    return service, private_key
+
+
+def _id_token(private_key, nonce: str) -> str:
+    now = int(time.time())
+    return jwt.encode(
+        {"iss": "https://issuer.example.com", "aud": "deer-flow", "sub": "s1", "exp": now + 300, "iat": now, "nonce": nonce},
+        private_key,
+        algorithm="RS256",
+        headers={"kid": "k1"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_id_token_nonce_mismatch_with_non_ascii_is_rejected_not_a_type_error():
+    """The nonce claim is provider-controlled text, so a mismatch must reject
+    with OIDCValidationError; the raw str comparison raised TypeError instead,
+    turning the callback's sso_failed redirect into a 500 (#6076 fixed the
+    same five compare sites and left this one behind)."""
+    service, private_key = _service_with_signing_key()
+
+    with pytest.raises(OIDCValidationError, match="nonce does not match"):
+        await service.validate_id_token(metadata=_metadata(), client_id="deer-flow", id_token=_id_token(private_key, "nònce-é"), nonce="expected")
+
+
+@pytest.mark.asyncio
+async def test_id_token_nonce_match_with_non_ascii_is_accepted():
+    """A matching non-ASCII nonce keeps its bytes: equality survives the comparison."""
+    service, private_key = _service_with_signing_key()
+
+    claims = await service.validate_id_token(metadata=_metadata(), client_id="deer-flow", id_token=_id_token(private_key, "nònce-é"), nonce="nònce-é")
+
+    assert claims["nonce"] == "nònce-é"
+
+
+@pytest.mark.asyncio
+async def test_id_token_nonce_claim_of_non_string_type_is_rejected_not_an_attribute_error():
+    """A provider returning a truthy non-string nonce claim (e.g. an int) must
+    reject with OIDCValidationError like every other malformed nonce; reaching
+    the comparison helper raised AttributeError on .encode() and turned the
+    callback's sso_failed redirect into a 500."""
+    service, private_key = _service_with_signing_key()
+
+    with pytest.raises(OIDCValidationError, match="nonce claim is not a string"):
+        await service.validate_id_token(metadata=_metadata(), client_id="deer-flow", id_token=_id_token(private_key, 12345), nonce="expected")

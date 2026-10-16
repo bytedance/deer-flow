@@ -1,3 +1,4 @@
+import copy
 import logging
 
 from langchain.chat_models import BaseChatModel
@@ -46,19 +47,26 @@ def _deep_merge_dicts(base: dict | None, override: dict) -> dict:
     for key, value in override.items():
         if isinstance(value, dict) and isinstance(merged.get(key), dict):
             merged[key] = _deep_merge_dicts(merged[key], value)
+        elif isinstance(value, dict):
+            # Copy, don't alias: *override* is usually a template straight from
+            # the cached ``ModelConfig`` (see ``_merge_settings``).
+            merged[key] = copy.deepcopy(value)
         else:
             merged[key] = value
     return merged
 
 
+# The two spellings of the vLLM/Qwen chat-template thinking switch: the legacy
+# ``thinking`` alias DeerFlow documented first and ``enable_thinking``, which
+# vLLM's Qwen reasoning parser reads. ``VllmChatModel`` maps the alias onto
+# ``enable_thinking`` just before sending; other OpenAI-compatible classes
+# forward both keys as written.
+_VLLM_THINKING_SWITCHES = ("thinking", "enable_thinking")
+
+
 def _vllm_disable_chat_template_kwargs(chat_template_kwargs: dict) -> dict:
     """Build the disable payload for vLLM/Qwen chat template kwargs."""
-    disable_kwargs: dict[str, bool] = {}
-    if "thinking" in chat_template_kwargs:
-        disable_kwargs["thinking"] = False
-    if "enable_thinking" in chat_template_kwargs:
-        disable_kwargs["enable_thinking"] = False
-    return disable_kwargs
+    return {key: False for key in _VLLM_THINKING_SWITCHES if key in chat_template_kwargs}
 
 
 def _merge_settings(settings: dict, payload: dict) -> None:
@@ -71,8 +79,62 @@ def _merge_settings(settings: dict, payload: dict) -> None:
     for key, value in payload.items():
         if isinstance(value, dict) and isinstance(settings.get(key), dict):
             settings[key] = _deep_merge_dicts(settings[key], value)
+        elif isinstance(value, dict):
+            # Never hand the constructor (or a later in-place edit here) the
+            # template's own mapping: payloads come straight from the cached
+            # ``ModelConfig``, and a shared reference would leak one call's
+            # adjustments into every later ``create_chat_model`` for that profile.
+            settings[key] = copy.deepcopy(value)
         else:
             settings[key] = value
+
+
+def _chat_template_kwargs(settings: dict) -> dict | None:
+    """``settings["extra_body"]["chat_template_kwargs"]`` when both levels are mappings, else ``None``."""
+    extra_body = settings.get("extra_body")
+    if not isinstance(extra_body, dict):
+        return None
+    chat_template_kwargs = extra_body.get("chat_template_kwargs")
+    return chat_template_kwargs if isinstance(chat_template_kwargs, dict) else None
+
+
+def _merge_thinking_payload(settings: dict, payload: dict) -> None:
+    """Deep-merge a thinking on/off *payload*, keeping its vLLM switch authoritative.
+
+    Keys are never removed: a template can only add or override, so a profile's
+    unrelated ``extra_body`` / ``chat_template_kwargs`` entries survive in both
+    directions. The one thing a plain deep merge gets wrong is the vLLM switch,
+    which has two spellings (see ``_VLLM_THINKING_SWITCHES``): a profile that
+    spells it differently from the payload (base ``enable_thinking: false``,
+    template ``thinking: true``) would keep both keys with opposite values, and
+    whichever key the server reads might be the profile's. So after merging, the
+    value the payload declares is mirrored onto the *other* spelling when the
+    profile carries it. Both keys then agree: ``VllmChatModel`` collapses them to
+    ``enable_thinking``, and a plain OpenAI-compatible class sends both, so the
+    server sees the payload's intent under whichever name it honors. No spelling
+    is invented (a template using only ``thinking`` never grows
+    ``enable_thinking``), and a payload that spells both itself is left as
+    written. Non-mapping template values are forwarded unchanged, as before.
+
+    Deep-merging also means a template cannot *remove* a key by omitting it:
+    a base ``extra_body.thinking.budget_tokens`` survives a disable template
+    that only sets ``thinking.type: disabled``. Enable-only keys therefore
+    belong in ``when_thinking_enabled``, not in the profile's base settings.
+    """
+    _merge_settings(settings, payload)
+    payload_kwargs = _chat_template_kwargs(payload)
+    merged_kwargs = _chat_template_kwargs(settings)
+    if payload_kwargs is None or merged_kwargs is None:
+        return
+    declared = {key: payload_kwargs[key] for key in _VLLM_THINKING_SWITCHES if key in payload_kwargs}
+    if len(declared) != 1:
+        return
+    value = next(iter(declared.values()))
+    # In-place is safe: ``_merge_settings`` / ``_deep_merge_dicts`` copy every
+    # template mapping they store, so ``merged_kwargs`` is never the config's own dict.
+    for key in _VLLM_THINKING_SWITCHES:
+        if key not in declared and key in merged_kwargs:
+            merged_kwargs[key] = value
 
 
 def _set_dotted_setting(settings: dict, path: str, value: object) -> None:
@@ -102,7 +164,7 @@ def _infer_dialect(effective_wte: dict) -> str:
     if isinstance(thinking, dict) and thinking.get("type"):
         return "openai_extra_body"
     chat_template_kwargs = extra_body.get("chat_template_kwargs") or {}
-    if isinstance(chat_template_kwargs, dict) and ("thinking" in chat_template_kwargs or "enable_thinking" in chat_template_kwargs):
+    if isinstance(chat_template_kwargs, dict) and any(key in chat_template_kwargs for key in _VLLM_THINKING_SWITCHES):
         return "vllm_chat_template"
     native_thinking = effective_wte.get("thinking")
     if isinstance(native_thinking, dict) and native_thinking.get("type"):
@@ -114,7 +176,7 @@ def _infer_dialect(effective_wte: dict) -> str:
 
 def _vllm_toggle_chat_template_kwargs(chat_template_kwargs: dict, *, enabled: bool) -> dict:
     """Mirror whichever vLLM/Qwen switch the template declares; default to ``enable_thinking``."""
-    toggled = {key: enabled for key in ("thinking", "enable_thinking") if key in chat_template_kwargs}
+    toggled = {key: enabled for key in _VLLM_THINKING_SWITCHES if key in chat_template_kwargs}
     return toggled or {"enable_thinking": enabled}
 
 
@@ -143,31 +205,37 @@ def _apply_legacy_thinking_settings(
 ) -> None:
     """Historical thinking/effort payload path for profiles without a ``reasoning:`` contract.
 
-    Kept byte-for-byte so existing configurations retain their behavior (issue
-    #5073 acceptance criterion), including the synthesized ``reasoning_effort=minimal``
-    on the OpenAI-compatible disable path that the contract path drops.
+    Kept as-is so existing configurations retain their behavior (issue #5073
+    acceptance criterion), including the synthesized ``reasoning_effort=minimal``
+    on the OpenAI-compatible disable path that the contract path drops. The one
+    deliberate change is how the operator's templates are applied: both
+    ``when_thinking_enabled`` and ``when_thinking_disabled`` used to be
+    ``dict.update``-ed onto the settings, so a template's ``extra_body`` replaced
+    the profile's whole ``extra_body`` and silently dropped sibling keys such as
+    GLM's ``tool_stream``. Both now go through ``_merge_thinking_payload`` like
+    the synthesized ``extra_body`` disable payloads and the contract path: keys
+    are never removed (so enable-only keys such as ``budget_tokens`` belong in
+    ``when_thinking_enabled``, not in the base ``extra_body``), template values
+    win on conflicts, and the template's vLLM switch stays authoritative across
+    its two spellings. The native-Anthropic disable still assigns
+    ``settings["thinking"]`` outright: that mapping is a tagged union keyed by
+    ``type``, and nothing else lives beside it at the top level.
     """
     if requested_reasoning_effort is not None and not is_codex_model:
         settings["reasoning_effort"] = requested_reasoning_effort
     if thinking_enabled and has_thinking_settings and effective_wte:
-        settings.update(effective_wte)
+        _merge_thinking_payload(settings, effective_wte)
     if not thinking_enabled:
         if model_config.when_thinking_disabled is not None:
-            # User-provided disable settings take full precedence
-            settings.update(model_config.when_thinking_disabled)
+            # User-provided disable settings win on conflicts; profile keys survive.
+            _merge_thinking_payload(settings, model_config.when_thinking_disabled)
         elif has_thinking_settings and effective_wte.get("extra_body", {}).get("thinking", {}).get("type"):
             # OpenAI-compatible gateway: thinking is nested under extra_body
-            settings["extra_body"] = _deep_merge_dicts(
-                settings.get("extra_body"),
-                {"thinking": {"type": "disabled"}},
-            )
+            _merge_thinking_payload(settings, {"extra_body": {"thinking": {"type": "disabled"}}})
             settings["reasoning_effort"] = "minimal"
         elif has_thinking_settings and (disable_chat_template_kwargs := _vllm_disable_chat_template_kwargs(effective_wte.get("extra_body", {}).get("chat_template_kwargs") or {})):
             # vLLM uses chat template kwargs to switch thinking on/off.
-            settings["extra_body"] = _deep_merge_dicts(
-                settings.get("extra_body"),
-                {"chat_template_kwargs": disable_chat_template_kwargs},
-            )
+            _merge_thinking_payload(settings, {"extra_body": {"chat_template_kwargs": disable_chat_template_kwargs}})
         elif has_thinking_settings and effective_wte.get("thinking", {}).get("type"):
             # Native langchain_anthropic: thinking is a direct constructor parameter
             settings["thinking"] = {"type": "disabled"}
@@ -208,11 +276,11 @@ def _apply_contract_thinking_settings(
         payload = _deep_merge_dicts(_dialect_payload(dialect, enabled=True, chat_template_kwargs=chat_template_kwargs), effective_wte)
         if contract.history is not None and dialect == "openai_extra_body":
             payload = _deep_merge_dicts(payload, {"extra_body": {"thinking": {"clear_thinking": contract.history == "clear"}}})
-        _merge_settings(settings, payload)
+        _merge_thinking_payload(settings, payload)
     elif model_config.when_thinking_disabled is not None:
-        _merge_settings(settings, model_config.when_thinking_disabled)
+        _merge_thinking_payload(settings, model_config.when_thinking_disabled)
     else:
-        _merge_settings(settings, _dialect_payload(dialect, enabled=False, chat_template_kwargs=chat_template_kwargs))
+        _merge_thinking_payload(settings, _dialect_payload(dialect, enabled=False, chat_template_kwargs=chat_template_kwargs))
     if contract.effort is None or contract.effort.path != "reasoning_effort":
         # A custom path is the only effort wire format for this contract.
         # Drop a generic key supplied by model_overrides as well as stale
@@ -448,7 +516,9 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     requested_reasoning_effort = resolved_reasoning.reasoning_effort
     if contract.source == "legacy":
         # Profiles without a ``reasoning:`` block keep the historical payload
-        # path byte-for-byte, driven by the caller's raw thinking flag.
+        # path, driven by the caller's raw thinking flag; the only change from
+        # the pre-contract factory is that its templates deep-merge (see the
+        # function docstring) instead of replacing whole settings.
         _apply_legacy_thinking_settings(
             model_settings_from_config,
             model_config,
