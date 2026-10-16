@@ -4849,6 +4849,10 @@
 
 ### 文档
 
+- **文档：** 新增韩语 README（`README_ko.md`），完整翻译当前英文 README。标题、表格和
+  链接与英文版一一对应，所有代码块和行内代码保持逐字节一致，只翻译正文。`README.md`
+  及其他译本的语言切换行和 `AGENTS.md` 的译本列表现已链接到该文件。
+  ([#6909])
 - **文档：** 配置检查与迁移命令现在在 backend 环境中运行。文档中的示例此前用
   系统 Python 执行，无法导入已安装的 backend workspace 包；用
   `uv run --directory backend` 选择环境会改变工作目录，导出的相对路径因此可能
@@ -9375,3 +9379,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6865]: https://github.com/bytedance/deer-flow/pull/6865
 [#6876]: https://github.com/bytedance/deer-flow/pull/6876
 [#6897]: https://github.com/bytedance/deer-flow/pull/6897
+[#6909]: https://github.com/bytedance/deer-flow/pull/6909

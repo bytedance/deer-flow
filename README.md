@@ -1,6 +1,6 @@
 # 🦌 DeerFlow - 2.0
 
-English | [中文](./README_zh.md) | [日本語](./README_ja.md) | [Français](./README_fr.md) | [Русский](./README_ru.md) | [Português](./README_pt.md)
+English | [中文](./README_zh.md) | [日本語](./README_ja.md) | [Français](./README_fr.md) | [Русский](./README_ru.md) | [Português](./README_pt.md) | [한국어](./README_ko.md)
 
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](./backend/pyproject.toml)
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](./Makefile)
@@ -178,6 +178,8 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
 
    GroundRoute web search and fetch contain malformed HTTP-success payloads the same way: a non-object payload, a `results` container that is not a list, or a non-empty list with no object entries returns the provider's format error, while non-object entries in an otherwise valid list are skipped in order. Missing, null, or empty results keep the existing "No results found" response.
 
+   DuckDuckGo web search distinguishes execution failures from empty results: rate limits, timeouts, blocked requests, client-setup failures, SDK errors, and a missing `ddgs` dependency return a structured `DuckDuckGo search failed: ...` error instead of "No results found", while a genuinely empty result set keeps the existing "No results found" response. The structured error text lets the harness classify an outage as transient or a configuration problem instead of a query that matched nothing.
+   
    Tavily web search and fetch contain malformed HTTP-success payloads the same way: a non-object payload, or a `results`/`failed_results` container that is not a list, returns the provider's format error, and non-object entries in an otherwise valid list are skipped in order. Missing, null, or empty results keep the existing response (`[]` for search, `Error: No results found` for fetch); missing or null search fields (`title`, `url`, `content`) normalize to empty text, and a non-string fetch `raw_content` is coerced to text before the truncation limit.
 
    Sofya web search and fetch contain malformed HTTP-success payloads the same way: a non-object payload, a `results` container that is not a list, or a non-empty list with no object entries returns the provider's format error, while non-object entries in an otherwise valid list are skipped in order. Missing, null, or empty results keep the existing "No results found" response.
@@ -1388,6 +1390,20 @@ Existing web citations and the text-only Python `knowledge_search(query)` APIs
 remain supported. No knowledge management service or page is required.
 See [the knowledge contract guide](backend/docs/KNOWLEDGE.md).
 
+Knowledge scope selection also works with operator-installed read-only Provider
+extensions. The shared selector shows only the filters a Provider supports:
+knowledge-base selection requires a catalog and dataset filtering; file
+selection additionally requires document listing and document filtering.
+Unsupported or inaccessible filters fail without expanding the search scope.
+Choosing no knowledge search stops retrieval before loading the Provider.
+Provider resource IDs are preserved up to 256 Unicode code points; longer IDs
+are rejected without truncation.
+RAGFlow keeps its existing configuration and citations, and search-only
+Providers remain usable without a catalog or management page. See the
+[offline Provider example](examples/deerflow-extension-knowledge/README.md)
+for extension registration and configuration. WeKnora's adapter is planned for
+the next phase.
+
 Skills are what make DeerFlow do *almost anything*.
 
 A standard Agent Skill is a structured capability module — a Markdown file that defines a workflow, best practices, and references to supporting resources. DeerFlow ships with built-in skills for research, report generation, slide creation, web pages, image and video generation, and more. But the real power is extensibility: add your own skills, replace the built-in ones, or combine them into compound workflows.
@@ -2075,6 +2091,8 @@ If the same rendered summary prompt and model candidates recur, DeerFlow reuses 
 
 Use `/compact` in the Web UI composer to summarize older context for the current thread. DeerFlow keeps the full chat visible, but future model calls use the compacted summary plus recent messages. The command is ignored when there is not enough history to compact, and it is blocked while the thread has a run in flight, including when that run is owned by another Gateway worker. If a multi-worker reservation loses its lease, DeerFlow cancels the checkpoint writer before the replacing run proceeds and returns a retryable conflict after cleanup. Thread-title edits are serialized through the same state-write boundary and show a conflict without closing the rename dialog when a run is active.
 
+Manual compaction also returns HTTP 409 when execution is pending or the checkpoint is unavailable, so it cannot confirm the thread is idle.
+
 The chat header also shows a context-window gauge when the selected model has a positive `context_window` configured. It estimates the latest materialized checkpoint's message tokens and keeps the previous same-thread percentage visible while data refetches, independently of the cumulative token-usage setting.
 
 When `token_budget.enabled` and `token_usage.enabled` are both enabled, each lead-agent run budget includes completed subagent usage, including the final batch. Hidden goal continuations share the budget; a new user run starts fresh.
@@ -2162,6 +2180,12 @@ empty unit, integration or documentation targets. Complete zero-pass successful
 summaries do not veto that sibling evidence. All-empty or all-ignored runs and
 bare `test result: ok` banners remain `UNVERIFIED`; incomplete zero-test summaries
 are kept as vetoes, and failures still take precedence.
+
+For `tests_passed:python -m unittest`, a complete `Ran N tests in ...s` / `OK`
+summary must include at least one ordinary passing test. Skips and expected
+failures do not count as passes. Successful runs with all-skipped,
+all-expected-failure, empty or incomplete summaries remain `UNVERIFIED`;
+nonzero exits, failures and unexpected successes still take precedence.
 
 For Maven and Gradle test acceptance, a `BUILD SUCCESS` / `BUILD SUCCESSFUL`
 banner alone remains `UNVERIFIED`: builds can succeed without running tests.
@@ -2258,6 +2282,8 @@ async with runtime:
 ```
 
 `SubagentRuntime.stop()` waits for its owned batch service to finish before propagating caller cancellation, including repeated cancellation. This drain has no timeout; repository operations and child cleanup must terminate. If service shutdown also fails or is cancelled, the first caller cancellation is preserved with the service failure as its cause.
+
+Gateway run finalization also retains ownership through caller cancellation: it finishes terminal persistence, stream completion, and resource cleanup before propagating the interruption. Backend I/O must terminate or enforce its own timeout. Gateway shutdown includes workers still finalizing after their terminal status commits; an expired shutdown drain budget is logged and does not cancel their outstanding writes.
 
 The factory still does not load YAML or create SQL infrastructure: the caller supplies the config snapshot, repository, and lifecycle. Because it accepts a caller-owned `system_prompt`, direct integrations also own any model-visible wording about those limits; the default middleware enforces the runtime limits regardless. The factory does not mount the Gateway owner-scoped HTTP routes or Web UI, so direct applications must expose their own result API/UI if they need those surfaces. For ordinary delegation only, `SubagentRuntime(...)` needs no asynchronous startup.
 
