@@ -23,7 +23,7 @@ OUTBOX = "0027_notification_deliveries"
 PARKED = "0028_parked_attempts"
 SCHEDULER = "0029_scheduler_agent_tasks"
 CLAIM_TOKENS = "0030_notification_claim_tokens"
-HEAD = "0040_scheduled_group_notice"
+HEAD = "0043_runtime_im_notices"
 PREVIOUS = "0026_mcp_task_lease_tokens"
 TABLE = "notification_deliveries"
 

@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 import httpx
 from agent_sandbox import Sandbox as AioSandboxClient
 from agent_sandbox.core.api_error import ApiError
+from pydantic import ValidationError
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT as _MAX_DOWNLOAD_SIZE
@@ -1090,6 +1091,16 @@ class AioSandbox(Sandbox):
                 kwargs["end_line"] = max(end_line, 0)
             result = self._client.file.read_file(file=path, **kwargs)
             return result.data.content if result.data else ""
+        except ValidationError as e:
+            # The server reports read failures (e.g. ENOENT) as an error
+            # envelope with ``data: {}``, which cannot satisfy the required
+            # ``content``/``file`` fields of the SDK's FileReadResult model,
+            # so the SDK raises a ValidationError. A missing file is an
+            # expected outcome (ReadBeforeWrite probes every new-file write),
+            # so log quietly and return an explicit, model-actionable result
+            # instead of leaking the pydantic error text.
+            logger.debug("Sandbox read_file validation failure for %r: %s", path, e)
+            return f"Error: file not found or unreadable: {path}"
         except Exception as e:
             logger.error(f"Failed to read file in sandbox: {e}")
             return f"Error: {e}"

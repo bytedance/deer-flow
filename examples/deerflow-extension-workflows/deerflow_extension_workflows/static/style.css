@@ -1,0 +1,8 @@
+.script-workflows { max-width: 960px; margin: auto; padding: 24px; color: var(--foreground); }
+.script-workflows form { display: grid; gap: 8px; }
+.script-workflows textarea { width: 100%; border: 1px solid var(--border); border-radius: 6px; padding: 12px; background: var(--background); color: var(--foreground); font-family: monospace; }
+.script-workflows button { padding: 8px 12px; margin: 4px; border: 1px solid var(--border); border-radius: 6px; background: var(--secondary); color: var(--secondary-foreground); cursor: pointer; }
+.script-workflows button:disabled { opacity: .5; cursor: wait; }
+.script-workflows pre { padding: 12px; border: 1px solid var(--border); white-space: pre-wrap; overflow-wrap: anywhere; }
+.script-workflows code { display: block; font-size: 12px; overflow-wrap: anywhere; }
+.script-workflows [role=status] { color: var(--destructive); }

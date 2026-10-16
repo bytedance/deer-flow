@@ -729,6 +729,21 @@
 
 #### 渠道
 
+- **channels:** IM 通道可以在多个 Gateway 实例上运行。`channels.leader_lease`
+  生效时（默认 `auto` 跟随多进程信号），每个 provider 的平台连接只属于在新表
+  `channel_leases`（迁移 `0042_channel_leases`）中持有该行的那个实例：归属由一条
+  upsert 依据数据库时钟判定，续约携带防护 epoch，持有者按自己的单调时钟在对端
+  可以连接之前先停传输，因此数据库卡住也不会出现两个 Telegram 轮询者或两个
+  Discord 会话。持有者崩溃后，对端在 `lease_seconds + grace_seconds` 再加一个续约
+  周期内接管；正常停止的持有者会释放租约，对端在下一次心跳接手；停止超时的传输保留
+  租约直到过期。GitHub webhook、消息总线和 manager 仍在每个实例上运行。
+  `GET /api/channels/` 会报告每个 provider 的 `leader`，`running` 在每个实例上都反映
+  持有者的传输状态，所以无论负载均衡把请求发到哪个实例，Web UI 的 provider 列表和
+  连接流程都能正常工作；定时任务的 IM 通知只由该 provider 的持有者认领。启动门禁在
+  拒绝 `enabled: false` 时改为推荐 `auto`/`true`，并拒绝没有 SQL 数据库的显式
+  `enabled: true`。从 Web UI 保存的凭据仍要等持有者下次启动该通道才生效，故障切换会
+  取消进行中的 IM 回复。 ([#6843])
+
 - **channels:** 新增 `channels.leader_lease` 配置段（`enabled: auto|true|false`、
   `lease_seconds`、`grace_seconds`；仅启动时读取），为按 provider 的 leader 租约预留，
   落地后每个 IM 平台连接只由一个 Gateway 实例持有（传输归属本身另行提交，在此之前
@@ -986,6 +1001,28 @@
   原因。([#6556])
 
 ### 修复
+
+- **llm：** 流式响应已返回 `200` 之后才在流内报告的 provider 错误，现在会像以 HTTP
+  状态码返回的同一错误一样重试。为了用 SSE keepalive 维持慢请求而提前返回 `200` 的
+  OpenAI 兼容网关，会把之后发生的 504 作为 SSE `error` 事件发出；openai SDK 将其抛出为
+  不带状态码的 `APIError`，因此 `LLMErrorHandlingMiddleware` 此前把它归为普通错误，
+  运行在第一次尝试后即失败。现在这类不带状态码的错误会依次从数字型 `code` 或 `status`
+  字段、消息中明确写出的 `[504]`、`HTTP 502` 或 `status 503`（`messages[502]` 这类
+  数组下标不算）、以及 `type: server_error`（视为 500）中取得 4xx 或 5xx 状态码；都
+  取不到时，繁忙判断才会额外匹配 `rate-limit`、`RATE_LIMIT_…` 等写法。重试预算、退避
+  和熔断器按对应的 HTTP 错误处理；带状态码的错误分类不变。 (issue #6896, [#6897])
+
+- **渠道：** 从 IM 渠道发起的运行不再随接收消息的 Gateway 实例一起消亡。manager 在整个
+  运行期间保持 `runs.wait` / `runs.stream` 请求打开，而 Gateway 会在创建请求断开时取消
+  运行，除非该请求声明了 `on_disconnect: continue`；因此 leader 切换、滚动重启或接收
+  实例崩溃都会取消所有进行中的 IM 运行。渠道运行现在声明 `continue`，运行会在执行它的
+  Gateway 上完成并持久化对话线程状态——即使 IM 回复随旧传输丢失，答案仍可在 Web UI
+  中查看。同一策略也覆盖 Slack/Discord `runs.wait` 遇到 SDK 300 秒读超时的情况：聊天里
+  仍会收到错误回复，但运行会在后台完成而不再被取消。由于运行会继续，manager 现在在运行
+  请求发出之后保留入站去重键（worker 被取消、读超时、连接断开）：provider 在新持有者上的
+  重投递会被丢弃，而不是把这一轮再执行一遍；Gateway 拒绝的请求或发送前的失败仍会释放该键
+  以便重试。即发即弃渠道（GitHub）不受影响：`runs.create` 在运行进入 pending 后即返回。
+  ([#6876])
 
 - **前端：** 用户管理设置页不再在静态网站演示中发出注定失败的查询，非管理员的
   `?settings=users` 深链接也不再打开仅管理员可见的面板。该页面此前只以
@@ -4452,12 +4489,45 @@
   任务，现在显示为任务时区当天的零点，与服务端实际执行时间一致。此前界面把末尾的
   `-07` 误认为 UTC 偏移量，显示成 UTC 零点：在 `Asia/Shanghai` 显示为 08:00，在 UTC
   以西的时区则显示为前一天晚上；任务列表、详情、对话卡片和编辑表单的预填时间都受影响。([#6692])
+- **子代理：** 持久批处理工作器在不再监管仍在运行的子代理时，现在会取消它，并在它
+  停止后从注册表中移除对应条目。此前，在长期运行的进程中停止批处理服务（SDK 的
+  `SubagentRuntime` 停止）会让每个仍在运行的 `SubagentResult`（包括完整对话
+  记录）永久留在进程级注册表中；轮询时的存储库错误会把条目标记为失败或重新排队，
+  却让其子代理在无人监管的情况下继续运行，因此重试可能把同一条目执行两次。始终不
+  停止的条目会在其租约过期后被移除。([#6785])
 - **网关：** 子代理批次 JSONL 导出
   （`GET /api/threads/{thread_id}/subagent-batches/{batch_id}/results.jsonl`）
   现在每次读取 10 行已存储结果，而不是 500 行。每行最多可包含 `max_result_chars`
   的报告和同等长度的证据 JSON，而导出会先把整页载入内存再开始输出，因此默认上限下
   单个请求约占用 280 MB（上限 1,000,000 时约 1.7 GB），并且每页会阻塞事件循环
   半秒以上。导出的行及其顺序不变。([#6706])
+- **网关：** 子代理批次条目列表
+  （`GET /api/threads/{thread_id}/subagent-batches/{batch_id}/items`，批次运行时工作区
+  每 2 秒轮询一次）不再为了只返回预览而载入每个条目的完整报告、证据 JSON 和提示词。
+  默认 `max_result_chars` 下，一页 100 个条目约占用 34 MB，并阻塞事件循环约 70 ms
+  （`limit=500` 时为 170 MB 和 300 ms）；现在不到 1 MB。响应内容不变。([#6781])
+- **渠道：** 在渠道设置页保存或断开机器人时，不再覆盖经由其他 Gateway worker
+  保存的机器人。每个 worker 都保留启动时读入的 `runtime-config.json` 内容，并用这份
+  副本重写整个文件，因此在两个 worker 下，一个 worker 上保存的 Telegram 机器人会在
+  另一个 worker 保存 Slack 机器人时丢失，已断开的机器人也会重新出现。现在每次保存
+  都会在跨进程共享的锁下重新读取文件，只修改自己的 provider。([#6844])
+- **持久化：** 同一用户同时对同一个运行首次评分（两个标签页、两台设备或客户端重试）时，
+  不再有一个请求返回 500。两个请求都会查不到已有记录并插入，第二个插入会触发
+  `(thread, run, user)` 唯一约束；在 Postgres 上，80 个这样的请求中有 26 个失败。
+  IM 会话绑定中的同类竞争（例如首条消息与 `/new` 同时到达）也不再导致消息处理失败。
+  落后的写入现在会更新另一方创建的记录。([#6852])
+- **MCP：** 在 SQLite 上取消后台 MCP 任务时，取消请求现在会在下一个轮询周期发往远程服务器，
+  而不是最多延迟 `mcp_tasks.lease_seconds`（默认 120 秒）。由于 SQLite 上 `FOR UPDATE`
+  不起作用，在轮询器认领任务期间提交的取消请求所清除的轮询租约会被写回；取消工作器
+  随后要等该租约过期，任务还会被多轮询一次，而结果会被丢弃。现在每次认领在写入租约时
+  都会重新确认任务仍可认领。Postgres 不受影响。([#6859])
+- **持久化：** 启动时的 schema 升级不再为已与模型一致的列记录虚假的
+  `safe_add_column ... drifts from the model definition` 警告。该检查拿模型的通用类型名
+  和默认值写法（`STRING`、`BIGINTEGER`、`DefaultClause('0')`）去比较数据库自己的写法
+  （`VARCHAR`、`BIGINT`、`'0'`），因此 revision 0023 之前创建的 Postgres 或 SQLite
+  数据库升级时都会记录一条，丢失 head stamp 的 schema 会记录 29 条（SQLite）或
+  36 条（Postgres），淹没了这个警告本应发现的真实类型不一致。现在两侧都按所连接
+  数据库的写法进行比较。([#6865])
 
 ### 安全
 
@@ -4779,6 +4849,10 @@
 
 ### 文档
 
+- **文档：** 新增韩语 README（`README_ko.md`），完整翻译当前英文 README。标题、表格和
+  链接与英文版一一对应，所有代码块和行内代码保持逐字节一致，只翻译正文。`README.md`
+  及其他译本的语言切换行和 `AGENTS.md` 的译本列表现已链接到该文件。
+  ([#6909])
 - **文档：** 配置检查与迁移命令现在在 backend 环境中运行。文档中的示例此前用
   系统 Python 执行，无法导入已安装的 backend workspace 包；用
   `uv run --directory backend` 选择环境会改变工作目录，导出的相对路径因此可能
@@ -9296,3 +9370,13 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6702]: https://github.com/bytedance/deer-flow/pull/6702
 [#6706]: https://github.com/bytedance/deer-flow/pull/6706
 [#6746]: https://github.com/bytedance/deer-flow/pull/6746
+[#6781]: https://github.com/bytedance/deer-flow/pull/6781
+[#6785]: https://github.com/bytedance/deer-flow/pull/6785
+[#6843]: https://github.com/bytedance/deer-flow/pull/6843
+[#6844]: https://github.com/bytedance/deer-flow/pull/6844
+[#6852]: https://github.com/bytedance/deer-flow/pull/6852
+[#6859]: https://github.com/bytedance/deer-flow/pull/6859
+[#6865]: https://github.com/bytedance/deer-flow/pull/6865
+[#6876]: https://github.com/bytedance/deer-flow/pull/6876
+[#6897]: https://github.com/bytedance/deer-flow/pull/6897
+[#6909]: https://github.com/bytedance/deer-flow/pull/6909

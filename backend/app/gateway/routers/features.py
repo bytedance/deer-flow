@@ -13,11 +13,11 @@ from pydantic import BaseModel, Field
 from app.gateway.browser_capability import browser_capability
 from app.gateway.conversation_access import conversation_references_enabled
 from app.gateway.deps import get_config
-from app.gateway.knowledge_scope_admission import RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER
 from app.gateway.routers.thread_activity import thread_activity_available
 from app.gateway.run_models import MAX_CONVERSATION_REFERENCES
 from deerflow.config.app_config import AppConfig
 from deerflow.config.image_generation import managed_image_profiles_enabled
+from deerflow.knowledge.providers import get_knowledge_capabilities
 from deerflow.scheduler.runtime import scheduler_tools_enabled
 from deerflow.subagents.capacity import configured_subagent_max_running
 
@@ -59,11 +59,11 @@ class ConversationReferencesFeature(BaseModel):
 
 
 class KnowledgeBaseFeature(BaseModel):
-    """Availability of RAGFlow retrieval scope selection in chat."""
+    """Availability of capability-driven retrieval scope selection in chat."""
 
     scope_selection_enabled: bool = Field(
         ...,
-        description="Whether chat may select a per-message RAGFlow retrieval scope",
+        description="Whether chat may select a per-message knowledge retrieval scope",
     )
 
 
@@ -74,7 +74,7 @@ class ScheduledTasksFeature(BaseModel):
     running: bool = Field(..., description="Whether this process's scheduler poller is running, so tasks run on schedule and new tasks can be created")
     tool_enabled: bool = Field(..., description="Whether chats can create and manage tasks and scheduled runs can stop their own schedule")
     min_interval_seconds: int = Field(..., description="Shortest interval and earliest one-time delay, in seconds")
-    group_notifications: bool = Field(..., description="Whether scheduled tasks support explicitly selected Feishu group notifications")
+    group_notifications: bool = Field(..., description="Whether scheduled tasks support explicitly selected group notifications")
 
 
 class ThreadActivityFeature(BaseModel):
@@ -140,7 +140,7 @@ async def list_features(request: Request, config: AppConfig = Depends(get_config
             max_references=MAX_CONVERSATION_REFERENCES,
         ),
         knowledge_base=KnowledgeBaseFeature(
-            scope_selection_enabled=_knowledge_scope_selection_enabled(config),
+            scope_selection_enabled=_knowledge_scope_selection_enabled(config, getattr(request.app.state, "extensions", None)),
         ),
         scheduled_tasks=_scheduled_tasks_feature(request, config),
         # Startup-scoped: the read repository exists only with SQL persistence.
@@ -168,10 +168,10 @@ def _scheduled_tasks_feature(request: Request, config: AppConfig) -> ScheduledTa
     )
 
 
-def _knowledge_scope_selection_enabled(config: AppConfig) -> bool:
-    """Fail closed unless the effective knowledge_search entry is RAGFlow."""
+def _knowledge_scope_selection_enabled(config: AppConfig, extensions=None) -> bool:
+    """Selection UI requires both a catalog and dataset filtering."""
     settings = config.knowledge_base
     if not settings.enabled or not settings.scope_selection_enabled:
         return False
-    tool = config.get_tool_config("knowledge_search")
-    return tool is not None and tool.use == RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER
+    capabilities = get_knowledge_capabilities(config, extensions=extensions)
+    return capabilities.supports("catalog") and capabilities.supports("dataset_filter")

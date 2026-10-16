@@ -12,6 +12,38 @@ from deerflow.community.ragflow.client import (
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("dataset_id", ["", ".", "..", "../other", "a/../../other", "a/b", "a\\b", "%2e%2e", "%252f", "a%2fb", "a?x=y", "a#fragment", "a b", " a", "a\n", "资料"])
+async def test_list_documents_rejects_unsafe_path_ids_without_http_request(dataset_id):
+    requests = []
+
+    async def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={"code": 0, "data": {"docs": []}})
+
+    client = RAGFlowClient(base_url="http://ragflow.test", api_key="secret", transport=httpx.MockTransport(handler))
+    with pytest.raises(ValueError, match="Invalid RAGFlow dataset ID") as exc:
+        await client.list_documents(dataset_id, params=[])
+    assert str(exc.value) == "Invalid RAGFlow dataset ID."
+    assert requests == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("dataset_id", ["dataset-1", "kb_ABC123", "0123456789abcdef0123456789abcdef"])
+async def test_list_documents_keeps_valid_ids_in_one_path_segment(dataset_id):
+    requests = []
+
+    async def handler(request):
+        requests.append(request)
+        assert request.url.path == f"/api/v1/datasets/{dataset_id}/documents"
+        assert dict(request.url.params) == {"page": "1"}
+        return httpx.Response(200, json={"code": 0, "data": {"docs": []}})
+
+    client = RAGFlowClient(base_url="http://ragflow.test", api_key="secret", transport=httpx.MockTransport(handler))
+    assert await client.list_documents(dataset_id, params=[("page", "1")]) == {"code": 0, "data": {"docs": []}}
+    assert len(requests) == 1
+
+
+@pytest.mark.anyio
 async def test_list_datasets_filters_by_bound_id_in_one_request() -> None:
     requests: list[httpx.Request] = []
 
