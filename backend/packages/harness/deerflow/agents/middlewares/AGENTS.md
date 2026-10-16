@@ -9,12 +9,14 @@ Preserve the recognition sample and 5,000,000 UTF-8-byte guard. Count incrementa
 on parsing or field-limit errors, report an undetermined count rather than a
 physical-line or sample total.
 
-Compaction keeps state `SystemMessage`s; transient instructions use request
-wrappers, and fully rescued partitions skip compaction. If latest-user rescue
-empties an AI/Tool-only window, use `_build_summary_input_text(strategy="last")`;
-mixed windows keep normal anchoring and final-message fallback. Budget raw text
-before escaping/wrapping; pass `trim_tokens_to_summarize=None` to avoid the
-LangChain default.
+Keep state `SystemMessage`s; inject transient instructions via request wrappers.
+Skip fully rescued partitions. Fold all raw source in order without human
+anchoring. PII-redact before splitting; budget before escaping. Generated carry:
+marked head/tail within half the raw budget; at most 64 chunks/pass. Commit
+hooks/history/removal only on success. Cap breaches use a bounded process-local
+5m cooldown across builds for the same user/thread/executor/window/policy;
+smaller source or changed policy retries immediately. See the linked contract.
+`trim_tokens_to_summarize=None` uses one unbounded step.
 
 Todo compaction: [contract](../../../../../docs/summarization.md#todo-reminders).
 
@@ -28,25 +30,23 @@ stay `in_progress`. Never infer status from reply text.
 
 Assembly order: `tool_error_handling_middleware.py::_build_runtime_middlewares` (exposed as `build_lead_runtime_middlewares`), then `../lead_agent/agent.py::build_middlewares`. Optional entries require their config/runtime condition.
 
-**Message provenance.** Stamp injected/rewritten messages with
-`provenance_kwargs()` from `deerflow_extension_api.provenance`: server-owned
-`deerflow_content_kind`, `deerflow_producer_kind`, and optional entity ID, even
+**Message provenance.** Injected/rewritten messages use
+`deerflow_extension_api.provenance.provenance_kwargs()`: server-owned
+`deerflow_content_kind`, `deerflow_producer_kind`, optional entity ID, even
 without observers. Producers: DynamicContext, DurableContext,
 SystemMessageCoalescing, ViewImage, SkillActivation. Summarization/Title use
-`SystemOperationKind.SUMMARIZATION`/`.TITLE`; summaries enter via DurableContext's
-`durable_context_data`, memory recall via DynamicContext's
-`dynamic_context_memory`. Memory only queues extraction.
-Rewrites that only modify the model-bound request view and never enter state do
-not require provenance stamps (precedents: InputSanitizationMiddleware,
-DanglingToolCallMiddleware, ModelContentCompatibilityMiddleware).
+`SystemOperationKind.SUMMARIZATION`/`.TITLE`; summaries enter through
+DurableContext's `durable_context_data`, recall through DynamicContext's
+`dynamic_context_memory`; Memory only queues extraction. Request-only rewrites
+need no stamps (InputSanitization, DanglingToolCall, ModelContentCompatibility).
 
-**Self-description.** Configurable middleware exposes JSON-serialisable
+**Self-description.** Configurable middleware: JSON-safe
 `release_policy_parameters()` (`ReleasePolicyProvider`, duck typed). Update
-`collect_release_policies()` declarations with behavior; use `canonical_hash`
-for long text. Summarization declares enabled task-continuity retention or None;
-DurableContext declares normalized skills root, sorted read tools and continuity
-switch. History readers, including capture failures, validate persisted metadata
-so malformed values cannot abort compaction/model calls.
+`collect_release_policies()` with behavior; hash long text with `canonical_hash`.
+Summarization: enabled task-continuity retention or None. DurableContext:
+normalized skills root, sorted read tools, continuity switch. All history readers,
+including capture failures, validate persisted metadata; malformed values must
+not abort compaction/model calls.
 
 **Removing tool calls.** Use `clone_ai_message_with_tool_calls`, not a bare
 `tool_calls` update: adapters resend stale `content` tool-call blocks, which
@@ -111,7 +111,7 @@ Before changing a later authorization phase, read the [authorization RFC](../../
 
 17. **DynamicContextMiddleware** - Injects date and optional memory outside the static prompt. Opt-out removes its frozen server memory but retains date/user messages. Date follows server-local time unless `DEER_FLOW_DATE_TIMEZONE` names an IANA zone (invalid values fall back locally).
 18. **SkillActivationMiddleware** - Detects strict `/skill-name task` syntax on the latest real user message, resolves only enabled and runtime-allowed skills, injects the `SKILL.md` body as hidden current-turn context, and records a `middleware:skill_activation` audit event; a retried activation call replays the recorded reminder without re-auditing. Skill `allowed-tools` is compatibility metadata only: activation never filters, grants, or denies tools — Agent assembly/execution authorization owns the permission ceiling.
-19. **DurableContextMiddleware** - Before compaction, captures task dispatches/result summaries in `ThreadState.delegations` and loaded skill name/path/description references (never bodies) in `ThreadState.skill_context`; projects them into each model request. Static authority rules are injected as a `SystemMessage`; untrusted field values (`summary_text`, delegation results, skill descriptions) are injected separately as a hidden `HumanMessage` data block so compressed history, delegated work, and which skills are active stay visible without being stored as `messages` or promoted to system-role instructions. `build_subagent_runtime_middlewares` also attaches this middleware immediately before subagent summarization so a compacted `summary_text` is projected ahead of a preserved assistant/tool tail instead of leaving strict providers with an assistant-first request. See [tool artifacts](TOOL_ARTIFACTS.md) for projection, retry limits and delegation scope.
+19. **DurableContextMiddleware** - Before compaction, captures task dispatch/result summaries in `ThreadState.delegations` and loaded skill name/path/description (never bodies) in `ThreadState.skill_context`; projects them per request. Static authority uses `SystemMessage`; untrusted `summary_text`, delegation results and skill descriptions use a separate hidden `HumanMessage` data block, never persisted as messages or promoted to system instructions. Subagents attach it immediately before summarization: summary precedes preserved AI/tool history for strict providers. See [tool artifacts](TOOL_ARTIFACTS.md) for projection, retry limits and delegation scope.
 20. **SummarizationMiddleware** - *(optional)* Compacts near token limits. Fraction trigger/keep profiles belong to the active run model; an explicit summary model only generates. Memory flush/manual compaction follow runtime/checkpoint agent policy. Preserve the latest user request and DynamicContext reminders; a backward cutoff may retain old AI/tool turns or make first-turn compaction a no-op.
 21. **TodoListMiddleware** - *(optional, if `is_plan_mode`)* Task tracking with `write_todos`. Skips reminders on `model_length_termination` so capped turns end cleanly. A raising model call requeues its reminder, uncounted, for the retry.
 22. **TokenUsageMiddleware** - *(optional, if `token_usage.enabled`)* Records token usage metrics; subagent usage is read from terminal `ToolMessage.additional_kwargs` in the current run and merged back into the dispatching AIMessage by message position. The same state update marks the ToolMessage with `subagent_token_usage_attributed=true`, so checkpoint replay or middleware re-entry cannot add the cumulative snapshot twice; missing/malformed usage or a result with no matching dispatch remains unmarked and retryable.
@@ -136,7 +136,7 @@ Before changing a later authorization phase, read the [authorization RFC](../../
 34. **Custom middlewares** - *(optional)* Any `custom_middlewares` passed to `build_middlewares` are injected here, before config-declared extensions and the terminal-response/safety/clarification tail
 35. **Configured extension middlewares** - `extensions.middlewares` in `config.yaml` or `extensions_config.json` optionally accepts `module.path:ClassName` strings or `{class, kwargs}` objects. `deerflow.reflection.resolve_class` loads `AgentMiddleware` classes; import, class, and constructor errors fail agent creation. `kwargs` must be JSON-compatible; YAML dates/timestamps become ISO strings. Order: built-ins/custom and loop/token guards → extensions → terminal-response/safety/clarification tail. Subagents share the list before their safety tail; separate lead/subagent lists are unsupported. Trusted operator config only: paths instantiate arbitrary code. Gateway skill/MCP toggles preserve it in raw JSON; adding an API write path requires explicit trust-boundary review.
 36. **TerminalResponseMiddleware** - When a provider returns an empty terminal `AIMessage` after tool execution, injects a hidden recovery prompt and retries the model once; a second empty response is replaced in checkpoint state by a visible error fallback marked for the run worker, so the run finishes as an error instead of a silent success
-37. **ModelLengthFinishReasonMiddleware** - Match stamps `stop_reason=model_length_capped` and ends tool loop. Suppresses calls, appends notice even with partial text, and stamps `model_length_termination` so downstream guards stand down. Preserves content blocks.
+37. **ModelLengthFinishReasonMiddleware** - Responses: same-container `status=incomplete` + `incomplete_details.reason=max_output_tokens`. Suppress calls via shared cloning after clearing invalid calls; keep non-call blocks/metadata. Stamp cap markers; add notice.
 38. **SafetyFinishReasonMiddleware** - *(optional, if `safety_finish_reason.enabled`)* Suppresses tool execution when the provider safety-terminated the response (e.g. `finish_reason=content_filter`); registered after terminal-response/custom/configured middlewares so LangChain's reverse-order `after_model` dispatch runs it first
 39. **ClarificationMiddleware** - Intercepts `ask_clarification`, writes a readable `ToolMessage.content` fallback plus a structured `ToolMessage.artifact.human_input` payload, and interrupts via `Command(goto=END)` (must be last). `after_model` drops same-turn sibling tool calls so they cannot run before the user answers; a malformed `ask_clarification` parked on `invalid_tool_calls` is the same stop signal. `disable_clarification` runs keep the siblings. Payloads are versioned — legacy `free_text`/`choice_with_other` stay `version: 1`; the v2 `form` mode (from `fields`) is `version: 2` so older frontends reject it and fall back to plain text. Field normalization is deterministic and lives in the middleware (it short-circuits before tool execution, so tool-arg typing gives no runtime validation), and it is atomic: any structurally broken entry — non-dict, bad/duplicate name, a name colliding with a JS `Object.prototype` member (`__proto__`/`constructor`), or exceeding the caps (16 fields / 24 options per field / 200 chars per text / `MAX_FORM_SERIALIZED_BYTES` = 16KB UTF-8, the per-item caps alone admitting forms whose IM text fallback overruns channel limits) — degrades the whole form to the legacy option/free-text modes, so a card never renders "complete" while missing a field. Benign issues degrade locally (unknown types — incl. unhashable JSON like `type: []` — and option-less selects become `text`); options are trimmed/deduped with blanks dropped (form- and top-level) since the frontend rejects blank labels. XML-to-dict option payloads are recursively flattened from dict/list containers in source order, scalar leaves kept, residual XML tags stripped before that trimming. Checkboxes are booleans defaulting to "no"; `required` on one means consent semantics. The response protocol is unchanged (v1 `text`/`option`): form cards submit a text summary as `response_kind: "text"`, so journal persistence needs no new allowlist entries. `RunJournal` reconciles visible, unpersisted `ToolMessage`s for current-run lead-agent calls at the next lead-agent `on_chat_model_start` after consumption, or at successful root `on_chain_end`. This preserves any middleware short-circuit, including blocked writes, across later model errors and checkpoint compaction (#4666). `_remember_current_run_tool_calls` excludes subagents; their results stay in `subagent.step`. Human Input Card replies are `hide_from_ui` `HumanMessage`s with `additional_kwargs.human_input_response`; `RunJournal` persists only allowlisted hidden sources (currently `ask_clarification`) as `llm.human.input`.
 
