@@ -796,6 +796,8 @@ def test_ls_tool_lists_user_data_root(tmp_path, monkeypatch, path) -> None:
     runtime = _make_runtime(tmp_path)
     (tmp_path / "uploads" / "report.txt").write_text("ready\n", encoding="utf-8")
     (tmp_path / "uploads" / ".upload-active.part").write_text("partial\n", encoding="utf-8")
+    (tmp_path / "workspace" / "src").mkdir()
+    (tmp_path / "workspace" / "src" / "deep.py").write_text("x = 1\n", encoding="utf-8")
 
     monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(id="local"))
 
@@ -804,34 +806,53 @@ def test_ls_tool_lists_user_data_root(tmp_path, monkeypatch, path) -> None:
     for name in ("workspace", "uploads", "outputs"):
         assert f"/mnt/user-data/{name}" in result
     assert "/mnt/user-data/uploads/report.txt" in result
+    assert "/mnt/user-data/workspace/src" in result
+    # Two levels from the root, like any other ls.
+    assert "deep.py" not in result
     assert ".upload-active.part" not in result
     assert str(tmp_path) not in result
 
 
-def test_glob_tool_searches_from_user_data_root(tmp_path, monkeypatch) -> None:
+def _plant_outside_allowed_dirs(tmp_path) -> None:
+    """Content in user-data/ that is not under workspace, uploads, or outputs."""
+    (tmp_path / "private.txt").write_text("ROOT_SECRET\n", encoding="utf-8")
+    (tmp_path / "extra").mkdir()
+    (tmp_path / "extra" / "notes.txt").write_text("EXTRA_SECRET\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize("path", ["/mnt/user-data", "/mnt/user-data/"])
+def test_ls_tool_on_user_data_root_lists_only_allowed_dirs(tmp_path, monkeypatch, path) -> None:
     runtime = _make_runtime(tmp_path)
-    (tmp_path / "workspace" / "app.py").write_text("print('hi')\n", encoding="utf-8")
-    (tmp_path / "outputs" / "chart.py").write_text("print('chart')\n", encoding="utf-8")
+    _plant_outside_allowed_dirs(tmp_path)
+    symlink_or_skip(tmp_path / "workspace" / "alias.txt", tmp_path / "private.txt")
 
     monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(id="local"))
 
-    result = glob_tool.func(runtime=runtime, description="find python files", pattern="**/*.py", path="/mnt/user-data")
+    result = ls_tool.func(runtime=runtime, description="list user data", path=path)
 
-    assert "/mnt/user-data/workspace/app.py" in result
-    assert "/mnt/user-data/outputs/chart.py" in result
-    assert str(tmp_path) not in result
+    assert "/mnt/user-data/workspace" in result
+    assert "private.txt" not in result
+    assert "extra" not in result
 
 
-def test_grep_tool_searches_from_user_data_root(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        (glob_tool, {"pattern": "**/*.txt"}),
+        (grep_tool, {"pattern": "SECRET"}),
+    ],
+)
+@pytest.mark.parametrize("path", ["/mnt/user-data", "/mnt/user-data/"])
+def test_search_tools_reject_user_data_root(tmp_path, monkeypatch, tool, arguments, path) -> None:
+    """A search walks every descendant, so it must not start above the allowed dirs."""
     runtime = _make_runtime(tmp_path)
-    (tmp_path / "uploads" / "report.md").write_text("Revenue grew 20%\n", encoding="utf-8")
+    _plant_outside_allowed_dirs(tmp_path)
 
     monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(id="local"))
 
-    result = grep_tool.func(runtime=runtime, description="find revenue", pattern="Revenue", path="/mnt/user-data")
+    result = tool.func(runtime=runtime, description="search user data", path=path, **arguments)
 
-    assert "/mnt/user-data/uploads/report.md:1: Revenue grew 20%" in result
-    assert str(tmp_path) not in result
+    assert result == f"Error: Permission denied: {path}"
 
 
 def _make_skills_sandbox(tmp_path, monkeypatch, *, disabled: str):

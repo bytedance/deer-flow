@@ -24,6 +24,7 @@ from deerflow.sandbox.tools import (
     _resolve_and_validate_user_data_path,
     _resolve_skills_path,
     bash_tool,
+    ls_tool,
     mask_local_paths_in_output,
     replace_virtual_path,
     replace_virtual_paths_in_command,
@@ -480,30 +481,24 @@ def test_validate_local_tool_path_allows_bare_virtual_root_for_reads() -> None:
     validate_local_tool_path(VIRTUAL_PATH_PREFIX, _THREAD_DATA, read_only=True)
 
 
-@pytest.mark.parametrize("path", [VIRTUAL_PATH_PREFIX, f"{VIRTUAL_PATH_PREFIX}/"])
-def test_resolve_user_data_root_only_when_allowed(path: str) -> None:
-    root = Path(_THREAD_DATA["workspace_path"]).parent.resolve()
-
-    assert _resolve_and_validate_user_data_path(path, _THREAD_DATA, allow_user_data_root=True) == str(root)
+@pytest.mark.parametrize("path", [VIRTUAL_PATH_PREFIX, f"{VIRTUAL_PATH_PREFIX}/", f"{VIRTUAL_PATH_PREFIX}/stray.txt"])
+def test_resolve_user_data_path_keeps_rejecting_the_root(path: str) -> None:
+    """Read and search tools resolve here; only ls lists the root, one allowed dir at a time."""
     with pytest.raises(PermissionError, match="path traversal"):
         _resolve_and_validate_user_data_path(path, _THREAD_DATA)
 
 
-def test_resolve_user_data_root_does_not_open_root_level_files() -> None:
-    with pytest.raises(PermissionError, match="path traversal"):
-        _resolve_and_validate_user_data_path(f"{VIRTUAL_PATH_PREFIX}/stray.txt", _THREAD_DATA, allow_user_data_root=True)
-
-
-def test_resolve_user_data_root_needs_a_shared_parent() -> None:
+def test_ls_tool_rejects_user_data_root_without_a_shared_parent(tmp_path) -> None:
     """Without a common parent there is no host root to list, so stay closed."""
-    thread_data = {
-        "workspace_path": "/tmp/deer-flow/a/workspace",
-        "uploads_path": "/tmp/deer-flow/b/uploads",
-        "outputs_path": "/tmp/deer-flow/c/outputs",
-    }
+    thread_data = {name: str(tmp_path / name / name.removesuffix("_path")) for name in ("workspace_path", "uploads_path", "outputs_path")}
+    for directory in thread_data.values():
+        Path(directory).mkdir(parents=True)
+    runtime = SimpleNamespace(state={"sandbox": {"sandbox_id": "local"}, "thread_data": thread_data}, context={"thread_id": "thread-1"})
 
-    with pytest.raises(PermissionError, match="path traversal"):
-        _resolve_and_validate_user_data_path(VIRTUAL_PATH_PREFIX, thread_data, allow_user_data_root=True)
+    with patch("deerflow.sandbox.tools.ensure_sandbox_initialized", return_value=LocalSandbox(id="local")):
+        result = ls_tool.func(runtime=runtime, description="list", path=VIRTUAL_PATH_PREFIX)
+
+    assert result == f"Error: Permission denied: {VIRTUAL_PATH_PREFIX}"
 
 
 @pytest.mark.parametrize("path", [VIRTUAL_PATH_PREFIX, f"{VIRTUAL_PATH_PREFIX}/"])
