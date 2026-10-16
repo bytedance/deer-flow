@@ -99,7 +99,13 @@ def _lock_for(path: Path) -> threading.RLock:
 
 @contextmanager
 def _projection_lock(root: Path) -> Iterator[None]:
-    """Serialize projection replacement in-process and across POSIX workers."""
+    """Serialize projection replacement across workers without Windows lock caps.
+
+    Windows ``LK_LOCK`` gives up after about ten seconds. Use the same
+    contention-only retry contract as the other cross-process locks so a
+    nested projection mutation cannot fail while its outer mutation lock is
+    still held.
+    """
     lock_path = root.parent / f".{root.name}.projection.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     process_lock = _lock_for(lock_path)
@@ -108,7 +114,15 @@ def _projection_lock(root: Path) -> Iterator[None]:
             fcntl.flock(lock_file, fcntl.LOCK_EX)
         else:  # pragma: no cover - Windows
             lock_file.seek(0)
-            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+            if lock_file.tell() == 0:
+                lock_file.write("\0")
+                lock_file.flush()
+
+            def acquire_region() -> None:
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+
+            retry_until_locked(acquire_region)
         try:
             yield
         finally:

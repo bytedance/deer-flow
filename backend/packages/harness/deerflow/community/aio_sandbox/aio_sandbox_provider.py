@@ -176,6 +176,11 @@ async def _run_started_acquire_worker[T](
 
 
 def _lock_file_exclusive(lock_file) -> None:
+    """Wait indefinitely through peer contention, matching POSIX flock.
+
+    A live peer holding this lock is expected to release it when its process
+    exits; an unbounded wait avoids Windows ``LK_LOCK``'s ~10-second cap.
+    """
     if fcntl is not None:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
         return

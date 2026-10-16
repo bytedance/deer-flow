@@ -39,3 +39,6 @@ the nested projection lock, retain it across requests, and acquire/release both
 off-loop inside the drained worker. Unrelated users retain independent locks;
 external filesystem writers do not participate in this history guarantee.
 The Windows sidecar acquisition retries only contention through `file_lock.retry_until_locked`; permanent errors propagate.
+The same retry contract applies to runtime channel config, extensions config,
+and skill projection sidecars, including projection nested inside a skill
+mutation. These shared filesystem locks no longer use `msvcrt.LK_LOCK`.
