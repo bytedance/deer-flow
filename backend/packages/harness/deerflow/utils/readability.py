@@ -40,9 +40,19 @@ class Article:
 
         class ImageMessageConverter(MarkdownConverter):
             def convert_img(self, el, text, parent_tags):
+                # Mirrors the inline-image policy of MarkdownConverter.convert_img
+                # (the "_inline" parent pseudo-tag plus keep_inline_images_in, as of
+                # markdownify >= 1.2.2) so only the images markdownify itself would
+                # render as "![..](..)" are captured. Revisit on a markdownify upgrade.
                 if "_inline" in parent_tags and el.parent.name not in self.options["keep_inline_images_in"]:
                     return super().convert_img(el, text, parent_tags)
-                image_urls.append(el.attrs.get("src", "") or "")
+                src = (el.attrs.get("src") or "").strip()
+                if not src:
+                    # An image with no usable src (empty, bare, or srcset-only) has
+                    # nothing to resolve: urljoin() would turn it into the article
+                    # URL and hand an HTML page to a vision provider.
+                    return ""
+                image_urls.append(src)
                 return f"{marker}{len(image_urls) - 1}END"
 
         image_pattern = rf"{marker}(\d+)END"
