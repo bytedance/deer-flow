@@ -10,11 +10,6 @@ ownership and capture cleanup. Retain the real XLSX conversion coverage.
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
-Multi-instance harness tests use `support.shell.require_script_bash()` for shell
-smoke checks. Keep config content and secret stability checks portable; isolate
-POSIX owner-only permission assertions so Windows skips only those checks.
-Nginx path expectations must include quoted-string escaping for native paths.
-
 Config-upgrade checkout fixtures clear inherited `DEER_FLOW_CONFIG_PATH`,
 `DEER_FLOW_PROJECT_ROOT` and `DEER_FLOW_ENV_FILE` before applying explicit test
 overrides. Exercise selector leaks through the real script with temporary
@@ -301,3 +296,8 @@ setup, after the autouse fixtures initialize runtime, to avoid the package cycle
 ### Web model provider presets
 
 `test_managed_provider_presets.py` covers encrypted compatibility, auto IDs, key switching, snapshot isolation and native/compatible protocols. Its HTTP double is below actual LangChain/vendor SDK serialization; do not replace these adapters with successful stubs. `test_managed_presets_live.py` requires explicit opt-in and vendor credentials, and remains skipped in CI.
+
+Multi-instance harness tests use `support.shell.require_script_bash()` for shell
+smoke checks. Keep config content and secret stability checks portable; isolate
+POSIX owner-only permission assertions so Windows skips only those checks.
+Nginx path expectations must include quoted-string escaping for native paths.
