@@ -288,3 +288,42 @@ async def test_cleanup_failure_overrides_pending_summary(monkeypatch, caplog, st
     (record,) = summaries(caplog)
     assert "outcome=error reason=request_failure attempts=1" in record
     assert "sentinel" not in record
+
+
+async def test_admission_rejection_has_zero_http_attempts(transport, caplog, monkeypatch):
+    from deerflow.community.jina_ai import request_admission
+
+    monkeypatch.setattr(request_admission, "_admission", None)
+    entered, release = asyncio.Event(), asyncio.Event()
+    seen = []
+
+    class HeldResponse(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            entered.set()
+            await release.wait()
+            yield b"ok"
+
+        async def aclose(self):
+            pass
+
+    def handle(request):
+        seen.append(request)
+        return httpx.Response(200, stream=HeldResponse())
+
+    transport(handle)
+    caplog.set_level(logging.DEBUG, logger=jina.__name__)
+    policy = {"max_concurrent_requests": 1, "max_queue_size": 0, "max_wait_seconds": 5}
+    first = asyncio.create_task(jina.JinaClient().crawl("https://example.invalid/first", request_admission=policy))
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        result = await jina.JinaClient().crawl("https://example.invalid/second", request_admission=policy)
+        assert result == "Error: Local Jina request admission rejected: queue full"
+        assert len(seen) == 1
+        assert len(summaries(caplog)) == 1
+        assert "outcome=error reason=request_failure attempts=0" in summaries(caplog)[0]
+    finally:
+        release.set()
+        assert await first == "ok"
+    assert len(summaries(caplog)) == 2
+    assert "outcome=success reason=success attempts=1" in summaries(caplog)[1]
+    assert request_admission._admission._active == 0
