@@ -134,6 +134,12 @@ def test_test_names_cannot_supply_failure_or_zero_evidence(label, point):
     assert verdict["all_hold"] is True
 
 
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_todo_diagnostic_location_cannot_supply_error_count(newline):
+    output = "⚠ 1 failed # TODO\n" + _summary("ℹ", todo=1) + "\ntest at sample.test.cjs:1:57\n\n  Error: fixture"
+    assert _verdict(output.replace("\n", newline))["all_hold"] is True
+
+
 def test_color_codes_are_normalized_for_counts_and_output_admission():
     output = "\x1b[90m﹣ all tests passed\x1b[39m\n" + "\n".join(f"\x1b[34m{line}\x1b[39m" for line in _summary("ℹ", passed=0, skipped=1).splitlines())
     assert _verdict(output)["leaves"][0]["checked"] is False

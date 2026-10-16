@@ -268,8 +268,8 @@ def _build_test_summary_holds(text: str) -> bool | None:
 
 
 _TEST_FAIL_SHAPE_RE = re.compile(
-    r"\b[1-9]\d*\s+failed\b"  # pytest / jest: "1 failed"
-    r"|\b[1-9]\d*\s+errors?\b"  # pytest: "1 error" — an errored collection means part of the selection never ran
+    r"\b[1-9]\d*[ \t]+failed\b"  # pytest / jest: same-line "1 failed", never a diagnostic location on the previous line
+    r"|\b[1-9]\d*[ \t]+errors?\b"  # pytest: "1 error" — an errored collection means part of the selection never ran
     r"|^FAILED\b"  # unittest summary line
     r"|^ERROR\s+\S"  # pytest short summary: "ERROR tests/unit/test_auth.py"
     r"|test result: FAILED"  # cargo test
