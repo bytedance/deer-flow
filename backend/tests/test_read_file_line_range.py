@@ -33,7 +33,7 @@ def _local_runtime(tmp_path: Path) -> SimpleNamespace:
 
 def _read(tmp_path, monkeypatch, **kwargs) -> str:
     runtime = _local_runtime(tmp_path)
-    (tmp_path / "uploads" / "five.txt").write_text(_FIVE_LINES, encoding="utf-8")
+    (tmp_path / "uploads" / "five.txt").write_text(_FIVE_LINES, encoding="utf-8", newline="\n")
     monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox("t1"))
     monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
     return read_file_tool.func(
