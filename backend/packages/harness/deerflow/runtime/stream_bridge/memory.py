@@ -22,6 +22,7 @@ class _RunStream:
     condition: asyncio.Condition = field(default_factory=asyncio.Condition)
     ended: bool = False
     start_offset: int = 0
+    retired: bool = False
 
 
 class MemoryStreamBridge(StreamBridge):
@@ -148,13 +149,16 @@ class MemoryStreamBridge(StreamBridge):
 
         while True:
             async with stream.condition:
-                if next_offset < stream.start_offset:
+                if stream.retired:
+                    entry: StreamItem = StreamGap(cursor_event_id, None, None)
+                    should_stop = True
+                elif next_offset < stream.start_offset:
                     logger.warning(
                         "subscriber for run %s fell behind retained buffer at offset %s",
                         run_id,
                         next_offset,
                     )
-                    entry: StreamItem = self._make_gap(stream, cursor_event_id)
+                    entry = self._make_gap(stream, cursor_event_id)
                     should_stop = True
                 else:
                     should_stop = False
@@ -184,9 +188,20 @@ class MemoryStreamBridge(StreamBridge):
     async def cleanup(self, run_id: str, *, delay: float = 0) -> None:
         if delay > 0:
             await asyncio.sleep(delay)
-        self._streams.pop(run_id, None)
-        self._counters.pop(run_id, None)
+        stream = self._streams.get(run_id)
+        if stream is None:
+            return
+        async with stream.condition:
+            # Established generators retain this object after registry removal.
+            # Retire that generation, release its payloads, and wake readers so
+            # they can reload durable state rather than waiting on an orphan.
+            stream.retired = True
+            stream.events.clear()
+            if self._streams.get(run_id) is stream:
+                self._streams.pop(run_id, None)
+                self._counters.pop(run_id, None)
+            stream.condition.notify_all()
 
     async def close(self) -> None:
-        self._streams.clear()
-        self._counters.clear()
+        for run_id in tuple(self._streams):
+            await self.cleanup(run_id)
