@@ -338,7 +338,12 @@ class LocalSandbox(Sandbox):
             return None
         # The lookahead (?=/|$|...) ensures we only match at a path-segment boundary,
         # preventing /mnt/skills from matching inside /mnt/skills-extra.
-        patterns = [re.escape(m.container_path) + r"(?=/|$|[\s\"';&|<>()])(?:/[^\s\"';&|<>()]*)?" for m in mappings]
+        #
+        # The tail ends at ":" as well (mirroring path_patterns._PATH_TAIL):
+        # substitution resumes after a match, so a tail that ran through a
+        # ":"-joined list ($PATH, $PYTHONPATH) swallowed every later entry and
+        # left those container paths unresolved.
+        patterns = [re.escape(m.container_path) + r"(?=/|$|[\s\"';&|<>()])(?:/[^\s\"';&|<>():]*)?" for m in mappings]
         return re.compile("|".join(f"({p})" for p in patterns))
 
     @cached_property
@@ -347,7 +352,11 @@ class LocalSandbox(Sandbox):
         mappings = sorted(self.path_mappings, key=lambda m: len(m.container_path), reverse=True)
         if not mappings:
             return None
-        patterns = [re.escape(m.container_path) + r"(?=/|$|[^\w./-])(?:/[^\s\"';&|<>()]*)?" for m in mappings]
+        # The tail ends at ":" for the same reason as _command_pattern above:
+        # write_file content regularly stores PATH-style exports, and a tail
+        # that ran through the ":" left the later list entries virtual in the
+        # host file (read_file masked them back, so the corruption was hidden).
+        patterns = [re.escape(m.container_path) + r"(?=/|$|[^\w./-])(?:/[^\s\"';&|<>():]*)?" for m in mappings]
         return re.compile("|".join(f"({p})" for p in patterns))
 
     @cached_property

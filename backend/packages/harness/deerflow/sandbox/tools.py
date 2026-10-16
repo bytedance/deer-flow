@@ -1541,7 +1541,12 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
         # ``:`` (PATH-style concatenation) or ``,``, which the shell-oriented
         # class rejects — narrowing to it would stop translating paths that
         # translate today. ``$`` covers a command ending exactly at the root.
-        pattern = re.compile(rf"{re.escape(VIRTUAL_PATH_PREFIX)}(?=/|$|[^\w./-])(/[^\s\"';&|<>()]*)?")
+        #
+        # The tail ends at ``:`` (like ``path_patterns._PATH_TAIL``): the
+        # boundary above admits PATH-style concatenation, but a tail that ran
+        # through the ``:`` swallowed every later entry of the list, leaving
+        # those virtual paths unresolved in the command.
+        pattern = re.compile(rf"{re.escape(VIRTUAL_PATH_PREFIX)}(?=/|$|[^\w./-])(/[^\s\"';&|<>():]*)?")
 
         def replace_user_data_match(match: re.Match) -> str:
             return replace_virtual_path(match.group(0), thread_data).replace("\\", "/")
