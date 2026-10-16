@@ -7,7 +7,9 @@ from deerflow.agents.memory.backends.deermem.deermem.core.queue import Conversat
 
 
 def _queue(updater: MagicMock | None = None) -> MemoryUpdateQueue:
-    return MemoryUpdateQueue(DeerMemConfig(), updater or MagicMock())
+    updater = updater or MagicMock()
+    updater.peek_clear_generation.return_value = (0, 0)
+    return MemoryUpdateQueue(DeerMemConfig(), updater)
 
 
 def test_conversation_context_has_user_id():
