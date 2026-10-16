@@ -192,7 +192,6 @@ class InfoQuestClient:
         return response_json
 
     @staticmethod
-    @staticmethod
     def _envelope_entries(raw_results: object) -> list[dict]:
         """Return the ``content``/``results`` envelopes of a search payload.
 
@@ -224,20 +223,29 @@ class InfoQuestClient:
         return entries
 
     @staticmethod
-    def _rows(value: object) -> list[dict]:
+    def _rows(value: object, container: str) -> list[dict]:
         """Return the object rows of one vertical, or [] when the key is absent.
 
         A missing or null container is an empty search. A container that is not
         a list, or a non-empty list holding no object entries, is malformed: the
         caller reports the provider's format error rather than an empty result,
         which would tell the agent the query legitimately matched nothing.
+        Non-object entries are skipped in order so the valid rows survive, and
+        each skip is logged with the container name and the entry index --
+        ``_envelope_entries`` reports its skips the same way, and a provider-side
+        drift would otherwise shed entries with no trace at all.
         """
         if value is None:
             return []
         if not isinstance(value, list):
             logger.error("InfoQuest returned an unexpected result container type: %s", type(value).__name__)
             raise InfoQuestResponseError("InfoQuest returned an unexpected response format")
-        rows = [row for row in value if isinstance(row, dict)]
+        rows: list[dict] = []
+        for index, row in enumerate(value):
+            if not isinstance(row, dict):
+                logger.warning("Skipping malformed InfoQuest result entry at %s[%d]", container, index)
+                continue
+            rows.append(row)
         if value and not rows:
             logger.error("InfoQuest returned a result container with no usable entries")
             raise InfoQuestResponseError("InfoQuest returned an unexpected response format")
@@ -253,7 +261,7 @@ class InfoQuestClient:
         counts = {"pages": 0, "news": 0}
 
         for results in cls._envelope_entries(raw_results):
-            organic_results = cls._rows(results.get("organic"))
+            organic_results = cls._rows(results.get("organic"), "organic")
             for result in organic_results:
                 clean_result = {
                     "type": "page",
@@ -273,7 +281,7 @@ class InfoQuestClient:
 
             top_stories = results.get("top_stories")
             if isinstance(top_stories, dict):
-                news_items = cls._rows(top_stories.get("items"))
+                news_items = cls._rows(top_stories.get("items"), "top_stories.items")
                 for obj in news_items:
                     clean_result = {
                         "type": "news",
@@ -371,7 +379,7 @@ class InfoQuestClient:
         counts = {"images": 0}
 
         for results in cls._envelope_entries(raw_results):
-            for result in cls._rows(results.get("images_results")):
+            for result in cls._rows(results.get("images_results"), "images_results"):
                 clean_result = {}
                 if "original" in result:
                     clean_result["image_url"] = result["original"]
