@@ -66,6 +66,13 @@ inside the box and reuse `deerflow.sandbox.search`, mirroring `e2b_sandbox`:
 - `download_file` — 100 MB cap, restricted to the `/mnt/user-data` prefix.
 - `list_dir` / `glob` / `grep` — `find` / `grep` with busybox-portable flags; results filtered/capped in Python.
 
+Command timeouts pass the same deadline to the SDK and event-loop bridge. A
+bridge deadline returns `Error: command timed out` followed by `Exit Code: 124`.
+BoxLite's `SimpleBox.exec` converts SDK wait failures to `ExecResult(exit_code=-1)`;
+if that result arrives before the bridge deadline, DeerFlow preserves `-1`.
+The bridge handler catches Python's builtin `TimeoutError`, which is distinct
+from the SDK's `boxlite.TimeoutError`.
+
 The provider creates `/mnt/user-data/{workspace,uploads,outputs}` and
 `/mnt/skills` on box start so those virtual paths resolve natively.
 

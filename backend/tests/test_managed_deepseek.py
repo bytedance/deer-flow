@@ -117,7 +117,7 @@ async def test_probe_requires_the_expected_tool_and_empty_arguments(store, provi
 async def test_probe_does_not_retry_or_expose_provider_errors(store, provider, status):
     provider.status = status
     result = await router.test_model(_ADMIN, router.SaveModelRequest(config=_profile()))
-    assert result == {"ok": False, "message": "connection_failed"}
+    assert result == {"ok": False, "message": "authentication_failed" if status in (401, 403) else "connection_failed"}
     assert _KEY not in json.dumps(result)
     assert len(provider.requests) == 1
     assert not store.path.exists()
@@ -140,7 +140,7 @@ async def test_probe_uses_draft_or_saved_key_without_persisting(store, provider,
     original_catalog = store.path.read_bytes()
     draft = _profile(api_key={"retained": None, "replacement": _KEY, "cleared": ""}[key_mode])
     result = await router.test_model(_ADMIN, router.SaveModelRequest(config=draft, expected_revision=saved.revision))
-    assert result == ({"ok": False, "message": "connection_failed"} if key_mode == "cleared" else {"ok": True, "message": "success"})
+    assert result == ({"ok": False, "message": "authentication_failed"} if key_mode == "cleared" else {"ok": True, "message": "success"})
     assert len(provider.requests) == 1
     expected_key = "not-required" if key_mode == "cleared" else _KEY
     assert provider.requests[0][0].headers["authorization"] == f"Bearer {expected_key}"
@@ -250,7 +250,7 @@ async def test_new_draft_without_key_does_not_use_environment_credentials(store,
     monkeypatch.setenv("DEEPSEEK_API_KEY", _KEY)
     monkeypatch.setenv("OPENAI_API_KEY", _KEY)
     result = await router.test_model(_ADMIN, router.SaveModelRequest(config=_profile(api_key=None)))
-    assert result == {"ok": False, "message": "connection_failed"}
+    assert result == {"ok": False, "message": "authentication_failed"}
     assert provider.requests[0][0].headers["authorization"] == "Bearer not-required"
     assert not store.path.exists()
 

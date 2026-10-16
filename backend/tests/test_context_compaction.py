@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Annotated, NotRequired, TypedDict
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
@@ -13,7 +14,7 @@ from app.gateway import services as gateway_services
 from deerflow.agents.middlewares.summarization_middleware import SummaryGenerationError
 from deerflow.runtime import context_compaction
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
-from deerflow.runtime.context_compaction import ContextCompactionFailed, compact_thread_context
+from deerflow.runtime.context_compaction import ContextCompactionFailed, ContextCompactionPendingWork, compact_thread_context
 from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY, DEFAULT_AGENT_NAME_METADATA_VALUE
 
 
@@ -34,6 +35,11 @@ class _FakeAccessor:
 
     async def aget(self, _config):
         return self.snapshot
+
+    async def aget_tuple(self, _config):
+        # Mirror CheckpointStateAccessor.aget_tuple: raw checkpoint tuple with
+        # channel_values. The stub thread is idle, so no __pregel_tasks entry.
+        return SimpleNamespace(checkpoint={"channel_values": dict(self.snapshot.values)})
 
     async def aupdate(self, config, values, *, as_node=None):
         self.update_args = (config, values, as_node)
@@ -122,6 +128,25 @@ async def test_compact_thread_context_reads_materialized_state_and_overwrites_me
     assert middleware.runtime_contexts == [
         {"thread_id": "thread-1", "user_id": "user-1", "agent_name": "research-agent"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_compact_thread_context_rejects_unavailable_checkpoint_before_summarizing(monkeypatch):
+    accessor = _FakeAccessor({"messages": [HumanMessage(content="question"), AIMessage(content="answer")]})
+    accessor.aget_tuple = AsyncMock(return_value=None)
+    accessor.aupdate = AsyncMock(wraps=accessor.aupdate)
+    middleware = _FakeCompactionMiddleware()
+    create_middleware = MagicMock(return_value=middleware)
+    monkeypatch.setattr(context_compaction, "_create_compaction_middleware", create_middleware)
+
+    with pytest.raises(ContextCompactionPendingWork, match="checkpoint is unavailable.*Cannot verify pending execution"):
+        await compact_thread_context(accessor, "thread-1", app_config=SimpleNamespace())
+
+    accessor.aget_tuple.assert_awaited_once()
+    create_middleware.assert_not_called()
+    assert middleware.prepare_calls == 0
+    assert middleware.runtime_contexts == []
+    accessor.aupdate.assert_not_awaited()
 
 
 @pytest.mark.asyncio

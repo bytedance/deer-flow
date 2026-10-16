@@ -8,6 +8,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import InjectedToolArg, StructuredTool
 from pydantic import BaseModel, Field
 
+from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.mcp.tools import get_mcp_tools
 from deerflow.tools.sync import make_sync_tool_wrapper
 
@@ -33,10 +34,20 @@ def test_mcp_tool_sync_wrapper_generation():
     mock_client_instance = MagicMock()
     # Use AsyncMock for get_tools as it's awaited (Fix for Comment 5)
     mock_client_instance.get_tools = AsyncMock(return_value=[mock_tool])
+    extensions_config = ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "test-server": {
+                    "type": "http",
+                    "url": "https://example.test/mcp",
+                }
+            }
+        }
+    )
 
     with (
         patch("langchain_mcp_adapters.client.MultiServerMCPClient", return_value=mock_client_instance),
-        patch("deerflow.config.extensions_config.ExtensionsConfig.from_file"),
+        patch("deerflow.config.extensions_config.ExtensionsConfig.from_file", return_value=extensions_config),
         patch(
             "deerflow.mcp.tools.build_servers_config",
             return_value={
@@ -85,11 +96,31 @@ def test_mcp_tool_loading_skips_failed_server():
 
     mock_client_instance = MagicMock()
     mock_client_instance.get_tools = AsyncMock(side_effect=get_tools_for_server)
+    extensions_config = ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "good-server": {
+                    "type": "http",
+                    "url": "https://good.example/mcp",
+                },
+                "bad-server": {
+                    "type": "http",
+                    "url": "https://bad.example/mcp",
+                },
+            }
+        }
+    )
 
     with (
         patch("langchain_mcp_adapters.client.MultiServerMCPClient", return_value=mock_client_instance),
-        patch("deerflow.config.extensions_config.ExtensionsConfig.from_file", return_value=MagicMock(model_extra={})),
-        patch("deerflow.mcp.tools.build_servers_config", return_value={"good-server": {}, "bad-server": {}}),
+        patch("deerflow.config.extensions_config.ExtensionsConfig.from_file", return_value=extensions_config),
+        patch(
+            "deerflow.mcp.tools.build_servers_config",
+            return_value={
+                "good-server": {"transport": "http", "url": "https://good.example/mcp"},
+                "bad-server": {"transport": "http", "url": "https://bad.example/mcp"},
+            },
+        ),
         patch("deerflow.mcp.tools.get_initial_oauth_headers", new_callable=AsyncMock, return_value={}),
         patch("deerflow.mcp.tools.build_oauth_tool_interceptor", return_value=None),
         patch("deerflow.mcp.tools.logger.warning") as mock_warning,
@@ -99,7 +130,11 @@ def test_mcp_tool_loading_skips_failed_server():
     assert [tool.name for tool in tools] == ["good-server_search"]
     assert tools[0].func is not None
     mock_warning.assert_called_once()
-    assert "bad-server" in mock_warning.call_args[0][0]
+    args, kwargs = mock_warning.call_args
+    assert args[1] == "bad-server"
+    assert args[2] == "RuntimeError"
+    assert "server 'bad-server'" in args[0] % args[1:]
+    assert kwargs.get("exc_info") is None
 
 
 def test_mcp_tool_sync_wrapper_in_running_loop():
@@ -229,8 +264,16 @@ def test_func_patched_mcp_tool_keeps_toolnode_runtime_injection(tmp_path):
     client.get_tools = AsyncMock(return_value=[discovered])
     client.tool_interceptors = []
     client.callbacks = None
-    cfg = MagicMock()
-    cfg.mcp_servers = {}
+    cfg = ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "pw": {
+                    "type": "stdio",
+                    "command": "x",
+                }
+            }
+        }
+    )
 
     with (
         patch("langchain_mcp_adapters.client.MultiServerMCPClient", return_value=client),

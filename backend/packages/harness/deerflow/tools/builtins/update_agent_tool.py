@@ -38,6 +38,7 @@ from deerflow.config.agents_config import load_agent_config, preserve_non_manage
 from deerflow.config.app_config import get_app_config
 from deerflow.config.paths import get_paths
 from deerflow.persistence.agents import get_agent_store
+from deerflow.persistence.agents.file import FileAgentStore
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.types import Runtime
 
@@ -158,19 +159,16 @@ def update_agent(
     if model is not None and get_app_config().get_model_config(model) is None:
         return _err(f"Unknown model '{model}'. Pass a model name that exists in config.yaml's models section.")
 
-    paths = get_paths()
-    agent_dir = paths.user_agent_dir(user_id, agent_name)
-    legacy_dir = paths.agent_dir(agent_name)
-    # Require config.yaml, not bare directory existence — a per-user agent
-    # directory can exist containing only memory.json (written the first
-    # time this user chats with a legacy shared agent, before update_agent
-    # is ever called). Bare .exists() would miss that case and let this
-    # fall through to load_agent_config, which correctly resolves through
-    # to the legacy shared config via resolve_agent_dir, silently forking
-    # a brand-new config.yaml/SOUL.md into the memory-only directory
-    # instead of blocking (mirrors resolve_agent_dir's guard, see #3390).
-    if not (agent_dir / "config.yaml").exists() and (legacy_dir / "config.yaml").exists():
-        return _err(f"Agent '{agent_name}' only exists in the legacy shared layout and is not scoped to a user. Run scripts/migrate_user_isolation.py to move legacy agents into the per-user layout before updating.")
+    # SQL definitions are already owner-scoped; the importer leaves their
+    # file-backed sources in place for rollback (#6743).
+    if isinstance(get_agent_store(), FileAgentStore):
+        paths = get_paths()
+        agent_dir = paths.user_agent_dir(user_id, agent_name)
+        legacy_dir = paths.agent_dir(agent_name)
+        # A memory-only user directory must not shadow the shared definition
+        # or allow a silent per-user fork (see #3390).
+        if not (agent_dir / "config.yaml").exists() and (legacy_dir / "config.yaml").exists():
+            return _err(f"Agent '{agent_name}' only exists in the legacy shared layout and is not scoped to a user. Run scripts/migrate_user_isolation.py to move legacy agents into the per-user layout before updating.")
 
     try:
         existing_cfg = load_agent_config(agent_name, user_id=user_id)

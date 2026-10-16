@@ -1,3 +1,4 @@
+import ctypes
 import errno
 import locale
 import logging
@@ -14,6 +15,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT, download_limit
 from deerflow.sandbox.env_policy import build_sandbox_env
 from deerflow.sandbox.local.list_dir import list_dir
 from deerflow.sandbox.path_patterns import replace_output_path_matches
@@ -50,23 +52,53 @@ class _BoundedPipeCapture:
         self._chunks: list[bytes] = []
         self._kept_bytes = 0
         self._total_bytes = 0
+        # Set when the child may have been killed mid-write (timeout path): the
+        # capture may end in a partial multi-byte sequence that the strict
+        # retry is allowed to trim. A complete buffer — no byte-cap cut, no
+        # kill — never trims, so a valid locale-encoded tail (e.g. cp1252
+        # ``b'caf\xe9'``) reaches the fallback with every byte intact.
+        self._split_tail = False
         self._lock = threading.Lock()
 
-    def _decode(self, data: bytes) -> str:
+    def mark_split_tail(self) -> None:
+        """Authorize the trim retry because the child may have been killed
+        mid-write, leaving a partial multi-byte sequence at the buffer end."""
+        with self._lock:
+            self._split_tail = True
+
+    def _decode(self, data: bytes, *, allow_trim: bool) -> str:
         """Decode captured bytes, preferring the primary encoding when valid.
 
         A forced ``encoding`` describes the shell's *own* output. Windows-native
         children (``python.exe``, CLI shims) inherit the pipe and keep writing the
         host code page, which is not valid in the forced encoding. Rather than
         replacing every such byte with U+FFFD, retry the whole buffer with
-        ``fallback_encoding`` (the locale) when the primary decode fails.
+        ``fallback_encoding`` (the locale) when the primary decode fails. Only a
+        capture that may have been cut mid-character (a byte-cap cut or a
+        timeout kill, signalled via ``allow_trim``) retries the strict attempt
+        without the trailing partial sequence; a complete buffer — even one
+        that merely *ends* in a byte shaped like a bare UTF-8 lead — goes to
+        the fallback untouched so no locale-encoded tail byte is dropped.
         """
         if self._fallback_encoding is None:
             return data.decode(self._encoding, errors="replace")
         try:
             return data.decode(self._encoding)
         except UnicodeDecodeError:
-            return data.decode(self._fallback_encoding, errors="replace")
+            pass
+        if allow_trim and self._encoding.replace("_", "-").lower() == "utf-8":
+            # The capture may have been cut mid-character (capture-cap
+            # boundary or a timeout kill). Retry the strict attempt without
+            # that tail so one split character cannot cascade the whole
+            # buffer to the fallback; a tail that survives the trim still
+            # fails the retried attempt and reaches the fallback untouched.
+            trimmed = _trim_trailing_partial_utf8(data)
+            if len(trimmed) != len(data):
+                try:
+                    return trimmed.decode(self._encoding)
+                except UnicodeDecodeError:
+                    pass
+        return data.decode(self._fallback_encoding, errors="replace")
 
     def append(self, chunk: bytes) -> None:
         with self._lock:
@@ -82,10 +114,14 @@ class _BoundedPipeCapture:
         with self._lock:
             data = b"".join(self._chunks)
             truncated = self._total_bytes > self._kept_bytes
+            split_tail = self._split_tail
             total_bytes = self._total_bytes
             kept_bytes = self._kept_bytes
 
-        output = self._decode(data)
+        # Trimming is only justified on a capture that may have been cut
+        # mid-character — a byte-cap cut or a timeout kill. A complete buffer
+        # goes to the fallback with every byte intact.
+        output = self._decode(data, allow_trim=truncated or split_tail)
         if self._normalize_newlines:
             # Match ``subprocess.run(..., text=True)``: text streams use universal
             # newlines, translating both CRLF and bare CR to LF.
@@ -94,6 +130,31 @@ class _BoundedPipeCapture:
             notice = f"\n... [output truncated after {kept_bytes} of {total_bytes} bytes; remaining output discarded] ..."
             output += notice
         return output
+
+
+def _trim_trailing_partial_utf8(data: bytes) -> bytes:
+    """Strip an incomplete multi-byte UTF-8 sequence from the end of ``data``.
+
+    A bounded capture can stop mid-character: the byte cap may cut between a
+    lead byte and its continuations, and a timeout kill can interrupt the
+    child mid-write. Only invoked when the caller has signalled such a cut
+    (``allow_trim``) — a complete buffer is never trimmed, so a locale-encoded
+    tail that merely *looks* like a bare UTF-8 lead (for example the ``E9``
+    byte of a cp1252 ``café``) reaches the locale fallback with every byte
+    intact instead of being dropped as an incomplete sequence.
+    """
+    for offset in range(min(len(data), 4)):
+        byte = data[len(data) - 1 - offset]
+        if byte < 0x80 or 0xC0 <= byte <= 0xC1 or byte > 0xF4:
+            # ASCII or an invalid byte: whatever precedes it is either complete
+            # or unrecoverable either way; stop without trimming.
+            break
+        if byte >= 0xC2:  # lead byte found
+            expected = 2 if byte < 0xE0 else (3 if byte < 0xF0 else 4)
+            if offset + 1 < expected:
+                return data[: len(data) - 1 - offset]
+            break
+    return data
 
 
 @dataclass(frozen=True)
@@ -508,6 +569,24 @@ class LocalSandbox(Sandbox):
         return pattern.sub(replace_match, content)
 
     @staticmethod
+    def _get_cmd_output_encoding() -> str:
+        """Select cmd builtins' console page, or the OEM default without a console."""
+        try:
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            for name in ("GetConsoleOutputCP", "GetOEMCP"):
+                get_code_page = getattr(kernel32, name)
+                get_code_page.argtypes = []
+                get_code_page.restype = ctypes.c_uint
+                code_page = get_code_page()
+                if code_page:
+                    return f"cp{code_page}"
+        except (AttributeError, OSError):
+            pass
+        # Last resort when the Windows APIs are unavailable. Unlike
+        # getpreferredencoding(), this remains independent of Python UTF-8 mode.
+        return locale.getencoding()
+
+    @staticmethod
     def _get_shell() -> str:
         """Detect available shell executable with fallback."""
         shell = LocalSandbox._find_first_available_shell(("/bin/zsh", "/bin/bash", "/bin/sh", "sh"))
@@ -591,14 +670,47 @@ class LocalSandbox(Sandbox):
                     timeout,
                     sandbox_env,
                     encoding="utf-8",
-                    fallback_encoding=locale.getpreferredencoding(False),
+                    # ``locale.getencoding()`` (3.11+, repo floor is 3.12)
+                    # deliberately ignores Python UTF-8 mode and returns the code
+                    # page the child's CRT actually used — ``getpreferredencoding``
+                    # would report ``"utf-8"`` on hosts running under
+                    # ``PYTHONUTF8=1``, silently making this fallback a no-op.
+                    fallback_encoding=locale.getencoding(),
                 )
             elif self._is_powershell(shell):
                 # PowerShell is pinned to UTF-8 by the preamble above, so its own
                 # output must be decoded as UTF-8: any other code page (GBK on
                 # zh-CN) mangles non-ASCII output because the pipe decoder
-                # replaces instead of raising.
-                stdout, stderr, returncode, timed_out = self._run_windows_command(args, timeout, sandbox_env, encoding="utf-8")
+                # replaces instead of raising. Native children PowerShell runs
+                # (python.exe, CLI shims) inherit the pipe and keep writing the
+                # host code page, so a buffer that is not valid UTF-8 falls back
+                # to the locale instead of being replaced wholesale — the same
+                # guard the MSYS branch above already applies.
+                stdout, stderr, returncode, timed_out = self._run_windows_command(
+                    args,
+                    timeout,
+                    sandbox_env,
+                    encoding="utf-8",
+                    # ``locale.getencoding()`` (3.11+, repo floor is 3.12)
+                    # deliberately ignores Python UTF-8 mode and returns the code
+                    # page the child's CRT actually used — ``getpreferredencoding``
+                    # would report ``"utf-8"`` on hosts running under
+                    # ``PYTHONUTF8=1``, silently making this fallback a no-op.
+                    fallback_encoding=locale.getencoding(),
+                )
+            elif self._is_cmd_shell(shell):
+                # cmd builtins use the console output page, which can differ
+                # from ANSI (e.g. cp437 vs cp1252) or be UTF-8 after chcp 65001.
+                # Native children can choose their own encoding; configure
+                # those tools explicitly when it differs from the console.
+                # Keep the encoding=None default's Python text-mode contract
+                # unchanged and override it only for this shell.
+                stdout, stderr, returncode, timed_out = self._run_windows_command(
+                    args,
+                    timeout,
+                    sandbox_env,
+                    encoding=self._get_cmd_output_encoding(),
+                )
             else:
                 stdout, stderr, returncode, timed_out = self._run_windows_command(args, timeout, sandbox_env)
         else:
@@ -684,6 +796,11 @@ class LocalSandbox(Sandbox):
             except subprocess.TimeoutExpired:
                 timed_out = True
                 LocalSandbox._terminate_windows_process_tree(process)
+                # The kill can interrupt the child mid-write, leaving a partial
+                # multi-byte sequence at the capture end; authorize the trim
+                # retry so the valid prefix survives the strict decode.
+                stdout_capture.mark_split_tail()
+                stderr_capture.mark_split_tail()
             returncode = process.returncode if process.returncode is not None else 0
         finally:
             join_timeout = 10 if timed_out else _PIPE_DRAIN_JOIN_TIMEOUT_SECONDS
@@ -921,7 +1038,8 @@ class LocalSandbox(Sandbox):
             # Re-raise with the original path for clearer error messages, hiding internal resolved paths
             raise type(e)(e.errno, e.strerror, path) from None
 
-    def download_file(self, path: str) -> bytes:
+    def download_file(self, path: str, *, max_bytes: int | None = None) -> bytes:
+        max_download_size = download_limit(max_bytes, DEFAULT_DOWNLOAD_LIMIT)
         normalised = path.replace("\\", "/")
         stripped_path = normalised.lstrip("/")
         allowed_prefix = VIRTUAL_PATH_PREFIX.lstrip("/")
@@ -930,15 +1048,15 @@ class LocalSandbox(Sandbox):
             raise PermissionError(errno.EACCES, f"Access denied: path must be under '{VIRTUAL_PATH_PREFIX}'", path)
 
         resolved_path = self._resolve_path(path)
-        max_download_size = 100 * 1024 * 1024
         try:
             file_size = os.path.getsize(resolved_path)
             if file_size > max_download_size:
                 raise OSError(errno.EFBIG, f"File exceeds maximum download size of {max_download_size} bytes", path)
-            # TOCTOU note: the file could grow between getsize() and read(); accepted
-            # tradeoff since this is a controlled sandbox environment.
             with open(resolved_path, "rb") as f:
-                return f.read()
+                data = f.read(max_download_size + 1)
+            if len(data) > max_download_size:
+                raise OSError(errno.EFBIG, f"File exceeds maximum download size of {max_download_size} bytes", path)
+            return data
         except OSError as e:
             # Re-raise with the original path for clearer error messages, hiding internal resolved paths
             raise type(e)(e.errno, e.strerror, path) from None
