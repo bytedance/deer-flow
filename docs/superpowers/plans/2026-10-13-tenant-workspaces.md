@@ -397,6 +397,14 @@ python -m pytest tests/test_workspace_execution.py tests/test_workspace_revocati
 - [x] 复用固定旧回归，最终 85 项与二十六文件云端 Ruff 通过；CI/回执/文档/恢复点保存，本地提交，不推送部署。
 - [ ] 继续 goal 控制信号、普通 lead/title/summary 等直接模型真实 lifetime、已准入外部效应、各撤权域和签名 scoped dispatcher/recovery/APIs，再接 pool/remote C。M4 父项及 M0–M11 完整验收不勾选，租户启动保持关闭。
 
+#### M4 第十七小步：命名直接模型生命周期与 goal STOP（2026-10-17 已验证）
+
+- [x] 复用已有真实 BaseChatModel 线程/原生 Run/SQL 夹具，先复现 lead/title 取消后提前关闭和 goal 归一化 STOP 的实际缺口。
+- [x] 用私有 invoke_worker_model 保护完整共享 model middleware、异步 title/summary 和 goal；每 Run 登记/shield/drain，保留实际 usage 与正常 completion hook，不改旧 unscoped 调用。
+- [x] Goal 读/准备/评估/持久化/重读不吞权限拒绝和 STOP；普通失败/verdict 行为由旧用例回归。
+- [x] 主干先八项通过，再复用必要边界至三十六项，最后固定一百一十四项与二十七文件云端 Ruff；CI/回执/恢复点/文档及本地提交。
+- [ ] 工具/文件/进程/网络/发布效应、真实 provider 流/SDK/cache、完整持久化 scoped goal、其他撤权域和 scoped dispatcher/recovery/APIs、远端 C 仍待实施。M4/M0–M11 父项继续未完成，启动关闭。
+
 ### M5：记忆、知识检索与工具凭据隔离
 
 **修改接点：**

@@ -46,7 +46,14 @@ class WorkerInvocationGuard:
             task.cancel()
             raise WorkerInvocationDenied("Native worker has closed")
         self._providers.add(task)
-        task.add_done_callback(self._providers.discard)
+        task.add_done_callback(self._finished)
+
+    def _finished(self, task):
+        self._providers.discard(task)
+        if not task.cancelled():
+            # A cancelled caller may already have left and a completed task is
+            # no longer in the drain snapshot. Retrieve its failure privately.
+            task.exception()
 
     async def drain(self):
         async def join():
@@ -82,6 +89,27 @@ async def check_invocation(*, required=False):
             raise WorkerInvocationDenied("Native invocation authority is required")
         return
     await guard.check()
+
+
+async def invoke_worker_model(invoke):
+    """Retain native provider work when its graph/system caller stops waiting.
+
+    The callable stays in the original Run context. Legacy callers retain their
+    cancellation behavior; native cleanup drains actual work before closure.
+    """
+    guard = get_invocation_guard()
+    if guard is None:
+        return await invoke()
+    await guard.check()
+
+    async def execute():
+        # Also drain if the retained task itself is cancelled, rather than
+        # confusing a cancelled executor Future with a stopped sync provider.
+        return await await_drained(invoke())
+
+    task = asyncio.create_task(execute())
+    guard.track(task)
+    return await asyncio.shield(task)
 
 
 def check_invocation_sync(*, required=False):

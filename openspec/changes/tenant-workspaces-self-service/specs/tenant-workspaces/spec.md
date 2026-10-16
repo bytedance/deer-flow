@@ -48,12 +48,12 @@ The system SHALL persist and authenticate workspace scope across native Run, MCP
 - **THEN** new claims and continuation SHALL be denied, cancellation SHALL use native lifecycle, and results SHALL not be delivered to the revoked member
 
 #### Scenario: Native caller exits before its host model provider
-- **WHEN** a native Run caller is cancelled or revoked while its host model service still has actual provider work in flight
+- **WHEN** a native Run caller is cancelled or revoked while its native lead/system model or host model service still has actual provider work in flight
 - **THEN** the Run SHALL retain its execution lifetime and reject same-thread replacement until that work has stopped, including when the provider task itself is cancelled
 - **AND** a different authorized workspace using the shared service SHALL be able to finish independently within the existing service budget
 
 #### Scenario: Native execution stop reaches a system model boundary
-- **WHEN** native execution authority is denied at the extension model service, title generation or summary generation boundary
+- **WHEN** native execution authority is denied at the extension model service, title generation, summary generation or goal evaluation boundary
 - **THEN** the owning worker SHALL receive the native stop signal without converting it into an ordinary provider failure, local title or summary skip that continues execution
 
 #### Scenario: Legitimate completion model work

@@ -164,4 +164,9 @@ Title async provider fallback and summary construction/sync/async provider fallb
 must rethrow GraphBubbleUp before generic Exception handling. Native STOP is not
 a candidate failure, a local title fallback or an ordinary summary skip. Existing
 provider-failure fallback stays intact; observer failures remain observational.
-This does not prove direct system model provider threads stopped on cancellation.
+The shared model wrapper and async title/summary invoke through
+invoke_worker_model: retain actual native work in the original Run and drain it
+before actual lifetime close. Sync/embedded and arbitrary provider streaming or
+transport internals are not granted equivalent cleanup proof. Tool wrapper
+currently rechecks admission only; actual tool effects need their own lifetime
+and publication protocol.

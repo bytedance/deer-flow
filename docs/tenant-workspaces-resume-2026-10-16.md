@@ -1,5 +1,5 @@
-<!-- 最新断点：文末 M4 模型服务实际生命周期与停止信号（2026-10-17）。 -->
-> 当前恢复点：上海 SQL #77 固定 85 项和 26 文件 Ruff 通过；HostModelInvoker 的真实 provider 线程等待与按 Run 清理已接通，title/summary/service 停止信号保留。下一步 goal/直接模型实际生命周期及外部效应、其他撤权域、dispatcher/recovery。完整 M0–M11 未完成，租户启用关闭。
+<!-- 最新断点：文末 M4 原生直接模型生命周期与目标停止信号（2026-10-17）。 -->
+> 当前恢复点：上海 SQL #83 固定 114 项与 27 文件 Ruff 通过；普通 lead/title/summary/goal 的命名异步调用点接通按 Run 的实际工作等待，goal STOP 保留。下一步复用原生 sandbox 已有 drain，贯通 Run/私有空间工具绑定与发布效应，再接其他撤权域和 signed dispatcher/recovery。完整 M0–M11 未完成，租户启用关闭。
 
 # 2026-10-16 暂停与恢复检查点
 
@@ -823,3 +823,46 @@ python scripts/render_tenant_run_control_pipeline.py tenant-service-final <归�
 LangChain inline callback 拒绝时存在 `ahandle_event was never awaited` 警告，
 RED/GREEN 均可见，未隐瞒或声称无警告。未调用真实 DeepSeek，也没有 physical C、
 HTTP/JWT/browser/Redis/NAS/计费及完整租户验收；M0–M11 父项保留，启动关闭。
+
+
+## M4 原生直接模型生命周期与目标停止信号（2026-10-17）
+
+上海 SQL job #78 先复现 lead/title 取消后仍有真实线程、native worker 却已关闭：
+四失败、四正常对照通过。#79 目标评估实际吞掉 WorkerInvocationDenied 并写入普通
+失败 verdict：两失败、六个既有命名 STOP 路径通过。#80 主干先 8 passed；#82
+复用同一夹具补 summary/goal 与必要边界，36 passed；#83 最终 `114 passed in 226.63s (0:03:46)`，
+二十七文件云端 Ruff check/format 通过。旧 85 项复用，本轮仅二十个直接入口用例、
+两个目标 STOP 用例及七个相关目标旧回归；不跑无关全套。
+
+invoke_worker_model 仅在 host 私有 guard 内保留实际工作，调用前核验、登记原 Run
+任务并 shield；被保留任务本身取消时也 drain。普通 lead 全共享 middleware、
+异步 title/summary、goal evaluator 接入同一入口。目标 usage sink 随实际调用一起
+执行；未绑定 guard 的旧入口保留原语义。模型类型/算力服务/观测协议没有替换。
+目标的读/准备/评估/持久化/重读路径保留原生权限拒绝与停止信号，普通 provider
+及 JSON 错误仍按原规则记录评估失败。停止信号不是普通 verdict。
+
+正常/取消覆盖四入口和两种数据库；#81 的两失败仅为 fixture 错把 provider 自身取消预期为用户中断；LangGraph 正确以
+NodeCancelledError 记为 error，线程等待/隔离已通过；#82 修正预期后全通过。
+这些用例同时覆盖 lead 成员版本撤销、title 保留任务被直接
+cancel 两处必要边界。复用原有续租、同线程拒绝、另一个空间独立完成、实际线程
+退出后清理、合法 completion 模型收尾断言。不以全局任务 drain 代替按 Run 所有权。
+
+```bash
+python scripts/render_tenant_run_control_pipeline.py direct-main <归档SHA256> \
+  --suite direct-main > /private/tmp/Jenkinsfile.direct-main
+python scripts/render_tenant_run_control_pipeline.py direct-final <归档SHA256> \
+  --suite direct-final > /private/tmp/Jenkinsfile.direct-final
+```
+
+仍是固定上海 internal PG/RO 源码/既有镜像/专属 job、精确资源清理，没有本机应用/
+pytest/Docker；归档、日志、源码哈希和清理回执：`native_direct_model_lifetime`。
+目标 STOP 场景使用实际内存 saver/accessor 加真实 SQL 成员权限；不是完整持久化
+scoped goal continuation/recovery 验收。确定性同步线程模型证明已命名调用点的
+生命周期，不证明任意外部 SDK、网络流或物理 C。工具/FS/进程/网络/发布效应、
+其他撤权域、dispatcher/recovery、HTTP/JWT/browser/Redis/NAS/配额和完整 M0–M11
+仍须推进；租户启动关闭，不推送、不部署。
+
+后续源码检查已确认 sandbox.lease.run_sync_lifecycle_operation 本来就 shield/drain
+实际同步线程，sandbox.tools 的异步原生工具也在使用它。下一步先复用、验收原始
+Run/私有空间绑定、延迟调用准入和输出效应，不重写沙箱执行器。该阅读结论不算
+scoped 工具业务验收。

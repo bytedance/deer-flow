@@ -32,6 +32,7 @@ from deerflow.extensions.notify import notify_context_compacted
 from deerflow.models import create_chat_model
 from deerflow.models.reasoning import resolve_reasoning_contract
 from deerflow.runtime.events.catalog import MIDDLEWARE_SUMMARIZE_TAG
+from deerflow.runtime.invocation import invoke_worker_model
 
 logger = logging.getLogger(__name__)
 _SUMMARY_TRIGGER_MESSAGE_NAME = "summary"
@@ -462,7 +463,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             invoke_config = {"metadata": {"lc_source": "summarization"}}
             extensions = getattr(self, "_extensions", None)
             if extensions is None:
-                response = await model.ainvoke(prompt, config=invoke_config)
+                response = await invoke_worker_model(lambda: model.ainvoke(prompt, config=invoke_config))
             else:
                 from deerflow_extension_api import SystemOperationKind
 
@@ -474,7 +475,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                     messages=prompt,
                     model_name=model_name,
                     invoke_config=invoke_config,
-                    invoke=lambda: model.ainvoke(prompt, config=invoke_config),
+                    invoke=lambda: invoke_worker_model(lambda: model.ainvoke(prompt, config=invoke_config)),
                     task_store=task_store,
                 )
             return self._checked_summary(response, last)

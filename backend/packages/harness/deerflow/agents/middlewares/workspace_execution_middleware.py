@@ -2,7 +2,7 @@
 
 from langchain.agents.middleware import AgentMiddleware
 
-from deerflow.runtime.invocation import check_invocation, check_invocation_sync
+from deerflow.runtime.invocation import check_invocation, check_invocation_sync, invoke_worker_model
 
 
 class WorkspaceExecutionMiddleware(AgentMiddleware):
@@ -14,7 +14,7 @@ class WorkspaceExecutionMiddleware(AgentMiddleware):
 
     async def awrap_model_call(self, request, handler):
         await check_invocation()
-        return await handler(request)
+        return await invoke_worker_model(lambda: handler(request))
 
     async def awrap_tool_call(self, request, handler):
         await check_invocation()

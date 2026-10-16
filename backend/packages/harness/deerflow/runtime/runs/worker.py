@@ -2467,6 +2467,8 @@ async def _persist_goal_evaluation(
         return updated_goal
     except GoalWriteConflict:
         return None
+    except (WorkspaceAccessDenied, WorkerInvocationDenied):
+        raise
     except Exception:
         logger.warning("Could not persist goal evaluation for thread %s", thread_id, exc_info=True)
         return None
@@ -2519,6 +2521,8 @@ async def _prepare_goal_continuation_input(
 
     try:
         goal = await read_thread_goal(checkpointer, thread_id)
+    except (WorkspaceAccessDenied, WorkerInvocationDenied):
+        raise
     except Exception:
         logger.warning("Could not read goal for thread %s after run %s", thread_id, run_id, exc_info=True)
         return None
@@ -2592,6 +2596,8 @@ async def _prepare_goal_continuation_input(
 
         if abort_event is not None and abort_event.is_set():
             return None
+    except (WorkspaceAccessDenied, WorkerInvocationDenied):
+        raise
     except Exception:
         logger.warning("Could not prepare goal evaluation for thread %s after run %s", thread_id, run_id, exc_info=True)
         return None
@@ -2612,6 +2618,8 @@ async def _prepare_goal_continuation_input(
             interaction_policy=interaction_policy,
             usage_callback=usage_callback,
         )
+    except (WorkspaceAccessDenied, WorkerInvocationDenied):
+        raise
     except Exception as exc:
         logger.warning("Goal evaluator failed for thread %s after run %s", thread_id, run_id, exc_info=True)
         if abort_event is not None and abort_event.is_set():
@@ -2637,6 +2645,8 @@ async def _prepare_goal_continuation_input(
     # evaluator ran — a user message or /goal clear racing the evaluation must win.
     try:
         current_goal, current_checkpoint_tuple = await _reread_goal_and_checkpoint(checkpointer, thread_id)
+    except (WorkspaceAccessDenied, WorkerInvocationDenied):
+        raise
     except Exception:
         logger.warning("Could not re-check goal state for thread %s after evaluation", thread_id, exc_info=True)
         return None
@@ -2674,6 +2684,8 @@ async def _prepare_goal_continuation_input(
     # conversation signature is meaningful for detecting a racing user turn here.
     try:
         latest_goal, latest_checkpoint_tuple = await _reread_goal_and_checkpoint(checkpointer, thread_id)
+    except (WorkspaceAccessDenied, WorkerInvocationDenied):
+        raise
     except Exception:
         logger.warning("Could not verify queued goal continuation for thread %s", thread_id, exc_info=True)
         return None

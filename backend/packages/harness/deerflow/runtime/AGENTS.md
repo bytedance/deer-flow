@@ -511,9 +511,8 @@ lanes remain intact; subscribe/global deletion authority is still absent.
 Actual native create_agent + full shared runtime middleware/model factory +
 real report-file main proves tool/second-model/independent-model/queue admission
 on both SQL engines. Native provider is deterministic. This does not settle
-already-admitted IO, shielded HostModelInvoker provider-task lifetimes, all system
-fallback signal propagation, actor/token revocation, physical C or full tenant
-activation. Keep these explicit follow-ups and the compiled gate false.
+already-admitted tool IO, arbitrary provider transports/cache, all actor/token
+revocation domains, physical C or full tenant activation. Keep these explicit follow-ups and the compiled gate false.
 
 Native HostModelInvoker tasks register with their original task-local invocation
 guard, not a global service drain. Construction and invocation shield/drain actual
@@ -521,4 +520,11 @@ work even if the provider task is cancelled. Worker finalization first drains bo
 work without sealing (completion hooks can invoke models), then seals/drains hook
 leftovers before journal/sandbox/lifetime close. Cancellation during drain defers
 interrupt and retains uncertain cleanup; it never proves remote physical STOP.
-Direct model-call lifetimes outside this service remain a separate audit.
+invoke_worker_model now binds the ordinary native lead model wrapper and async
+title/summary/goal calls to the same per-Run task drain. The retained callable
+executes in original Run context; unscoped callers retain legacy cancellation.
+Retrieve completed failures privately even if they leave the drain set before
+finalization. Goal usage sinks execute inside retained work; goal read/prepare/
+evaluate/persist/re-read paths rethrow native workspace refusal/STOP before
+ordinary fallback. Direct transports, streaming internals and other unintegrated
+call sites remain separate audits; native tool IO is the next effect domain.

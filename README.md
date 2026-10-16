@@ -3063,3 +3063,9 @@ and wait before releasing their execution lifetime. Shared services retain per-R
 cleanup boundaries, and title/summary/service fallbacks preserve native stop signals.
 [Evidence and remaining scope](docs/tenant-workspaces-testing.md) distinguish this
 from direct-model/remote transport cleanup and full tenant deployment.
+
+Scoped native lead-agent, title, summary and goal model calls also retain their
+actual work until native cleanup; goal evaluation preserves permission refusal
+and stop signals. [Validation scope](docs/tenant-workspaces-testing.md) covers
+deterministic provider threads, with tool effects and arbitrary external model
+transports still pending. Multi-tenant deployment remains disabled.

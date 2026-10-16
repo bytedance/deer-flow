@@ -21,19 +21,70 @@ class ThreadServiceModel(BaseChatModel):
     def _llm_type(self):
         return "deterministic-host-thread"
 
+    def bind_tools(self, tools, **kwargs):
+        return self
+
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         probe = _probe.get()
         probe["calls"] += 1
         probe["loop"].call_soon_threadsafe(probe["entered"].set)
         try:
             assert probe["release"].wait(20), "fixture provider was never released"
-            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="independent service report"))])
+            content = "independent service report"
+            if any("strict completion evaluator" in str(message.content) for message in messages):
+                content = '{"satisfied": true, "blocker": "none", "reason": "report verified", "evidence_summary": "offline fixture"}'
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content=content))])
         finally:
             probe["loop"].call_soon_threadsafe(probe["finished"].set)
 
 
 @pytest.mark.parametrize("trigger", ["normal", "cancel", "member", "provider_cancel"])
 def test_native_run_retains_real_model_service_until_provider_stops(native_engine, trigger):  # noqa: F811
+    _run_model_lifetime_case(native_engine, trigger, "extension")
+
+
+@pytest.mark.parametrize(
+    ("entrypoint", "trigger"),
+    [(entrypoint, trigger) for entrypoint in ("lead", "title", "summary", "goal") for trigger in ("normal", "cancel")] + [("lead", "member"), ("title", "provider_cancel")],
+)
+def test_native_direct_model_retains_actual_provider(native_engine, trigger, entrypoint):  # noqa: F811
+    _run_model_lifetime_case(native_engine, trigger, entrypoint)
+
+
+async def _call_direct_model(entrypoint, config, state):
+    from langchain_core.messages import HumanMessage
+
+    from deerflow.models import create_chat_model
+
+    if entrypoint == "title":
+        from deerflow.agents.middlewares.title_middleware import TitleMiddleware
+        from deerflow.config.title_config import TitleConfig
+
+        title_config = config.model_copy(update={"title": TitleConfig(model_name="offline-service")})
+        result = await TitleMiddleware(app_config=title_config)._agenerate_title_result({"messages": [HumanMessage(content="research question"), AIMessage(content="existing answer")]})
+        return {"messages": [AIMessage(content=result["title"])]}
+    model = create_chat_model("offline-service", app_config=config, attach_tracing=False)
+    if entrypoint == "lead":
+        from langchain.agents import create_agent
+
+        from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
+
+        agent = create_agent(model=model, tools=[], middleware=build_lead_runtime_middlewares(app_config=config, user_id="owner"), context_schema=dict)
+        return await agent.ainvoke(state)
+    if entrypoint == "summary":
+        from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
+
+        summary = DeerFlowSummarizationMiddleware(model=model, trigger=("tokens", 1024), keep=("messages", 2), app_config=config, run_model_name="offline-service", anchor_model_name="offline-service")
+        result = await summary._asummarize_with([HumanMessage(content="research question"), AIMessage(content="existing answer")])
+        return {"messages": [AIMessage(content=result)]}
+    from deerflow.runtime.goal import build_goal_state, evaluate_goal_completion
+
+    result = await evaluate_goal_completion(build_goal_state("verify offline report"), [HumanMessage(content="research question"), AIMessage(content="existing answer")], model=model, model_name="offline-service", app_config=config)
+    assert result["satisfied"]
+    return {"messages": [AIMessage(content="goal verified")]}
+
+
+def _run_model_lifetime_case(engine, trigger, entrypoint):
     from deerflow_extension_api import ModelInvocationRequest, ModelMessage
     from langchain_core.messages import HumanMessage
     from langgraph.graph import END, START, MessagesState, StateGraph
@@ -77,6 +128,11 @@ def test_native_run_retains_real_model_service_until_provider_stops(native_engin
 
             async def call_service(state):
                 try:
+                    if entrypoint != "extension":
+                        from deerflow.runtime.invocation import get_invocation_guard
+
+                        probe["guard"] = get_invocation_guard()
+                        return await _call_direct_model(entrypoint, config, state)
                     result = await invoker.invoke(ModelInvocationRequest(messages=[ModelMessage("user", "produce an offline research report")]))
                     return {"messages": [AIMessage(content=result.content)]}
                 finally:
@@ -112,10 +168,12 @@ def test_native_run_retains_real_model_service_until_provider_stops(native_engin
             record.task = task
             await manager.start_heartbeat()
             await asyncio.wait_for(probe["entered"].wait(), 15)
-            assert probe["calls"] == 1 and len(scope.budget.workers) == 1
+            assert probe["calls"] == 1 and len(scope.budget.workers) == int(entrypoint == "extension")
             fresh = case.original
             if trigger == "provider_cancel":
-                next(iter(scope.budget.workers)).cancel()
+                pending = scope.budget.workers if entrypoint == "extension" else probe["guard"]._providers
+                assert len(pending) == 1
+                next(iter(pending)).cancel()
             elif trigger == "cancel":
                 await manager.cancel(record.run_id, action="interrupt")
             elif trigger == "member":
@@ -130,7 +188,7 @@ def test_native_run_retains_real_model_service_until_provider_stops(native_engin
             if trigger != "normal":
                 if trigger != "provider_cancel":
                     await asyncio.wait_for(caller_exited.wait(), 15)
-                assert not probe["finished"].is_set() and len(scope.budget.workers) == 1
+                assert not probe["finished"].is_set() and len(scope.budget.workers) == int(entrypoint == "extension")
                 # A shielded wait observes termination without cancelling the owner.
                 done, _ = await asyncio.wait({task}, timeout=1)
                 assert not done, "native worker closed while its real service provider thread was still running"
@@ -177,7 +235,7 @@ def test_native_run_retains_real_model_service_until_provider_stops(native_engin
                     assert independent.workspace_execution_closed and independent_probe["finished"].is_set()
                     assert independent_probe["calls"] == 1
                     assert not task.done() and not probe["finished"].is_set()
-                    assert len(scope.budget.workers) == scope.budget.admitted == 1
+                    assert len(scope.budget.workers) == scope.budget.admitted == int(entrypoint == "extension")
                 finally:
                     _probe.reset(independent_token)
             probe["release"].set()
@@ -188,6 +246,8 @@ def test_native_run_retains_real_model_service_until_provider_stops(native_engin
             assert probe["calls"] == (2 if trigger == "normal" else 1)
             async with case.sf() as session:
                 row = await session.get(RunRow, record.run_id)
+                # A provider task cancellation is a node/provider failure, not
+                # a user interrupt (LangGraph wraps it as NodeCancelledError).
                 assert row.status == ("success" if trigger == "normal" else "error" if trigger == "provider_cancel" else "interrupted")
                 assert not list((await session.scalars(sa.select(WorkspaceOperationOutboxRow).where(WorkspaceOperationOutboxRow.kind == "run_execution", WorkspaceOperationOutboxRow.state != "completed"))).all())
             set_current_workspace(fresh)
@@ -207,10 +267,10 @@ def test_native_run_retains_real_model_service_until_provider_stops(native_engin
             _probe.reset(probe_token)
             reset_app_config()
 
-    _in_workspace_case(native_engine, scenario)
+    _in_workspace_case(engine, scenario)
 
 
-@pytest.mark.parametrize("entrypoint", ["extension", "title", "summary"])
+@pytest.mark.parametrize("entrypoint", ["extension", "title", "summary", "goal"])
 def test_native_system_model_stop_is_not_an_ordinary_fallback(native_engine, entrypoint):  # noqa: F811
     from deerflow_extension_api import ModelInvocationFailed, ModelInvocationRequest, ModelMessage
     from langchain_core.messages import HumanMessage
@@ -259,6 +319,15 @@ def test_native_system_model_stop_is_not_an_ordinary_fallback(native_engine, ent
             record = await manager.create_or_reject("system-model-stop", user_id="owner")
 
             async def call_system(state):
+                if entrypoint == "goal":
+                    from langgraph.checkpoint.memory import InMemorySaver
+                    from test_goal_worker import _full_accessor, _seed_goal_thread
+
+                    from deerflow.runtime.goal import read_thread_goal
+                    from deerflow.runtime.runs.worker import _prepare_goal_continuation_input
+
+                    goal_saver = InMemorySaver()
+                    await _seed_goal_thread(goal_saver, thread_id=record.thread_id, goal_text="finish research report")
                 entered.set()
                 await release.wait()
                 if entrypoint == "extension":
@@ -266,6 +335,22 @@ def test_native_system_model_stop_is_not_an_ordinary_fallback(native_engine, ent
                         await invoker.invoke(ModelInvocationRequest(messages=[ModelMessage("user", "stop before provider")]))
                     except ModelInvocationFailed:
                         returned.append("normalized failure")
+                elif entrypoint == "goal":
+                    returned.append(
+                        await _prepare_goal_continuation_input(
+                            bridge=MemoryStreamBridge(),
+                            accessor=_full_accessor(goal_saver),
+                            checkpointer=goal_saver,
+                            thread_id=record.thread_id,
+                            run_id=record.run_id,
+                            model_name="offline-service",
+                            app_config=config,
+                            evaluator_model_factory=lambda: create_chat_model("offline-service", app_config=config, attach_tracing=False),
+                        )
+                    )
+                    # If a broken fallback persists a normal failure, expose its
+                    # normalized reason to prove the actual STOP was consumed.
+                    returned.append((await read_thread_goal(goal_saver, record.thread_id)).get("last_evaluation"))
                 elif entrypoint == "title":
                     title = TitleMiddleware(app_config=config)
                     returned.append(await title._agenerate_title_result({"messages": [HumanMessage(content="research question"), AIMessage(content="existing answer")]}))
