@@ -18,6 +18,8 @@ This directory contains detailed documentation for the DeerFlow backend.
 
 | Document | Description |
 |----------|-------------|
+| [GITHUB_AGENTS.md](GITHUB_AGENTS.md) | GitHub event-driven agent architecture and bindings |
+| [MCP_SERVER.md](MCP_SERVER.md) | MCP server configuration and tool discovery |
 | [STREAMING.md](STREAMING.md) | Token-level streaming design: Gateway vs DeerFlowClient paths, `stream_mode` semantics, per-id dedup |
 | [RUN_EVENT_STREAM.md](RUN_EVENT_STREAM.md) | Persisted run event stream contract: envelope, producers, consumers, and known gaps |
 | [FILE_UPLOAD.md](FILE_UPLOAD.md) | File upload functionality |
