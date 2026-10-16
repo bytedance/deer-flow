@@ -1,4 +1,4 @@
-<!-- 最新断点：文末 M4 captured MCP STOP checkpoint；此前 M3/B 小步保留为历史。 -->
+<!-- 最新断点：文末 M4 active native Run membership control checkpoint；此前 M3/B/MCP 小步保留为历史。 -->
 > 当前恢复点：M4 单机 B 已真实 Docker 执行报告、原线程发布、原生 MCP 结果回流与撤权 STOP；上海 physical #6（6 passed）、SQL #30（22 passed / 6 default skipped）。下一步直接接原生持久取消/撤权 outbox 与 STOP 控制结算，再接 pool/远端 C/续跑及实际 TCP/NAS C→B→C。全量 M0–M11 保留，租户启动仍关闭。最新详细回执见文末。
 
 # 2026-10-16 暂停与恢复检查点
@@ -498,3 +498,54 @@ Continue M4 with native Run and other resource-domain revocation, then pool and
 remote C original authority/continuation/notification and real C->B->C. All M0-M11
 parent gates remain open, tenant activation compiled closed, no deployment or
 remote push. This completes only the captured MCP STOP substep.
+
+M4 active native Run membership control checkpoint (2026-10-16): SQL #33
+records fixture-import setup error (not business RED); #34 RED actual native
+Run cancel_action remains NULL after member mutation; #35 SUCCESS actual graph/
+SQL/heartbeat main, 2 cases in 19.00s. #36 SUCCESS queued/binding/lease companion,
+4 cases in 22.51s. #37 RED proves failed completion hook was falsely certified
+closed; #38 SUCCESS conservative stream/journal/lifecycle/lease cleanup proof,
+6 cases in 27.95s. No second Agent or task authority was introduced.
+
+The same native workspace transaction sets first cancel intent and captures
+run_stop identity, using the existing Run clock. Native heartbeat consumes an
+interrupt directive even when an unconsumed first action was rollback. The
+captured pending/quarantined barrier blocks private-thread admission and ordinary
+orphan expiry release after metadata becomes interrupted. Only the original
+native owner, valid lease and exact original Run/creation/parent snapshot can
+confirm actual closed task/finalizers or its locally unattached pending NoStart.
+Registration is rechecked after start_lock; cleanup cannot adopt a peer owner.
+Native cleanup uncertainty leaves the barrier pending. Parent workspace_revoke
+stays pending and now explicitly includes physical execution as a separate domain.
+This native execution receipt does not certify a remote C container's STOP.
+
+SQL #39 retained 21 passing affected regressions plus two old startup-test refusal
+message failures: schema fence 0037 rejects current fixture head 0040 before the
+compiled integration guard. Keep both production guards unchanged. The negative
+test now asserts the compiled flag is false and checks the actual guard's refusal
+order; no tenant startup or authorization success is patched. #40 SUCCESS, 23
+regressions in 42.00s and eight-file cloud Ruff check/format. Existing MCP adapter
+warnings remain visible (26 regression, 12 physical), not suppressed. Physical
+#13 SUCCESS, the existing six MCP STOP cases in 30.90s, without new cases there.
+
+#41 SUCCESS, the same six Run cases in 27.82s and seven-file cloud Ruff, using
+versioned Jenkinsfile.tenant-run-control.in plus the standard-library renderer.
+Its test container has no Docker socket, production/NAS/model mount or published
+port; fixed tools/PG IDs, RO source and internal fixture network are enforced.
+Current ten runtime/test/config/template files match #40/#41. Exact known owned
+containers/networks and both recorded latest SQL/physical PG volumes are absent;
+older unrecorded volumes remain unattributed and no global prune is used. Source,
+log, images, volume/physical manifests: native_run_member_control in progress JSON.
+Native 0040/e0003 unchanged; strict OpenSpec validation passes. Local commit only.
+
+Next prioritize the FULL native Run lifetime: terminal-before-revocation and
+direct user cancel, scoped lease/status/progress/journal/checkpoint/goal/external
+writes and lost-owner/process recovery. Already-in-flight rollback is not proved
+safe by the queued first-intent case. Then integrate browser/Scheduler/credential/
+policy/account revocation and pool/remote C/continuation/notification with real
+C->B->C. Preserve outstanding M3 and M5-M11. This internal deterministic graph/
+SQL fixture is not public JWT, TCP/NAS, actual C, OS reboot, real model/business,
+least-privilege SQL or full runtime acceptance. All M0-M11 parent gates remain
+open; tenant activation compiled false and old unreleased schema fence unchanged.
+No deployment/push/PR or local application/Docker/Node/pytest execution. Serial
+self-review plus focused CI is not independent full audit.

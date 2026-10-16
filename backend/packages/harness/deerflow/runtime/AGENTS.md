@@ -371,3 +371,27 @@ worker to create child work. This key is an execution fence, not authentication
 or a substitute for native launch credentials. Legacy unscoped Runs do not
 receive it. The same immutable WorkspaceContext feeds the ECS submit signer;
 recipient authorization and the management/control protocol remain required.
+
+Scoped native execution now requires configured ownership heartbeats.
+`workspace_stop_requested` on LeaseRenewal carries a captured revocation cleanup
+directive, not fresh execution permission. RunManager signals the existing abort
+path, retains its own lease during interrupted finalization, then confirms only
+an actually closed worker task or its locally unattached pending admission.
+A persisted run_stop blocks peer admission even after the native status says
+interrupted. The manager rechecks local registration/owner under start_lock
+before acknowledging. No selected workspace or withdrawn member capability is
+used for cleanup. Native Run ownership and immutable admission remain authority.
+
+run_agent sets workspace_execution_closed only after stream/journal/lifecycle and
+sandbox lease cleanup. Close failures, interrupted cleanup or failed completion/
+extension stop hooks preserve uncertainty and do not close the durable barrier.
+Normal caller cancellation is drained by the existing close_agent_stream logic;
+this adds no second Agent loop. Local closure is not remote C container absence.
+The Shanghai deterministic native graph main proves active member-version
+invalidation, held graph/native finalizers, continued cleanup renewal, peer
+admission exclusion and native close acknowledgement; queued NoStart, original
+binding/lease denial and cleanup failure are companion checks. Public HTTP/JWT,
+checkpoint/journal/external-tool fencing, direct user Run cancellation, the
+already-terminalizing-before-revocation window and remote C recovery remain M4
+requirements. Failed/unknown cleanup remains blocked for later reconciliation;
+do not turn ordinary orphan expiry into STOP or enable the compiled tenant gate.

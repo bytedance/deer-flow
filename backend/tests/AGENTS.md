@@ -329,3 +329,18 @@ verify exact owned-container absence/removal. Terminal metadata alone cannot
 produce a STOP receipt or settle native cancellation; a running or unobservable
 object still retains uncertainty. The companion test uses actual Docker
 observation after the old ordinary queued-cancel path.
+
+`test_workspace_revocation.py` first proves the native graph/SQL/real heartbeat
+main on both databases. The held on_run_completed hook creates a real window
+where metadata is interrupted while native finalizers are still alive; peer
+admission must remain blocked. The finite companions cover callback failure
+(no fake success), pending/unattached NoStart, first rollback intent preservation
+with interrupt-only revocation consumption, wrong owner/context/incarnation/time,
+expired owner lease, refusal of ordinary orphan takeover and replacement-parent
+preservation. Trusted internal user/admission fixtures are explicit; no model,
+public JWT, actual C container or new checkpoint rollback is claimed. Lease fault
+restore is only disposable fixture restoration, never runtime takeover authority.
+The startup negative test derives which closed production guard rejects current
+metadata (unreleased schema fence or compiled integration gate), while separately
+asserting _WORKSPACE_RUNTIME_INTEGRATED is False. It patches neither production
+fence and proves no tenant startup; M10 must still align the release candidate.

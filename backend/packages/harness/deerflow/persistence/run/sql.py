@@ -21,6 +21,7 @@ from deerflow.persistence.run.model import RunChangeClockRow, RunRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
 from deerflow.persistence.user.model import UserRow
+from deerflow.persistence.workspaces.run_control import pending_run_stop
 from deerflow.persistence.workspaces.scope import resolve_resource_scope
 from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 from deerflow.runtime.run_origin import origin_kind_of
@@ -571,6 +572,7 @@ class RunRepository(RunStore):
             .where(
                 RunRow.status.in_(("pending", "running")),
                 RunRow.created_at <= before_dt,
+                ~pending_run_stop(run_id=RunRow.run_id, workspace_id=RunRow.workspace_id),
             )
             .order_by(RunRow.created_at.asc())
         )
@@ -800,19 +802,28 @@ class RunRepository(RunStore):
                 .where(
                     RunRow.run_id == run_id,
                     RunRow.owner_worker_id == owner_worker_id,
-                    RunRow.status.in_(("pending", "running")),
+                    or_(RunRow.status.in_(("pending", "running")), pending_run_stop(run_id=RunRow.run_id, workspace_id=RunRow.workspace_id)),
                 )
                 .values(
                     lease_expires_at=lease_dt,
                     updated_at=datetime.now(UTC),
                 )
-                .returning(RunRow.run_id, RunRow.cancel_action)
+                .returning(
+                    RunRow.run_id,
+                    case((pending_run_stop(run_id=RunRow.run_id, workspace_id=RunRow.workspace_id), "interrupt"), else_=RunRow.cancel_action).label("cancel_action"),
+                    pending_run_stop(run_id=RunRow.run_id, workspace_id=RunRow.workspace_id).label("workspace_stop_requested"),
+                )
             )
             row = result.first()
             await session.commit()
         if row is None:
             return LeaseRenewal(renewed=False)
-        return LeaseRenewal(renewed=True, cancel_action=row.cancel_action)
+        return LeaseRenewal(renewed=True, cancel_action=row.cancel_action, workspace_stop_requested=bool(row.workspace_stop_requested))
+
+    async def confirm_workspace_run_stop(self, target, *, evidence):
+        from deerflow.persistence.workspaces.run_control import confirm_local_run_stop
+
+        return await confirm_local_run_stop(self._sf, target, evidence=evidence)
 
     async def request_cancel(self, run_id: str, *, action: str) -> str | None:
         """Atomically persist the first cancellation action on an active run."""
@@ -882,7 +893,7 @@ class RunRepository(RunStore):
                 await session.commit()
                 return StatusFinalization(finalized=True)
 
-            current = await session.execute(select(RunRow.cancel_action).where(RunRow.run_id == run_id))
+            current = await session.execute(select(case((pending_run_stop(run_id=RunRow.run_id, workspace_id=RunRow.workspace_id), "interrupt"), else_=RunRow.cancel_action)).where(RunRow.run_id == run_id))
             cancel_action = current.scalar_one_or_none()
             await session.commit()
             return StatusFinalization(
@@ -914,6 +925,7 @@ class RunRepository(RunStore):
                     RunRow.run_id == run_id,
                     RunRow.status.in_(("pending", "running")),
                     _lease_expired_or_null(RunRow.lease_expires_at, cutoff),
+                    ~pending_run_stop(run_id=RunRow.run_id, workspace_id=RunRow.workspace_id),
                 )
                 .values(**values)
             )
@@ -938,6 +950,7 @@ class RunRepository(RunStore):
             .where(
                 RunRow.status.in_(("pending", "running")),
                 RunRow.created_at <= before_dt,
+                ~pending_run_stop(run_id=RunRow.run_id, workspace_id=RunRow.workspace_id),
                 _lease_expired_or_null(RunRow.lease_expires_at, cutoff),
             )
             .order_by(RunRow.created_at.asc())
@@ -1019,6 +1032,8 @@ class RunRepository(RunStore):
                     raise WorkspaceAccessDenied("private thread is unavailable")
                 values["workspace_context_json"] = asdict(context)
                 values["thread_incarnation"] = thread.incarnation
+                if await session.scalar(select(pending_run_stop(workspace_id=context.workspace_id, user_id=resolved_user_id, thread_id=thread_id))):
+                    raise ConflictError("Thread has native execution cleanup awaiting confirmation")
             # Keep the global clock -> run-row lock order used by every other
             # mutator. One position covers this atomic set of changes; run_id
             # provides deterministic ordering within the position.

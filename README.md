@@ -3019,3 +3019,9 @@ transactions persist cancellation intents, and only a verified STOP receipt can
 settle the original task. The bounded Shanghai SQL/Docker checks and repeatable
 CI instructions are in [workspace testing](docs/tenant-workspaces-testing.md).
 Other revocation domains, remote C and complete tenant activation remain pending.
+
+Active native Runs now consume member-revocation intent through the existing
+ownership heartbeat. A durable cleanup barrier prevents replacement admission
+until local native execution is confirmed closed; failed cleanup stays pending.
+See [Run control validation and its limits](docs/tenant-workspaces-testing.md).
+Remote C physical STOP and complete tenant lifecycle activation remain pending.

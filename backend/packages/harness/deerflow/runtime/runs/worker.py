@@ -1057,6 +1057,8 @@ async def run_agent(
             ):
                 raise RuntimeError("worker workspace identity differs from the admitted Run")
             run_manager._workspace_transition_kwargs(record)
+            if not run_manager.heartbeat_enabled:
+                raise RuntimeError("workspace execution requires native ownership heartbeats")
             principal = get_current_user()
             if principal is None or str(principal.id) != workspace_context.actor_user_id:
                 raise RuntimeError("worker workspace actor requires its native authenticated principal")
@@ -1471,6 +1473,8 @@ async def run_agent(
                             try:
                                 await close_agent_stream(stream)
                             except asyncio.CancelledError as exc:
+                                if exc.__cause__ is not None:
+                                    record.workspace_cleanup_uncertain = True
                                 _log_cancelled_stream_close_failure(
                                     exc,
                                     run_id=run_id,
@@ -1478,6 +1482,7 @@ async def run_agent(
                                 )
                                 raise
                             except Exception:
+                                record.workspace_cleanup_uncertain = True
                                 abort_requested = broke_on_abort or record.abort_event.is_set()
                                 if close_error is None and not abort_requested:
                                     raise
@@ -1527,6 +1532,8 @@ async def run_agent(
                         try:
                             await close_agent_stream(stream)
                         except asyncio.CancelledError as exc:
+                            if exc.__cause__ is not None:
+                                record.workspace_cleanup_uncertain = True
                             _log_cancelled_stream_close_failure(
                                 exc,
                                 run_id=run_id,
@@ -1534,6 +1541,7 @@ async def run_agent(
                             )
                             raise
                         except Exception:
+                            record.workspace_cleanup_uncertain = True
                             abort_requested = broke_on_abort or record.abort_event.is_set()
                             if close_error is None and not abort_requested:
                                 raise
@@ -1932,8 +1940,10 @@ async def run_agent(
                 try:
                     await ctx.on_run_completed(record)
                 except Exception:
+                    record.workspace_cleanup_uncertain = True
                     logger.warning("Run completion hook failed for %s (non-fatal)", run_id, exc_info=True)
                 except BaseException as exc:
+                    record.workspace_cleanup_uncertain = True
                     # A terminal hook must not leave replacement runs blocked or
                     # stream consumers waiting indefinitely.
                     deferred_finalization_interrupt = _defer_finalization_interrupt(
@@ -1967,12 +1977,14 @@ async def run_agent(
                         deferred_finalization_interrupt,
                     )
                 except Exception:
+                    record.workspace_cleanup_uncertain = True
                     logger.warning(
                         "Extension task-stop notification failed for run %s (non-fatal)",
                         run_id,
                         exc_info=True,
                     )
                 except BaseException as exc:
+                    record.workspace_cleanup_uncertain = True
                     # Cancellation here must not strand the finalizing barrier or
                     # leave stream consumers waiting for the end frame.
                     deferred_finalization_interrupt = _defer_finalization_interrupt(
@@ -1991,21 +2003,26 @@ async def run_agent(
             if deferred_finalization_interrupt is not None:
                 raise deferred_finalization_interrupt
         finally:
+            workspace_journal_closed = journal is None
             try:
                 if journal is not None:
                     try:
                         await journal.close(flush=not record.ownership_lost)
+                        workspace_journal_closed = True
                     except Exception:
                         logger.warning("Failed to close journal for run %s", run_id, exc_info=True)
             finally:
                 lease_cleanup_interrupt: BaseException | None = None
+                workspace_cleanup_ok = workspace_journal_closed and not record.workspace_cleanup_uncertain
                 try:
                     from deerflow.sandbox.lease import release_sandbox_execution_lease_async
 
                     await release_sandbox_execution_lease_async(runtime_ctx)
                 except Exception:
+                    workspace_cleanup_ok = False
                     logger.warning("Failed to release sandbox execution lease for run %s", run_id, exc_info=True)
                 except BaseException as exc:
+                    workspace_cleanup_ok = False
                     # release_async completes the underlying cleanup before it
                     # re-raises cancellation. Defer that interruption until the
                     # worker has dropped all other run-scoped references too.
@@ -2053,6 +2070,8 @@ async def run_agent(
                 _create_contextless_task(run_manager.cleanup(run_id))
                 _schedule_terminal_cycle_collection()
 
+                if record.workspace_context is not None and workspace_cleanup_ok:
+                    record.workspace_execution_closed = True
                 if lease_cleanup_interrupt is not None:
                     raise lease_cleanup_interrupt
 

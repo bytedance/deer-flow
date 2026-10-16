@@ -232,6 +232,10 @@ class RunRecord:
     # further durable run/thread finalization because its lease ownership is
     # either known to be lost or could not be confirmed before expiry.
     ownership_lost: bool = False
+    workspace_stop_requested: bool = False
+    workspace_execution_closed: bool = False
+    workspace_cleanup_uncertain: bool = False
+    workspace_stop_confirmed: bool = False
     stop_reason: str | None = None
     goal_verdict: dict[str, Any] | None = None
     # Process-local finalization barrier for a worker-installed scheduled goal.
@@ -2476,6 +2480,42 @@ class RunManager:
             logger.warning("Unable to verify terminal commit for run %s", record.run_id, exc_info=True)
         return False
 
+    @staticmethod
+    def _awaits_workspace_stop(record: RunRecord) -> bool:
+        return record.workspace_context is not None and record.workspace_stop_requested and not record.workspace_stop_confirmed
+
+    async def _confirm_finished_workspace_stops(self) -> None:
+        confirm = getattr(self._store, "confirm_workspace_run_stop", None)
+        if confirm is None:
+            return
+        from deerflow.persistence.workspaces.run_control import NativeRunStopTarget
+
+        async with self._lock:
+            candidates = [
+                record
+                for record in self._runs.values()
+                if record.workspace_context is not None and record.abort_event.is_set() and not record.ownership_lost and not record.workspace_stop_confirmed and record.owner_worker_id == self._worker_id
+            ]
+        for record in candidates:
+            async with record.start_lock:
+                async with self._lock:
+                    if self._runs.get(record.run_id) is not record or record.owner_worker_id != self._worker_id or record.ownership_lost:
+                        continue
+                evidence = None
+                if record.task is None and record.status == RunStatus.pending and not record.store_only:
+                    evidence = "native_not_started"
+                elif record.task is not None and record.task.done() and record.workspace_execution_closed:
+                    evidence = "native_worker_closed"
+                if evidence is None:
+                    continue
+                try:
+                    target = NativeRunStopTarget.from_record(record)
+                    if await self._call_store_with_retry("confirm_workspace_run_stop", record.run_id, lambda: confirm(target, evidence=evidence)):
+                        record.workspace_stop_confirmed = True
+                        record.status = RunStatus.interrupted
+                except Exception:
+                    logger.warning("Native Run stop acknowledgement deferred; durable barrier retained")
+
     async def _renew_leases(self) -> None:
         """Renew locally-owned leases, failing closed at their deadlines.
 
@@ -2505,14 +2545,16 @@ class RunManager:
             active_runs = [
                 (rid, record)
                 for rid, record in self._runs.items()
-                if (record.status in (RunStatus.pending, RunStatus.running) or self._awaits_terminal_commit(record)) and record.owner_worker_id == self._worker_id and (record.task is None or not record.task.done())
+                if (record.status in (RunStatus.pending, RunStatus.running) or self._awaits_terminal_commit(record) or self._awaits_workspace_stop(record))
+                and record.owner_worker_id == self._worker_id
+                and (record.task is None or not record.task.done())
             ]
 
         for run_id, record in active_runs:
-            if record.status not in (RunStatus.pending, RunStatus.running) and not self._awaits_terminal_commit(record):
+            if record.status not in (RunStatus.pending, RunStatus.running) and not self._awaits_terminal_commit(record) and not self._awaits_workspace_stop(record):
                 continue
             confirmed_deadline = self._parse_lease_deadline(record.lease_expires_at)
-            if self._awaits_terminal_commit(record) and record.status not in (RunStatus.pending, RunStatus.running):
+            if not self._awaits_workspace_stop(record) and self._awaits_terminal_commit(record) and record.status not in (RunStatus.pending, RunStatus.running):
                 # The DB may have committed the terminal CAS while the worker
                 # is still receiving its acknowledgement. It no longer needs
                 # renewal and must not be mistaken for a peer takeover.
@@ -2543,6 +2585,8 @@ class RunManager:
                         ),
                     )
                 if renewal.renewed:
+                    if getattr(renewal, "workspace_stop_requested", False):
+                        record.workspace_stop_requested = True
                     if confirmed_deadline <= datetime.now(UTC):
                         if await self._release_confirmed_terminal_barrier(record, timeout=lease_seconds):
                             continue
@@ -2578,7 +2622,7 @@ class RunManager:
                     async with self._lock:
                         still_active = (
                             self._runs.get(run_id) is record
-                            and (record.status in (RunStatus.pending, RunStatus.running) or self._awaits_terminal_commit(record))
+                            and (record.status in (RunStatus.pending, RunStatus.running) or self._awaits_terminal_commit(record) or self._awaits_workspace_stop(record))
                             and record.owner_worker_id == self._worker_id
                             and (record.task is None or not record.task.done())
                         )
@@ -2623,6 +2667,7 @@ class RunManager:
                 run_id,
                 action=action,
             )
+        await self._confirm_finished_workspace_stops()
 
     async def _reconcile_orphans_periodic(self) -> None:
         """Sweep for expired leases owned by dead peers.

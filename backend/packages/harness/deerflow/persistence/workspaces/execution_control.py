@@ -45,8 +45,11 @@ async def enqueue_task_stop(session, task, now):
 
 async def enqueue_membership_revocation(session, workspace, member):
     """Called under the existing workspace lock BEFORE changing the version."""
+    from deerflow.persistence.workspaces.run_control import enqueue_membership_run_stops
+
+    await enqueue_membership_run_stops(session, workspace, member)
     now = datetime.now(UTC)
-    payload = {"version": 1, "membership_version": member.version, "policy_version": workspace.policy_version, "pending_domains": ["runs", "browser", "scheduler", "credentials", "mcp"]}
+    payload = {"version": 1, "membership_version": member.version, "policy_version": workspace.policy_version, "pending_domains": ["runs", "execution", "browser", "scheduler", "credentials", "mcp"]}
     op = hashlib.sha256(canonical(["workspace_revoke", workspace.id, member.user_id, member.version, workspace.policy_version])).hexdigest()
     if await session.get(WorkspaceOperationOutboxRow, op) is None:
         session.add(WorkspaceOperationOutboxRow(operation_id=op, workspace_id=workspace.id, user_id=member.user_id, kind="workspace_revoke", payload=payload, state="pending"))

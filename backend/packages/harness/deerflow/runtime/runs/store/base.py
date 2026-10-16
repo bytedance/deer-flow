@@ -35,6 +35,9 @@ class LeaseRenewal:
 
     renewed: bool
     cancel_action: str | None = None
+    # True only for a captured native workspace stop; cleanup is not a new
+    # execution grant and retains the owning lease through finalizers.
+    workspace_stop_requested: bool = False
 
 
 @dataclass(frozen=True)

@@ -37,9 +37,15 @@ def test_workspace_startup_preserves_legacy_and_refuses_authorization_bypass(nat
             with pytest.raises(RuntimeError, match="authenticated"):
                 await startup.validate_workspace_bootstrap(enabled, sf)
             monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED")
-            # This build has not integrated resource/background entrypoints.
-            # Operator YAML cannot turn that missing code into tenant safety.
-            with pytest.raises(RuntimeError, match="entrypoint integration"):
+            # Both gates stay closed. The current fixture head can be newer
+            # than the deliberately unreleased startup schema fence; in that
+            # case schema rejection precedes the compiled integration refusal.
+            # Do not patch either production guard to claim a tenant startup.
+            assert startup._WORKSPACE_RUNTIME_INTEGRATED is False
+            async with sf() as session:
+                versions = (await session.scalars(sa.text("SELECT version_num FROM alembic_version"))).all()
+            refusal = "entrypoint integration" if versions == [startup._NATIVE_WORKSPACE_SCHEMA] else "schema is incompatible"
+            with pytest.raises(RuntimeError, match=refusal):
                 await startup.validate_workspace_bootstrap(enabled, sf)
             async with sf() as session:
                 session.add(WorkspaceRow(id="bb7cc038-790e-4dd7-bac5-ac8d24d0d96e", kind="team", name="Closed team", status="closed", policy_version=3))

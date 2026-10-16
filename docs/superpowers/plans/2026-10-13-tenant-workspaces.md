@@ -337,6 +337,15 @@ python -m pytest tests/test_workspace_execution.py tests/test_workspace_revocati
 - [x] 修复 Gateway 包导入回归；保存代码/镜像/日志/资源回执、部署配置说明和复测文档，本地提交本小步。物理 #12 六项通过（含旧终态经实际观测才结算）；SQL #32 十七项通过，十项当时的物理默认跳过。
 - [ ] 持续接通 Run/browser/Scheduler/credential 的原生撤权处理、pool/远程 C/续跑/通知和真实 C→B→C；总门禁保持关闭，M4 父项未完成。原生 MCP 的完整公共 HTTP/JWT 入口、真实 TCP/NAS 和 OS 重启也未获此小步证明。
 
+#### M4 第十小步：原生 Run 撤权、取消与清理阻塞（已验证的 active Run 子步）
+
+- [x] 先验证真实 native Run/Graph 主干：成员版本变更与 Run interrupt intent/持久 run_stop 同事务；原生心跳观察后停止 graph，清理未完成时保留阻塞。
+- [x] 复用 native cancel_action 和 owning worker；保留原始 Run/线程代次/创建时间/成员快照/worker 绑定，不从 UI 当前空间补授权。尚未开始的旧 rollback intent 遇撤权仅消费 interrupt 清理；已进入 checkpoint 恢复的窗口仍待闭环。
+- [x] 持久 run_stop 阻止同线程新准入与无 STOP 的孤儿回收；只有当前 native owner、未过期 lease、实际 worker task 完成且 native finalizers 已退出，才能确认本地 Run 执行关闭。未知/缺失身份隔离保留阻塞，不按过期猜测停止。
+- [x] 主干通过后仅补 queued、错误 owner/租约和重建目标等必要边界；上海定向回归、文档、回执和本地提交。远程 C 的物理 STOP、其他资源域和完整 M4 父项仍须后续闭环。
+
+- [ ] 继续补齐 FULL Run 生命周期（先终态后撤权、用户直接取消、丢失 owner/重启）、lease/status/progress/journal/checkpoint/goal/工具发布的完整权限栅栏；然后接其他资源域、pool/远程 C 和真实 C→B→C。此子步不完成 M4 父项。
+
 ### M5：记忆、知识检索与工具凭据隔离
 
 **修改接点：**

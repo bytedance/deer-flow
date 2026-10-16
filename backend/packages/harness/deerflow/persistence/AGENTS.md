@@ -253,3 +253,25 @@ task or retarget a replacement. Parent revocations remain pending for other
 domains. Keep the member helper import inside business mutation methods: eager
 import through mcp_tasks/run/thread_meta package roots creates a Gateway cycle.
 Native head stays 0040; no outbox migration or tenant activation is implied.
+
+Membership invalidation now also captures active normal Runs in `run_control.py`.
+Under the existing workspace transaction it retains native clock -> Run order,
+sets the first cancel_action/timestamp and records `run_stop`. Identity includes
+native Run ID, original user/workspace/thread/incarnation/context, creation time
+and native owner. Missing/future snapshots quarantine; they still block admission.
+The native heartbeat returns an interrupt cleanup directive for these rows even
+if an earlier persisted action was rollback. It can renew the same owner through
+terminal cleanup, without granting another execution.
+
+Pending/quarantined run_stop blocks same-private-thread scoped admission and is
+excluded from ordinary startup/expired-lease orphan terminalization. Only the
+owning native runtime can acknowledge a matching local execution: it rechecks
+registration after start_lock, actual task completion plus successful native
+cleanup (or local pending/unattached NoStart), and the repository checks the
+original tuple and unexpired native Run lease. It does not consult the selected
+space, revive membership, mutate a replacement parent or infer STOP from expiry.
+This is a native execution-close receipt, not remote C physical STOP. Root
+revocation retains a separate pending execution domain plus browser, Scheduler
+and credentials. Native 0040/e0003 stay unchanged; no new DDL or activation.
+Full scoped Run lease/terminal/progress publication fences and revocation that
+arrives after a prior terminal commit remain required integration work.

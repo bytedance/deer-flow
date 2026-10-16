@@ -114,3 +114,48 @@ verify exact owned-container absence/removal. Terminal metadata alone cannot
 produce a STOP receipt or settle native cancellation; a running or unobservable
 object still retains uncertainty. The companion test uses actual Docker
 observation after the old ordinary queued-cancel path.
+
+## 原生 Run 成员撤权与清理阻塞（M4）
+
+测试入口是 `backend/tests/test_workspace_revocation.py`。这是原生 LangGraph/RunManager
+与 SQLite/PostgreSQL 的确定性检查，不调用模型；测试容器不需要 Docker socket。
+可信内部 principal/准入 fixture 不代表公开 Gateway/JWT 已接通。
+
+先验证实际 graph 运行，成员版本在原生事务中变化，持久 cancel intent 与 run_stop
+同时提交；UI 选择另一个空间后，原生心跳仍消费原始 Run 的 interrupt。分别持有
+图清理和 native completion hook：即使 Run 元数据已 interrupted，另一个 worker
+也不能建立新 Run，原 owner 仍可为清理续约。实际 worker task 退出、stream/
+journal/生命周期/sandbox lease 清理成功且 owner 租约有效后，才能确认 native
+execution closed。失败或未知保留阻塞，绝不从租约过期推断 STOP。
+
+共三类场景，各覆盖两种数据库：正常主干、同一主干的真实 finalizer 报错分支、
+排队且未附 worker task 的 NoStart。排队检查同时覆盖错误 owner/原始快照/父代次/
+创建时间、过期租约、普通孤儿回收拒绝、重建父线程不被旧清理改写和幂等确认。
+这里的 NoStart 只描述 native graph 未开始；C 容器停止仍必须由执行账本证明。
+
+可复跑的专属 SQL CI：
+
+```bash
+# 保存本地提交后生成只含版本库文件的源码归档；不包含私有配置或 key。
+git archive --format=tar.gz HEAD -o /private/tmp/tenant-run-control-source.tar.gz
+shasum -a 256 /private/tmp/tenant-run-control-source.tar.gz
+python scripts/render_tenant_run_control_pipeline.py tenant-run-control <归档SHA256> \
+  > /private/tmp/Jenkinsfile.tenant-run-control
+```
+
+将源码包以 `tenant-run-control-source.tar.gz` 上传到上海 Jenkins 专属任务目录，
+使用渲染的 Jenkinsfile 更新 `deerflow-tenant-execution-m4-sql`，先验证再构建。
+目标工作目录固定 `/data/jenkins-agent/deerflow/tenant-execution-m4-sql`；先确认没有
+本任务正在运行/排队。认证仅在 Jenkins 本机，权限沿用已授权范围。
+
+仓库模板 `examples/ecs-native/deploy/Jenkinsfile.tenant-run-control.in` 校验源码 SHA，
+固定 tools/PG 镜像 ID、内部网络及 CPU/内存；容器只读挂载源码包。Python/SQL/graph
+在上海运行，不挂生产/NAS/模型凭据、不发布服务端口。宿主仅启动带本次精确标签
+的测试容器，清理并记录专属 PG 匿名卷，保留日志与 `run-control-<BUILD_NUMBER>/`
+中的卷名回执。旧未记录卷不推测归属，不做全局 prune。
+
+新增控制记录复用通用 outbox，无 ORM 迁移（native 0040/executor e0003）。实际
+运行需要 native ownership heartbeats；失败的关闭确认保留 pending，完整故障恢复
+仍在 M10/M11。完整 Run HTTP/JWT、直接用户取消、checkpoint/journal/工具发布权限
+栅栏，以及先进入终态再撤权的生命周期窗口尚未完成；不要据此启用租户总门禁。
+其他执行域、browser、Scheduler、凭据和完整 C→B→C 仍需实施。
