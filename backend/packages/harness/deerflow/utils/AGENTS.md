@@ -6,6 +6,9 @@ capture/fetch publication. It writes and fsyncs a hidden exclusive sibling befor
 umask; replacements preserve existing permission bits before publication. Never
 read the process umask by changing it in this threaded runtime. Behavioral tests
 for both tool imports live in `tests/test_browser_outputs_atomic.py`.
+Failure cleanup must preserve the original publication exception, including
+interruptions. Descriptor close and sibling unlink are separate best-effort
+operations: a close failure must not prevent the unlink attempt.
 
 ### Model Retry Hints
 

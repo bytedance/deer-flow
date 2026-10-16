@@ -119,6 +119,31 @@ def test_publish_failure_preserves_target_and_cleans_temporary(tmp_path, monkeyp
         assert list(tmp_path.iterdir()) == []
 
 
+def test_descriptor_cleanup_failure_still_attempts_unlink(tmp_path, monkeypatch, publisher):
+    target = tmp_path / "shot.png"
+    publish_error = OSError("fdopen failed")
+    close = os.close
+    closed = []
+
+    def fail_fdopen(*args):
+        raise publish_error
+
+    def fail_close(fd):
+        close(fd)
+        closed.append(fd)
+        raise OSError("close failed")
+
+    with monkeypatch.context() as patches:
+        patches.setattr(os, "fdopen", fail_fdopen)
+        patches.setattr(os, "close", fail_close)
+        with pytest.raises(OSError) as caught:
+            publisher(target, b"new")
+
+    assert caught.value is publish_error
+    assert len(closed) == 1
+    assert list(tmp_path.iterdir()) == []
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor permissions")
 def test_publish_permission_failure_keeps_previous_file(tmp_path, monkeypatch, publisher):
     target = tmp_path / "shot.png"
@@ -157,3 +182,34 @@ def test_capture_writes_go_through_the_atomic_publish():
 def test_both_tools_share_the_atomic_publisher():
     for module in (browser_automation_tools, browserless_tools):
         assert module._publish_bytes_atomically is publish_bytes_atomically
+
+
+@pytest.mark.parametrize("publish_error", [OSError("publication failed"), KeyboardInterrupt("publication interrupted")], ids=["io-error", "interrupt"])
+@pytest.mark.parametrize("existing", [False, True], ids=["new", "existing"])
+def test_cleanup_failure_preserves_publication_error(tmp_path, monkeypatch, publisher, publish_error, existing):
+    target = tmp_path / "shot.png"
+    if existing:
+        target.write_bytes(b"old")
+    cleanup_attempts = []
+
+    def fail_publish(*args):
+        raise publish_error
+
+    def fail_cleanup(path, **kwargs):
+        cleanup_attempts.append(path)
+        raise PermissionError("cleanup failed")
+
+    with monkeypatch.context() as patches:
+        patches.setattr(os, "replace", fail_publish)
+        patches.setattr(Path, "unlink", fail_cleanup)
+        with pytest.raises(type(publish_error)) as caught:
+            publisher(target, b"new complete capture")
+
+    assert caught.value is publish_error
+    assert len(cleanup_attempts) == 1
+    assert cleanup_attempts[0].parent == tmp_path
+    assert cleanup_attempts[0].read_bytes() == b"new complete capture"
+    if existing:
+        assert target.read_bytes() == b"old"
+    else:
+        assert not target.exists()
