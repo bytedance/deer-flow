@@ -32,3 +32,7 @@ def checkpoint_agent_binding_metadata(metadata: object) -> dict[str, str]:
     if not isinstance(value, str) or not value:
         return {}
     return {CHECKPOINT_AGENT_NAME_METADATA_KEY: value}
+
+
+# Native execution identity for child-task admission, never caller config.
+RUN_OWNER_WORKER_CONTEXT_KEY: Final[str] = "__deerflow_run_owner_worker"

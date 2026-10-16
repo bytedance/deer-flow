@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -10,9 +11,14 @@ from sqlalchemy import and_, case, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from deerflow.mcp.tasks import ATTENTION_TASK_STATUSES, POLLABLE_TASK_STATUSES, TERMINAL_TASK_STATUSES
+from deerflow.authz.workspace import WorkspaceContext, get_current_workspace
+from deerflow.mcp.tasks import ATTENTION_TASK_STATUSES, POLLABLE_TASK_STATUSES, TERMINAL_TASK_STATUSES, TaskReference
 from deerflow.persistence.mcp_tasks.model import McpTaskRow
+from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
+from deerflow.persistence.workspaces.scope import resolve_resource_scope
+from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 from deerflow.utils.time import coerce_iso
 
 _POLLABLE_STATUS_VALUES = tuple(status.value for status in POLLABLE_TASK_STATUSES)
@@ -161,15 +167,102 @@ async def _lock_current_thread_incarnation(
 class McpTaskRepository:
     """Durable source of truth for long-running MCP task lifecycle state."""
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    supports_workspace_submissions = True
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession], *, workspace_required=False) -> None:
         self._sf = session_factory
+        self.workspace_scope_required = bool(workspace_required)
+
+    def _read_scope(self, statement, user_id):
+        context = resolve_resource_scope(None, user_id, required=self.workspace_scope_required)
+        if context is None:
+            return statement.where(McpTaskRow.workspace_id.is_(None))
+        parent = ThreadMetaRepository._owned_scope(select(ThreadMetaRow.thread_id).where(ThreadMetaRow.thread_id == McpTaskRow.thread_id, ThreadMetaRow.incarnation.is_not_distinct_from(McpTaskRow.thread_incarnation)), user_id, context)
+        return statement.where(McpTaskRow.workspace_id == context.workspace_id, parent.correlate(McpTaskRow).exists())
+
+    async def _locked_source(self, session, *, context, user_id, thread_id, thread_incarnation, run_id, running, source_worker_id=None):
+        context = resolve_resource_scope(context, user_id, required=True)
+        parent = await ThreadMetaRepository(self._sf)._locked_row(session, thread_id, user_id, context)
+        if parent is None or not thread_incarnation or parent.incarnation != thread_incarnation:
+            raise WorkspaceAccessDenied("MCP task parent identity changed")
+        source = await session.scalar(select(RunRow).where(RunRow.run_id == run_id).with_for_update())
+        if (
+            source is None
+            or source.user_id != user_id
+            or source.workspace_id != context.workspace_id
+            or source.thread_id != thread_id
+            or source.thread_incarnation != thread_incarnation
+            or source.operation_kind != "run"
+            or (running and (source.status != "running" or source.cancel_action is not None or not source_worker_id or source.owner_worker_id != source_worker_id))
+        ):
+            raise WorkspaceAccessDenied("MCP task source Run is unavailable")
+        if running and source.lease_expires_at is not None:
+            expires = source.lease_expires_at
+            if expires.tzinfo is None:
+                expires = expires.replace(tzinfo=UTC)
+            if expires < datetime.now(UTC):
+                raise WorkspaceAccessDenied("MCP task source Run lease expired")
+        try:
+            captured = WorkspaceContext(**source.workspace_context_json)
+        except (TypeError, ValueError):
+            raise WorkspaceAccessDenied("MCP task source authority is invalid") from None
+        if captured != context:
+            raise WorkspaceAccessDenied("MCP task source authority changed")
+
+    async def validate_submission(self, request):
+        if type(request.workspace_context) is not WorkspaceContext:
+            raise WorkspaceAccessDenied("MCP task requires explicit admitted workspace")
+        async with self._sf() as session:
+            await self._locked_source(
+                session, context=request.workspace_context, user_id=request.user_id, thread_id=request.thread_id, thread_incarnation=request.thread_incarnation, run_id=request.run_id, running=True, source_worker_id=request.source_worker_id
+            )
+            await session.commit()
+
+    async def _locked_reference(self, session, reference, *, lease_owner, lease_token, now):
+        await self._locked_source(session, context=reference.workspace_context, user_id=reference.user_id, thread_id=reference.thread_id, thread_incarnation=reference.thread_incarnation, run_id=reference.run_id, running=False)
+        row = await session.scalar(select(McpTaskRow).where(McpTaskRow.id == reference.local_task_id).with_for_update())
+        if (
+            row is None
+            or row.user_id != reference.user_id
+            or row.workspace_id != reference.workspace_context.workspace_id
+            or row.thread_id != reference.thread_id
+            or row.thread_incarnation != reference.thread_incarnation
+            or row.run_id != reference.run_id
+            or row.remote_task_id != reference.remote_task_id
+            or row.server_name != reference.server_name
+        ):
+            raise WorkspaceAccessDenied("MCP task reference changed")
+        try:
+            captured = WorkspaceContext(**row.workspace_context_json)
+        except (TypeError, ValueError):
+            raise WorkspaceAccessDenied("MCP task captured authority is invalid") from None
+        if captured != reference.workspace_context:
+            raise WorkspaceAccessDenied("MCP task captured authority changed")
+        expires_at = row.lease_expires_at
+        if expires_at is not None and expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=UTC)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=UTC)
+        if row.lease_owner != lease_owner or row.lease_token != lease_token or expires_at is None or expires_at < now or row.cancel_requested_at is not None or row.status not in _POLLABLE_STATUS_VALUES:
+            return None
+        return row
+
+    async def validate_reference(self, reference, *, lease_owner, lease_token, now):
+        async with self._sf() as session:
+            row = await self._locked_reference(session, reference, lease_owner=lease_owner, lease_token=lease_token, now=now)
+            if row is None:
+                raise WorkspaceAccessDenied("MCP task claim authority changed")
+            await session.commit()
 
     @staticmethod
     def _row_to_dict(row: McpTaskRow, *, include_internal: bool = False) -> dict[str, Any]:
         data = row.to_dict()
         thread_incarnation = data.pop("thread_incarnation", None)
+        workspace = data.pop("workspace_context_json", None)
         if include_internal:
             data["_thread_incarnation"] = thread_incarnation
+            if workspace is not None:
+                data["_workspace_context"] = workspace
         for key in _TIMESTAMP_FIELDS:
             if data.get(key) is not None:
                 data[key] = coerce_iso(data[key])
@@ -197,7 +290,12 @@ class McpTaskRepository:
         input_required: dict[str, Any] | None,
         next_poll_at: datetime | None,
         driver_data: dict[str, Any] | None = None,
+        workspace_context: WorkspaceContext | None = None,
+        source_worker_id: str | None = None,
     ) -> dict[str, Any]:
+        if workspace_context is None and (self.workspace_scope_required or get_current_workspace() is not None):
+            raise WorkspaceAccessDenied("MCP task persistence requires explicit admitted workspace")
+        context = resolve_resource_scope(workspace_context, user_id, required=self.workspace_scope_required)
         now = datetime.now(UTC)
         row = McpTaskRow(
             id=task_id,
@@ -225,12 +323,11 @@ class McpTaskRepository:
         )
         _record_event_if_changed(row, tracking_degraded=False, now=now)
         async with self._sf() as session:
-            if not await _lock_current_thread_incarnation(
-                session,
-                user_id=user_id,
-                thread_id=thread_id,
-                thread_incarnation=expected_thread_incarnation,
-            ):
+            if context is not None:
+                await self._locked_source(session, context=context, user_id=user_id, thread_id=thread_id, thread_incarnation=expected_thread_incarnation, run_id=run_id, running=True, source_worker_id=source_worker_id)
+                row.workspace_id = context.workspace_id
+                row.workspace_context_json = asdict(context)
+            elif not await _lock_current_thread_incarnation(session, user_id=user_id, thread_id=thread_id, thread_incarnation=expected_thread_incarnation):
                 raise McpTaskThreadMismatchError("MCP task submission crossed a thread lifecycle boundary")
             row.thread_incarnation = expected_thread_incarnation
             session.add(row)
@@ -264,7 +361,7 @@ class McpTaskRepository:
                     thread_incarnation=thread_incarnation,
                 ),
             )
-            row = (await session.execute(stmt)).scalar_one_or_none()
+            row = (await session.execute(self._read_scope(stmt, user_id))).scalar_one_or_none()
             return self._row_to_dict(row) if row is not None else None
 
     async def list_by_run(self, run_id: str, *, user_id: str, thread_id: str, thread_incarnation: str | None) -> list[dict[str, Any]]:
@@ -277,7 +374,7 @@ class McpTaskRepository:
             _matches_current_thread_incarnation(user_id=user_id, thread_id=thread_id, thread_incarnation=thread_incarnation),
         )
         async with self._sf() as session:
-            return [self._row_to_dict(row) for row in (await session.execute(stmt)).scalars()]
+            return [self._row_to_dict(row) for row in (await session.execute(self._read_scope(stmt, user_id))).scalars()]
 
     async def list_by_thread(
         self,
@@ -302,7 +399,7 @@ class McpTaskRepository:
             stmt = stmt.where(McpTaskRow.status.in_(_POLLABLE_STATUS_VALUES))
         stmt = stmt.order_by(McpTaskRow.created_at.desc(), McpTaskRow.id.desc()).limit(limit)
         async with self._sf() as session:
-            result = await session.execute(stmt)
+            result = await session.execute(self._read_scope(stmt, user_id))
             return [self._row_to_dict(row) for row in result.scalars()]
 
     async def claim_due_tasks(
@@ -330,6 +427,8 @@ class McpTaskRepository:
             .limit(limit)
             .with_for_update(skip_locked=True)
         )
+        if self.workspace_scope_required:
+            stmt = stmt.where(McpTaskRow.workspace_id.is_not(None), McpTaskRow.workspace_context_json.is_not(None))
         async with self._sf() as session:
             result = await session.execute(stmt)
             rows = list(result.scalars())
@@ -357,8 +456,16 @@ class McpTaskRepository:
         input_required: dict[str, Any] | None,
         next_poll_at: datetime | None,
         polled_at: datetime,
+        task_reference: TaskReference | None = None,
     ) -> bool:
         async with self._sf() as session:
+            if task_reference is not None:
+                if task_reference.local_task_id != task_id or task_reference.workspace_context is None:
+                    raise WorkspaceAccessDenied("MCP result reference is invalid")
+                if await self._locked_reference(session, task_reference, lease_owner=lease_owner, lease_token=lease_token, now=polled_at) is None:
+                    return False
+            elif self.workspace_scope_required:
+                raise WorkspaceAccessDenied("MCP result requires its persisted workspace reference")
             # Atomic fence: a poll result from an older generation must not
             # overwrite a claim a newer generation reclaimed after lease expiry.
             values: dict[str, Any] = {
@@ -384,6 +491,7 @@ class McpTaskRepository:
                 update(McpTaskRow)
                 .where(
                     McpTaskRow.id == task_id,
+                    *([] if task_reference is not None else [McpTaskRow.workspace_id.is_(None)]),
                     McpTaskRow.lease_owner == lease_owner,
                     McpTaskRow.lease_token == lease_token,
                     McpTaskRow.lease_expires_at >= polled_at,
@@ -486,6 +594,8 @@ class McpTaskRepository:
         requested_at: datetime,
     ) -> dict[str, Any] | None:
         """Persist a user-scoped cancellation request without exposing the remote id."""
+        if self.workspace_scope_required:
+            return None
         async with self._sf() as session:
             if not await _lock_current_thread_incarnation(
                 session,
@@ -499,6 +609,7 @@ class McpTaskRepository:
                 select(McpTaskRow)
                 .where(
                     McpTaskRow.id == task_id,
+                    McpTaskRow.workspace_id.is_(None),
                     McpTaskRow.user_id == user_id,
                     McpTaskRow.thread_id == thread_id,
                     McpTaskRow.thread_incarnation.is_not_distinct_from(thread_incarnation),
@@ -537,7 +648,10 @@ class McpTaskRepository:
         limit: int,
         task_id: str | None = None,
     ) -> list[dict[str, Any]]:
+        if self.workspace_scope_required:
+            return []
         stmt = select(McpTaskRow).where(
+            McpTaskRow.workspace_id.is_(None),
             McpTaskRow.cancel_requested_at.is_not(None),
             McpTaskRow.status.not_in(_TERMINAL_STATUS_VALUES),
             McpTaskRow.next_cancel_at.is_not(None),
@@ -651,10 +765,13 @@ class McpTaskRepository:
         limit: int,
         tracking_degraded_after_errors: int,
     ) -> list[dict[str, Any]]:
+        if self.workspace_scope_required:
+            return []
         statuses = ("pending", "claimed", "launching", "retry", "dispatched")
         stmt = (
             select(McpTaskRow)
             .where(
+                McpTaskRow.workspace_id.is_(None),
                 McpTaskRow.event_version > McpTaskRow.notified_version,
                 McpTaskRow.notification_status.in_(statuses),
                 or_(McpTaskRow.next_notification_at.is_(None), McpTaskRow.next_notification_at <= now),

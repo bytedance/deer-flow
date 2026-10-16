@@ -6,7 +6,7 @@ acceptance remain pending. Historical `0035/e0001` release receipts are immutabl
 
 ## Scope and prerequisites
 
-`scripts/tenant_migration.py` operates only on native `0039_run_workspace_identity`
+`scripts/tenant_migration.py` operates only on native `0040_mcp_workspace_identity`
 and independent executor `e0002_workspace_scope` databases. It never performs
 DDL, starts workers, enables registration, resumes admission, releases physical
 capacity or changes account verification. M10 must collect actual drain,
@@ -133,13 +133,13 @@ at that checkpoint required the reviewed 0038 revision; old receipts remain immu
 stand in for a matching new generation. Executor e0002 is unchanged.
 
 
-Current native head is `0039_run_workspace_identity`, following unchanged 0038.
+Run identity revision `0039_run_workspace_identity` follows unchanged 0038.
 It adds nullable JSON `runs.workspace_context_json` (the immutable four-field
 identity) and nullable VARCHAR(32) `runs.thread_incarnation`. Fresh ORM and parent
 upgrade share this shape. Historical rows keep their prior bytes/ownership and
 receive no permission snapshot or incarnation grant. Repeated upgrades are
 idempotent; destructive downgrade refuses, requiring a matched backup instead.
-Current native backfill/export and independent executor import require 0039 and
+Current native backfill/export and independent executor import require 0040 and
 e0002. Past deployment receipts remain immutable. M10 must align the complete
 candidate's startup schema fence and paired release manifest before activation;
 the existing closed startup fence is not an activation proof.
@@ -149,3 +149,14 @@ from client metadata or current UI selection at recovery. Snapshot equality is
 identity only, not current membership authorization. Ordinary Agent Run and
 worker lifecycle integration, revocation, live publish/continuation checks and
 physical release/restore still remain M4/M10 acceptance work.
+
+
+Current native head is `0040_mcp_workspace_identity`, after unchanged 0039.
+It appends nullable JSON `mcp_tasks.workspace_context_json`, with no default
+permission grant or history backfill. Fresh ORM/parent upgrade have the same
+shape. Exact old task content, remote handles and lease fields survive repeat
+upgrade; destructive downgrade refuses and releases its own migration pool.
+Current native/export/executor attribution requires 0040/e0002. Earlier matched
+release receipts remain historical and cannot prove the current candidate.
+The existing closed startup schema fence is older; M10/M11 must align it and
+both release manifests only after the complete runtime/restore audit.

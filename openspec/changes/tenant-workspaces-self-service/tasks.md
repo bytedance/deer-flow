@@ -1097,3 +1097,44 @@ M3 and M0-M11 parent gates stay unchecked. Align current native 0039 and paired
 manifest before any activation; no deployment/push/model/local application tests.
 Review performed serially against provenance/lock/rollback/context/compatibility
 checks; this is not an independent full production audit.
+
+
+M4 native MCP checkpoint (2026-10-16): SQL job
+`deerflow-tenant-execution-m4-sql` #12 typed submission-scope RED -> #13
+actual submit/persist/source-end/switch/poll main GREEN. #14 reveals stale
+source-worker admission and foreign limit-one thread projection in both
+dialects. #15 four pass/two fixture failures: old deliberately denied row uses
+the one poll slot, so independent during-poll edge never runs; use two slots
+for those two tasks. #16 SUCCESS: 20 checks (8 new DB cases, 12 reused), actual
+member/policy/nonce/source-owner/cancel and result-write withdrawal boundaries,
+original-scope compensation calls, contextless mandatory-mode legacy exclusion,
+actual 0039->0040 repeat migration/history/NULL authority/refused downgrade/no
+Postgres session leak. Remote IO is deterministic; no B receiver auth is mocked
+or claimed. Native task/Run remain the only metadata authorities.
+
+Scope job `deerflow-tenant-execution-m4` #4 RED actual interceptor still signs
+legacy scope -> #5 SUCCESS 11 checks (1 new, 10 reused): typed original runtime
+v2 signing, missing/forged identity downgrade refusal, unintegrated receiver
+refusal and legacy parity. #6 SUCCESS final 17 Python files Ruff check/format;
+no repeated DB/application suite. Exact current bytes match final source and
+scope #5 for all 17; 15 MCP/framework code files also match SQL #16, excluding
+the separately verified producer/test delta. Source/log/image and empty own
+container/network receipts: native_mcp_scope in progress JSON. Native schema is
+0040_mcp_workspace_identity; executor remains e0002. Earlier receipts immutable.
+
+MCP snapshots live in a dedicated nullable column. Native tools copy original
+WorkspaceContext and server-owned source_worker_id; live SQL checks occur before
+IO, again at insert, before poll and at result commit without locks over remote
+IO. Historical NULL scope cannot be regenerated from current selection. Original
+Run completion does not erase task ownership. Scoped cancellation/notification
+queues are not yet available and never fall back to unscoped claims. The B
+receiver/management protocol still needs current native metadata authorization,
+immutable ledger identity and physical activation/publication proof; current
+unintegrated receivers refuse v2. Next implement that paired protocol and actual
+native ToolNode-to-B main, then scoped control/notifications/Scheduler and full
+runtime/credential/physical revocation. Do not infer physical Stop from metadata
+or a fixture cancel call. Remaining M3 and all M0-M11 parent gates stay unchecked.
+Startup remains compiled false; align the old schema fence and complete paired
+0040 candidate/manifest only after M10/M11. No deployment/push/PR/live model or
+local application runtime tests. This is serial self-review plus bounded CI,
+not a full independent production/security audit or complete M4 acceptance.

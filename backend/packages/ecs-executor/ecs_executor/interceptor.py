@@ -8,6 +8,7 @@ from typing import Any
 
 from langchain_core.tools import ToolException
 
+from deerflow.authz.workspace import get_current_workspace
 from deerflow.config.extensions_config import get_extensions_config
 from deerflow.mcp_scope import runtime_thread_incarnation
 from deerflow.runtime.user_context import require_current_user, resolve_runtime_user_id
@@ -81,6 +82,9 @@ def build_execution_scope_interceptor() -> Any:
             # resolver; its legacy unauthenticated default must never sign work.
             if not isinstance(context, dict) or not isinstance(context.get("user_id"), str) or not context["user_id"]:
                 raise ValueError("Missing authenticated runtime context")
+            workspace_context = context.get("workspace_context")
+            if workspace_context is None and (get_current_workspace() is not None or any(key in context for key in ("workspace_id", "actor_user_id", "membership_version", "policy_version"))):
+                raise ValueError("Missing trusted workspace execution identity")
             token = mint_execution_scope(
                 secret=secret,
                 audience=audience,
@@ -90,6 +94,7 @@ def build_execution_scope_interceptor() -> Any:
                 run_id=context.get("run_id"),
                 operation="submit",
                 arguments=request.args,
+                workspace_context=workspace_context,
             )
         except (ValueError, RuntimeError, TypeError):
             raise ToolException("MCP submit requires a valid trusted execution scope") from None

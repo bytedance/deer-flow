@@ -5,6 +5,7 @@ from enum import StrEnum
 from math import isfinite
 from typing import Any
 
+from deerflow.authz.workspace import WorkspaceContext
 from deerflow.constants import (
     MCP_TASK_NAME_MAX_LENGTH,
     MCP_TASK_SERVER_NAME_MAX_LENGTH,
@@ -16,6 +17,17 @@ def _validate_storage_text(value: str, *, field_name: str, max_length: int) -> N
         raise ValueError(f"{field_name} must not be empty")
     if len(value) > max_length:
         raise ValueError(f"{field_name} must not exceed {max_length} characters")
+
+
+def _validate_workspace(context, user_id, thread_incarnation, run_id):
+    if context is None:
+        return
+    if type(context) is not WorkspaceContext or context.actor_user_id != user_id:
+        raise ValueError("MCP task workspace actor is invalid")
+    if not isinstance(thread_incarnation, str) or not 1 <= len(thread_incarnation) <= 32 or any(ord(c) < 32 or ord(c) == 127 for c in thread_incarnation):
+        raise ValueError("MCP task workspace requires its original thread incarnation")
+    if not isinstance(run_id, str) or not 1 <= len(run_id) <= 64:
+        raise ValueError("MCP task workspace requires its original Run")
 
 
 class TaskStatus(StrEnum):
@@ -94,9 +106,25 @@ class TaskReference:
     remote_task_id: str
     driver_data: dict[str, Any] = field(default_factory=dict)
     thread_incarnation: str | None = None
+    workspace_context: WorkspaceContext | None = None
+    run_id: str | None = None
+
+    def __post_init__(self) -> None:
+        _validate_workspace(self.workspace_context, self.user_id, self.thread_incarnation, self.run_id)
 
     @classmethod
     def from_record(cls, record: dict[str, Any]) -> TaskReference:
+        snapshot = record.get("_workspace_context")
+        context = None
+        if snapshot is not None:
+            try:
+                context = WorkspaceContext(**snapshot)
+            except (TypeError, ValueError):
+                raise ValueError("MCP task workspace snapshot is invalid") from None
+            if context.workspace_id != record.get("workspace_id") or context.actor_user_id != record["user_id"]:
+                raise ValueError("MCP task workspace differs from persisted owner")
+        elif record.get("workspace_id") is not None:
+            raise ValueError("historical MCP task lacks captured workspace authority")
         return cls(
             local_task_id=record["id"],
             user_id=record["user_id"],
@@ -107,6 +135,8 @@ class TaskReference:
             # shape; preserve its explicit NULL session scope during rollout.
             thread_incarnation=record.get("_thread_incarnation"),
             driver_data=dict(record.get("driver_data") or {}),
+            workspace_context=context,
+            run_id=record.get("run_id") if context is not None else None,
         )
 
 
@@ -124,8 +154,13 @@ class TaskSubmitRequest:
     driver_data: dict[str, Any] = field(default_factory=dict)
     local_task_id: str | None = None
     thread_incarnation: str | None = None
+    workspace_context: WorkspaceContext | None = None
+    source_worker_id: str | None = None
 
     def __post_init__(self) -> None:
+        _validate_workspace(self.workspace_context, self.user_id, self.thread_incarnation, self.run_id)
+        if self.workspace_context is not None and (not isinstance(self.source_worker_id, str) or not 1 <= len(self.source_worker_id) <= 128):
+            raise ValueError("MCP task requires the original native Run worker")
         _validate_storage_text(
             self.server_name,
             field_name="server_name",

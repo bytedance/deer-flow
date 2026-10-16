@@ -360,3 +360,14 @@ original identity across native create/handoff/adopt/start and caller switching.
 This is not JWT HTTP, physical C/B execution, lease/finalization fencing or live
 tool/notification authorization proof. MCP/Scheduler and signed transport wiring
 must consume the original identity before full tenant execution can activate.
+
+
+The scoped worker also stamps RUN_OWNER_WORKER_CONTEXT_KEY from the admitted
+record into tool runtime. Callers cannot supply it through context/configurable;
+configurable entries are cleared at install and cleanup. The MCP wrapper copies it into the scoped
+submission request so pre-IO and post-IO SQL reject a replaced/expired/cancelled
+source execution; a current membership snapshot alone cannot authorize a stale
+worker to create child work. This key is an execution fence, not authentication
+or a substitute for native launch credentials. Legacy unscoped Runs do not
+receive it. The same immutable WorkspaceContext feeds the ECS submit signer;
+recipient authorization and the management/control protocol remain required.

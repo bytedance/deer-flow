@@ -371,3 +371,12 @@ and deterministic native worker execution, as documented in the runtime guide.
 Remote transport, leases, terminal publication and full worker lifecycle remain
 pending. Workspace startup remains closed until the whole runtime and release
 plan is verified. See persistence/runtime guides and tenant migration docs.
+
+
+M4 MCP metadata/driver foundation: scoped native task requests/references retain
+the source Run's immutable workspace; source execution owner is copied from a
+server-owned runtime key. SQL validates source/current membership/nonce before
+and after remote submission and before polling/result commit. Native schema is
+now 0040; independent executor schema remains e0002. Scoped submit signing uses
+v2 and does not fall back to legacy; B receiver/management, scoped control queues,
+remote publication/physical execution and full tenant activation remain pending.

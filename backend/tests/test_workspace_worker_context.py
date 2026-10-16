@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from test_workspace_executor_migration import executor_engine, native_engine  # noqa: F401
 
 from deerflow.runtime import RunManager, RunStatus
+from deerflow.runtime.context_keys import RUN_OWNER_WORKER_CONTEXT_KEY
 from deerflow.runtime.runs.worker import RunContext, run_agent
 from deerflow.runtime.stream_bridge.memory import MemoryStreamBridge
 
@@ -45,13 +46,17 @@ def test_native_worker_cannot_inherit_workspace_authority_from_caller_context():
             ctx=RunContext(checkpointer=None),
             agent_factory=lambda **kwargs: compiled,
             graph_input={"messages": []},
-            config={"configurable": {"thread_id": record.thread_id, **{key: "caller-spoof" for key in WORKSPACE_KEYS}}, "context": {key: "caller-spoof" for key in WORKSPACE_KEYS}},
+            config={
+                "configurable": {"thread_id": record.thread_id, **{key: "caller-spoof" for key in WORKSPACE_KEYS | {RUN_OWNER_WORKER_CONTEXT_KEY}}},
+                "context": {key: "caller-spoof" for key in WORKSPACE_KEYS | {RUN_OWNER_WORKER_CONTEXT_KEY}},
+            },
             stream_modes=["values"],
         )
         assert record.status == RunStatus.success, record.error
         assert observed, "the actual native graph must execute"
         assert not WORKSPACE_KEYS.intersection(observed), "caller identity survived the native worker boundary"
         assert not WORKSPACE_KEYS.intersection(observed_configurable), "caller identity survived in configurable"
+        assert RUN_OWNER_WORKER_CONTEXT_KEY not in observed and RUN_OWNER_WORKER_CONTEXT_KEY not in observed_configurable
         assert observed["thread_id"] == record.thread_id and observed["run_id"] == record.run_id
 
     asyncio.run(scenario())
@@ -120,7 +125,7 @@ def test_native_sql_run_handoff_executes_with_its_original_workspace(native_engi
                     ctx=RunContext(checkpointer=None, thread_store=threads, workspace_context=adopted.workspace_context),
                     agent_factory=lambda **kwargs: compiled,
                     graph_input={"messages": []},
-                    config={"configurable": {"thread_id": record.thread_id}, "context": {key: "caller-spoof" for key in WORKSPACE_KEYS}},
+                    config={"configurable": {"thread_id": record.thread_id}, "context": {key: "caller-spoof" for key in WORKSPACE_KEYS | {RUN_OWNER_WORKER_CONTEXT_KEY}}},
                     thread_incarnation=adopted.thread_incarnation,
                     stream_modes=["values"],
                 )
@@ -129,6 +134,7 @@ def test_native_sql_run_handoff_executes_with_its_original_workspace(native_engi
                 assert observed["workspace_id"] == original.workspace_id and observed["actor_user_id"] == observed["user_id"] == "owner"
                 assert observed["membership_version"] == original.membership_version and observed["policy_version"] == original.policy_version
                 assert observed["thread_incarnation"] == parent["incarnation"]
+                assert observed[RUN_OWNER_WORKER_CONTEXT_KEY] == "runtime-worker"
                 assert get_current_workspace() == other, "worker scope leaked into its caller"
                 async with sf() as session:
                     stored = await session.get(RunRow, record.run_id)

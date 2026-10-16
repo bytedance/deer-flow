@@ -278,3 +278,13 @@ grant. Full real Next build plus native HTTP and restored artifact verify proper
 and no request-header leak. Gateway is synthetic; JWT/SQL/browser/task/physical
 acceptance remain required. Prioritize M4 native execution scope, retain M3 final
 gates and align the currently stale schema fence before release; activation false.
+
+
+M4 MCP checkpoint: native scoped task submit/poll/result metadata now uses
+persisted original workspace and source execution fences, with actual SQL and
+controlled remote IO evidence. User task list/get projections filter private
+scope. Submit signing emits v2 from typed original runtime; unintegrated receivers
+refuse it. This is not complete MCP HTTP permission/credential binding, B receiver,
+management, cancellation, notifications or physical execution acceptance; those
+entrypoints remain required. See native_mcp_scope in progress JSON. Tenant
+startup remains closed; no header or metadata object activates authority.

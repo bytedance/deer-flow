@@ -525,3 +525,12 @@ admission and pending transition main is verified independently of startup.
 This does not provide the full HTTP/internal/Scheduler/MCP caller bindings,
 credential version fences or remote launch authentication; the compiled tenant
 activation gate remains closed until all runtime/release integration is proven.
+
+
+Native persistence constructs McpTaskRepository with workspace_required from
+the startup-only operator configuration, like other scoped repositories.
+McpTaskService uses original request/persisted task identity for remote calls
+and result commit, not request selectors. This does not integrate the MCP HTTP
+router, scoped cancellation/notifications or remote B receiver; full native
+permissions/credential revocation and entrypoint bindings remain acceptance
+requirements. Tenant startup is still compiled closed.

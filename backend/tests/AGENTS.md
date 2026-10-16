@@ -293,3 +293,19 @@ change actual parent nonce/member version before handoff/adopt/start; retain an
 exact row snapshot to prove no owner/lease mutation. Unbound legacy CAS must not
 operate on a scoped row. These do not prove public JWT/cookie admission, remote
 physical execution, recurring jobs, or in-flight tool/publication revocation.
+
+
+Workspace MCP checks use actual scoped SQL Run/task/member/parent records and
+native McpTaskService; only remote protocol IO is deterministic. The main ends
+the source Run and changes the caller's selection before polling, then inspects
+actual task scope/result and context reset. Source-policy/nonce/owner/cancel
+withdrawal checks happen around real IO and insert; observe compensation calls
+and absent durable rows without claiming physical remote Stop. Poll withdrawal
+checks assert no terminal/result commit. Use two poll slots for the independent
+before/during cases so a deliberately denied old row cannot consume the one
+slot and prevent the second edge from executing. Mandatory-mode checks use an
+actual contextless worker call and inspect an untouched unattributed task.
+Migration coverage reconstructs parent 0039 only in its disposable DB, preserves
+old content/remote handles/leases through repeat upgrade to 0040 and refuses
+downgrade without leaking a Postgres session. Crypto producer checks separately
+prove original-runtime v2 identity and legacy-receiver refusal, not B server auth.

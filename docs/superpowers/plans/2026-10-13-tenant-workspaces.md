@@ -292,6 +292,14 @@ python -m pytest tests/test_workspace_execution.py tests/test_workspace_revocati
 - [x] 将不可变身份通过原生 RunContext 带入 worker/runtime，清除调用方伪造字段；不从 UI 当前选择恢复任务身份。
 - [x] 在上海验证主干及必要拒绝边界，保存回执并本地提交。普通 Run 的 reject 准入及 pending/确定性 worker 主干已验证；完整入口、worker 生命周期、签名接收、MCP/Scheduler 和撤权仍须实际接通后才能勾 M4。
 
+#### M4 第四小步：原生 MCP 持久归属和后台轮询（2026-10-16）
+
+接点：`TaskSubmitRequest/TaskReference` 的可信不可变身份；`McpTaskRepository` 在提交前及提交后持久化事务核对原 Run/私有父代次/实时成员，并保存独立 JSON 身份列（在真实 head 之后新增迁移）；`McpTaskService.submit/_poll_one_claimed/_apply_snapshot` 从原请求或持久行绑定空间并在外部调用和结果提交前重查。原生工具 wrapper 从可信 Runtime 复制身份，不从 UI 选择或参数恢复。保持原生 task/Run 权威，禁止凭当前成员资格补齐历史快照。
+
+- [x] 真实 SQLite/PostgreSQL 上验证提交、原 Run 结束、切换空间、原身份轮询与结果持久化主干 RED→GREEN。远端协议使用确定性 IO fixture，此步不宣称实际 B 执行端授权。
+- [x] 主干后补提交前/后撤权、父代次改变和结果提交前撤权必要边界，保留旧任务兼容检查；未接通的 scoped 通知/取消队列不得退回无空间路径。
+- [x] 新 ORM 字段附加迁移并验证历史保留；更新文档/回执并本地提交。随后继续 B 接收端 v2 签名与物理执行，不以本步代替 M4 完整验收。
+
 ### M5：记忆、知识检索与工具凭据隔离
 
 **修改接点：**

@@ -66,6 +66,7 @@ from deerflow.runtime.context_keys import (
     DEFAULT_AGENT_NAME_METADATA_VALUE,
     NOTIFICATION_ONLY_CONTEXT_KEY,
     PROJECT_CONTEXT_KEY,
+    RUN_OWNER_WORKER_CONTEXT_KEY,
     checkpoint_agent_binding_metadata,
 )
 from deerflow.runtime.events.message_identity import attach_message_seq, message_identity
@@ -250,6 +251,7 @@ def _release_run_scoped_references(
         configurable = runnable_config.get("configurable")
         if isinstance(configurable, dict):
             configurable.pop("__pregel_runtime", None)
+            configurable.pop(RUN_OWNER_WORKER_CONTEXT_KEY, None)
             configurable.pop(CONVERSATION_READER_CONTEXT_KEY, None)
             configurable.pop(SCHEDULER_CAPABILITY_CONTEXT_KEY, None)
             configurable.pop(AGENT_RUNS_CONTEXT_KEY, None)
@@ -550,6 +552,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
     frozenset(
         {
             CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
+            RUN_OWNER_WORKER_CONTEXT_KEY,
             DEERFLOW_TRACE_METADATA_KEY,
             CONVERSATION_READER_CONTEXT_KEY,
             SCHEDULER_CAPABILITY_CONTEXT_KEY,
@@ -698,6 +701,7 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
             configurable.pop(key, None)
         if "workspace_context" in runtime_context:
             configurable["user_id"] = runtime_context["workspace_context"].actor_user_id
+        configurable.pop(RUN_OWNER_WORKER_CONTEXT_KEY, None)
         configurable.pop(CONVERSATION_READER_CONTEXT_KEY, None)
         configurable.pop(SCHEDULER_CAPABILITY_CONTEXT_KEY, None)
         configurable.pop(AGENT_RUNS_CONTEXT_KEY, None)
@@ -1219,6 +1223,8 @@ async def run_agent(
             scheduler_capability=ctx.scheduler_capability,
             workspace_context=ctx.workspace_context,
         )
+        if ctx.workspace_context is not None:
+            runtime_ctx[RUN_OWNER_WORKER_CONTEXT_KEY] = record.owner_worker_id
         # Bind every checkpoint produced by this run to the effective agent
         # identity that produced its state. Manual compaction uses only this
         # server-overwritten value for memory policy; request metadata cannot

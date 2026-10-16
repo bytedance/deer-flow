@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.mcp_tasks.errors import PermanentNotificationError
+from deerflow.authz.workspace import get_current_workspace, reset_current_workspace, set_current_workspace
 from deerflow.constants import (
     MCP_TASK_POLL_AFTER_MAX_SECONDS,
     MCP_TASK_REMOTE_ID_MAX_LENGTH,
@@ -26,6 +27,7 @@ from deerflow.mcp.tasks import (
     TaskSubmitRequest,
 )
 from deerflow.persistence.mcp_tasks import DuplicateMcpRemoteTaskError
+from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 from deerflow.runtime.cancellation import wait_for_task_until
 from deerflow.runtime.runs.manager import ConflictError
 from deerflow.runtime.runs.schemas import RunStatus
@@ -292,6 +294,17 @@ class McpTaskService:
         else:
             self._observe_batch_release_task(state, task, ordinary=True, action=action)
 
+    async def _with_workspace(self, context, operation):
+        if context is None:
+            if get_current_workspace() is not None:
+                raise WorkspaceAccessDenied("unscoped MCP work cannot inherit an ambient workspace")
+            return await operation()
+        token = set_current_workspace(context)
+        try:
+            return await operation()
+        finally:
+            reset_current_workspace(token)
+
     async def submit(
         self,
         *,
@@ -304,10 +317,18 @@ class McpTaskService:
         if driver is None:
             raise LookupError(f"No MCP task driver registered as {driver_name!r}")
 
+        context = request.workspace_context
+        if context is None:
+            if getattr(self._repository, "workspace_scope_required", False) or get_current_workspace() is not None:
+                raise WorkspaceAccessDenied("MCP submission requires its admitted workspace")
+        else:
+            if getattr(self._repository, "supports_workspace_submissions", False) is not True:
+                raise WorkspaceAccessDenied("MCP workspace submission requires a scoped durable repository")
+            await self._repository.validate_submission(request)
         submitted_at = now or datetime.now(UTC)
         local_task_id = request.local_task_id or f"mcp-task-{uuid.uuid4().hex}"
         driver_request = replace(request, local_task_id=local_task_id)
-        submission = await driver.submit(driver_request)
+        submission = await self._with_workspace(context, lambda: driver.submit(driver_request))
         driver_data = {**request.driver_data, **submission.driver_data}
         task_reference = TaskReference(
             local_task_id=local_task_id,
@@ -317,6 +338,8 @@ class McpTaskService:
             remote_task_id=submission.remote_task_id,
             thread_incarnation=request.thread_incarnation,
             driver_data=driver_data,
+            workspace_context=context,
+            run_id=request.run_id if context is not None else None,
         )
         try:
             if len(submission.remote_task_id) > MCP_TASK_REMOTE_ID_MAX_LENGTH:
@@ -343,6 +366,7 @@ class McpTaskService:
                 input_required=snapshot.input_required,
                 next_poll_at=next_poll_at,
                 driver_data=driver_data,
+                **({"workspace_context": context, "source_worker_id": request.source_worker_id} if context is not None else {}),
             )
         except DuplicateMcpRemoteTaskError:
             # This handle already has a durable owner. Cancelling it as
@@ -377,7 +401,7 @@ class McpTaskService:
         reason: str,
     ) -> None:
         compensation = asyncio.create_task(
-            driver.cancel(task_reference),
+            self._with_workspace(task_reference.workspace_context, lambda: driver.cancel(task_reference)),
             name=f"mcp-submit-compensation-{task_reference.local_task_id}",
         )
         self._compensation_tasks.add(compensation)
@@ -1351,7 +1375,12 @@ class McpTaskService:
             return
 
         try:
-            snapshot = self._normalize_snapshot(await driver.get_status(TaskReference.from_record(record)))
+            reference = TaskReference.from_record(record)
+            if reference.workspace_context is None and getattr(self._repository, "workspace_scope_required", False):
+                raise WorkspaceAccessDenied("MCP polling requires a captured workspace reference")
+            if reference.workspace_context is not None:
+                await self._repository.validate_reference(reference, lease_owner=self._lease_owner, lease_token=record["lease_token"], now=datetime.now(UTC))
+            snapshot = self._normalize_snapshot(await self._with_workspace(reference.workspace_context, lambda: driver.get_status(reference)))
         except McpTaskProtocolError as exc:
             logger.error(
                 "MCP task status contract failed permanently (task_id=%s, driver=%s): %s",
@@ -1408,6 +1437,7 @@ class McpTaskService:
             input_required=snapshot.input_required,
             next_poll_at=self._next_poll_at(snapshot, now=polled_at),
             polled_at=polled_at,
+            **({"task_reference": TaskReference.from_record(record)} if record.get("workspace_id") is not None or record.get("_workspace_context") is not None else {}),
         )
         if not applied:
             logger.info(

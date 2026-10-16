@@ -79,3 +79,30 @@ recognized by injected-argument recovery and can silently remove server runtime
 identity. Preserve hidden runtime and native incarnation validation; never expose
 runtime as a public model argument. `test_mcp_session_pool` covers the real local
 ToolNode path without old Fleet workspace hooks.
+
+
+M4 scoped MCP foundation: TaskSubmitRequest/TaskReference carry immutable
+WorkspaceContext; submissions also carry source_worker_id from the worker's
+server-owned RUN_OWNER_WORKER_CONTEXT_KEY, never model arguments. The service
+requires a scoped durable repository, validates the actual running source Run
+before remote IO, and rechecks current workspace/member/parent/Run/owner/lease/
+cancel state under SQL locks when persisting the returned handle. No writer
+transaction spans remote IO. Compensation carries the same original scope.
+
+McpTaskRow.workspace_context_json (0040) stores that identity separately from
+remote-controlled driver_data. Historical NULL snapshots cannot become execution
+authority from current selection. Internal claim records expose the snapshot
+only for typed TaskReference recovery. User get/list-by-run/list-by-thread SQL
+filters workspace/private parent before pagination. Native background polling
+validates the persisted reference and lease before IO, binds original scope for
+the driver, and rechecks authorization plus claim fencing at snapshot commit.
+Original Run completion does not redirect or erase the durable task's scope.
+
+Mandatory workspace mode skips unattributed legacy poll rows and refuses their
+references. Scoped cancel/notification queues are not integrated yet: they are
+not claimed through legacy code, and mandatory mode disables those legacy queue
+paths entirely. Do not present this as working tenant cancellation or delivery.
+Next implement their native control/launch authority and B v2 receiver/management
+protocol, publication and physical Stop proof. The global tenant startup gate
+remains closed. Deterministic remote IO fixtures prove metadata/driver boundaries,
+not actual external service authorization or physical B execution.

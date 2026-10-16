@@ -71,10 +71,15 @@ alongside the existing Run identity and argument digest. `verify_execution_scope
 requires an independently authorized `expected_workspace_context` with exactly
 matching workspace, actor, membership and policy versions. A scoped verifier
 refuses a legacy token; an unintegrated verifier refuses version 2. Tokens do not
-resolve membership or authorize parent/child resources. Native Run/MCP/worker
-integration and live reauthorization remain pending; the current interceptor
-continues to use the legacy protocol behind the closed tenant activation gate.
-Do not enable tenant execution on the strength of this signing primitive.
+resolve membership or authorize parent/child resources. The submit interceptor
+now signs version 2 from the original typed runtime snapshot and refuses missing
+or forged workspace identity instead of degrading to legacy. A different ambient
+selection never supplies submission authority. Unscoped legacy submits retain
+the prior protocol. Native MCP metadata and polling retain original scope, but
+ExecutionJobs/remote launch/browser receivers and the management status/cancel
+protocol still need independent tenant authorization. They must refuse scoped
+work until integrated. Do not enable tenant execution from the signing or
+metadata proofs; the global startup gate remains closed.
 
 A submit response durably stages the job without execution. Only the first
 signed native background status poll activates it, after native submission SQL

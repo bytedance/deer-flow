@@ -220,7 +220,17 @@ runs.workspace_context_json and VARCHAR(32) runs.thread_incarnation with the
 idempotent safe_add_column helper. Fresh ORM has the same shape. Existing rows
 remain NULL and retain their content/ownership; missing historical authority
 must not be reconstructed from a current request. Downgrade refuses and requires
-matched restore. Native/export/executor attribution now requires 0039/e0002.
+matched restore. Native/export/executor attribution currently requires 0040/e0002.
 Alembic env disposes its owned async engine in finally even when DDL or a refused
 downgrade raises; do not conceal leaked migration sessions by forcing database
 drop or terminating unrelated connections in tests.
+
+
+0040_mcp_workspace_identity follows unchanged 0039 and adds only nullable JSON
+mcp_tasks.workspace_context_json via safe_add_column. Fresh ORM and parent
+upgrade agree. Existing task content, remote handles and leases stay unchanged;
+NULL history must not be assigned current membership authority. Repeat upgrade
+is idempotent; destructive downgrade refuses and requires matched restore.
+Native/backfill/export/executor attribution revisions are pinned to 0040/e0002.
+Historical release receipts remain immutable; do not reinterpret them as the
+new candidate's stop/restore proof or bypass the closed tenant startup guard.

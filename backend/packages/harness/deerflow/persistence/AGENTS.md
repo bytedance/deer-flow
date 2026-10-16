@@ -123,7 +123,7 @@ Marker mutation locks workspace -> actor -> thread and updates its workspace
 clock only when the native monotonic marker moves. Version reads use one live
 membership SELECT; missing required scope is refused. Scoped delete_by_thread
 is refused pending thread lifecycle integration, never blind all-viewer cleanup.
-Current offline native/executor ownership receipts require 0039/e0002; physical
+Current offline native/executor ownership receipts require 0040/e0002; physical
 paired rollout, activity/run feeds and lifecycle acceptance remain required.
 
 RunRepository read scope consumes trusted task-local context and the operator
@@ -197,7 +197,7 @@ callers pass the explicit actor. Constructor workspace_required is not yet full
 runtime-factory activation. #82 evidence/limits live in workspace progress JSON.
 
 
-0039_run_workspace_identity is the native head after unchanged 0038. It adds
+0039_run_workspace_identity follows unchanged 0038 (current head is 0040). It adds
 nullable runs.workspace_context_json and runs.thread_incarnation without
 backfilling live authority. Scoped atomic short-operation admission captures
 immutable WorkspaceContext and parent incarnation under the existing private
@@ -207,7 +207,7 @@ Interrupt/rollback admission remains refused. Legacy put
 refuses bound workspace callers and any existing workspace row, including
 unbound callers, rather than retargeting a captured identity. Dedicated scoped
 worker write/recovery methods remain M4 work. Backfill/export and executor import
-agree on 0039/e0002 but do not fabricate permission snapshots for history.
+agree on current 0040/e0002 but do not fabricate permission snapshots for history.
 
 
 M4 pending execution: scoped create_thread_operation_atomic admits normal Runs
@@ -221,3 +221,19 @@ cancel CAS. Legacy unbound calls require workspace_id IS NULL and cannot touch
 a scoped row. A denied CAS must preserve the pending row and its owner/lease.
 These start/transfer fences do not authorize terminal publication, lease renewal,
 recovery, cancellation, remote dispatch or external writes; all remain M4 work.
+
+
+0040_mcp_workspace_identity is the native head after unchanged 0039. It adds
+nullable mcp_tasks.workspace_context_json with no historical authority backfill.
+McpTaskRepository fixes workspace_scope_required at construction. Scoped submit
+validation locks workspace -> native actor -> private parent -> source Run,
+checks immutable identity and current executing owner/lease/cancel intent, then
+releases before IO. Create repeats the checks in its insert transaction. Poll
+validation/result commit lock that source and exact task, validate original
+scope and native claim token; the source may have ended while the durable task
+continues. Resource reads filter private scope before limits. Legacy unbound
+snapshot writes require workspace_id NULL. Mandatory workers skip unattributed
+legacy rows; unsupported scoped cancellation/notification cannot use legacy
+claims. Releasing retry diagnostics is not permission to publish a result.
+Native backfill/export and executor import require 0040/e0002; release/schema
+startup alignment and full M4 control/publication/physical evidence stay pending.

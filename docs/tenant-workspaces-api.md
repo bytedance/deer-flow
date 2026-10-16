@@ -914,3 +914,23 @@ admission, MCP/Scheduler/remote protocol, leases/recovery and live publication/
 revocation integration remain required. Next scope native MCP/B records and
 wire version-2 submission signing/verification so scoped work never degrades
 to legacy execution authority. No API activation or deployment is implied.
+
+
+M4 native MCP preparation (0040): scoped TaskSubmitRequest and durable
+TaskReference carry original WorkspaceContext. The hidden native runtime owner
+key supplies the executing source worker, not user/model arguments. Submission
+requires a running uncancelled original Run and current source owner/lease,
+member and private parent generation; create rechecks after remote IO without
+holding locks across IO. The task's dedicated snapshot is independent of remote
+driver_data. User get/list/run projection filter before limits. Background poll
+uses the persisted identity after source Run completion and caller selection
+changes; results require live scope and the original native claim fence at
+commit. Mandatory mode never polls unattributed legacy work.
+
+Scoped cancel/notification are still withheld from legacy queues, and there is
+no new public activation. The ECS submit interceptor now emits v2 from original
+runtime and refuses identity downgrade; receivers without independent tenant
+authorization refuse it. B receiver/management, HTTP/native credential bindings,
+physical execution/publication, Scheduler/continuation/notifications/revocation
+and unknown Stop remain M4 requirements. Remote IO in metadata tests is a fixture;
+it is not evidence of actual B service authorization or cancellation/Stop.

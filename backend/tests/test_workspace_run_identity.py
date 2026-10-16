@@ -204,7 +204,7 @@ def test_run_identity_parent_upgrade_preserves_history_without_granting_authorit
     with native_engine.begin() as conn:
         before = conn.execute(sa.text("SELECT " + columns + " FROM runs ORDER BY run_id")).all()
         assert before, "fixture must contain actual historical native runs"
-        # Reconstruct the exact parent on this disposable fixture database only.
+        # Reconstruct the parent Run columns on this disposable fixture database only.
         conn.execute(sa.text("ALTER TABLE runs DROP COLUMN workspace_context_json"))
         conn.execute(sa.text("ALTER TABLE runs DROP COLUMN thread_incarnation"))
         conn.execute(sa.text("UPDATE alembic_version SET version_num='0038_workspace_read_clocks'"))
@@ -220,7 +220,7 @@ def test_run_identity_parent_upgrade_preserves_history_without_granting_authorit
 
     cfg = asyncio.run(configuration())
     for _ in range(2):
-        bootstrap._upgrade(cfg, "head")
+        bootstrap._upgrade(cfg, "0039_run_workspace_identity")
         with native_engine.connect() as conn:
             assert conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "0039_run_workspace_identity"
             assert conn.execute(sa.text("SELECT " + columns + " FROM runs ORDER BY run_id")).all() == before
