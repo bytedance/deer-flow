@@ -311,6 +311,32 @@ class TestResolveAgentDirMemoryOnlyFallback:
 
 
 class TestLoadAgentSoul:
+    def test_default_soul_strips_utf8_bom(self, tmp_path):
+        (tmp_path / "SOUL.md").write_text("\ufeff  You are helpful.\n", encoding="utf-8")
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
+            from deerflow.config.agents_config import load_agent_soul
+
+            soul = load_agent_soul(None)
+
+        assert soul == "You are helpful."
+
+    @pytest.mark.parametrize("per_user", [False, True])
+    def test_named_soul_strips_utf8_bom(self, tmp_path, per_user):
+        agent_dir = (tmp_path / "users" / "test-user" / "agents" if per_user else tmp_path / "agents") / "reviewer"
+        agent_dir.mkdir(parents=True)
+        (agent_dir / "config.yaml").write_text("name: reviewer\n", encoding="utf-8")
+        (agent_dir / "SOUL.md").write_text("\ufeffYou are a reviewer.\ufeff", encoding="utf-8")
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
+            from deerflow.config.agents_config import load_agent_soul
+
+            soul = load_agent_soul("reviewer", user_id="test-user")
+
+        # A BOM is only stripped at the start of the file; an interior U+FEFF
+        # remains content owned by the author.
+        assert soul == "You are a reviewer.\ufeff"
+
     def test_reads_soul_file(self, tmp_path):
         expected_soul = "You are a specialized code review expert."
         _write_agent(tmp_path, "code-reviewer", {"name": "code-reviewer"}, soul=expected_soul)

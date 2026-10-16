@@ -83,7 +83,7 @@ class FileAgentStore(AgentStore):
                     break
         if not soul_path.exists():
             return None
-        content = soul_path.read_text(encoding="utf-8").strip()
+        content = soul_path.read_text(encoding="utf-8-sig").strip()
         return content or None
 
     def list(self, *, user_id: str | None = None) -> list[AgentConfig]:
