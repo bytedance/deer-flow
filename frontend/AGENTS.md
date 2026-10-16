@@ -117,8 +117,9 @@ Read [src/AGENTS.md](src/AGENTS.md) for component and domain ownership.
 ## Code Style
 
 `core/utils/markdown.ts` reads web-fetch titles from the first nonblank line.
-Match zero to three literal spaces before `# ` without trimming indentation;
-mixed space/tab code blocks must fall back to the URL. Strip optional closing
+Match zero to three literal spaces before a single `#` followed by an ASCII
+space or tab, without trimming indentation; mixed space/tab code blocks must
+fall back to the URL. Strip optional closing
 hashes with a backwards scan so long fetched titles cannot cause quadratic regex
 backtracking. Closing hashes require a preceding space/tab (or an empty title)
 and only ASCII spaces/tabs afterward, apart from the terminal CR in CRLF input.
@@ -384,10 +385,11 @@ through the contract's aliases/default (`resolveReasoningEffort`). Effort values
 are open strings (`ReasoningEffortValue`), so provider-specific tokens such as
 `max` flow through local settings and account preferences unchanged; the custom
 agent dialog offers only the intersection with the per-agent `low/medium/high`
-schema and hides "off" for required-thinking models. Do not read the booleans in
-components directly. On a legacy model, `resolveReasoningEffort` keeps only its
-advertised generic values; this drops a remembered provider-specific token after
-a model switch without changing the backend's direct legacy-request behavior.
+schema and blocks new "off" for required-thinking models. Do not read the booleans in
+components directly. Legacy `resolveReasoningEffort` keeps only advertised generic
+values, dropping provider tokens after a switch; backend requests stay unchanged.
+Agent settings omit untouched reasoning, show invalid saved values for clearing,
+and require a known model to save a model switch.
 
 ## Full-stack plugin UI
 

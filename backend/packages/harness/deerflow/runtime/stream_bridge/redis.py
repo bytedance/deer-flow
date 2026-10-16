@@ -252,6 +252,7 @@ class RedisStreamBridge(StreamBridge):
         pending_initial_response: list[Any] | None = None
         block_ms = max(1, int(heartbeat_interval * 1000)) if heartbeat_interval > 0 else 1
         consecutive_errors = 0
+        stream_observed = False
 
         while True:
             snapshot_stream_id = stream_id
@@ -301,6 +302,19 @@ class RedisStreamBridge(StreamBridge):
                 # non-blocking transaction succeeds between attempts.
                 if response:
                     consecutive_errors = 0
+
+            if earliest_entries:
+                stream_observed = True
+            elif stream_observed or pending_initial_response is not None:
+                # Cleanup/expiry can remove unread events and END while a slow
+                # subscriber drains its fetched batch. An absent observed stream
+                # is lost history, not an idle stream waiting for its producer.
+                yield StreamGap(
+                    requested_event_id=stream_id if pending_initial_response is None else None,
+                    earliest_available_event_id=None,
+                    latest_available_event_id=None,
+                )
+                return
 
             if earliest_entries and (gap_detection_enabled or pending_initial_tail_id is not None):
                 earliest_id = self._decode(earliest_entries[0][0])
