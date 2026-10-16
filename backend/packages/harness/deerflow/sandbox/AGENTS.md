@@ -110,6 +110,12 @@ Fork lookups reject invalidated clients; cancelled acquires leave borrowers a pe
 
 **Sandbox Tools** (in `packages/harness/deerflow/sandbox/tools.py`):
 
+Local `find_grep_matches` applies its long-line guard only to regex searches.
+Escaped fixed-string patterns can scan long lines without regex backtracking;
+retain file-size, binary-file, glob, symlink and result-summary limits.
+Offline regressions: `tests/test_local_grep_long_lines.py`, including the real
+LocalSandbox virtual-path entry point and unchanged regex protection.
+
 Remote `list_dir` prints the root, then prunes ignored descendants before the
 500-entry cap. Preserve root literals, host case policy, status markers and the
 subshell. Keep parser filtering as a backstop; test ignored roots, metacharacters,
