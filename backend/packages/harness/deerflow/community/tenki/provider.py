@@ -244,10 +244,20 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
     def _destroy_warm_entry(self, sandbox_id: str, entry: TenkiSandbox, *, reason: str) -> None:
         self._close_quietly(entry, context=f"warm pool, reason={reason}")
 
-    def _invalidate_sandbox(self, sandbox_id: str, reason: str) -> None:
+    def _invalidate_sandbox(self, sandbox_id: str, reason: str, *, expected_sandbox: TenkiSandbox | None = None) -> None:
         """Destroy and deregister a sandbox after a terminal command-path failure."""
         to_close: TenkiSandbox | None = None
         with self._lock:
+            active = self._sandboxes.get(sandbox_id)
+            warm_entry = self._warm_pool.get(sandbox_id)
+            current = active or (warm_entry[0] if warm_entry is not None else None)
+            if expected_sandbox is not None and current is not expected_sandbox:
+                # Operations already in flight can fail after another failure
+                # has removed their adapter and acquire rebuilt this scope.
+                # The logical id is stable; only the originating adapter owns
+                # the right to invalidate this active or warm generation.
+                logger.debug("Ignoring late terminal failure from replaced Tenki sandbox %s: %s", sandbox_id, reason)
+                return
             active = self._sandboxes.pop(sandbox_id, None)
             warm_entry = self._warm_pool.pop(sandbox_id, None)
             for key in [k for k, sid in self._thread_sandboxes.items() if sid == sandbox_id]:
@@ -383,13 +393,14 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
         except Exception as e:
             logger.warning("Tenki bootstrap for %s raised: %s", sandbox_id, e)
         logger.info("Created Tenki sandbox %s (name=%s)", sandbox_id, self._sandbox_name(sandbox_id))
-        return TenkiSandbox(
+        sandbox = TenkiSandbox(
             sandbox_id,
             remote,
             default_env=self._config["environment"],
             home_dir=self._config["home_dir"],
-            on_terminal_failure=self._invalidate_sandbox,
+            on_terminal_failure=lambda failed_id, reason: self._invalidate_sandbox(failed_id, reason, expected_sandbox=sandbox),
         )
+        return sandbox
 
     def _terminate_orphan(self, sandbox_id: str, remote: Any) -> None:
         """Terminate a microVM that was created but never handed to the adapter."""

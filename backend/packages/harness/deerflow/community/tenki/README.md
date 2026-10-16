@@ -104,6 +104,10 @@ profile output or stderr warnings. Timeout, nonzero-exit, and command-error
 diagnostics still prevent reuse. Failed probes log the sandbox ID and returned
 output before the unhealthy microVM is terminated and replaced.
 
+Terminal failures are bound to the adapter that issued the operation. If another
+operation already replaced that sandbox, a delayed failure from the old adapter
+cannot terminate its healthy replacement, whether active or waiting in the warm pool.
+
 ## Scope: stable features only
 
 Only the stable Tenki surface is used — sandbox create/terminate plus

@@ -40,6 +40,74 @@ def provider(monkeypatch):
     value.shutdown()
 
 
+@pytest.mark.parametrize("replacement_location", ["active", "warm"])
+@pytest.mark.parametrize("first_close_fails", [False, True])
+def test_late_terminal_failure_cannot_evict_replacement(provider, replacement_location, first_close_fails):
+    started, release = threading.Event(), threading.Event()
+    old_remote = Remote([OSError("termination unavailable")] if first_close_fails else [])
+    new_remote = Remote()
+    remotes = iter([old_remote, new_remote])
+    provider._client = SimpleNamespace(create=lambda **kwargs: next(remotes))
+    sandbox_id = provider.acquire("thread", user_id="user")
+    old = provider.get(sandbox_id)
+
+    def fail_old_command(*args, **kwargs):
+        if args[-1] == "old-in-flight":
+            started.set()
+            assert release.wait(5)
+        raise ConnectionError("old connection lost")
+
+    def healthy_command(*args, **kwargs):
+        text = "BOOTSTRAP_OK\n" if "BOOTSTRAP_OK" in args[-1] else "ok\n"
+        return SimpleNamespace(timed_out=False, exit_code=0, stdout_text=text, stderr_text="")
+
+    old_remote.exec = fail_old_command
+    new_remote.exec = healthy_command
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(old.execute_command, "old-in-flight")
+        try:
+            assert started.wait(5)
+            assert "old connection lost" in old.execute_command("first-failure")
+            assert provider.get(sandbox_id) is None
+            assert provider.acquire("thread", user_id="user") == sandbox_id
+            replacement = provider.get(sandbox_id)
+            assert replacement is not old
+            if replacement_location == "warm":
+                provider.release(sandbox_id)
+        finally:
+            release.set()
+        assert "old connection lost" in pending.result(timeout=5)
+
+    tracked = provider.get(sandbox_id) if replacement_location == "active" else provider._warm_pool[sandbox_id][0]
+    assert tracked is replacement
+    assert not replacement.is_closed
+    assert new_remote.calls == 0
+    assert old_remote.calls == 1
+    assert (id(old) in provider._pending_closes) is first_close_fails
+    # The retained replacement still serves the same scope, including a real
+    # warm health probe. Fencing old failures must not reject healthy reuse.
+    assert provider.acquire("thread", user_id="user") == sandbox_id
+    assert provider.get(sandbox_id) is replacement
+    assert replacement.execute_command("echo ok") == "ok\n"
+
+
+def test_current_generation_terminal_callback_still_evicts(provider):
+    remote = Remote()
+    provider._client = SimpleNamespace(create=lambda **kwargs: remote)
+    sandbox_id = provider.acquire("thread", user_id="user")
+    sandbox = provider.get(sandbox_id)
+
+    def fail_command(*args, **kwargs):
+        raise ConnectionError("current connection lost")
+
+    remote.exec = fail_command
+    assert "current connection lost" in sandbox.execute_command("fail")
+    assert provider.get(sandbox_id) is None
+    assert not provider._thread_sandboxes
+    assert sandbox.is_closed
+    assert remote.calls == 1
+
+
 @pytest.mark.parametrize("thread_id", ["thread", None])
 def test_shutdown_fences_late_creation(provider, monkeypatch, thread_id):
     started, release = threading.Event(), threading.Event()

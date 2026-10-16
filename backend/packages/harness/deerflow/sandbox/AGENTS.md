@@ -106,6 +106,9 @@ Fork lookups reject invalidated clients; cancelled acquires leave borrowers a pe
   and retry on idle sweeps/shutdown. Only accepted terminate RPCs or authoritative
   already-gone session errors acknowledge close; transport failures do not. These
   process-local handles provide no crash recovery or physical-stop guarantee.
+  Terminal callbacks bind the originating adapter object. Recheck that identity
+  under the provider lock before deregistering active/warm entries or transferring
+  cleanup responsibility; logical scope ids are reused by replacement generations.
 
 
 **Shared warm-pool lifecycle:** `deerflow.community.warm_pool_lifecycle.WarmPoolLifecycleMixin` owns `DEFAULT_IDLE_TIMEOUT=600`, `IDLE_CHECK_INTERVAL=60`, `DEFAULT_REPLICAS=3`, the idle-checker loop, warm expiry, oldest-warm eviction, replica counts and soft-cap logs. Providers own active registries, creation/discovery, health checks and `_destroy_warm_entry`: AIO destroys `SandboxInfo` via its backend; Boxlite closes loop-affine `BoxliteBox`; Tenki terminates the remote VM with `TenkiSandbox.close`. AIO delegates only warm expiry; active-idle cleanup stays outside the mixin. Shutdown must await the idle-checker thread before tearing down provider resources. `_stop_idle_checker()` uses a bounded join and raises on timeout; keep provider shutdown retryable after failure. Tenki keeps its admission fence set and uses a separate completion flag rather than reopening admission on retry.
