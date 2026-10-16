@@ -430,6 +430,13 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         return await super().abefore_agent(state, runtime)
 
     @override
+    def before_model(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
+        # LangChain registers both halves of this hook as one graph node. An
+        # async-only override would make compiled invoke()/stream() fail even
+        # with prewarm disabled. Sync runs retain ordinary lazy acquisition.
+        return super().before_model(state, runtime)
+
+    @override
     async def abefore_model(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
         # This deliberately starts but does not await acquisition. The model's
         # first response then overlaps Docker startup; the first sandbox tool

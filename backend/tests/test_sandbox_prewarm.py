@@ -588,3 +588,42 @@ async def test_cancel_after_disabled_prewarm_close_drains_blocked_ordinary_relea
         finish_release.set()
         await asyncio.gather(cleanup, return_exceptions=True)
         await get_sandbox_lease_manager(provider).release_async(rt.context["sandbox_lease_owner_id"])
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("method", ["invoke", "stream"])
+def test_compiled_sync_graph_keeps_lazy_path_without_speculation(setup, monkeypatch, enabled, method):
+    from langchain.agents import create_agent
+    from langchain_core.language_models import BaseChatModel
+    from langchain_core.messages import AIMessage
+    from langchain_core.outputs import ChatGeneration, ChatResult
+
+    from deerflow.sandbox.middleware import SandboxMiddleware
+
+    provider, config = setup
+    config.sandbox.prewarm = enabled
+
+    class Model(BaseChatModel):
+        @property
+        def _llm_type(self):
+            return "sync-prewarm-compatibility-test"
+
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="Explained without execution"))])
+
+    middleware = SandboxMiddleware()
+    monkeypatch.setattr(middleware, "_prepare_agent_skill_projection", lambda *args, **kwargs: None)
+    graph = create_agent(Model(), tools=[], middleware=[middleware])
+    context = {"thread_id": "sync-thread", "user_id": "alice", "app_config": config}
+    state = {"messages": [HumanMessage(content="```python\nprint(42)\n```")]}
+    if method == "invoke":
+        result = graph.invoke(state, context=context)
+    else:
+        result = list(graph.stream(state, context=context, stream_mode="values"))[-1]
+    assert result["messages"][-1].content == "Explained without execution"
+    assert "__deerflow_sandbox_prewarm" not in context
+    assert provider.calls == []
+    assert not prewarm._permits
