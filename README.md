@@ -794,6 +794,11 @@ DeerFlow supports multiple sandbox execution modes:
 - **Docker Execution** (runs sandbox code in isolated Docker containers)
 - **Docker Execution with Kubernetes** (runs sandbox code in Kubernetes pods via provisioner service)
 
+The optional [Tenki provider](backend/packages/harness/deerflow/community/tenki/README.md)
+retains failed termination handles for retry and rejects late acquisitions after
+reset or shutdown. If shutdown reports outstanding work, retry after its SDK
+workers finish or the remote service recovers.
+
 Sandbox references in conversation state are server-owned. External run and
 thread-state APIs reject caller-supplied `sandbox` values; when restoring a
 checkpoint, the runtime resolves the reference against the authenticated user

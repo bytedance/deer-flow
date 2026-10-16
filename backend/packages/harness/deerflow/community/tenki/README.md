@@ -84,7 +84,20 @@ working via the remap.
 Warm-pool capacity is governed by `sandbox.replicas` across active + warm
 sandboxes. `sandbox.idle_timeout` controls how long released warm sandboxes stay
 running; `0` disables idle reaping. Active sandboxes are never evicted to satisfy
-the cap.
+the cap. Handles awaiting a failed termination also count toward capacity and
+cannot be reused. Idle sweeps retry their termination; with idle reaping disabled,
+call `shutdown()` again to retry cleanup.
+
+`reset()` retires the provider and parks its existing sandboxes; `shutdown()`
+permanently fences admission and requests termination. A synchronous SDK creation
+already in progress remains owned by its worker, which requests termination
+instead of publishing its late result. Shutdown raises an actionable `RuntimeError`
+while acquires or terminations remain outstanding; retry after the workers finish
+or the service recovers. An async caller cancelling its wait does not stop the
+SDK worker. If the provider remains open, the completed acquire can still be reused
+by the same scope. Accepted termination requests do not prove that a remote VM
+has physically stopped. Pending handles are process-local and do not survive a
+Gateway crash; cross-process orphan recovery remains outside this contract.
 
 The warm-pool health probe accepts an exact `ok` line alongside login-shell
 profile output or stderr warnings. Timeout, nonzero-exit, and command-error
