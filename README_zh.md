@@ -292,7 +292,7 @@ make docker-init    # 拉取 sandbox 镜像（首次运行或镜像更新时执�
 make docker-start   # 启动服务（会根据 config.yaml 自动判断 sandbox 模式）
 ```
 
-如果 `config.yaml` 使用的是 provisioner 模式（`sandbox.use: deerflow.community.aio_sandbox:AioSandboxProvider` 且配置了 `provisioner_url`），`make docker-start` 才会启动 `provisioner`。
+如果 `config.yaml` 使用的是 provisioner 模式（`sandbox.use: deerflow.community.aio_sandbox:AioSandboxProvider` 且配置了 `provisioner_url`），`make docker-start` 才会启动 `provisioner`。直接使用 Docker Compose 的用户可以在 dev 命令中加入 `--profile provisioner` 来启用相同模式；默认栈不需要 Kubernetes。
 
 **生产模式**（本地构建镜像，并挂载运行期配置与数据）：
 
