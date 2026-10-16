@@ -366,7 +366,8 @@ required; do not enable workspace startup based on these transport tests.
 M4 native Run identity preparation uses runs.workspace_context_json plus
 thread_incarnation (0039) under the existing private admission lock. RunManager
 preserves and validates that snapshot, including local idempotency rechecks;
-legacy create/upsert refuse workspace authority. This currently covers native
-short operations and hydration, not ordinary Agent execution or remote worker
-lifecycle. Workspace startup remains closed until the whole runtime and release
+legacy create/upsert refuse workspace authority. This now includes scoped normal Run reject admission, pending transitions
+and deterministic native worker execution, as documented in the runtime guide.
+Remote transport, leases, terminal publication and full worker lifecycle remain
+pending. Workspace startup remains closed until the whole runtime and release
 plan is verified. See persistence/runtime guides and tenant migration docs.

@@ -898,3 +898,19 @@ authority. Resident idempotency hits recheck scoped SQL, including live policy
 versions; legacy create/put cannot retarget workspace rows. There is no new
 public authority endpoint. Ordinary Agent Run admission remains refused pending
 RunContext/worker/lease/journal integration. M4 parent and startup stay closed.
+
+
+M4 ordinary native Run main: the framework's trusted scoped SQL reject admission
+now records normal Runs; interrupt/rollback and legacy upsert remain refused.
+Pending handoff/adoption/start recheck live membership and original parent
+incarnation while applying the existing owner/cancel CAS. Local and durable
+idempotency recovery also require the current parent generation. The host
+copies the record's identity into RunContext; the worker checks the native
+principal, strips caller workspace claims from context/configurable, runs in
+its original space, and restores its caller's selection. Deterministic actual
+LangGraph execution is verified with both SQL dialects, not a canned authorized
+response. The public tenant startup gate remains closed; full HTTP/internal
+admission, MCP/Scheduler/remote protocol, leases/recovery and live publication/
+revocation integration remain required. Next scope native MCP/B records and
+wire version-2 submission signing/verification so scoped work never degrades
+to legacy execution authority. No API activation or deployment is implied.

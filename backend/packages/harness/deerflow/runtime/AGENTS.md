@@ -289,7 +289,7 @@ WorkspaceContext before admission and pass it, original record user and admittin
 worker to scoped SQL cleanup. Ambient selection changes do not redirect release.
 Legacy calls omit the new cleanup keywords for custom-store compatibility.
 Scope-aware cleanup is mandatory for tenant stores; worker lifecycle,
-leases and normal Run admission remain M4 integration work. Short-operation
+leases and complete caller admission integration remain M4 work. Short-operation
 admission snapshots and hydration are documented below.
 
 compact_thread_context accepts optional validate_scope and commit_update
@@ -333,6 +333,30 @@ resident overlays compare the same durable identity before retaining live
 controls. Store capability supports_workspace_admission is explicit; legacy or
 memory stores cannot silently admit a bound workspace. Local idempotency reuse
 checks exact space/operation and re-reads current scoped SQL before returning.
-Legacy create/put cannot create or retarget scoped authority. These checks do
-not integrate normal Agent Run/RunContext, ownership leases, worker recovery,
-remote dispatch or journal writes; keep those M4 gates closed until implemented.
+Legacy create/put cannot create or retarget scoped authority. The later pending
+Run/worker main below adds ordinary reject admission and
+RunContext propagation. Ownership leases, worker recovery, remote dispatch,
+terminal publication and journal write attribution remain M4 work; keep the
+overall tenant activation gate closed until the complete plan is verified.
+
+
+M4 ordinary Run/worker main: handoff/try_start pass the original Run's immutable
+scope/nonce explicitly; adopt_pending accepts a trusted receiver context and
+restores its caller's ambient selection after its scoped CAS/read. The caller
+must still authenticate the launch capability; the ownership CAS is not an
+authentication mechanism. Workspace access denial must not be converted to
+ConflictError merely because its suppressed context contains IntegrityError.
+
+RunContext.workspace_context is host-bound from the persisted Run. Before any
+private worker preflight, run_agent checks it against the record, original
+incarnation and native authenticated principal, then binds that workspace for
+the complete worker/finalization lifetime and restores the caller even through
+cleanup exceptions. An unscoped Run cannot inherit ambient workspace authority.
+_build_runtime_context refuses all five workspace identity fields from callers;
+only the typed host snapshot populates tool runtime identity. _install also
+removes those fields from configurable; user_id follows the authenticated actor
+for a scoped run. Actual deterministic graphs and both SQL dialects verify
+original identity across native create/handoff/adopt/start and caller switching.
+This is not JWT HTTP, physical C/B execution, lease/finalization fencing or live
+tool/notification authorization proof. MCP/Scheduler and signed transport wiring
+must consume the original identity before full tenant execution can activate.

@@ -281,3 +281,15 @@ checks exact historical rows and NULL authority through repeat upgrades, then
 checks refused downgrade preserves head and leaves no migration-owned Postgres
 session. Never force DROP DATABASE or terminate connections to hide a leak.
 These are short-operation/recovery foundations, not normal Agent Run execution.
+
+
+Workspace worker context checks use actual native RunManager/StreamBridge and
+compiled LangGraph, without a model. The scoped main provisions real verified
+SQL membership, creates the ordinary Run, hands off and adopts that same row,
+then executes the graph with the persisted native principal. Observe actual
+tool runtime and ambient identity inside the graph, private thread busy state,
+persisted terminal row and unchanged caller selection. Pending refusal checks
+change actual parent nonce/member version before handoff/adopt/start; retain an
+exact row snapshot to prove no owner/lease mutation. Unbound legacy CAS must not
+operate on a scoped row. These do not prove public JWT/cookie admission, remote
+physical execution, recurring jobs, or in-flight tool/publication revocation.

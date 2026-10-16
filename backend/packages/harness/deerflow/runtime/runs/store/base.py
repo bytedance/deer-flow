@@ -239,14 +239,16 @@ class RunStore(abc.ABC):
         pass
 
     @abc.abstractmethod
-    async def start_run(self, run_id: str, *, owner_worker_id: str | None = None) -> bool:
+    async def start_run(self, run_id: str, *, owner_worker_id: str | None = None, user_id: str | None = None, thread_id: str | None = None, thread_incarnation: str | None = None, workspace_context: WorkspaceContext | None = None) -> bool:
         """Atomically transition a pending run to running.
 
         Returns ``False`` when the row is missing or no longer pending.
         """
         pass
 
-    async def transfer_pending(self, run_id: str, *, thread_id: str, user_id: str | None, expected_owner_worker_id: str, owner_worker_id: str, lease_expires_at: str | None) -> bool:
+    async def transfer_pending(
+        self, run_id: str, *, thread_id: str, user_id: str | None, expected_owner_worker_id: str, owner_worker_id: str, lease_expires_at: str | None, workspace_context: WorkspaceContext | None = None, thread_incarnation: str | None = None
+    ) -> bool:
         """CAS a pending admission to a trusted dispatcher or execution worker."""
         raise NotImplementedError
 

@@ -1065,3 +1065,35 @@ existing closed schema fence is older than 0039; align full release candidate
 and matched manifest before activation, never bypass the compiled gate. All
 M0-M11 parent gates remain unchecked, M3 incomplete; no activation/deployment/
 push/model calls or local application runtime tests.
+
+
+M4 native ordinary Run/worker checkpoint (2026-10-16):
+`deerflow-tenant-execution-m4-sql` #6 parent-replacement local replay RED;
+#7 new nonce predicates refuse durable replay but expose incorrect access-denial
+mapping through IntegrityError context. #8 actual worker/compiled graph exposes
+caller workspace-field spoofing. #9 both SQL dialects refuse ordinary scoped
+Run at the prior placeholder. #10 main GREEN (7 passed): actual scoped reject
+admission -> native handoff -> adoption -> actual deterministic LangGraph in
+original workspace despite caller switch; same single persisted Run succeeds.
+#11 SUCCESS: 19 passed (5 new worker cases, 14 reused), seven-file Ruff
+check/format. Pending nonce/member withdrawal checks leave exact owner/lease/
+status/change_seq unchanged; legacy unbound CAS cannot start/transfer a scoped
+row. Caller fields are removed from both runtime and configurable. Scope resets
+after actual worker cleanup. Native legacy C/trace and Gateway checks retained.
+Exact source/code/log/image/empty-container/network receipts: native_run_worker.
+Final seven code files match cloud bytes. No new schema: native 0039/e0002.
+
+Only framework/module integration is proved. The fixture uses real SQL native
+principal/member rows directly; this is not public HTTP/JWT/cookie auth, live
+lead-agent/model, checkpoint/NAS/memory, or physical remote C/B acceptance.
+Global compiled startup gate remains false; no bypass or flag activation.
+Next persist the original scope into native MCP/B task submission/records and
+wire v2 signing/verification without legacy downgrade, then Scheduler/occurrence,
+notifications/continuations, browser/remote assignment and owner-fenced leases,
+recovery/cancellation/terminal journal/publication and live tool/credential
+revocation. Ordinary scoped interrupt/rollback and legacy upsert stay refused.
+Unknown physical STOP must keep reservations until physical proof. Remaining
+M3 and M0-M11 parent gates stay unchecked. Align current native 0039 and paired
+manifest before any activation; no deployment/push/model/local application tests.
+Review performed serially against provenance/lock/rollback/context/compatibility
+checks; this is not an independent full production audit.

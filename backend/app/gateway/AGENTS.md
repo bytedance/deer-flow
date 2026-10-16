@@ -515,3 +515,13 @@ service also requires mode, even if a partial state omitted the flag; missing
 service never becomes available from config/query input. This capability is
 read-only and does not bypass _WORKSPACE_RUNTIME_INTEGRATED. Clients must not
 interpret enabled=true/available=false as legacy single-user mode.
+
+
+The native background Agent launcher clones RunContext.workspace_context from
+the admitted RunRecord, not request config, a selector or a shared singleton.
+The worker validates that snapshot and native principal, binds its original
+workspace and restores the invoking task's context. The normal SQL Run reject
+admission and pending transition main is verified independently of startup.
+This does not provide the full HTTP/internal/Scheduler/MCP caller bindings,
+credential version fences or remote launch authentication; the compiled tenant
+activation gate remains closed until all runtime/release integration is proven.

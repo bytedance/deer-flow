@@ -1549,10 +1549,10 @@
   },
   "latest_checkpoint": {
     "work_package": "M4",
-    "status": "partial M4; native short-operation durable identity/hydration verified",
+    "status": "partial M4; native scoped ordinary Run/pending transitions/worker main verified",
     "last_verified_job": "deerflow-tenant-execution-m4-sql",
-    "last_verified_build": 5,
-    "next": "Complete trusted normal Agent Run/RunContext admission and worker lifecycle; include live parent incarnation fences at idempotency/claim/adopt before execution; retain M3/M0-M11 gates",
+    "last_verified_build": 11,
+    "next": "Persist immutable native MCP/B task scope and wire execution-scope v2 producer/receiver without legacy downgrade; then Scheduler/notifications and owner-fenced runtime lifecycle/revocation, retaining M3/M0-M11 gates",
     "tenant_activation": "closed",
     "deployment": "none",
     "previous_backend_job": "deerflow-tenant-m1-postgres",
@@ -8248,6 +8248,170 @@
       "Full native C-to-B-to-C, signed receiver wiring, MCP/Scheduler/execution ledger, external writes/publication/continuation/notifications/revocation and unknown physical STOP remain M4 requirements",
       "Startup schema fence is still closed and at the older expected revision; align complete candidate/release manifest with current 0039 before activation, without bypassing compiled coverage gate",
       "All M0-M11 parent gates remain incomplete; no deployment, push, PR or local app runtime"
+    ]
+  },
+  "native_run_worker": {
+    "job": "deerflow-tenant-execution-m4-sql",
+    "builds": [
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 33280,
+        "number": 6,
+        "result": "FAILURE",
+        "phase": "m4-parent-red",
+        "source_archive_sha256": "4f799d9d531215364cd2e4e5825330ad7b3ae138fdc8dfec435e177634abfa81",
+        "log_sha256": "8383643a35e43c64501cbb63de60d65ca921456fa84a68778692ab17a25d97ea",
+        "code_sha256": {
+          "backend/app/gateway/services.py": "19eaae3a56a08ccde11e37ec9c8b418fa3a89b04e19ba0f43344948a5efc0491",
+          "backend/packages/harness/deerflow/persistence/run/sql.py": "92187b1c9ef1830e816360055b4f13845bbaacf2ca97f4b0afc6cbfe01f80771",
+          "backend/packages/harness/deerflow/runtime/runs/manager.py": "cbf02cc826d5db07978993a5d5026f3163e774a03100990e4489251fb4208e5c",
+          "backend/packages/harness/deerflow/runtime/runs/store/base.py": "760f93b559923670484c0d4489bc37d7f78d0a6df6e40105f94255a792261e06",
+          "backend/packages/harness/deerflow/runtime/runs/worker.py": "f62691910408efd0fb6e4ca96f3844316db9163b345612693e1e11543855e18a",
+          "backend/tests/test_workspace_run_identity.py": "56cd070b00a36145f52fd0107ad068c434972f270a0335e5bf9e21d3036a7e77"
+        }
+      },
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 39914,
+        "number": 7,
+        "result": "FAILURE",
+        "phase": "m4-parent-main",
+        "source_archive_sha256": "5e7942979a78d13aa07195ed05b3f685516ddb97c6412fdbd4805c10fd30c2da",
+        "log_sha256": "e08200835b379145322f0473c33668c3c465439c120d59e420fa5ebc18418d5c",
+        "code_sha256": {
+          "backend/app/gateway/services.py": "19eaae3a56a08ccde11e37ec9c8b418fa3a89b04e19ba0f43344948a5efc0491",
+          "backend/packages/harness/deerflow/persistence/run/sql.py": "9176908f8b009d4e8d64b37449d1f3a748839aa2a1743e00a55eee238be9ff8c",
+          "backend/packages/harness/deerflow/runtime/runs/manager.py": "cbf02cc826d5db07978993a5d5026f3163e774a03100990e4489251fb4208e5c",
+          "backend/packages/harness/deerflow/runtime/runs/store/base.py": "760f93b559923670484c0d4489bc37d7f78d0a6df6e40105f94255a792261e06",
+          "backend/packages/harness/deerflow/runtime/runs/worker.py": "f62691910408efd0fb6e4ca96f3844316db9163b345612693e1e11543855e18a",
+          "backend/tests/test_workspace_run_identity.py": "07d13950ed5c4d6e7a2541ca9cada7d72fff658543825e53c88df1a424639465"
+        }
+      },
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 27745,
+        "number": 8,
+        "result": "FAILURE",
+        "phase": "m4-worker-context-red",
+        "source_archive_sha256": "7dff25a6179a5f6c57be3c380f09a9d6a6542a106d79842b4f9474c60d2c2522",
+        "log_sha256": "838f169d19630fa8067ed926c568a384b9f3537c0b3d18ba5089afd5f96b9e0a",
+        "code_sha256": {
+          "backend/app/gateway/services.py": "19eaae3a56a08ccde11e37ec9c8b418fa3a89b04e19ba0f43344948a5efc0491",
+          "backend/packages/harness/deerflow/persistence/run/sql.py": "9176908f8b009d4e8d64b37449d1f3a748839aa2a1743e00a55eee238be9ff8c",
+          "backend/packages/harness/deerflow/runtime/runs/manager.py": "cbf02cc826d5db07978993a5d5026f3163e774a03100990e4489251fb4208e5c",
+          "backend/packages/harness/deerflow/runtime/runs/store/base.py": "760f93b559923670484c0d4489bc37d7f78d0a6df6e40105f94255a792261e06",
+          "backend/packages/harness/deerflow/runtime/runs/worker.py": "f62691910408efd0fb6e4ca96f3844316db9163b345612693e1e11543855e18a",
+          "backend/tests/test_workspace_run_identity.py": "07d13950ed5c4d6e7a2541ca9cada7d72fff658543825e53c88df1a424639465",
+          "backend/tests/test_workspace_worker_context.py": "c9d43b2bb6ed895df4e1ecaf2277102c8a7efef617c05d21a92fc91795a2a271"
+        }
+      },
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 33251,
+        "number": 9,
+        "result": "FAILURE",
+        "phase": "m4-runtime-sql-red",
+        "source_archive_sha256": "9cc519404d6dddd253483c53f54876ba081a527481be9103b5976d3bdb7387ea",
+        "log_sha256": "8d84f9e86d98c2b9dce66cc39f5add0bd0c12eccba729abfc9640ff756a1215a",
+        "code_sha256": {
+          "backend/app/gateway/services.py": "19eaae3a56a08ccde11e37ec9c8b418fa3a89b04e19ba0f43344948a5efc0491",
+          "backend/packages/harness/deerflow/persistence/run/sql.py": "9176908f8b009d4e8d64b37449d1f3a748839aa2a1743e00a55eee238be9ff8c",
+          "backend/packages/harness/deerflow/runtime/runs/manager.py": "68bb6b444cef91ae1cc4fc51784885c1a1edeb6c96c8159b52490f317c829cd1",
+          "backend/packages/harness/deerflow/runtime/runs/store/base.py": "760f93b559923670484c0d4489bc37d7f78d0a6df6e40105f94255a792261e06",
+          "backend/packages/harness/deerflow/runtime/runs/worker.py": "f62691910408efd0fb6e4ca96f3844316db9163b345612693e1e11543855e18a",
+          "backend/tests/test_workspace_run_identity.py": "07d13950ed5c4d6e7a2541ca9cada7d72fff658543825e53c88df1a424639465",
+          "backend/tests/test_workspace_worker_context.py": "aae96c4f3bed92d88167e983902ebb0bd4b1a4c34f1a2f455925baff397193db"
+        }
+      },
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 39930,
+        "number": 10,
+        "result": "SUCCESS",
+        "phase": "m4-runtime-main",
+        "source_archive_sha256": "f6937027321cc2baa7ae4c3c6be96d7cda5883c7774c4abdee3bfe54d602e41c",
+        "log_sha256": "7e1fb92634419a823ecd0bf6888acb8288716ffdfced325cd1b6c299e0b6a656",
+        "code_sha256": {
+          "backend/app/gateway/services.py": "014d9d1b93b7a7d0a9e83f4ed61891e72d0cc172f923108b0256f92061950648",
+          "backend/packages/harness/deerflow/persistence/run/sql.py": "953b1641bf79ba1108fd20b545f9d6ae1e5e26f71bf663e37f8222779b6aec33",
+          "backend/packages/harness/deerflow/runtime/runs/manager.py": "480eedb78088b50197734f1904f1642e2712155162f4963a72559d3686aca1f4",
+          "backend/packages/harness/deerflow/runtime/runs/store/base.py": "6288487b7b8abc8d27d3ce866b5af808455030e297df3abc92a3bd9f9728b709",
+          "backend/packages/harness/deerflow/runtime/runs/worker.py": "152e2531440e9e1f2c37ee2cf4d13ad44faa7f6e0e0cb8f6916d01a2431936fe",
+          "backend/tests/test_workspace_run_identity.py": "07d13950ed5c4d6e7a2541ca9cada7d72fff658543825e53c88df1a424639465",
+          "backend/tests/test_workspace_worker_context.py": "73e7d429d9a62466bf13de74ba6e36aded161b9e3023dded8ddd0e85b1d5356b"
+        }
+      },
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 57350,
+        "number": 11,
+        "result": "SUCCESS",
+        "phase": "m4-runtime-verified",
+        "source_archive_sha256": "6e9ca864eeba8e251c01c31634395381f613835fc4ae671c4b369f1a44db0a2e",
+        "log_sha256": "b76167ad495bee1dd6dbe37f8fb36d1dda11338a3b33541f147e831161d8afae",
+        "code_sha256": {
+          "backend/app/gateway/services.py": "014d9d1b93b7a7d0a9e83f4ed61891e72d0cc172f923108b0256f92061950648",
+          "backend/packages/harness/deerflow/persistence/run/sql.py": "953b1641bf79ba1108fd20b545f9d6ae1e5e26f71bf663e37f8222779b6aec33",
+          "backend/packages/harness/deerflow/runtime/runs/manager.py": "d2c2c4117894943de8a15b4244f8444087179b375d98edfaa0d8acee3b6649e7",
+          "backend/packages/harness/deerflow/runtime/runs/store/base.py": "6288487b7b8abc8d27d3ce866b5af808455030e297df3abc92a3bd9f9728b709",
+          "backend/packages/harness/deerflow/runtime/runs/worker.py": "152e2531440e9e1f2c37ee2cf4d13ad44faa7f6e0e0cb8f6916d01a2431936fe",
+          "backend/tests/test_workspace_run_identity.py": "07d13950ed5c4d6e7a2541ca9cada7d72fff658543825e53c88df1a424639465",
+          "backend/tests/test_workspace_worker_context.py": "b0f092783ddd36ab757e1b2ee2186c666e9c3e1851174005d6464f4b12b3b02d"
+        }
+      }
+    ],
+    "image_id": "sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01",
+    "postgres_image_id": "sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea",
+    "remaining_owned_resources": {
+      "container": [],
+      "network": []
+    },
+    "status": "partial M4: native scoped Run reject admission, pending handoff/adoption/start and deterministic worker context main verified",
+    "base_commit": "09df837c4",
+    "new_tests": 5,
+    "reused_tests": 14,
+    "final_tests_passed": 19,
+    "main_tests_passed": 7,
+    "final_test_seconds": 38.55,
+    "native_schema": "0039_run_workspace_identity",
+    "executor_schema": "e0002_workspace_scope",
+    "red_reasons": {
+      "6": "Both real SQL dialects accept recreated-parent local idempotency replay",
+      "7": "New nonce filter refuses durable replay but RunManager wrongly converts WorkspaceAccessDenied with underlying IntegrityError context into ConflictError; 2 failures, 2 existing main passes",
+      "8": "Real native worker/compiled graph succeeds but observes all caller-forged workspace context fields",
+      "9": "Both real SQL dialects refuse native scoped ordinary Run admission at previous lifecycle placeholder"
+    },
+    "green_results": {
+      "10": "7 passed: both-dialect SQL admission/handoff/adopt/actual graph main, caller identity refusal and original identity/parent retry coverage",
+      "11": "19 passed, seven changed Python files Ruff check and format passed"
+    },
+    "final_command": "python -m pytest tests/test_workspace_worker_context.py tests/test_workspace_run_identity.py::test_native_admission_captures_identity_before_selection_changes tests/test_workspace_run_identity.py::test_native_identity_rejects_legacy_upsert_and_stale_local_replay tests/test_workspace_run_identity.py::test_native_recovery_never_invents_or_accepts_conflicting_identity tests/test_workspace_run_reservations.py tests/test_workspace_run_reads.py tests/test_ecs_executor_c_main.py tests/test_worker_trace_binding.py::test_runtime_context_and_metadata_carry_the_bound_trace_id tests/test_worker_trace_binding.py::test_both_forks_agree_when_the_caller_forges_both tests/test_gateway_services.py::test_start_run_replaces_a_caller_supplied_trace_id -q --tb=short --no-showlocals",
+    "verification": [
+      "Actual SQLite/PostgreSQL and native RunManager/MemoryStreamBridge/compiled LangGraph; no authorization-success stubs or live model",
+      "SQL fixture provisions active verified native principal/membership and creates the actual scoped ordinary Run; same Run ID/immutable snapshot survives native handoff/adoption and actual graph execution",
+      "Graph sees original ambient and runtime workspace and private thread running state despite caller selecting another space; caller context restored; exactly one persisted Run for the thread reaches success",
+      "Pending handoff/adoption/start refuse changed member version/parent nonce; exact Run row including owner/lease/status/change_seq remains unchanged; unbound legacy calls cannot operate on scoped rows",
+      "Final seven code-file bytes match cloud source; own containers/networks empty; fixed preloaded tools/Postgres image, internal fixture network, no deployment/NAS/model or local application runtime"
+    ],
+    "self_review": [
+      "Reviewed capture provenance, exact scope/actor/nonce matching, resource/clock/Run lock order, denied-CAS rollback and legacy compatibility",
+      "Reviewed native principal check and task-local context reset through finalizers; no foreground selection becomes background authority",
+      "Review is serial self-review, not independent full-production/security audit"
+    ],
+    "limits": [
+      "Framework-level scoped Run reject admission and native deterministic worker main only; no public HTTP/JWT/cookie/native-agent/model acceptance or remote physical C/B execution",
+      "Checkpoint store/NAS/memory/RAG, in-flight external tools and publication are not proved by this no-model graph",
+      "Next persist original workspace in native MCP/B request/task records and wire version-2 signer/receiver; scoped execution must never fall back to legacy tokens/records",
+      "Scheduler/occurrence, notifications/continuations, remote assignment/browser, owner-fenced lease/recovery/cancel/terminal journal publication and in-flight member/credential revocation remain M4 work",
+      "Interrupt/rollback admission and legacy upserts remain refused for scoped work; unknown physical STOP/reservation release still needs actual fault/physical evidence",
+      "Global compiled tenant startup remains false and old expected schema fence remains to be aligned with current 0039 in complete M10/M11 release candidate; no test/operator bypass",
+      "All M0-M11 parent gates remain incomplete; no activation, deployment, push, PR, model calls or local application runtime"
     ]
   }
 }

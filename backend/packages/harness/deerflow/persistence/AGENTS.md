@@ -201,9 +201,23 @@ runtime-factory activation. #82 evidence/limits live in workspace progress JSON.
 nullable runs.workspace_context_json and runs.thread_incarnation without
 backfilling live authority. Scoped atomic short-operation admission captures
 immutable WorkspaceContext and parent incarnation under the existing private
-thread lock. RunRepository advertises supports_workspace_admission; ordinary
-Agent Run admission remains refused until lifecycle integration. Legacy put
+thread lock. RunRepository advertises supports_workspace_admission; scoped normal Run
+reject admission and pending transitions are now integrated as documented below.
+Interrupt/rollback admission remains refused. Legacy put
 refuses bound workspace callers and any existing workspace row, including
 unbound callers, rather than retargeting a captured identity. Dedicated scoped
 worker write/recovery methods remain M4 work. Backfill/export and executor import
 agree on 0039/e0002 but do not fabricate permission snapshots for history.
+
+
+M4 pending execution: scoped create_thread_operation_atomic admits normal Runs
+only with reject strategy, retaining the lock-captured identity snapshot.
+find_by_idempotency_key and durable conflict recovery additionally join the
+current private parent's incarnation to the original Run; do not reuse a row
+across parent replacement. start_run and transfer_pending receive the captured
+context/nonce, lock workspace -> actor -> parent -> clock -> Run, validate live
+membership and exact stored identity, then execute the native pending/owner/
+cancel CAS. Legacy unbound calls require workspace_id IS NULL and cannot touch
+a scoped row. A denied CAS must preserve the pending row and its owner/lease.
+These start/transfer fences do not authorize terminal publication, lease renewal,
+recovery, cancellation, remote dispatch or external writes; all remain M4 work.

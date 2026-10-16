@@ -284,6 +284,14 @@ python -m pytest tests/test_workspace_execution.py tests/test_workspace_revocati
 - [x] 校验父迁移升级保留历史、错误快照拒绝及原生兼容；检查旧 upsert 不得改写带空间的身份。
 - [x] 完成定向检查、文档及回执并本地提交；随后继续普通 Run/RunContext 与 worker 生命周期接入。
 
+#### M4 第三小步：父代次和可信运行上下文（2026-10-16）
+
+接点：`RunRepository._read_scope` 的幂等父代次谓词及 `_pending_transition_scope/start_run/transfer_pending` 的锁内准入；`RunManager.handoff_pending/adopt_pending/try_start` 传递持久身份；`RunContext`、`run_agent`、`_build_runtime_context` 与 `_install_runtime_context` 执行主体校验和任务局部绑定，Gateway 后台 launcher 从原记录复制身份。
+
+- [x] 先复用真实 SQL 幂等重试边界，验证父会话代次改变时旧准入不再复用；本地与持久冲突恢复均须比对原 Run 的 incarnation 与当前私有父会话。
+- [x] 将不可变身份通过原生 RunContext 带入 worker/runtime，清除调用方伪造字段；不从 UI 当前选择恢复任务身份。
+- [x] 在上海验证主干及必要拒绝边界，保存回执并本地提交。普通 Run 的 reject 准入及 pending/确定性 worker 主干已验证；完整入口、worker 生命周期、签名接收、MCP/Scheduler 和撤权仍须实际接通后才能勾 M4。
+
 ### M5：记忆、知识检索与工具凭据隔离
 
 **修改接点：**

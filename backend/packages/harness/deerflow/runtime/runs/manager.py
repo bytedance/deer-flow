@@ -10,14 +10,14 @@ import sqlite3
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 
-from deerflow.authz.workspace import WorkspaceContext, get_current_workspace
+from deerflow.authz.workspace import WorkspaceContext, get_current_workspace, reset_current_workspace, set_current_workspace
 from deerflow.persistence.workspaces.scope import resolve_resource_scope
 from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user, resolve_user_id
@@ -987,6 +987,18 @@ class RunManager:
 
         return self._compute_edit_replay_visibility(list(records_by_id.values()))
 
+    @staticmethod
+    def _workspace_transition_kwargs(record: RunRecord) -> dict[str, Any]:
+        context = record.workspace_context
+        if context is None:
+            if record.workspace_id is not None:
+                raise WorkspaceAccessDenied("historical Run lacks captured execution authority")
+            return {}
+        if type(context) is not WorkspaceContext:
+            raise WorkspaceAccessDenied("Run execution authority is invalid")
+        RunManager._workspace_context_from_store({"workspace_context_json": asdict(context), "workspace_id": record.workspace_id, "user_id": record.user_id, "thread_incarnation": record.thread_incarnation})
+        return {"workspace_context": context, "thread_incarnation": record.thread_incarnation}
+
     async def handoff_pending(self, run_id: str, *, owner_worker_id: str) -> None:
         """Detach an unstarted admission after a durable owner CAS.
 
@@ -1006,12 +1018,26 @@ class RunManager:
                 record.ownership_lost = True
             try:
                 updated = await self._store.transfer_pending(
-                    run_id, thread_id=record.thread_id, user_id=record.user_id, expected_owner_worker_id=self._worker_id, owner_worker_id=owner_worker_id, lease_expires_at=self._compute_lease_expires_at()
+                    run_id,
+                    thread_id=record.thread_id,
+                    user_id=record.user_id,
+                    expected_owner_worker_id=self._worker_id,
+                    owner_worker_id=owner_worker_id,
+                    lease_expires_at=self._compute_lease_expires_at(),
+                    **self._workspace_transition_kwargs(record),
                 )
+            except WorkspaceAccessDenied:
+                record.ownership_lost = False
+                raise
             except BaseException:
                 # A cancelled/ambiguous CAS cannot safely restore local write
                 # authority. Resolve its durable owner before clearing the fence.
-                row = await self._store.get(run_id, user_id=record.user_id)
+                scope_token = set_current_workspace(record.workspace_context) if record.workspace_context is not None else None
+                try:
+                    row = await self._store.get(run_id, user_id=record.user_id)
+                finally:
+                    if scope_token is not None:
+                        reset_current_workspace(scope_token)
                 if row is not None and row.get("owner_worker_id") == self._worker_id:
                     record.ownership_lost = False
                 raise
@@ -1022,7 +1048,21 @@ class RunManager:
                 self._runs.pop(run_id)
                 self._unindex_run_locked(run_id, record.thread_id)
 
-    async def adopt_pending(self, run_id: str, *, thread_id: str, user_id: str, expected_owner_worker_id: str) -> RunRecord:
+    async def adopt_pending(self, run_id: str, *, thread_id: str, user_id: str, expected_owner_worker_id: str, workspace_context: WorkspaceContext | None = None) -> RunRecord:
+        """Adopt after authenticating the launch capability, preserving its identity.
+
+        Explicit workspace_context belongs to the trusted receiver. A browser
+        selection or this internal ownership CAS never authenticates a launch.
+        """
+        context = resolve_resource_scope(workspace_context, user_id, required=getattr(self._store, "workspace_scope_required", False))
+        token = set_current_workspace(context) if context is not None else None
+        try:
+            return await self._adopt_pending(run_id, thread_id=thread_id, user_id=user_id, expected_owner_worker_id=expected_owner_worker_id)
+        finally:
+            if token is not None:
+                reset_current_workspace(token)
+
+    async def _adopt_pending(self, run_id: str, *, thread_id: str, user_id: str, expected_owner_worker_id: str) -> RunRecord:
         """Adopt an existing admission, without changing its admitted payload.
 
         The caller must first authenticate the signed launch capability. This
@@ -1034,7 +1074,17 @@ class RunManager:
             if run_id in self._runs:
                 raise RunStartupError("Run already registered locally")
         expiry = self._compute_lease_expires_at()
-        if not await self._store.transfer_pending(run_id, thread_id=thread_id, user_id=user_id, expected_owner_worker_id=expected_owner_worker_id, owner_worker_id=self._worker_id, lease_expires_at=expiry):
+        transition_kwargs = {}
+        context = get_current_workspace()
+        if context is not None:
+            previous = await self._store.get(run_id, user_id=user_id)
+            if previous is None:
+                raise WorkspaceAccessDenied("pending adoption workspace is unavailable")
+            captured = self._record_from_store(previous)
+            if captured.workspace_context != context or captured.thread_id != thread_id:
+                raise WorkspaceAccessDenied("pending adoption workspace identity differs")
+            transition_kwargs = self._workspace_transition_kwargs(captured)
+        if not await self._store.transfer_pending(run_id, thread_id=thread_id, user_id=user_id, expected_owner_worker_id=expected_owner_worker_id, owner_worker_id=self._worker_id, lease_expires_at=expiry, **transition_kwargs):
             raise RunStartupError("Pending adoption lost ownership or was cancelled")
         row = await self._store.get(run_id, user_id=user_id)
         if row is None or row.get("owner_worker_id") != self._worker_id:
@@ -1063,7 +1113,11 @@ class RunManager:
                     updated = await self._call_store_with_retry(
                         "start_run",
                         run_id,
-                        lambda: self._store.start_run(run_id, owner_worker_id=self._worker_id),
+                        lambda: self._store.start_run(
+                            run_id,
+                            owner_worker_id=self._worker_id,
+                            **({"user_id": record.user_id, "thread_id": record.thread_id, **self._workspace_transition_kwargs(record)} if record.workspace_id is not None or record.workspace_context is not None else {}),
+                        ),
                     )
                 except Exception as exc:
                     raise RunStartupError(f"Failed to start run {run_id}: {exc}") from exc
@@ -1892,7 +1946,7 @@ class RunManager:
                         )
                     except RunIdempotencyConflict as exc:
                         return reuse_idempotent_run(exc)
-                    except ConflictError:
+                    except (ConflictError, WorkspaceAccessDenied):
                         raise
                     except Exception as exc:
                         if _is_unique_violation(exc):
@@ -1932,6 +1986,8 @@ class RunManager:
                             break
                         except RunIdempotencyConflict as exc:
                             return reuse_idempotent_run(exc)
+                        except WorkspaceAccessDenied:
+                            raise
                         except Exception as exc:
                             is_unique = _is_unique_violation(exc)
                             if is_unique and attempt + 1 < max_retries:

@@ -28,7 +28,7 @@ import weakref
 from collections.abc import Callable, Coroutine, Mapping
 from contextlib import AbstractAsyncContextManager
 from contextvars import Context
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from functools import lru_cache
 from typing import Any, Final, Literal, cast
@@ -40,6 +40,7 @@ from langgraph.types import Overwrite
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
 from deerflow.agents.interaction_policy import RunInteractionPolicy, resolve_run_interaction_policy
 from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
+from deerflow.authz.workspace import WorkspaceContext, get_current_workspace, reset_current_workspace, set_current_workspace
 from deerflow.config.app_config import AppConfig
 from deerflow.config.database_config import CheckpointChannelMode
 from deerflow.constants import CONVERSATION_READER_CONTEXT_KEY, TOOL_RESULTS_DIRNAME
@@ -542,6 +543,9 @@ class _LargeFileToolChunkBatcher:
 # strips ``__``-prefixed keys in build_run_config, but embedded harness callers
 # have no such filter and ``deerflow_trace_id`` carries no prefix to be caught
 # by it anyway.
+_WORKSPACE_CONTEXT_KEYS = frozenset({"workspace_id", "actor_user_id", "membership_version", "policy_version", "workspace_context"})
+
+
 _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
     frozenset(
         {
@@ -565,6 +569,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
         }
     )
     | SANDBOX_SERVER_OWNED_CONTEXT_KEYS
+    | _WORKSPACE_CONTEXT_KEYS
 )
 
 
@@ -580,6 +585,7 @@ def _build_runtime_context(
     *,
     thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
     scheduler_capability: SchedulerRunCapability | None = None,
+    workspace_context: WorkspaceContext | None = None,
 ) -> dict[str, Any]:
     """Build the dict that becomes ``ToolRuntime.context`` for the run.
 
@@ -601,6 +607,10 @@ def _build_runtime_context(
             if key in _SERVER_OWNED_RUNTIME_CONTEXT_KEYS:
                 continue
             runtime_ctx.setdefault(key, value)
+    if workspace_context is not None:
+        if type(workspace_context) is not WorkspaceContext:
+            raise ValueError("runtime workspace requires a trusted immutable identity")
+        runtime_ctx.update(asdict(workspace_context), workspace_context=workspace_context, user_id=workspace_context.actor_user_id)
     if app_config is not None:
         runtime_ctx["app_config"] = app_config
     if agent_runs is not None:
@@ -675,6 +685,8 @@ class RunContext:
     scheduler_capability: SchedulerRunCapability | None = field(default=None)
     # Server-selected occurrence identity. Metadata alone never activates a goal.
     scheduled_task_runtime: Mapping[str, Any] | None = field(default=None)
+    # Bound by the host from the admitted Run, never request config or selection.
+    workspace_context: WorkspaceContext | None = field(default=None)
 
 
 def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> None:
@@ -682,6 +694,10 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
     # persistence; the reader capability belongs only to host-owned context.
     configurable = config.get("configurable")
     if isinstance(configurable, dict):
+        for key in _WORKSPACE_CONTEXT_KEYS:
+            configurable.pop(key, None)
+        if "workspace_context" in runtime_context:
+            configurable["user_id"] = runtime_context["workspace_context"].actor_user_id
         configurable.pop(CONVERSATION_READER_CONTEXT_KEY, None)
         configurable.pop(SCHEDULER_CAPABILITY_CONTEXT_KEY, None)
         configurable.pop(AGENT_RUNS_CONTEXT_KEY, None)
@@ -1024,7 +1040,25 @@ async def run_agent(
             )
             logger.info("Run %s was cancelled", run_id)
 
+    workspace_token = None
     try:
+        workspace_context = ctx.workspace_context
+        if record.workspace_id is not None or record.workspace_context is not None or workspace_context is not None:
+            if (
+                type(workspace_context) is not WorkspaceContext
+                or workspace_context != record.workspace_context
+                or workspace_context.workspace_id != record.workspace_id
+                or workspace_context.actor_user_id != record.user_id
+                or thread_incarnation != record.thread_incarnation
+            ):
+                raise RuntimeError("worker workspace identity differs from the admitted Run")
+            run_manager._workspace_transition_kwargs(record)
+            principal = get_current_user()
+            if principal is None or str(principal.id) != workspace_context.actor_user_id:
+                raise RuntimeError("worker workspace actor requires its native authenticated principal")
+            workspace_token = set_current_workspace(workspace_context)
+        elif get_current_workspace() is not None:
+            raise RuntimeError("unscoped Run cannot inherit ambient workspace authority")
         normalized_stream_modes = normalize_stream_modes(stream_modes)
         requested_modes: set[str] = set(normalized_stream_modes)
         lg_modes = to_langgraph_stream_modes(normalized_stream_modes)
@@ -1183,6 +1217,7 @@ async def run_agent(
             ctx.agent_runs,
             thread_incarnation=thread_incarnation,
             scheduler_capability=ctx.scheduler_capability,
+            workspace_context=ctx.workspace_context,
         )
         # Bind every checkpoint produced by this run to the effective agent
         # identity that produced its state. Manual compaction uses only this
@@ -1974,11 +2009,15 @@ async def run_agent(
                         run_id,
                     )
                 finally:
-                    _release_run_scoped_references(
-                        runnable_configs,
-                        runtime_ctx,
-                        journal,
-                    )
+                    try:
+                        _release_run_scoped_references(
+                            runnable_configs,
+                            runtime_ctx,
+                            journal,
+                        )
+                    finally:
+                        if workspace_token is not None:
+                            reset_current_workspace(workspace_token)
                 # Drop graph and per-run payload references before the terminal
                 # worker task itself becomes collectable.
                 agent = None

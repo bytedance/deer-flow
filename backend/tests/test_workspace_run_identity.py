@@ -126,6 +126,23 @@ def test_native_identity_rejects_legacy_upsert_and_stale_local_replay(native_eng
                     pass
                 set_current_workspace(original)
                 async with sf() as session:
+                    await session.execute(sa.text("UPDATE threads_meta SET incarnation=:nonce WHERE thread_id=:id"), {"nonce": "b" * 32, "id": "identity-boundary"})
+                    await session.commit()
+                try:
+                    await manager._admit_thread_operation("identity-boundary", operation_kind=ThreadOperationKind.checkpoint_write, user_id="owner", idempotency_key="identity-replay")
+                    accepted.append("recreated-parent local replay")
+                except WorkspaceAccessDenied:
+                    pass
+                peer = RunManager(store=runs, worker_id="identity-replay-peer")
+                try:
+                    await peer._admit_thread_operation("identity-boundary", operation_kind=ThreadOperationKind.checkpoint_write, user_id="owner", idempotency_key="identity-replay")
+                    accepted.append("recreated-parent durable replay")
+                except WorkspaceAccessDenied:
+                    pass
+                async with sf() as session:
+                    await session.execute(sa.text("UPDATE threads_meta SET incarnation=:nonce WHERE thread_id=:id"), {"nonce": record.thread_incarnation, "id": "identity-boundary"})
+                    await session.commit()
+                async with sf() as session:
                     await session.execute(sa.text("UPDATE workspaces SET policy_version=policy_version+1 WHERE id=:id"), {"id": team["id"]})
                     await session.commit()
                 try:

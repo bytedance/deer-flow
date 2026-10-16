@@ -1897,7 +1897,9 @@ async def execute_admitted_native_run(
             )
         except Exception:
             logger.warning("Scheduler tool capability is unavailable for this run", exc_info=True)
-    execution_context = replace(run_ctx, scheduler_capability=scheduler_capability) if scheduler_capability is not None else run_ctx
+    execution_context = replace(run_ctx, workspace_context=record.workspace_context)
+    if scheduler_capability is not None:
+        execution_context = replace(execution_context, scheduler_capability=scheduler_capability)
     await run_agent(
         bridge,
         run_mgr,
