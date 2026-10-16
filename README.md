@@ -2641,6 +2641,9 @@ captures from overwriting one another. Failed publication releases the placehold
 if cleanup fails, Gateway logs a warning with its path and preserves the original
 publication error or interruption.
 
+`browser_screenshot` never replaces an existing `outputs/` file: a taken name
+moves to the next free one, such as `report-1.png`.
+
 Browser dependency auto-detection accepts `name`, `group`, and `use` in any
 order within a tool entry, with either indented or indentless YAML lists.
 
