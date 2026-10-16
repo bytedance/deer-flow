@@ -15,6 +15,8 @@ import threading
 import time
 import unicodedata
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import timedelta
 from functools import partial
 from pathlib import Path, PurePosixPath
@@ -76,6 +78,13 @@ def _import_sdk() -> tuple[type[SandboxSync], type[ConnectionConfigSync], type[R
     return SandboxSync, ConnectionConfigSync, RunCommandOpts
 
 
+def _import_manager():
+    """Load management support only when retrying an unconfirmed termination."""
+    from opensandbox.sync import SandboxManagerSync
+
+    return SandboxManagerSync
+
+
 class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxProvider):
     """Create one OpenSandbox environment per effective user/thread scope."""
 
@@ -96,8 +105,18 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
         self._idle_checker_stop = threading.Event()
         self._idle_checker_thread: threading.Thread | None = None
         self._shutdown_called = False
+        self._shutdown_complete = False
+        self._shutdown_lock = threading.Lock()
+        self._accepting = True
+        self._operations = 0
+        self._pending_destroy: dict[int, OpenSandboxSandbox] = {}
+        self._destroying: set[int] = set()
         self._sdk: tuple[type[SandboxSync], type[ConnectionConfigSync], type[RunCommandOpts]] | None = None
         self._config = self._load_config()
+        # A fresh retry transport must address the original management scope,
+        # rather than re-resolving mutable SDK environment fallbacks.
+        self._management_domain = self._config["domain"] or os.environ.get("OPEN_SANDBOX_DOMAIN") or "localhost:8080"
+        self._management_api_key = self._config["api_key"] or os.environ.get("OPEN_SANDBOX_API_KEY", "")
         atexit.register(self.shutdown)
         self._start_idle_checker()
 
@@ -169,13 +188,19 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
         # SandboxSync.create() derives an SDK-owned transport on a config copy,
         # and destroy() closes that transport. A fresh base config per remote
         # ensures no live sandbox can inherit another sandbox's transport.
-        return connection_config_cls(
-            api_key=self._config["api_key"],
-            domain=self._config["domain"],
+        config = connection_config_cls(
+            api_key=self._management_api_key,
+            domain=self._management_domain,
             protocol=self._config["protocol"],
             request_timeout=timedelta(seconds=self._config["request_timeout"]),
             use_server_proxy=self._config["use_server_proxy"],
         )
+        # The SDK treats an empty explicit key as permission to reread the
+        # environment. Never silently upgrade an originally unauthenticated
+        # management scope to a different principal on a cleanup retry.
+        if hasattr(config, "get_api_key") and config.get_api_key() != self._management_api_key:
+            raise RuntimeError("OpenSandbox management credentials changed; restore the original environment before retrying cleanup")
+        return config
 
     @staticmethod
     def _sandbox_id(thread_id: str, user_id: str) -> str:
@@ -191,46 +216,101 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
         super()._start_idle_checker()
 
     def _active_count_locked(self) -> int:
-        return len(self._sandboxes)
+        return len(self._sandboxes) + len(self._pending_destroy)
+
+    def _cleanup_idle_resources(self, idle_timeout: float) -> None:
+        with self._lock:
+            pending = list(self._pending_destroy.values())
+        for sandbox in pending:
+            self._destroy_quietly(sandbox, context="retry termination")
+        super()._cleanup_idle_resources(idle_timeout)
 
     def _destroy_warm_entry(self, sandbox_id: str, entry: OpenSandboxSandbox, *, reason: str) -> None:
         self._destroy_quietly(entry, context=f"warm pool, reason={reason}")
 
-    @staticmethod
-    def _destroy_quietly(sandbox: OpenSandboxSandbox, *, context: str) -> None:
+    def _destroy_quietly(self, sandbox: OpenSandboxSandbox, *, context: str) -> None:
+        token = id(sandbox)
+        with self._lock:
+            self._pending_destroy[token] = sandbox
+            if token in self._destroying:
+                return
+            self._destroying.add(token)
+        confirmed = False
         try:
             sandbox.destroy()
         except Exception as exc:
             logger.warning("Error destroying OpenSandbox %s (%s): %s", sandbox.id, context, exc)
+        else:
+            confirmed = True
+        finally:
+            with self._lock:
+                if confirmed:
+                    self._pending_destroy.pop(token, None)
+                self._destroying.discard(token)
 
-    def _invalidate_sandbox(self, sandbox_id: str, reason: str) -> None:
+    def _destroy_remote(self, remote_id: str) -> None:
+        # SandboxSync.destroy() always retires its transport, including failed
+        # DELETEs. Retry only the management API, never reconnect/start execd or
+        # replay an agent command. Every attempt owns a fresh bounded client.
+        _, connection_config_cls, _ = self._get_sdk()
+        manager = _import_manager().create(connection_config=self._new_connection_config(connection_config_cls))
+        try:
+            manager.kill_sandbox(remote_id)
+        finally:
+            manager.close()
+
+    def _invalidate_sandbox(self, sandbox_id: str, reason: str, *, expected: OpenSandboxSandbox | None = None) -> None:
         with self._lock:
+            current = self._sandboxes.get(sandbox_id)
+            warm = self._warm_pool.get(sandbox_id)
+            if expected is not None and current is not expected and (warm is None or warm[0] is not expected):
+                return
             active = self._sandboxes.pop(sandbox_id, None)
             warm_entry = self._warm_pool.pop(sandbox_id, None)
             for key in [key for key, value in self._thread_sandboxes.items() if value == sandbox_id]:
                 self._thread_sandboxes.pop(key, None)
-        sandbox = active or (warm_entry[0] if warm_entry is not None else None)
+            sandbox = active or (warm_entry[0] if warm_entry is not None else None)
+            if sandbox is not None:
+                self._pending_destroy[id(sandbox)] = sandbox
         if sandbox is None:
             return
         logger.warning("Invalidating OpenSandbox %s after terminal failure: %s", sandbox_id, reason)
         self._destroy_quietly(sandbox, context="terminal failure")
 
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
+        with self._acquiring():
+            return self._acquire(thread_id, user_id=user_id)
+
+    @contextmanager
+    def _acquiring(self) -> Iterator[None]:
         with self._lock:
-            if self._shutdown_called:
-                raise RuntimeError("OpenSandboxProvider has been shut down")
+            if not self._accepting:
+                raise RuntimeError("OpenSandboxProvider is retired or shut down")
+            self._operations += 1
+        try:
+            yield
+        finally:
+            self._finish_operation()
+
+    def _finish_operation(self) -> None:
+        with self._lock:
+            self._operations -= 1
+            if not self._accepting and not self._shutdown_called and self._operations == 0:
+                self._park_active_locked()
+
+    def _acquire(self, thread_id: str | None, *, user_id: str | None) -> str:
         if thread_id is None:
             sandbox_id = str(uuid.uuid4())[:8]
             sandbox = self._create_sandbox(sandbox_id, thread_id=None, user_id=user_id)
             with self._lock:
-                if self._shutdown_called:
+                if not self._accepting:
                     destroy_after_unlock = True
                 else:
                     self._sandboxes[sandbox_id] = sandbox
                     destroy_after_unlock = False
             if destroy_after_unlock:
                 self._destroy_quietly(sandbox, context="created during shutdown")
-                raise RuntimeError("OpenSandboxProvider shut down during acquire")
+                raise RuntimeError("OpenSandboxProvider retired or shut down during acquire")
             return sandbox_id
 
         key = self._thread_key(thread_id, user_id)
@@ -252,11 +332,16 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
 
     def _acquire_scope_locked(self, key: tuple[str, str], sandbox_id: str, *, thread_id: str, user_id: str | None) -> str:
         with self._lock:
+            if not self._accepting:
+                raise RuntimeError("OpenSandboxProvider is retired or shut down")
             existing = self._thread_sandboxes.get(key)
             active = self._sandboxes.get(existing) if existing is not None else None
         if existing is not None and active is not None:
             try:
                 active.renew()
+                with self._lock:
+                    if not self._accepting:
+                        raise RuntimeError("OpenSandboxProvider retired or shut down during acquire")
                 return existing
             except Exception:
                 # A terminal renewal failure invokes _invalidate_sandbox,
@@ -265,21 +350,21 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
                 # and must remain visible to the caller.
                 with self._lock:
                     invalidated = self._sandboxes.get(existing) is not active and existing not in self._warm_pool
-                    shutting_down = self._shutdown_called
+                    shutting_down = not self._accepting
                 if not invalidated or not active.is_closed or shutting_down:
                     raise
                 logger.info("Rebuilding terminal OpenSandbox %s during acquire", existing)
         reclaimed = self._reclaim_warm_pool(sandbox_id)
         if reclaimed is not None:
             with self._lock:
-                if self._shutdown_called:
-                    raise RuntimeError("OpenSandboxProvider shut down during acquire")
+                if not self._accepting:
+                    raise RuntimeError("OpenSandboxProvider retired or shut down during acquire")
                 if reclaimed in self._sandboxes:
                     self._thread_sandboxes[key] = reclaimed
                     return reclaimed
         sandbox = self._create_sandbox(sandbox_id, thread_id=thread_id, user_id=user_id)
         with self._lock:
-            if self._shutdown_called:
+            if not self._accepting:
                 destroy_after_unlock = True
             else:
                 self._sandboxes[sandbox_id] = sandbox
@@ -287,7 +372,7 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
                 destroy_after_unlock = False
         if destroy_after_unlock:
             self._destroy_quietly(sandbox, context="created during shutdown")
-            raise RuntimeError("OpenSandboxProvider shut down during acquire")
+            raise RuntimeError("OpenSandboxProvider retired or shut down during acquire")
         return sandbox_id
 
     def _create_sandbox(self, sandbox_id: str, *, thread_id: str | None, user_id: str | None) -> OpenSandboxSandbox:
@@ -311,6 +396,16 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             metadata=metadata,
             connection_config=connection_config,
         )
+        sandbox = OpenSandboxSandbox(
+            sandbox_id,
+            remote,
+            run_command_opts_cls=run_command_opts_cls,
+            default_env=self._config["environment"],
+            sandbox_timeout=None if self._config["sandbox_timeout"] is None else timedelta(seconds=self._config["sandbox_timeout"]),
+            default_command_timeout=self._config["command_timeout"],
+            on_terminal_failure=lambda failed_id, reason: self._invalidate_sandbox(failed_id, reason, expected=sandbox),
+            retry_termination=self._destroy_remote,
+        )
         try:
             bootstrap = remote.commands.run(
                 _BOOTSTRAP_COMMAND,
@@ -324,21 +419,10 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
                 detail = format_execution(bootstrap).strip() or ("no exit code" if exit_code is None else f"exit code {exit_code}")
                 raise RuntimeError(f"OpenSandbox bootstrap failed: {detail}")
         except Exception:
-            try:
-                remote.destroy()
-            except Exception:
-                logger.warning("Failed to destroy OpenSandbox %s after bootstrap failure", remote.id, exc_info=True)
+            self._destroy_quietly(sandbox, context="bootstrap failure")
             raise
 
-        return OpenSandboxSandbox(
-            sandbox_id,
-            remote,
-            run_command_opts_cls=run_command_opts_cls,
-            default_env=self._config["environment"],
-            sandbox_timeout=None if self._config["sandbox_timeout"] is None else timedelta(seconds=self._config["sandbox_timeout"]),
-            default_command_timeout=self._config["command_timeout"],
-            on_terminal_failure=self._invalidate_sandbox,
-        )
+        return sandbox
 
     def _reclaim_warm_pool(self, sandbox_id: str) -> str | None:
         with self._lock:
@@ -373,7 +457,14 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
                 return
         try:
             with self._acquire_serializer.hold(sandbox_id):
-                self._release_scope_locked(sandbox_id)
+                with self._lock:
+                    if sandbox_id not in self._sandboxes:
+                        return
+                    self._operations += 1
+                try:
+                    self._release_scope_locked(sandbox_id)
+                finally:
+                    self._finish_operation()
         except AcquireSerializerClosed:
             # reset/shutdown can close the serializer between the existence
             # check and checkout. Preserve release's no-op after termination.
@@ -404,6 +495,8 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             destroy_after_unlock = self._shutdown_called
             if not destroy_after_unlock:
                 self._warm_pool[sandbox_id] = (sandbox, time.time())
+            else:
+                self._pending_destroy[id(sandbox)] = sandbox
         if destroy_after_unlock:
             self._destroy_quietly(sandbox, context="released during shutdown")
 
@@ -552,32 +645,42 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
     def reset(self) -> None:
         """Park active clients so the detached provider still owns their cleanup."""
         with self._lock:
-            now = time.time()
-            for sandbox_id, sandbox in self._sandboxes.items():
-                self._warm_pool.setdefault(sandbox_id, (sandbox, now))
-            self._sandboxes.clear()
-            self._thread_sandboxes.clear()
-            self._acquire_serializer.close()
+            self._accepting = False
+            if self._operations == 0:
+                self._park_active_locked()
+        self._acquire_serializer.close()
+
+    def _park_active_locked(self) -> None:
+        now = time.time()
+        for sandbox_id, sandbox in self._sandboxes.items():
+            self._warm_pool.setdefault(sandbox_id, (sandbox, now))
+        self._sandboxes.clear()
+        self._thread_sandboxes.clear()
 
     def shutdown(self) -> None:
-        with self._lock:
-            if self._shutdown_called:
-                return
-            self._shutdown_called = True
-        try:
-            self._stop_idle_checker()
-        except Exception:
+        with self._shutdown_lock:
             with self._lock:
-                self._shutdown_called = False
-            raise
-        with self._lock:
-            sandboxes = list(self._sandboxes.values()) + [entry for entry, _ in self._warm_pool.values()]
-            self._sandboxes.clear()
-            self._warm_pool.clear()
-            self._thread_sandboxes.clear()
+                if self._shutdown_complete:
+                    return
+                self._shutdown_called = True
+                self._accepting = False
             self._acquire_serializer.close()
-        for sandbox in sandboxes:
-            self._destroy_quietly(sandbox, context="shutdown")
+            self._stop_idle_checker()
+            with self._lock:
+                if self._operations:
+                    raise RuntimeError(f"OpenSandbox shutdown incomplete: {self._operations} acquire/release operations pending; retry shutdown")
+                sandboxes = list(self._sandboxes.values()) + [entry for entry, _ in self._warm_pool.values()] + list(self._pending_destroy.values())
+                self._sandboxes.clear()
+                self._warm_pool.clear()
+                self._thread_sandboxes.clear()
+                for sandbox in sandboxes:
+                    self._pending_destroy[id(sandbox)] = sandbox
+            for sandbox in {id(box): box for box in sandboxes}.values():
+                self._destroy_quietly(sandbox, context="shutdown")
+            with self._lock:
+                if self._pending_destroy:
+                    raise RuntimeError(f"OpenSandbox shutdown incomplete: {len(self._pending_destroy)} terminations pending; retry shutdown")
+                self._shutdown_complete = True
 
 
 __all__ = ["OpenSandboxProvider"]

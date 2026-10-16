@@ -998,6 +998,42 @@ def test_reacquire_waits_until_release_output_sync_finishes(output_sync_provider
     assert (outputs / "report.txt").read_bytes() == b"report"
 
 
+@pytest.mark.parametrize("transition", ["reset", "shutdown"])
+def test_lifecycle_keeps_started_output_transfer_owned(output_sync_provider, monkeypatch, transition):
+    from concurrent.futures import ThreadPoolExecutor
+
+    provider, remote, sandbox_id, outputs = output_sync_provider
+    remote.file_data["/mnt/user-data/outputs/report.txt"] = b"report"
+    box = provider.get(sandbox_id)
+    download = box._download_file_bounded
+    entered, resume = threading.Event(), threading.Event()
+
+    def gated(*args, **kwargs):
+        entered.set()
+        assert resume.wait(5)
+        return download(*args, **kwargs)
+
+    monkeypatch.setattr(box, "_download_file_bounded", gated)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(provider.release, sandbox_id)
+        try:
+            assert entered.wait(5)
+            if transition == "shutdown":
+                with pytest.raises(RuntimeError, match="acquire/release operations"):
+                    provider.shutdown()
+            else:
+                provider.reset()
+            assert provider.get(sandbox_id) is box
+            assert sandbox_id not in provider._warm_pool
+            assert remote.destroy_calls == 0
+        finally:
+            resume.set()
+        future.result(timeout=5)
+    assert (outputs / "report.txt").read_bytes() == b"report"
+    provider.shutdown()
+    assert remote.destroy_calls == 1
+
+
 @pytest.mark.parametrize("transition", ["shutdown", "reset"])
 def test_release_is_noop_when_lifecycle_closes_before_serializer_hold(output_sync_provider, monkeypatch, transition):
     provider, remote, sandbox_id, outputs = output_sync_provider

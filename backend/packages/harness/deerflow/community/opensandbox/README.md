@@ -82,7 +82,7 @@ output directories may reach the pass limits before all files are mirrored.
 
 Create returns only after the SDK readiness check and DeerFlow's
 `/mnt/user-data/{workspace,uploads,outputs}` bootstrap succeed. A bootstrap
-failure explicitly destroys the newly created remote sandbox.
+failure requests destruction and retains an unconfirmed deletion for retry.
 Each remote has an independent SDK connection transport. Before an operation,
 the adapter renews `sandbox_timeout`; commands use `bash_command_timeout` when
 the caller supplies no timeout and extend the renewal horizon when necessary.
@@ -114,7 +114,25 @@ The full DeerFlow surface is implemented:
   transports evict the dead client so the next acquire cold-starts a
   replacement. A file-path 404 remains an ordinary missing-file error.
 
-`reset()` parks active clients for later cleanup; `shutdown()` destroys active
-and warm remotes. Cross-process discovery and ownership coordination are not
-implemented yet, so each Gateway process has its own warm pool and capacity
-accounting.
+`reset()` permanently retires admission and parks existing clients once started
+acquire/output-transfer operations finish. A late create result is destroyed
+instead of published. `shutdown()` also fences admission and reports outstanding
+acquire/release operations or unconfirmed terminations with a retryable
+`RuntimeError`; it does not report complete while those resources remain owned.
+
+The SDK closes its HTTP transport even when a deletion fails. DeerFlow keeps
+the remote identity and retries only `SandboxManagerSync.kill_sandbox()` through
+a fresh client with the original management endpoint, credentials and bounded
+`request_timeout`. Successful deletion or API 404/410 acknowledges termination;
+a broken connection or unhealthy execd does not. Pending remotes cannot be reused
+and still count toward the replica soft cap. Idle sweeps and subsequent shutdown
+calls retry cleanup. With idle reaping disabled, call `shutdown()` again after
+the service recovers. An originally empty API key cannot silently acquire a new
+environment credential; restore the original environment before retrying that
+cleanup. No agent command is replayed.
+
+These are process-local guarantees after the SDK has returned a sandbox handle.
+SDK failures before `create()` returns may hide the remote identity and cannot
+be recovered by this provider. Pending cleanup does not survive a Gateway crash;
+cross-process discovery and ownership coordination remain unimplemented. An
+accepted deletion is not a guarantee that remote teardown has physically finished.

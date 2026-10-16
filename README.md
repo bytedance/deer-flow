@@ -794,6 +794,11 @@ DeerFlow supports multiple sandbox execution modes:
 - **Docker Execution** (runs sandbox code in isolated Docker containers)
 - **Docker Execution with Kubernetes** (runs sandbox code in Kubernetes pods via provisioner service)
 
+The optional [OpenSandbox provider](backend/packages/harness/deerflow/community/opensandbox/README.md)
+retains unconfirmed deletions and retries them through fresh management clients.
+If shutdown reports outstanding work, retry after SDK operations finish or the
+management service recovers.
+
 Sandbox references in conversation state are server-owned. External run and
 thread-state APIs reject caller-supplied `sandbox` values; when restoring a
 checkpoint, the runtime resolves the reference against the authenticated user
