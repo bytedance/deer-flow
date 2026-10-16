@@ -1662,7 +1662,7 @@ class E2BSandboxProvider(SandboxProvider):
         idle_timeout = float(self._config["idle_timeout"])
         if idle_timeout <= 0:
             return
-        now_wall = time.time()
+        now_wall = time.monotonic()
         with self._lock:
             expired = [(sandbox_id, entry) for sandbox_id, entry in self._warm_pool.items() if now_wall - entry[1] >= idle_timeout]
         for sandbox_id, entry in expired:
@@ -2994,7 +2994,7 @@ class E2BSandboxProvider(SandboxProvider):
             with self._lock:
                 should_kill = self._shutdown_called
                 if not should_kill:
-                    self._warm_pool[sandbox_id] = (seed or "", time.time())
+                    self._warm_pool[sandbox_id] = (seed or "", time.monotonic())
                     self._warm_pool.move_to_end(sandbox_id)
                     self._end_transition_locked()
                     transition_slot_held = False

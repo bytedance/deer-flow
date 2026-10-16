@@ -387,7 +387,7 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
             if self._shutdown_called:
                 close_sandbox = sandbox
             else:
-                self._warm_pool[sandbox_id] = (sandbox, time.time())
+                self._warm_pool[sandbox_id] = (sandbox, time.monotonic())
 
         if close_sandbox is not None:
             self._close_quietly(close_sandbox, context="released during shutdown")

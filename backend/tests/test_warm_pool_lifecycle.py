@@ -34,7 +34,7 @@ class _Provider(WarmPoolLifecycleMixin[str]):
 
 def test_replica_count_includes_active_and_warm_entries() -> None:
     provider = _Provider(replicas=2, active_count=1)
-    provider._warm_pool["warm-1"] = ("entry-1", time.time())
+    provider._warm_pool["warm-1"] = ("entry-1", time.monotonic())
 
     assert provider._replica_count() == (2, 2)
 
@@ -61,7 +61,7 @@ def test_evict_oldest_warm_returns_none_when_pool_empty() -> None:
 
 def test_reap_expired_warm_destroys_only_expired_entries() -> None:
     provider = _Provider()
-    now = time.time()
+    now = time.monotonic()
     provider._warm_pool["expired"] = ("entry-expired", now - 100)
     provider._warm_pool["fresh"] = ("entry-fresh", now)
 
@@ -74,7 +74,7 @@ def test_reap_expired_warm_destroys_only_expired_entries() -> None:
 
 def test_reap_expired_warm_noops_when_timeout_disabled() -> None:
     provider = _Provider(idle_timeout=0)
-    provider._warm_pool["expired"] = ("entry-expired", time.time() - 100)
+    provider._warm_pool["expired"] = ("entry-expired", time.monotonic() - 100)
 
     provider._reap_expired_warm(idle_timeout=0)
 
@@ -123,7 +123,7 @@ def test_provider_shutdown_resets_guard_when_idle_checker_stop_fails(module_name
 def test_start_idle_checker_uses_monkeypatchable_interval(monkeypatch) -> None:
     provider = _Provider(idle_timeout=0.01)
     monkeypatch.setattr(_Provider, "IDLE_CHECK_INTERVAL", 0.01)
-    provider._warm_pool["expired"] = ("entry-expired", time.time() - 10)
+    provider._warm_pool["expired"] = ("entry-expired", time.monotonic() - 10)
 
     provider._start_idle_checker()
     deadline = time.time() + 1
@@ -135,3 +135,18 @@ def test_start_idle_checker_uses_monkeypatchable_interval(monkeypatch) -> None:
     assert provider.destroyed == [("expired", "entry-expired", "idle_timeout")]
     assert provider._idle_checker_thread is not None
     assert not provider._idle_checker_thread.is_alive()
+
+
+def test_reap_ignores_forward_wall_clock_jumps(monkeypatch) -> None:
+    """A forward wall-clock step (NTP correction, VM resume/restore) must not
+    destroy freshly parked warm sandboxes. Regression for #6970: idle age is a
+    duration and must be measured on the monotonic clock, not the wall clock."""
+    provider = _Provider()
+    provider._warm_pool["fresh"] = ("entry-fresh", time.monotonic())
+    wall_now = time.time()
+    monkeypatch.setattr(time, "time", lambda: wall_now + 601)
+
+    provider._reap_expired_warm(idle_timeout=600)
+
+    assert "fresh" in provider._warm_pool
+    assert provider.destroyed == []

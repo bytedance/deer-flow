@@ -900,7 +900,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                     deferred += 1
                     logger.debug("Deferring container %s during reconciliation: this instance is tearing it down", info.sandbox_id)
                     continue
-                self._warm_pool[info.sandbox_id] = (info, current_time)
+                self._warm_pool[info.sandbox_id] = (info, time.monotonic())
                 self._warm_pool_identity[info.sandbox_id] = None
             self._unowned_since.pop(info.sandbox_id, None)
             adopted += 1
@@ -1555,7 +1555,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         if timeout <= 0:
             return
 
-        now = time.time()
+        now = time.monotonic()
         expired: list[tuple[str, SandboxInfo]] = []
         with self._lock:
             for sandbox_id, (entry, timestamp) in self._warm_pool.items():
@@ -2754,7 +2754,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             self._last_activity.pop(sandbox_id, None)
             # Park in warm pool — container keeps running
             if info and sandbox_id not in self._warm_pool:
-                self._warm_pool[sandbox_id] = (info, time.time())
+                self._warm_pool[sandbox_id] = (info, time.monotonic())
                 self._warm_pool_identity[sandbox_id] = thread_keys_to_remove[0] if thread_keys_to_remove else active_identity
 
         if sandbox is not None:

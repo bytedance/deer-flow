@@ -1119,7 +1119,7 @@ def test_idle_reaper_destroys_expired_warm(monkeypatch):
     sid = provider.acquire("thread-1", user_id="u1")
     provider.release(sid)
     warm_box = provider._warm_pool[sid][0]
-    provider._warm_pool[sid] = (warm_box, time.time() - 9999)
+    provider._warm_pool[sid] = (warm_box, time.monotonic() - 9999)
     time.sleep(0.3)
     assert sid not in provider._warm_pool
     assert warm_box.is_closed
@@ -1134,8 +1134,8 @@ def test_replica_enforcement_evicts_oldest_warm(monkeypatch):
     sid_b = provider.acquire("thread-b", user_id="u1")
     provider.release(sid_b)
     box_a = provider._warm_pool[sid_a][0]
-    provider._warm_pool[sid_a] = (box_a, time.time() - 100)
-    provider._warm_pool[sid_b] = (provider._warm_pool[sid_b][0], time.time())
+    provider._warm_pool[sid_a] = (box_a, time.monotonic() - 100)
+    provider._warm_pool[sid_b] = (provider._warm_pool[sid_b][0], time.monotonic())
     provider.acquire("thread-c", user_id="u1")
     assert sid_a not in provider._warm_pool
     assert box_a.is_closed

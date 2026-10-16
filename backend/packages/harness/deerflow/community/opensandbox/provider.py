@@ -403,7 +403,7 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
                 self._thread_sandboxes.pop(key, None)
             destroy_after_unlock = self._shutdown_called
             if not destroy_after_unlock:
-                self._warm_pool[sandbox_id] = (sandbox, time.time())
+                self._warm_pool[sandbox_id] = (sandbox, time.monotonic())
         if destroy_after_unlock:
             self._destroy_quietly(sandbox, context="released during shutdown")
 

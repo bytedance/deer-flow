@@ -746,7 +746,7 @@ def test_adopted_warm_pool_box_still_health_checks(monkeypatch):
         _fake_run,
         default_env={},
     )
-    provider._warm_pool["adopted"] = (adopted, time.time())
+    provider._warm_pool["adopted"] = (adopted, time.monotonic())
     calls = 0
     original_execute = adopted.execute_command
 
@@ -1039,8 +1039,8 @@ def test_reset_parked_resources_are_reaped_after_idle_timeout(monkeypatch):
 
     provider.reset()
 
-    provider._warm_pool[sid_active] = (active_box, time.time() - 9999)
-    provider._warm_pool[sid_warm] = (warm_box, time.time() - 9999)
+    provider._warm_pool[sid_active] = (active_box, time.monotonic() - 9999)
+    provider._warm_pool[sid_warm] = (warm_box, time.monotonic() - 9999)
     provider._reap_expired_warm(idle_timeout=1)
 
     assert provider._warm_pool == {}
@@ -1076,7 +1076,7 @@ def test_idle_reaper_destroys_expired_warm_boxes(monkeypatch):
 
     # Backdate the warm-pool timestamp so it appears long-expired
     warm_box = provider._warm_pool[sid][0]
-    provider._warm_pool[sid] = (warm_box, time.time() - 9999)
+    provider._warm_pool[sid] = (warm_box, time.monotonic() - 9999)
 
     # Wait long enough for the reaper to detect and destroy it
     time.sleep(0.3)
@@ -1118,10 +1118,10 @@ def test_replica_enforcement_evicts_oldest_warm(monkeypatch):
 
     # Make sid_a definitely older by backdating its timestamp
     box_a = provider._warm_pool[sid_a][0]
-    provider._warm_pool[sid_a] = (box_a, time.time() - 100)
+    provider._warm_pool[sid_a] = (box_a, time.monotonic() - 100)
     # Refresh sid_b's timestamp so it's newer
     box_b = provider._warm_pool[sid_b][0]
-    provider._warm_pool[sid_b] = (box_b, time.time())
+    provider._warm_pool[sid_b] = (box_b, time.monotonic())
 
     # Acquiring a third thread triggers replica enforcement:
     # warm pool count (2) >= replicas (2) → evict oldest (sid_a)
@@ -1507,12 +1507,12 @@ def test_failed_health_check_does_not_remove_swapped_warm_entry(monkeypatch):
         _fake_run,
         default_env={},
     )
-    provider._warm_pool["shared-id"] = (stale, time.time())
+    provider._warm_pool["shared-id"] = (stale, time.monotonic())
     provider._warm_pool_identity["shared-id"] = ("user-a", "thread-a")
 
     def _swap_during_health_check(*args, **kwargs):
         with provider._lock:
-            provider._warm_pool["shared-id"] = (replacement, time.time())
+            provider._warm_pool["shared-id"] = (replacement, time.monotonic())
             provider._warm_pool_identity["shared-id"] = (
                 "user-b",
                 "thread-b",
