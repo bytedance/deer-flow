@@ -1,6 +1,6 @@
 # AGENTS.md
 
-This is the source of truth for DeerFlow frontend coding agents; the sibling `CLAUDE.md` imports it via `@AGENTS.md`.
+DeerFlow frontend guidance source of truth; `CLAUDE.md` imports `@AGENTS.md`.
 
 ## Project Overview
 
