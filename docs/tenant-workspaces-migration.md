@@ -7,7 +7,7 @@ acceptance remain pending. Historical `0035/e0001` release receipts are immutabl
 ## Scope and prerequisites
 
 `scripts/tenant_migration.py` operates only on native `0040_mcp_workspace_identity`
-and independent executor `e0002_workspace_scope` databases. It never performs
+and independent executor `e0003_execution_identity` databases. It never performs
 DDL, starts workers, enables registration, resumes admission, releases physical
 capacity or changes account verification. M10 must collect actual drain,
 physical-stop, coherent backup/restore and NAS evidence and own the schema
@@ -156,7 +156,18 @@ It appends nullable JSON `mcp_tasks.workspace_context_json`, with no default
 permission grant or history backfill. Fresh ORM/parent upgrade have the same
 shape. Exact old task content, remote handles and lease fields survive repeat
 upgrade; destructive downgrade refuses and releases its own migration pool.
-Current native/export/executor attribution requires 0040/e0002. Earlier matched
+Current native/export/executor attribution requires 0040/e0003. Earlier matched
 release receipts remain historical and cannot prove the current candidate.
 The existing closed startup schema fence is older; M10/M11 must align it and
 both release manifests only after the complete runtime/restore audit.
+
+
+The current executor candidate is e0003_execution_identity after e0002. The
+explicit offline upgrade accepts the frozen e0001/e0002 shapes and interrupted
+reviewed additive shapes only; all workers/dispatchers must already be stopped.
+It appends nullable execution_identity without rewriting historical record bytes,
+state or version. Offline workspace attribution retains NULL execution identity
+and cannot authorize runtime execution. Old binaries fail startup on the new
+revision/column shape; this does not stop a pre-existing running process. Align
+the complete paired candidate and restore manifest at M10/M11; do not rewrite
+historical receipts or activate tenants from this bounded schema preparation.

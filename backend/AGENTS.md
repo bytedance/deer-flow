@@ -387,3 +387,11 @@ membership/account policy and checks the original running Run/private parent and
 snapshot. It is not a durable physical start/publication grant; HTTP B receivers
 remain closed to v2 until ledger, MCP commitment, management and worker fences are
 integrated. Never enable the tenant startup gate on the strength of this helper.
+
+Executor schema `e0003_execution_identity` appends a nullable immutable B intent
+snapshot/hash. Native ownership attribution leaves it NULL; it does not create a
+launch grant. JobStore validates captured identity on reads/mutations/retries.
+Unintegrated local and pool queued claims exclude workspace-attributed jobs;
+pool filtering precedes limit. All old processes must stop before offline upgrade.
+Do not interpret this schema floor or claim refusal as completed scoped B/C launch,
+management, publication or tenant runtime activation.

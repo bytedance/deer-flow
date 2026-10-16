@@ -55,7 +55,7 @@ def test_executor_scope_upgrade_refuses_old_runtime_and_retains_reservations(exe
     with pytest.raises(SchemaCompatibilityError):
         require_schema(executor_engine)
     upgrade_schema(executor_engine)
-    assert require_schema(executor_engine) == "e0002_workspace_scope"
+    assert require_schema(executor_engine) == "e0003_execution_identity"
     with executor_engine.connect() as conn:
         inspector = sa.inspect(conn)
         for name in ("ecs_execution_jobs", "ecs_native_affinities"):
@@ -68,7 +68,7 @@ def test_executor_scope_upgrade_refuses_old_runtime_and_retains_reservations(exe
         assert conn.execute(sa.text("SELECT CAST(record AS TEXT) FROM ecs_execution_jobs WHERE id='unknown'")).scalar_one() == before
         assert conn.execute(sa.text("SELECT node_id,workspace_id FROM ecs_native_affinities")).one() == ("node", None)
     upgrade_schema(executor_engine)
-    assert require_schema(executor_engine) == "e0002_workspace_scope"
+    assert require_schema(executor_engine) == "e0003_execution_identity"
 
 
 def test_new_executor_record_binds_immutable_workspace(executor_engine):

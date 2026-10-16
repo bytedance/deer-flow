@@ -564,12 +564,24 @@ cloud/Jenkins work is paused.
 
 ## Tenant schema foundation (implementation in progress)
 
-This development branch requires `e0002_workspace_scope` for production ledger
+This development branch requires `e0003_execution_identity` for production ledger
 admission. The explicit offline upgrade accepts only reviewed legacy/current
 shapes, adds nullable indexed workspace fields to jobs and native affinities,
 and leaves existing physical reservations, JSON payloads and versions intact.
 It never assigns legacy tenant ownership or replays work. New job creation
 persists scope; mutation and conflicting create retries cannot change it.
+
+The appended e0003 migration adds a separate nullable JSON execution identity.
+Explicit B snapshots bind actor, workspace, source Run/thread/incarnation and the
+effective input/profile budget digest. Scoped create retries, reads and ordinary
+mutations validate this independent identity; output/state updates retain it.
+Historical rows keep NULL identity, including offline workspace attribution.
+Local and pool queued claims refuse workspace-attributed jobs until native MCP
+commit/start authorization is integrated; pool filtering happens before limit.
+Unknown physical reservations remain reserved. Stop every old worker/dispatcher
+before upgrading: an old binary starting afterward rejects the new revision/shape,
+but changing a schema cannot stop an already-running old process. No live schema
+upgrade, scoped launch or tenant deployment is enabled by this work.
 
 These columns are not user authorization. Tenant protocol, live membership
 checks, native/executor backfill and the controlled migration receipt remain

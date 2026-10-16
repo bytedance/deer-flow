@@ -308,6 +308,13 @@ python -m pytest tests/test_workspace_execution.py tests/test_workspace_revocati
 - [x] 保存本轮回执、更新文档并本地提交。此预校验不启用 HTTP B 路径，不充当稍后物理启动或发布的授权。
 - [ ] 后续配套不可变物理账本与旧 worker schema 栅栏、原生 MCP 提交确认、v2 管理协议；启动/接管/发布分别重验，撤权清理保留 STOP 与容量事实。接通实际 C→B→C 后才验 M4 父项。
 
+#### M4 第六小步：物理账本身份与版本栅栏（2026-10-16）
+
+- [x] 先验证 B 身份写入、重复提交与状态推进主干，再固定 workspace/actor/thread/incarnation/run 和有效 spec/profile/input budget；JSON 记录不能单独改身份。
+- [x] 在 e0002 后新增 nullable execution_identity；历史任务原文、状态、占用与版本保留，回填 workspace_id 不自动产生执行授权。停止所有旧进程后才允许离线升级；旧版启动必须拒绝新 schema。
+- [x] 实际 LocalWorker 和 Scheduling 领取入口均不能抢跑尚未接入权限的空间工作；池过滤先于 limit，已有未知物理占用继续计入容量。
+- [x] 上海定向主干/必要边界与迁移回归、静态检查通过后保存回执并本地提交。接下来直接接 B HTTP/v2 管理和真实原生 MCP 提交确认，随后启动/接管/发布与实际 C→B→C；不以账本测试代替这条业务主干。
+
 ### M5：记忆、知识检索与工具凭据隔离
 
 **修改接点：**

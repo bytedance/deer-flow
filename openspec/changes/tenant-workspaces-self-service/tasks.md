@@ -1165,3 +1165,35 @@ three Python files exactly match #19 source; build/log/source/image/empty owned
 resource receipts are `native_b_submission_preflight` in progress JSON. No deployment,
 push/PR, live model calls, local application/pytest/Docker runtime or broad test
 rerun. Previous evidence remains historical and unchanged.
+
+
+M4 immutable physical B ledger checkpoint (2026-10-16): SQL job
+`deerflow-tenant-execution-m4-sql` #20 RED absent identity column/revision;
+#21 SUCCESS two actual SQLite/PostgreSQL original intent/retry/mutation mains
+(10.64s); #22 RED actual pool claim bypasses attributed-scope guard in both DBs;
+#23 SUCCESS 22 tests (24.72s) and six-file cloud Ruff check/format. Three new
+focused functions give six dialect cases; sixteen existing migration/attribution,
+legacy submit/cancel/staging, unknown-capacity and schema checks are reused.
+
+Append e0003_execution_identity after frozen e0002; nullable historical values
+remain NULL. Preserve old JSON bytes, physical state and versions. Captured B
+identity binds original actor/workspace/Run/private thread/incarnation, request
+digest and effective input/profile/budget digest. JobStore reads/retries/mutations
+validate independent identity; pool claim/adoption reads do too. Workspace
+attribution does not produce this grant. Unintegrated local and pool claims
+exclude workspace-attributed work; pool predicate precedes limit, while unknown
+assigned physical work still counts against capacity. All old processes must stop
+before offline schema upgrade; version/shape/wire mismatches fail closed. This
+is not acceptance of old-binary restart, rolling upgrade or full physical cleanup.
+
+Exact six current Python files match #23 source; build/source/log/image/empty
+owned container/network receipts are native_b_execution_ledger in progress JSON.
+Current paired candidate is native 0040 / executor e0003, not the historical
+release receipts. Startup remains compiled false with its older closed schema
+fence. Next directly wire B submit/v2 management/native MCP commitment, then
+actual start/adopt/publication/cleanup and native ToolNode-to-B/C-to-B-to-C main;
+do not substitute more unintegrated safety preparations or broad tests for that
+flow. C identity, Scheduler/continuation/control/outbox/notification/credential
+revocation and M3/M5-M11 remain. Every M0-M11 parent stays incomplete; no tenant
+activation/deployment/push/PR/model/local runtime occurred. Review is serial
+self-review plus focused CI, not a full independent audit.

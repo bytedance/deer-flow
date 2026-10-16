@@ -6,7 +6,7 @@ from contextlib import contextmanager
 
 from sqlalchemy import JSON, Column, MetaData, String, Table, func, select, text, update
 
-from ecs_executor.job_store import _JOBS
+from ecs_executor.job_store import _JOBS, _validated_record
 
 _METADATA = MetaData()
 _NODES = Table("ecs_execution_nodes", _METADATA, Column("id", String(64), primary_key=True), Column("record", JSON, nullable=False))
@@ -98,6 +98,7 @@ class Scheduling:
                 select(_JOBS)
                 .where(
                     _JOBS.c.state == "queued",
+                    _JOBS.c.workspace_id.is_(None),
                     func.coalesce(_JOBS.c.record["affinity_node"].as_string(), node_id) == node_id,
                     func.coalesce(_JOBS.c.record["kind"].as_string(), "B") == kind,
                     _JOBS.c.record["spec"]["profile"].as_string().in_(node.profiles),
@@ -108,7 +109,7 @@ class Scheduling:
                 .limit(1)
             )
             for row in connection.execute(query):
-                job = dict(row.record)
+                job = _validated_record(row)
                 job.update(state="starting", node_id=node_id, worker_owner=owner, generation=uuid.uuid4().hex, attempt=1, lease_until=time.time() + self.lease_seconds)
                 result = connection.execute(update(_JOBS).where(_JOBS.c.id == row.id, _JOBS.c.version == row.version, _JOBS.c.state == "queued").values(record=job, state="starting", version=row.version + 1))
                 if result.rowcount:
@@ -126,7 +127,7 @@ class Scheduling:
                 func.coalesce(_JOBS.c.record["physical_stopped"].as_boolean(), False).is_(False),
             )
             for row in connection.execute(query):
-                job = dict(row.record)
+                job = _validated_record(row)
                 if job.get("kind", "B") != kind or job.get("node_id") != node_id or job.get("physical_stopped"):
                     continue
                 if job["worker_owner"] != owner:

@@ -7,7 +7,8 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import inspect, text
 
-SCHEMA_REVISION = "e0002_workspace_scope"
+SCHEMA_REVISION = "e0003_execution_identity"
+WORKSPACE_REVISION = "e0002_workspace_scope"
 LEGACY_REVISION = "e0001_execution_ledger"
 VERSION_TABLE = "ecs_executor_alembic_version"
 # Frozen deployed contract, independent of the evolving runtime metadata.
@@ -19,6 +20,9 @@ _LEGACY_SHAPES = {
 _SHAPES = {name: dict(shape) for name, shape in _LEGACY_SHAPES.items()}
 for _name in ("ecs_execution_jobs", "ecs_native_affinities"):
     _SHAPES[_name]["workspace_id"] = ("string", 36)
+
+_WORKSPACE_SHAPES = {name: dict(shape) for name, shape in _SHAPES.items()}
+_SHAPES["ecs_execution_jobs"]["execution_identity"] = ("json", None)
 
 _PRIMARY_KEYS = {"ecs_execution_jobs": ["id"], "ecs_execution_nodes": ["id"], "ecs_native_affinities": ["user_id", "thread_id", "incarnation"]}
 
@@ -61,15 +65,18 @@ def _validate(connection, *, complete, allow_legacy=False):
                 raise SchemaCompatibilityError("Executor column collation is incompatible")
         columns = {column["name"]: column for column in inspector.get_columns(name)}
         expected_shape = validation_shapes[name]
-        if allow_legacy and name in _LEGACY_SHAPES and set(columns) == set(_LEGACY_SHAPES[name]):
-            expected_shape = _LEGACY_SHAPES[name]
+        if allow_legacy:
+            for known_shapes in (_LEGACY_SHAPES, _WORKSPACE_SHAPES):
+                if name in known_shapes and set(columns) == set(known_shapes[name]):
+                    expected_shape = known_shapes[name]
+                    break
         if set(columns) != set(expected_shape):
             raise SchemaCompatibilityError("Executor column shape is incompatible")
         for key, (kind, length) in expected_shape.items():
             column = columns[key]
             expected_type = {"string": String, "integer": Integer, "json": JSON}[kind]
             expected_sql_type = {"string": f"VARCHAR({length})", "integer": "INTEGER", "json": "JSON"}[kind]
-            if not isinstance(column["type"], expected_type) or str(column["type"]).upper() != expected_sql_type or column["nullable"] != (key == "workspace_id"):
+            if not isinstance(column["type"], expected_type) or str(column["type"]).upper() != expected_sql_type or column["nullable"] != (key in {"workspace_id", "execution_identity"}):
                 raise SchemaCompatibilityError("Executor column type/nullability is incompatible")
             if any(column.get(field) is not None for field in ("default", "computed", "identity")):
                 raise SchemaCompatibilityError("Executor generated/default column semantics are incompatible")
@@ -115,7 +122,7 @@ def _validate(connection, *, complete, allow_legacy=False):
                 raise SchemaCompatibilityError("Executor index semantics are incompatible")
     if VERSION_TABLE in tables:
         versions = connection.execute(text("SELECT version_num FROM ecs_executor_alembic_version")).scalars().all()
-        if versions != [SCHEMA_REVISION] and not (allow_legacy and versions == [LEGACY_REVISION]):
+        if versions != [SCHEMA_REVISION] and not (allow_legacy and versions in ([LEGACY_REVISION], [WORKSPACE_REVISION])):
             raise SchemaCompatibilityError("Executor revision is unknown or incompatible")
     elif complete:
         raise SchemaCompatibilityError("Executor schema is unversioned; run the explicit offline upgrade")
