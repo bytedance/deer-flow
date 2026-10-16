@@ -100,7 +100,17 @@ class RedisCheckpointHistoryCache:
         try:
             pipe = self._client.pipeline(transaction=False)
             for key, entry in entries.items():
-                tag, data = self._serde.dumps_typed(entry)
+                try:
+                    tag, data = self._serde.dumps_typed(entry)
+                except Exception as exc:
+                    # Cache writes are optional; one unserializable entry must not
+                    # abort authoritative history reads or discard other entries.
+                    logger.warning(
+                        "checkpoint history cache serialization failed; skipping (key=%s): %s",
+                        key,
+                        type(exc).__name__,
+                    )
+                    continue
                 pipe.set(key, tag.encode() + _TAG_SEPARATOR + data, ex=self._ttl)
             await pipe.execute()
         except _redis_error() as exc:
