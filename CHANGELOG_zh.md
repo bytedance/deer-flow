@@ -25,7 +25,7 @@
   首次启动会导入已有的 `runtime-config.json`（表中已有的 provider 保留其行）并删除该
   明文文件，因此回退到旧版本需要重新填写 UI 配置的机器人。没有可用密钥时，保存凭据
   返回 `503` 而不是以明文存储，密钥无法解密的行视为未配置。`database.backend: memory`
-  仍使用 JSON 文件。
+  仍使用 JSON 文件。 ([#6988])
 
 - **渠道：** 飞书渠道上基于选项的澄清改为渲染为可交互的按钮卡片，而不是纯文本：每个
   选项变成一个按钮（最多 4 个——再多时纯文本路径更易读），点击选项即可完成澄清，
@@ -9404,3 +9404,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6897]: https://github.com/bytedance/deer-flow/pull/6897
 [#6909]: https://github.com/bytedance/deer-flow/pull/6909
 [#6930]: https://github.com/bytedance/deer-flow/pull/6930
+[#6988]: https://github.com/bytedance/deer-flow/pull/6988

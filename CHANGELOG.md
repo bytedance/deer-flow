@@ -29,7 +29,7 @@ This release closes that milestone with **621 merged pull requests**.
   deletes the plaintext file, so a downgrade must re-enter UI-configured bots.
   Without a usable key, saving credentials answers `503` instead of storing
   plaintext, and rows the key cannot decrypt read as not configured.
-  `database.backend: memory` keeps the JSON file.
+  `database.backend: memory` keeps the JSON file. ([#6988])
 
 - **channels:** Option-based clarifications on the Feishu channel render as an
   interactive button card instead of plain text: each option becomes a button
@@ -11796,3 +11796,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6897]: https://github.com/bytedance/deer-flow/pull/6897
 [#6909]: https://github.com/bytedance/deer-flow/pull/6909
 [#6930]: https://github.com/bytedance/deer-flow/pull/6930
+[#6988]: https://github.com/bytedance/deer-flow/pull/6988
