@@ -353,6 +353,8 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
 
    To route OpenAI models through `/v1/responses`, keep using `langchain_openai:ChatOpenAI` and set `use_responses_api: true` with `output_version: responses/v1`.
 
+   The lead agent also recognizes Responses output-token caps (`status: incomplete` with `incomplete_details.reason: max_output_tokens`), including streaming responses. It suppresses tool execution, removes the suppressed calls from later model requests, and preserves text and reasoning. A capped tool-call response includes a visible notice; other incomplete reasons retain their existing handling.
+
    When thinking is disabled on a legacy profile, blank `extra_body`, `thinking`, and nested `extra_body.thinking` keys in a `when_thinking_enabled` template are treated as absent during dialect inference. When thinking is enabled, template values are forwarded as configured.
 
    Models whose provider contract differs from DeerFlow's generic thinking/effort assumptions can declare a per-model mapping-valued `reasoning:` block (thinking `unsupported`/`optional`/`required`, the accepted effort values with aliases and a default, the payload dialect, and the reasoning-history requirement). The setup wizard's Z.AI GLM-5.3-Flash profile uses it: thinking stays on for every foreground and background call, and the effort selector offers the model's own `low`/`high`/`max` levels. Ollama's existing boolean `reasoning: true` remains a native provider setting and is forwarded to ChatOllama. When migrating a profile to a custom effort `path`, remove any old `reasoning_effort` setting from the profile and thinking templates; configuration validation rejects the leftover key. The chat UI drops a remembered provider-specific effort when switching to a legacy model that does not advertise it. Profiles without the block keep their existing provider behavior. See `config.example.yaml` for the shape and the equivalent manual configuration.
@@ -2049,6 +2051,17 @@ When your role lacks `runs:create`, the Web UI rejects a new task or `/goal <com
 
 ### Manual Context Compaction
 
+Automatic and manual compaction process all selected history in chronological
+chunks before replacing it. `summarization.trim_tokens_to_summarize` bounds raw
+input per step; generated summaries use at most half to leave room for source.
+Oversized summaries retain marked head/tail text; raw history is never clipped.
+A pass is limited to 64 chunks and leaves history unchanged on failure or limit
+exhaustion. A limit breach starts a five-minute per-process cooldown for the
+same thread/history window and policy, including rebuilt middleware. A larger
+input budget or smaller source window permits an immediate retry. Model fallback
+and SDK retries can add calls. See the
+[summarization guide](backend/docs/summarization.md).
+
 With `task_continuity.enabled`, `history_search` searches the current task's active
 and compacted history. Its optional `role` accepts `user`, `assistant`, or `tool`
 and filters before the eight-result limit; omitting it or passing `null` preserves
@@ -2090,6 +2103,8 @@ Compaction keeps the current user request and summarizes older assistant/tool ac
 If the same rendered summary prompt and model candidates recur, DeerFlow reuses the existing summary when the first candidate previously returned it unchanged. An unchanged fallback response is not cached, so reuse cannot prevent the primary model from being retried after an invocation failure. Cache failures fall back to normal generation. See [summarization telemetry](backend/docs/summarization.md#reuse-and-telemetry) for the summary result and reuse counters.
 
 Use `/compact` in the Web UI composer to summarize older context for the current thread. DeerFlow keeps the full chat visible, but future model calls use the compacted summary plus recent messages. The command is ignored when there is not enough history to compact, and it is blocked while the thread has a run in flight, including when that run is owned by another Gateway worker. If a multi-worker reservation loses its lease, DeerFlow cancels the checkpoint writer before the replacing run proceeds and returns a retryable conflict after cleanup. Thread-title edits are serialized through the same state-write boundary and show a conflict without closing the rename dialog when a run is active.
+
+Manual compaction also returns HTTP 409 when execution is pending or the checkpoint is unavailable, so it cannot confirm the thread is idle.
 
 The chat header also shows a context-window gauge when the selected model has a positive `context_window` configured. It estimates the latest materialized checkpoint's message tokens and keeps the previous same-thread percentage visible while data refetches, independently of the cumulative token-usage setting.
 
@@ -2171,7 +2186,7 @@ result text does not turn an unknown status into success or failure.
 
 Cancelled or timed-out background sub-agent executions retain provider-reported token usage from completed model calls, including responses received before their next progress update. Final usage delivery to the parent run does not count earlier progress snapshots twice.
 
-For `tests_passed:go test ./...`, packages marked `[no test files]` or `[no tests to run]` do not veto a passing summary from another package. Runs with only zero-test package summaries remain `UNVERIFIED`; failures still take precedence. This checks recorded execution evidence, not claim correctness.
+For `tests_passed:go test ./...`, packages marked `[no test files]` or `[no tests to run]` do not veto a passing summary from another package. Runs with only zero-test package summaries remain `UNVERIFIED`; failures still take precedence. Under `-v`, a record whose per-case lines are all `--- SKIP` also remains `UNVERIFIED`: Go exits 0 and prints the same `ok` banner, so nothing ran to pass. Non-verbose output cannot separate an all-skipped package from a passing one and stays trusted as recorded. This checks recorded execution evidence, not claim correctness.
 
 For `tests_passed:cargo test`, a complete passing target summary can coexist with
 empty unit, integration or documentation targets. Complete zero-pass successful
@@ -2280,6 +2295,8 @@ async with runtime:
 ```
 
 `SubagentRuntime.stop()` waits for its owned batch service to finish before propagating caller cancellation, including repeated cancellation. This drain has no timeout; repository operations and child cleanup must terminate. If service shutdown also fails or is cancelled, the first caller cancellation is preserved with the service failure as its cause.
+
+Gateway run finalization also retains ownership through caller cancellation: it finishes terminal persistence, stream completion, and resource cleanup before propagating the interruption. Backend I/O must terminate or enforce its own timeout. Gateway shutdown includes workers still finalizing after their terminal status commits; an expired shutdown drain budget is logged and does not cancel their outstanding writes.
 
 The factory still does not load YAML or create SQL infrastructure: the caller supplies the config snapshot, repository, and lifecycle. Because it accepts a caller-owned `system_prompt`, direct integrations also own any model-visible wording about those limits; the default middleware enforces the runtime limits regardless. The factory does not mount the Gateway owner-scoped HTTP routes or Web UI, so direct applications must expose their own result API/UI if they need those surfaces. For ordinary delegation only, `SubagentRuntime(...)` needs no asynchronous startup.
 
