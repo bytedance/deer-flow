@@ -156,6 +156,33 @@ async def test_delayed_cleanup_preserves_replay_until_its_grace_expires():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["cleanup", "close"])
+@pytest.mark.parametrize("count", [0, 1, 5])
+async def test_fully_consumed_terminal_generation_keeps_end_even_after_recreation(operation, count):
+    bridge = MemoryStreamBridge(queue_maxsize=2)
+    for index in range(count):
+        await bridge.publish("complete", "messages", index)
+    stream = bridge.subscribe("complete", heartbeat_interval=0.001)
+    try:
+        if count:
+            for _ in range(min(count, 2)):
+                await anext(stream)
+        else:
+            assert await anext(stream) is HEARTBEAT_SENTINEL
+        await bridge.publish_end("complete")
+        if operation == "cleanup":
+            await bridge.cleanup("complete")
+        else:
+            await bridge.close()
+        await bridge.publish("complete", "messages", "replacement")
+        assert await asyncio.wait_for(anext(stream), 0.5) is END_SENTINEL
+        with pytest.raises(StopAsyncIteration):
+            await anext(stream)
+    finally:
+        await _finish(bridge, [stream])
+
+
+@pytest.mark.asyncio
 async def test_unretired_empty_stream_heartbeats_then_delivers_normally():
     bridge = MemoryStreamBridge(heartbeat_interval=0.001)
     stream = bridge.subscribe("live")
@@ -172,7 +199,8 @@ async def test_unretired_empty_stream_heartbeats_then_delivers_normally():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("observer", [False, True])
-async def test_gateway_reports_recovery_gap_without_cancelling_a_running_run(monkeypatch, observer):
+@pytest.mark.parametrize("terminal", [False, True])
+async def test_gateway_reports_recovery_gap_without_cancelling_a_running_run(monkeypatch, observer, terminal):
     from app.gateway.services import sse_consumer
 
     manager = RunManager()
@@ -185,13 +213,19 @@ async def test_gateway_reports_recovery_gap_without_cancelling_a_running_run(mon
     stream = sse_consumer(bridge, record, request, manager, apply_on_disconnect=not observer)
     try:
         assert "event: messages" in await anext(stream)
+        if terminal:
+            await bridge.publish_end(record.run_id)
+            await manager.set_status(record.run_id, RunStatus.success)
         await bridge.cleanup(record.run_id)
         frame = await asyncio.wait_for(anext(stream), 0.5)
-        assert "event: gap" in frame and "event: end" not in frame
-        payload = json.loads(next(line[6:] for line in frame.splitlines() if line.startswith("data: ")))
-        assert payload["recovery"] == "reload_durable_state"
-        assert payload["earliest_available_event_id"] is None
-        assert payload["latest_available_event_id"] is None
+        if terminal:
+            assert "event: end" in frame and "event: gap" not in frame
+        else:
+            assert "event: gap" in frame and "event: end" not in frame
+            payload = json.loads(next(line[6:] for line in frame.splitlines() if line.startswith("data: ")))
+            assert payload["recovery"] == "reload_durable_state"
+            assert payload["earliest_available_event_id"] is None
+            assert payload["latest_available_event_id"] is None
         with pytest.raises(StopAsyncIteration):
             await anext(stream)
         manager.cancel.assert_not_awaited()

@@ -11,8 +11,10 @@ Observed Redis streams removed during replay yield `StreamGap` with empty bounds
 
 Memory stream cleanup retires the captured stream generation, clears its retained
 payloads and wakes its Condition. Established readers emit one empty-bound
-`StreamGap` and stop, including on bridge close; they never attach to a recreated
-run stream. An unpublished stream without explicit cleanup still heartbeats.
+`StreamGap` and stop if replay is unfinished, including on bridge close. Fully
+consumed terminal streams keep END, using the retired generation's tail offset;
+readers never attach to a recreated stream. An unpublished stream without explicit
+cleanup still heartbeats.
 
 Memory/Redis bridges keep startup-only `stream_bridge.heartbeat_interval_seconds`; explicit `subscribe(..., heartbeat_interval=...)` overrides it. Provider contexts drain owned cache/bridge/checkpointer/Store teardown across cancellation. `close_agent_stream()` shields close to completion: preserve counts, defer host cancellation, balance repeats, keep active errors, log attached close failures at callers, map close cancellation to failure, never time out.
 

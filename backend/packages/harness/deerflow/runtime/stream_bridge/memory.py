@@ -150,7 +150,7 @@ class MemoryStreamBridge(StreamBridge):
         while True:
             async with stream.condition:
                 if stream.retired:
-                    entry: StreamItem = StreamGap(cursor_event_id, None, None)
+                    entry: StreamItem = END_SENTINEL if stream.ended and next_offset >= stream.start_offset else StreamGap(cursor_event_id, None, None)
                     should_stop = True
                 elif next_offset < stream.start_offset:
                     logger.warning(
@@ -196,6 +196,7 @@ class MemoryStreamBridge(StreamBridge):
             # Retire that generation, release its payloads, and wake readers so
             # they can reload durable state rather than waiting on an orphan.
             stream.retired = True
+            stream.start_offset += len(stream.events)
             stream.events.clear()
             if self._streams.get(run_id) is stream:
                 self._streams.pop(run_id, None)

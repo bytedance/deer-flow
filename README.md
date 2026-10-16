@@ -572,8 +572,9 @@ DeerFlow still uses `Forwarded` / `X-Forwarded-*` headers to recover the browser
 > The local two-Gateway harness disables IM providers under both `channels` and `channel_connections` by default. `DEERFLOW_MI_KEEP_CHANNELS=1` preserves them; `channels.leader_lease` stays as configured.
 >
 > Cleaning up an in-memory run stream, or closing its bridge, releases retained
-> payloads and signals a replay gap to established subscribers. They reload
-> durable state instead of waiting on a detached buffer or consuming stale history.
+> payloads and signals a replay gap to subscribers with unfinished replay. They
+> reload durable state instead of waiting on a detached buffer or consuming stale
+> history. Fully consumed terminal streams retain their normal `end` signal.
 >
 > During SSE replay-gap recovery, the Web UI preserves a reconnect pointer claimed by another run while durable state is loading. An older recovery cannot overwrite that pointer when it rejoins its own stream. Even a stale foreign pointer is preserved, so the next reload may first check that run before active-run recovery rejoins, adding a reconnect cycle.
 >
