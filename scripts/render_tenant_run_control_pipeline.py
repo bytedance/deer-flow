@@ -10,7 +10,9 @@ def main():
     parser.add_argument("phase")
     parser.add_argument("source_sha256")
     parser.add_argument(
-        "--suite", choices=("revocation", "lifetime"), default="revocation"
+        "--suite",
+        choices=("revocation", "lifetime", "checkpoint", "checkpoint-regression"),
+        default="revocation",
     )
     args = parser.parse_args()
     if (
@@ -28,6 +30,10 @@ def main():
     tests = "tests/test_workspace_revocation.py"
     if args.suite == "lifetime":
         tests += " tests/test_workspace_run_lifetime.py"
+    if args.suite == "checkpoint":
+        tests = "tests/test_workspace_run_checkpoints.py"
+    if args.suite == "checkpoint-regression":
+        tests += " tests/test_workspace_run_lifetime.py tests/test_workspace_worker_context.py"
     rendered = rendered.replace("@@TEST_PATHS@@", tests)
     if "@@" in rendered:
         parser.error("unresolved pipeline marker")

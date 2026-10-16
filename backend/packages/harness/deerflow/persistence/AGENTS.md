@@ -310,3 +310,13 @@ after lock acquisition. Neither workspace locking nor lifecycle receipts grant
 execution, result reads or remote C physical STOP. Root revocations remain pending
 for remaining domains. Checkpoint/journal/tool/goal write authorization and full
 public Gateway/credential integrations remain M4/M5/M10/M11 requirements.
+
+Scoped worker saver IO uses RunRepository.commit_worker_checkpoint with an
+explicit immutable NativeRunStopTarget, independent of ambient UI selection.
+Lock workspace -> actor -> original private thread incarnation -> Run -> open
+execution lifetime; revalidate captured Run creation/owner/context, native lease,
+no cancellation and no pending stop before draining prepared saver IO. No model,
+graph construction or tool/network execution belongs in the callback. This is
+not a distributed transaction across checkpoint and metadata storage, nor a
+cleanup/rollback grant after withdrawal. Generic status/progress/journal and
+external effects remain separately required; tenant activation stays closed.

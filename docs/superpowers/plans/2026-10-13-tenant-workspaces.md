@@ -356,6 +356,14 @@ python -m pytest tests/test_workspace_execution.py tests/test_workspace_revocati
 
 - [ ] 完整 scoped worker 的 checkpoint/journal/goal/工具效应权限与 lease 栅栏、active rollback、真实 API 绑定和受认证的 owner/实例恢复仍待实施，再接其他资源域及 pool/远程 C。Native close 不等于 C physical STOP，M4 父项保持未完成。
 
+#### M4 第十二小步：原生 worker checkpoint 提交保护（本轮已验证）
+
+- [x] 先用实际 native Run/graph 和持久 SQLite checkpoint 复现撤权后迟到结果；正常路径作为对照。
+- [x] 复用原生 saver，所有支持的读写使用原始私有线程、Run/owner、open lifetime、当前成员和 lease 的短事务保护；模型不持锁。
+- [x] 主干通过后仅增加取消、过期、换 owner 的必要边界；再回归已有十九项生命周期/撤权/上下文检查。缺失权限不新增执行/清理授权，旧 checkpoint 保留。
+- [x] 固定 CI、证据、文档和本地提交；无新增数据库迁移、模型调用或租户启用。
+- [ ] Delta/cache/Postgres checkpoint、同 SQLite 文件兼容、真实权限撤销并发/崩溃恢复，以及 journal/status/progress/SSE/发布/工具/goal 其他入口和 active rollback 控制权限仍待完整贯通。随后真实 API、其他撤权资源域、pool/remote C。M4 父项保持未完成。
+
 ### M5：记忆、知识检索与工具凭据隔离
 
 **修改接点：**

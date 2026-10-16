@@ -1067,6 +1067,13 @@ async def run_agent(
             if principal is None or str(principal.id) != workspace_context.actor_user_id:
                 raise RuntimeError("worker workspace actor requires its native authenticated principal")
             workspace_token = set_current_workspace(workspace_context)
+            if checkpointer is not None:
+                from deerflow.persistence.workspaces.run_control import NativeRunStopTarget
+                from deerflow.runtime.checkpointer.scoped_run import ScopedRunSaver
+
+                if not callable(getattr(run_manager._store, "commit_worker_checkpoint", None)):
+                    raise RuntimeError("workspace checkpoint execution requires a durable native fence")
+                checkpointer = ScopedRunSaver(checkpointer, run_manager._store, NativeRunStopTarget.from_record(record))
         elif get_current_workspace() is not None:
             raise RuntimeError("unscoped Run cannot inherit ambient workspace authority")
         normalized_stream_modes = normalize_stream_modes(stream_modes)

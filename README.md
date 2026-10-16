@@ -3032,3 +3032,9 @@ and late member revocation preserve that barrier; an unstarted rollback leaves
 the prior conversation intact. [Validation and remaining gates](docs/tenant-workspaces-testing.md)
 record the native graph/SQL/checkpoint checks. Complete tenant activation and
 remote C physical recovery remain pending.
+
+Scoped native worker checkpoint IO now revalidates its captured private thread,
+Run owner, live membership and lease before saving state. Late results after
+revocation, cancellation or ownership loss cannot update that checkpoint.
+[Validation and limitations](docs/tenant-workspaces-testing.md) describe this
+partial integration; complete tenant activation remains closed.

@@ -199,3 +199,40 @@ python scripts/render_tenant_run_control_pipeline.py tenant-run-lifetime <归档
 policy/Scheduler/browser/credential 撤权、实际 C→B→C 和成套恢复仍未验收。
 本轮仅内部确定性 graph/SQL/SQLite-checkpoint 及已有 MCP 物理回归，没有真实模型、
 新公开接口或租户启用。最新回执将记录在 `native_run_execution_lifetime`。
+
+## 原生 worker 的 checkpoint 提交保护
+
+本轮复用 native Run/graph 与 AsyncSqliteSaver，并先保存已有私人报告。正常生成
+可以追加报告；成员版本变更、用户 interrupt、native lease 过期或 owner 更换后，
+迟到输出不能改变 checkpoint 的 ID、内容和 pending writes。失去 owner/lease
+不等于可以关闭生命周期，持久阻塞记录仍保留。
+
+Jenkins SQL #53 先复现撤权漏洞，#54 主干四项通过。#55 的旧输入 checkpoint
+尚在后台落盘，#56 的同步 SQLite 夹具写阻塞异步事务：测试现改为观察真实 saver
+commit，并用 async session 建账号。#57 十项通过（34.16 秒）；#58 复用已有
+十九项撤权、生命周期和 worker context 回归，没有增加其他场景。所有证据/hash
+及精确资源清理见 `native_worker_checkpoint_fence`。本机没有运行应用或测试。
+
+复跑沿用同一专属 SQL 任务及固定镜像，先渲染 checkpoint 主干，再跑旧回归：
+
+```bash
+python scripts/render_tenant_run_control_pipeline.py tenant-worker-checkpoint <归档SHA256> \
+  --suite checkpoint > /private/tmp/Jenkinsfile.tenant-worker-checkpoint
+python scripts/render_tenant_run_control_pipeline.py tenant-worker-regression <归档SHA256> \
+  --suite checkpoint-regression > /private/tmp/Jenkinsfile.tenant-worker-regression
+```
+
+每次 source tar 的 `<phase>-source.tar.gz`、SHA 和实际上传 phase 必须相符，沿用
+前述本机 Jenkins 凭据、own-job busy 检查、只读源码/internal PG 及精确卷清理；
+不挂 Docker socket、NAS、生产凭据或真实模型配置。
+
+该保护核验原始 workspace/actor/线程代次/Run 创建时间/worker、open lifetime、
+实时成员权限及 native lease；只在准备好的 saver IO 期间持 SQL 锁并 drain，
+不会锁住模型推理。取消/撤权不能变成新的 checkpoint 清理授权；active rollback、
+copy/prune/delete 仍拒绝。普通 Run 的 goal/duration 若经过该 saver，也受同一
+保护；其他 producer 仍需独立接入。
+
+这是 full-mode SQLite checkpoint + SQLite/PostgreSQL 元数据库证据，尚未覆盖
+PostgreSQL checkpoint、delta/cache、同文件 SQLite、跨库事务/崩溃未知结果。
+Journal/SSE/发布、通用 Run 状态/进度、工具和其他权限效应、真实 HTTP/JWT、
+远端 C 与 C→B→C 仍未完成；不能据此开启租户功能或声明整条业务已验收。

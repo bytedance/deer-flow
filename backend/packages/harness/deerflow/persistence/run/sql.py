@@ -416,6 +416,41 @@ class RunRepository(RunStore):
             raise WorkspaceAccessDenied("pending Run lifetime is unavailable") from exc
         return change_seq, [RunRow.workspace_id == context.workspace_id, RunRow.user_id == user_id, RunRow.thread_id == thread_id, RunRow.thread_incarnation == thread_incarnation]
 
+    async def commit_worker_checkpoint(self, target: NativeRunStopTarget, *, commit):
+        """Drain prepared native checkpoint IO under original execution fencing.
+
+        No graph/model/tool work belongs in commit. The checkpoint backend can
+        be separate from metadata: locks serialize live authority, not a
+        distributed transaction. Explicit captured identity never follows UI
+        selection or grants a cancelled worker a new cleanup write capability.
+        """
+        from deerflow.utils.file_io import await_drained
+
+        if type(target) is not NativeRunStopTarget:
+            raise WorkspaceAccessDenied("checkpoint requires captured native Run identity")
+        async with self._sf() as session:
+            parent = await ThreadMetaRepository(self._sf)._locked_row(session, target.thread_id, target.user_id, target.workspace_context)
+            if parent is None or parent.incarnation != target.thread_incarnation:
+                raise WorkspaceAccessDenied("worker checkpoint parent changed")
+            row = await session.scalar(select(RunRow).where(RunRow.run_id == target.run_id).with_for_update())
+            try:
+                if row is None or NativeRunStopTarget.from_row(row) != target or row.operation_kind != "run":
+                    raise ValueError("worker checkpoint Run differs")
+                await execution_lifetime(session, target)
+            except ValueError as exc:
+                raise WorkspaceAccessDenied("worker checkpoint execution changed") from exc
+            now = datetime.now(UTC)
+            lease = row.lease_expires_at
+            if lease is not None and lease.tzinfo is None:
+                lease = lease.replace(tzinfo=UTC)
+            if row.status not in ("running", "success", "error", "interrupted") or row.cancel_action is not None or lease is None or lease <= now:
+                raise WorkspaceAccessDenied("worker checkpoint execution is no longer live")
+            if await session.scalar(select(pending_run_stop(run_id=target.run_id))):
+                raise WorkspaceAccessDenied("worker checkpoint stop is pending")
+            result = await await_drained(commit())
+            await session.commit()
+            return result
+
     async def start_run(self, run_id: str, *, owner_worker_id: str | None = None, user_id: str | None = None, thread_id: str | None = None, thread_incarnation: str | None = None, workspace_context: WorkspaceContext | None = None) -> bool:
         """Start only a still-pending run; cancelled rows must not be resurrected."""
         async with self._sf() as session:

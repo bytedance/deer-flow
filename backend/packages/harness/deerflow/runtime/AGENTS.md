@@ -427,3 +427,19 @@ Running scoped rollback is intentionally pending its real checkpoint permission
 fence, not silently accepted. Complete scoped worker checkpoint/journal/goal/
 external-tool effects, signed recovery, public APIs and other resource domains
 remain open; compiled tenant activation remains false.
+
+For captured scoped Runs, run_agent installs ScopedRunSaver before any worker
+checkpoint use. It wraps the native saver and preserves serializer/versioning;
+supported async tuple/history/delta reads and put/pending-write IO go through
+fresh native SQL execution fencing. Each listed tuple is read under its own
+short fence. No unsafe saver-specific __getattr__ forwarding, sync access,
+thread copy/prune or destructive rollback is granted. The owner/space/thread/
+Run binding is captured once; UI selection cannot retarget it. Missing durable
+fence fails closed. Raw legacy unscoped behavior is unchanged.
+
+Actual full-mode SQLite checkpoints with both native metadata dialects verify
+normal generation and stale member/cancel/lease/owner refusal; head ID, content
+and pending writes survive refusal. This is not delta/cache/Postgres checkpoint,
+same-file SQLite, crash recovery, complete journal/SSE/status/progress/tool or
+goal permission proof. Other worker effects and active scoped rollback remain
+required. Keep the compiled tenant gate false.

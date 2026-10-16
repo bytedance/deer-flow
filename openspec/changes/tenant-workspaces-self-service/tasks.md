@@ -1458,3 +1458,38 @@ pending; every M0-M11 parent stays open, compiled tenant flag false and unreleas
 startup schema fence unchanged. No deployment/push/PR/local app runtime. Local
 Git/OpenSpec/stdlib packaging and static formatting only; serial self-review,
 not independent full audit. Save as local checkpoint, then continue the full goal.
+
+M4 native worker checkpoint fence checkpoint (2026-10-16): SQL #53 RED
+reproduced actual late-result writes after membership version withdrawal on both
+metadata dialects; #54 SUCCESS four main checks (21.74s). #55/#56 were fixture
+ordering/synchronous SQLite setup failures, retained as evidence. The final
+fixture observes actual initial saver commit and inserts accounts asynchronously;
+no timing sleeps or authority mocks. #57 SUCCESS all ten normal/member/cancel/
+lease/owner checks (34.16s), and #58 SUCCESS existing nineteen revocation/lifetime/
+worker-context regressions. Both final archives match recorded runtime/test/
+renderer/template bytes. Fixed tools/PG images unchanged; exact owned fixtures,
+networks and recorded anonymous volumes absent. Full receipts and hashes:
+native_worker_checkpoint_fence in progress JSON.
+
+run_agent wraps its native saver only for a captured scoped Run. Prepared saver
+IO locks original workspace -> actor -> private thread incarnation -> Run ->
+open lifetime, validates original Run/creation/owner and live native lease plus
+no cancel/stop intent, and drains IO before releasing locks. Every graph/goal/
+duration write through that local saver uses the same fence. Model/graph/tool
+execution is outside SQL transactions. Original UI selection cannot retarget
+checkpoint IO. Missing native fence fails closed. Sync/destructive/copy/prune
+operations are unavailable; running scoped rollback still needs explicit control
+authority. This adapter adds no Agent loop, table or checkpoint authority.
+
+Proof uses actual full-mode AsyncSqliteSaver with an existing private report and
+both native metadata dialects; compares head ID/content/pending writes after
+stale generation. Lost owner/lease never closes the lifetime barrier. This is
+not Postgres checkpoint, delta/cache, same-file SQLite, cross-store atomicity,
+crash recovery or whole-worker output protection. Journal/SSE/publication,
+status/progress, tools, other goal producers, credential/account/policy/Scheduler/
+browser revocation, admitted APIs and signed pool/remote C remain required.
+All M0-M11 parent gates remain open, compiled tenant activation false and startup
+schema gate unchanged. No deployment/push/PR, real-model invocation, local app/
+Node/browser/pytest/Docker runtime or global prune. Continue remaining effects,
+then authenticated launch/cancel/recovery and actual C->B->C. Serial self-review;
+not independent full audit.
