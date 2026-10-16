@@ -1117,7 +1117,9 @@ class DeerFlowClient:
                 else:
                     counted_usage_ids.add(msg_id)
                     streamed = streamed_usage_by_id.pop(msg_id, {})
-                    delta = {key: value - streamed.get(key, 0) for key, value in delta.items()}
+                    # State rewrites may lower totals; do not retract streamed usage.
+                    # Signed provider corrections remain valid in the chunk path.
+                    delta = {key: max(value - streamed.get(key, 0), 0) for key, value in delta.items()}
             for key, value in delta.items():
                 cumulative_usage[key] += value
             return delta

@@ -2888,7 +2888,9 @@ When continuing a thread, `values` still contains the full conversation state, w
 The embedded client's `end.usage` sums usage deltas across streamed chunks,
 including providers such as native Gemini that report usage more than once per
 reply. The completed message's usage is reconciled without counting those
-chunks again; providers that report usage only at completion remain supported.
+chunks again; a lower completed-message count does not subtract tokens already
+reported by chunks. Signed provider corrections in chunks remain supported, as
+do providers that report usage only at completion.
 
 Concurrent `upload_files()` calls preserve filenames absent at the start of each
 call by assigning numeric suffixes and returning the actual saved names. The same

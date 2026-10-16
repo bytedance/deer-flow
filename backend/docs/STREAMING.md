@@ -265,7 +265,7 @@ sequenceDiagram
 - `streamed_ids` **在 messages 流的第一个有效事件时**加入。一条只通过 values 快照到达的非 AI 消息（HumanMessage、被 truncate 的 tool 消息），`streamed_ids` 里永远没有它。
 - `counted_usage_ids` 只在看到完整消息的非空 `usage_metadata` 时加入。带用量的 `AIMessageChunk` 是增量，会逐段累加，不能收到第一段就将该 id 标为完成。
 
-`streamed_usage_by_id` 保存每条消息已计入总量的 chunk 用量。完整消息到达时，只计入完整用量与这份累计值的差，再清除该累计值并标记 `counted_usage_ids`。重复的完整消息或晚到的同 id chunk 不会再次计数；没有完整快照时，已收到的 chunk 用量仍保留在总量中。没有 id 的消息无法跨模式匹配，维持逐事件计数。
+`streamed_usage_by_id` 保存每条消息已计入总量的 chunk 用量。完整消息到达时，各字段只计入 `max(完整用量 - chunk 累计, 0)`，再清除该累计值并标记 `counted_usage_ids`。中间件若调低完整消息的用量，不会扣回已经报告的 chunk 用量；这只限制完整消息的核算差值，chunk 内的有符号供应商修正仍按增量累加。重复的完整消息或晚到的同 id chunk 不会再次计数；没有完整快照时，已收到的 chunk 用量仍保留在总量中。没有 id 的消息无法跨模式匹配，维持逐事件计数。
 
 例如原生 Gemini 适配器把服务端累计值转换成 chunk 增量：先 `10/1/11`，再 `0/3/3`（输入/输出/总量），最终 AIMessage 为 `10/4/14`。客户端必须累加两段并避免快照重复计数，而不是在第一段后忽略该 id。纯用量 chunk 即使没有文本也要计入；适配器返回的输入 token 修正值同样按增量累加。`tests/test_client_stream_usage.py` 用真实 Gemini、vLLM 和 OpenAI 适配器及 LangGraph、仅替换 SDK 网络调用，覆盖增量用量和仅在末尾汇总用量的路径。
 

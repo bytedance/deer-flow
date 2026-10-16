@@ -177,3 +177,44 @@ def test_stream_keeps_no_id_usage_deltas(client):
         events = list(client.stream("hi"))
 
     assert events[-1].data["usage"] == {"input_tokens": 10, "output_tokens": 4, "total_tokens": 14}
+
+
+@pytest.mark.parametrize("snapshot_mode", ["messages", "values"])
+@pytest.mark.parametrize(
+    ("final_usage", "expected"),
+    [
+        ({"input_tokens": 5, "output_tokens": 2, "total_tokens": 7}, {"input_tokens": 10, "output_tokens": 4, "total_tokens": 14}),
+        ({"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}, {"input_tokens": 10, "output_tokens": 4, "total_tokens": 14}),
+        ({"input_tokens": 5, "output_tokens": 12, "total_tokens": 17}, {"input_tokens": 10, "output_tokens": 12, "total_tokens": 17}),
+    ],
+    ids=["lower", "zero", "mixed"],
+)
+def test_stream_snapshot_cannot_subtract_already_accounted_usage(client, snapshot_mode, final_usage, expected):
+    # A middleware may rewrite usage in the completed message. Reconciliation
+    # may add missing tokens, but must not retract usage already reported.
+    partial = AIMessageChunk(id="a", content="Hello", usage_metadata={"input_tokens": 10, "output_tokens": 4, "total_tokens": 14})
+    full = AIMessage(id="a", content="Hello again", usage_metadata=final_usage)
+    snapshot = (snapshot_mode, (full, {}) if snapshot_mode == "messages" else {"messages": [full]})
+    duplicate = full.model_copy()
+    duplicate_snapshot = (snapshot_mode, (duplicate, {}) if snapshot_mode == "messages" else {"messages": [duplicate]})
+    other = AIMessage(id="b", content="Another reply", usage_metadata={"input_tokens": 3, "output_tokens": 1, "total_tokens": 4})
+    agent = MagicMock()
+    agent.stream.return_value = iter(
+        [
+            ("messages", (partial, {})),
+            snapshot,
+            duplicate_snapshot,
+            ("messages", (partial.model_copy(update={"content": ""}), {})),
+            ("messages", (other, {})),
+        ]
+    )
+    with patch.object(client, "_ensure_agent"), patch.object(client, "_agent", agent):
+        events = list(client.stream("hi"))
+
+    assert events[-1].data["usage"] == {key: value + other.usage_metadata[key] for key, value in expected.items()}
+    # Raw values remain faithful to state; only accounting is clamped.
+    if snapshot_mode == "values":
+        assert [event for event in events if event.type == "values"][-1].data["messages"][0]["usage_metadata"] == final_usage
+    else:
+        reconciled = next(event for event in events if event.type == "messages-tuple" and event.data["content"] == "Hello again")
+        assert reconciled.data["usage_metadata"] == {key: max(final_usage[key] - partial.usage_metadata[key], 0) for key in expected}
