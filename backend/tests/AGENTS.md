@@ -10,6 +10,11 @@ ownership and capture cleanup. Retain the real XLSX conversion coverage.
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+Multi-instance harness tests use `support.shell.require_script_bash()` for shell
+smoke checks. Keep config content and secret stability checks portable; isolate
+POSIX owner-only permission assertions so Windows skips only those checks.
+Nginx path expectations must include quoted-string escaping for native paths.
+
 Config-upgrade checkout fixtures clear inherited `DEER_FLOW_CONFIG_PATH`,
 `DEER_FLOW_PROJECT_ROOT` and `DEER_FLOW_ENV_FILE` before applying explicit test
 overrides. Exercise selector leaks through the real script with temporary
