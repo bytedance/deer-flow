@@ -658,16 +658,30 @@ scripts/tenant_artifact_html_bridge_probe.py bundles the actual React preview,
 Auth/Workspace providers and REST client into the pinned Shanghai browser image.
 The HTTP cookie/scope server and navigation/env modules are fixtures, not Next or
 Gateway acceptance. The rich-report P/T main precedes retirement/read-only route
-boundaries. Local ESM graphs, XHR/dynamically-created elements, srcset, external
+boundaries. Full module/import-map fidelity, XHR/dynamically-created elements, srcset, external
 base/fragment handling, broader CSS/media/error fidelity and actual backend/
 principal/two-tab acceptance remain open. M3 is partial; runtime activation stays
 closed. Do not advertise general HTML resource support from this checkpoint.
 
 
-Local module delivery is currently WIP (html-module-plan and existing resource
-plan/session/child). Babel parses import/re-export/dynamic/meta syntax; native
-import maps and child Blobs are intended to retain module execution and cycles.
-Do not treat this as verified: #101 reproduced missing relative resolution; #102
-timed out in initial browser networkidle before assertions. Current pause and
-exact next diagnostics live in docs/tenant-workspaces-resume-2026-10-16.md.
-Last complete check remains #100; full M3/general HTML acceptance stays open.
+html-module-plan parses static import/re-export, dynamic import and import.meta
+syntax with Babel; do not rewrite JavaScript by matching text inside strings or
+comments. Parent module reads use the existing same-thread captured byte reader.
+The child builds a registry by canonical resource URL, gives every graph edge a
+stable import-map ID before execution, then creates its own Blobs. The browser
+owns module evaluation, cycles, top-level await, JSON import attributes and module
+instance caching. Serialize graph preparation, not module evaluation. Dynamic
+local imports extend the map; external URLs/bare names retain native handling.
+Keep the original MIME: a file read being authorized must not turn text/plain
+into executable module code. import.meta keeps its native object identity with
+logical source URL/resolution; it grants no extra file authority.
+
+The native React browser fixture uses confirmed-space/resource/module output as
+readiness. #103 recorded networkidle timeout with no outstanding network requests;
+#104 passed the unchanged production code using those functional assertions. Do
+not equate global networkidle with report completion. Catch initial navigation
+failures inside the diagnostic result path; retain errors and pending requests.
+Remaining compatibility includes authored/scoped import maps, classic-script
+dynamic imports, preload/dynamic DOM/media/CSS fidelity and browser matrix/Next/
+real Gateway/principal acceptance. Full M3/general HTML acceptance stays open;
+latest exact check receipts are in docs/tenant-workspaces-progress.json.

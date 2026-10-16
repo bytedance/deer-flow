@@ -873,3 +873,36 @@ Then compiled Next/actual backend acceptance and shell/selector/remaining UI/liv
 browser gates. All M0-M11 parent gates remain unchecked, M3 partial, activation
 false. No deployment, remote push, local application runtime, model call or new
 image download.
+
+
+M3 scoped module checkpoint (2026-10-16): resume from WIP 216ac886. #103 records
+initial networkidle timeout with no outstanding requests and no main assertions.
+Keep production code unchanged, use existing confirmed-space/resource/module
+output assertions for readiness: #104 SUCCESS (P/T module main, 16 regressions).
+Only then extend the same browser fixture with JSON options and module refusal/
+MIME/held-read retirement/reopen: #105 SUCCESS, 40 existing regressions/five files.
+A temporary formatter found Next's reserved local variable `module`; rename it
+modulePlan while preserving the DTO key. #106 SUCCESS: same main/boundaries,
+40 existing regressions, five-file format/target lint, early full tsc and required
+full pnpm check. No new Rstest cases. Repeated-import checks now wait for both
+async actions to settle. Exact source/archive/image/terminal/empty resources:
+frontend_html_modules in progress JSON; earlier #101/#102 pause evidence retained.
+
+Babel plans module source ranges; child import-map IDs/Blobs and a canonical URL
+registry leave execution, cycles, top-level await, JSON attributes and instance
+caching to the browser. Parent same-thread captured byte reader is unchanged.
+Import.meta retains native object identity with logical source URL/resolution.
+MIME remains authoritative: text/plain module body does not execute. Dynamic
+module reads cannot proxy ordinary APIs/foreign threads. Hidden report aborts
+held module and data transport; old bootstrap is revoked; fresh same-space
+module/data preview survives. Sandbox/Cookie policy and activation gate stay.
+
+Proof is native React/Auth/Workspace/REST/iframe in pinned Chromium against an
+HttpOnly Cookie/scope server and env/router build doubles; not compiled Next,
+Gateway/JWT/SQL/NAS, live principal/two-tab or physical proof. Native DOM paragraph/
+div and KaTeX diagnostics remain; expected MIME/revoked-Blob console errors belong
+to negative probes, page errors are empty. General HTML/import-map/dynamic media/
+CSS compatibility remains unaccepted. Next prioritize the approved native space
+switcher/shell and actual backend upload/chat/download main; retain these HTML
+and other M3/principal/physical requirements. All M0-M11 parent gates unchecked,
+M3 partial, activation false. No deployment, push, model call or local app runtime.

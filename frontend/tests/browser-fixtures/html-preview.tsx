@@ -21,8 +21,8 @@ const report = `<!doctype html><html><head><title>Private report</title>
 </head><body><h1>Private report</h1><div class="box">Nested stylesheet</div>
 <img id="asset" src="img/chart.png" alt="Private chart">
 <p id="script">waiting</p><p id="data">waiting</p>
-<p id="module">waiting</p><p id="inline-module">waiting</p><p id="literal-module">waiting</p><p id="module-meta">waiting</p><p id="dynamic-module">waiting</p>
-<button id="dynamic" type="button">Load module</button>
+<p id="module">waiting</p><p id="inline-module">waiting</p><p id="literal-module">waiting</p><p id="json-module">waiting</p><p id="module-meta">waiting</p><p id="dynamic-module">waiting</p>
+<button id="dynamic" type="button">Load module</button><button id="hold-module" type="button">Hold module</button><button id="denied-module" type="button">Check modules</button><p id="module-denials">waiting</p>
 <button id="refresh" type="button">Refresh data</button>
 <button id="hold" type="button">Hold data</button><button id="denied" type="button">Check denied</button><p id="denials">waiting</p>
 <a id="external" href="https://example.test/source">External source</a>
@@ -32,6 +32,7 @@ const report = `<!doctype html><html><head><title>Private report</title>
 import {label} from './modules/value.js';
 document.getElementById('inline-module').textContent='inline:'+label;
 const literal=await import('./modules/literal.js');document.getElementById('literal-module').textContent=literal.literal;
+const config=await import('./modules/config.json',{with:{type:'json'}});document.getElementById('json-module').textContent=config.default.workspace;
 </script>
 <script>
 window.probe={isolated:false};

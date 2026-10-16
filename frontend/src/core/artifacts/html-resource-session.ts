@@ -119,10 +119,14 @@ export function createHTMLArtifactResourceSession({
             kind === "css"
               ? planHTMLStylesheet(new TextDecoder().decode(resource.bytes))
               : undefined;
-          const module = kind === "module" ? planHTMLModule(new TextDecoder().decode(resource.bytes)) : undefined;
-          port?.postMessage({ type: "resource", id, ...resource, css,module }, [
-            resource.bytes,
-          ]);
+          const modulePlan =
+            kind === "module"
+              ? planHTMLModule(new TextDecoder().decode(resource.bytes))
+              : undefined;
+          port?.postMessage(
+            { type: "resource", id, ...resource, css, module: modulePlan },
+            [resource.bytes],
+          );
         })
         .catch(() => {
           if (current() && !controller.signal.aborted)

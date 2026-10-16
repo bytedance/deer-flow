@@ -232,3 +232,12 @@ script/local GET refresh, read-only route refusal and held-read hide/reopen.
 fixtures: no Next/Gateway/principal/physical acceptance implied. General HTML
 module/dynamic/CSS fidelity and backend two-tab gates remain open; M3 partial,
 all parent gates unchecked and activation closed. Exact evidence in progress JSON.
+
+
+Scoped module preview (#106 frontend): actual native React/Chromium P/T main
+proves static/named re-export/cycle/inline/literal and computed dynamic imports,
+JSON attributes, import.meta data and settled instance reuse. Same-thread parent
+byte reader is unchanged. Module API/foreign-thread refusal, native MIME failure
+and held-read hide/reopen pass; 40 existing regressions/full check. HTTP auth/scope
+and env/router are fixtures; no real Gateway/principal/physical proof. Native
+shell/selector and backend main next; other HTML/M3 and M4-M11 gates stay open.

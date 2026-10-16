@@ -2,9 +2,8 @@ import { parse, serialize, type DefaultTreeAdapterMap } from "parse5";
 import postcss from "postcss";
 import valueParser from "postcss-value-parser";
 
-import type { createHTMLArtifactResourceReader } from "./html-resource-reader";
-
 import { planHTMLModule, type HTMLModulePlan } from "./html-module-plan";
+import type { createHTMLArtifactResourceReader } from "./html-resource-reader";
 
 type Reader = ReturnType<typeof createHTMLArtifactResourceReader>;
 export interface HTMLResourceEdit {
@@ -146,11 +145,25 @@ export function planHTMLDocument(
     return token;
   };
   visit(document, (node) => {
-    const isModule = node.tagName === "script" && node.attrs.some((attr)=>attr.name === "type" && attr.value.trim().toLowerCase() === "module");
-    if (isModule && !node.attrs.some((attr)=>attr.name === "src")) {
-      const text=node.childNodes.map((child)=>"value" in child ? child.value : "").join("");
-      node.childNodes=[];
-      node.attrs.push({name:"src",value:tokenFor({kind:"module",module:planHTMLModule(text),attribute:true})});
+    const isModule =
+      node.tagName === "script" &&
+      node.attrs.some(
+        (attr) =>
+          attr.name === "type" && attr.value.trim().toLowerCase() === "module",
+      );
+    if (isModule && !node.attrs.some((attr) => attr.name === "src")) {
+      const text = node.childNodes
+        .map((child) => ("value" in child ? child.value : ""))
+        .join("");
+      node.childNodes = [];
+      node.attrs.push({
+        name: "src",
+        value: tokenFor({
+          kind: "module",
+          module: planHTMLModule(text),
+          attribute: true,
+        }),
+      });
       return;
     }
     for (const attr of node.attrs) {
@@ -198,5 +211,10 @@ export function planHTMLDocument(
           });
     }
   });
-  return { html: serialize(document), resources, baseURL,sourceURL:reader.sourceURL };
+  return {
+    html: serialize(document),
+    resources,
+    baseURL,
+    sourceURL: reader.sourceURL,
+  };
 }

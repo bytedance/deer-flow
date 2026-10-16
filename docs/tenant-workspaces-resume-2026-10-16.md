@@ -1,3 +1,5 @@
+> 用户已于 2026-10-16 明确要求继续，当前已恢复，最新验证见文末 #106。下面暂停段为历史记录；完整 M0–M11 目标继续保留。
+
 # 2026-10-16 暂停与恢复检查点
 
 用户明确要求今天到这里、保存进度。**当前暂停**；不要自动继续编码、启动构建、部署或推送。用户再次要求继续后再恢复完整 M0–M11 目标，不能把当前 HTML 子项当作总目标。
@@ -29,3 +31,36 @@
 Jenkins：`106.14.210.163`，只管理 DeerFlow 专属任务。SSH 密钥位置沿用现有配置。Jenkins 密码只允许在服务器本机内存使用，不输出、不复制。固定镜像沿用 #100 的 compiler/browser IDs，不拉新镜像。只清理本项目精确 label，不做全局 prune、不触碰 assetforge。
 
 无部署、远程推送、模型调用或本地应用运行。当前停在可恢复 WIP，不是功能完成点。
+
+
+M3 scoped module checkpoint (2026-10-16): resume from WIP 216ac886. #103 records
+initial networkidle timeout with no outstanding requests and no main assertions.
+Keep production code unchanged, use existing confirmed-space/resource/module
+output assertions for readiness: #104 SUCCESS (P/T module main, 16 regressions).
+Only then extend the same browser fixture with JSON options and module refusal/
+MIME/held-read retirement/reopen: #105 SUCCESS, 40 existing regressions/five files.
+A temporary formatter found Next's reserved local variable `module`; rename it
+modulePlan while preserving the DTO key. #106 SUCCESS: same main/boundaries,
+40 existing regressions, five-file format/target lint, early full tsc and required
+full pnpm check. No new Rstest cases. Repeated-import checks now wait for both
+async actions to settle. Exact source/archive/image/terminal/empty resources:
+frontend_html_modules in progress JSON; earlier #101/#102 pause evidence retained.
+
+Babel plans module source ranges; child import-map IDs/Blobs and a canonical URL
+registry leave execution, cycles, top-level await, JSON attributes and instance
+caching to the browser. Parent same-thread captured byte reader is unchanged.
+Import.meta retains native object identity with logical source URL/resolution.
+MIME remains authoritative: text/plain module body does not execute. Dynamic
+module reads cannot proxy ordinary APIs/foreign threads. Hidden report aborts
+held module and data transport; old bootstrap is revoked; fresh same-space
+module/data preview survives. Sandbox/Cookie policy and activation gate stay.
+
+Proof is native React/Auth/Workspace/REST/iframe in pinned Chromium against an
+HttpOnly Cookie/scope server and env/router build doubles; not compiled Next,
+Gateway/JWT/SQL/NAS, live principal/two-tab or physical proof. Native DOM paragraph/
+div and KaTeX diagnostics remain; expected MIME/revoked-Blob console errors belong
+to negative probes, page errors are empty. General HTML/import-map/dynamic media/
+CSS compatibility remains unaccepted. Next prioritize the approved native space
+switcher/shell and actual backend upload/chat/download main; retain these HTML
+and other M3/principal/physical requirements. All M0-M11 parent gates unchecked,
+M3 partial, activation false. No deployment, push, model call or local app runtime.
