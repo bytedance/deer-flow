@@ -5988,7 +5988,7 @@ This release closes that milestone with **621 merged pull requests**.
   tool layer allowed only paths below it and answered `Permission denied`
   (with a trailing slash, from an internal "path traversal detected" check).
   Writes to the root, and reads of files placed directly in it, are still
-  rejected.
+  rejected. ([#6991])
 
 ### Security
 
@@ -11785,3 +11785,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6897]: https://github.com/bytedance/deer-flow/pull/6897
 [#6909]: https://github.com/bytedance/deer-flow/pull/6909
 [#6930]: https://github.com/bytedance/deer-flow/pull/6930
+[#6991]: https://github.com/bytedance/deer-flow/pull/6991

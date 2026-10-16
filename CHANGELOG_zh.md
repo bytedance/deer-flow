@@ -4542,7 +4542,7 @@
   本身，并像 AIO 一样列出或搜索 `workspace`、`uploads` 和 `outputs`。提供方有意映射了
   这个根目录，但工具层只允许其下的路径，因此返回 `Permission denied`（带结尾斜杠时
   来自内部的 “path traversal detected” 检查）。写入根目录以及读取直接放在根目录下的
-  文件仍然会被拒绝。
+  文件仍然会被拒绝。([#6991])
 
 ### 安全
 
@@ -9396,3 +9396,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6897]: https://github.com/bytedance/deer-flow/pull/6897
 [#6909]: https://github.com/bytedance/deer-flow/pull/6909
 [#6930]: https://github.com/bytedance/deer-flow/pull/6930
+[#6991]: https://github.com/bytedance/deer-flow/pull/6991
