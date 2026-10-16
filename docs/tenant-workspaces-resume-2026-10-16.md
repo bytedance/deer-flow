@@ -171,3 +171,23 @@ M4-M11 requirements. Never bypass startup to fake a tenant Run. Current startup
 schema fence remains 0037 while actual read-clock revision is 0038; align with
 the complete candidate/release manifest before activation. All parent gates stay
 unchecked; activation false, no deployment/push/model/local application tests.
+
+
+M4 execution signature checkpoint (2026-10-16): deerflow-tenant-execution-m4
+#1 RED (existing signer lacks workspace_context), #2 native signature roundtrip
+main GREEN, #3 SUCCESS (3 new checks + 7 existing MCP/signature regressions = 10;
+Ruff check/format pass). Add explicit version 2 to the existing bounded HMAC
+submission protocol. Sign immutable WorkspaceContext and require a separately
+resolved receiver expectation; reject cross-space/actor/version mismatch, legacy
+downgrade, unsupported/malformed protocol and workspace signatures presented to
+unintegrated receivers. Legacy unscoped protocol remains compatible. No ORM
+changes, alternate runtime or task authority. Exact cloud source/log/image
+receipts and empty own containers: execution_scope_v2 in progress JSON.
+
+This is a transport primitive only: interceptor/worker wiring, native persistent
+Run/RunContext, MCP/Scheduler/ledger/parent-child attribution and live membership
+checks still need implementation. Revalidation/revocation, publication,
+continuation, notifications and unknown physical STOP remain M4 requirements.
+Next implement original Run attribution first, without opening or bypassing the
+startup guard. All M0-M11 parent gates remain unchecked, M3 incomplete; no
+activation/deployment/push/model calls or local application runtime tests.

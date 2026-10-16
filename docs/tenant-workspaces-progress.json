@@ -1,6 +1,6 @@
 {
   "status": "partial",
-  "work_package": "M3",
+  "work_package": "M4",
   "base_commit": "1a199c6d",
   "job": "deerflow-tenant-contract-m0",
   "red": {
@@ -29,7 +29,7 @@
     "M1 original deployment-data inventory and physical maintenance/restore evidence with M10",
     "M2 full scoped Gateway activation and SSO/invitation management acceptance",
     "M3 threads/runs and attachments, scoped conversion/maintenance, client switching and physical file/NAS integration",
-    "M4 through M11 remain pending"
+    "M4 is partial (execution signature primitive only); M5 through M11 remain pending"
   ],
   "static_checks": [
     "ruff check with backend/ruff.toml passed",
@@ -1548,11 +1548,11 @@
     ]
   },
   "latest_checkpoint": {
-    "work_package": "M3",
-    "status": "partial M3; native SSR return verified",
-    "last_verified_job": "deerflow-tenant-frontend",
-    "last_verified_build": 128,
-    "next": "Prioritize M4 trusted Run/MCP/Scheduler/B/C scope and deterministic execution main, retaining remaining M3 and full M0-M11 release gates",
+    "work_package": "M4",
+    "status": "partial M4; versioned execution signature primitive verified",
+    "last_verified_job": "deerflow-tenant-execution-m4",
+    "last_verified_build": 3,
+    "next": "Implement trusted persistent native Run/RunContext attribution, then MCP/Scheduler/B/C live authorization; keep remaining M3 and M0-M11 release gates",
     "tenant_activation": "closed",
     "deployment": "none",
     "previous_backend_job": "deerflow-tenant-m1-postgres",
@@ -8037,5 +8037,70 @@
     "runtime_activation": false,
     "deployment": "none",
     "remote_push": "none"
+  },
+  "execution_scope_v2": {
+    "job": "deerflow-tenant-execution-m4",
+    "builds": [
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 23082,
+        "number": 1,
+        "result": "FAILURE",
+        "source_archive_sha256": "f0b3d5502682259fce3e3fc41ce8434cbbbab9675060932063200e03120423aa",
+        "log_sha256": "6c8b1b356de3d3a0b973db7530d0ffa8b73aec25fd161affe4bdd77d8a1b4141",
+        "code_sha256": {
+          "backend/packages/ecs-executor/ecs_executor/scope.py": "2d39f6f0f89c6f87bc29981fd7f694b35b6d049b9c9a5286cdaa210b44df8cb1",
+          "backend/tests/test_workspace_execution.py": "306d46d19a2a447dceee818701c755c07a38b15511f1f76d4c27d3a0ad02f69b"
+        }
+      },
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 19314,
+        "number": 2,
+        "result": "SUCCESS",
+        "source_archive_sha256": "1c2a7319c7880ca639ce59322427669166c827c30296cb404c020be5f9dc4bb3",
+        "log_sha256": "4aec9c327de2c66c3429d1d02ec9b588e70c162aa5c65cbf8204da50e9a6c82b",
+        "code_sha256": {
+          "backend/packages/ecs-executor/ecs_executor/scope.py": "76a48748e9a206d11f08de01dc7c550165c7e70bdd861501c28e0aa8c9c9f736",
+          "backend/tests/test_workspace_execution.py": "4c49ab0727c517d85b2b38e7a2d6b360a3a8f426b2b39a71b3dd41cabd431316"
+        }
+      },
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 22997,
+        "number": 3,
+        "result": "SUCCESS",
+        "source_archive_sha256": "5ba8a46a8bca6113ba5bb956bafff6fa6d6633aca666305191cf57c14c7808f4",
+        "log_sha256": "49dab59c1d5bb76a5f2ca8648b27af40ffe5a2a9f58dc53d61d2318569d163e7",
+        "code_sha256": {
+          "backend/packages/ecs-executor/ecs_executor/scope.py": "76a48748e9a206d11f08de01dc7c550165c7e70bdd861501c28e0aa8c9c9f736",
+          "backend/tests/test_workspace_execution.py": "ceb96c6f3c3c2ca2183429a367292c51ab867ed256dc1fc510391ae012471a7f"
+        }
+      }
+    ],
+    "image_id": "sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01",
+    "owned_containers_remaining": [],
+    "status": "partial M4: versioned execution signature primitive verified; runtime admission remains closed",
+    "base_commit": "b53ab3ae8",
+    "new_tests": 3,
+    "reused_tests": 7,
+    "final_tests_passed": 10,
+    "red_reason": "Trusted workspace context is not accepted by existing submission signer (unexpected keyword), not an import/dependency failure",
+    "main_tests_passed": 1,
+    "final_command": "python -m pytest tests/test_workspace_execution.py tests/test_ecs_executor_scope.py -q --tb=short --no-showlocals",
+    "verification": [
+      "Shanghai Jenkins isolated --network none --cpus 1 --memory 2g --memory-swap 2g; fixed existing image; no model calls or deployment",
+      "Cloud Ruff check and format --check passed for both task code files",
+      "Local Ruff check and format --check --no-cache and git diff --check passed; no local application runtime"
+    ],
+    "limits": [
+      "Only signing/verification primitives: native Run/RunContext, MCP/Scheduler/ledger, parents/children, claim/adopt, membership revalidation, publication/continuation/notification/revocation and physical STOP remain required",
+      "Receiver must supply an independently authorized immutable WorkspaceContext; constructing it from this token does not establish authorization",
+      "Existing interceptor and worker admission are not wired to version 2; legacy behavior retained only behind unchanged closed tenant activation",
+      "M3 and all M0-M11 parent gates remain incomplete; no deployment, push or PR"
+    ]
   }
 }

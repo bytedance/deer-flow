@@ -65,6 +65,17 @@ not invent a thread/run context after the Agent run ends. Scope lifetime default
 to 60 seconds, with a 300-second maximum; keep host clocks synchronized. JSON
 arguments are bounded to 256 KiB and nesting 32; tokens are bounded to 8 KiB.
 
+Workspace transport preparation (not tenant activation): `mint_execution_scope`
+accepts a trusted immutable `workspace_context` and signs protocol `version: 2`
+alongside the existing Run identity and argument digest. `verify_execution_scope`
+requires an independently authorized `expected_workspace_context` with exactly
+matching workspace, actor, membership and policy versions. A scoped verifier
+refuses a legacy token; an unintegrated verifier refuses version 2. Tokens do not
+resolve membership or authorize parent/child resources. Native Run/MCP/worker
+integration and live reauthorization remain pending; the current interceptor
+continues to use the legacy protocol behind the closed tenant activation gate.
+Do not enable tenant execution on the strength of this signing primitive.
+
 A submit response durably stages the job without execution. Only the first
 signed native background status poll activates it, after native submission SQL
 has committed. Staging expires after 300 seconds by default. The run/request key

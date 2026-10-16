@@ -873,3 +873,17 @@ not automatic workspace selection or switch cancellation. Tab-local immutable
 scope, SDK stream/retry/reconnect binding, query/cache/provider reset, native UI
 selector and actual authenticated two-tab browser acceptance remain M3/M7/M11.
 No local frontend runtime/test or deployment ran; tenant activation stays closed.
+
+
+M4 execution transport preparation: optional `ecs_executor.scope` submission
+signatures support explicit version 2 carrying the immutable four-field
+WorkspaceContext plus the existing user/thread/incarnation/Run and argument
+binding. The receiver must supply a separately resolved expected workspace
+context; cross-space/actor/version mismatch and legacy downgrade are refused.
+Callers without this expectation refuse scoped signatures. Matching claims do
+not establish current membership. No request selector or model argument can be
+used as the expected authority. This primitive is not yet wired into native
+Run/MCP/Scheduler/worker admission; tenant startup remains closed. Management
+status/cancel, persisted parent-child binding, live revocation/publication and
+unknown-work reservations remain M4 requirements. The bounded Shanghai #1/#2/#3
+receipt is recorded under execution_scope_v2; full M4 is not complete.

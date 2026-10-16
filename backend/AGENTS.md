@@ -353,3 +353,11 @@ Runtime artifact MIME lookup requires the system `media-types` table even on a s
 
 
 Native ECS cloud CI note: trusted repository regression fixtures require Git and make and the extension-manager source-install tests require package-index access and their own loopback Git/index servers. Keep Git/make in the test-only image. Invoke `/app/backend/.venv/bin/python -m pytest` and `/app/backend/.venv/bin/ruff` directly. Remove inherited `UV_PROJECT_ENVIRONMENT` and `UV_OFFLINE`. Give the frozen source backend an independent byte copy of the installed venv (no shared writable packages); `UV_NO_SYNC=1` keeps ordinary `uv run` on that installed checkout. ExtensionManager strips the selector and no-sync keys for its installs; direct extension-test `uv sync` must target its own temporary project. Check selected base-package metadata afterward to detect damage to the fixed top-level environment. A CI Docker bridge may provide dependency transport while mounting only reviewed public test source; no credentials, env files, Docker socket, NAS/database data or published ports belong in that fixture. This CI transport does not change ordinary B sandbox network-none isolation or production dependencies. Full-collection tests must select the already-loaded backend conftest plugin by exact path when checking its hooks; bare `import conftest` can resolve a nested test plugin.
+
+
+M4 transport preparation: `ecs_executor.scope` supports explicit version-2
+submission scopes carrying trusted `WorkspaceContext`. Verification requires a
+separately authorized expected context, rejects legacy downgrade, and refuses
+scoped tokens for callers without that expectation. This is a signing primitive
+only: native Run/MCP/Scheduler/executor wiring and live authorization remain
+required; do not enable workspace startup based on these transport tests.
