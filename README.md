@@ -2173,7 +2173,7 @@ result text does not turn an unknown status into success or failure.
 
 Cancelled or timed-out background sub-agent executions retain provider-reported token usage from completed model calls, including responses received before their next progress update. Final usage delivery to the parent run does not count earlier progress snapshots twice.
 
-For `tests_passed:go test ./...`, packages marked `[no test files]` or `[no tests to run]` do not veto a passing summary from another package. Runs with only zero-test package summaries remain `UNVERIFIED`; failures still take precedence. This checks recorded execution evidence, not claim correctness.
+For `tests_passed:go test ./...`, packages marked `[no test files]` or `[no tests to run]` do not veto a passing summary from another package. Runs with only zero-test package summaries remain `UNVERIFIED`; failures still take precedence. Under `-v`, a record whose per-case lines are all `--- SKIP` also remains `UNVERIFIED`: Go exits 0 and prints the same `ok` banner, so nothing ran to pass. Non-verbose output cannot separate an all-skipped package from a passing one and stays trusted as recorded. This checks recorded execution evidence, not claim correctness.
 
 For `tests_passed:cargo test`, a complete passing target summary can coexist with
 empty unit, integration or documentation targets. Complete zero-pass successful
