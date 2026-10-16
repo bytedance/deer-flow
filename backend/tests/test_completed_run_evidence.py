@@ -604,6 +604,68 @@ async def test_seal_cancellation_is_deferred_until_after_end(evidence, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_host_cancellation_drains_durable_evidence_seal(evidence, monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from deerflow.runtime.runs.manager import RunManager
+    from deerflow.runtime.runs.worker import RunContext, run_agent
+
+    _sf, events, runs, reader = evidence
+    manager = RunManager(store=runs, event_store=events)
+    record = await manager.create("cancel-durable-seal", user_id="alice")
+    entered, release = asyncio.Event(), asyncio.Event()
+    original_seal = runs.seal_evidence
+    journals = []
+
+    async def gated_seal(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return await original_seal(*args, **kwargs)
+
+    seal = AsyncMock(side_effect=gated_seal)
+    monkeypatch.setattr(runs, "seal_evidence", seal)
+
+    class Agent:
+        async def astream(self, graph_input, config=None, **kwargs):
+            journals.append(config["context"]["__run_journal"])
+            yield {"messages": []}
+
+        async def aget_state(self, _config):
+            return SimpleNamespace(values={"messages": []})
+
+    bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
+    worker = asyncio.create_task(run_agent(bridge, manager, record, ctx=RunContext(checkpointer=None, event_store=events), agent_factory=lambda **kwargs: Agent(), graph_input={}, config={}))
+    record.task = worker
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        worker.cancel("first host cancellation")
+        await asyncio.sleep(0)
+        for _ in range(3):
+            worker.cancel("repeated host cancellation")
+            await asyncio.sleep(0)
+        assert not worker.done()
+        assert not journals[0]._closed
+        bridge.publish_end.assert_not_awaited()
+        release.set()
+        done, _pending = await asyncio.wait({worker}, timeout=5)
+        assert done, "worker did not finish after the seal write was released"
+        with pytest.raises(asyncio.CancelledError, match="first host cancellation"):
+            await worker
+        seal.assert_awaited_once()
+        snapshot = await reader.get_snapshot(thread_id=record.thread_id, run_id=record.run_id)
+        assert snapshot.seal_state == "sealed"
+        assert snapshot.status == "success"
+        assert journals[0]._closed
+        assert not record.finalizing
+        bridge.publish_end.assert_awaited_once()
+    finally:
+        release.set()
+        await asyncio.gather(worker, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_graph_assembly_failure_has_partial_coverage(evidence):
     from types import SimpleNamespace
     from unittest.mock import AsyncMock

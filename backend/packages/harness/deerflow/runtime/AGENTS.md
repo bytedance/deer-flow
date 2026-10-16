@@ -85,10 +85,13 @@ writes. `RunRecord.terminal_commit_pending` keeps `_renew_leases()` renewing tha
 still-active row until the commit is attempted; a renewal rejected by the worker's
 own commit is confirmed by re-reading the row, while a peer claim fences the run.
 Never select runs for renewal by local status alone. Shutdown's drain treats the
-same state as active: such runs are awaited (never cancelled — cancellation would
-skip their terminal tail) so the duration checkpoint and terminal commit land
-before checkpointer teardown. A drain timeout leaves staged statuses and commit
-barriers intact without persisting `interrupted`. A finalizer that raises is
+same state as active, and also awaits committed terminal workers still executing
+hooks, END or resource cleanup. The registered worker shields and drains one owned
+finalizer across repeated host cancellation, preserving the first interruption even
+if a step fails. There is no deadline that cancels or detaches writes; backend I/O
+must be bounded by its backend. Only the optional completion hook receives host
+cancellation, and its child task is drained before the terminal tail continues.
+A drain timeout leaves staged statuses and commit barriers intact without persisting `interrupted`. A finalizer that raises is
 logged with its run ID, staged status and exception while the other runs continue
 draining. Coverage: `tests/test_gateway_run_drain_shutdown.py`.
 
@@ -195,6 +198,11 @@ Check all owners and categories; surviving rows retain the allocation floor.
 **Changed-run discovery:** Use the durable `(change_seq, run_id)` cursor and repeat history audits after admission. Details: `backend/docs/runtime-guidance-details.md`.
 
 **Terminal run cleanup:** Close streams, journals, and graph references even on cancellation. Details: `backend/docs/runtime-guidance-details.md`.
+
+Clear both the terminal worker's journal and message-sequence stamper references;
+the stamper's generation callback captures the journal. Diagnostic tracebacks may
+retain finalizer frames, so config/callback removal alone is insufficient. Keep
+the DEBUG checkpoint-inspection failure regression in `test_run_worker_rollback.py`.
 
 **`RunManager._runs` holds only records this worker admitted.** A cross-worker idempotent reuse returns the `store_only` row from `_record_from_store()` unregistered: the peer never finalizes or `cleanup()`s it, so a registered copy stays `pending`/`running`, 409s later same-thread admissions, hides the owner's orphan from reconciliation, and sends a peer `cancel()` down the local-owner path. Pinned by `test_peer_idempotent_reuse_*` and `test_peer_cancel_of_reused_run_*` (`tests/test_multi_worker_run_ownership.py`) plus `tests/test_gateway_services.py::test_start_run_peer_idempotent_reuse_*`.
 
