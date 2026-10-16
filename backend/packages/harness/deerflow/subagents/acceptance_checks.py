@@ -182,6 +182,27 @@ _TEST_ZERO_SHAPE_RE = re.compile(r"\b0\s+passed\b|\[no test files\]|\[no tests t
 
 _GO_ZERO_TEST_LINE_RE = re.compile(r"^(?:ok|\?)[ \t]+\S+[^\r\n]*\[(?:no test files|no tests to run)\][ \t]*\r?$", re.MULTILINE)
 
+# ``go test -v`` is the only shape that records what actually happened inside a
+# package: one ``--- PASS|FAIL|SKIP:`` line per case.
+_GO_TEST_RESULT_LINE_RE = re.compile(r"^[ \t]*--- (PASS|FAIL|SKIP):", re.MULTILINE)
+
+
+def _go_package_summary_is_evidence(text: str) -> bool:
+    """Whether a Go ``ok`` package line can carry positive test evidence.
+
+    A package whose cases are all skipped still exits 0 and prints the same
+    ``ok`` banner a passing package does, so under ``-v`` the per-case lines are
+    the only evidence separating an executed test from a declined one — the bar
+    unittest's ``OK (skipped=N)`` (#6916) and Cargo's ignored-only targets (#6891)
+    already enforce. Records without per-case lines (plain ``go test``) stay
+    judged by the banner alone: Go's non-verbose output for an all-skipped
+    package is byte-identical to a passing one, so nothing in the record can
+    separate them and inventing a veto there would fail real passes.
+    """
+    results = _GO_TEST_RESULT_LINE_RE.findall(text)
+    return not results or "PASS" in results
+
+
 # Cargo emits separate summaries for unit, integration and documentation
 # targets. Only complete successful records may qualify an empty sibling;
 # a bare success banner or clipped counters cannot erase zero-test evidence.
@@ -2079,7 +2100,12 @@ def _check_tests_passed_leaf(command: str, bash_executions: list[dict[str, Any]]
         return base
     # Empty packages/targets cannot veto complete positive sibling evidence.
     summary_tail = _without_empty_cargo_targets(_GO_ZERO_TEST_LINE_RE.sub("", output_tail))
+<<<<<<< HEAD
     passing = _TEST_PASS_SHAPE_RE.search(summary_tail) or _GO_TEST_PASS_SHAPE_RE.search(summary_tail) or _unittest_test_summary_holds(summary_tail) or build_summary is True or node_summary is True
+=======
+    go_ok = _GO_TEST_PASS_SHAPE_RE.search(summary_tail) and _go_package_summary_is_evidence(summary_tail)
+    passing = _TEST_PASS_SHAPE_RE.search(summary_tail) or go_ok or _unittest_test_summary_holds(summary_tail) or build_summary is True
+>>>>>>> origin/main
     if passing and not _TEST_ZERO_SHAPE_RE.search(summary_tail):
         base["checked"] = True
         base["holds"] = True
