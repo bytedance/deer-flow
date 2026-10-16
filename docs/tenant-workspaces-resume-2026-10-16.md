@@ -1,8 +1,8 @@
-> 用户已于 2026-10-16 明确要求继续，当前已恢复，最新验证见文末 #113。下面暂停段为历史记录；完整 M0–M11 目标继续保留。
+> 用户已于 2026-10-16 明确要求继续，当前已恢复，最新验证见文末 #116。下面暂停段为历史记录；完整 M0–M11 目标继续保留。
 
 # 2026-10-16 暂停与恢复检查点
 
-用户明确要求今天到这里、保存进度。**当前暂停**；不要自动继续编码、启动构建、部署或推送。用户再次要求继续后再恢复完整 M0–M11 目标，不能把当前 HTML 子项当作总目标。
+以下为先前用户要求暂停时保存的历史快照。用户已于 2026-10-16 明确要求继续；当前执行状态以文首及文末恢复检查点为准，完整 M0–M11 目标保留，不能把当前子项当作总目标。
 
 - 工作树：`/Users/wenbinwang/.codex/worktrees/ecs-native-reuse/deerflow2`。
 - 分支：`codex/tenant-workspaces-plan`；环境默认的 `1d28/deerflow2` 是另一棵 checkout，不要在那边修改。
@@ -86,3 +86,29 @@ acceptance remain open. Next wire native shell then real backend main. Remaining
 HTML/UI/global state and M4-M11 requirements are retained; all M0-M11 parent gates
 remain unchecked, M3 partial and runtime activation false. No deployments, pushes,
 model calls or local application/browser/Docker tests.
+
+
+M3 native shell/bootstrap checkpoint (2026-10-16, #116 SUCCESS): WorkspaceContent
+uses the server capability before mounting WorkspaceShell; unknown/unavailable
+capability fails closed, explicit legacy disabled still works. One confirmed
+lifetime QueryClient serves sidebar and page. Mount-only WorkspaceContentBoundary
+keeps activity/delete owner/private sidebar/footer and page/extensions/commands/
+settings/deep-link features out until confirmation, while Header/switcher remain
+available. Account preference synchronizer is legacy-only pending scoped policy.
+#114 records two actual pre-confirmation/unknown-capability legacy-mount REDs.
+#115 main plus existing context/cache regressions pass before final checks.
+#116 final eight tests (only two new cases), five-file format/target lint, early
+full tsc and required full pnpm check pass. Retained native control/rich-report
+browser main/all twelve observations pass; it does not exercise the new shell.
+Exact terminal/source/archive/empty-resource evidence: frontend_native_shell in
+progress JSON. Initial formatter-only RequestInfo stringification lint was
+corrected in the fixture; no production behavior change from that correction.
+
+Shell DOM proof uses actual root/native Sidebar/Header/Auth/Workspace/cache but
+server cookies/capability/navigation and private feature leaves are doubles. It
+is not compiled Next/hydration, real feature HTTP/JWT/SQL/NAS/backend business,
+principal/two-tab or physical proof. Next handle workspace route/deep-link and
+switch-from-private-thread semantics, then compiled Next and backend main.
+Actual private clients/global settings/store/title/focus/live WSS, remaining HTML
+and M4-M11 remain required. All parent gates unchecked; M3 partial, activation
+false. No deployment, remote push, model calls or local application tests.

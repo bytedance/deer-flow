@@ -1,16 +1,7 @@
 import { cookies } from "next/headers";
-import { Toaster } from "sonner";
 
-import { QueryClientProvider } from "@/components/query-client-provider";
-import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
-import { CommandPalette } from "@/components/workspace/command-palette";
-import { GatewayOfflineBanner } from "@/components/workspace/gateway-offline-banner";
-import { ModelLoadErrorBanner } from "@/components/workspace/model-load-error-banner";
-import { SettingsDialogHost } from "@/components/workspace/settings";
-import { WorkspaceSettingsDeepLink } from "@/components/workspace/workspace-settings-deep-link";
-import { WorkspaceSidebar } from "@/components/workspace/workspace-sidebar";
-import { ExtensionPageBootstrap } from "@/core/extensions/hooks";
-import { UserPreferencesBoundary } from "@/core/settings/user-preferences-boundary";
+import { WorkspaceShell } from "@/components/workspace/workspace-shell";
+import { getServerSideWorkspaceCapability } from "@/core/workspaces/server";
 
 function parseSidebarOpenCookie(
   value: string | undefined,
@@ -31,24 +22,17 @@ export async function WorkspaceContent({
   const initialSidebarOpen = parseSidebarOpenCookie(
     cookieStore.get("sidebar_state")?.value,
   );
-
+  // An unknown/unavailable capability cannot silently mount a legacy shell.
+  const capability = gatewayUnavailable
+    ? null
+    : await getServerSideWorkspaceCapability().catch(() => null);
   return (
-    <QueryClientProvider>
-      <UserPreferencesBoundary>
-        <ExtensionPageBootstrap />
-        <SidebarProvider className="h-screen" defaultOpen={initialSidebarOpen}>
-          <WorkspaceSidebar />
-          <SidebarInset className="min-w-0">
-            <GatewayOfflineBanner gatewayUnavailable={gatewayUnavailable} />
-            <ModelLoadErrorBanner gatewayUnavailable={gatewayUnavailable} />
-            {children}
-          </SidebarInset>
-        </SidebarProvider>
-        <CommandPalette />
-        <SettingsDialogHost />
-        <WorkspaceSettingsDeepLink />
-        <Toaster position="top-center" />
-      </UserPreferencesBoundary>
-    </QueryClientProvider>
+    <WorkspaceShell
+      capability={capability}
+      initialSidebarOpen={initialSidebarOpen}
+      gatewayUnavailable={gatewayUnavailable}
+    >
+      {children}
+    </WorkspaceShell>
   );
 }

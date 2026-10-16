@@ -104,6 +104,20 @@ export function useWorkspaceLifetime(): WorkspaceLifetime | null {
   return context.state.active;
 }
 
+/** Shell regions share their parent's lifetime cache; this gate only mounts content. */
+export function WorkspaceContentBoundary({
+  children,
+  fallback = null,
+}: {
+  children: ReactNode;
+  fallback?: ReactNode;
+}) {
+  const context = useWorkspaceContext();
+  if (context && (context.state.status !== "ready" || !context.state.active))
+    return fallback;
+  return children;
+}
+
 /** A pending/denied workspace must never fall back to unscoped content reads. */
 export function WorkspaceReadyBoundary({
   children,

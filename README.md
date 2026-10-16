@@ -1989,7 +1989,7 @@ For example, independent read-only research can run concurrently when the wall-c
 
 ### Sandbox & File System
 
-Standalone artifact previews retain their file link through sign-in. They show a loading state while confirming access, and an unavailable message with a refresh hint when access cannot be confirmed. Workspace-aware report links, source references and images are being integrated. A native sidebar space-switcher component is implemented; workspace-shell wiring and real-backend acceptance are still pending. Tenant activation remains gated by the [workspace acceptance plan](docs/superpowers/plans/2026-10-13-tenant-workspaces.md).
+Standalone artifact previews retain their file link through sign-in. They show a loading state while confirming access, and an unavailable message with a refresh hint when access cannot be confirmed. Workspace-aware report links, source references and images are being integrated. The native sidebar space switcher is wired through a server capability gate; private shell regions wait for confirmed scope and share a fresh workspace cache. Compiled Next and real-backend acceptance are still pending. Tenant activation remains gated by the [workspace acceptance plan](docs/superpowers/plans/2026-10-13-tenant-workspaces.md).
 
 Host-externalized tool outputs use the Gateway's normal file-creation umask.
 Host and sandbox outputs use deterministic filenames hashed from the raw tool
@@ -3010,5 +3010,5 @@ filesystem/fault acceptance remain unfinished gates before tenant activation.
 [Frontend Request preservation](docs/tenant-workspaces-api.md#frontend-request-preservation-partial-m3)
 now keeps explicit workspace selectors, request bodies and cancellation while
 retaining CSRF behavior. Automatic space selection, SDK streams, cache isolation
-and the native UI switcher remain pending. [Frontend CI notes](docs/tenant-workspaces-frontend-testing.md)
+and compiled Next / real-backend UI acceptance remain pending. [Frontend CI notes](docs/tenant-workspaces-frontend-testing.md)
 record the isolated Shanghai validation setup and replay commands.

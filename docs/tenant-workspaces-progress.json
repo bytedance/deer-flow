@@ -1551,8 +1551,8 @@
     "work_package": "M3",
     "status": "partial M3; resumed",
     "last_verified_job": "deerflow-tenant-frontend",
-    "last_verified_build": 113,
-    "next": "Native workspace layout/bootstrap and real backend main; retain all remaining M0-M11 gates",
+    "last_verified_build": 116,
+    "next": "Workspace route/deep-link semantics, compiled Next and actual backend business main; retain remaining M0-M11 gates",
     "tenant_activation": "closed",
     "deployment": "none",
     "previous_backend_job": "deerflow-tenant-m1-postgres",
@@ -2122,7 +2122,7 @@
     ]
   },
   "user_pause_checkpoint": {
-    "status": "resumed at explicit user request on 2026-10-16; native control checkpoint in frontend_native_switcher/#113; earlier pause historical",
+    "status": "resumed at explicit user request on 2026-10-16; latest native shell checkpoint frontend_native_shell/#116; prior pause historical",
     "date": "2026-10-16",
     "reason": "今天先到这里了，保存下进度",
     "last_fully_verified_commit": "3fb8ed75",
@@ -6847,6 +6847,285 @@
     "remaining": [
       "Wire server-confirmed capability and native WorkspaceContent/layout while retaining usable recovery controls and preventing private sidebar/background reads before confirmation.",
       "Actual backend personal/team upload/chat/download main; remaining HTML, UI-store/title/focus/live-WSS, two-tab/principal/physical and M4-M11 gates."
+    ],
+    "runtime_activation": false,
+    "deployment": "none",
+    "remote_push": "none",
+    "followup": "Native shell composition checkpoint is frontend_native_shell; full M3/Next/backend acceptance remains open."
+  },
+  "frontend_native_shell": {
+    "status": "partial M3; native shell/bootstrap mounting and cache main verified with leaf/server fixtures; compiled Next and real backend business acceptance pending",
+    "date": "2026-10-16",
+    "base_commit": "e544e4f1",
+    "job": "deerflow-tenant-frontend",
+    "history": {
+      "114": "Two domain RED failures: actual WorkspaceContent mounts legacy private leaf probes before confirmation and with unknown/unavailable capabilities. No missing-import/setup failure.",
+      "115": "Both new shell workflow checks plus existing Context/cache six regressions pass (eight tests/three files). Shared actual sidebar/page QueryClient identity and fresh cache on P/T transition verified before broader checks.",
+      "formatter": "First cloud target lint rejects String(RequestInfo) in the test fixture. Replace with explicit string/URL/Request URL selection; then cloud eslint --fix and Prettier pass. No production behavior change for this lint repair.",
+      "116": "Final source: eight checks/three files, five-file format/target lint, early full tsc and required full pnpm check; retained native control/rich-report browser main and twelve observations pass."
+    },
+    "contract": "Server WorkspaceContent reads workspace capability with the existing authenticated server helper, refusing unknown/failed or enabled-but-unavailable capability. Explicit disabled capability retains legacy UI. Client WorkspaceShell mounts WorkspaceProvider only from that server capability. One QueryClient keyed by confirmed actor/workspace/version/epoch owns sidebar and page; transition invalidates/remounts it. New mount-only WorkspaceContentBoundary gates sidebar activity/delete owner/private navigation/footer and main page/extensions/command/settings/deep-link features. Native Header/switcher/rail remain reachable outside those gates. Standalone WorkspaceReadyBoundary and its viewer-owned cache remain unchanged. Account preference synchronizer remains legacy-only pending scoped settings policy; no personal preferences copied into team via that synchronizer.",
+    "verification": {
+      "new_rstest_cases": 2,
+      "existing_context_cache_regressions": 6,
+      "rstest_total": 8,
+      "rstest_files": 3,
+      "shell_main": "Actual async WorkspaceContent + native WorkspaceShell/Sidebar/Header/WorkspaceSession/Auth/cache under Happy DOM. Held initial metadata leaves controls present and private leaf probes absent. P confirmation mounts page/sidebar with one QueryClient. Held T transition removes probes and retains controls, then both regions share a fresh T cache. Unknown/unavailable server-capability fixture refuses private mounts; disabled legacy works without workspace requests.",
+      "retained_browser": "Existing actual native Header/Sidebar/Dropdown P/T main and twelve scoped rich-report/resource/module transition observations; this browser fixture does not mount WorkspaceContent/WorkspaceShell.",
+      "checks": [
+        "eight focused DOM checks",
+        "retained pinned Chromium native control/rich-report main",
+        "five-file Prettier",
+        "target ESLint --max-warnings 0",
+        "early full tsc --noEmit",
+        "required full pnpm check",
+        "source/archive equality",
+        "exact owned-resource cleanup",
+        "OpenSpec strict and git whitespace checks"
+      ]
+    },
+    "proof_limits": "Shell DOM tests mock Next cookies/navigation, server capability helper and private leaf feature components; client metadata fetch is a deterministic fixture. They prove native root composition, confirmation/mounting and common cache, not actual server helper HTTP, production Next rendering/hydration, real private feature traffic, JWT/SQL/NAS/backend business or physical execution. Retained browser has synthetic HTTP Cookie/scope and env/navigation doubles, not native shell. Existing browser negative MIME/revoked-Blob console diagnostics remain; no page errors. No new model/deployment/remote push/local app tests.",
+    "evidence": {
+      "frontend": [
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 23072,
+          "number": 114,
+          "result": "FAILURE",
+          "owned_resources": {
+            "containers": [],
+            "networks": []
+          },
+          "file_counts": [],
+          "passed_counts": [],
+          "failed_counts": [
+            "2"
+          ],
+          "format_passed": false,
+          "full_check_invoked": false,
+          "type_errors": [],
+          "archive_sha256": "e80f15322b7a63bb0767691f0944b90f20a863ec4b7a9615d260a19916f45507"
+        },
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 27596,
+          "number": 115,
+          "result": "SUCCESS",
+          "owned_resources": {
+            "containers": [],
+            "networks": []
+          },
+          "file_counts": [
+            "3"
+          ],
+          "passed_counts": [
+            "8"
+          ],
+          "failed_counts": [],
+          "format_passed": false,
+          "full_check_invoked": false,
+          "type_errors": [],
+          "archive_sha256": "74def2c0fc77b92c4f8c7f938f82927e1518b1c4df138ca96f21ef821bfe2091"
+        },
+        {
+          "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+          "building": false,
+          "duration": 503169,
+          "number": 116,
+          "result": "SUCCESS",
+          "owned_resources": {
+            "containers": [],
+            "networks": []
+          },
+          "file_counts": [
+            "3"
+          ],
+          "passed_counts": [
+            "8"
+          ],
+          "failed_counts": [],
+          "format_passed": true,
+          "full_check_invoked": true,
+          "type_errors": [],
+          "browser": {
+            "status": "main_passed",
+            "browser_version": "149.0.7827.55",
+            "rows": [
+              {
+                "imageWidth": 1,
+                "color": "rgb(12, 34, 56)",
+                "background": "url(\"blob:null/8cc0fa37-bfd8-4abd-8d03-016e034f3d85\")",
+                "script": "script:11111111-1111-1111-1111-111111111111",
+                "data": "11111111-1111-1111-1111-111111111111:1",
+                "isolated": true,
+                "external": "https://example.test/source",
+                "workspace": "11111111-1111-1111-1111-111111111111",
+                "parent_control_width": 1,
+                "modules": {
+                  "main": "module:11111111-1111-1111-1111-111111111111:ab",
+                  "inline": "inline:11111111-1111-1111-1111-111111111111",
+                  "literal": "literal:11111111-1111-1111-1111-111111111111",
+                  "json": "11111111-1111-1111-1111-111111111111",
+                  "meta": "11111111-1111-1111-1111-111111111111",
+                  "dynamic": "dynamic:11111111-1111-1111-1111-111111111111:1:1"
+                },
+                "refreshed": true
+              },
+              {
+                "imageWidth": 1,
+                "color": "rgb(12, 34, 56)",
+                "background": "url(\"blob:null/13816082-03f8-460c-8ab0-6de487c66338\")",
+                "script": "script:22222222-2222-2222-2222-222222222222",
+                "data": "22222222-2222-2222-2222-222222222222:1",
+                "isolated": true,
+                "external": "https://example.test/source",
+                "workspace": "22222222-2222-2222-2222-222222222222",
+                "parent_control_width": 1,
+                "modules": {
+                  "main": "module:22222222-2222-2222-2222-222222222222:ab",
+                  "inline": "inline:22222222-2222-2222-2222-222222222222",
+                  "literal": "literal:22222222-2222-2222-2222-222222222222",
+                  "json": "22222222-2222-2222-2222-222222222222",
+                  "meta": "22222222-2222-2222-2222-222222222222",
+                  "dynamic": "dynamic:22222222-2222-2222-2222-222222222222:1:1"
+                },
+                "refreshed": true
+              }
+            ],
+            "boundaries": {
+              "read_only_thread_route": true,
+              "module_refusal_and_mime": true,
+              "retired_bootstrap_revoked": true,
+              "held_transport_aborted": true,
+              "held_module_transport_aborted": true,
+              "new_module_document_survives": true,
+              "new_document_survives": true,
+              "pending_switch_hides_content": true,
+              "pending_controls_remain_available": true,
+              "denied_switch_has_no_fallback": true,
+              "retry_keeps_requested_space": true,
+              "explicit_personal_recovery": true
+            },
+            "pending_snapshot": {
+              "charset": "UTF-8",
+              "iframeCount": 0,
+              "buttons": [
+                {
+                  "label": null,
+                  "busy": null,
+                  "text": "Toggle Sidebar"
+                },
+                {
+                  "label": "Switch workspace: Switching workspace…",
+                  "busy": "true",
+                  "text": "Switching workspace…"
+                }
+              ]
+            },
+            "forbidden_hits": [],
+            "control_requests": [
+              {
+                "path": "/api/workspaces",
+                "workspace": null
+              },
+              {
+                "path": "/api/workspaces/current",
+                "workspace": "11111111-1111-1111-1111-111111111111"
+              },
+              {
+                "path": "/api/workspaces",
+                "workspace": null
+              },
+              {
+                "path": "/api/workspaces/current",
+                "workspace": "22222222-2222-2222-2222-222222222222"
+              },
+              {
+                "path": "/api/workspaces",
+                "workspace": null
+              },
+              {
+                "path": "/api/workspaces/current",
+                "workspace": "11111111-1111-1111-1111-111111111111"
+              },
+              {
+                "path": "/api/workspaces",
+                "workspace": null
+              },
+              {
+                "path": "/api/workspaces/current",
+                "workspace": "22222222-2222-2222-2222-222222222222"
+              },
+              {
+                "path": "/api/workspaces",
+                "workspace": null
+              },
+              {
+                "path": "/api/workspaces/current",
+                "workspace": "22222222-2222-2222-2222-222222222222"
+              },
+              {
+                "path": "/api/workspaces",
+                "workspace": null
+              },
+              {
+                "path": "/api/workspaces/current",
+                "workspace": "11111111-1111-1111-1111-111111111111"
+              }
+            ],
+            "errors": [],
+            "console_errors": [
+              "Failed to load module script: Expected a JavaScript-or-Wasm module script but the server responded with a MIME type of \"text/plain\". Strict MIME type checking is enforced for module scripts per HTML spec.",
+              "Failed to load resource: net::ERR_FILE_NOT_FOUND",
+              "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+              "Failed to load resource: the server responded with a status of 403 (Forbidden)"
+            ],
+            "inflight": [],
+            "failure": null,
+            "scope": "actual native React Header/Sidebar/ArtifactFilePreview/Auth/Workspace/REST against cookie/scope HTTP fixtures and navigation/env build doubles; not Next/Gateway/SQL acceptance",
+            "network": "none",
+            "models_called": false,
+            "native_source_sha256": "0eee3ee8f64c3a2fc3dadeff3de28fe7139dfe759127454c59d61ef54585384f",
+            "module_sha256": "00e60d053de7b889276a35f1a0f05ef26391ccd627ff365a5e5715a2c0220c2a",
+            "images": {
+              "compiler": "sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01",
+              "browser": "sha256:52ce23272ed5c945389367eb92f97fdd6754aa93d1c369bb01d7a44d45c5f47e"
+            },
+            "request_summary": {
+              "total": 81,
+              "allowed": 81,
+              "cookie_present": 81,
+              "workspace_header_present": 77,
+              "workspaces": [
+                "11111111-1111-1111-1111-111111111111",
+                "22222222-2222-2222-2222-222222222222"
+              ]
+            }
+          },
+          "browser_exit": "0",
+          "archive_sha256": "cfd121b6324dbc2e169018178ee9b19af5103f287e22da4ec6b4e7db1d6714b7",
+          "browser_artifact": "job/deerflow-tenant-frontend/116/artifact/m3-native-shell-verified-html.json"
+        }
+      ],
+      "formatter_resources": {
+        "containers": [],
+        "networks": []
+      },
+      "ci_image": "sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01"
+    },
+    "source_sha256": {
+      "frontend/src/app/workspace/workspace-content.tsx": "044552b42ba6c6c7998809f5332ce4dbbc0c045edfc79ec2d38dc15ebbc5aba1",
+      "frontend/src/components/workspace/workspace-shell.tsx": "679f9f7e16148c4b4f2bd213ddb89038a592d53e26a8b1012819edde9d654b15",
+      "frontend/src/components/workspace/workspace-sidebar.tsx": "c94dbd12dec9aa50d5c2e2f220a4245ad81697c3da04ce5c4dc13dd842926891",
+      "frontend/src/core/workspaces/context.tsx": "bb2745b3cb6fdabd2e1fe43c7d270347df6a12a065713c30e61c434fb9adf3b3",
+      "frontend/tests/unit/app/workspace/workspace-content.dom.test.tsx": "b8287abcc0e74e70fe733cbdcab488791821e39e4104ec411b4d69a5e58cab79"
+    },
+    "remaining": [
+      "Copied workspace route locators, private thread URL transition/sign-in return intent and actual compiled Next browser hydration.",
+      "Audit actual private feature clients/global settings/dialog/store/title/focus/live WSS; do not confuse unmount probes with real-backend read authorization.",
+      "Real Gateway same-user personal/team upload/chat/download business main, principal/two-tab/remaining HTML/physical and M4-M11 requirements."
     ],
     "runtime_activation": false,
     "deployment": "none",

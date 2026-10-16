@@ -249,3 +249,12 @@ under existing Context. Private content detaches before confirmation, no silent
 fallback. Existing rich-report boundaries and Context three regressions retained;
 full frontend check passes. HTTP auth/scope and navigation/env are fixtures.
 Actual workspace layout/bootstrap and backend main remain next; no activation.
+
+
+Native workspace shell (#116 frontend): WorkspaceContent obtains the server
+capability before client bootstrap. Unknown/unavailable blocks legacy fallback;
+private sidebar/activity/page/settings are mount-gated behind confirmed scope,
+with one lifetime cache shared across regions. Native root/sidebar/cache DOM
+proof uses capability/cookie/navigation and leaf-feature doubles; retained
+Chromium browser exercises native control/report, not this shell. Actual Next/
+private HTTP/route locators/principal/global stores and backend main remain open.

@@ -700,4 +700,27 @@ The isolated browser fixture now mounts real WorkspaceHeader/SidebarProvider and
 uses the real dropdown instead of test-only P/T selection buttons. Declare UTF-8
 for its HTML and define build-time process.env for native Next Link. These are
 fixture setup, not replacements for compiled Next/shell/backend acceptance.
-WorkspaceContent/layout bootstrap is still pending; activation remains closed.
+The native WorkspaceContent server boundary now loads the capability before
+WorkspaceShell mounts scoped content; compiled Next/real backend acceptance and
+activation remain pending.
+
+
+WorkspaceContent reads only the server workspace capability (unknown/failed and
+enabled-but-unavailable fail closed with retry/sign-in). It never enables tenant
+mode from a URL or local storage. WorkspaceShell owns one QueryClient per confirmed
+WorkspaceSession lifetime for both sidebar and page. WorkspaceContentBoundary is
+a mount-only gate for those regions; it must be under this cache owner. Keep the
+standalone WorkspaceReadyBoundary, which still owns its separate viewer cache.
+Header/switcher/rail remain outside private region gates. Activity polling and
+the delete-dialog owner mount inside the confirmed sidebar, alongside private
+nav/projects/recent/footer; page, extensions bootstrap, commands/settings/deep-link
+features are confirmed-only too. Pending/denied scope clears the active cache and
+unmounts private consumers before another lifetime mounts.
+
+The legacy UserPreferencesBoundary remains on the legacy path only. Do not start
+its account-level synchronizer in tenant mode or copy personal model/preferences
+into a team; scoped settings/global-store isolation remains an M5/M3 release gate.
+Initial shell scope is the server-confirmed personal workspace; copied workspace
+route locators, switching away from a private thread URL, sign-in return intent
+and compiled Next/real Gateway/two-tab/principal validation remain required.
+Keep the runtime activation guard false until all plan gates are accepted.
