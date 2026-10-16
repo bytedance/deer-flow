@@ -1549,17 +1549,17 @@
   },
   "latest_checkpoint": {
     "work_package": "M4",
-    "status": "partial M4: checkpoint plus native SQL journal/ordinary Run metadata effects verified; stream/tools/dispatch and full tenant integration pending",
+    "status": "partial M4: native checkpoint/journal/Run metadata and stream/thread-status producer main verified; model/tool effects and full tenant integration pending",
     "last_verified_job": "deerflow-tenant-execution-m4-sql",
-    "last_verified_build": 63,
-    "next": "Guard worker stream/publication and model/tool invocation boundaries plus thread metadata effects; integrate scoped dispatcher/recovery/control and authenticated APIs, then remaining revocation domains and real C->B->C. Keep full M0-M11 objective.",
+    "last_verified_build": 66,
+    "next": "Integrate fresh model/tool invocation guards at native middleware/model boundaries, then effect-specific publication/IO and scoped dispatcher/recovery/APIs; complete all revocation domains and real C->B->C. Retain all M0-M11 scope.",
     "tenant_activation": "closed",
     "deployment": "none",
     "previous_backend_job": "deerflow-tenant-m1-postgres",
     "previous_backend_build": 89,
     "native_candidate_schema": "0040_mcp_workspace_identity",
     "last_verified_database_job": "deerflow-tenant-execution-m4-sql",
-    "last_verified_database_build": 63,
+    "last_verified_database_build": 66,
     "executor_candidate_schema": "e0003_execution_identity"
   },
   "workspace_feedback": {
@@ -10913,5 +10913,163 @@
     ],
     "next": "Guard worker stream/publication and model/tool invocation boundaries plus thread metadata effects; integrate scoped dispatcher/recovery/control and authenticated APIs, then remaining revocation domains and real C->B->C. Keep full M0-M11 objective.",
     "review": "Serial source review and focused native Shanghai integration; not independent full audit."
+  },
+  "native_worker_stream_thread_fence": {
+    "builds": [
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 39988,
+        "number": 64,
+        "result": "FAILURE",
+        "job": "deerflow-tenant-execution-m4-sql",
+        "phase": "m4-worker-stream-red",
+        "source_archive_sha256": "835511d45a862918b4206bf03f6e3d1c2fd0f2702606123685a91b66a763c370",
+        "log_sha256": "6e56319a3f6da65b25601a9d63fafcdd6c5529850850afab97596f26b7659689",
+        "code_sha256": {
+          "backend/packages/harness/deerflow/persistence/thread_meta/sql.py": "6fb9fcb8beb94116106b2599474ccec073e141cd16b8631b463cfc2f6412e528",
+          "backend/packages/harness/deerflow/runtime/events/store/db.py": "acd2c54995fccce534310a0ca0cc9b558eff3105cec7f0019f3ccc5048a098f8",
+          "backend/packages/harness/deerflow/runtime/journal.py": "b7858524ac3526893b426962943f4e6052898b42b87f19ea47cfcab77f6c91fb",
+          "backend/tests/test_workspace_worker_effects.py": "99e16a22e890009d9559b428cc68ef20e3f0e5d891ed4d744bbac0112197f50c",
+          "backend/packages/harness/deerflow/runtime/checkpointer/scoped_run.py": "031673eed7357d2525df89860bfdda97db98afa2738663a94121067a36b5acf4",
+          "backend/tests/test_workspace_run_checkpoints.py": "51b7b4f4d1f4416297748e93abc47c4bc7594269f1344aa6a2443b219bc359f4",
+          "backend/packages/harness/deerflow/persistence/workspaces/run_control.py": "fb653d62630e86b52a6e978ac2cbe802b2e3aa4b651daea615632c81c5d897b2",
+          "backend/packages/harness/deerflow/persistence/workspaces/execution_control.py": "8af23b8c9ad22ace9d11e0895edee9004a6f08005a9ab2eee9d13e333a5f75fa",
+          "backend/packages/harness/deerflow/persistence/run/sql.py": "20d2a0f0c10cf6ff6802ce7ea0e7b6727ecedf962ceeeb5279de782b0bc95206",
+          "backend/packages/harness/deerflow/runtime/runs/store/base.py": "63ace590b6f6ed997dd40dad6d3641aed2a0f6a7821f7f1cb5594d10a6107a57",
+          "backend/packages/harness/deerflow/runtime/runs/manager.py": "d64feffac7e04f4116277579900e77917799773d623836e2c77c41bba6454a88",
+          "backend/packages/harness/deerflow/runtime/runs/worker.py": "55ed990f6735aa8bb5f05342c51f77a212b5cbf01b44f303a84f016a7d430ff1",
+          "backend/tests/test_workspace_revocation.py": "3a8ffc933f0a5d970467a3be4976021780e6540c818277f55898db3c690fd3c6",
+          "backend/tests/test_workspace_run_lifetime.py": "bcc80edcba722388824c0ba1a2070819bcc405af0b40de960e26fb392736a3df",
+          "backend/tests/test_workspace_startup.py": "8506825ce9830feb1db64e6edac97b0ec2c8071062eccd967e90aea701cab887",
+          "scripts/render_tenant_run_control_pipeline.py": "48fc4e0f328c2aec5cc00628bdaace7f2f9be02a56acef6b42edec57f733bdf1",
+          "examples/ecs-native/deploy/Jenkinsfile.tenant-run-control.in": "4d2327acde2b4afa75494e2c73a242a7fa08d183a3509d345216bef4a316736f"
+        },
+        "recorded_removed_fixture_volumes": [
+          "ab832e6698c2d6cd94a68a07968e7dbb40bfba6d09a7da56de802f1ac488bd52"
+        ]
+      },
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 39887,
+        "number": 65,
+        "result": "SUCCESS",
+        "job": "deerflow-tenant-execution-m4-sql",
+        "phase": "m4-worker-stream-main",
+        "source_archive_sha256": "795e18a07785e7e453a6efd4f928740e0a1af5058b54ce978a179dccf3303464",
+        "log_sha256": "217b9e63ad1fb94b4b43f4ab03cbed59c73adc5b568350ce1f63ff13cb3aa8a9",
+        "code_sha256": {
+          "backend/packages/harness/deerflow/runtime/stream_bridge/scoped_worker.py": "2e664b3aa2dae4132c0bdb32f2e11aa2a8cf93c5724cef0c807ac126535f4d8c",
+          "backend/packages/harness/deerflow/persistence/thread_meta/sql.py": "441873f52c58edda20b82492e7da3941fc0429d8aface45352913817d251465a",
+          "backend/packages/harness/deerflow/runtime/events/store/db.py": "acd2c54995fccce534310a0ca0cc9b558eff3105cec7f0019f3ccc5048a098f8",
+          "backend/packages/harness/deerflow/runtime/journal.py": "b7858524ac3526893b426962943f4e6052898b42b87f19ea47cfcab77f6c91fb",
+          "backend/tests/test_workspace_worker_effects.py": "99e16a22e890009d9559b428cc68ef20e3f0e5d891ed4d744bbac0112197f50c",
+          "backend/packages/harness/deerflow/runtime/checkpointer/scoped_run.py": "031673eed7357d2525df89860bfdda97db98afa2738663a94121067a36b5acf4",
+          "backend/tests/test_workspace_run_checkpoints.py": "51b7b4f4d1f4416297748e93abc47c4bc7594269f1344aa6a2443b219bc359f4",
+          "backend/packages/harness/deerflow/persistence/workspaces/run_control.py": "319cf59831a7cd5ff20e2c5c6ac979e06013e3f42405111116d52fee96f08b7e",
+          "backend/packages/harness/deerflow/persistence/workspaces/execution_control.py": "8af23b8c9ad22ace9d11e0895edee9004a6f08005a9ab2eee9d13e333a5f75fa",
+          "backend/packages/harness/deerflow/persistence/run/sql.py": "f37931167207b7f54714819e4e20003c2164b37d201f49f3f0ef32d8d4bf8fe0",
+          "backend/packages/harness/deerflow/runtime/runs/store/base.py": "63ace590b6f6ed997dd40dad6d3641aed2a0f6a7821f7f1cb5594d10a6107a57",
+          "backend/packages/harness/deerflow/runtime/runs/manager.py": "d64feffac7e04f4116277579900e77917799773d623836e2c77c41bba6454a88",
+          "backend/packages/harness/deerflow/runtime/runs/worker.py": "7dc9f5b715efe5620c4e4931a4c4e30c628344946a0fe24e27ccd756895dc314",
+          "backend/tests/test_workspace_revocation.py": "3a8ffc933f0a5d970467a3be4976021780e6540c818277f55898db3c690fd3c6",
+          "backend/tests/test_workspace_run_lifetime.py": "bcc80edcba722388824c0ba1a2070819bcc405af0b40de960e26fb392736a3df",
+          "backend/tests/test_workspace_startup.py": "8506825ce9830feb1db64e6edac97b0ec2c8071062eccd967e90aea701cab887",
+          "scripts/render_tenant_run_control_pipeline.py": "48fc4e0f328c2aec5cc00628bdaace7f2f9be02a56acef6b42edec57f733bdf1",
+          "examples/ecs-native/deploy/Jenkinsfile.tenant-run-control.in": "516f73f4ba3cef08c836db5ebfd333f279d33ccff60d272ed15f691309f1664b"
+        },
+        "recorded_removed_fixture_volumes": [
+          "1dd33078da25263fe4b994633943ff2f4823ee567c110aeb1c1621042bd203e0"
+        ]
+      },
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 127706,
+        "number": 66,
+        "result": "SUCCESS",
+        "job": "deerflow-tenant-execution-m4-sql",
+        "phase": "m4-worker-stream-final",
+        "source_archive_sha256": "cd3ab47020bcb09660d0ba126a2d8e3df8732d5c66054e9bf9f872b3c579d68b",
+        "log_sha256": "3d4c5bec637349d48851088c0fe6b8b23b305cd5e2a8133d8a21a63b6cd2e38f",
+        "code_sha256": {
+          "backend/packages/harness/deerflow/runtime/stream_bridge/scoped_worker.py": "2e664b3aa2dae4132c0bdb32f2e11aa2a8cf93c5724cef0c807ac126535f4d8c",
+          "backend/packages/harness/deerflow/persistence/thread_meta/sql.py": "441873f52c58edda20b82492e7da3941fc0429d8aface45352913817d251465a",
+          "backend/packages/harness/deerflow/runtime/events/store/db.py": "acd2c54995fccce534310a0ca0cc9b558eff3105cec7f0019f3ccc5048a098f8",
+          "backend/packages/harness/deerflow/runtime/journal.py": "b7858524ac3526893b426962943f4e6052898b42b87f19ea47cfcab77f6c91fb",
+          "backend/tests/test_workspace_worker_effects.py": "99e16a22e890009d9559b428cc68ef20e3f0e5d891ed4d744bbac0112197f50c",
+          "backend/packages/harness/deerflow/runtime/checkpointer/scoped_run.py": "031673eed7357d2525df89860bfdda97db98afa2738663a94121067a36b5acf4",
+          "backend/tests/test_workspace_run_checkpoints.py": "51b7b4f4d1f4416297748e93abc47c4bc7594269f1344aa6a2443b219bc359f4",
+          "backend/packages/harness/deerflow/persistence/workspaces/run_control.py": "306a8c2d4c12235fd5b53ccd6c8fbf3e034dfaff90767b0d1b770aa60b99d66d",
+          "backend/packages/harness/deerflow/persistence/workspaces/execution_control.py": "8af23b8c9ad22ace9d11e0895edee9004a6f08005a9ab2eee9d13e333a5f75fa",
+          "backend/packages/harness/deerflow/persistence/run/sql.py": "f37931167207b7f54714819e4e20003c2164b37d201f49f3f0ef32d8d4bf8fe0",
+          "backend/packages/harness/deerflow/runtime/runs/store/base.py": "63ace590b6f6ed997dd40dad6d3641aed2a0f6a7821f7f1cb5594d10a6107a57",
+          "backend/packages/harness/deerflow/runtime/runs/manager.py": "d64feffac7e04f4116277579900e77917799773d623836e2c77c41bba6454a88",
+          "backend/packages/harness/deerflow/runtime/runs/worker.py": "2c0d5ee8735b310107c541fe97ccdcf60aeefa8368da3b92443a166302fffdb9",
+          "backend/tests/test_workspace_revocation.py": "3a8ffc933f0a5d970467a3be4976021780e6540c818277f55898db3c690fd3c6",
+          "backend/tests/test_workspace_run_lifetime.py": "bcc80edcba722388824c0ba1a2070819bcc405af0b40de960e26fb392736a3df",
+          "backend/tests/test_workspace_startup.py": "8506825ce9830feb1db64e6edac97b0ec2c8071062eccd967e90aea701cab887",
+          "scripts/render_tenant_run_control_pipeline.py": "48fc4e0f328c2aec5cc00628bdaace7f2f9be02a56acef6b42edec57f733bdf1",
+          "examples/ecs-native/deploy/Jenkinsfile.tenant-run-control.in": "516f73f4ba3cef08c836db5ebfd333f279d33ccff60d272ed15f691309f1664b"
+        },
+        "recorded_removed_fixture_volumes": [
+          "043c4cb03668c6cebc12ace805db51fa373637223f27805a35ac0dcbdc492bbc"
+        ]
+      }
+    ],
+    "images": [
+      {
+        "id": "sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01",
+        "declared_volumes": []
+      },
+      {
+        "id": "sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea",
+        "declared_volumes": [
+          "/var/lib/postgresql/data"
+        ]
+      }
+    ],
+    "remaining_owned_resources": {
+      "container": [],
+      "network": []
+    },
+    "historical_volume_limit": "Only recorded exact fixture volumes are confirmed removed; no ownership is inferred for old unrecorded volumes and no global prune is performed.",
+    "status": "partial M4; native stream producer and worker thread-status main verified",
+    "red": {
+      "build": 64,
+      "failed": 2,
+      "passed": 2,
+      "seconds": 21.19,
+      "reason": "Actual native MemoryStreamBridge replay retained late AI response after membership withdrawal, despite prior SQL journal/Run metadata protection."
+    },
+    "main": {
+      "build": 65,
+      "passed": 4,
+      "seconds": 21.5
+    },
+    "final": {
+      "build": 66,
+      "passed": 46,
+      "seconds": 97.72,
+      "cloud_ruff_files": 15
+    },
+    "scope": "Reused the existing actual native graph/BaseChatModel/journal cases; added public MemoryStreamBridge subscribe/replay and private ThreadMeta assertions, no new scenario/case matrix. SQLite/PostgreSQL metadata. Normal output/end works; member/cancel/lease/owner loss refuses late frame enqueue. Lease/owner faults preserve replacement thread status/title and cannot end its lane.",
+    "invariants": [
+      "One immutable NativeRunStopTarget captured once at worker bind, reused by native stream, checkpoint, journal and worker thread metadata views.",
+      "Prepared native stream enqueue uses the existing short live execution SQL fence and drained IO. No graph/model/tool execution or subscriber socket delivery occurs inside it.",
+      "Every worker publish path, including metadata, root/subgraph values/messages, errors and goal helper emissions, receives the bound producer view. Known WorkspaceAccessDenied stops via native interrupt rather than publishing an unfenced error payload.",
+      "End has no result payload and uses original owner/lease/lifetime control only, independent of current membership. Lost/replaced/expired owners cannot signal end; exact already-completed NoStart remains recognizable.",
+      "Worker ThreadMeta status/display-name writes use native Run execution fencing in their own SQL transaction; manual non-worker API behavior remains unchanged.",
+      "Actual execution-close confirmation locks only original private parent incarnation before clock/Run and may update only its status/time. Deleted/replaced/deleting parents and lost owner/lease are not altered. This does not close a remote C container."
+    ],
+    "limits": [
+      "Producer proof uses MemoryStreamBridge replay, not HTTP/JWT/browser socket delivery or Redis. Redis atomicity, backpressure/faults, generation protocol and restart/unknown-outcome acceptance remain pending.",
+      "No held title-publication race or full title UI acceptance; same helper is installed for worker title mutations and replacement title preservation is verified.",
+      "Stream/statestore output protection does not authorize or prevent arbitrary external tools, model invocations, filesystem/publication/network effects. Invocation guards, effect-specific protocols and physical isolation remain required.",
+      "Model/provider output is deterministic; no real external model, NAS/TCP/remote C, active rollback, scoped dispatch/recovery, quotas or full M0-M11 activation proof."
+    ],
+    "next": "Integrate fresh model/tool invocation guards at native middleware/model boundaries, then effect-specific publication/IO and scoped dispatcher/recovery/APIs; complete all revocation domains and real C->B->C. Retain all M0-M11 scope.",
+    "review": "Serial source review and focused Shanghai native integration; no independent full audit."
   }
 }

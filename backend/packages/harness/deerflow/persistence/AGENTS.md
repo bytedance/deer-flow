@@ -344,3 +344,20 @@ cleanup barrier open. It uses workspace -> clock -> Run/lifetime/STOP ordering
 without reusing revoked membership. Actual execution-close acknowledgement can
 terminalize that cancelled row after true cleanup, never a lost owner/expired
 lease. This does not authorize response/token/error/goal data or remote C STOP.
+
+RunRepository.commit_worker_io drains only prepared native checkpoint/queue IO
+under lock_worker_effect; commit_worker_checkpoint remains its adapter entry.
+This is not a distributed SQL/Redis transaction or permission to hold SQL locks
+across model/tool work or subscriber socket delivery. signal_owned_stream_end
+uses original owner/lease and lifetime control without a member grant or result
+payload; lost/replaced/expired owners cannot signal end. Exact completed NoStart
+can still be recognized by the original owner.
+
+ThreadMetaRepository.bind_worker is a private worker view for status/display-name
+mutations. Those writes use the captured Run's live SQL fence in the SAME session;
+regular manual API mutations retain their existing private-scope behavior.
+Actual native execution-close acknowledgement locks only the original private
+parent incarnation before clock/Run and may update its status/time. It must not
+resurrect deleting or replaced parents, overwrite a replacement owner's state,
+set a title/result, or treat this as remote C physical STOP. Producer lease/owner
+refusal leaves durable lifetime cleanup pending for trusted recovery.

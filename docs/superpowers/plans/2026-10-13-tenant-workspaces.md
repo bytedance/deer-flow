@@ -372,6 +372,14 @@ python -m pytest tests/test_workspace_execution.py tests/test_workspace_revocati
 - [x] 保留原有停止状态断言，最终 46 项固定验证与十三文件云端格式检查、可复跑 CI、回执、文档和本地提交；不增加新表或启用租户。
 - [ ] 继续 SSE/发布/cache、ThreadMeta 状态/标题、模型工具效应、scoped dispatcher/recovery/launch 与 active rollback；再接所有撤权域和 pool/remote C。已有日志/元数据保护不是完整 worker 或 M4 验收。
 
+#### M4 第十四小步：原生流生产与线程状态保护（本轮主干已验证）
+
+- [x] 复用已有实际原生模型业务用例，通过 native subscribe/replay 复现撤权后迟到帧；不增加新的场景矩阵。
+- [x] 一次捕获原始 Run 身份，复用现有短事务/IO fence 包住 worker producer；所有 publish helper 和错误分支受保护，end 只有原 owner 控制权限。
+- [x] worker 线程状态/标题接同事务 Run fence；实际关闭仅能更新原私有线程代次的状态，不覆盖替代 owner/线程。
+- [x] 正常/撤权主干后，仅跑原有固定 46 项组合与十五文件格式检查；证据、计划、恢复点和本地提交保存。
+- [ ] 继续实际模型/工具调用前检查、发布/文件/网络效应；Redis/HTTP/JWT/browser/背压/故障/generation/restart、held title/UI 和完整 dispatcher/recovery/remote C 仍待验收。流输出保护不是阻止外部副作用的替代方案，M4 父项保持未完成。
+
 ### M5：记忆、知识检索与工具凭据隔离
 
 **修改接点：**

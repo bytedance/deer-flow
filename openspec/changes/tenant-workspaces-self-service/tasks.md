@@ -1533,3 +1533,47 @@ Postgres/delta checkpoint/shared SQLite, crash/unknown-result, quota/billing,
 NAS/TCP or remote C proof. All M0-M11 parents remain open, activation false,
 startup schema fence unchanged, root revocations pending. No deployment/push/PR
 or local application/test/Docker/Node/browser runtime. Serial self-review only.
+
+M4 native stream/thread producer checkpoint (2026-10-16): #64 RED retained
+actual late response in native MemoryStreamBridge replay after member withdrawal
+on both metadata engines (two failed/two passed, 21.19s), despite prior journal
+and Run SQL protection. #65 main four passed (21.50s). #66 SUCCESS final existing
+46 checks (97.72s), fifteen-file cloud Ruff. No new scenario/case matrix: expanded
+the existing actual native graph/model callback cases with real subscribe/replay,
+end and ThreadMeta state assertions. Final source hashes and exact removed owned
+containers/networks/recorded anonymous volumes: native_worker_stream_thread_fence.
+Pinned images/native 0040/executor e0003 unchanged; no new migrations.
+
+run_agent captures one immutable NativeRunStopTarget and installs producer-only
+ScopedWorkerBridge plus bound ThreadMeta writer views; saver/journal reuse the
+same target. Prepared native queue IO uses the existing short drained SQL
+execution fence, covering all worker publish helpers; no graph/model/tool or SSE
+subscriber socket delivery is under that lock. Known refusal stops through the
+native interrupt path, including an error publication that races withdrawal.
+End contains no result data and uses original live-owner control, independent of
+withdrawn membership; stale/expired/replaced owners cannot end a successor lane.
+Exact completed NoStart remains recognizable. The producer grants neither
+subscribe/read nor global bridge deletion authority.
+
+Worker ThreadMeta status/title writes use Run effect fencing in the SAME
+metadata transaction. Real final close can update only status/time of the
+original private parent incarnation; parent existence lock precedes clock/Run.
+Deletion/replacement/deleting parents and lost owner/lease are preserved. Cancel/
+member cases end correctly after actual close; owner/lease cases preserve the
+replacement idle state/title and remain unclosed. Title writer uses this guard,
+but full held-title publication/UI acceptance is not claimed by these tests.
+
+Next guard actual native model/tool invocation before handlers/provider calls,
+then effect-specific filesystem/publication/network and scoped dispatcher/owner
+recovery/APIs, all revocation domains and signed pool/remote C C->B->C. The native
+build_lead_runtime_middlewares chain is an appropriate tool-layer entrypoint;
+ordinary tool error normalization must not consume a revocation gate. HostModelInvoker
+is the extension model service, not the complete lead/middleware model boundary;
+do not treat observer callbacks as execution authorization.
+
+This is MemoryStreamBridge producer/replay evidence, not Redis/cross-store
+atomicity, HTTP/JWT/browser sockets, backpressure/fault/generation/restart proof.
+No real model, active rollback, quotas/NAS/TCP/remote C or full M0-M11 acceptance.
+All parent gates remain open; compiled tenant activation false and schema startup
+fence unchanged. No deployment/push/PR or local app/Node/browser/pytest/Docker.
+Serial self-review; preserve full scope and continue actual invocation effects.

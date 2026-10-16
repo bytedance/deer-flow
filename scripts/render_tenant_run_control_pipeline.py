@@ -19,6 +19,7 @@ def main():
             "effects",
             "effects-regression",
             "effects-final",
+            "stream-main",
         ),
         default="revocation",
     )
@@ -48,6 +49,16 @@ def main():
         tests += " tests/test_workspace_run_lifetime.py tests/test_workspace_worker_context.py tests/test_workspace_run_checkpoints.py tests/test_workspace_event_reads.py"
     if args.suite == "effects-final":
         tests += " tests/test_workspace_worker_effects.py tests/test_run_journal.py::test_close_flushes_and_detaches_runtime_dependencies tests/test_run_journal.py::test_close_preserves_buffer_and_dependencies_when_flush_fails tests/test_run_worker_delivery.py::test_delivery_is_durable_before_terminal_run_status tests/test_run_worker_delivery.py::test_delivery_write_retries_before_persisting_success tests/test_run_repository.py::TestRunRepository::test_update_run_completion"
+    if args.suite == "stream-main":
+        tests = " ".join(
+            "tests/test_workspace_worker_effects.py::test_native_journal_and_completion_keep_execution_authority["
+            + dialect
+            + "-"
+            + trigger
+            + "]"
+            for dialect in ("sqlite", "postgres")
+            for trigger in ("normal", "member")
+        )
     rendered = rendered.replace("@@TEST_PATHS@@", tests)
     if "@@" in rendered:
         parser.error("unresolved pipeline marker")

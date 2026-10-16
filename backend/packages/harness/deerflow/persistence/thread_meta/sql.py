@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
@@ -28,6 +29,27 @@ class ThreadMetaRepository(ThreadMetaStore):
     def __init__(self, session_factory: async_sessionmaker[AsyncSession], *, workspace_required: bool = False) -> None:
         self._sf = session_factory
         self._workspace_required = workspace_required
+        self._worker_target = None
+
+    def bind_worker(self, target):
+        from deerflow.persistence.workspaces.run_control import NativeRunStopTarget
+
+        if type(target) is not NativeRunStopTarget:
+            raise WorkspaceAccessDenied("thread worker requires captured Run identity")
+        bound = copy.copy(self)
+        bound._worker_target = target
+        return bound
+
+    async def _locked_worker_mutation(self, session, thread_id, user_id, context):
+        target = self._worker_target
+        if target is None:
+            return await self._locked_row(session, thread_id, user_id, context)
+        if thread_id != target.thread_id or user_id != target.user_id:
+            raise WorkspaceAccessDenied("worker thread mutation differs from captured Run")
+        from deerflow.persistence.run.sql import RunRepository
+
+        await RunRepository(self._sf).lock_worker_effect(session, target)
+        return await session.get(ThreadMetaRow, thread_id)
 
     def _scope(self, user_id, *, integrated=True):
         context = resolve_resource_scope(None, user_id, required=self._workspace_required)
@@ -373,9 +395,9 @@ class ThreadMetaRepository(ThreadMetaStore):
     ) -> None:
         """Update the display name and remove caller-selected stale metadata atomically."""
         resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.update_display_name")
-        context = self._scope(resolved_user_id)
+        context = self._worker_target.workspace_context if self._worker_target is not None else self._scope(resolved_user_id)
         async with self._sf() as session:
-            row = await self._locked_row(session, thread_id, resolved_user_id, context)
+            row = await self._locked_worker_mutation(session, thread_id, resolved_user_id, context)
             if row is None or (resolved_user_id is not None and row.user_id != resolved_user_id):
                 return
             row.display_name = display_name
@@ -394,9 +416,9 @@ class ThreadMetaRepository(ThreadMetaStore):
         user_id: str | None | _AutoSentinel = AUTO,
     ) -> None:
         resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.update_status")
-        context = self._scope(resolved_user_id)
+        context = self._worker_target.workspace_context if self._worker_target is not None else self._scope(resolved_user_id)
         async with self._sf() as session:
-            row = await self._locked_row(session, thread_id, resolved_user_id, context)
+            row = await self._locked_worker_mutation(session, thread_id, resolved_user_id, context)
             if row is None:
                 return
             row.status = status

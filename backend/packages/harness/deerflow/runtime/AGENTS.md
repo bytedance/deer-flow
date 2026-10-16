@@ -465,3 +465,21 @@ status and held/failed finalizers remain verified. This is not stream/cache/
 publication, ThreadMeta title/status, model/tool invocation, dispatcher/recovery,
 active rollback, public JWT/browser or remote C proof. Keep full M0-M11 gates
 open and compiled tenant activation false.
+
+After validating scoped admission, run_agent captures NativeRunStopTarget once
+and binds native stream/checkpoint/journal/thread-writer views to it. Private
+ScopedWorkerBridge wraps every worker publish helper with the short prepared-IO
+execution fence; it does not grant subscribe or cleanup authority. A known
+WorkspaceAccessDenied terminates through native interrupt rather than leaking an
+unfenced error payload, including a provider exception that races withdrawal.
+End is payload-free original-owner control, not result delivery or STOP proof.
+
+Native MemoryStreamBridge subscribe/replay now proves refusal of late member/
+cancel/lease/owner output. Normal output and own-lane end remain functional;
+expired/replaced owners cannot end a successor lane or overwrite replacement
+thread status/title. Existing actual-close/held-finalizer and checkpoint tests
+still pass in the fixed 46-case combination. No new scenario matrix was added.
+Full held-title publication/UI, Redis/generation/fault/backpressure, real
+HTTP/JWT/browser sockets, model/tool invocation guards and effect-specific
+publication/IO protocols remain pending. Never infer external-effect safety
+from output refusal; keep the compiled tenant gate false.

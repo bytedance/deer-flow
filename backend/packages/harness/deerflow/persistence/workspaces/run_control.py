@@ -235,9 +235,41 @@ async def mark_owner_interrupted(session_factory, target):
         return True
 
 
+async def signal_owned_stream_end(session_factory, target, *, signal):
+    """Signal the owner's closed producer lane; never publish result data.
+
+    No live member privilege is needed to end its own lane, but a replaced or
+    expired owner cannot terminate a successor's stream. An exact completed
+    lifetime remains recognizable for a late NoStart consumer.
+    """
+    from deerflow.persistence.run.model import RunRow
+    from deerflow.utils.file_io import await_drained
+
+    if type(target) is not NativeRunStopTarget:
+        raise ValueError("captured stream-end control identity required")
+    async with session_factory() as session:
+        if session.get_bind().dialect.name == "sqlite":
+            await session.execute(text("BEGIN IMMEDIATE"))
+        if await session.scalar(select(WorkspaceRow.id).where(WorkspaceRow.id == target.workspace_id).with_for_update()) is None:
+            return False
+        row = await session.scalar(select(RunRow).where(RunRow.run_id == target.run_id).with_for_update())
+        try:
+            if row is None or NativeRunStopTarget.from_row(row) != target or row.operation_kind != "run":
+                return False
+            lifetime = await execution_lifetime(session, target, open_only=False)
+        except ValueError:
+            return False
+        if lifetime.state != "completed" and (row.lease_expires_at is None or _aware(row.lease_expires_at) <= datetime.now(UTC)):
+            return False
+        await await_drained(signal())
+        await session.commit()
+        return True
+
+
 async def confirm_local_execution(session_factory, target):
     from deerflow.persistence.run.model import RunRow
     from deerflow.persistence.run.sql import RunRepository
+    from deerflow.persistence.thread_meta.model import ThreadMetaRow
 
     if type(target) is not NativeRunStopTarget:
         raise ValueError("captured native close target required")
@@ -250,6 +282,13 @@ async def confirm_local_execution(session_factory, target):
         # otherwise request a workspace key-share lock after holding clock.
         if await session.scalar(select(WorkspaceRow.id).where(WorkspaceRow.id == target.workspace_id).with_for_update()) is None:
             return None
+        # Lock existence only, not current membership. A replaced/deleted
+        # parent must never receive this original execution's cleanup status.
+        parent = await session.scalar(
+            select(ThreadMetaRow)
+            .where(ThreadMetaRow.thread_id == target.thread_id, ThreadMetaRow.workspace_id == target.workspace_id, ThreadMetaRow.user_id == target.user_id, ThreadMetaRow.incarnation == target.thread_incarnation)
+            .with_for_update()
+        )
         sequence = await RunRepository._next_change_seq(session)
         row = await session.scalar(select(RunRow).where(RunRow.run_id == target.run_id).with_for_update())
         try:
@@ -272,6 +311,9 @@ async def confirm_local_execution(session_factory, target):
         lifetime.state = "completed"
         lifetime.payload = {**lifetime.payload, "receipt": {"evidence": "native_worker_closed", "owner_worker_id": target.owner_worker_id, "observed_at": now.isoformat()}}
         row.updated_at, row.change_seq = now, sequence
+        if parent is not None and parent.workspace_id == target.workspace_id and parent.user_id == target.user_id and parent.incarnation == target.thread_incarnation and parent.status != "deleting":
+            parent.status = "idle" if row.status == "success" else row.status
+            parent.updated_at = now
         session.add(WorkspaceAuditEventRow(id=str(uuid4()), workspace_id=target.workspace_id, actor_user_id=None, action="run.lifecycle_closed", resource_id=target.run_id, outcome="success", request_id=target.execution_id))
         closed_status = row.status
         await session.commit()

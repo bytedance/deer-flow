@@ -1,6 +1,7 @@
 """Actual native model callbacks, journal SQL and Run metadata need one owner."""
 
 import asyncio
+import json
 from contextvars import Context
 from datetime import UTC, datetime, timedelta
 
@@ -23,6 +24,7 @@ def test_native_journal_and_completion_keep_execution_authority(native_engine, t
     from deerflow.persistence.run.model import RunRow
     from deerflow.persistence.run.sql import RunRepository
     from deerflow.persistence.thread_meta import ThreadMetaRepository
+    from deerflow.persistence.thread_meta.model import ThreadMetaRow
     from deerflow.persistence.user.model import UserRow
     from deerflow.persistence.workspaces.model import WorkspaceOperationOutboxRow
     from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied, WorkspaceRepository
@@ -67,9 +69,10 @@ def test_native_journal_and_completion_keep_execution_authority(native_engine, t
             builder.add_edge(START, "respond")
             builder.add_edge("respond", END)
             graph = builder.compile()
+            bridge = MemoryStreamBridge()
             task = asyncio.create_task(
                 run_agent(
-                    MemoryStreamBridge(),
+                    bridge,
                     manager,
                     record,
                     ctx=RunContext(checkpointer=None, event_store=DbRunEventStore(case.sf, workspace_required=True), thread_store=threads, workspace_context=case.original),
@@ -121,10 +124,27 @@ def test_native_journal_and_completion_keep_execution_authority(native_engine, t
                         row.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
                     else:
                         row.owner_worker_id = "replacement-owner"
+                    parent = await session.get(ThreadMetaRow, record.thread_id)
+                    parent.status, parent.display_name = "idle", "replacement-owner-title"
                     await session.commit()
             set_current_workspace(case.other)
             release.set()
             await asyncio.wait_for(task, timeout=20)
+            frames = []
+            ended = False
+            async for item in bridge.subscribe(record.run_id, heartbeat_interval=0.01):
+                if item.event == "__end__":
+                    ended = True
+                    break
+                if item.event == "__heartbeat__":
+                    break
+                frames.append(item)
+            late_frames = [item for item in frames if "late private research report" in json.dumps(item.data, default=str)]
+            if trigger == "normal":
+                assert late_frames and ended, "normal native stream was suppressed or did not end"
+            else:
+                assert not late_frames, "stale worker queued a late private response for replay"
+                assert ended == (trigger not in ("lease", "owner")), "old owner terminated a stream it no longer owns"
             async with case.sf() as session:
                 events = (await session.scalars(sa.select(RunEventRow).where(RunEventRow.run_id == record.run_id))).all()
                 row = await session.get(RunRow, record.run_id)
@@ -140,6 +160,10 @@ def test_native_journal_and_completion_keep_execution_authority(native_engine, t
                     assert row.last_ai_message is None and row.total_tokens == 0, "withdrawn worker mutated durable completion/progress"
                     assert row.status == ("running" if trigger in ("lease", "owner") else "interrupted")
                 assert lifetime.state == ("open" if trigger in ("lease", "owner") else "completed"), "denied effects confused cleanup acknowledgement with ownership loss"
+                parent = await session.get(ThreadMetaRow, record.thread_id)
+                assert parent.status == ("idle" if trigger in ("normal", "lease", "owner") else "interrupted"), "old worker overwrote current thread status"
+                if trigger in ("lease", "owner"):
+                    assert parent.display_name == "replacement-owner-title"
             assert get_current_workspace() == case.other
         finally:
             release.set()

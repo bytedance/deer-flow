@@ -450,8 +450,8 @@ class RunRepository(RunStore):
         _, sequence = await self.lock_worker_effect(session, target, change_clock=change_clock)
         return sequence, [RunRow.workspace_id == target.workspace_id]
 
-    async def commit_worker_checkpoint(self, target: NativeRunStopTarget, *, commit):
-        """Drain prepared native saver IO, never graph/model/tool work.
+    async def commit_worker_io(self, target: NativeRunStopTarget, *, commit):
+        """Drain prepared native checkpoint/queue IO, never graph/model/tool work.
 
         This serializes authority, not a distributed checkpoint transaction.
         Cleanup and rollback after withdrawal need separate control authority.
@@ -463,6 +463,14 @@ class RunRepository(RunStore):
             result = await await_drained(commit())
             await session.commit()
             return result
+
+    async def commit_worker_checkpoint(self, target: NativeRunStopTarget, *, commit):
+        return await self.commit_worker_io(target, commit=commit)
+
+    async def signal_worker_stream_end(self, target, *, signal):
+        from deerflow.persistence.workspaces.run_control import signal_owned_stream_end
+
+        return await signal_owned_stream_end(self._sf, target, signal=signal)
 
     async def start_run(self, run_id: str, *, owner_worker_id: str | None = None, user_id: str | None = None, thread_id: str | None = None, thread_incarnation: str | None = None, workspace_context: WorkspaceContext | None = None) -> bool:
         """Start only a still-pending run; cancelled rows must not be resurrected."""

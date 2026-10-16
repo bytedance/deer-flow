@@ -273,3 +273,38 @@ python scripts/render_tenant_run_control_pipeline.py tenant-worker-effects <归�
 pending dispatch 和 owner/实例恢复、active rollback、真实 HTTP/JWT/browser、
 quota/billing 或远端 C。被拒绝的 token 统计不能作为完整计费证据。仍需完成所有
 撤权域及真实 C→B→C；启动旗标和 schema fence 不变，不据此启用租户功能。
+
+## 原生流生产与线程状态保护
+
+这一步直接扩展上一节的同一业务用例，用 `MemoryStreamBridge.subscribe` 读取实际
+重放队列，并检查 ThreadMeta。没有新增场景矩阵。#64 RED：正常两项通过，但
+撤权后迟到的完整 AI 响应仍在原生流队列中（两种元数据库各失败一项，21.19s），
+说明 SQL 日志保护不能替代流生产保护。#65 主干四项通过（21.50s）；#66 原有
+固定 46 项全部通过（97.72s），十五文件云端 Ruff。
+
+取消/撤权后，迟到正文不能进入队列；实际 native 结束后可发无载荷 end，并更新
+原私有线程的结束状态。lease 过期或 owner 被替换后，旧 worker 不能写迟到帧、
+结束新 owner 的流或覆盖其 idle 状态/标题，生命周期仍保持 open。实际关闭的
+状态回写不依赖已撤销的成员权限，只能针对原始线程代次；title writer 接同一
+效应 fence，但这里没有宣称完整 held-title 发布/UI 已验收。
+
+短 SQL fence 只包住准备好的原生队列写入并 drain，不包模型、工具或 SSE
+subscriber 的 socket 发送。它不能让独立的 SQL/Redis 变为一个分布式事务。
+生产者 view 不提供 subscribe/删除权限；消费端仍需既有 fresh observer 验证。
+
+复跑先用 `--suite stream-main` 运行同一用例的正常/撤权对照，再用原有
+`--suite effects-final` 固定组合覆盖已有取消/过期/换 owner 和旧路径回归：
+
+```bash
+python scripts/render_tenant_run_control_pipeline.py tenant-worker-stream <归档SHA256> \
+  --suite stream-main > /private/tmp/Jenkinsfile.tenant-worker-stream
+```
+
+沿用同一专属 SQL job、源码包 phase/SHA 核验、固定镜像与精确 label/匿名卷清理。
+所有构建、源码/日志哈希、已移除的精确资源见 `native_worker_stream_thread_fence`。
+本机只做 Git/标准库打包/OpenSpec/静态格式，没有运行应用或测试。
+
+验证限于 MemoryStreamBridge 生产/重放与 SQL，不是 Redis、HTTP/JWT/browser
+socket、跨进程 generation、背压/故障/重启或跨库未知结果验收。模型/工具调用
+发生前的权限、文件/发布/网络等外部效应、scoped dispatch/recovery/active rollback
+和远端 C 仍待完成。不得把丢弃输出当成已阻止工具副作用或开启租户的依据。

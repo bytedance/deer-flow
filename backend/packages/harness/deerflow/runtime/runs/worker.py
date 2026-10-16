@@ -1072,19 +1072,27 @@ async def run_agent(
             if principal is None or str(principal.id) != workspace_context.actor_user_id:
                 raise RuntimeError("worker workspace actor requires its native authenticated principal")
             workspace_token = set_current_workspace(workspace_context)
+            from deerflow.persistence.workspaces.run_control import NativeRunStopTarget
+            from deerflow.runtime.stream_bridge.scoped_worker import ScopedWorkerBridge
+
+            target = NativeRunStopTarget.from_record(record)
+            if not callable(getattr(run_manager._store, "commit_worker_io", None)) or not callable(getattr(run_manager._store, "signal_worker_stream_end", None)):
+                raise RuntimeError("workspace stream requires native execution fencing")
+            bridge = ScopedWorkerBridge(bridge, run_manager._store, target)
+            if thread_store is not None:
+                if not callable(getattr(thread_store, "bind_worker", None)):
+                    raise RuntimeError("workspace thread metadata requires native execution fencing")
+                thread_store = thread_store.bind_worker(target)
             if checkpointer is not None:
-                from deerflow.persistence.workspaces.run_control import NativeRunStopTarget
                 from deerflow.runtime.checkpointer.scoped_run import ScopedRunSaver
 
                 if not callable(getattr(run_manager._store, "commit_worker_checkpoint", None)):
                     raise RuntimeError("workspace checkpoint execution requires a durable native fence")
-                checkpointer = ScopedRunSaver(checkpointer, run_manager._store, NativeRunStopTarget.from_record(record))
+                checkpointer = ScopedRunSaver(checkpointer, run_manager._store, target)
             if event_store is not None:
-                from deerflow.persistence.workspaces.run_control import NativeRunStopTarget
-
                 if not callable(getattr(event_store, "bind_worker", None)):
                     raise RuntimeError("workspace journal requires native durable execution fencing")
-                event_store = event_store.bind_worker(NativeRunStopTarget.from_record(record))
+                event_store = event_store.bind_worker(target)
         elif get_current_workspace() is not None:
             raise RuntimeError("unscoped Run cannot inherit ambient workspace authority")
         normalized_stream_modes = normalize_stream_modes(stream_modes)
@@ -1693,6 +1701,13 @@ async def run_agent(
     except asyncio.CancelledError:
         await _finish_cancellation(record.abort_action)
 
+    except WorkspaceAccessDenied:
+        # Known effect refusal is not a model error payload. Stop through the
+        # original native control path while still draining actual execution.
+        record.abort_action = "interrupt"
+        record.abort_event.set()
+        await _finish_cancellation("interrupt")
+
     except Exception as exc:
         error_msg = f"{exc}"
         logger.exception("Run %s failed: %s", run_id, error_msg)
@@ -1706,14 +1721,16 @@ async def run_agent(
         if cancel_action is not None:
             await _finish_cancellation(cancel_action)
         else:
-            await bridge.publish(
-                run_id,
-                "error",
-                {
-                    "message": error_msg,
-                    "name": type(exc).__name__,
-                },
-            )
+            try:
+                await bridge.publish(
+                    run_id,
+                    "error",
+                    {"message": error_msg, "name": type(exc).__name__},
+                )
+            except WorkspaceAccessDenied:
+                record.abort_action = "interrupt"
+                record.abort_event.set()
+                await _finish_cancellation("interrupt")
 
     finally:
         try:

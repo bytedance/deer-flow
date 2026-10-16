@@ -3045,3 +3045,9 @@ Revoked or cancelled workers discard denied buffered responses; their original
 STOP control path can still record interruption without releasing cleanup early.
 [Verification and remaining work](docs/tenant-workspaces-testing.md) keep the
 full tenant integration and activation requirements explicit.
+
+Scoped native workers now fence stream enqueue and thread-status updates with
+the same captured execution identity. Late output is refused, and an expired
+or replaced worker cannot end a successor's stream. [Validation limits](docs/tenant-workspaces-testing.md)
+separate this producer integration from pending model/tool, Redis and full tenant
+activation work.
