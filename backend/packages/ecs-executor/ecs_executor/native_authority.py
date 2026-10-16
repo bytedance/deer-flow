@@ -1,6 +1,6 @@
 """Read native admission authority without creating a parallel task authority."""
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime
 
 from sqlalchemy import inspect, or_, select, text
@@ -12,6 +12,7 @@ from deerflow.persistence.mcp_tasks.model import McpTaskRow
 from deerflow.persistence.projects.model import ProjectRow
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.persistence.user.model import UserRow
 from deerflow.persistence.workspaces.model import WorkspaceMembershipRow, WorkspaceRow
 from deerflow.persistence.workspaces.sql import WorkspaceRepository
 
@@ -123,3 +124,34 @@ class NativeSubmissionAuthority:
         if task_scope != live or job_scope != live or job.get("workspace_id") != live.workspace_id:
             raise PermissionError("Native task or execution identity changed")
         return live
+
+    @contextmanager
+    def fence(self, job, server_name, *, require_active=True):
+        """Serialize short intent/result writes with native revocation.
+
+        No Docker/HTTP operation may execute inside this context. Scope/actor/
+        private-parent/source/task lock order matches native resource writers.
+        A committed start intent precedes the external start; later revocation
+        requires control-only STOP and never authorizes result publication.
+        """
+        try:
+            context = WorkspaceContext(**job["workspace_context"])
+        except (KeyError, TypeError, ValueError):
+            raise PermissionError("Physical execution requires original captured scope") from None
+        with self.engine.connect() as connection:
+            if connection.dialect.name == "sqlite":
+                connection.exec_driver_sql("BEGIN IMMEDIATE")
+            else:
+                connection.begin()
+            try:
+                connection.execute(select(WorkspaceRow.id).where(WorkspaceRow.id == context.workspace_id).with_for_update()).first()
+                connection.execute(select(UserRow.id).where(UserRow.id == context.actor_user_id).with_for_update()).first()
+                connection.execute(select(ThreadMetaRow.thread_id).where(ThreadMetaRow.thread_id == job["thread_id"]).with_for_update()).first()
+                connection.execute(select(RunRow.run_id).where(RunRow.run_id == job["run_id"]).with_for_update()).first()
+                connection.execute(select(McpTaskRow.id).where(McpTaskRow.user_id == job["user_id"], McpTaskRow.server_name == server_name, McpTaskRow.remote_task_id == job["id"]).with_for_update()).first()
+                resolved = NativeSubmissionAuthority(connection).resolve_task(job, server_name, require_active=require_active)
+                yield resolved
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise

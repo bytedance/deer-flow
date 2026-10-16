@@ -1,0 +1,58 @@
+pipeline {
+ agent { node { label 'shanghai-builder'; customWorkspace '/data/jenkins-agent/deerflow/tenant-execution-m4-physical' } }
+ options { disableConcurrentBuilds(); skipDefaultCheckout(true); timeout(time: 8, unit: 'MINUTES'); timestamps() }
+ stages { stage('Scoped B physical @@PHASE@@') { steps { sh '''set +x
+set -eu
+[ "${JOB_NAME:-}" = "deerflow-tenant-execution-m4-physical" ]
+[ "$PWD" = "/data/jenkins-agent/deerflow/tenant-execution-m4-physical" ]
+printf '%s  %s\n' '@@SOURCE_SHA256@@' '@@PHASE@@-source.tar.gz' | sha256sum --check
+fixture="deerflow-tenant-execution-m4-physical-${BUILD_NUMBER}"
+pg="${fixture}-db"
+shared="$PWD/physical-${BUILD_NUMBER}"
+mkdir -p "$shared"
+chmod 700 "$shared"
+printf '[]' > "$shared/owned.json"
+chmod 600 "$shared/owned.json"
+image=$(docker image inspect --format '{{.Id}}' deerflow-native:final-ci-tools-52ce)
+[ "$image" = 'sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01' ]
+cleanup() {
+ for target in "$fixture" "$pg"; do
+  owned=$(docker inspect -f '{{ index .Config.Labels "org.deerflow.tenant.owned" }}' "$target" 2>/dev/null || true)
+  if [ "$owned" = "$fixture" ]; then
+   docker inspect --format '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}}{{println}}{{end}}{{end}}' "$target" > "$shared/${target}-volumes.txt"
+   docker rm -fv "$target" >/dev/null
+  fi
+ done
+ owned=$(docker network inspect -f '{{ index .Labels "org.deerflow.tenant.owned" }}' "$fixture" 2>/dev/null || true)
+ if [ "$owned" = "$fixture" ]; then docker network rm "$fixture" >/dev/null; fi
+ python3 - "$shared/owned.json" <<'OWNED_CLEANUP'
+import json,re,subprocess,sys
+from pathlib import Path
+p=Path(sys.argv[1])
+if not p.exists():raise SystemExit(0)
+for row in json.loads(p.read_text()):
+ identity,digest=row['id'],row['spec_digest']
+ assert re.fullmatch(r'[0-9a-f]{32}',identity) and re.fullmatch(r'[0-9a-f]{64}',digest)
+ name='deerflow-exec-'+identity
+ result=subprocess.run(['docker','inspect',name],capture_output=True,text=True)
+ if result.returncode:
+  assert 'no such object' in result.stderr.lower() or 'no such container' in result.stderr.lower(), 'Inspection unavailable; cleanup not confirmed'
+  continue
+ observation=json.loads(result.stdout)[0];labels=observation['Config'].get('Labels') or {}
+ assert labels.get('deerflow.execution.job')==identity and labels.get('deerflow.execution.spec')==digest, 'Refuse unrelated object'
+ subprocess.run(['docker','rm','-f',name],check=True,capture_output=True)
+ result=subprocess.run(['docker','inspect',name],capture_output=True,text=True)
+ assert result.returncode and ('no such object' in result.stderr.lower() or 'no such container' in result.stderr.lower()), 'STOP not confirmed'
+OWNED_CLEANUP
+}
+trap cleanup EXIT HUP INT TERM
+docker network create --internal --label "org.deerflow.tenant.owned=$fixture" "$fixture" >/dev/null
+docker run -d --pull=never --name "$pg" --network "$fixture" --label "org.deerflow.tenant.owned=$fixture" --cpus .5 --memory 512m --memory-swap 512m -e POSTGRES_PASSWORD=tenant-test-only -e POSTGRES_DB=tenant_test sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea >/dev/null
+attempt=0
+until docker exec "$pg" pg_isready -U postgres -d tenant_test >/dev/null 2>&1; do
+ attempt=$((attempt+1)); [ "$attempt" -lt 30 ]; sleep 1
+done
+docker run --rm --pull=never --name "$fixture" --label "org.deerflow.tenant.owned=$fixture" --label org.deerflow.tenant.phase=m0 --network "$fixture" -e "TEST_EXECUTOR_POSTGRES_URL=postgresql+psycopg://postgres:tenant-test-only@$pg:5432/tenant_test" --cpus 1 --memory 2g --memory-swap 2g -e ECS_EXECUTOR_SCOPE_PHYSICAL_TEST=1 -e "TEST_SCOPE_EXECUTION_IMAGE=$image" -e "TEST_SCOPE_OWNED_MANIFEST=$shared/owned.json" -e "TEST_SCOPE_PHYSICAL_ROOT=$shared" -v /var/run/docker.sock:/var/run/docker.sock:ro -v /usr/bin/docker:/usr/bin/docker:ro -v "$shared:$shared" -v "$PWD/@@PHASE@@-source.tar.gz:/run/source.tar.gz:ro" --entrypoint /bin/sh "$image" -c 'mkdir /tmp/source && tar xzf /run/source.tar.gz -C /tmp/source && cd /tmp/source/backend && export PYTHONPATH=/tmp/source/backend:/tmp/source/backend/packages/harness:/tmp/source/backend/packages/extension-api:/tmp/source/backend/packages/ecs-executor && export DEER_FLOW_HOME=/tmp/tenant-home && /app/backend/.venv/bin/python -m pytest tests/test_workspace_execution_physical.py --basetemp="$TEST_SCOPE_PHYSICAL_ROOT/tests" -q --tb=short --no-showlocals' > @@PHASE@@.log 2>&1
+''' } } }
+ post { always { archiveArtifacts artifacts: '@@PHASE@@.log', allowEmptyArchive: false, fingerprint: true } }
+}

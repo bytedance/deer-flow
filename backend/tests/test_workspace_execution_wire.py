@@ -10,7 +10,7 @@ from test_workspace_executor_migration import executor_engine, native_engine  # 
 from test_workspace_mcp import _in_workspace_case
 
 
-def test_native_tool_to_scoped_b_commit_and_background_status(native_engine, executor_engine, tmp_path, monkeypatch):  # noqa: F811
+def _exercise_native_tool_to_b(native_engine, executor_engine, tmp_path, monkeypatch, *, after_queue=None, execution_image=None, execution_argv=None):  # noqa: F811
     import httpx
     from ecs_executor.job_store import JobStore
     from ecs_executor.jobs import ExecutionJobs, ExecutionProfile
@@ -46,7 +46,7 @@ def test_native_tool_to_scoped_b_commit_and_background_status(native_engine, exe
         store,
         secret=secret,
         audience="B",
-        profiles={"small": ExecutionProfile(image="fixture-only-no-launch")},
+        profiles={"small": ExecutionProfile(image=execution_image or "fixture-only-no-launch")},
         user_profiles={"owner": {"small"}},
         artifact_root=tmp_path / "artifacts",
         workspace_root=tmp_path / "shared",
@@ -120,7 +120,7 @@ def test_native_tool_to_scoped_b_commit_and_background_status(native_engine, exe
                 source.parent.mkdir(parents=True, exist_ok=True)
                 source.write_bytes(b"original input")
                 references = {"program.txt": {"path": "uploads/program.txt", "sha256": hashlib.sha256(b"original input").hexdigest()}}
-                arguments = {"request_key": "report", "profile": "small", "argv": ["echo", "report"], "input_refs": references}
+                arguments = {"request_key": "report", "profile": "small", "argv": execution_argv or ["echo", "report"], "input_refs": references}
                 state = {"messages": [AIMessage(content="", tool_calls=[{"name": "submit", "args": arguments, "id": "submit-1", "type": "tool_call"}])]}
                 await graph.ainvoke(
                     state, context={"user_id": "owner", "thread_id": run.thread_id, "thread_incarnation": run.thread_incarnation, "run_id": run.run_id, "workspace_context": case.original, RUN_OWNER_WORKER_CONTEXT_KEY: run.owner_worker_id}
@@ -155,6 +155,9 @@ def test_native_tool_to_scoped_b_commit_and_background_status(native_engine, exe
                     row = await session.get(McpTaskRow, local_id)
                     assert row.status == "working" and row.workspace_context_json == asdict(case.original)
                     assert row.run_id == run.run_id and row.remote_task_id == remote_id
+                if after_queue is not None:
+                    await after_queue(SimpleNamespace(case=case, jobs=jobs, store=store, tasks=tasks, remote_id=remote_id, local_id=local_id, run=run, original=case.original, other=case.other))
+                    return
                 assert store.claim_queued() is None, "physical launch needs its own integration"
                 assert base64.b64decode(queued["spec"]["input_files"]["program.txt"]) == b"original input"
                 management = mint_management_scope(secret=secret, audience="B", user_id="owner", task_id=remote_id, operation="status", workspace_context=saved_scope)
@@ -225,3 +228,7 @@ def test_native_tool_to_scoped_b_commit_and_background_status(native_engine, exe
     finally:
         store.engine.dispose()
         jobs.publication.engine.dispose()
+
+
+def test_native_tool_to_scoped_b_commit_and_background_status(native_engine, executor_engine, tmp_path, monkeypatch):  # noqa: F811
+    _exercise_native_tool_to_b(native_engine, executor_engine, tmp_path, monkeypatch)

@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -72,7 +73,7 @@ class ExecutionJobs:
             raise ValueError("Native file publication requires both fixed shared workspace and metadata database")
         from ecs_executor.publication import WorkspacePublication
 
-        self.publication = WorkspacePublication(workspace_root=workspace_root, metadata_database_url=metadata_database_url) if workspace_root else None
+        self.publication = WorkspacePublication(workspace_root=workspace_root, metadata_database_url=metadata_database_url, native_server_name=native_server_name if workspace_required else None) if workspace_root else None
         if type(workspace_required) is not bool or (workspace_required and (self.publication is None or not isinstance(native_server_name, str) or not native_server_name.strip() or len(native_server_name) > 128)):
             raise ValueError("Scoped B requires fixed native metadata, workspace root and native MCP server binding")
         if self.publication is not None:
@@ -152,6 +153,38 @@ class ExecutionJobs:
         if not self.workspace_required or not job.get("workspace_context"):
             raise PermissionError("Scoped B execution authority is unavailable")
         return NativeSubmissionAuthority(self.publication.engine).resolve_task(job, self.native_server_name, require_active=require_active)
+
+    def execution_authority(self, job):
+        from ecs_executor.native_authority import NativeSubmissionAuthority
+
+        if job.get("workspace_id") is None and not self.workspace_required:
+            return nullcontext()
+        if not self.workspace_required or not job.get("workspace_context"):
+            raise PermissionError("Physical execution requires original native authority")
+        return NativeSubmissionAuthority(self.publication.engine).fence(job, self.native_server_name)
+
+    def claim_queued(self):
+        if not self.workspace_required:
+            return self.store.claim_queued()
+        for candidate in self.store.list_active(kind="B"):
+            if candidate.get("state") != "queued" or not candidate.get("workspace_context"):
+                continue
+            claimed = False
+
+            def claim(record):
+                nonlocal claimed
+                claimed = record["state"] == "queued" and not record.get("cancel_requested")
+                if claimed:
+                    record["state"] = "starting"
+
+            try:
+                with self.execution_authority(candidate):
+                    fresh = self.store.mutate(candidate["id"], claim)
+            except PermissionError:
+                continue
+            if claimed:
+                return fresh
+        return None
 
     def status(self, user_id, token, args):
         job = self._authorize(user_id, token, "status", args)

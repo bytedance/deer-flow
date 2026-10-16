@@ -322,6 +322,13 @@ python -m pytest tests/test_workspace_execution.py tests/test_workspace_revocati
 - [x] 主干通过后验证孤儿 staged、版本/legacy 降级、错空间/server/代次/撤权/取消等必要边界，验证 scoped 输入文件访问与旧主干兼容，保留测试/源码回执并本地提交。
 - [ ] 随后直接接实际 worker 的启动、接管和发布重验，撤权清理只经控制协议确认 STOP 才释放占用，再跑原生 C→B→C；本步骤不以 staged/queued 代替物理业务验收，也不绕过 Gateway 启动门禁。
 
+#### M4 第八小步：实际单机 B 物理执行与停止（2026-10-16）
+
+- [x] 真实 Docker 主干：沿已验证原生工具/MCP 路径，用原始输入快照生成报告，受原生权限锁保护地领取、写启动意图、发布并提交结果，再由原任务轮询回流，确认容器移除。
+- [x] 主干后仅补创建后撤权无 start、运行中撤权无发布、观测失败不确认 STOP、实际移除后才确认停止；独立校验 native task cancel fence 阻止发布。保留原未知历史状态与版本。
+- [x] 将物理 CI 固化到仓库模板/渲染器，完成上海重跑、受影响旧 worker/文件回归和静态检查，保存测试文档与回执并本地提交。
+- [ ] 原生撤权/取消 outbox 到 STOP 回执、native task 控制结算、pool 远端 worker、C 启动/续跑/通知、实际 NAS/TCP 和完整 C→B→C 仍须继续。单机轮询发现撤权不代替持久 outbox；启动意图前后与撤权的线性化边界必须保留，SQL 权限锁不得跨 Docker/HTTP 调用。
+
 ### M5：记忆、知识检索与工具凭据隔离
 
 **修改接点：**

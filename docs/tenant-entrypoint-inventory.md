@@ -302,3 +302,15 @@ Direct B cancellation before physical start can return through native polling;
 this does not enable native scoped cancel/outbox/notification queues or prove
 physical STOP. B worker scoped claims, full C→B→C, publication/continuation,
 credential revocation and M0-M11 remain pending. Global activation stays closed.
+
+
+M4 single-host B physical component: real Docker now executes the immutable input
+snapshot and publishes a native report/result under the original task authority.
+Claim/start-intent/result transitions use short native workspace/actor/parent/
+Run/task fences; Docker/HTTP stays outside SQL locks. Reconciliation observes
+withdrawal, persists stop intent and removes only the exact owned object. Failed
+inspection retains the unconfirmed physical fact. Task cancellation blocks native
+publication inside the publication lock. Source Run end and selected-space switch
+do not change task ownership. Native cancellation/revocation outbox settlement,
+pool/remote C, notifications, actual NAS/TCP and full M0-M11 remain pending. See
+tenant-workspaces-testing.md; tenant activation remains closed.

@@ -79,8 +79,11 @@ hold a lock or authorize a later physical start/publication. Scoped HTTP
 V2 status/cancel verify a separately resolved native MCP receipt with exact server,
 remote ID, source Run, private thread/incarnation and independent live snapshots.
 Status can queue staged work only with an uncancelled pollable native task;
-source Run completion does not erase task ownership. Physical scoped claims are
-still withheld pending start/adopt/publication/control integration.
+source Run completion does not erase task ownership. Single-host scoped B now
+claims through native authority, fences durable start intent/result writes and
+rechecks publication. Scope revocation observed by the worker requests durable
+control-only STOP; only actual removal confirms physical_stopped. Pool scoped
+claims and native control/outbox settlement remain incomplete.
 
 Workspace transport preparation (not tenant activation): `mint_execution_scope`
 accepts a trusted immutable `workspace_context` and signs protocol `version: 2`
@@ -102,7 +105,8 @@ The private executor config accepts `workspace_required` (default false) and
 `native_server_name` (exact native MCP server binding). Scoped mode requires fixed
 metadata/shared-root settings and the matched native 0040/executor e0003 schema.
 Existing team data refuses legacy B startup. The example keeps scoped mode off;
-these flags do not enable physical tenant execution or bypass Gateway activation.
+single-host B uses the original committed task authority. Gateway tenant
+activation stays closed until the complete runtime/release plan is verified.
 
 A submit response durably stages the job without execution. Only the first
 signed native background status poll queues it. In scoped mode the receiver
@@ -591,8 +595,11 @@ Explicit B snapshots bind actor, workspace, source Run/thread/incarnation and th
 effective input/profile budget digest. Scoped create retries, reads and ordinary
 mutations validate this independent identity; output/state updates retain it.
 Historical rows keep NULL identity, including offline workspace attribution.
-Local and pool queued claims refuse workspace-attributed jobs until native MCP
-commit/start authorization is integrated; pool filtering happens before limit.
+Default JobStore and pool claims refuse workspace-attributed jobs. The scoped
+single-host ExecutionJobs claimer uses original native task authority and short
+workspace/actor/private-parent/Run/task SQL locks around claim/start/result writes.
+It never holds those locks across Docker or HTTP; pool filtering still precedes
+limit and pool scoped execution remains pending.
 Unknown physical reservations remain reserved. Stop every old worker/dispatcher
 before upgrading: an old binary starting afterward rejects the new revision/shape,
 but changing a schema cannot stop an already-running old process. No live schema
@@ -613,3 +620,32 @@ releases physical capacity. The caller must stop writers and retain coherent
 backups plus both database receipts. Native `export_native_workspace_bindings` now supplies the metadata-only DTO.
 A guarded operator CLI and paired migration receipts are still required;
 hand-authored bindings are not a deployment procedure.
+
+
+## Scoped single-host physical evidence
+
+The Shanghai-only physical test follows the real native durable ToolNode wrapper,
+ordinary MCP HTTP driver and native SQL receipt into real Docker. Input snapshot
+bytes become a native report, publication is checked under the original task
+scope and the original MCP row receives completion after source Run ends and UI
+selection changes. Actual container removal is checked before STOP flags. Creation
+and running withdrawal boundaries, one failed physical observation and cancelled
+task publication refusal are tested. There is no permission-success or Docker
+execution stub in that main.
+
+Native authority locks serialize the short durable start intent with native
+revocation writers. The start intent is the admission linearization point;
+withdrawal afterward requires physical STOP, not another start or result grant.
+The worker rechecks before start, on reconciliation and at publication/result
+commit. Its captured stop request survives in the private ledger and does not
+need withdrawn member permission to remove the exact owned object. Failed
+observation never establishes STOP. This polling path is not the still-pending
+native revocation outbox or task control settlement; revoked native task results
+are withheld while that dedicated control receipt remains unimplemented.
+
+Reproduce with the versioned Jenkins template and standard-library renderer in
+[the tenant testing guide](../../../docs/tenant-workspaces-testing.md). The default
+suite skips physical tests before fixture setup. CI uses only owned shared temp
+paths and preloaded image IDs; it performs no deployment or model calls. Actual
+NAS/TCP, pool/remote C/continuation/notifications, durable outbox, least-privilege
+DB role and full M0-M11 tenant/restore acceptance remain pending.

@@ -107,13 +107,14 @@ def remove_tree_at(parent_fd, name):
 
 
 class WorkspacePublication:
-    def __init__(self, *, workspace_root: Path, metadata_database_url: str):
+    def __init__(self, *, workspace_root: Path, metadata_database_url: str, native_server_name: str | None = None):
         self.root = Path(workspace_root).resolve()
         self.paths = Paths(self.root)
         self.engine = create_engine(metadata_database_url)
+        self.native_server_name = native_server_name
 
     @contextmanager
-    def authorized_root(self, job, path, *, create=False):
+    def authorized_root(self, job, path, *, create=False, require_task=False):
         with self.engine.connect() as connection:
             if self.engine.dialect.name == "sqlite":
                 connection.exec_driver_sql("BEGIN IMMEDIATE")
@@ -141,6 +142,12 @@ class WorkspacePublication:
                 owner = connection.execute(query).first()
                 if owner is None or owner.user_id != job["user_id"] or owner.incarnation != job["incarnation"]:
                     raise ValueError("Native file access denied: owner/incarnation no longer matches")
+                if require_task:
+                    from ecs_executor.native_authority import NativeSubmissionAuthority
+
+                    if not self.native_server_name:
+                        raise PermissionError("Scoped publication requires native MCP binding")
+                    NativeSubmissionAuthority(connection).resolve_task(job, self.native_server_name, require_active=True)
                 self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
                 root_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
                 try:
@@ -181,7 +188,7 @@ class WorkspacePublication:
         outputs = self.paths.sandbox_outputs_dir(job["thread_id"], user_id=make_safe_user_id(job["user_id"]))
         for name in files:
             relative_file(name)
-        with self.authorized_root(job, outputs, create=True) as outputs_fd:
+        with self.authorized_root(job, outputs, create=True, require_task=job.get("workspace_id") is not None) as outputs_fd:
             try:
                 os.stat(job["id"], dir_fd=outputs_fd, follow_symlinks=False)
             except FileNotFoundError:

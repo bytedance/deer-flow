@@ -117,3 +117,11 @@ not a replacement. Direct remote cancellation of a staged/queued B job can flow
 back through ordinary polling, but scoped native cancel queue/outbox/delivery
 and physical execution/Stop are still incomplete. Global tenant activation stays
 closed; no model or public Gateway tenant startup is proved by component tests.
+
+Scoped B single-host physical completion is now proven through the native wrapper,
+MCP HTTP, real SQL/Docker and original task result persistence. Source Run end and
+UI selection do not redirect its authority. Native scope/cancel fences also guard
+publication. On observed member withdrawal the executor stops its exact owned
+object and withholds business results; native task cancellation/notification and
+revocation outbox/control receipts are still separate pending work. Do not mark a
+revoked task completed/cancelled by reusing its withdrawn member context.

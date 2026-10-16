@@ -1,4 +1,4 @@
-> 当前恢复点：M4 原生工具/MCP HTTP → B 入账、原生任务确认、v2 管理与原身份后台轮询；上海 SQL #29 SUCCESS（25 tests）。下一步直接接物理 worker 启动/接管/发布与撤权控制，再跑真实 C→B→C；全量 M0–M11 保留，租户启动仍关闭。历史暂停段与旧回执见下文，最新详细回执见文末。
+> 当前恢复点：M4 单机 B 已真实 Docker 执行报告、原线程发布、原生 MCP 结果回流与撤权 STOP；上海 physical #6（6 passed）、SQL #30（22 passed / 6 default skipped）。下一步直接接原生持久取消/撤权 outbox 与 STOP 控制结算，再接 pool/远端 C/续跑及实际 TCP/NAS C→B→C。全量 M0–M11 保留，租户启动仍关闭。最新详细回执见文末。
 
 # 2026-10-16 暂停与恢复检查点
 
@@ -396,3 +396,48 @@ parent is incomplete, Gateway activation stays compiled false with its old
 closed schema fence pending the complete M10/M11 candidate. No deployment,
 push/PR/model/local runtime. Review remains serial self-review plus focused CI,
 not a complete independent audit or full tenant/runtime acceptance.
+
+
+M4 scoped single-host physical checkpoint (2026-10-16): new owned job
+`deerflow-tenant-execution-m4-physical` #1 RED missing scoped claim integration;
+#2 SUCCESS actual native ToolNode/durable MCP/SQL -> Docker original-input report
+-> native original-thread publication -> original MCP completion after source Run
+ends and selected space changes (2 cases, 19.78s). #3 SUCCESS six physical cases
+(main plus create/running withdrawal on both DBs, 31.02s). No permission-success
+or SQL/Docker execution stubs: the one inspect outage is a denied observation
+between real running and real STOP. Native task cancel intent independently
+refuses publication under native scope locks. Unknown inspection keeps running/
+unconfirmed fact; only actual owned-object removal records STOP. Unknown old
+record state/version remains uncertain/7 and no business result is committed
+through a withdrawn membership.
+
+Native scope/actor/private-parent/Run/task locks fence short claim/start-intent/
+result SQL writes; no Docker/HTTP inside locks. Start intent is the admission
+linearization point; withdrawal later requires STOP, not another start or result
+grant. Worker reconciliation detects withdrawal and persists a private control
+stop request. Original actor scope is not reused as cleanup permission. Native
+task control settlement is still pending: revoked task remains working/no result,
+not falsely completed/cancelled by a business authorization bypass. Durable
+revocation/cancellation outbox/STOP receipt must now settle that state, then wire
+pool/remote C/continuation/notification and actual C-to-B-to-C.
+
+Repo template #4 SUCCESS; #5 SUCCESS opt-in before fixture setup; #6 SUCCESS same
+six cases (31.04s) using final versioned CI template with exact owned PostgreSQL
+anonymous-volume cleanup. Only known owned labels/job-spec IDs are cleaned; old
+unrecorded volume ownership is not guessed and no global prune occurs. SQL job
+#30 SUCCESS 22 affected regressions + six physical default skips (49.25s), seven
+Python files Ruff check/format. Existing adapter deprecation warnings remain
+visible (14 physical / 26 regression). Current eight runtime/test/renderer/template
+files match physical #6; seven Python files also match SQL #30. Latest template
+alone differs from #30 by recorded exact fixture volume cleanup. SHA/log/image/
+manifest/empty known resources receipts: native_b_single_host_physical in JSON.
+
+Repeatable artifacts: docs/tenant-workspaces-testing.md,
+examples/ecs-native/deploy/Jenkinsfile.tenant-physical.in and
+scripts/render_tenant_physical_pipeline.py. Actual Docker, native SQLite/PostgreSQL
+and file IO run in Shanghai; MCP uses in-process ASGI and trusted internal user/
+admission fixtures. No public JWT, TCP/NAS, pool, remote C/LLM/continuation or
+least-privilege DB proof. Full M0-M11 parents stay open; compiled activation false
+and old closed startup schema fence pending final paired candidate/restore audit.
+No deployment/push/PR/models/local app tests. This is focused CI plus serial
+self-review, not independent full audit or complete tenant/runtime acceptance.

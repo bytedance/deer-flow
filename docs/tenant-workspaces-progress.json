@@ -1549,17 +1549,17 @@
   },
   "latest_checkpoint": {
     "work_package": "M4",
-    "status": "partial M4: actual native ToolNode/MCP HTTP B staging, native commitment, v2 status/cancel and original-scope polling verified; physical start/adopt/publish/control pending",
-    "last_verified_job": "deerflow-tenant-execution-m4-sql",
-    "last_verified_build": 29,
-    "next": "Directly integrate scoped physical worker start/adopt/publication with current native task authority and durable cancellation/revocation control; then actual Docker/NAS/TCP native C-to-B-to-C. Retain remaining M3/M0-M11 gates and keep tenant startup closed.",
+    "status": "partial M4: single-host B actual Docker report/publication/native task result and observed-withdrawal STOP verified; native control settlement/outbox, pool and C continuation pending",
+    "last_verified_job": "deerflow-tenant-execution-m4-physical",
+    "last_verified_build": 6,
+    "next": "Implement durable native cancellation/revocation outbox and control-only observed-STOP receipt/settlement without reusing withdrawn member authorization; then pool/remote C startup, continuation/notification and actual TCP/NAS C-to-B-to-C. Retain full M3/M0-M11 scope and keep startup closed.",
     "tenant_activation": "closed",
     "deployment": "none",
     "previous_backend_job": "deerflow-tenant-m1-postgres",
     "previous_backend_build": 89,
     "native_candidate_schema": "0040_mcp_workspace_identity",
     "last_verified_database_job": "deerflow-tenant-execution-m4-sql",
-    "last_verified_database_build": 29,
+    "last_verified_database_build": 30,
     "executor_candidate_schema": "e0003_execution_identity"
   },
   "workspace_feedback": {
@@ -9061,6 +9061,342 @@
       "Native scoped cancellation/notification queues and revocation outbox/control remain incomplete. Direct B cancellation before launch does not establish native control delivery or physical STOP.",
       "Metadata test role owns fixture databases; least-privilege SQL role/mount/network and full paired restore/old-binary restart remain M10/M11.",
       "Global tenant startup remains compiled false with older closed schema fence. All M0-M11 parent gates remain incomplete; no deployment/push/PR, model or local application/Docker/pytest runtime."
+    ]
+  },
+  "native_b_single_host_physical": {
+    "builds": [
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 39970,
+        "number": 1,
+        "result": "FAILURE",
+        "job": "deerflow-tenant-execution-m4-physical",
+        "phase": "m4-b-physical-red",
+        "source_archive_sha256": "eb39b212eedfe5c8691aeab5d310b45a999c87cecc44893213f43ed2dec9191d",
+        "log_sha256": "f287a22b6287b285725f1ea464da51b21a90af94c38fcb4aa0ac558c924c1cf5",
+        "code_sha256": {
+          "backend/packages/ecs-executor/ecs_executor/native_authority.py": "a8fd263fec0e65b5d0d5d3cdecdbeec770adf4510a5d9cd4ac8a7dadd0245d10",
+          "backend/packages/ecs-executor/ecs_executor/jobs.py": "63442c13a6acdc20f944c740a3647fe453bde075078b57b207838a8ef51a7c0b",
+          "backend/packages/ecs-executor/ecs_executor/publication.py": "1db851891cefe0c4d2c236df545c7af4984bab534d2d4b2138582ecacc50c760",
+          "backend/packages/ecs-executor/ecs_executor/worker.py": "49f4c75aa727eecd49c608a88f76b87702ea556a17fa08f5af4398aec16716ec",
+          "backend/tests/test_workspace_execution_wire.py": "779627b1509f4521bc6f0a907457266f142236af205a471628b293e98e839f4b",
+          "backend/tests/test_workspace_execution_physical.py": "e6450598baad19d39a1ac92d71f17865fc327ef0e657b55484fd26ced578085c"
+        },
+        "owned_physical_ids": [
+          {
+            "id": "6bda0bf934d84372ab5e8cb10eb38a28",
+            "spec_digest": "47896fc7a801a80f748820e335a73050a5edeb2d1a66cd2cfdbdb85ed57984c4"
+          },
+          {
+            "id": "ecdadebeaea24d38ad7efed6fc9d32c7",
+            "spec_digest": "47896fc7a801a80f748820e335a73050a5edeb2d1a66cd2cfdbdb85ed57984c4"
+          }
+        ],
+        "remaining_owned_job_containers": [],
+        "recorded_removed_fixture_volumes": []
+      },
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 39868,
+        "number": 2,
+        "result": "SUCCESS",
+        "job": "deerflow-tenant-execution-m4-physical",
+        "phase": "m4-b-physical-main",
+        "source_archive_sha256": "6801694564bc037158f4b745a63e3845fe647a4bb42d2365fd5dcaa89eac9927",
+        "log_sha256": "1db9be6f3b282638de6cd4d7059c1f33d2eb0331f5bed1d15fd72566f518bb3d",
+        "code_sha256": {
+          "backend/packages/ecs-executor/ecs_executor/native_authority.py": "95c784591cc8b1eeaec48a1046fc269fa4d60c6c93b9df06f66504a665ebd826",
+          "backend/packages/ecs-executor/ecs_executor/jobs.py": "3a1b1170ad7e1e63c128a8ec883f937e0a3625b97768c5abad393578270f7361",
+          "backend/packages/ecs-executor/ecs_executor/publication.py": "cb124b20cf45578c446d120928adb630274019c75feecbdcd672bd5a61fbd238",
+          "backend/packages/ecs-executor/ecs_executor/worker.py": "8963c06f5a6a7cdc1ae07f4f0ae05c0d5564c8ca4b5c4c198f29d26cd5a5b3ad",
+          "backend/tests/test_workspace_execution_wire.py": "779627b1509f4521bc6f0a907457266f142236af205a471628b293e98e839f4b",
+          "backend/tests/test_workspace_execution_physical.py": "e6450598baad19d39a1ac92d71f17865fc327ef0e657b55484fd26ced578085c"
+        },
+        "owned_physical_ids": [
+          {
+            "id": "3878263ace6d4c169a06dd3673a22706",
+            "spec_digest": "47896fc7a801a80f748820e335a73050a5edeb2d1a66cd2cfdbdb85ed57984c4"
+          },
+          {
+            "id": "e76753769c1d4ac69d8cd8a36de7ff7f",
+            "spec_digest": "47896fc7a801a80f748820e335a73050a5edeb2d1a66cd2cfdbdb85ed57984c4"
+          }
+        ],
+        "remaining_owned_job_containers": [],
+        "recorded_removed_fixture_volumes": []
+      },
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 47734,
+        "number": 3,
+        "result": "SUCCESS",
+        "job": "deerflow-tenant-execution-m4-physical",
+        "phase": "m4-b-physical-boundaries",
+        "source_archive_sha256": "f2cf5d281002e68cd916db93d812edfb1826dbbafaf970e289a48d172273088a",
+        "log_sha256": "5dbff2bd0a6facbde328357199a1e06e2f3d9be1a033b46c8cef89f65eca144f",
+        "code_sha256": {
+          "backend/packages/ecs-executor/ecs_executor/native_authority.py": "95c784591cc8b1eeaec48a1046fc269fa4d60c6c93b9df06f66504a665ebd826",
+          "backend/packages/ecs-executor/ecs_executor/jobs.py": "3a1b1170ad7e1e63c128a8ec883f937e0a3625b97768c5abad393578270f7361",
+          "backend/packages/ecs-executor/ecs_executor/publication.py": "cb124b20cf45578c446d120928adb630274019c75feecbdcd672bd5a61fbd238",
+          "backend/packages/ecs-executor/ecs_executor/worker.py": "8963c06f5a6a7cdc1ae07f4f0ae05c0d5564c8ca4b5c4c198f29d26cd5a5b3ad",
+          "backend/tests/test_workspace_execution_wire.py": "779627b1509f4521bc6f0a907457266f142236af205a471628b293e98e839f4b",
+          "backend/tests/test_workspace_execution_physical.py": "d27c811844075f0a8a1dda03cf4fadb7dd04603561a8d01b28e5aca5c6656432"
+        },
+        "owned_physical_ids": [
+          {
+            "id": "3985e71703ce49e1807653f409056ae8",
+            "spec_digest": "47896fc7a801a80f748820e335a73050a5edeb2d1a66cd2cfdbdb85ed57984c4"
+          },
+          {
+            "id": "0c8c34d2bb304aa59d04014c768490fe",
+            "spec_digest": "47896fc7a801a80f748820e335a73050a5edeb2d1a66cd2cfdbdb85ed57984c4"
+          },
+          {
+            "id": "5ed1c3f5c5014b86baf2a0f46c7c0bbc",
+            "spec_digest": "174489af1424c8b51773f7a9cd1cbde0a1e7799979414a842365f2bdd7d702af"
+          },
+          {
+            "id": "7ba158afa06341d080f727ddd0710bf4",
+            "spec_digest": "174489af1424c8b51773f7a9cd1cbde0a1e7799979414a842365f2bdd7d702af"
+          },
+          {
+            "id": "252b20d138f24a02b034c1800c040483",
+            "spec_digest": "174489af1424c8b51773f7a9cd1cbde0a1e7799979414a842365f2bdd7d702af"
+          },
+          {
+            "id": "1b6e8527324f494e99c361d6e5e21a29",
+            "spec_digest": "174489af1424c8b51773f7a9cd1cbde0a1e7799979414a842365f2bdd7d702af"
+          }
+        ],
+        "remaining_owned_job_containers": [],
+        "recorded_removed_fixture_volumes": []
+      },
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 48014,
+        "number": 4,
+        "result": "SUCCESS",
+        "job": "deerflow-tenant-execution-m4-physical",
+        "phase": "m4-b-physical-verified",
+        "source_archive_sha256": "dc939b7f2fe57a01d0f73e5e3caf94e2951e1719a093a0a1cf9b4c3ab79b3ec6",
+        "log_sha256": "74996454f5ede86797e39336c0116954b7315271c5a2dde223ecfc40a3889d9f",
+        "code_sha256": {
+          "backend/packages/ecs-executor/ecs_executor/native_authority.py": "95c784591cc8b1eeaec48a1046fc269fa4d60c6c93b9df06f66504a665ebd826",
+          "backend/packages/ecs-executor/ecs_executor/jobs.py": "3a1b1170ad7e1e63c128a8ec883f937e0a3625b97768c5abad393578270f7361",
+          "backend/packages/ecs-executor/ecs_executor/publication.py": "cb124b20cf45578c446d120928adb630274019c75feecbdcd672bd5a61fbd238",
+          "backend/packages/ecs-executor/ecs_executor/worker.py": "8963c06f5a6a7cdc1ae07f4f0ae05c0d5564c8ca4b5c4c198f29d26cd5a5b3ad",
+          "backend/tests/test_workspace_execution_wire.py": "779627b1509f4521bc6f0a907457266f142236af205a471628b293e98e839f4b",
+          "backend/tests/test_workspace_execution_physical.py": "d27c811844075f0a8a1dda03cf4fadb7dd04603561a8d01b28e5aca5c6656432",
+          "scripts/render_tenant_physical_pipeline.py": "1fa40c2483535550657a4cfea55c3baae9d8e691d108d308d622e05c47577759",
+          "examples/ecs-native/deploy/Jenkinsfile.tenant-physical.in": "aea5dbe0662de02b52b92d23123451a625c926ddcad0f156e82df4dfba00dde5"
+        },
+        "owned_physical_ids": [
+          {
+            "id": "ff9e4876afa84f769aa717772926b00b",
+            "spec_digest": "47896fc7a801a80f748820e335a73050a5edeb2d1a66cd2cfdbdb85ed57984c4"
+          },
+          {
+            "id": "e591d53482794473959d20dc065e97b2",
+            "spec_digest": "47896fc7a801a80f748820e335a73050a5edeb2d1a66cd2cfdbdb85ed57984c4"
+          },
+          {
+            "id": "67382f1d6fd34bee8783c247bb6b96a2",
+            "spec_digest": "174489af1424c8b51773f7a9cd1cbde0a1e7799979414a842365f2bdd7d702af"
+          },
+          {
+            "id": "6f18af3ee4624946bfb6e87154bb4142",
+            "spec_digest": "174489af1424c8b51773f7a9cd1cbde0a1e7799979414a842365f2bdd7d702af"
+          },
+          {
+            "id": "d9a2749f352d4eba9530b4600f79768f",
+            "spec_digest": "174489af1424c8b51773f7a9cd1cbde0a1e7799979414a842365f2bdd7d702af"
+          },
+          {
+            "id": "cff653bb6b964fb7b9640df9382c20c8",
+            "spec_digest": "174489af1424c8b51773f7a9cd1cbde0a1e7799979414a842365f2bdd7d702af"
+          }
+        ],
+        "remaining_owned_job_containers": [],
+        "recorded_removed_fixture_volumes": []
+      },
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 82983,
+        "number": 5,
+        "result": "SUCCESS",
+        "job": "deerflow-tenant-execution-m4-physical",
+        "phase": "m4-b-physical-final",
+        "source_archive_sha256": "a8895e5a72ef314f13e8d0c531c3df3f076269d11758d464df7684425d80890d",
+        "log_sha256": "fe2c92475842ffcba6bcd48c81fc1a76bbf4be5ff6f90bfc48f090c0613c003b",
+        "code_sha256": {
+          "backend/packages/ecs-executor/ecs_executor/native_authority.py": "95c784591cc8b1eeaec48a1046fc269fa4d60c6c93b9df06f66504a665ebd826",
+          "backend/packages/ecs-executor/ecs_executor/jobs.py": "3a1b1170ad7e1e63c128a8ec883f937e0a3625b97768c5abad393578270f7361",
+          "backend/packages/ecs-executor/ecs_executor/publication.py": "cb124b20cf45578c446d120928adb630274019c75feecbdcd672bd5a61fbd238",
+          "backend/packages/ecs-executor/ecs_executor/worker.py": "8963c06f5a6a7cdc1ae07f4f0ae05c0d5564c8ca4b5c4c198f29d26cd5a5b3ad",
+          "backend/tests/test_workspace_execution_wire.py": "779627b1509f4521bc6f0a907457266f142236af205a471628b293e98e839f4b",
+          "backend/tests/test_workspace_execution_physical.py": "02364bfd756d1e1bb6a8a84fefa4508481d35f7c4b856691bfb82eb964d2bb93",
+          "scripts/render_tenant_physical_pipeline.py": "1fa40c2483535550657a4cfea55c3baae9d8e691d108d308d622e05c47577759",
+          "examples/ecs-native/deploy/Jenkinsfile.tenant-physical.in": "aea5dbe0662de02b52b92d23123451a625c926ddcad0f156e82df4dfba00dde5"
+        },
+        "owned_physical_ids": [
+          {
+            "id": "a2ceaeafd17a4ea085fc26201bef7867",
+            "spec_digest": "47896fc7a801a80f748820e335a73050a5edeb2d1a66cd2cfdbdb85ed57984c4"
+          },
+          {
+            "id": "4b66f2a4bb554ba4a39fc65694276b6a",
+            "spec_digest": "47896fc7a801a80f748820e335a73050a5edeb2d1a66cd2cfdbdb85ed57984c4"
+          },
+          {
+            "id": "c13158fb28b14f94bce4e00c7c0db72e",
+            "spec_digest": "174489af1424c8b51773f7a9cd1cbde0a1e7799979414a842365f2bdd7d702af"
+          },
+          {
+            "id": "146555975e824bf6b7dc83bb8228e7c1",
+            "spec_digest": "174489af1424c8b51773f7a9cd1cbde0a1e7799979414a842365f2bdd7d702af"
+          },
+          {
+            "id": "68a386b798064980bd6bf201fa10f1d6",
+            "spec_digest": "174489af1424c8b51773f7a9cd1cbde0a1e7799979414a842365f2bdd7d702af"
+          },
+          {
+            "id": "aa68860461074cb89973ff38a732ce01",
+            "spec_digest": "174489af1424c8b51773f7a9cd1cbde0a1e7799979414a842365f2bdd7d702af"
+          }
+        ],
+        "remaining_owned_job_containers": [],
+        "recorded_removed_fixture_volumes": []
+      },
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 47829,
+        "number": 6,
+        "result": "SUCCESS",
+        "job": "deerflow-tenant-execution-m4-physical",
+        "phase": "m4-b-physical-volumes",
+        "source_archive_sha256": "b997e4e7fb8b4254c7d2b22f214e5f8883ec372bbd3008e1ce9e2f4b98eddf5e",
+        "log_sha256": "f859a8ea29e5ecc57563b8b98ba1907ad7d5a2da3b1193f9b88ca629be27d0f5",
+        "code_sha256": {
+          "backend/packages/ecs-executor/ecs_executor/native_authority.py": "95c784591cc8b1eeaec48a1046fc269fa4d60c6c93b9df06f66504a665ebd826",
+          "backend/packages/ecs-executor/ecs_executor/jobs.py": "3a1b1170ad7e1e63c128a8ec883f937e0a3625b97768c5abad393578270f7361",
+          "backend/packages/ecs-executor/ecs_executor/publication.py": "cb124b20cf45578c446d120928adb630274019c75feecbdcd672bd5a61fbd238",
+          "backend/packages/ecs-executor/ecs_executor/worker.py": "8963c06f5a6a7cdc1ae07f4f0ae05c0d5564c8ca4b5c4c198f29d26cd5a5b3ad",
+          "backend/tests/test_workspace_execution_wire.py": "779627b1509f4521bc6f0a907457266f142236af205a471628b293e98e839f4b",
+          "backend/tests/test_workspace_execution_physical.py": "02364bfd756d1e1bb6a8a84fefa4508481d35f7c4b856691bfb82eb964d2bb93",
+          "scripts/render_tenant_physical_pipeline.py": "1fa40c2483535550657a4cfea55c3baae9d8e691d108d308d622e05c47577759",
+          "examples/ecs-native/deploy/Jenkinsfile.tenant-physical.in": "847f6014f8e60c7fcb70c48439c57fa9a9ba91e2e35733208cb60f4dde712b71"
+        },
+        "owned_physical_ids": [
+          {
+            "id": "45adf45139ff4ba3abbb4f6f5da841f0",
+            "spec_digest": "47896fc7a801a80f748820e335a73050a5edeb2d1a66cd2cfdbdb85ed57984c4"
+          },
+          {
+            "id": "e210f1732e1247eda341e5185995b468",
+            "spec_digest": "47896fc7a801a80f748820e335a73050a5edeb2d1a66cd2cfdbdb85ed57984c4"
+          },
+          {
+            "id": "898b70148d26402e93d18994d781be92",
+            "spec_digest": "174489af1424c8b51773f7a9cd1cbde0a1e7799979414a842365f2bdd7d702af"
+          },
+          {
+            "id": "f2da072b43a4480cb56814a77cf54bce",
+            "spec_digest": "174489af1424c8b51773f7a9cd1cbde0a1e7799979414a842365f2bdd7d702af"
+          },
+          {
+            "id": "9e121fa6ba704a76b3898b6c56232db7",
+            "spec_digest": "174489af1424c8b51773f7a9cd1cbde0a1e7799979414a842365f2bdd7d702af"
+          },
+          {
+            "id": "a02950f3ae2c4d59b7d58f2fccd62c60",
+            "spec_digest": "174489af1424c8b51773f7a9cd1cbde0a1e7799979414a842365f2bdd7d702af"
+          }
+        ],
+        "remaining_owned_job_containers": [],
+        "recorded_removed_fixture_volumes": [
+          "1118afcc5d7048d715c00ac1a673f9a4701535ba7f8eced4585dc52816ca8c07"
+        ]
+      },
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 83114,
+        "number": 30,
+        "result": "SUCCESS",
+        "job": "deerflow-tenant-execution-m4-sql",
+        "phase": "m4-b-physical-regressions",
+        "source_archive_sha256": "2a47ac66a726bfbf881b5cdac43e9012f5b9edf4d765d7e2a951bf10adb5d836",
+        "log_sha256": "222e752681b8c691190a830a559da6fdd85a84268ef9e27dc2b558982e4b5331",
+        "code_sha256": {
+          "backend/packages/ecs-executor/ecs_executor/native_authority.py": "95c784591cc8b1eeaec48a1046fc269fa4d60c6c93b9df06f66504a665ebd826",
+          "backend/packages/ecs-executor/ecs_executor/jobs.py": "3a1b1170ad7e1e63c128a8ec883f937e0a3625b97768c5abad393578270f7361",
+          "backend/packages/ecs-executor/ecs_executor/publication.py": "cb124b20cf45578c446d120928adb630274019c75feecbdcd672bd5a61fbd238",
+          "backend/packages/ecs-executor/ecs_executor/worker.py": "8963c06f5a6a7cdc1ae07f4f0ae05c0d5564c8ca4b5c4c198f29d26cd5a5b3ad",
+          "backend/tests/test_workspace_execution_wire.py": "779627b1509f4521bc6f0a907457266f142236af205a471628b293e98e839f4b",
+          "backend/tests/test_workspace_execution_physical.py": "02364bfd756d1e1bb6a8a84fefa4508481d35f7c4b856691bfb82eb964d2bb93",
+          "scripts/render_tenant_physical_pipeline.py": "1fa40c2483535550657a4cfea55c3baae9d8e691d108d308d622e05c47577759",
+          "examples/ecs-native/deploy/Jenkinsfile.tenant-physical.in": "aea5dbe0662de02b52b92d23123451a625c926ddcad0f156e82df4dfba00dde5"
+        }
+      }
+    ],
+    "images": [
+      {
+        "id": "sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01",
+        "declared_volumes": []
+      },
+      {
+        "id": "sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea",
+        "declared_volumes": [
+          "/var/lib/postgresql/data"
+        ]
+      }
+    ],
+    "remaining_owned_resources": {
+      "container": [],
+      "network": []
+    },
+    "historical_volume_limit": "Only recorded exact fixture volumes are confirmed removed; no ownership is inferred for old unrecorded volumes and no global prune is performed.",
+    "base_commit": "c7482ab88",
+    "status": "partial M4: single-host B actual Docker report/publication/native task result and observed-withdrawal STOP verified; native control settlement/outbox, pool and C continuation pending",
+    "native_revision": "0040_mcp_workspace_identity",
+    "executor_revision": "e0003_execution_identity",
+    "main_build": 2,
+    "main_passed": 2,
+    "main_seconds": 19.78,
+    "physical_job": "deerflow-tenant-execution-m4-physical",
+    "physical_build": 6,
+    "physical_passed": 6,
+    "physical_seconds": 31.04,
+    "regression_job": "deerflow-tenant-execution-m4-sql",
+    "regression_build": 30,
+    "regressions_passed": 22,
+    "default_physical_skipped": 6,
+    "regression_seconds": 49.25,
+    "static_python_files": 7,
+    "known_warnings": "14 physical / 26 regression pre-existing adapter streamablehttp_client deprecation warnings, not suppressed",
+    "verification": [
+      "Physical #1 RED missing scoped claimer; #2 GREEN actual Docker main on SQLite/PostgreSQL after original Run end and UI selection switch.",
+      "Physical #3 GREEN six concentrated cases: main, withdrawal after actual create/no start, withdrawal while actually running with one failed physical observation. No permission-success/SQL/Docker execution stub.",
+      "Actual input snapshot becomes report.md under native original-thread output, original MCP task receives completed/result URI and actual container removal precedes physical_stopped.",
+      "Scope/actor/private-parent/source/task locks cover short claim/start-intent/result SQL transitions; Docker/HTTP is outside locks. Publication rechecks active native task/cancel state under its native publication lock.",
+      "Native cancel intent refuses direct publication while actor is still active. Revoked actor has no successful task result/artifact; worker uses captured stop intent/ownership and actual removal instead of withdrawn member authority.",
+      "Physical #4 validates versioned repo CI template; #5 adds opt-in before fixture setup; #6 adds exact fixture volume cleanup, without adding case count. Current eight code/template files match #6; seven Python files match SQL #30.",
+      "SQL #30: 22 affected old-path/preflight/ledger/file/cleanup regressions passed, six physical cases skipped by default, seven Python files cloud Ruff check/format passed.",
+      "Fixed images unchanged; all recorded test execution containers and labelled fixture containers/networks absent. Current exact recorded PostgreSQL anonymous volume confirmed removed; no ownership inferred for historical unrecorded volumes."
+    ],
+    "limits": [
+      "Single-host B component only. Pool scoped claims remain closed; no remote C, full C-to-B-to-C continuation, notification or Scheduler scope acceptance.",
+      "Observed withdrawal persists private STOP intent, but native cancellation/revocation outbox and native task control-only STOP receipt/settlement remain incomplete. Revoked native task stays working with no business result until that control protocol exists. Queued denied work is not granted or silently settled.",
+      "Start intent is the native-revocation-fenced admission linearization point; a later withdrawal requires STOP. Polling is not the durable revocation outbox. Full races/partitions/reboot/lease recovery remain M4/M10/M11.",
+      "MCP uses in-process ASGI transport and trusted internal CurrentUser/native admission fixture; actual Docker and native SQL/files run in Shanghai. No public JWT/Gateway tenant startup, TCP, real NAS or least-privilege DB role proof.",
+      "No schema change this step. Current native0040/executor e0003 candidate and older closed native startup fence still require complete paired M10/M11 release/restore evidence.",
+      "All M0-M11 parents remain incomplete and Gateway activation compiled false. No deployment/push/PR/model/local application/pytest/browser/Docker runtime or global resource prune."
     ]
   }
 }

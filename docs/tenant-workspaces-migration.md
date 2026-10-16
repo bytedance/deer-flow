@@ -171,3 +171,15 @@ and cannot authorize runtime execution. Old binaries fail startup on the new
 revision/column shape; this does not stop a pre-existing running process. Align
 the complete paired candidate and restore manifest at M10/M11; do not rewrite
 historical receipts or activate tenants from this bounded schema preparation.
+
+
+M4 single-host B physical component: real Docker now executes the immutable input
+snapshot and publishes a native report/result under the original task authority.
+Claim/start-intent/result transitions use short native workspace/actor/parent/
+Run/task fences; Docker/HTTP stays outside SQL locks. Reconciliation observes
+withdrawal, persists stop intent and removes only the exact owned object. Failed
+inspection retains the unconfirmed physical fact. Task cancellation blocks native
+publication inside the publication lock. Source Run end and selected-space switch
+do not change task ownership. Native cancellation/revocation outbox settlement,
+pool/remote C, notifications, actual NAS/TCP and full M0-M11 remain pending. See
+tenant-workspaces-testing.md; tenant activation remains closed.

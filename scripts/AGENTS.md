@@ -417,3 +417,15 @@ separate native/executor commit receipts and idempotent recovery, and never
 convert `metadata_verified` into permission to activate runtime admission.
 See `docs/tenant-workspaces-migration.md`; real-database contract tests use
 synthetic receipts and cannot be cited as a cloud backup or physical-stop proof.
+
+
+## Tenant physical CI rendering
+
+`render_tenant_physical_pipeline.py` is standard-library-only text rendering and
+never invokes Docker or imports the application. It validates phase and SHA256,
+then fills `examples/ecs-native/deploy/Jenkinsfile.tenant-physical.in`. The template
+runs only the fixed Shanghai job/workspace, pins existing image IDs, uses an
+internal fixture database and job-owned shared paths, and checks exact job/spec
+labels before cleanup. Physical tests are opt-in before fixture setup. This is
+test orchestration, not production deployment or tenant activation. See
+`docs/tenant-workspaces-testing.md` for rerun instructions and acceptance limits.

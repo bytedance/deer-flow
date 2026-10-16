@@ -7,6 +7,9 @@ import hashlib
 import json
 import os
 import time
+from contextlib import nullcontext
+
+from sqlalchemy.exc import SQLAlchemyError
 
 from ecs_executor.files import collect, manifest, prepare
 from ecs_executor.job_store import TERMINAL
@@ -52,19 +55,23 @@ class LocalWorker:
             await asyncio.to_thread(self.store.expire_staged)
             # Reconcile claimed work before accepting a new queued job.
             for job in await asyncio.to_thread(self.store.list_active):
-                if job["state"] in {"starting", "running", "uncertain"}:
+                if job.get("state") in {"starting", "running", "uncertain"}:
                     try:
                         await self.reconcile(job)
-                    except (RuntimeError, TimeoutError, OSError):
+                    except (RuntimeError, TimeoutError, OSError, SQLAlchemyError):
                         # Retry inspection/STOP; never issue another start.
                         continue
             for terminal in await asyncio.to_thread(self.store.list_cleanup_pending):
                 try:
                     await self.cleanup(terminal)
-                except (RuntimeError, TimeoutError, OSError):
+                except (RuntimeError, TimeoutError, OSError, SQLAlchemyError):
                     # Result and durable pending flag survive cleanup failures.
                     continue
-            job = await asyncio.to_thread(self.store.claim_queued)
+            try:
+                claimer = getattr(self.jobs, "claim_queued", self.store.claim_queued)
+                job = await asyncio.to_thread(claimer)
+            except (RuntimeError, SQLAlchemyError):
+                return
             if job:
                 await self.launch(job)
 
@@ -88,9 +95,34 @@ class LocalWorker:
         # A crash after removal merely re-observes absence on the next tick.
         await asyncio.to_thread(self.store.mutate, job["id"], lambda record: record.update(cleanup_pending=False, physical_stopped=True))
 
+    def _authority(self, job):
+        if job.get("workspace_id") is None and not getattr(self.jobs, "workspace_required", False):
+            return nullcontext()
+        resolver = getattr(self.jobs, "execution_authority", None)
+        if resolver is None:
+            raise PermissionError("Worker has no scoped execution authority")
+        return resolver(job)
+
+    def _authorize(self, job):
+        with self._authority(job):
+            pass
+
+    def _fenced_change(self, job, change):
+        with self._authority(job):
+            return self.store.mutate(job["id"], change)
+
+    async def _request_stop(self, job):
+        def request(record):
+            if record["state"] not in TERMINAL:
+                record.update(cancel_requested=True, error="Execution authority withdrawn; physical STOP required")
+
+        return await asyncio.to_thread(self.store.mutate, job["id"], request)
+
     async def launch(self, job):
         ref, profile = self._ref(job), job["profile"]
         try:
+            job = await asyncio.to_thread(self.store.get, job["id"])
+            await asyncio.to_thread(self._authorize, job)
             inputs, outputs = await asyncio.to_thread(prepare, self.jobs.artifact_root, job)
             await self.docker.checked(
                 "create",
@@ -138,17 +170,24 @@ class LocalWorker:
                 *job["spec"]["argv"],
             )
 
+            admitted = False
+
             def intent(record):
-                if record["state"] == "starting" and not record.get("cancel_requested"):
+                nonlocal admitted
+                admitted = record["state"] == "starting" and not record.get("cancel_requested") and not record.get("start_intent")
+                if admitted:
                     record.update(start_intent=True, started_at=time.time())
 
-            fresh = await asyncio.to_thread(self.store.mutate, job["id"], intent)
-            if not fresh.get("start_intent"):
+            fresh = await asyncio.to_thread(self._fenced_change, job, intent)
+            if not admitted:
                 await self.reconcile(fresh)
                 return
+            await asyncio.to_thread(self._authorize, fresh)
             await self.docker.checked("start", ref)
             await self.reconcile(fresh)
-        except (RuntimeError, TimeoutError, OSError):
+        except PermissionError:
+            await self.reconcile(await self._request_stop(job))
+        except (RuntimeError, TimeoutError, OSError, SQLAlchemyError):
 
             def uncertain(record):
                 if record["state"] not in TERMINAL:
@@ -164,6 +203,11 @@ class LocalWorker:
         # Removing the exact managed object fences late start commands. A
         # cancellation is terminal only after that STOP/removal is observed.
         deadline = job.get("started_at", time.time()) + job["profile"]["max_execution_seconds"]
+        if not job.get("cancel_requested") and deadline > time.time():
+            try:
+                await asyncio.to_thread(self._authorize, job)
+            except PermissionError:
+                job = await self._request_stop(job)
         if job.get("cancel_requested") or deadline <= time.time():
             if observation is not None:
                 await self.docker.checked("rm", "-f", self._ref(job))
@@ -203,6 +247,7 @@ class LocalWorker:
             output_files = {}
             overflow = True
         payload = json.dumps({"files": manifest(output_files), "stdout": stdout[:limit].decode("utf-8", errors="replace"), "truncated": overflow, "exit_code": observation["State"]["ExitCode"]}, ensure_ascii=True).encode()
+        await asyncio.to_thread(self._authorize, job)
         artifact = await asyncio.to_thread(self._publish, job["id"], payload)
         native_uri = None
         if self.jobs.publication and not overflow:
@@ -214,7 +259,7 @@ class LocalWorker:
                     if record["state"] not in TERMINAL:
                         record.update(state="failed", error="Private result retained; native publication denied or failed", exit_code=observation["State"]["ExitCode"], artifact=artifact, cleanup_pending=True)
 
-                await asyncio.to_thread(self.store.mutate, job["id"], unpublished)
+                await asyncio.to_thread(self._fenced_change, job, unpublished)
                 return
 
         def complete(record):
@@ -225,7 +270,7 @@ class LocalWorker:
                 if overflow:
                     record["error"] = "Execution output exceeds profile limit"
 
-        await asyncio.to_thread(self.store.mutate, job["id"], complete)
+        await asyncio.to_thread(self._fenced_change, job, complete)
 
     def _publish(self, job_id: str, payload: bytes):
         root = self.jobs.artifact_root

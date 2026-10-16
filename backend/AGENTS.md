@@ -387,14 +387,16 @@ preflight. It verifies cryptographic intent before native lookup, reuses native
 membership/account policy and checks the original running Run/private parent and
 snapshot. It is not a durable physical start/publication grant. Opt-in scoped B
 HTTP submission and v2 management now verify original native MCP commitment and
-snapshot identity; unintegrated physical worker claims still refuse scoped work.
+snapshot identity. Scoped single-host B physically executes with native authority
+fences; default store/pool scoped claims remain closed.
 Never enable the tenant startup gate on this component evidence.
 
 Executor schema `e0003_execution_identity` appends a nullable immutable B intent
 snapshot/hash. Native ownership attribution leaves it NULL; it does not create a
 launch grant. JobStore validates captured identity on reads/mutations/retries.
-Unintegrated local and pool queued claims exclude workspace-attributed jobs;
-pool filtering precedes limit. All old processes must stop before offline upgrade.
+Default JobStore and pool queued claims exclude workspace-attributed jobs;
+scoped single-host B claims via ExecutionJobs native authority. Pool filtering
+precedes limit. All old processes must stop before offline upgrade.
 Do not interpret this schema floor or HTTP management as completed scoped B/C
 physical launch/publication, native cancellation delivery or tenant activation.
 
@@ -409,3 +411,15 @@ Staging expiry only mutates staged rows and leaves unknown history/reservations
 untouched. Scoped file snapshots/publication recheck live scope under native
 workspace/actor/private-parent locks. Full physical start/adopt/result/control
 and M0-M11 evidence are still required; activation stays compiled false.
+
+Scoped single-host B now uses NativeSubmissionAuthority.fence around short
+claim/start-intent/result SQL writes, locking workspace -> actor -> private
+parent -> source Run -> native task. Docker/HTTP is outside that transaction.
+The worker authorizes before start/reconcile/publication and persists a control
+stop request on observed withdrawal; cleanup only uses captured ownership and
+physical inspection, never a withdrawn business grant. Native file publication
+rechecks active task/cancel state under native scope/parent locks before writes.
+No automatic start replay or STOP/capacity inference from failed inspection.
+Pool scoped claims stay closed. Native outbox/task control settlement and remote
+C/full lifecycle remain required; Gateway activation remains compiled false.
+Reproduction and exact limits: ../docs/tenant-workspaces-testing.md.
