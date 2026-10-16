@@ -53,8 +53,8 @@ async def test_redis_cache_skips_unserializable_entry_but_writes_other_entries(m
 
     assert fake.pipe.executed
     assert fake.pipe.writes == [
-        ("before", b"json\\x00encoded", 60),
-        ("after", b"json\\x00encoded", 60),
+        ("before", b"json\x00encoded", 60),
+        ("after", b"json\x00encoded", 60),
     ]
     assert "broken" in caplog.text
     assert "TypeError" in caplog.text
