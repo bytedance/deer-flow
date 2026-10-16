@@ -189,7 +189,7 @@ def test_skills_writer_preserves_the_lifecycle_ledger(
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
     monkeypatch.setattr("app.gateway.routers.skills.reload_extensions_config", lambda *a, **k: None)
 
-    skills_router._write_extensions_skill_state(MagicMock(), "demo", False, rebuild_public_projection=False)
+    skills_router._write_extensions_skill_state(MagicMock(_app_config=None), "demo", False, rebuild_public_projection=False)
 
     written = json.loads(cfg.read_text(encoding="utf-8"))
     assert written["mcpLifecycle"] == ledger  # preserved byte-for-value, never recomputed

@@ -440,6 +440,12 @@ to delegation. Browser fields are allowlisted. Code is trusted, not sandboxed.
 within 64 KiB and snapshot artifacts. Keep identity, policy/deadline and citation
 gates. Test ToolNode and checkpoint replay. See `docs/full-stack-plugins.md`.
 
+Evolution host grants (`host_access.evidence` / `skill_mutations`) compose with
+`host_access.model_invocation` through `HostAccess`. Evolution grants require a
+unique stable name and entry point; model-only grants retain their per-install
+identity and permit repeated entry points. Keep all granted dependencies when
+wrapping services with `ModelInvocationService`. The additive evolution contracts
+ship in extension API 0.2.7, after 0.2.6's PluginToolResult contract.
 Full Agent run control is an optional `deerflow_extension_api.AgentRuns` handle
 on action/tool contexts and the request resolver. Gateway owns principal binding,
 revocation and ordinary route admission in `app/gateway/extension_agent_runs.py`.

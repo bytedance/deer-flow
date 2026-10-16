@@ -319,7 +319,7 @@ def test_temp_creation_and_cleanup_within_mutation(tmp_path, monkeypatch, user_s
     active = False
 
     @contextmanager
-    def locked():
+    def locked(*, names=()):
         nonlocal active
         assert not root.exists()
         active = True

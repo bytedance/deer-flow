@@ -29,10 +29,12 @@ The empty-DB path keeps using `create_all` because `Base.metadata` is the only a
 `0028_parked_attempts` → `0029_scheduler_agent_tasks` →
 `0030_notification_claim_tokens` → `0031_scheduled_streak_boundary` →
 `0032_activity_and_task_events` → `0033_batch_result_artifact` → `0034_run_event_seq_watermark` →
-`0035_login_throttle` → `0036_run_idempotency_request` → `0037_project_document_summaries` →
-`0038_channel_thread_bindings` → `0039_user_disabled` →
-`0040_scheduled_group_notice` → `0041_im_notice_preferences` →
-`0042_channel_leases` (current head). The preference
+`0035_login_throttle` → `0036_run_idempotency_request` →
+`0037_project_document_summaries` → `0038_channel_thread_bindings` →
+`0039_user_disabled` → `0040_scheduled_group_notice` →
+`0041_im_notice_preferences` → `0042_channel_leases` →
+`0043_runtime_im_notices` → `0044_completed_run_evidence` →
+`0045_skill_mutations` (current head). The preference
 revision adds a separate owner/key table with a cascading users foreign key and
 does not alter users; the project-documents revision adds a new owner-scoped
 shelf table, and the MCP lease-token revision adds two nullable token columns to
@@ -190,7 +192,6 @@ on installs that never enabled it. The convention is:
 - `extensions/loader.py::load_extensions` — registers each spec's `table_prefix` with `register_extension_table_prefix()`
 - Tests: `tests/test_persistence_bootstrap.py` (branches), `tests/test_persistence_bootstrap_concurrency.py` (concurrency), `tests/test_persistence_bootstrap_regression.py` (issue #3682), `tests/test_persistence_migrations_env.py` (filter, including extension-owned tables), `tests/test_extension_loader.py::TestTablePrefixRegistration` (spec-to-filter wiring), `tests/blocking_io/test_persistence_bootstrap.py` (asyncio.to_thread anchor), `tests/test_migration_0004_run_ownership_dedupe.py` + `tests/test_migration_0007_scheduled_run_active_dedupe.py` (dedupe-before-unique-index pre-steps), `tests/test_migration_0025_repair_run_change_seq.py` (issue #5516 skipped-revision heal)
 
-
 `0041_im_notice_preferences` adds the owner/provider proactive-notification
 boolean table without a users FK (local synthetic IM owners are supported).
 Upgrade/drop are table-guarded; fresh bootstrap registers the ORM model.
@@ -198,3 +199,6 @@ It follows 0040 without reparenting history, has no backfill and leaves the
 forward-compatibility floor unchanged. Downgrade removes the saved choices;
 reenabling a provider never reopens notifications canceled before downgrade.
 Tests: `test_migration_0041_im_notice_preferences.py`.
+
+- `0044_completed_run_evidence` adds nullable evidence sealing fields and completed-run snapshots after `0043_runtime_im_notices`.
+- `0045_skill_mutations` adds durable owner enrollment, asset revisions, proposals, publication operations and scan leases. The single-head pin lives in `tests/test_migration_0045_skill_mutations.py`.

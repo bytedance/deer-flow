@@ -48,6 +48,7 @@ from deerflow.runtime.events.catalog import (
     RUN_START_EVENT,
 )
 from deerflow.runtime.events.store.base import RunEventStore, RunEventStoreNotCommittedError
+from deerflow.runtime.user_context import AUTO, _AutoSentinel
 from deerflow.utils.llm_text import strip_leading_think_blocks
 from deerflow.utils.messages import message_to_text, restore_original_human_message
 
@@ -319,12 +320,19 @@ class RunJournal(BaseCallbackHandler):
         flush_threshold: int = 20,
         progress_reporter: Callable[[dict], Awaitable[None]] | None = None,
         progress_flush_interval: float = 5.0,
+        user_id: str | None | _AutoSentinel = AUTO,
     ):
         super().__init__()
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
         self.run_id = run_id
         self.thread_id = thread_id
+        self._evidence_owner_id = user_id if isinstance(event_store, DbRunEventStore) else AUTO
         self._store: RunEventStore | None = event_store
         self._closed = False
+        self._accepting_evidence = True
+        self._producer_lock = threading.Lock()
+        self._pending_producer_callbacks = 0
         self._track_tokens = track_token_usage
         self._flush_threshold = flush_threshold
         self._progress_reporter = progress_reporter
@@ -566,7 +574,7 @@ class RunJournal(BaseCallbackHandler):
         tags: list[str] | None = None,
         **kwargs: Any,
     ) -> None:
-        if self._closed:
+        if self._closed or not self._accepting_evidence:
             return
 
         messages: list[AnyMessage] = []
@@ -952,6 +960,7 @@ class RunJournal(BaseCallbackHandler):
         return {
             "thread_id": self.thread_id,
             "run_id": self.run_id,
+            **({"user_id": self._evidence_owner_id} if self._evidence_owner_id is not AUTO else {}),
             "event_type": event_type,
             "category": category,
             "content": content,
@@ -1025,7 +1034,7 @@ class RunJournal(BaseCallbackHandler):
         caller: str,
     ) -> None:
         """Queue one logical response and merge usage into its canonical callback."""
-        if self._closed:
+        if self._closed or not self._accepting_evidence:
             return
 
         has_usage = self._has_positive_usage(events)
@@ -1063,8 +1072,8 @@ class RunJournal(BaseCallbackHandler):
         # Some providers immediately re-fire on_llm_end with usage filled in.
         # Defer an incomplete copy until the next event or flush.
 
-    def _put(self, *, event_type: str, category: str, content: str | dict = "", metadata: dict | None = None) -> None:
-        if self._closed:
+    def _put(self, *, event_type: str, category: str, content: str | dict = "", metadata: dict | None = None, _admitted: bool = False) -> None:
+        if self._closed or (not self._accepting_evidence and not _admitted):
             return
         self._commit_pending_llm_response()
         self._buffer.append(self._make_event(event_type=event_type, category=category, content=content, metadata=metadata))
@@ -1441,17 +1450,22 @@ class RunJournal(BaseCallbackHandler):
             if owner_loop.is_closed() or not owner_loop.is_running():
                 logger.warning("Dropping cross-thread middleware event after run loop shutdown")
                 return
-            try:
-                owner_loop.call_soon_threadsafe(
-                    partial(
-                        self._put,
-                        event_type=event_type,
-                        category=MIDDLEWARE_EVENT_PATTERN.category,
-                        content={"name": name, "hook": hook, "action": action, "changes": dict(changes)},
+            with self._producer_lock:
+                if not self._accepting_evidence:
+                    return
+                self._pending_producer_callbacks += 1
+                try:
+                    owner_loop.call_soon_threadsafe(
+                        partial(
+                            self._record_admitted_middleware,
+                            event_type=event_type,
+                            category=MIDDLEWARE_EVENT_PATTERN.category,
+                            content={"name": name, "hook": hook, "action": action, "changes": dict(changes)},
+                        )
                     )
-                )
-            except RuntimeError:
-                logger.warning("Dropping cross-thread middleware event after run loop shutdown")
+                except RuntimeError:
+                    self._pending_producer_callbacks -= 1
+                    logger.warning("Dropping cross-thread middleware event after run loop shutdown")
             return
 
         self._put(
@@ -1459,6 +1473,13 @@ class RunJournal(BaseCallbackHandler):
             category=MIDDLEWARE_EVENT_PATTERN.category,
             content={"name": name, "hook": hook, "action": action, "changes": changes},
         )
+
+    def _record_admitted_middleware(self, **kwargs) -> None:
+        try:
+            self._put(**kwargs, _admitted=True)
+        finally:
+            with self._producer_lock:
+                self._pending_producer_callbacks -= 1
 
     def claim_tool_promotions(self, tool_names: Iterable[str]) -> list[str]:
         """Atomically claim names not yet reported by this run's lead agent."""
@@ -1642,9 +1663,39 @@ class RunJournal(BaseCallbackHandler):
             _batch, error = self._quarantined_batches[0]
             raise RuntimeError(f"RunJournal flush refused: {len(_batch)} event(s) for run {self.run_id} have an unknown durable outcome") from error
 
+    async def _stop_evidence_producers(self) -> None:
+        with self._producer_lock:
+            self._accepting_evidence = False
+        while self._pending_producer_callbacks:
+            await asyncio.sleep(0)
+
+    async def _drain_evidence(self) -> None:
+        if self._closed:
+            return
+        await self._stop_evidence_producers()
+        await self.flush()
+
+    async def finish_evidence(self):
+        """Stop declared producers and drain accepted work before capturing bounds.
+
+        This is independent of terminal business status and does not detach the
+        journal. Proven uncommitted writes remain available for explicit retry;
+        unknown outcomes stay quarantined and never yield a durable receipt.
+        Unsupported stores return no durable receipt.
+        """
+        if self._closed:
+            return None
+        await self._drain_evidence()
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
+        if isinstance(self._store, DbRunEventStore):
+            return await self._store.evidence_receipt(self.thread_id, self.run_id)
+        return None
+
     def _detach_runtime_dependencies(self) -> None:
         """Drop every external or potentially cyclic run-scoped reference."""
         self._closed = True
+        self._accepting_evidence = False
         with self._skill_usage_lock:
             self._skill_usages.clear()
         self._store = None
@@ -1691,6 +1742,7 @@ class RunJournal(BaseCallbackHandler):
                     raise RuntimeError(f"RunJournal for run {self.run_id} was force-closed; close cannot report success")
                 if self._closed:
                     return
+                await self._stop_evidence_producers()
                 await self._flush_locked()
                 self._detach_runtime_dependencies()
             return

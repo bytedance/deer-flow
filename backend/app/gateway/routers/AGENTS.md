@@ -16,6 +16,8 @@ create-only: collisions return 409, never overwrite or upsert. Ordinary creation
 and import share `_persist_new_agent`, which uses `run_drained_write` so a
 cancelled request still drains the owned persistence worker.
 
+Skill mutation operation lists return `next_cursor: null` when `has_more` is false, including empty pages after a supplied `after_id`. The next cursor is the final returned operation only when a further page exists.
+
 `GET /api/agent-tool-groups` projects only configured group names for the
 custom-Agent settings allowlist. Never expose tool provider paths, credentials,
 or raw tool configuration through this catalog.

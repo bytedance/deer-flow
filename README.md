@@ -1864,6 +1864,24 @@ classifies the sanitized text a remote tool result shows the model, PII-redacted
 `pii_redaction` is enabled, and adds an advisory warning through a lifecycle state
 update; it imports only the extension contract.
 
+Extensions may opt into owner-scoped completed-run evidence and safe updates to
+existing user-custom skills through `host_access` in operator-controlled
+`config.yaml`. These optional APIs stage an immutable candidate, check its exact
+contents, and publish with version conflict detection and crash recovery. They
+do **not** implement a learning/evolution plugin. Automatic changes are limited to
+the body and description of `SKILL.md`; changing permissions, supporting files,
+or enabled state is out of scope. The host contract requires `deerflow-extension-api==0.2.7`. See [Skill evolution host API](docs/skill-evolution-host.md)
+for deployment requirements, grants, recovery, and the plugin integration flow.
+Once an owner is enrolled, use the Gateway for skill management: standalone SDK
+processes without its durable mutation runtime refuse enrolled skill access,
+including custom-skill YAML diagnostics. Gateway diagnostics recover pending
+publications before scanning.
+Skill discovery preserves user scope when the caller uses the default configuration.
+Admin operation lists return `next_cursor: null` at the end of pagination.
+Keyed resume retries preserve the original run's evidence origin and agent identity.
+This host slice follows up the [Skill Self-Evolution RFC](https://github.com/bytedance/deer-flow/issues/1865)
+and the bilingual [Plugin Host APIs RFC](https://github.com/bytedance/deer-flow/issues/5539).
+
 Full-stack contributions can additionally provide browser pages, conversation actions,
 authenticated backend operations and model tools through the
 [plugin APIs](docs/full-stack-plugins.md). The independent
@@ -2311,6 +2329,8 @@ async with runtime:
 `SubagentRuntime.stop()` waits for its owned batch service to finish before propagating caller cancellation, including repeated cancellation. This drain has no timeout; repository operations and child cleanup must terminate. If service shutdown also fails or is cancelled, the first caller cancellation is preserved with the service failure as its cause.
 
 Gateway run finalization also retains ownership through caller cancellation: it finishes terminal persistence, stream completion, and resource cleanup before propagating the interruption. Backend I/O must terminate or enforce its own timeout. Gateway shutdown includes workers still finalizing after their terminal status commits; an expired shutdown drain budget is logged and does not cancel their outstanding writes.
+
+Terminal cleanup releases the run journal and its message-sequence callback even when diagnostic logs retain a checkpoint-inspection traceback.
 
 The factory still does not load YAML or create SQL infrastructure: the caller supplies the config snapshot, repository, and lifecycle. Because it accepts a caller-owned `system_prompt`, direct integrations also own any model-visible wording about those limits; the default middleware enforces the runtime limits regardless. The factory does not mount the Gateway owner-scoped HTTP routes or Web UI, so direct applications must expose their own result API/UI if they need those surfaces. For ordinary delegation only, `SubagentRuntime(...)` needs no asynchronous startup.
 

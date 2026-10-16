@@ -1449,7 +1449,8 @@ async def test_terminal_cycle_collection_is_coalesced_contextless_and_off_loop(m
 
 
 @pytest.mark.anyio
-async def test_run_agent_releases_terminal_runtime_callbacks(caplog):
+@pytest.mark.parametrize("fail_checkpoint_inspection", [False, True])
+async def test_run_agent_releases_terminal_runtime_callbacks(caplog, fail_checkpoint_inspection):
     from deerflow.runtime.journal import RunJournal
 
     caplog.set_level(logging.DEBUG, logger="deerflow.runtime.runs.worker")
@@ -1471,8 +1472,10 @@ async def test_run_agent_releases_terminal_runtime_callbacks(caplog):
             yield {"messages": []}
 
         async def aget_state(self, _config):
-            # Finalization reads checkpoint messages. A missing-method traceback
-            # retained by DEBUG log capture would itself keep the journal alive.
+            # A real checkpoint failure can retain the worker frame through a
+            # diagnostic traceback, just as a missing mock method can.
+            if fail_checkpoint_inspection:
+                raise RuntimeError("checkpoint inspection unavailable")
             return SimpleNamespace(values={"messages": []})
 
     await run_agent(
@@ -1490,7 +1493,10 @@ async def test_run_agent_releases_terminal_runtime_callbacks(caplog):
 
     stream_config = captured["config"]
     journal = captured["journal"]
-    assert "Failed to inspect trailing human_input_request" not in caplog.text
+    if fail_checkpoint_inspection:
+        assert any(record.exc_info and "Failed to inspect trailing human_input_request" in record.message for record in caplog.records)
+    else:
+        assert "Failed to inspect trailing human_input_request" not in caplog.text
     assert "__pregel_runtime" not in stream_config["configurable"]
     assert "__run_journal" not in stream_config["context"]
     assert journal not in (stream_config.get("callbacks") or [])

@@ -201,6 +201,11 @@ Check all owners and categories; surviving rows retain the allocation floor.
 
 **Terminal run cleanup:** Close streams, journals, and graph references even on cancellation. Details: `backend/docs/runtime-guidance-details.md`.
 
+Clear both the terminal worker's journal and message-sequence stamper references;
+the stamper's generation callback captures the journal. Diagnostic tracebacks may
+retain finalizer frames, so config/callback removal alone is insufficient. Keep
+the DEBUG checkpoint-inspection failure regression in `test_run_worker_rollback.py`.
+
 **`RunManager._runs` holds only records this worker admitted.** A cross-worker idempotent reuse returns the `store_only` row from `_record_from_store()` unregistered: the peer never finalizes or `cleanup()`s it, so a registered copy stays `pending`/`running`, 409s later same-thread admissions, hides the owner's orphan from reconciliation, and sends a peer `cancel()` down the local-owner path. Pinned by `test_peer_idempotent_reuse_*` and `test_peer_cancel_of_reused_run_*` (`tests/test_multi_worker_run_ownership.py`) plus `tests/test_gateway_services.py::test_start_run_peer_idempotent_reuse_*`.
 
 **A `RunRecord` owner matches its durable row.** HTTP admissions omit `user_id` and the SQL store stamps the ambient user, so `create()` and `_admit_thread_operation()` resolve an omitted owner from the contextvar, keeping `None` without one — never `get_effective_user_id()`'s `default` bucket. A `None` record made SQL keyed retries on a peer or after `cleanup()` return 500, hid HTTP runs from owner-scoped history, and skipped their MCP `background_tasks` projection. Pinned by `test_run_record_owner_matches_row_stamped_from_context`, `test_keyed_retry_without_explicit_user_*`, the `sql` case of `test_start_run_peer_idempotent_reuse_*`, `test_run_manager_*_admitted_without_explicit_user`, and `test_run_manager_keeps_omitted_owner_unset_without_user_context`.
@@ -300,3 +305,15 @@ the admitted group keeps its records on success or completes rollback on failure
 This is a store-local guarantee, not a change to RunJournal cancellation policy or
 JSONL's single-process deployment constraint. Regression coverage is in
 `tests/test_jsonl_event_store_cancellation.py`.
+
+## Completed-evidence provenance
+
+Gateway admission and RunManager validate host-owned evidence origin against the shared `EVIDENCE_ORIGINS` in `runtime/runs/schemas.py`. Preserve the string values and reject client metadata as provenance; only trusted Python entry points set the admission argument.
+
+Idempotent resume reuse preserves both the private request identity and the original evidence origin/agent across worker and store boundaries. A retry must not relabel existing evidence. Memory/SQLite parity is covered in `tests/test_completed_evidence_admission.py`.
+
+Completed-evidence finalization obeys the journal write-ownership contract:
+unknown or cancelled write outcomes cannot yield a receipt or be replayed. Only
+proven-not-committed batches may be retried. Normal close stops new evidence
+producers and drains already admitted cross-thread callbacks inside its operation
+lock before flushing and detaching; do not reacquire that lock through `flush()`.
