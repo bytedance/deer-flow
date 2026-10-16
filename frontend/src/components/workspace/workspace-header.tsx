@@ -15,6 +15,8 @@ import { useI18n } from "@/core/i18n/hooks";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
+import { WorkspaceSwitcher } from "./workspace-switcher";
+
 export function WorkspaceHeader({ className }: { className?: string }) {
   const { t } = useI18n();
   const { state } = useSidebar();
@@ -49,6 +51,7 @@ export function WorkspaceHeader({ className }: { className?: string }) {
           </div>
         )}
       </div>
+      <WorkspaceSwitcher />
       <SidebarMenu>
         <SidebarMenuItem>
           <SidebarMenuButton

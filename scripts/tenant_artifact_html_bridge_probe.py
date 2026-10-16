@@ -26,7 +26,7 @@ from urllib.parse import urlparse,parse_qs
 from playwright.async_api import async_playwright
 FILES={k:base64.b64decode(v) for k,v in json.loads(base64.b64decode(FILES_BASE64)).items()}
 P="11111111-1111-1111-1111-111111111111";T="22222222-2222-2222-2222-222222222222"
-requests=[];reads={P:0,T:0};forbidden_hits=[];held_started=threading.Event();held_release=threading.Event();held_module_started=threading.Event()
+requests=[];reads={P:0,T:0};forbidden_hits=[];held_started=threading.Event();held_release=threading.Event();held_module_started=threading.Event();held_workspace=None;denied_workspace=None;workspace_started=threading.Event();workspace_release=threading.Event();retry_seen=threading.Event();control_requests=[]
 def chunk(tag,data):return struct.pack(">I",len(data))+tag+data+struct.pack(">I",zlib.crc32(tag+data))
 PNG=b"\x89PNG\r\n\x1a\n"+chunk(b"IHDR",struct.pack(">IIBBBBB",1,1,8,6,0,0,0))+chunk(b"IDAT",zlib.compress(b"\x00\xff\x00\x00\xff"))+chunk(b"IEND",b"")
 class Handler(BaseHTTPRequestHandler):
@@ -38,17 +38,21 @@ class Handler(BaseHTTPRequestHandler):
  def do_GET(self):
   u=urlparse(self.path)
   cookie="access_token=html-bridge-fixture" in self.headers.get("Cookie","")
-  if u.path=="/":return self.reply(200,b'<!doctype html><style>iframe{width:640px;height:400px}#control{width:16px;height:16px}</style><div id="root"></div><script src="/compiled/app.js"></script>',"text/html")
+  if u.path=="/":return self.reply(200,b'<!doctype html><style>iframe{width:640px;height:400px}#control{width:16px;height:16px}</style><div id="root"></div><script src="/compiled/app.js"></script>',"text/html;charset=utf-8")
   if u.path.startswith("/compiled/"):
    name=u.path[len("/compiled/"):]
    if name in FILES:return self.reply(200,FILES[name],mimetypes.guess_type(name)[0] or "application/octet-stream")
    return self.reply(404,b"not-found","text/plain")
   if u.path=="/api/auth/me" or "/threads/foreign/" in u.path:forbidden_hits.append(u.path)
   if u.path=="/api/workspaces":
+   control_requests.append({"path":u.path,"workspace":None})
    body=[{"id":ws,"name":"Personal" if ws==P else "Team","kind":"personal" if ws==P else "team","status":"active","personal_user_id":"alice" if ws==P else None,"role":"owner","membership_version":1,"policy_version":1} for ws in (P,T)]
    return self.reply(200 if cookie else 401,json.dumps(body).encode(),"application/json")
   if u.path=="/api/workspaces/current":
    ws=self.headers.get("X-Deerflow-Workspace")
+   control_requests.append({"path":u.path,"workspace":ws})
+   if held_workspace is not None and ws==held_workspace:workspace_started.set();workspace_release.wait(12)
+   if denied_workspace is not None and ws==denied_workspace:retry_seen.set();return self.reply(403,b'{"detail":{"code":"workspace_unavailable"}}',"application/json")
    return self.reply(200 if cookie and ws in (P,T) else 403,json.dumps({"actor_user_id":"alice","workspace_id":ws,"membership_version":1,"policy_version":1}).encode(),"application/json")
   if "/artifacts/" in u.path:
    ws=parse_qs(u.query).get("workspace_id",[None])[0];header=self.headers.get("X-Deerflow-Workspace")
@@ -83,13 +87,14 @@ class Handler(BaseHTTPRequestHandler):
    return self.reply(404,b"not-found","text/plain")
   return self.reply(404,b"not-found","text/plain")
 async def main():
+ global held_workspace,denied_workspace
  server=ThreadingHTTPServer(("127.0.0.1",0),Handler);threading.Thread(target=server.serve_forever,daemon=True).start();origin=f"http://127.0.0.1:{server.server_port}"
- rows=[];errors=[];failure=None;boundaries={};failed_requests=[];inflight={};console_errors=[]
+ rows=[];errors=[];failure=None;boundaries={};pending_snapshot=None;failed_requests=[];inflight={};console_errors=[]
  try:
   async with async_playwright() as p:
    browser=await p.chromium.launch(headless=True)
    try:
-    context=await browser.new_context();await context.add_cookies([{"name":"access_token","value":"html-bridge-fixture","url":origin,"httpOnly":True,"sameSite":"Lax"}]);page=await context.new_page();page.on("pageerror",lambda e:errors.append(str(e)));page.on("requestfailed",lambda r:failed_requests.append(r.url))
+    context=await browser.new_context();await context.add_cookies([{"name":"access_token","value":"html-bridge-fixture","url":origin,"httpOnly":True,"sameSite":"Lax"}]);page=await context.new_page();page.on("pageerror",lambda e:errors.append(str(e)+"\n"+getattr(e,"stack","")));page.on("requestfailed",lambda r:failed_requests.append(r.url))
     page.on("request",lambda request:inflight.__setitem__(id(request),request.url))
     page.on("requestfinished",lambda request:inflight.pop(id(request),None))
     page.on("requestfailed",lambda request:inflight.pop(id(request),None))
@@ -97,8 +102,11 @@ async def main():
     try:
      await page.goto(origin)  # The scoped UI/resource assertions below own readiness.
      for ws,label in [(P,None),(T,"Team")]:
-      if label:await page.get_by_role("button",name=label,exact=True).click()
+      if label:
+       await page.get_by_role("button",name="Switch workspace: Personal",exact=True).click()
+       await page.get_by_role("menuitemradio",name="Team workspace: Team",exact=True).click()
       await page.wait_for_function("(ws) => document.querySelector('[data-testid=scope]')?.textContent===ws",arg=ws)
+      await page.get_by_role("button",name="Switch workspace: "+("Personal" if ws==P else "Team"),exact=True).wait_for(state="visible",timeout=3000)
       await page.wait_for_function("document.querySelector('#control')?.complete && document.querySelector('#control').naturalWidth===1")
       handle=await page.locator('iframe[title="Artifact preview"]').element_handle();frame=await handle.content_frame();assert frame is not None
       await frame.wait_for_function("window.probe && document.querySelector('#asset')?.complete && document.querySelector('#data')?.textContent!=='waiting'",timeout=15000)
@@ -135,12 +143,43 @@ async def main():
      await frame.wait_for_function("window.moduleReady && document.querySelector('#json-module').textContent!=='waiting'",timeout=15000)
      boundaries['new_module_document_survives']=await frame.evaluate("(ws)=>document.querySelector('#module').textContent==='module:'+ws+':ab' && window.valueLoads===1",T)
      boundaries['new_document_survives']=await frame.locator('#data').inner_text()==T+':3'
+     private_count=len(requests);held_workspace=P
+     await page.get_by_role('button',name='Switch workspace: Team',exact=True).click()
+     await page.get_by_role('menuitemradio',name='Personal workspace: Personal',exact=True).click()
+     assert await asyncio.to_thread(workspace_started.wait,5),"space confirmation was not held"
+     await page.wait_for_function("!document.querySelector('iframe')")
+     pending_snapshot=await page.evaluate("({charset:document.characterSet,iframeCount:document.querySelectorAll('iframe').length,buttons:[...document.querySelectorAll('button')].map(button=>({label:button.getAttribute('aria-label'),busy:button.getAttribute('aria-busy'),text:button.textContent}))})")
+     assert pending_snapshot['charset'].upper()=='UTF-8',"Fixture HTML must declare UTF-8"
+     assert any(button['label']=='Switch workspace: Switching workspace…' for button in pending_snapshot['buttons']),"Pending label differs from native translation"
+     loading=page.get_by_role('button',name='Switch workspace: Switching workspace…',exact=True)
+     boundaries['pending_switch_hides_content']=len(requests)==private_count and await loading.get_attribute('aria-busy')=='true'
+     await loading.click();boundaries['pending_controls_remain_available']=await page.get_by_role('menuitemradio',name='Team workspace: Team',exact=True).is_visible();await page.keyboard.press('Escape')
+     held_workspace=None;workspace_release.set()
+     await page.wait_for_function("(ws)=>document.querySelector('[data-testid=scope]')?.textContent===ws",arg=P)
+     handle=await page.locator('iframe[title="Artifact preview"]').element_handle();frame=await handle.content_frame()
+     await frame.wait_for_function("(ws)=>window.moduleReady && document.querySelector('#json-module').textContent===ws && document.querySelector('#data').textContent===ws+':3'",arg=P,timeout=15000)
+     denied_workspace=T;private_count=len(requests);control_count=len(control_requests)
+     await page.get_by_role('button',name='Switch workspace: Personal',exact=True).click()
+     await page.get_by_role('menuitemradio',name='Team workspace: Team',exact=True).click()
+     await page.get_by_role('alert').wait_for(state='visible')
+     boundaries['denied_switch_has_no_fallback']=await page.locator('iframe').count()==0 and len(requests)==private_count and not any(item['workspace']==P for item in control_requests[control_count:])
+     team_attempts=sum(item['workspace']==T for item in control_requests);retry_seen.clear()
+     await page.get_by_role('button',name='Retry workspace',exact=True).click()
+     assert await asyncio.to_thread(retry_seen.wait,5),"retry did not reach requested space"
+     await page.wait_for_function("document.querySelector('[role=alert]')!==null")
+     boundaries['retry_keeps_requested_space']=sum(item['workspace']==T for item in control_requests)==team_attempts+1 and len(requests)==private_count
+     denied_workspace=None
+     await page.get_by_role('button',name='Use personal workspace',exact=True).click()
+     await page.get_by_role('button',name='Switch workspace: Personal',exact=True).wait_for(state='visible')
+     handle=await page.locator('iframe[title="Artifact preview"]').element_handle();frame=await handle.content_frame()
+     await frame.wait_for_function("(ws)=>window.moduleReady && document.querySelector('#json-module').textContent===ws && document.querySelector('#data').textContent===ws+':4'",arg=P,timeout=15000)
+     boundaries['explicit_personal_recovery']=await frame.evaluate("window.valueLoads===1")
     except Exception as e:
      failure=str(e)
      try:errors.append((await page.locator('#root').inner_text(timeout=1500))[:1000])
      except Exception:pass
-    passed=not errors and len(rows)==2 and len(boundaries)==7 and all(boundaries.values()) and all(x['modules']=={'main':'module:'+x['workspace']+':ab','inline':'inline:'+x['workspace'],'literal':'literal:'+x['workspace'],'json':x['workspace'],'meta':x['workspace'],'dynamic':'dynamic:'+x['workspace']+':1:1'} and x['imageWidth']==1 and x['color']=='rgb(12, 34, 56)' and x['background'].startswith('url("blob:') and x['script']=='script:'+x['workspace'] and x['data']==x['workspace']+':1' and x['refreshed'] and x['isolated'] and x['external']=='https://example.test/source' for x in rows)
-    print(json.dumps({"status":"main_passed" if passed else "main_failed","browser_version":browser.version,"rows":rows,"boundaries":boundaries,"forbidden_hits":forbidden_hits,"requests":requests,"errors":errors,"console_errors":console_errors[-20:],"inflight":list(inflight.values())[-20:],"failure":failure,"scope":"actual native React ArtifactFilePreview/Auth/Workspace/REST against cookie/scope HTTP fixtures and navigation/env build doubles; not Next/Gateway/SQL acceptance","network":"none","models_called":False}),flush=True)
+    passed=not errors and len(rows)==2 and len(boundaries)==12 and all(boundaries.values()) and all(x['modules']=={'main':'module:'+x['workspace']+':ab','inline':'inline:'+x['workspace'],'literal':'literal:'+x['workspace'],'json':x['workspace'],'meta':x['workspace'],'dynamic':'dynamic:'+x['workspace']+':1:1'} and x['imageWidth']==1 and x['color']=='rgb(12, 34, 56)' and x['background'].startswith('url("blob:') and x['script']=='script:'+x['workspace'] and x['data']==x['workspace']+':1' and x['refreshed'] and x['isolated'] and x['external']=='https://example.test/source' for x in rows)
+    print(json.dumps({"status":"main_passed" if passed else "main_failed","browser_version":browser.version,"rows":rows,"boundaries":boundaries,"pending_snapshot":pending_snapshot,"forbidden_hits":forbidden_hits,"control_requests":control_requests,"requests":requests,"errors":errors,"console_errors":console_errors[-20:],"inflight":list(inflight.values())[-20:],"failure":failure,"scope":"actual native React Header/Sidebar/ArtifactFilePreview/Auth/Workspace/REST against cookie/scope HTTP fixtures and navigation/env build doubles; not Next/Gateway/SQL acceptance","network":"none","models_called":False}),flush=True)
     return passed
    finally:await browser.close()
  finally:server.shutdown();server.server_close()
@@ -164,7 +203,7 @@ def main():
         native_source = member.read()
     names = [args.label + "-html-compile", args.label + "-html-browser"]
     try:
-        compile_script = "set -eu\nmkdir -p /tmp/tenant-source/frontend\ntar xzf /run/source.tar.gz -C /tmp/tenant-source\nln -s /deps/node_modules /tmp/tenant-source/frontend/node_modules\ncat > /tmp/fixture-env.js <<'JS'\nexport const env = {NEXT_PUBLIC_STATIC_WEBSITE_ONLY: \"false\"};\nJS\ncat > /tmp/fixture-navigation.js <<'JS'\nexport const useRouter=()=>({push(){},replace(){}});\nexport const usePathname=()=>\"/artifacts/view\";\nexport const useSearchParams=()=>new URLSearchParams(location.search);\nJS\nnode --input-type=module - <<'JS'\nimport fs from 'node:fs';import path from 'node:path';\nconst deps='/deps/node_modules/.pnpm';const name=fs.readdirSync(deps).find(x=>x.startsWith('@rspack+core@2.0.8'));\nif(!name)throw new Error('Pinned existing Rspack not found');\nconst {rspack}=await import(path.join(deps,name,'node_modules/@rspack/core/dist/index.js'));\nconst root='/tmp/tenant-source/frontend';\nconst compiler=rspack({mode:'production',context:root,target:'web',devtool:false,\n entry:path.join(root,'tests/browser-fixtures/html-preview.tsx'),\n output:{path:'/tmp/compiled',filename:'app.js',chunkFilename:'[name].[contenthash].js',publicPath:'/compiled/'},\n resolve:{extensions:['.tsx','.ts','.jsx','.js','.mjs','.json'],alias:{'@/env$':'/tmp/fixture-env.js','next/navigation$':'/tmp/fixture-navigation.js','@':path.join(root,'src')},conditionNames:['browser','import','module','default'],fallback:{fs:false,path:false,crypto:false}},\n module:{rules:[{test:/\\.[jt]sx?$/,exclude:/node_modules/,use:{loader:'builtin:swc-loader',options:{jsc:{parser:{syntax:'typescript',tsx:true},transform:{react:{runtime:'automatic'}},target:'es2022'}}}},{test:/\\.css$/,type:'asset/source'},{test:/\\.(woff2?|ttf|png|svg|wasm)$/,type:'asset/resource'}]},\n optimization:{minimize:false},performance:{hints:false},plugins:[new rspack.DefinePlugin({'process.env.NODE_ENV':JSON.stringify('production')})]\n});\nawait new Promise((resolve,reject)=>compiler.run((error,stats)=>{if(error)return reject(error);if(stats.hasErrors())return reject(new Error(stats.toString({all:false,errors:true})));resolve();}));\nawait new Promise((resolve,reject)=>compiler.close(error=>error?reject(error):resolve()));\nJS\npython3 - <<'INNER'\nfrom pathlib import Path\nimport json,base64\nroot=Path('/tmp/compiled')\nprint(json.dumps({str(p.relative_to(root)):base64.b64encode(p.read_bytes()).decode() for p in root.rglob('*') if p.is_file()}))\nINNER\n"
+        compile_script = "set -eu\nmkdir -p /tmp/tenant-source/frontend\ntar xzf /run/source.tar.gz -C /tmp/tenant-source\nln -s /deps/node_modules /tmp/tenant-source/frontend/node_modules\ncat > /tmp/fixture-env.js <<'JS'\nexport const env = {NEXT_PUBLIC_STATIC_WEBSITE_ONLY: \"false\"};\nJS\ncat > /tmp/fixture-navigation.js <<'JS'\nexport const useRouter=()=>({push(){},replace(){}});\nexport const usePathname=()=>\"/artifacts/view\";\nexport const useSearchParams=()=>new URLSearchParams(location.search);\nJS\nnode --input-type=module - <<'JS'\nimport fs from 'node:fs';import path from 'node:path';\nconst deps='/deps/node_modules/.pnpm';const name=fs.readdirSync(deps).find(x=>x.startsWith('@rspack+core@2.0.8'));\nif(!name)throw new Error('Pinned existing Rspack not found');\nconst {rspack}=await import(path.join(deps,name,'node_modules/@rspack/core/dist/index.js'));\nconst root='/tmp/tenant-source/frontend';\nconst compiler=rspack({mode:'production',context:root,target:'web',devtool:false,\n entry:path.join(root,'tests/browser-fixtures/html-preview.tsx'),\n output:{path:'/tmp/compiled',filename:'app.js',chunkFilename:'[name].[contenthash].js',publicPath:'/compiled/'},\n resolve:{extensions:['.tsx','.ts','.jsx','.js','.mjs','.json'],alias:{'@/env$':'/tmp/fixture-env.js','next/navigation$':'/tmp/fixture-navigation.js','@':path.join(root,'src')},conditionNames:['browser','import','module','default'],fallback:{fs:false,path:false,crypto:false}},\n module:{rules:[{test:/\\.[jt]sx?$/,exclude:/node_modules/,use:{loader:'builtin:swc-loader',options:{jsc:{parser:{syntax:'typescript',tsx:true},transform:{react:{runtime:'automatic'}},target:'es2022'}}}},{test:/\\.css$/,type:'asset/source'},{test:/\\.(woff2?|ttf|png|svg|wasm)$/,type:'asset/resource'}]},\n optimization:{minimize:false},performance:{hints:false},plugins:[new rspack.DefinePlugin({'process.env.NODE_ENV':JSON.stringify('production'),'process.env':JSON.stringify({NODE_ENV:'production'})})]\n});\nawait new Promise((resolve,reject)=>compiler.run((error,stats)=>{if(error)return reject(error);if(stats.hasErrors())return reject(new Error(stats.toString({all:false,errors:true})));resolve();}));\nawait new Promise((resolve,reject)=>compiler.close(error=>error?reject(error):resolve()));\nJS\npython3 - <<'INNER'\nfrom pathlib import Path\nimport json,base64\nroot=Path('/tmp/compiled')\nprint(json.dumps({str(p.relative_to(root)):base64.b64encode(p.read_bytes()).decode() for p in root.rglob('*') if p.is_file()}))\nINNER\n"
         compiled = subprocess.run(
             [
                 "docker",

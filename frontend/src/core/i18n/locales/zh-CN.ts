@@ -1262,6 +1262,17 @@ export const zhCN: Translations = {
 
   // Workspace
   workspace: {
+    spaceSwitcher: {
+      label: "切换空间",
+      personal: "个人空间",
+      team: "团队空间",
+      loading: "正在切换空间…",
+      unavailable: "空间暂不可用",
+      error: "暂时无法确认空间访问权限。",
+      retry: "重试空间确认",
+      personalAction: "进入个人空间",
+      authRequired: "请重新登录以确认空间访问权限。",
+    },
     officialWebsite: "访问 DeerFlow 官方网站",
     githubTooltip: "访问 DeerFlow 的 GitHub 仓库",
     settingsAndMore: "设置和更多",

@@ -685,3 +685,19 @@ Remaining compatibility includes authored/scoped import maps, classic-script
 dynamic imports, preload/dynamic DOM/media/CSS fidelity and browser matrix/Next/
 real Gateway/principal acceptance. Full M3/general HTML acceptance stays open;
 latest exact check receipts are in docs/tenant-workspaces-progress.json.
+
+
+WorkspaceHeader includes WorkspaceSwitcher, using the existing Sidebar and
+DropdownMenu radio primitives plus en-US/zh-CN labels. It renders nothing without
+WorkspaceContext and never enables the mode or fetches its own catalog. Display
+only the confirmed active row; a pending selection has no active row, retains
+available controls and delegates to WorkspaceSession.select. Error actions are
+explicit: refresh the requested selector, choose the current actor's personal
+space through select(undefined), or use native sign-in. Never recover from denial
+by silently selecting personal scope. Keep controls outside ready-only content
+when integrating the shell: the pending/failed view must not mount resource reads.
+The isolated browser fixture now mounts real WorkspaceHeader/SidebarProvider and
+uses the real dropdown instead of test-only P/T selection buttons. Declare UTF-8
+for its HTML and define build-time process.env for native Next Link. These are
+fixture setup, not replacements for compiled Next/shell/backend acceptance.
+WorkspaceContent/layout bootstrap is still pending; activation remains closed.

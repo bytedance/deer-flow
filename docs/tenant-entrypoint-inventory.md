@@ -241,3 +241,11 @@ byte reader is unchanged. Module API/foreign-thread refusal, native MIME failure
 and held-read hide/reopen pass; 40 existing regressions/full check. HTTP auth/scope
 and env/router are fixtures; no real Gateway/principal/physical proof. Native
 shell/selector and backend main next; other HTML/M3 and M4-M11 gates stay open.
+
+
+Native sidebar switcher (#113 frontend): actual Header/Sidebar/Dropdown P/T
+selection main, pending/denied/retry/explicit personal confirmation verified
+under existing Context. Private content detaches before confirmation, no silent
+fallback. Existing rich-report boundaries and Context three regressions retained;
+full frontend check passes. HTTP auth/scope and navigation/env are fixtures.
+Actual workspace layout/bootstrap and backend main remain next; no activation.

@@ -906,3 +906,25 @@ CSS compatibility remains unaccepted. Next prioritize the approved native space
 switcher/shell and actual backend upload/chat/download main; retain these HTML
 and other M3/principal/physical requirements. All M0-M11 parent gates unchecked,
 M3 partial, activation false. No deployment, push, model call or local app runtime.
+
+
+M3 native switcher checkpoint (2026-10-16, #113 SUCCESS): actual existing
+WorkspaceHeader/Sidebar/Dropdown now selects server-confirmed personal/team
+spaces through WorkspaceSession. Only confirmed names display. Pending removes
+private report content and keeps the menu usable. Denial has explicit retry,
+personal confirmation and sign-in controls; retry retains target, no silent
+personal fallback. #108 is actual missing-control RED after #107 fixture setup
+repair; #109 main passes before adding two workflow boundaries. #110/#111 reveal
+fixture windows-1252 decoding; only fixture UTF-8 response corrected for #112.
+#113 final native browser main/all twelve observations, existing Context three
+tests (no new Rstest cases), six-file format/target lint, early full tsc and full
+pnpm check pass. Exact receipts/source hashes/empty owned resources recorded in
+frontend_native_switcher in progress JSON.
+
+This proves the actual control under opted-in native Context plus HTTP auth/scope
+fixtures and navigation/env build doubles; actual WorkspaceContent/layout
+bootstrap, compiled Next, real Gateway/JWT/SQL/NAS/principal/two-tab and physical
+acceptance remain open. Next wire native shell then real backend main. Remaining
+HTML/UI/global state and M4-M11 requirements are retained; all M0-M11 parent gates
+remain unchecked, M3 partial and runtime activation false. No deployments, pushes,
+model calls or local application/browser/Docker tests.

@@ -1111,6 +1111,17 @@ export interface Translations {
 
   // Workspace
   workspace: {
+    spaceSwitcher: {
+      label: string;
+      personal: string;
+      team: string;
+      loading: string;
+      unavailable: string;
+      error: string;
+      retry: string;
+      personalAction: string;
+      authRequired: string;
+    };
     officialWebsite: string;
     githubTooltip: string;
     settingsAndMore: string;

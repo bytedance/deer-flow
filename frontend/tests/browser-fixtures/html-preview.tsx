@@ -2,7 +2,9 @@ import { useState } from "react";
 import { createRoot } from "react-dom/client";
 
 import { QueryClientProvider } from "@/components/query-client-provider";
+import { SidebarProvider } from "@/components/ui/sidebar";
 import { ArtifactFilePreview } from "@/components/workspace/artifacts/artifact-file-preview";
+import { WorkspaceHeader } from "@/components/workspace/workspace-header";
 import { urlOfArtifact } from "@/core/artifacts/utils";
 import { AuthProvider } from "@/core/auth/AuthProvider";
 import { I18nContext } from "@/core/i18n/context";
@@ -10,12 +12,9 @@ import { enUS } from "@/core/i18n/locales/en-US";
 import {
   WorkspaceProvider,
   WorkspaceReadyBoundary,
-  useWorkspaceContext,
   useWorkspaceLifetime,
 } from "@/core/workspaces/context";
 
-const P = "11111111-1111-1111-1111-111111111111";
-const T = "22222222-2222-2222-2222-222222222222";
 const report = `<!doctype html><html><head><title>Private report</title>
 <link rel="stylesheet" href="css/main.css">
 </head><body><h1>Private report</h1><div class="box">Nested stylesheet</div>
@@ -45,14 +44,10 @@ document.getElementById('denied').addEventListener('click',async()=>{const resul
 function Preview() {
   const [active, setActive] = useState(true);
   const lifetime = useWorkspaceLifetime();
-  const controls = useWorkspaceContext();
-  if (!lifetime || !controls)
-    throw new Error("Fixture requires a confirmed workspace");
+  if (!lifetime) throw new Error("Fixture requires a confirmed workspace");
   return (
     <>
       <div data-testid="scope">{lifetime?.scope.workspaceId}</div>
-      <button onClick={() => void controls.select(P)}>Personal</button>
-      <button onClick={() => void controls.select(T)}>Team</button>
       <button onClick={() => setActive((value) => !value)}>
         {active ? "Hide report" : "Show report"}
       </button>
@@ -93,9 +88,14 @@ createRoot(document.getElementById("root")!).render(
         value={{ locale: "en-US", t: enUS, setLocale: () => undefined }}
       >
         <WorkspaceProvider enabled>
-          <WorkspaceReadyBoundary>
-            <Preview />
-          </WorkspaceReadyBoundary>
+          <SidebarProvider>
+            <div>
+              <WorkspaceHeader />
+            </div>
+            <WorkspaceReadyBoundary>
+              <Preview />
+            </WorkspaceReadyBoundary>
+          </SidebarProvider>
         </WorkspaceProvider>
       </I18nContext.Provider>
     </QueryClientProvider>
