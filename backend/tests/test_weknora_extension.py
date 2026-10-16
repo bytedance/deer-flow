@@ -28,7 +28,7 @@ def adapter(monkeypatch):
         if request.url.path == "/api/v1/knowledge-bases":
             data = state.get("bases", [{"id": "kb-1", "name": "Synthetic base"}])
         elif request.url.path == "/api/v1/knowledge-bases/kb-1/knowledge":
-            return httpx.Response(200, json={"success": True, "data": [state["document"]], "total": 1})
+            return httpx.Response(200, json={"success": True, "data": [state["document"]], **state.get("pagination", {"total": 1})})
         elif request.url.path == "/api/v1/knowledge/doc-1":
             data = state["document"]
         elif request.url.path == "/api/v1/knowledge-search":
@@ -352,4 +352,49 @@ async def test_oversized_hit_list_does_not_cause_unbounded_detail_requests(adapt
     state["hits"] = [{"knowledge_id": f"doc-{i}", "content": "synthetic"} for i in range(101)]
     with pytest.raises(RuntimeError, match="result limit"):
         await provider.search_scoped("Cedar", context=KnowledgeRequestContext("alice", "lead_agent"))
+    assert not any("/knowledge/" in r.url.path for r in calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pagination", [{}, {"total": None}, {"total": "1"}, {"total": True}, {"total": -1}, {"total": 1.5}])
+async def test_invalid_document_total_is_explicit_provider_error(adapter, pagination):
+    provider, calls, state, *_ = adapter
+    ctx = await selection(provider)
+    state["pagination"] = pagination
+    with pytest.raises(RuntimeError, match="Invalid WeKnora document total"):
+        await provider.documents(ctx.scope["dataset_ids"][0], context=ctx, page=1, page_size=20, search="")
+    assert not any(r.method == "POST" for r in calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["hits", "document"])
+@pytest.mark.parametrize("data", ["bad", [], ["bad"], 42])
+async def test_malformed_retrieval_payloads_fail_without_retry(adapter, target, data):
+    provider, calls, state, *_ = adapter
+    ctx = await selection(provider)
+    state[target] = data
+    if target == "hits" and data == []:
+        assert (await provider.search_scoped("Cedar", context=ctx)).hits == []
+    else:
+        with pytest.raises(RuntimeError, match="Invalid WeKnora"):
+            await provider.search_scoped("Cedar", context=ctx)
+    assert len([r for r in calls if r.method == "POST"]) == (1 if target == "hits" else 0)
+
+
+@pytest.mark.asyncio
+async def test_retrieval_response_size_limit_without_retry(adapter):
+    provider, calls, _, _, transport = adapter
+    ctx = await selection(provider, docs=False)
+    posts = []
+
+    async def handler(request):
+        if request.method == "POST":
+            posts.append(request)
+            return httpx.Response(200, content=b"x" * (4 * 1024 * 1024 + 1))
+        return await transport.handle_async_request(request)
+
+    provider._transport = httpx.MockTransport(handler)
+    with pytest.raises(RuntimeError, match="size"):
+        await provider.search_scoped("Cedar", context=ctx)
+    assert len(posts) == 1
     assert not any("/knowledge/" in r.url.path for r in calls)

@@ -80,6 +80,11 @@ export const enUS: Translations = {
         description:
           "Demonstrate read-only retrieval and structured tool results using fixed sample documents, without an external knowledge service.",
       },
+      weknora: {
+        title: "WeKnora knowledge retrieval",
+        description:
+          "Search WeKnora knowledge bases and selected documents with source citations. Requires administrator installation and access configuration.",
+      },
       knowledge: {
         title: "Knowledge scope example",
         description:

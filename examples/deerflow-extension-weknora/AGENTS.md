@@ -11,6 +11,8 @@ into an unrestricted search. Use KB-bound `hybrid-search` with optional
 `knowledge_ids` and disabled context enrichment. The global search endpoint
 rejects document targets for KB-restricted keys and unions base/document target
 lists. Never broaden credentials to work around that. Verify result membership.
+Reject malformed document totals and detail shapes as provider errors; reserve
+permission errors for resource identity, membership and searchability failures.
 Dataset IDs derive from endpoint/tenant/native base, not credentials or labels.
 
 Tests live in `backend/tests/test_weknora_extension*.py`; live tests require

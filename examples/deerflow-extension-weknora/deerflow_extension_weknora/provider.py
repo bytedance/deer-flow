@@ -157,12 +157,17 @@ class WeKnoraProvider:
             if doc.get("knowledge_base_id") != ds.native_id:
                 raise PermissionError("WeKnora returned a document outside the requested base")
             items.append({"id": native_id(doc.get("id")), "name": ds.binding.text(doc.get("title") or doc.get("file_name"), 500) or "Unnamed document", "selectable": _searchable(doc)})
-        return RetrievalCatalogPage(items=items, total=payload.get("total"), page=page, page_size=page_size)
+        total = payload.get("total")
+        if type(total) is not int or total < 0:
+            raise RuntimeError("Invalid WeKnora document total")
+        return RetrievalCatalogPage(items=items, total=total, page=page, page_size=page_size)
 
     async def _document(self, ds: _Dataset, document_id: str) -> dict[str, Any]:
         payload = await self._request(ds.binding, "GET", f"/api/v1/knowledge/{native_id(document_id)}")
         doc = payload["data"]
-        if not isinstance(doc, dict) or doc.get("id") != document_id or doc.get("knowledge_base_id") != ds.native_id or not _searchable(doc):
+        if not isinstance(doc, dict):
+            raise RuntimeError("Invalid WeKnora document response")
+        if doc.get("id") != document_id or doc.get("knowledge_base_id") != ds.native_id or not _searchable(doc):
             raise PermissionError("Selected WeKnora document is unavailable or not searchable")
         return doc
 

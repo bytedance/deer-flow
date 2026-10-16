@@ -76,6 +76,11 @@ export const zhCN: Translations = {
         description:
           "使用固定示例文档演示只读检索与结构化工具结果，不连接外部知识库。",
       },
+      weknora: {
+        title: "WeKnora 知识检索",
+        description:
+          "检索 WeKnora 知识库和所选文档，并展示来源引用。需要管理员安装并配置访问权限。",
+      },
       knowledge: {
         title: "知识范围选择示例",
         description: "用示例文档演示知识库和文件范围选择、检索及来源引用。",

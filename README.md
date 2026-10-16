@@ -1405,7 +1405,8 @@ for extension registration and configuration. The installable
 [WeKnora read-only extension](examples/deerflow-extension-weknora/README.md)
 targets WeKnora v0.8.3 and adds knowledge-base/document selection and shared
 retrieval citations. Configure explicit user-to-workspace credential bindings;
-resource authorization remains with WeKnora.
+resource authorization remains with WeKnora. The extension directory includes
+its installation guide in English and Chinese.
 
 Skills are what make DeerFlow do *almost anything*.
 
