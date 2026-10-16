@@ -2055,13 +2055,11 @@ class SubagentExecutor:
             # usage before the outer wrapper chooses CANCELLED or TIMED_OUT.
             if collector is not None:
                 result.update_token_usage_records(collector.snapshot_records())
-            if execution_context is not None and execution_context.get("sandbox_id") is not None:
+            if execution_context is not None:
                 try:
-                    from deerflow.sandbox import get_sandbox_provider
-                    from deerflow.sandbox.lease import get_sandbox_lease_manager
+                    from deerflow.sandbox.lease import release_sandbox_execution_lease_async
 
-                    provider = get_sandbox_provider()
-                    await get_sandbox_lease_manager(provider).release_async(sandbox_lease_owner_id)
+                    await release_sandbox_execution_lease_async(execution_context)
                 except Exception:
                     logger.warning(
                         "[trace=%s] Failed to release sandbox execution lease for subagent %s",

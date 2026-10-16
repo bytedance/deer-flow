@@ -17,6 +17,7 @@ from langgraph.types import Command, Overwrite
 from deerflow.agents.thread_state import ThreadState
 from deerflow.sandbox.exceptions import SandboxAuthorizationError, SandboxRuntimeError
 from deerflow.sandbox.lease import (
+    ensure_sandbox_lease_owner,
     get_sandbox_lease_manager,
     release_sandbox_execution_lease,
     release_sandbox_execution_lease_async,
@@ -468,6 +469,7 @@ async def test_prewarm_overlaps_model_call_and_is_claimed_by_first_tool(monkeypa
     monkeypatch.setattr("deerflow.sandbox.prewarm.get_app_config", _aio_prewarm_config)
     set_sandbox_provider(provider)
     context = {"thread_id": "thread-prewarm", "user_id": "owner-prewarm"}
+    ensure_sandbox_lease_owner(context)
     runtime = Runtime(context=context)
     tool_runtime = ToolRuntime(
         state={},
@@ -488,6 +490,8 @@ async def test_prewarm_overlaps_model_call_and_is_claimed_by_first_tool(monkeypa
         provider.allow_finish.set()
         sandbox = await tool_task
     finally:
+        provider.allow_finish.set()
+        await release_sandbox_execution_lease_async(context)
         reset_sandbox_provider()
 
     assert sandbox.id == "async-sandbox"
@@ -501,13 +505,12 @@ async def test_unused_prewarm_is_released_after_run(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr("deerflow.sandbox.prewarm.get_app_config", _aio_prewarm_config)
     set_sandbox_provider(provider)
     runtime = Runtime(context={"thread_id": "thread-unused", "user_id": "owner-unused"})
+    ensure_sandbox_lease_owner(runtime.context)
     try:
         middleware = SandboxMiddleware()
         await middleware.abefore_model({"messages": [HumanMessage(content="Traceback (most recent call last):")]}, runtime)
-        await asyncio.sleep(0)
+        await runtime.context["__deerflow_sandbox_prewarm"].task
         await middleware.aafter_agent({}, runtime)
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
     finally:
         reset_sandbox_provider()
 

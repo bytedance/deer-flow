@@ -1328,6 +1328,7 @@ sandbox:
 sandbox:
    use: deerflow.community.aio_sandbox:AioSandboxProvider # Docker-based sandbox
    prewarm: true # optional: overlap likely sandbox work with the first model call
+   prewarm_max_concurrent: 1 # pending or ready-but-unused prewarms per process/provider
 ```
 
 For AIO images on the supported semver line (`1.9.3` through the recommended
@@ -1349,11 +1350,23 @@ is attempted, and the container is recycled instead of being returned to the
 warm pool. Session-level cleanup does not clear that quarantine because a
 timed-out create may commit after cleanup has already returned.
 
-`prewarm` is disabled by default. When enabled, DeerFlow starts an AIO sandbox
-only for user turns with a code fence, path, shell command, or traceback, then
-the first sandbox tool reuses that in-flight startup. Turns that do not use a
-sandbox return the completed prewarm to the provider's warm pool. The option is
-ignored by non-AIO providers.
+`prewarm` is disabled by default and applies only to asynchronous AIO runs.
+For likely sandbox turns (for example, code fences or explicit shell commands),
+startup can overlap the first model call. Authorization is checked before
+speculation and checked again when a tool uses the sandbox. The acquisition
+belongs to the run's execution lease; cancellation, model failure, and turns
+without a sandbox tool drain startup and release that owner. Unused sandboxes
+follow the provider's normal warm-pool/idle cleanup policy, so false positives
+can still consume resources until eviction.
+
+`prewarm_max_concurrent` is a positive integer, default `1`. It bounds pending
+and ready-but-unused prewarms for each provider instance in a process. When
+full, DeerFlow skips speculation without queuing or delaying foreground tools.
+The limit is not a total-container cap or a deployment-wide quota; multiple
+Gateway processes have separate budgets. Other providers and synchronous
+embedded calls keep their existing acquisition behavior. Restart after changing
+these settings. Use the [sandbox benchmarks](../scripts/benchmark/sandbox/README.md)
+to measure first-tool wait, unused speculation, and resource pressure on your host.
 
 **BoxLite micro-VM Sandbox** (runs sandbox code in daemonless OCI micro-VMs):
 ```yaml

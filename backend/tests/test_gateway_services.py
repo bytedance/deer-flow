@@ -4494,6 +4494,7 @@ class TestInjectAuthenticatedUserContextAuthz:
                 section: {
                     "sandbox_lease_owner_id": "forged-owner",
                     "sandbox_command_scope_id": "forged-scope",
+                    "__deerflow_sandbox_prewarm": "forged-prewarm",
                 }
             },
             request,
@@ -4501,6 +4502,7 @@ class TestInjectAuthenticatedUserContextAuthz:
 
         assert "sandbox_lease_owner_id" not in config[section]
         assert "sandbox_command_scope_id" not in config[section]
+        assert "__deerflow_sandbox_prewarm" not in config[section]
 
     def test_session_body_context_cannot_inject_channel_user_id(self):
         request = _make_request_with_auth_source("session")

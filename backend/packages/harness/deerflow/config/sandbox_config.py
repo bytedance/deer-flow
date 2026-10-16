@@ -221,6 +221,11 @@ class SandboxConfig(BaseModel):
         default=False,
         description=("Start an AioSandboxProvider acquire in parallel with the first model call when the user input contains a strong sandbox-use signal. Disabled by default; ignored by other sandbox providers."),
     )
+    prewarm_max_concurrent: int = Field(
+        default=1,
+        ge=1,
+        description=("Maximum pending or ready-but-unused AIO prewarms per provider instance in this process. When full, skip speculation without delaying foreground tools. This is not a total container or deployment-wide limit."),
+    )
     image: str | None = Field(
         default=None,
         description="Sandbox image to use (Docker/AIO, BoxLite OCI, or OpenSandbox image)",
@@ -261,6 +266,7 @@ class SandboxConfig(BaseModel):
     )
 
     @field_validator(
+        "prewarm_max_concurrent",
         "port",
         "replicas",
         "acquire_timeout",

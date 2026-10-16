@@ -27,11 +27,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+SANDBOX_PREWARM_CONTEXT_KEY = "__deerflow_sandbox_prewarm"
 SANDBOX_LEASE_OWNER_CONTEXT_KEY = "sandbox_lease_owner_id"
 SANDBOX_COMMAND_SCOPE_CONTEXT_KEY = "sandbox_command_scope_id"
 SANDBOX_SERVER_OWNED_CONTEXT_KEYS = frozenset(
     {
         SANDBOX_LEASE_OWNER_CONTEXT_KEY,
+        SANDBOX_PREWARM_CONTEXT_KEY,
         SANDBOX_COMMAND_SCOPE_CONTEXT_KEY,
     }
 )
@@ -789,7 +791,10 @@ def release_sandbox_execution_lease(context: Any) -> None:
 
 
 async def release_sandbox_execution_lease_async(context: Any) -> None:
-    """Async counterpart to :func:`release_sandbox_execution_lease`."""
+    """Drain speculative work before releasing the ordinary execution lease."""
+    from deerflow.sandbox.prewarm import close_sandbox_prewarm_context
+
+    await close_sandbox_prewarm_context(context)
     lease = _sandbox_execution_lease(context)
     if lease is None:
         return

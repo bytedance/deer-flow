@@ -1898,7 +1898,7 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
     provider = get_sandbox_provider()
     user_id = resolve_runtime_user_id(runtime)
     owner_id = sandbox_lease_owner(runtime.context)
-    sandbox_id = await claim_sandbox_prewarm(runtime)
+    sandbox_id = await claim_sandbox_prewarm(runtime, provider=provider)
     if sandbox_id is None:
         if owner_id is None:
             sandbox_id = await provider.acquire_async(thread_id, user_id=user_id)

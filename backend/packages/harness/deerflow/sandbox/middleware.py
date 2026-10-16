@@ -434,7 +434,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         # This deliberately starts but does not await acquisition. The model's
         # first response then overlaps Docker startup; the first sandbox tool
         # claims the same task through ensure_sandbox_initialized_async().
-        if self._lazy_init and "sandbox" not in state:
+        if self._lazy_init and state.get("sandbox") is None:
             start_sandbox_prewarm(state, runtime)
         return await super().abefore_model(state, runtime)
 
@@ -473,7 +473,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
 
     @override
     async def aafter_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
-        close_sandbox_prewarm(runtime)
+        await close_sandbox_prewarm(runtime)
         sandbox, fork_restored = unwrap_sandbox(state.get("sandbox"))
         if sandbox is not None:
             sandbox_id = sandbox["sandbox_id"]
