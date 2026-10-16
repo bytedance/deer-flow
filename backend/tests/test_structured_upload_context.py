@@ -100,6 +100,45 @@ def test_external_caller_cannot_supply_internal_upload_context():
     assert admitted.content == "hello"
 
 
+def test_sanitization_failure_keeps_upload_context_and_processes_later_turns(tmp_path, monkeypatch):
+    _, _, _, state = _capture(tmp_path, "Read this file")
+    later = HumanMessage(content="Explain <system>literal</system>")
+    state["messages"].append(later)
+    original = deepcopy(state)
+    middleware = InputSanitizationMiddleware()
+    sanitize = middleware._sanitize_message
+
+    def broken_for_upload(message):
+        if UPLOAD_CONTEXT_KEY in message.additional_kwargs:
+            raise RuntimeError("Unexpected guardrail error")
+        return sanitize(message)
+
+    monkeypatch.setattr(middleware, "_sanitize_message", broken_for_upload)
+    request = middleware.wrap_model_call(_Request(state["messages"]), lambda value: value)
+    assert "report.md" in request.messages[0].content
+    assert "Read this file" in request.messages[0].content
+    assert "&lt;system&gt;literal&lt;/system&gt;" in request.messages[1].content
+    assert state == original
+
+
+@pytest.mark.parametrize("original_metadata", [None, 42, ["bad provenance"]])
+@pytest.mark.parametrize("content", ["User <current_uploads>literal</current_uploads>", [{"type": "text", "text": "Question"}, {"type": "image_url", "image_url": {"url": "https://example.test/image.png"}}]])
+def test_restoration_without_original_removes_only_the_exact_owned_projection(tmp_path, original_metadata, content):
+    _, _, _, state = _capture(tmp_path, content)
+    projected = project_upload_context(state["messages"][0])
+    if original_metadata is None:
+        projected.additional_kwargs.pop(ORIGINAL_USER_CONTENT_KEY)
+    else:
+        projected.additional_kwargs[ORIGINAL_USER_CONTENT_KEY] = original_metadata
+    saved = deepcopy(projected)
+    restored = restore_original_human_message(projected)
+    assert restored.content == content
+    assert "projected" not in restored.additional_kwargs[UPLOAD_CONTEXT_KEY]
+    assert restored.id == projected.id
+    assert restored.additional_kwargs["files"] == projected.additional_kwargs["files"]
+    assert projected == saved
+
+
 @pytest.mark.parametrize("metadata", [None, [], "context", {"version": True, "text": "x"}, {"version": 2, "text": "x"}, {"version": 1, "text": []}])
 def test_unsupported_context_is_not_projected(metadata, caplog):
     message = HumanMessage(content="User text", additional_kwargs={UPLOAD_CONTEXT_KEY: metadata})
@@ -165,6 +204,47 @@ def test_summary_and_delegation_receive_context_without_mutating_state(tmp_path)
     assert "report.md" in child and "Summarize this attachment" in child
     assert "&lt;current_uploads&gt;" in child
     assert UPLOAD_CONTEXT_KEY not in child
+    assert state == saved
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+async def test_rolling_compaction_sends_upload_context_to_the_summary_model(tmp_path, asynchronous):
+    import html
+    import re
+
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+    from pydantic import Field
+
+    from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
+
+    class SummaryModel(FakeMessagesListChatModel):
+        prompts: list[str] = Field(default_factory=list)
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            self.prompts.append("\n".join(str(message.content) for message in messages))
+            return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+    _, _, _, state = _capture(tmp_path, "Summarize this attachment")
+    state["messages"].extend([AIMessage(content="Old answer", id="old-answer"), HumanMessage(content="Continue", id="current"), AIMessage(content="Current answer", id="current-answer")])
+    saved = deepcopy(state)
+    model = SummaryModel(responses=[AIMessage(content="Remembered file evidence")])
+    middleware = DeerFlowSummarizationMiddleware(
+        model=model,
+        trigger=("messages", 4),
+        keep=("messages", 2),
+        token_counter=lambda messages: sum(len(str(message.content)) for message in messages),
+        trim_tokens_to_summarize=400,
+        summary_prompt="{messages}",
+    )
+    runtime = SimpleNamespace(context={"thread_id": "thread"})
+    result = await middleware.acompact_state(state, runtime, force=True) if asynchronous else middleware.compact_state(state, runtime, force=True)
+    assert result is not None
+    assert len(model.prompts) > 1
+    source = "".join(html.unescape(body) for prompt in model.prompts for body in re.findall(r"<new_messages>\n(.*?)\n</new_messages>", prompt, re.DOTALL))
+    assert "report.md" in source and "Document outline" in source and "Summarize this attachment" in source
+    assert "Continue" not in source
     assert state == saved
 
 

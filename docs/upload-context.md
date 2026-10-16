@@ -35,11 +35,16 @@ The copied envelope carries `projected: true` for nested-wrapper idempotence.
 It is transient: UI/run-journal restoration removes that flag and restores the
 user text. Never copy a projected request back into graph state. Model-facing
 copies and persisted messages must not share mutable content blocks.
+If original-user provenance is missing or malformed, restoration still clears
+the transient flag and removes the exact owned upload prefix when present; it
+does not guess how to recover user text from transport framing. A guardrail
+exception retains the existing fail-open behavior and still projects the
+independently captured file descriptions.
 
-Summary token counting and summary prompts project the same context before
-trimming. Parent conversation snapshots include it as inert historical data,
-not child system instructions. Memory admission removes the context metadata;
-file outlines are not durable user memory.
+Summary token counting and rolling summary source preparation project the same
+context before applying source budgets. Parent conversation snapshots include it
+as inert historical data, not child system instructions. Memory admission removes
+the context metadata; file outlines are not durable user memory.
 
 ## Display and compatibility
 

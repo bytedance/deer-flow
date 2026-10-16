@@ -468,7 +468,9 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
                     index,
                     exc_info=True,
                 )
-                continue
+                # Preserve the existing fail-open stance without also losing
+                # independently captured file descriptions for this turn.
+                sanitized = None
             projected = project_upload_context(sanitized if sanitized is not None else msg)
             if projected is not msg:
                 messages[index] = projected

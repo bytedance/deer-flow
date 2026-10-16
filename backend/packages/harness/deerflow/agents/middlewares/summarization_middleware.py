@@ -715,7 +715,6 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         body = self._build_summary_input_text(source, previous)
         return self.summary_prompt.format(messages=body).rstrip() if body else None
 
-
     def before_model(self, state: AgentState, runtime: Runtime) -> dict | None:
         return self._maybe_summarize(state, runtime)
 
