@@ -483,7 +483,7 @@ make docker-logs    # View logs
 
 `make docker-start` starts `provisioner` only when `config.yaml` uses provisioner mode (`sandbox.use: deerflow.community.aio_sandbox:AioSandboxProvider` with `provisioner_url`).
 
-Docker builds use the upstream `uv` registry by default. If you need faster mirrors in restricted networks, export `UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple` and `NPM_REGISTRY=https://registry.npmmirror.com` before running `make docker-init` or `make docker-start`.
+Docker builds use the upstream `uv` registry by default. The gateway image installs with `uv sync --locked`, and `uv.lock` pins `https://pypi.org/simple`, so `UV_INDEX_URL` has to keep that value: exporting a mirror such as `https://pypi.tuna.tsinghua.edu.cn/simple` fails the build with ``The lockfile at `uv.lock` needs to be updated, but `--locked` was provided`` (reproduce with `cd backend && UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple uv sync --locked --check`). Installing from a mirror requires regenerating the lock or dropping `--locked`, and both change what the image installs, so keep the default index for a checkout you intend to contribute back. `NPM_REGISTRY=https://registry.npmmirror.com` is independent of this and applies to the frontend image only.
 
 Local AIO sandbox control traffic is always direct: loopback/private addresses,
 single-label cluster hosts, and Docker/Podman internal hostnames do not inherit
