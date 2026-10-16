@@ -6377,6 +6377,12 @@ This release closes that milestone with **621 merged pull requests**.
 
 ### Documentation
 
+- **docs:** Add a Korean README (`README_ko.md`), a complete translation of the
+  current English README. Headings, tables, and links mirror the English
+  one-to-one, and every code block and inline code span stays byte-identical;
+  only the prose is translated. The language switcher in `README.md` and the
+  other translations, and the translations list in `AGENTS.md`, now link to it.
+  ([#6909])
 - **docs:** Configuration checks and migration commands now run in the
   backend environment. The documented examples ran with system Python,
   which cannot import the installed backend workspace packages; selecting
@@ -11769,4 +11775,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6865]: https://github.com/bytedance/deer-flow/pull/6865
 [#6876]: https://github.com/bytedance/deer-flow/pull/6876
 [#6897]: https://github.com/bytedance/deer-flow/pull/6897
+[#6909]: https://github.com/bytedance/deer-flow/pull/6909
 [#6913]: https://github.com/bytedance/deer-flow/pull/6913

@@ -85,10 +85,13 @@ writes. `RunRecord.terminal_commit_pending` keeps `_renew_leases()` renewing tha
 still-active row until the commit is attempted; a renewal rejected by the worker's
 own commit is confirmed by re-reading the row, while a peer claim fences the run.
 Never select runs for renewal by local status alone. Shutdown's drain treats the
-same state as active: such runs are awaited (never cancelled — cancellation would
-skip their terminal tail) so the duration checkpoint and terminal commit land
-before checkpointer teardown. A drain timeout leaves staged statuses and commit
-barriers intact without persisting `interrupted`. A finalizer that raises is
+same state as active, and also awaits committed terminal workers still executing
+hooks, END or resource cleanup. The registered worker shields and drains one owned
+finalizer across repeated host cancellation, preserving the first interruption even
+if a step fails. There is no deadline that cancels or detaches writes; backend I/O
+must be bounded by its backend. Only the optional completion hook receives host
+cancellation, and its child task is drained before the terminal tail continues.
+A drain timeout leaves staged statuses and commit barriers intact without persisting `interrupted`. A finalizer that raises is
 logged with its run ID, staged status and exception while the other runs continue
 draining. Coverage: `tests/test_gateway_run_drain_shutdown.py`.
 
@@ -123,6 +126,8 @@ invalid values) from the producer-supplied tool stamp; tool content, args,
 prompts, and derived hashes do not enter the event. Ordinary task-tool subagents use the narrow parent-loop
 recorder proxy, never the journal itself; durable batch runs have no parent
 journal and emit no such event. Recorder failures are fail-open.
+
+**RunJournal write ownership** (`runtime/journal.py`): a batch handed to `store.put_batch()` is owned by a journal task until its outcome settles, so a cancelled `flush()`/`close()` caller detaches the waiter and re-raises `CancelledError` only after the owned write is drained — never abandon or replay the in-flight batch. A generic `put_batch` exception is an ambiguous outcome: it is quarantined, blocks every successor write, and makes `flush()`/`close()` report non-success instead of replaying the batch. Only `RunEventStoreNotCommittedError` means the store proved none of the batch committed and may be deliberately retried; stores must raise it instead of a bare exception for that case. Explicit `flush()` and `close(flush=True)` share one per-journal operation lock, so a successor batch can never overtake an unsettled predecessor, every waiter observes the same settlement, and a normal close detaches only after the whole buffer has settled. `close(flush=False)` is a separate abort path that never queues on that lock: it revokes write ownership before its first await and makes any in-flight flush report non-success rather than a late success. A cancelled write waits a bounded time for the store call to end; `Task.cancelled()`/a clean return does not prove an uncooperative backend's I/O actually stopped, so this is a bound on waiting, not a termination guarantee. An inner store task that outlives that bound stays supervised until it settles, so its late result is retrieved and logged rather than dropped. Two adjacent limits are known and tracked separately, not fixed here: the bounded wait covers the store write, not a `progress_reporter` that ignores cancellation (a pre-existing hazard on the force-close path); and background-write warnings log the exception type and message, whose text is backend-controlled and may echo driver-level parameters, so log consumers must not treat it as payload-free.
 
 **JSONL record boundaries** (`runtime/events/store/jsonl.py`): thread reads,
 run reads, and sequence recovery split on physical newlines. Do not use

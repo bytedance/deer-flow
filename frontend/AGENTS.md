@@ -117,8 +117,9 @@ Read [src/AGENTS.md](src/AGENTS.md) for component and domain ownership.
 ## Code Style
 
 `core/utils/markdown.ts` reads web-fetch titles from the first nonblank line.
-Match zero to three literal spaces before `# ` without trimming indentation;
-mixed space/tab code blocks must fall back to the URL. Strip optional closing
+Match zero to three literal spaces before a single `#` followed by an ASCII
+space or tab, without trimming indentation; mixed space/tab code blocks must
+fall back to the URL. Strip optional closing
 hashes with a backwards scan so long fetched titles cannot cause quadratic regex
 backtracking. Closing hashes require a preceding space/tab (or an empty title)
 and only ASCII spaces/tabs afterward, apart from the terminal CR in CRLF input.
