@@ -218,7 +218,7 @@ Direct `AppConfig.from_file()` continues to read only operator configuration.
 `config/managed_model_providers.py` is the sole registry for provider IDs, labels,
 endpoints, protocols, authentication parameter mappings, adapters and request
 defaults. Capability rules match exact verified model IDs; unknown preset IDs
-have an unsupported-thinking contract, no vision and no inferred context window.
+have an unsupported-thinking contract, no vision and no inferred context window. Verified DeepSeek presets declare an effort vocabulary of `low`/`medium`/`high`/`max`/`xhigh` (default `low`) and alias the generic `minimal` preset onto `low`, so a saved per-agent `minimal` default serializes as a value the official endpoint accepts (issue #4514).
 Preset drafts cannot supply endpoints or adapter paths. Legacy custom
 `openai-compatible` records retain endpoint-based official DeepSeek detection;
 never infer that adapter from a model-name substring. Reads do not migrate the
