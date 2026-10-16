@@ -61,6 +61,37 @@ Join these records with the provider's active/warm snapshots before interpreting
 resource use. Record host/daemon capacity separately and do not compare stripped
 code-only images with a browser-enabled image as equivalent functionality.
 
-This provider microbenchmark does not measure model latency, speculative startup
-prediction, complete Agent runs, or first-tool overlap. Those need a separate
-production-runtime experiment with controlled model behavior.
+## First-tool overlap and unused prewarming
+
+The provider microbenchmark does not measure first-tool overlap. For that, use
+the compiled-agent experiment with the same isolated config/home and pinned image:
+
+```sh
+uv run python -m scripts.benchmark.sandbox.bench_prewarm \
+  --image <pinned-image> --cases tool plain fenced_no_tool model_error cancel \
+  --model-delays 0 1 3 --iterations 5 --output prewarm.jsonl
+
+uv run python -m scripts.benchmark.sandbox.bench_prewarm \
+  --image <same-pinned-image> --cases tool fenced_no_tool cancel \
+  --model-delays 3 --iterations 2 --users 4 --concurrency 4 \
+  --replicas 2 --prewarm-max-concurrent 1 --output prewarm-pressure.jsonl
+```
+
+This uses a scripted model with production thread/sandbox middleware, the bash
+tool, authorization, and execution-lease cleanup. Containers and commands are
+real; model delays and users are synthetic. No paid model is called, and this is
+not a Gateway HTTP/SSE or live-model latency measurement. Each A/B pair has the
+same prompt and predetermined tool intent, randomized variant order, fresh thread
+IDs, and exact-resource destruction between batches. Output paths must be new.
+
+`first_tool_wait_ms` spans tool initialization (including fresh authorization)
+until the sandbox is usable; `elapsed_ms` also includes graph construction and
+terminal cleanup. `unused_active_ms` ends when an unused acquisition is parked:
+it excludes subsequent warm-pool residency. Lease cleanup does not imply physical
+container destruction; ordinary idle eviction still applies. `replicas` and the
+speculative budget do not enforce deployment-wide admission or user fairness.
+
+Join per-case monotonic windows and lifecycle snapshots with the companion
+`.resources.jsonl`; a whole-file peak mixes enabled/disabled cases and teardown.
+Keep those phases separate when comparing memory or CPU. Record dirty-tree/driver
+hashes and inspect semantic success, cleanup records, and process exit status.
