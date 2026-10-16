@@ -236,6 +236,7 @@ class RunRecord:
     workspace_execution_closed: bool = False
     workspace_cleanup_uncertain: bool = False
     workspace_stop_confirmed: bool = False
+    workspace_lifetime_confirmed: bool = False
     stop_reason: str | None = None
     goal_verdict: dict[str, Any] | None = None
     # Process-local finalization barrier for a worker-installed scheduled goal.
@@ -1467,6 +1468,8 @@ class RunManager:
                 run_id,
             )
             return CancelOutcome.lease_valid_elsewhere, None
+        except WorkspaceAccessDenied:
+            raise
         except Exception:
             logger.warning(
                 "Failed to persist cancellation request for run %s",
@@ -1476,6 +1479,10 @@ class RunManager:
             return CancelOutcome.unknown, None
 
         if winning_action is not None:
+            if winning_action == "rollback" and get_current_workspace() is not None:
+                # Scoped rollback is admitted only while still pending. No
+                # native work began, so preserve prior checkpoint state.
+                winning_action = "interrupt"
             logger.info(
                 "Run %s cancellation requested (requested=%s,winner=%s)",
                 run_id,
@@ -1488,7 +1495,8 @@ class RunManager:
         # guarded cancellation UPDATE. Re-read so the API reports that precise
         # terminal result rather than claiming the request was accepted.
         try:
-            fresh = await self._store.get(run_id)
+            scope = get_current_workspace()
+            fresh = await self._store.get(run_id, **({"user_id": scope.actor_user_id} if scope is not None else {}))
         except Exception:
             fresh = None
         if fresh is None:
@@ -1521,7 +1529,7 @@ class RunManager:
         """Set process-local abort state without status persistence or cleanup."""
         async with self._lock:
             record = self._runs.get(run_id)
-            if record is None or (record.status not in (RunStatus.pending, RunStatus.running) and not record.scheduled_goal_cleanup_pending) or record.abort_event.is_set():
+            if record is None or (record.status not in (RunStatus.pending, RunStatus.running) and not record.scheduled_goal_cleanup_pending and not self._awaits_workspace_lifetime(record)) or record.abort_event.is_set():
                 return
 
             record.abort_action = action
@@ -1562,6 +1570,14 @@ class RunManager:
         Returns:
             A :class:`CancelOutcome` enum describing what happened.
         """
+        context = get_current_workspace()
+        async with self._lock:
+            cached = self._runs.get(run_id)
+            cached_scoped = cached is not None and (cached.workspace_id is not None or cached.workspace_context is not None)
+        if getattr(self._store, "workspace_scope_required", False) or context is not None or cached_scoped:
+            context = resolve_resource_scope(None, context.actor_user_id if context is not None else None, required=True)
+            if await self.get(run_id, user_id=context.actor_user_id, raise_on_store_error=True) is None:
+                return CancelOutcome.unknown
         # ------------------------------------------------------------------
         # Local path — this worker owns the run in-memory.
         # ------------------------------------------------------------------
@@ -1595,7 +1611,7 @@ class RunManager:
             if record is not None:
                 if record.status == RunStatus.interrupted or record.abort_event.is_set():
                     return CancelOutcome.cancelled
-                if record.status not in (RunStatus.pending, RunStatus.running) and not record.scheduled_goal_cleanup_pending:
+                if record.status not in (RunStatus.pending, RunStatus.running) and not record.scheduled_goal_cleanup_pending and not self._awaits_workspace_lifetime(record):
                     return CancelOutcome.cancelled if durable_cancel_won else CancelOutcome.not_cancellable
                 record.abort_action = action
                 record.abort_event.set()
@@ -1608,7 +1624,7 @@ class RunManager:
 
         # Persist outside the lock so store calls don't block other mutations.
         if record is not None:
-            if record.scheduled_goal_cleanup_pending:
+            if record.scheduled_goal_cleanup_pending or self._awaits_workspace_lifetime(record):
                 # The worker must remove its scheduled goal before releasing
                 # the real durable slot. Abort/request state already records
                 # cancellation; ordinary runs retain immediate persistence.
@@ -1621,7 +1637,7 @@ class RunManager:
                 # guarded ``update_status``. If so, surface ``taken_over``
                 # so the client sees a status consistent with the store.
                 try:
-                    existing = await self._store.get(run_id)
+                    existing = await self._store.get(run_id, **({"user_id": context.actor_user_id} if context is not None else {}))
                 except Exception:
                     existing = None
                 if existing is not None and existing.get("status") == "error":
@@ -1638,6 +1654,10 @@ class RunManager:
 
         if durable_cancel_won:
             return CancelOutcome.cancelled
+        if context is not None:
+            # Expiry never proves a scoped execution stopped. Keep its native
+            # lifetime and request owner cleanup instead of legacy takeover.
+            return await self._request_remote_cancel(run_id, action=action)
 
         # ------------------------------------------------------------------
         # Non-local path — no in-memory record, must consult the store.
@@ -1650,7 +1670,7 @@ class RunManager:
             return CancelOutcome.unknown
 
         try:
-            row = await self._store.get(run_id)
+            row = await self._store.get(run_id, **({"user_id": context.actor_user_id} if context is not None else {}))
         except Exception:
             logger.warning("Failed to fetch run %s from store during cancel", run_id, exc_info=True)
             return CancelOutcome.unknown
@@ -1696,7 +1716,7 @@ class RunManager:
         #       → not_cancellable or taken_over.
         # Re-read to distinguish.
         try:
-            fresh = await self._store.get(run_id)
+            fresh = await self._store.get(run_id, **({"user_id": context.actor_user_id} if context is not None else {}))
         except Exception:
             fresh = None
         if fresh is None:
@@ -2481,6 +2501,40 @@ class RunManager:
         return False
 
     @staticmethod
+    def _awaits_workspace_lifetime(record: RunRecord) -> bool:
+        return record.workspace_context is not None and record.operation_kind == "run" and not record.store_only and not record.workspace_lifetime_confirmed
+
+    async def _confirm_workspace_execution_closed(self, record: RunRecord) -> bool:
+        """Called only at native closure, or to retry that captured proof."""
+        if record.workspace_context is None:
+            return True
+        if not record.workspace_execution_closed or record.workspace_cleanup_uncertain or record.ownership_lost:
+            return False
+        confirm = getattr(self._store, "confirm_workspace_execution", None)
+        if confirm is None:
+            return False
+        from deerflow.persistence.workspaces.run_control import NativeRunStopTarget
+
+        async with record.start_lock:
+            async with self._lock:
+                if self._runs.get(record.run_id) is not record or record.owner_worker_id != self._worker_id or record.ownership_lost:
+                    return False
+            try:
+                result = await self._call_store_with_retry("confirm_workspace_execution", record.run_id, lambda: confirm(NativeRunStopTarget.from_record(record)))
+            except Exception:
+                logger.warning("Native execution closure acknowledgement deferred")
+                return False
+            if result is None:
+                return False
+            record.workspace_lifetime_confirmed = True
+            record.finalizing = False
+            if result["status"] == "interrupted":
+                record.status = RunStatus.interrupted
+                record.abort_action = "interrupt"
+                record.abort_event.set()
+            return True
+
+    @staticmethod
     def _awaits_workspace_stop(record: RunRecord) -> bool:
         return record.workspace_context is not None and record.workspace_stop_requested and not record.workspace_stop_confirmed
 
@@ -2502,9 +2556,9 @@ class RunManager:
                     if self._runs.get(record.run_id) is not record or record.owner_worker_id != self._worker_id or record.ownership_lost:
                         continue
                 evidence = None
-                if record.task is None and record.status == RunStatus.pending and not record.store_only:
+                if record.task is None and record.status in (RunStatus.pending, RunStatus.interrupted) and not record.store_only and not record.workspace_execution_closed:
                     evidence = "native_not_started"
-                elif record.task is not None and record.task.done() and record.workspace_execution_closed:
+                elif record.workspace_execution_closed and (record.task is None or record.task.done()):
                     evidence = "native_worker_closed"
                 if evidence is None:
                     continue
@@ -2512,6 +2566,9 @@ class RunManager:
                     target = NativeRunStopTarget.from_record(record)
                     if await self._call_store_with_retry("confirm_workspace_run_stop", record.run_id, lambda: confirm(target, evidence=evidence)):
                         record.workspace_stop_confirmed = True
+                        record.workspace_lifetime_confirmed = True
+                        record.abort_action = "interrupt"
+                        record.finalizing = False
                         record.status = RunStatus.interrupted
                 except Exception:
                     logger.warning("Native Run stop acknowledgement deferred; durable barrier retained")
@@ -2528,6 +2585,10 @@ class RunManager:
             return
         lease_seconds = self._run_ownership_config.lease_seconds
         cancellations: list[tuple[str, str]] = []
+        async with self._lock:
+            closed = [record for record in self._runs.values() if self._awaits_workspace_lifetime(record) and record.workspace_execution_closed and record.owner_worker_id == self._worker_id]
+        for record in closed:
+            await self._confirm_workspace_execution_closed(record)
 
         async with self._lock:
             # Renew any pending/running run owned by this worker unless its
@@ -2545,24 +2606,24 @@ class RunManager:
             active_runs = [
                 (rid, record)
                 for rid, record in self._runs.items()
-                if (record.status in (RunStatus.pending, RunStatus.running) or self._awaits_terminal_commit(record) or self._awaits_workspace_stop(record))
+                if (record.status in (RunStatus.pending, RunStatus.running) or self._awaits_terminal_commit(record) or self._awaits_workspace_stop(record) or self._awaits_workspace_lifetime(record))
                 and record.owner_worker_id == self._worker_id
-                and (record.task is None or not record.task.done())
+                and (record.task is None or not record.task.done() or self._awaits_workspace_lifetime(record))
             ]
 
         for run_id, record in active_runs:
-            if record.status not in (RunStatus.pending, RunStatus.running) and not self._awaits_terminal_commit(record) and not self._awaits_workspace_stop(record):
+            if record.status not in (RunStatus.pending, RunStatus.running) and not self._awaits_terminal_commit(record) and not self._awaits_workspace_stop(record) and not self._awaits_workspace_lifetime(record):
                 continue
             confirmed_deadline = self._parse_lease_deadline(record.lease_expires_at)
-            if not self._awaits_workspace_stop(record) and self._awaits_terminal_commit(record) and record.status not in (RunStatus.pending, RunStatus.running):
+            if not self._awaits_workspace_lifetime(record) and not self._awaits_workspace_stop(record) and self._awaits_terminal_commit(record) and record.status not in (RunStatus.pending, RunStatus.running):
                 # The DB may have committed the terminal CAS while the worker
                 # is still receiving its acknowledgement. It no longer needs
                 # renewal and must not be mistaken for a peer takeover.
                 remaining = (confirmed_deadline - datetime.now(UTC)).total_seconds() if confirmed_deadline is not None else 0
-                if await self._release_confirmed_terminal_barrier(record, timeout=remaining if remaining > 0 else lease_seconds):
+                if not self._awaits_workspace_lifetime(record) and await self._release_confirmed_terminal_barrier(record, timeout=remaining if remaining > 0 else lease_seconds):
                     continue
             if confirmed_deadline is None or confirmed_deadline <= datetime.now(UTC):
-                if await self._release_confirmed_terminal_barrier(record, timeout=lease_seconds):
+                if not self._awaits_workspace_lifetime(record) and await self._release_confirmed_terminal_barrier(record, timeout=lease_seconds):
                     continue
                 await self._mark_ownership_lost(
                     record,
@@ -2588,7 +2649,7 @@ class RunManager:
                     if getattr(renewal, "workspace_stop_requested", False):
                         record.workspace_stop_requested = True
                     if confirmed_deadline <= datetime.now(UTC):
-                        if await self._release_confirmed_terminal_barrier(record, timeout=lease_seconds):
+                        if not self._awaits_workspace_lifetime(record) and await self._release_confirmed_terminal_barrier(record, timeout=lease_seconds):
                             continue
                         await self._mark_ownership_lost(
                             record,
@@ -2622,15 +2683,15 @@ class RunManager:
                     async with self._lock:
                         still_active = (
                             self._runs.get(run_id) is record
-                            and (record.status in (RunStatus.pending, RunStatus.running) or self._awaits_terminal_commit(record) or self._awaits_workspace_stop(record))
+                            and (record.status in (RunStatus.pending, RunStatus.running) or self._awaits_terminal_commit(record) or self._awaits_workspace_stop(record) or self._awaits_workspace_lifetime(record))
                             and record.owner_worker_id == self._worker_id
-                            and (record.task is None or not record.task.done())
+                            and (record.task is None or not record.task.done() or self._awaits_workspace_lifetime(record))
                         )
                     if still_active:
                         # A detached precheck may have observed running just
                         # before our terminal CAS committed. Re-read before
                         # treating the rejected renewal as lost ownership.
-                        if await self._release_confirmed_terminal_barrier(record, timeout=lease_seconds):
+                        if not self._awaits_workspace_lifetime(record) and await self._release_confirmed_terminal_barrier(record, timeout=lease_seconds):
                             continue
                         logger.warning(
                             "Run %s lease renewal failed (status=%s,owner=%s) – worker likely taken over; aborting local task",
@@ -2645,7 +2706,7 @@ class RunManager:
                         )
             except Exception:
                 if confirmed_deadline <= datetime.now(UTC):
-                    if await self._release_confirmed_terminal_barrier(record, timeout=lease_seconds):
+                    if not self._awaits_workspace_lifetime(record) and await self._release_confirmed_terminal_barrier(record, timeout=lease_seconds):
                         continue
                     await self._mark_ownership_lost(
                         record,

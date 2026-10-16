@@ -344,3 +344,21 @@ The startup negative test derives which closed production guard rejects current
 metadata (unreleased schema fence or compiled integration gate), while separately
 asserting _WORKSPACE_RUNTIME_INTEGRATED is False. It patches neither production
 fence and proves no tenant startup; M10 must still align the release candidate.
+
+`test_workspace_run_lifetime.py` first proves three native graph mains (normal,
+member revoke during terminal cleanup, peer user interrupt), each on SQLite and
+PostgreSQL. A held real completion hook plus a separate native manager proves
+terminal status does not release private-thread admission; wrong-space and
+withdrawn cached-user requests cannot signal local abort. Successful native close
+then permits a fresh Run. The only added corrective scenario seeds a real durable
+SQLite checkpoint, cancels an unstarted owner rollback and executes a late native
+consumer; checkpoint ID/content must remain intact. It does not mock permission,
+SQL, native closure or graph execution into success. Scoped running rollback and
+actual C/OS recovery still need separate integration.
+
+The versioned Run CI renderer accepts only revocation/lifetime suite names. The
+lifetime suite combines these eight cases with the prior six Run-stop cases;
+CI retains fixed images, RO source, internal PG, no runtime Docker socket and
+recorded exact fixture-volume removal. Keep previous red/main/regression archives
+and do not overwrite their phase names. Source receipts identify exact code
+rather than treating a later formatter/test change as already verified.

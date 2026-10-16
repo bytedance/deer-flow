@@ -15,7 +15,7 @@ from sqlalchemy import or_, select, text
 
 from deerflow.mcp.tasks.control import TaskControlTarget, TaskStopReceipt, canonical
 from deerflow.persistence.mcp_tasks.model import McpTaskRow
-from deerflow.persistence.workspaces.model import WorkspaceAuditEventRow, WorkspaceOperationOutboxRow
+from deerflow.persistence.workspaces.model import WorkspaceAuditEventRow, WorkspaceOperationOutboxRow, WorkspaceRow
 
 ACTIVE = ("submitted", "working", "input_required")
 
@@ -130,6 +130,7 @@ class WorkspaceControlRepository:
 
     async def _owned(self, session, claim, now):
         row = await session.scalar(select(WorkspaceOperationOutboxRow).where(WorkspaceOperationOutboxRow.operation_id == claim.operation_id).with_for_update())
+        now = max(now, datetime.now(UTC))
         if row is None or row.kind != "mcp_stop" or row.state != "claimed" or row.lease_owner != claim.owner or row.lease_token != claim.token or row.lease_expires_at is None or _aware(row.lease_expires_at) <= now:
             return None
         if row.payload.get("target") != claim.target.as_payload():
@@ -152,10 +153,17 @@ class WorkspaceControlRepository:
             raise ValueError("control receipt does not match original intent")
         async with self._sf() as session:
             await self._begin(session)
+            # The later audit FK follows the same workspace-first order as
+            # membership mutation; locking this row grants no business access.
+            if await session.scalar(select(WorkspaceRow.id).where(WorkspaceRow.id == claim.target.workspace_id).with_for_update()) is None:
+                return False
             row = await self._owned(session, claim, now)
             if row is None:
                 return False
             task = await session.scalar(select(McpTaskRow).where(McpTaskRow.id == claim.target.task_id).with_for_update())
+            now = max(now, datetime.now(UTC))
+            if _aware(row.lease_expires_at) <= now:
+                return False
             compatible = task is None
             if task is not None:
                 try:

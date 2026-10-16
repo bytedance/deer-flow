@@ -395,3 +395,35 @@ checkpoint/journal/external-tool fencing, direct user Run cancellation, the
 already-terminalizing-before-revocation window and remote C recovery remain M4
 requirements. Failed/unknown cleanup remains blocked for later reconciliation;
 do not turn ordinary orphan expiry into STOP or enable the compiled tenant gate.
+
+Run lifetime refinement: every new scoped normal admission has a persistent
+run_execution barrier through its native finalizers, independent of staged
+Run.status. Heartbeat renews only matching open lifetime ownership, including
+terminal-looking cleanup. No old lease is revived. The final native worker
+boundary acknowledges successful stream/journal/hooks/sandbox cleanup; direct
+await callers use that actual boundary, while dedicated task settlement remains
+available through heartbeat. This is not a remote C physical-stop assertion.
+
+RunManager.cancel rechecks current private scope before any local cached abort
+state, including optional stores holding scoped records. Scope denial is never
+the legacy persistence-error fallback. A peer can durably request cleanup even
+when metadata already says success; scoped expiry does not go through legacy
+orphan takeover. Only an exact prior committed receipt can be recognized after
+expiry; new closure still requires valid ownership.
+
+A pending/unattached owner cancel may stage local interrupted before its SQL
+NoStart acknowledgement. Recognize that combination only with the native DB
+still pending, captured identity and valid lease. Stored first rollback intent
+is preserved, but scoped NoStart consumes interrupt and never restores/deletes
+checkpoint state. run_agent also guards its own pre-start cancellation boundary,
+so a late queued consumer cannot reinterpret a missing pre-run snapshot as an
+empty original thread. Legacy unscoped rollback behavior remains unchanged.
+The Shanghai test uses a real SQLite checkpoint with both metadata dialects and
+checks exact checkpoint ID/content before and after that late consumer.
+
+Normal success, late member withdrawal, peer interrupt, wrong-space/revoked
+cached denial, actual cleanup failure and NoStart are verified in focused CI.
+Running scoped rollback is intentionally pending its real checkpoint permission
+fence, not silently accepted. Complete scoped worker checkpoint/journal/goal/
+external-tool effects, signed recovery, public APIs and other resource domains
+remain open; compiled tenant activation remains false.

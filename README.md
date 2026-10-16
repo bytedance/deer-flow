@@ -3025,3 +3025,10 @@ ownership heartbeat. A durable cleanup barrier prevents replacement admission
 until local native execution is confirmed closed; failed cleanup stays pending.
 See [Run control validation and its limits](docs/tenant-workspaces-testing.md).
 Remote C physical STOP and complete tenant lifecycle activation remain pending.
+
+New scoped Runs now retain a durable execution-lifetime barrier through cleanup,
+even after their logical status becomes terminal. Fresh-scope user cancellation
+and late member revocation preserve that barrier; an unstarted rollback leaves
+the prior conversation intact. [Validation and remaining gates](docs/tenant-workspaces-testing.md)
+record the native graph/SQL/checkpoint checks. Complete tenant activation and
+remote C physical recovery remain pending.

@@ -15,7 +15,7 @@ from uuid import uuid4
 from sqlalchemy import select, text
 
 from deerflow.authz.workspace import WorkspaceContext
-from deerflow.persistence.workspaces.model import WorkspaceAuditEventRow, WorkspaceOperationOutboxRow
+from deerflow.persistence.workspaces.model import WorkspaceAuditEventRow, WorkspaceOperationOutboxRow, WorkspaceRow
 
 
 def _canonical(value):
@@ -70,13 +70,22 @@ class NativeRunStopTarget:
     def as_payload(self):
         return asdict(self)
 
+    def execution_binding(self):
+        result = self.as_payload()
+        result.pop("owner_worker_id")
+        return result
+
+    @property
+    def execution_id(self):
+        return hashlib.sha256(_canonical(["run_execution", self.execution_binding()])).hexdigest()
+
     @property
     def operation_id(self):
         return hashlib.sha256(_canonical(["run_stop", self.as_payload()])).hexdigest()
 
 
-def pending_run_stop(*, run_id=None, workspace_id=None, thread_id=None, user_id=None):
-    query = select(WorkspaceOperationOutboxRow.operation_id).where(WorkspaceOperationOutboxRow.kind == "run_stop", WorkspaceOperationOutboxRow.state != "completed")
+def _pending(kind, *, run_id=None, workspace_id=None, thread_id=None, user_id=None, reason=None):
+    query = select(WorkspaceOperationOutboxRow.operation_id).where(WorkspaceOperationOutboxRow.kind == kind, WorkspaceOperationOutboxRow.state != "completed")
     if run_id is not None:
         query = query.where(WorkspaceOperationOutboxRow.payload["run_id"].as_string() == run_id)
     if workspace_id is not None:
@@ -85,7 +94,77 @@ def pending_run_stop(*, run_id=None, workspace_id=None, thread_id=None, user_id=
         query = query.where(WorkspaceOperationOutboxRow.payload["thread_id"].as_string() == thread_id)
     if user_id is not None:
         query = query.where(WorkspaceOperationOutboxRow.user_id == user_id)
+    if reason is not None:
+        query = query.where(WorkspaceOperationOutboxRow.payload["reason"].as_string() == reason)
     return query.correlate_except(WorkspaceOperationOutboxRow).exists()
+
+
+def pending_run_stop(**kwargs):
+    return _pending("run_stop", **kwargs)
+
+
+def pending_run_execution(**kwargs):
+    return _pending("run_execution", **kwargs)
+
+
+def pending_execution_barrier(**kwargs):
+    return pending_run_stop(**kwargs) | pending_run_execution(**kwargs)
+
+
+def revocation_run_stop(**kwargs):
+    # User rollback remains a native action until revocation supersedes its
+    # authority. The operation identity does not depend on either cause.
+    return _pending("run_stop", reason="revocation", **kwargs)
+
+
+async def create_execution_lifetime(session, row):
+    target = NativeRunStopTarget.from_row(row)
+    session.add(
+        WorkspaceOperationOutboxRow(
+            operation_id=target.execution_id,
+            workspace_id=target.workspace_id,
+            user_id=target.user_id,
+            kind="run_execution",
+            state="open",
+            payload={"version": 1, "run_id": target.run_id, "thread_id": target.thread_id, "binding": target.execution_binding(), "owner_worker_id": target.owner_worker_id},
+        )
+    )
+
+
+async def execution_lifetime(session, target, *, open_only=True):
+    operation = await session.scalar(select(WorkspaceOperationOutboxRow).where(WorkspaceOperationOutboxRow.operation_id == target.execution_id).with_for_update())
+    if (
+        operation is None
+        or operation.kind != "run_execution"
+        or operation.workspace_id != target.workspace_id
+        or operation.user_id != target.user_id
+        or operation.payload is None
+        or operation.payload.get("binding") != target.execution_binding()
+        or operation.payload.get("owner_worker_id") != target.owner_worker_id
+    ):
+        raise ValueError("native execution lifetime binding differs")
+    if operation.state != "open" and (open_only or operation.state != "completed"):
+        raise ValueError("native execution lifetime is not open")
+    return operation
+
+
+async def enqueue_run_stop(session, row, *, reason, now, invalid_identity=False):
+    try:
+        target = NativeRunStopTarget.from_row(row)
+        if invalid_identity:
+            raise ValueError("captured native Run epoch is incompatible")
+        op, state = target.operation_id, "pending"
+        payload = {"version": 1, "run_id": row.run_id, "thread_id": row.thread_id, "target": target.as_payload(), "reason": reason}
+    except ValueError:
+        op = hashlib.sha256(_canonical(["run_stop_invalid", row.run_id, row.workspace_id, row.user_id])).hexdigest()
+        state, payload = "quarantine", {"version": 1, "run_id": row.run_id, "thread_id": row.thread_id, "error": "invalid_captured_identity", "reason": reason}
+    existing = await session.get(WorkspaceOperationOutboxRow, op)
+    if existing is None:
+        session.add(WorkspaceOperationOutboxRow(operation_id=op, workspace_id=row.workspace_id, user_id=row.user_id, kind="run_stop", state=state, payload=payload))
+    elif reason == "revocation" and existing.state != "completed":
+        existing.payload = {**existing.payload, "reason": "revocation"}
+    row.cancel_action = row.cancel_action or "interrupt"
+    row.cancel_requested_at = row.cancel_requested_at or now
 
 
 async def enqueue_membership_run_stops(session, workspace, member):
@@ -96,24 +175,73 @@ async def enqueue_membership_run_stops(session, workspace, member):
     # workspace transaction. No task cancellation, graph or network IO here.
     sequence = await RunRepository._next_change_seq(session)
     rows = (
-        await session.scalars(select(RunRow).where(RunRow.workspace_id == workspace.id, RunRow.user_id == member.user_id, RunRow.operation_kind == "run", RunRow.status.in_(("pending", "running"))).order_by(RunRow.run_id).with_for_update())
+        await session.scalars(
+            select(RunRow)
+            .where(
+                RunRow.workspace_id == workspace.id,
+                RunRow.user_id == member.user_id,
+                RunRow.operation_kind == "run",
+                (RunRow.status.in_(("pending", "running")) | pending_run_execution(run_id=RunRow.run_id, workspace_id=RunRow.workspace_id)),
+            )
+            .order_by(RunRow.run_id)
+            .with_for_update()
+        )
     ).all()
     now = datetime.now(UTC)
     for row in rows:
         try:
-            target = NativeRunStopTarget.from_row(row)
-            if target.workspace_context.membership_version > member.version or target.workspace_context.policy_version > workspace.policy_version:
-                raise ValueError("future native Run snapshot")
-            op, state = target.operation_id, "pending"
-            payload = {"version": 1, "run_id": row.run_id, "thread_id": row.thread_id, "target": target.as_payload()}
+            context = NativeRunStopTarget.from_row(row).workspace_context
+            invalid = context.membership_version > member.version or context.policy_version > workspace.policy_version
         except ValueError:
-            op = hashlib.sha256(_canonical(["run_stop_invalid", row.run_id, workspace.id, member.user_id])).hexdigest()
-            state, payload = "quarantine", {"version": 1, "run_id": row.run_id, "thread_id": row.thread_id, "error": "missing_captured_identity"}
-        if await session.get(WorkspaceOperationOutboxRow, op) is None:
-            session.add(WorkspaceOperationOutboxRow(operation_id=op, workspace_id=workspace.id, user_id=member.user_id, kind="run_stop", state=state, payload=payload))
-        row.cancel_action = row.cancel_action or "interrupt"
-        row.cancel_requested_at = row.cancel_requested_at or now
+            invalid = True
+        await enqueue_run_stop(session, row, reason="revocation", now=now, invalid_identity=invalid)
         row.updated_at, row.change_seq = now, sequence
+
+
+async def confirm_local_execution(session_factory, target):
+    from deerflow.persistence.run.model import RunRow
+    from deerflow.persistence.run.sql import RunRepository
+
+    if type(target) is not NativeRunStopTarget:
+        raise ValueError("captured native close target required")
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        if session.get_bind().dialect.name == "sqlite":
+            await session.execute(text("BEGIN IMMEDIATE"))
+        # Cleanup does not authorize from current membership, but it must
+        # honor workspace -> clock -> Run lock order. The audit FK would
+        # otherwise request a workspace key-share lock after holding clock.
+        if await session.scalar(select(WorkspaceRow.id).where(WorkspaceRow.id == target.workspace_id).with_for_update()) is None:
+            return None
+        # Cleanup does not authorize from current membership, but it must
+        # honor workspace -> clock -> Run lock order. The audit FK would
+        # otherwise request a workspace key-share lock after holding clock.
+        if await session.scalar(select(WorkspaceRow.id).where(WorkspaceRow.id == target.workspace_id).with_for_update()) is None:
+            return False
+        sequence = await RunRepository._next_change_seq(session)
+        row = await session.scalar(select(RunRow).where(RunRow.run_id == target.run_id).with_for_update())
+        try:
+            if row is None or NativeRunStopTarget.from_row(row) != target:
+                return None
+            lifetime = await execution_lifetime(session, target, open_only=False)
+        except ValueError:
+            return None
+        if lifetime.state == "completed":
+            return {"status": row.status}
+        now = datetime.now(UTC)
+        if row.lease_expires_at is None or _aware(row.lease_expires_at) <= now:
+            return None
+        if row.status not in ("success", "error", "timeout", "interrupted"):
+            return None
+        if row.cancel_requested_at is not None and await session.scalar(select(pending_run_stop(run_id=row.run_id, workspace_id=row.workspace_id))):
+            row.status = "interrupted"
+        lifetime.state = "completed"
+        lifetime.payload = {**lifetime.payload, "receipt": {"evidence": "native_worker_closed", "owner_worker_id": target.owner_worker_id, "observed_at": now.isoformat()}}
+        row.updated_at, row.change_seq = now, sequence
+        session.add(WorkspaceAuditEventRow(id=str(uuid4()), workspace_id=target.workspace_id, actor_user_id=None, action="run.lifecycle_closed", resource_id=target.run_id, outcome="success", request_id=target.execution_id))
+        closed_status = row.status
+        await session.commit()
+        return {"status": closed_status}
 
 
 async def confirm_local_run_stop(session_factory, target, *, evidence):
@@ -134,16 +262,28 @@ async def confirm_local_run_stop(session_factory, target, *, evidence):
             exact = NativeRunStopTarget.from_row(row) == target
         except ValueError:
             exact = False
-        if not exact or row.lease_expires_at is None or _aware(row.lease_expires_at) <= now or row.cancel_requested_at is None:
+        if not exact or row.cancel_requested_at is None:
             return False
         operation = await session.scalar(select(WorkspaceOperationOutboxRow).where(WorkspaceOperationOutboxRow.operation_id == target.operation_id).with_for_update())
         if operation is None or operation.kind != "run_stop" or operation.workspace_id != target.workspace_id or operation.user_id != target.user_id or operation.payload.get("target") != target.as_payload():
             return False
         if operation.state == "completed":
             return True
+        now = datetime.now(UTC)
+        if row.lease_expires_at is None or _aware(row.lease_expires_at) <= now:
+            return False
+        try:
+            lifetime = await execution_lifetime(session, target, open_only=False)
+        except ValueError:
+            return False
+        if evidence == "native_worker_closed" and lifetime.state != "completed":
+            return False
         if operation.state != "pending" or (evidence == "native_not_started" and row.status != "pending") or row.status not in ("pending", "running", "interrupted", "error", "timeout"):
             return False
         row.status, row.updated_at, row.change_seq = "interrupted", now, sequence
+        if evidence == "native_not_started":
+            lifetime.state = "completed"
+            lifetime.payload = {**lifetime.payload, "receipt": {"evidence": evidence, "owner_worker_id": target.owner_worker_id, "observed_at": now.isoformat()}}
         operation.state = "completed"
         operation.payload = {**operation.payload, "receipt": {"evidence": evidence, "owner_worker_id": target.owner_worker_id, "observed_at": now.isoformat()}}
         session.add(WorkspaceAuditEventRow(id=str(uuid4()), workspace_id=target.workspace_id, actor_user_id=None, action="run.execution_closed", resource_id=target.run_id, outcome="success", request_id=target.operation_id))

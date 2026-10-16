@@ -1,4 +1,4 @@
-<!-- 最新断点：文末 M4 active native Run membership control checkpoint；此前 M3/B/MCP 小步保留为历史。 -->
+<!-- 最新断点：文末 M4 new scoped Run execution lifetime checkpoint；此前各小步保留为历史。 -->
 > 当前恢复点：M4 单机 B 已真实 Docker 执行报告、原线程发布、原生 MCP 结果回流与撤权 STOP；上海 physical #6（6 passed）、SQL #30（22 passed / 6 default skipped）。下一步直接接原生持久取消/撤权 outbox 与 STOP 控制结算，再接 pool/远端 C/续跑及实际 TCP/NAS C→B→C。全量 M0–M11 保留，租户启动仍关闭。最新详细回执见文末。
 
 # 2026-10-16 暂停与恢复检查点
@@ -549,3 +549,68 @@ least-privilege SQL or full runtime acceptance. All M0-M11 parent gates remain
 open; tenant activation compiled false and old unreleased schema fence unchanged.
 No deployment/push/PR or local application/Docker/Node/pytest execution. Serial
 self-review plus focused CI is not independent full audit.
+
+M4 new scoped Run execution lifetime checkpoint (2026-10-16): SQL #42 RED
+missing run_execution at real native admission; #43 SUCCESS three actual native
+graph mains x SQLite/Postgres (6 cases, 23.61s): normal close, member withdrawal
+after logical success, and user interrupt during held completion cleanup.
+#44 SUCCESS new scope/cache boundaries plus prior Run control (12, 39.03s).
+#45 SUCCESS 23 affected native/MCP/owner regressions (45.87s, five-file cloud Ruff).
+#46 SUCCESS versioned fixed suite (12, 38.92s); #47 SUCCESS peer cancellation and
+cached-scope guard (12, 39.21s); #48 SUCCESS 13 final affected legacy takeover/
+cache/ownership regressions (27.75s); #49 SUCCESS locked-time/receipt refinement
+(12, 38.99s). Existing MCP client deprecation warnings remain visible, not masked.
+
+The generic native outbox now records run_execution at admission. Immutable
+Run/user/space/thread/incarnation/creation/context binding does not depend on
+owner, but owner changes only alongside native pending handoff/adopt CAS. Start,
+renew and transfer refuse missing/mismatched history. Logical terminal status
+cannot release admission while native stream/journal/hooks/sandbox cleanup is
+open. Normal actual worker close acknowledges the lifetime at the last native
+boundary; dedicated task settlement also closes a requested stop. Awaited native
+workers use their real close boundary, not a fabricated completed task. Member
+invalidation includes terminal-looking unclosed executions. Fresh-scope user
+cancel can request a peer's cleanup without lease-expiry takeover or cache bypass.
+All scoped rows stay out of ordinary startup/expiry orphan release. Unknown
+historical state is never filled from current membership or assumed stopped.
+
+Source audit found an actual pre-start rollback risk: rollback_point=None can
+mean no snapshot captured, but native restoration would delete the prior thread.
+#50 RED confirms owner pending cancellation chose restoration action; no actual
+delete is asserted as observed there. Fix typed NoStart to consume interrupt,
+retain the first persisted rollback request, recognize local interrupted/DB
+pending under original valid ownership, and guard late native pre-start consumers.
+#51 SUCCESS all 14 cases (42.76s) including a REAL SQLite checkpoint seeded before
+admission and exact ID/content preservation after a late native consumer, both
+metadata dialects. Running/terminal scoped rollback remains refused until the
+real checkpoint write fence is integrated; legacy unscoped behavior is unchanged.
+
+Cleanup now takes the original workspace lock before clock/Run or outbox/task
+locks: the new/existing audit FK must not ask for a workspace key-share lock
+while already holding the native clock/task in inverse order. This is existence/
+ordering, not live-member authorization. Claim/lease time is refreshed after SQL
+locks; only exact already-committed receipts are recognized after expiry, never
+new release from an expired owner. This ordering is serial source review, not
+a claim of complete concurrency/fault acceptance.
+
+#52 SUCCESS final fixed Run suite, 14 cases in 70.27s plus eight-file cloud Ruff;
+physical #14 SUCCESS existing six MCP/Docker STOP cases, 46.45s (12 existing
+adapter warnings). Final eleven runtime/test/template files match both archives.
+Fixed tools/PG IDs unchanged; all known owned containers/networks and recorded
+exact latest SQL/physical PG anonymous volumes absent. Old unrecorded volumes
+are not guessed and no global prune. Full hashes/logs/manifests are in
+native_run_execution_lifetime. SQL CI runtime has RO source/internal PG, no
+Docker socket/production/NAS/model mount or published ports. Pure stdlib renderer
+supports --suite lifetime; eight new cases plus prior six, not a new broad suite.
+
+Next: complete scoped worker checkpoint/journal/goal/external-tool effect and
+lease fences, active rollback and real cancel/launch API binding. Then integrate
+account/policy/browser/Scheduler/credential revocation and signed pool/remote C
+launch/adopt/recovery/continuation/notification with actual C->B->C. Preserve all
+outstanding M3 and M5-M11 product scope. Native execution close is not C container
+physical STOP. No public Gateway/JWT, actual C, NAS/TCP/OS reboot, real model,
+least-privilege SQL, quota or full product/release proof. Root revocations remain
+pending; every M0-M11 parent stays open, compiled tenant flag false and unreleased
+startup schema fence unchanged. No deployment/push/PR/local app runtime. Local
+Git/OpenSpec/stdlib packaging and static formatting only; serial self-review,
+not independent full audit. Save as local checkpoint, then continue the full goal.

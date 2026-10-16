@@ -1006,6 +1006,10 @@ async def run_agent(
         restore_checkpoint: bool = True,
     ) -> None:
         nonlocal checkpoint_rollback_completed
+        if record.workspace_context is not None and not started:
+            # An unstarted execution has no captured pre-run state. None here
+            # must never mean permission to delete the prior conversation.
+            action = "interrupt"
         await run_manager.set_finalizing(run_id, True)
         if action == "rollback":
             await run_manager.set_status(
@@ -2072,6 +2076,7 @@ async def run_agent(
 
                 if record.workspace_context is not None and workspace_cleanup_ok:
                     record.workspace_execution_closed = True
+                    await run_manager._confirm_workspace_execution_closed(record)
                 if lease_cleanup_interrupt is not None:
                     raise lease_cleanup_interrupt
 

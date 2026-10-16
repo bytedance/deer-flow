@@ -275,3 +275,38 @@ revocation retains a separate pending execution domain plus browser, Scheduler
 and credentials. Native 0040/e0003 stay unchanged; no new DDL or activation.
 Full scoped Run lease/terminal/progress publication fences and revocation that
 arrives after a prior terminal commit remain required integration work.
+
+New scoped normal Run admission now creates one `run_execution` row in the
+existing generic outbox, in the SAME transaction. Its binding excludes owner
+but retains original Run/user/workspace/thread/incarnation/creation/context;
+pending handoff/adopt updates only its owner alongside the native owner CAS.
+Start/transfer refuse a missing/mismatched lifetime instead of filling history.
+No new ORM/schema migration is needed; native Run metadata remains authority.
+
+The durable barrier now covers logical terminal status through actual native
+closure, not only a requested stop. Member invalidation selects active Runs OR
+unclosed lifetimes, so a completion hook still running after `success` is covered.
+Scoped user cancellation locks the fresh private parent, then rechecks original
+Run identity under clock/Run locks before enqueuing captured stop intent. Unbound
+legacy cancellation cannot touch scoped rows. Wrong space/withdrawn membership
+cannot reuse a local cache or become an infrastructure-error abort fallback.
+Pending scoped rollback is NoStart/interrupt only and retains old checkpoint;
+running/terminal scoped rollback remains refused until its write fence exists.
+
+Only the successful native closing boundary can close an execution lifetime;
+dedicated task completion also settles its stop child. Awaited native workers can
+acknowledge their own last close boundary without a synthetic completed task.
+Exact committed receipts can be recognized after lease expiry, but an OPEN row
+requires a currently valid owner lease rechecked after locks. Failed cleanup keeps
+the barrier. Ordinary startup/expiry takeover skips ALL scoped rows, including
+missing historical lifetimes: authenticated scoped recovery/physical proof is
+still required, never assume expiry means STOP. M8 concurrency must count these
+unclosed lifetimes as reserved even when Run.status looks terminal.
+
+Cleanup locks the original workspace row (existence only, no live-member grant)
+BEFORE clock/Run or outbox/task locks. Audit's workspace FK would otherwise take
+an inverse workspace key-share lock during flush. MCP claims recheck actual time
+after lock acquisition. Neither workspace locking nor lifecycle receipts grant
+execution, result reads or remote C physical STOP. Root revocations remain pending
+for remaining domains. Checkpoint/journal/tool/goal write authorization and full
+public Gateway/credential integrations remain M4/M5/M10/M11 requirements.

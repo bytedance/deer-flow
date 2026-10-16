@@ -346,6 +346,16 @@ python -m pytest tests/test_workspace_execution.py tests/test_workspace_revocati
 
 - [ ] 继续补齐 FULL Run 生命周期（先终态后撤权、用户直接取消、丢失 owner/重启）、lease/status/progress/journal/checkpoint/goal/工具发布的完整权限栅栏；然后接其他资源域、pool/远程 C 和真实 C→B→C。此子步不完成 M4 父项。
 
+#### M4 第十一小步：Run 全程持久清理记录与用户取消（本轮已验证）
+
+- [x] 实际 native graph 完成业务逻辑但 completion hook 尚未退出时，持久记录仍阻止 peer 准入；分别验证正常结束、此时成员撤权和用户 interrupt。
+- [x] 在新 scoped normal Run 准入事务建立 run_execution 生命周期记录；handoff/adopt 同事务转移 native owner，缺失记录不补历史授权。native Run 仍是执行权威，记录仅保存未确认关闭事实。
+- [x] 原生心跳在 terminal metadata 后仍为未关闭生命周期续约，并消费原生 cancel intent。用户取消需新鲜私有 scope；撤权只消费 interrupt，不能因为旧 rollback intent 而回写旧 checkpoint。
+- [x] 只有原生关闭边界、原始绑定和有效 owner lease 可完成 run_execution；failed/unknown cleanup 保留阻塞。根撤权仍保留其他资源域和 C physical STOP 待办。
+- [x] 上海主干、必要旧路径回归、可复跑 CI、文档/回执和本地提交；完整工具/checkpoint/journal 权限栅栏与其他资源域仍归 M4 后续。
+
+- [ ] 完整 scoped worker 的 checkpoint/journal/goal/工具效应权限与 lease 栅栏、active rollback、真实 API 绑定和受认证的 owner/实例恢复仍待实施，再接其他资源域及 pool/远程 C。Native close 不等于 C physical STOP，M4 父项保持未完成。
+
 ### M5：记忆、知识检索与工具凭据隔离
 
 **修改接点：**

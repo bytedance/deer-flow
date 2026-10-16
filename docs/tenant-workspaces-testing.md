@@ -159,3 +159,43 @@ python scripts/render_tenant_run_control_pipeline.py tenant-run-control <归档S
 仍在 M10/M11。完整 Run HTTP/JWT、直接用户取消、checkpoint/journal/工具发布权限
 栅栏，以及先进入终态再撤权的生命周期窗口尚未完成；不要据此启用租户总门禁。
 其他执行域、browser、Scheduler、凭据和完整 C→B→C 仍需实施。
+
+## Run 从准入到关闭的持久生命周期
+
+`run_execution` 在新 scoped normal Run 准入的同一事务中建立；原生 Run 仍是执行
+权威，该记录只保存“尚未确认关闭”的事实。pending handoff/adopt 仅同事务转移
+native owner，不改原始用户、空间、线程代次、创建时间和授权快照。历史缺失记录
+不自动补。没有新增表或迁移（native 0040 / executor e0003）。
+
+`Run.status=success/interrupted` 不等于清理已结束。生命周期未关闭时，另一个
+worker 仍不能准入；原 owner 可为清理续约。正常结束、终态清理期撤权和另一
+worker 发起 interrupt 均由实际 native graph/heartbeat 验证。外空间或已撤销
+成员不能复用缓存来取消。只有原生最后关闭边界和有效 owner 绑定能关闭 OPEN
+记录；已提交的精确回执可幂等识别，过期租约不能新释放资源。
+
+另一个真实状态检查覆盖未启动 rollback：记录最初请求，但只消费 interrupt，
+明确 NoStart 后，迟到消费者也不能恢复或删除 checkpoint。测试用实际 SQLite
+checkpointer，检查前后 checkpoint ID 和内容。正在运行的 scoped rollback
+仍拒绝，直到完整 checkpoint 权限栅栏接通；不把未实现能力当已支持。
+
+复跑时沿用上一节源码包/专属任务步骤，渲染命令增加白名单 suite：
+
+```bash
+python scripts/render_tenant_run_control_pipeline.py tenant-run-lifetime <归档SHA256> \
+  --suite lifetime > /private/tmp/Jenkinsfile.tenant-run-lifetime
+```
+
+源码包须命名 `tenant-run-lifetime-source.tar.gz`，与 phase 对齐。该套件共十四项：
+八项生命周期/真实 checkpoint 检查，加原有六项 Run 撤权/失败清理/NoStart 检查。
+新增场景先跑主干，之后回归既有实现；不把完整后台功能当已完成。应用测试只在上海；本机仅做标准库打包/渲染、Git、OpenSpec 和静态格式检查。
+复跑需要的镜像、内部 PG 和精确卷清理仍由同一仓库模板管理。
+
+全部 scoped Run 都不走旧的“租约过期即孤儿释放”，即便历史生命周期记录缺失。
+仍需完成受认证的 owner/实例恢复与远程 C 物理 STOP。M8 配额必须计入未关闭
+生命周期。清理通过原始 workspace-first 锁序避开审计 FK 与成员变更的反向等待，
+不依赖仍有效的成员授权；锁 workspace 也不授予执行或读取结果权限。
+
+完整 worker checkpoint/journal/goal/外部工具写入权限、真实 JWT/HTTP、account/
+policy/Scheduler/browser/credential 撤权、实际 C→B→C 和成套恢复仍未验收。
+本轮仅内部确定性 graph/SQL/SQLite-checkpoint 及已有 MCP 物理回归，没有真实模型、
+新公开接口或租户启用。最新回执将记录在 `native_run_execution_lifetime`。
