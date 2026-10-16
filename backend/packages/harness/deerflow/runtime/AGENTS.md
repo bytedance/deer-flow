@@ -288,8 +288,9 @@ Native short thread-operation reservations capture the trusted immutable
 WorkspaceContext before admission and pass it, original record user and admitting
 worker to scoped SQL cleanup. Ambient selection changes do not redirect release.
 Legacy calls omit the new cleanup keywords for custom-store compatibility.
-Scope-aware cleanup is mandatory for tenant stores; worker lifecycle/snapshots,
-leases and normal Run admission remain M4 integration work.
+Scope-aware cleanup is mandatory for tenant stores; worker lifecycle,
+leases and normal Run admission remain M4 integration work. Short-operation
+admission snapshots and hydration are documented below.
 
 compact_thread_context accepts optional validate_scope and commit_update
 adapters. It revalidates after reading a checkpoint and immediately before
@@ -322,3 +323,16 @@ intent first, then drain teardown even if cancellation fails; a blocked close
 must not delay cancel. Observer callers keep apply_on_disconnect=False.
 #74 exposed the ordering window and #75 verifies it plus native cancellation
 and scoped observer mains. No new inference/stream engine is introduced.
+
+
+Native Run identity preparation: RunRecord retains workspace_id, immutable
+WorkspaceContext and thread_incarnation from lock-fenced durable admission or
+hydration. _record_from_store validates identity shape/owner/space/incarnation;
+historical NULL snapshots stay NULL, regardless of ambient selection. Scoped
+resident overlays compare the same durable identity before retaining live
+controls. Store capability supports_workspace_admission is explicit; legacy or
+memory stores cannot silently admit a bound workspace. Local idempotency reuse
+checks exact space/operation and re-reads current scoped SQL before returning.
+Legacy create/put cannot create or retarget scoped authority. These checks do
+not integrate normal Agent Run/RunContext, ownership leases, worker recovery,
+remote dispatch or journal writes; keep those M4 gates closed until implemented.

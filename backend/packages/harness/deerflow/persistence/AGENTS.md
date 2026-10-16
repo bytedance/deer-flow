@@ -114,7 +114,7 @@ under workspace/actor/thread locks. Callers must not put model or network work i
 that callback. Controlled withdrawal/cancellation and physical mount checks remain
 required; isolated byte-level mains do not close those gates.
 
-Current native head is 0038_workspace_read_clocks; workspace_thread_read_versions
+Read-clock revision 0038_workspace_read_clocks (now followed by 0039); workspace_thread_read_versions
 uses (workspace_id,user_id) PK and a non-null BIGINT zero-default version. Legacy
 per-user clocks/marker PKs stay unchanged. ThreadReadRepository captures the
 operator workspace_required flag, consumes trusted scope and filters run rows
@@ -123,7 +123,7 @@ Marker mutation locks workspace -> actor -> thread and updates its workspace
 clock only when the native monotonic marker moves. Version reads use one live
 membership SELECT; missing required scope is refused. Scoped delete_by_thread
 is refused pending thread lifecycle integration, never blind all-viewer cleanup.
-Current offline native/executor ownership receipts require 0038/e0002; physical
+Current offline native/executor ownership receipts require 0039/e0002; physical
 paired rollout, activity/run feeds and lifecycle acceptance remain required.
 
 RunRepository read scope consumes trusted task-local context and the operator
@@ -195,3 +195,15 @@ workspace cleanup must use the canonical ThreadDeletion receipt, not generic
 feedback.delete_by_thread. Unbound stats defaults remain all-owner; scoped
 callers pass the explicit actor. Constructor workspace_required is not yet full
 runtime-factory activation. #82 evidence/limits live in workspace progress JSON.
+
+
+0039_run_workspace_identity is the native head after unchanged 0038. It adds
+nullable runs.workspace_context_json and runs.thread_incarnation without
+backfilling live authority. Scoped atomic short-operation admission captures
+immutable WorkspaceContext and parent incarnation under the existing private
+thread lock. RunRepository advertises supports_workspace_admission; ordinary
+Agent Run admission remains refused until lifecycle integration. Legacy put
+refuses bound workspace callers and any existing workspace row, including
+unbound callers, rather than retargeting a captured identity. Dedicated scoped
+worker write/recovery methods remain M4 work. Backfill/export and executor import
+agree on 0039/e0002 but do not fabricate permission snapshots for history.

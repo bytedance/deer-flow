@@ -191,3 +191,32 @@ continuation, notifications and unknown physical STOP remain M4 requirements.
 Next implement original Run attribution first, without opening or bypassing the
 startup guard. All M0-M11 parent gates remain unchecked, M3 incomplete; no
 activation/deployment/push/model calls or local application runtime tests.
+
+
+M4 durable native identity checkpoint (2026-10-16):
+`deerflow-tenant-execution-m4-sql` #1 both-dialect missing-snapshot RED -> #2
+native short-operation admission/hydration main GREEN. #3 exposes all four
+legacy create/upsert and local idempotency bypasses in both dialects; recovery
+shape check passes. #4 has 16 passed plus a PostgreSQL teardown error: Alembic
+owned engine was not disposed on refused downgrade. env now disposes in finally.
+#5 SUCCESS: 16 tests (7 new cases, 9 reused), ten-file Ruff check/format, actual
+parent 0038->0039 repeat upgrade/history/NULL authority/refused downgrade/no
+leftover PostgreSQL session. Exact code/source/log/image receipts and empty own
+containers/networks: native_run_identity in progress JSON. Local code matches
+final cloud bytes; OpenSpec strict and diff checks pass.
+
+Native head is now 0039_run_workspace_identity, executor remains e0002. Original
+WorkspaceContext and locked parent incarnation persist into the existing Run
+row and restore without consulting browser selection; old history is not granted
+new authority. Resident overlay and local idempotency require matching durable
+identity and live scoped SQL. Legacy create/upsert refuse workspace authority.
+This does not yet enable normal Agent Run/RunContext, journal/lease/worker recovery
+or remote execution. Next add live parent-incarnation fences to idempotency
+recovery and claim/adopt, then finish normal Run/RunContext/worker propagation.
+Snapshot equality alone is not live parent or membership authorization. Native
+C->B->C, MCP/Scheduler/ledger/signature receiver, publication/continuation/
+notifications/revocation and unknown STOP remain M4 requirements. Startup's
+existing closed schema fence is older than 0039; align full release candidate
+and matched manifest before activation, never bypass the compiled gate. All
+M0-M11 parent gates remain unchecked, M3 incomplete; no activation/deployment/
+push/model calls or local application runtime tests.

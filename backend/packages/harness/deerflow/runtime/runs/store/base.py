@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from deerflow.authz.workspace import WorkspaceContext
 from deerflow.utils.time import coerce_iso
 
 
@@ -121,6 +122,7 @@ class RunStore(abc.ABC):
     # Trusted provider capabilities, fixed by operator construction. A bound
     # workspace must never authorize resident data through an unscoped store.
     supports_workspace_reads: bool = False
+    supports_workspace_admission: bool = False
     workspace_scope_required: bool = False
 
     async def list_changed(
@@ -453,6 +455,7 @@ class RunStore(abc.ABC):
         created_at: str | None = None,
         grace_seconds: int = 10,
         idempotency_key: str | None = None,
+        workspace_context: WorkspaceContext | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Atomically create an active thread operation with cross-process uniqueness.
 
@@ -464,6 +467,8 @@ class RunStore(abc.ABC):
         Returns ``(new_run_dict, claimed_run_dicts)``.
         Raises ``IntegrityError`` on conflict for ``reject`` strategy.
         """
+        if workspace_context is not None:
+            raise NotImplementedError("Legacy RunStore cannot persist workspace authority")
         legacy_impl = type(self).create_run_atomic
         if legacy_impl is RunStore.create_run_atomic:
             raise NotImplementedError("RunStore must implement create_thread_operation_atomic() or create_run_atomic()")

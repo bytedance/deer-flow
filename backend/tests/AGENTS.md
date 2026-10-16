@@ -270,3 +270,14 @@ actual parent directory with a symlink and inspect both original/outside files
 and outside temp inventory. Restore the directory in finally. No sandbox/model
 execution or production physical isolation is implied. Native remote tests remain
 unbound compatibility; scoped remote integration is still M4/M5.
+
+
+Workspace Run identity checks use real SQLite/PostgreSQL admission and native
+RunManager, then change the ambient selection and persisted policy independently.
+Keep assertions on actual stored identity/nonce and refusal without mutation,
+including unbound legacy upsert and resident idempotency reuse. The migration
+case reconstructs parent 0038 only inside its disposable fixture database,
+checks exact historical rows and NULL authority through repeat upgrades, then
+checks refused downgrade preserves head and leaves no migration-owned Postgres
+session. Never force DROP DATABASE or terminate connections to hide a leak.
+These are short-operation/recovery foundations, not normal Agent Run execution.

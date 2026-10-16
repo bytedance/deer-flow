@@ -276,6 +276,14 @@ python -m pytest tests/test_workspace_execution.py tests/test_workspace_revocati
 - [x] 保存源包、镜像、构建与验证回执并本地提交。此步不接通实际租户运行，不改变 M4 父验收状态。
 - [ ] 后续接原生持久 Run/RunContext、MCP/Scheduler/执行账与接收端实时授权；撤权、续跑、通知和物理 STOP 验收继续保持待完成。
 
+#### M4 第二小步：原生准入持久身份快照（2026-10-16）
+
+在既有 `runs` 表追加 nullable JSON 权限快照和 thread incarnation，并追加新迁移至 0038 之后。先在原生已授权短操作准入路径保存锁内捕获的身份，并由 RunManager 恢复同一快照；后台不得从当前选择重新生成身份。旧历史缺失快照保留空值，不凭当前成员资格补权。普通 Agent Run 准入及生命周期尚未集成，维持其拒绝与启动关闭。
+
+- [x] 真实 SQLite/PostgreSQL 的原生准入、持久读取和恢复主干 RED→GREEN。
+- [x] 校验父迁移升级保留历史、错误快照拒绝及原生兼容；检查旧 upsert 不得改写带空间的身份。
+- [x] 完成定向检查、文档及回执并本地提交；随后继续普通 Run/RunContext 与 worker 生命周期接入。
+
 ### M5：记忆、知识检索与工具凭据隔离
 
 **修改接点：**

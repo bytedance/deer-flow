@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 
-from deerflow.authz.workspace import get_current_workspace
+from deerflow.authz.workspace import WorkspaceContext, get_current_workspace
 from deerflow.persistence.workspaces.scope import resolve_resource_scope
 from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user, resolve_user_id
@@ -200,6 +200,9 @@ class RunRecord:
     metadata: dict = field(default_factory=dict)
     kwargs: dict = field(default_factory=dict)
     user_id: str | None = None
+    workspace_id: str | None = None
+    workspace_context: WorkspaceContext | None = None
+    thread_incarnation: str | None = None
     created_at: str = ""
     updated_at: str = ""
     task: asyncio.Task | None = field(default=None, repr=False)
@@ -477,6 +480,24 @@ class RunManager:
             return False
 
     @staticmethod
+    def _workspace_context_from_store(row: dict[str, Any]) -> WorkspaceContext | None:
+        snapshot = row.get("workspace_context_json")
+        if snapshot is None:
+            if row.get("thread_incarnation") is not None:
+                raise WorkspaceAccessDenied("Run workspace identity is incomplete")
+            return None
+        if not isinstance(snapshot, dict):
+            raise WorkspaceAccessDenied("Run workspace identity is invalid")
+        try:
+            context = WorkspaceContext(**snapshot)
+        except (TypeError, ValueError):
+            raise WorkspaceAccessDenied("Run workspace identity is invalid") from None
+        incarnation = row.get("thread_incarnation")
+        if context.workspace_id != row.get("workspace_id") or context.actor_user_id != row.get("user_id") or not isinstance(incarnation, str) or not 1 <= len(incarnation) <= 32 or any(ord(c) < 32 or ord(c) == 127 for c in incarnation):
+            raise WorkspaceAccessDenied("Run workspace identity does not match its persisted owner")
+        return context
+
+    @staticmethod
     def _record_from_store(row: dict[str, Any]) -> RunRecord:
         """Build a read-only runtime record from a serialized store row.
 
@@ -500,6 +521,9 @@ class RunManager:
             created_at=row.get("created_at") or "",
             updated_at=row.get("updated_at") or "",
             user_id=row.get("user_id"),
+            workspace_id=row.get("workspace_id"),
+            workspace_context=RunManager._workspace_context_from_store(row),
+            thread_incarnation=row.get("thread_incarnation"),
             error=row.get("error"),
             model_name=row.get("model_name"),
             store_only=True,
@@ -644,6 +668,8 @@ class RunManager:
         run_id = str(uuid.uuid4())
         now = _now_iso()
         user_id = _resolve_record_user_id(user_id)
+        if resolve_resource_scope(None, user_id, required=getattr(self._store, "workspace_scope_required", False)) is not None:
+            raise WorkspaceAccessDenied("workspace runs require trusted atomic admission")
         lease_expires_at = self._compute_lease_expires_at()
         record = RunRecord(
             run_id=run_id,
@@ -692,6 +718,9 @@ class RunManager:
             record.run_id == row.get("run_id")
             and record.thread_id == row.get("thread_id")
             and record.user_id == row.get("user_id")
+            and record.workspace_id == row.get("workspace_id")
+            and record.thread_incarnation == row.get("thread_incarnation")
+            and record.workspace_context == RunManager._workspace_context_from_store(row)
             and record.operation_kind.value == row.get("operation_kind", "run")
             and canonical_run_created_at(record.created_at) == canonical_run_created_at(row["created_at"])
         )
@@ -1743,6 +1772,9 @@ class RunManager:
         now = _now_iso()
         # Resolve before the idempotency checks below compare it with stored rows.
         user_id = _resolve_record_user_id(user_id)
+        workspace_context = resolve_resource_scope(None, user_id, required=getattr(self._store, "workspace_scope_required", False))
+        if workspace_context is not None and getattr(self._store, "supports_workspace_admission", False) is not True:
+            raise WorkspaceAccessDenied("workspace admission requires a scoped durable Run store")
 
         _supported_strategies = ("reject", "interrupt", "rollback")
         if multitask_strategy not in _supported_strategies:
@@ -1778,6 +1810,14 @@ class RunManager:
                         continue
                     if existing.thread_id != thread_id or existing.user_id != user_id:
                         raise RuntimeError("Run idempotency key resolved to a different thread or user")
+                    if workspace_context is not None:
+                        if existing.workspace_context != workspace_context or existing.operation_kind != operation_kind:
+                            raise WorkspaceAccessDenied("Run idempotency workspace identity differs")
+                        durable = await self._store.find_by_idempotency_key(idempotency_key, user_id=user_id, thread_id=thread_id)
+                        if durable is None or not self._resident_matches_durable(existing, durable):
+                            raise WorkspaceAccessDenied("Run idempotency workspace authorization changed")
+                    elif existing.workspace_id is not None:
+                        raise WorkspaceAccessDenied("Run idempotency requires workspace authority")
                     existing.idempotency_reused = True
                     return existing
 
@@ -1792,6 +1832,11 @@ class RunManager:
                 existing = self._record_from_store(conflict.existing)
                 if existing.thread_id != thread_id or existing.user_id != user_id:
                     raise RuntimeError("Run idempotency key resolved to a different thread or user") from conflict
+                if workspace_context is not None:
+                    if existing.workspace_context != workspace_context or existing.operation_kind != operation_kind:
+                        raise WorkspaceAccessDenied("Run idempotency workspace identity differs") from conflict
+                elif existing.workspace_id is not None:
+                    raise WorkspaceAccessDenied("Run idempotency requires workspace authority") from conflict
                 existing.idempotency_reused = True
                 return existing
 
@@ -1837,8 +1882,10 @@ class RunManager:
                     }
                     if idempotency_key is not None:
                         create_kwargs["idempotency_key"] = idempotency_key
+                    if workspace_context is not None:
+                        create_kwargs["workspace_context"] = workspace_context
                     try:
-                        await self._call_store_with_retry(
+                        stored_result = await self._call_store_with_retry(
                             "create_thread_operation_atomic",
                             run_id,
                             lambda: self._store.create_thread_operation_atomic(**create_kwargs),
@@ -1869,13 +1916,15 @@ class RunManager:
                     }
                     if idempotency_key is not None:
                         create_kwargs["idempotency_key"] = idempotency_key
+                    if workspace_context is not None:
+                        create_kwargs["workspace_context"] = workspace_context
                     # Interrupt / rollback: store-side claim + insert in one
                     # transaction. Retry on IntegrityError in case another
                     # worker races us between our SELECT FOR UPDATE and INSERT.
                     max_retries = 3
                     for attempt in range(max_retries):
                         try:
-                            await self._call_store_with_retry(
+                            stored_result = await self._call_store_with_retry(
                                 "create_thread_operation_atomic",
                                 run_id,
                                 lambda: self._store.create_thread_operation_atomic(**create_kwargs),
@@ -1897,6 +1946,15 @@ class RunManager:
                     # ``create_thread_operation_atomic`` already marked any claimed store
                     # rows as interrupted in the same transaction; no extra
                     # store write is needed for them.
+
+            if workspace_context is not None:
+                # Only the durable lock-fenced admission result establishes identity.
+                captured = self._record_from_store(stored_result[0])
+                if captured.workspace_context != workspace_context:
+                    raise WorkspaceAccessDenied("Run admission changed captured workspace identity")
+                record.workspace_id = captured.workspace_id
+                record.workspace_context = captured.workspace_context
+                record.thread_incarnation = captured.thread_incarnation
 
             # 3) Only now safe to register locally — store insert succeeded.
             self._runs[run_id] = record

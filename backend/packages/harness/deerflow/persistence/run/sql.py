@@ -8,6 +8,7 @@ minutes -- we don't hold connections across long execution.
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -15,6 +16,7 @@ from sqlalchemy import and_, case, delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from deerflow.authz.workspace import WorkspaceContext
 from deerflow.persistence.run.model import RunChangeClockRow, RunRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
@@ -50,6 +52,7 @@ def _origin_kind(operation_kind: str, metadata: Any) -> str | None:
 
 class RunRepository(RunStore):
     supports_workspace_reads = True
+    supports_workspace_admission = True
 
     async def find_by_idempotency_key(self, key: str, *, user_id: str, thread_id: str) -> dict[str, Any] | None:
         """Owner-scoped recovery of an admission whose acknowledgement was lost."""
@@ -188,6 +191,8 @@ class RunRepository(RunStore):
         commit from turning the retry into a primary-key failure.
         """
         resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.put")
+        if resolve_resource_scope(None, resolved_user_id, required=self._workspace_required) is not None:
+            raise WorkspaceAccessDenied("workspace Run upserts require scoped lifecycle integration")
         now = datetime.now(UTC)
         created = datetime.fromisoformat(created_at) if created_at else now
         lease_dt = datetime.fromisoformat(lease_expires_at) if lease_expires_at else None
@@ -214,6 +219,8 @@ class RunRepository(RunStore):
         async with self._sf() as session:
             values["change_seq"] = await self._next_change_seq(session)
             row = await session.get(RunRow, run_id)
+            if row is not None and row.workspace_id is not None:
+                raise WorkspaceAccessDenied("legacy upsert cannot mutate a workspace Run")
             if row is None:
                 session.add(RunRow(run_id=run_id, created_at=created, **values))
             else:
@@ -929,6 +936,7 @@ class RunRepository(RunStore):
         created_at: str | None = None,
         grace_seconds: int = 10,
         idempotency_key: str | None = None,
+        workspace_context: WorkspaceContext | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Atomically create a run with cross-process thread-uniqueness.
 
@@ -946,7 +954,7 @@ class RunRepository(RunStore):
         from deerflow.runtime.runs.manager import ConflictError
 
         resolved_user_id = resolve_user_id(user_id or AUTO, method_name="RunRepository.create_thread_operation_atomic")
-        context = resolve_resource_scope(None, resolved_user_id, required=self._workspace_required)
+        context = resolve_resource_scope(workspace_context, resolved_user_id, required=self._workspace_required)
         if context is not None and (operation_kind == "run" or multitask_strategy != "reject"):
             raise WorkspaceAccessDenied("workspace agent-run lifecycle is not integrated")
         now = datetime.now(UTC)
@@ -982,6 +990,8 @@ class RunRepository(RunStore):
                 thread = await ThreadMetaRepository(self._sf)._locked_row(session, thread_id, resolved_user_id, context, include_deleting=operation_kind == "delete")
                 if thread is None or not thread.incarnation:
                     raise WorkspaceAccessDenied("private thread is unavailable")
+                values["workspace_context_json"] = asdict(context)
+                values["thread_incarnation"] = thread.incarnation
             # Keep the global clock -> run-row lock order used by every other
             # mutator. One position covers this atomic set of changes; run_id
             # provides deterministic ordering within the position.

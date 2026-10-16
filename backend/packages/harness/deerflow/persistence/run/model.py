@@ -14,6 +14,10 @@ class RunRow(Base):
     __tablename__ = "runs"
 
     workspace_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    # Captured only by trusted admission under the private thread lock.
+    # NULL historical rows never gain authority from a later browser selection.
+    workspace_context_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    thread_incarnation: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     thread_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)

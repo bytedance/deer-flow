@@ -206,10 +206,21 @@ Alembic batch so legacy projects do not become shared. ORM fresh bootstrap has
 the same default/constraint. Destructive downgrade refuses; restore the matched
 backup generation instead. Old source ancestry/release receipts are unchanged.
 
-0038_workspace_read_clocks is the current head after unchanged 0037. It creates
+0038_workspace_read_clocks follows unchanged 0037 (the head is now 0039). It creates
 only workspace_thread_read_versions (workspace_id,user_id primary key; version
 BIGINT non-null default 0), without modifying or copying legacy read counters
 or inventing workspace ownership. ORM fresh bootstrap registers the same table.
 Downgrade refuses discarding workspace clock data; restore a matched generation.
-Native backfill/export and executor import require this current revision while
+Native backfill/export and executor import require the latest reviewed revision while
 executor schema remains e0002. Historical deployment receipts are unchanged.
+
+
+0039_run_workspace_identity follows unchanged 0038 and adds only nullable JSON
+runs.workspace_context_json and VARCHAR(32) runs.thread_incarnation with the
+idempotent safe_add_column helper. Fresh ORM has the same shape. Existing rows
+remain NULL and retain their content/ownership; missing historical authority
+must not be reconstructed from a current request. Downgrade refuses and requires
+matched restore. Native/export/executor attribution now requires 0039/e0002.
+Alembic env disposes its owned async engine in finally even when DDL or a refused
+downgrade raises; do not conceal leaked migration sessions by forcing database
+drop or terminating unrelated connections in tests.

@@ -6,7 +6,7 @@ acceptance remain pending. Historical `0035/e0001` release receipts are immutabl
 
 ## Scope and prerequisites
 
-`scripts/tenant_migration.py` operates only on native `0038_workspace_read_clocks`
+`scripts/tenant_migration.py` operates only on native `0039_run_workspace_identity`
 and independent executor `e0002_workspace_scope` databases. It never performs
 DDL, starts workers, enables registration, resumes admission, releases physical
 capacity or changes account verification. M10 must collect actual drain,
@@ -116,18 +116,36 @@ Exact source digests and Jenkins results are in
 Project visibility refinement: `0037_project_visibility` follows the unchanged
 `0036_tenant_workspaces`; existing projects receive private visibility, never an
 automatic team grant. At that checkpoint, native startup and both sides of the offline ownership
-export agreed on 0037. The current 0038 requirement is recorded below. Previous 0036 phase receipts remain historical
+export agreed on 0037. The later 0038 and current 0039 requirements are recorded below. Previous 0036 phase receipts remain historical
 and cannot be reused for the new generation. The executor stays at e0002.
 Jenkins #23 verified real 0035-to-current upgrades on both databases plus paired
 attribution; #24 verified the actual plan/apply/verify CLI and synthetic receipt
 requirements on both. These are consumer/DDL proofs, not cloud drain, restored
 production backups, NAS mapping or deployed tenant release acceptance.
 
-Current native head is `0038_workspace_read_clocks`, appended after unchanged
+Read-clock revision `0038_workspace_read_clocks` was appended after unchanged
 0037. It adds `workspace_thread_read_versions` keyed by `(workspace_id,user_id)`
 with a BIGINT zero-default clock. Native per-user clocks/markers and shipped
 ancestors are unchanged. DDL does not copy a global clock into team spaces or
 attribute ownership. New workspace clocks begin at zero and advance only with
 a scoped marker change. Native backfill/export and independent executor import
-now require the reviewed 0038 revision; old receipts remain immutable and cannot
+at that checkpoint required the reviewed 0038 revision; old receipts remain immutable and cannot
 stand in for a matching new generation. Executor e0002 is unchanged.
+
+
+Current native head is `0039_run_workspace_identity`, following unchanged 0038.
+It adds nullable JSON `runs.workspace_context_json` (the immutable four-field
+identity) and nullable VARCHAR(32) `runs.thread_incarnation`. Fresh ORM and parent
+upgrade share this shape. Historical rows keep their prior bytes/ownership and
+receive no permission snapshot or incarnation grant. Repeated upgrades are
+idempotent; destructive downgrade refuses, requiring a matched backup instead.
+Current native backfill/export and independent executor import require 0039 and
+e0002. Past deployment receipts remain immutable. M10 must align the complete
+candidate's startup schema fence and paired release manifest before activation;
+the existing closed startup fence is not an activation proof.
+
+The original workspace snapshot is captured at private thread admission, not
+from client metadata or current UI selection at recovery. Snapshot equality is
+identity only, not current membership authorization. Ordinary Agent Run and
+worker lifecycle integration, revocation, live publish/continuation checks and
+physical release/restore still remain M4/M10 acceptance work.

@@ -887,3 +887,14 @@ Run/MCP/Scheduler/worker admission; tenant startup remains closed. Management
 status/cancel, persisted parent-child binding, live revocation/publication and
 unknown-work reservations remain M4 requirements. The bounded Shanghai #1/#2/#3
 receipt is recorded under execution_scope_v2; full M4 is not complete.
+
+
+M4 durable Run identity preparation (0039): native short-operation admission
+persists the trusted WorkspaceContext and locked parent incarnation into the
+existing Run row, and RunManager hydrates the same identity after a selection
+change. Malformed or owner/space-conflicting snapshots are refused. Historical
+rows keep absent snapshots; current membership cannot invent their execution
+authority. Resident idempotency hits recheck scoped SQL, including live policy
+versions; legacy create/put cannot retarget workspace rows. There is no new
+public authority endpoint. Ordinary Agent Run admission remains refused pending
+RunContext/worker/lease/journal integration. M4 parent and startup stay closed.
