@@ -538,6 +538,17 @@ describe("onceRunAtInstant", () => {
     );
   });
 
+  test("a date-only run_at is midnight in the task's zone, as the server runs it", () => {
+    // `-07` at the end of a bare date is a day, not a UTC offset.
+    expect(onceRunAtInstant("2026-12-07", "Asia/Shanghai")).toBe(
+      "2026-12-06T16:00:00+00:00",
+    );
+    // West of UTC the old reading (UTC midnight) also fell on the previous day.
+    expect(onceRunAtInstant("2026-12-07", "America/New_York")).toBe(
+      "2026-12-07T05:00:00+00:00",
+    );
+  });
+
   test("a run_at with an offset is already an instant", () => {
     for (const value of [
       "2026-10-07T01:00:00Z",
@@ -654,5 +665,23 @@ describe("describeTaskSchedule for a chat-created one-time task", () => {
         now: new Date("2026-10-01T00:00:00Z"),
       }).text,
     ).toBe("Once, Oct 7 09:00 (America/New_York)");
+  });
+
+  test("reads a date-only run_at as midnight on that day in the task's zone", () => {
+    for (const [timezone, expected] of [
+      ["Asia/Shanghai", "Once, Dec 7 00:00 (Asia/Shanghai)"],
+      ["America/New_York", "Once, Dec 7 00:00 (America/New_York)"],
+    ] as const) {
+      const task = {
+        schedule_type: "once" as const,
+        schedule_spec: { run_at: "2026-12-07" },
+        timezone,
+      };
+      expect(
+        describeTaskSchedule(task, "en-US", {
+          now: new Date("2026-10-01T00:00:00Z"),
+        }).text,
+      ).toBe(expected);
+    }
   });
 });

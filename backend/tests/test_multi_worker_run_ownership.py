@@ -1967,6 +1967,29 @@ async def test_cancel_takeover_from_crashed_worker():
 
 
 @pytest.mark.anyio
+async def test_cancel_takeover_marks_orphan_recovery_for_waiting_consumers():
+    """A crash takeover must carry the orphan-recovery stop reason.
+
+    The owner is presumed dead, so a cross-worker SSE/``wait`` consumer's only
+    liveness edge is the durable row: without the marker its heartbeat fallback
+    never fires and it waits forever for an END that no producer can publish.
+    """
+    store = MemoryRunStore()
+    grace = 10
+    expired_lease = (datetime.now(UTC) - timedelta(seconds=grace + 5)).isoformat()
+    await store.put("run-takeover-liveness", thread_id="t1", status="running", created_at=datetime.now(UTC).isoformat(), owner_worker_id="dead-worker", lease_expires_at=expired_lease)
+
+    manager = _make_manager(store=store, run_ownership_config=_lease_config(heartbeat_enabled=True, grace_seconds=grace))
+    outcome = await manager.cancel("run-takeover-liveness")
+    assert outcome == CancelOutcome.taken_over
+
+    row = await store.get("run-takeover-liveness")
+    assert row is not None
+    assert row["status"] == "error"
+    assert row["stop_reason"] == ORPHAN_RECOVERY_STOP_REASON
+
+
+@pytest.mark.anyio
 async def test_cancel_requests_active_lease_from_other_worker():
     """A cancel routed to a peer must durably notify the live owner."""
     store = MemoryRunStore()
@@ -2172,12 +2195,12 @@ async def test_cancel_takeover_race_owner_renewed_lease():
     # simulate the lease having been renewed.
     original = store.claim_for_takeover
 
-    async def race_lost(run_id, *, grace_seconds, error):
+    async def race_lost(run_id, *, grace_seconds, error, stop_reason=None):
         # Simulate a heartbeat renewal between the read and the write
         run = store._runs.get(run_id)
         if run and run["status"] in ("pending", "running"):
             run["lease_expires_at"] = (datetime.now(UTC) + timedelta(seconds=60)).isoformat()
-        return await original(run_id, grace_seconds=grace_seconds, error=error)
+        return await original(run_id, grace_seconds=grace_seconds, error=error, stop_reason=stop_reason)
 
     store.claim_for_takeover = race_lost
     manager = _make_manager(store=store, run_ownership_config=_lease_config(heartbeat_enabled=True, grace_seconds=grace))
@@ -2690,9 +2713,9 @@ async def test_cancel_claim_lost_to_terminal_returns_not_cancellable():
     # conditional UPDATE so it matches 0 rows.
     original = store.claim_for_takeover
 
-    async def race_claim(run_id, *, grace_seconds, error):
+    async def race_claim(run_id, *, grace_seconds, error, stop_reason=None):
         store._runs[run_id]["status"] = "success"
-        return await original(run_id, grace_seconds=grace_seconds, error=error)
+        return await original(run_id, grace_seconds=grace_seconds, error=error, stop_reason=stop_reason)
 
     store.claim_for_takeover = race_claim
 
@@ -2722,10 +2745,10 @@ async def test_cancel_claim_lost_to_takeover_returns_taken_over():
     # UPDATE so it matches 0 rows (peer already took it over).
     original = store.claim_for_takeover
 
-    async def race_takeover(run_id, *, grace_seconds, error):
+    async def race_takeover(run_id, *, grace_seconds, error, stop_reason=None):
         store._runs[run_id]["status"] = "error"
         store._runs[run_id]["error"] = "peer claim"
-        return await original(run_id, grace_seconds=grace_seconds, error=error)
+        return await original(run_id, grace_seconds=grace_seconds, error=error, stop_reason=stop_reason)
 
     store.claim_for_takeover = race_takeover
 

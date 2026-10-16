@@ -36,8 +36,9 @@ reach the OpenSandbox management service but cannot directly reach sandbox
 `execd` endpoints.
 
 Values in `sandbox.environment` that start with `$` are resolved from the
-Gateway process environment when the provider starts. Missing variables resolve
-to an empty string, matching the E2B provider.
+Gateway process environment once, when `config.yaml` loads; a missing variable
+fails the load. The provider injects the resolved values unchanged, so a secret
+that itself starts with `$` reaches the sandbox intact.
 
 ## Lifecycle and contract
 

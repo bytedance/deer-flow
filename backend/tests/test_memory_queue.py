@@ -144,7 +144,7 @@ def test_finishing_worker_reschedules_once_when_reprocess_pending() -> None:
     with patch("deerflow.agents.memory.backends.deermem.deermem.core.queue.threading.Timer", return_value=created_timer) as timer_cls:
         queue._process_queue()
 
-    timer_cls.assert_called_once_with(0, queue._process_queue)
+    timer_cls.assert_called_once_with(0.05, queue._process_queue)
     assert created_timer.daemon is True
     created_timer.start.assert_called_once_with()
     assert queue._reprocess_pending is False
@@ -190,7 +190,7 @@ def test_flush_nowait_is_non_blocking() -> None:
 
 def test_queue_keeps_updates_for_different_agents_in_same_thread() -> None:
     queue = _queue()
-    with patch.object(queue, "_reset_timer"):
+    with patch.object(queue, "_rearm_timer_locked"):
         queue.add(thread_id="thread-1", messages=["agent-a"], agent_name="agent-a")
         queue.add(thread_id="thread-1", messages=["agent-b"], agent_name="agent-b")
 
@@ -212,7 +212,7 @@ def test_queue_still_coalesces_updates_for_same_agent_in_same_thread() -> None:
 
 def test_process_queue_updates_different_agents_in_same_thread_separately() -> None:
     queue = _queue()
-    with patch.object(queue, "_reset_timer"):
+    with patch.object(queue, "_rearm_timer_locked"):
         queue.add(thread_id="thread-1", messages=["agent-a"], agent_name="agent-a")
         queue.add(thread_id="thread-1", messages=["agent-b"], agent_name="agent-b")
 

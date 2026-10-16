@@ -82,6 +82,8 @@ The legacy locations are anchored to the installed harness source, not to the ca
 `scripts/doctor.py` calls `AppConfig.resolve_config_path` rather than copying this order.
 
 Config values starting with `$` are resolved as environment variables (e.g., `$OPENAI_API_KEY`).
+This happens once, at load: consumers such as sandbox providers and ACP `env` use the values verbatim,
+because a resolved secret may itself start with `$` (`tests/test_sandbox_environment_passthrough.py`).
 `ModelConfig` also declares `use_responses_api` and `output_version` so OpenAI `/v1/responses` can be enabled explicitly while still using `langchain_openai:ChatOpenAI`.
 
 `ModelConfig.request_admission` is optional and is not a provider parameter.

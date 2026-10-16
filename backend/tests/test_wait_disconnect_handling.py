@@ -12,8 +12,8 @@ it subscribes to the stream bridge until ``END_SENTINEL``, polls
 ``on_disconnect`` mode by cancelling the background run on real client
 disconnect. Store-only consumers wait for the bridge's real terminal marker
 instead of treating an ordinary durable terminal status as proof that all tail
-events have already been published. A durable ``orphan_recovered`` stop reason
-provides the narrow heartbeat fallback when the publisher is known to be gone.
+events have already been published. Explicit run or scheduled-task orphan-recovery
+stop reasons provide the narrow heartbeat fallback when the publisher is gone.
 """
 
 from __future__ import annotations
@@ -594,6 +594,148 @@ class TestWaitForRunCompletion:
             assert completed is True
 
         asyncio.run(run())
+
+    def test_wait_completes_after_cancel_takeover_of_crashed_owner(self) -> None:
+        """A cancel takeover must wake a waiting consumer; no producer survives.
+
+        Regression: the takeover path wrote ``error`` without the
+        orphan-recovery stop reason, so ``/wait`` (and SSE joins) kept looping
+        on heartbeats waiting for an END the dead owner can no longer publish.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        from app.gateway.services import wait_for_run_completion
+        from deerflow.config.run_ownership_config import RunOwnershipConfig
+        from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+        async def run() -> None:
+            store = MemoryRunStore()
+            grace = 10
+            expired_lease = (datetime.now(UTC) - timedelta(seconds=grace + 5)).isoformat()
+            await store.put(
+                "takeover-wait",
+                thread_id=THREAD_ID,
+                status="running",
+                created_at=datetime.now(UTC).isoformat(),
+                owner_worker_id="dead-worker",
+                lease_expires_at=expired_lease,
+            )
+            mgr = RunManager(
+                store=store,
+                run_ownership_config=RunOwnershipConfig(lease_seconds=30, grace_seconds=grace, heartbeat_enabled=True),
+            )
+            record = await mgr.get("takeover-wait")
+            assert record is not None
+            assert record.store_only is True
+
+            outcome = await mgr.cancel("takeover-wait", action="interrupt")
+            assert outcome == CancelOutcome.taken_over
+
+            bridge = _FastHeartbeatBridge()
+            completed = await asyncio.wait_for(
+                wait_for_run_completion(bridge, record, _FakeRequest(), mgr),
+                timeout=1.0,
+            )
+
+            assert completed is True
+
+        asyncio.run(run())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("consumer_kind", ["sse", "wait"])
+@pytest.mark.parametrize("recovery_path", ["occurrence", "once"])
+async def test_scheduler_recovery_completes_subscribed_consumers(tmp_path, consumer_kind, recovery_path) -> None:
+    """Both scheduler recovery paths terminate already-subscribed consumers."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.gateway.services import sse_consumer, wait_for_run_completion
+    from deerflow.config.database_config import DatabaseConfig
+    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
+    from deerflow.persistence.run import RunRepository
+    from deerflow.persistence.scheduled_task_runs import ScheduledTaskRunRepository
+    from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
+    from deerflow.runtime import RunManager, RunStatus
+
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    consumer_task = None
+    try:
+        session_factory = get_session_factory()
+        assert session_factory is not None
+        task_repo = ScheduledTaskRepository(session_factory)
+        occurrence_repo = ScheduledTaskRunRepository(session_factory)
+        run_repo = RunRepository(session_factory)
+        now = datetime.now(UTC)
+        await task_repo.create(
+            task_id="orphan-task",
+            user_id="user-1",
+            thread_id="orphan-thread",
+            context_mode="reuse_thread",
+            assistant_id="lead_agent",
+            title="Recovered task",
+            prompt="test",
+            schedule_type="once" if recovery_path == "once" else "cron",
+            schedule_spec={"run_at": now.isoformat()} if recovery_path == "once" else {"cron": "* * * * *"},
+            timezone="UTC",
+            next_run_at=None,
+        )
+        await occurrence_repo.create(
+            run_record_id="orphan-occurrence",
+            task_id="orphan-task",
+            thread_id="orphan-thread",
+            scheduled_for=now,
+            trigger="scheduled",
+            status="running",
+        )
+        await occurrence_repo.update_status("orphan-occurrence", status="running", run_id="orphan-run")
+        if recovery_path == "once":
+            await task_repo.update("orphan-task", user_id="user-1", updates={"status": "running"})
+        await run_repo.put(
+            "orphan-run",
+            thread_id="orphan-thread",
+            user_id="user-1",
+            status="running",
+            owner_worker_id="dead-worker",
+            lease_expires_at=(now - timedelta(seconds=60)).isoformat(),
+        )
+        manager = RunManager(store=run_repo)
+        record = await manager.get("orphan-run", user_id="user-1")
+        assert record is not None and record.store_only
+        assert record.status == RunStatus.running
+        subscribed = asyncio.Event()
+
+        class SubscribedBridge(_FastHeartbeatBridge):
+            def subscribe(self, run_id, **kwargs):
+                subscribed.set()
+                return super().subscribe(run_id, **kwargs)
+
+        bridge = SubscribedBridge()
+        await bridge.publish(record.run_id, "values", {"step": 1})
+
+        async def consume():
+            if consumer_kind == "wait":
+                return await wait_for_run_completion(bridge, record, _FakeRequest(), manager)
+            return [frame async for frame in sse_consumer(bridge, record, _FakeRequest(), manager)]
+
+        consumer_task = asyncio.create_task(consume())
+        await asyncio.wait_for(subscribed.wait(), timeout=1.0)
+        assert not consumer_task.done()
+        recover = task_repo.reconcile_stuck_once_tasks if recovery_path == "once" else occurrence_repo.reconcile_active_runs
+        await recover(error="crashed owner", now=now)
+        recovered = await run_repo.get(record.run_id, user_id="user-1")
+        assert recovered is not None
+        assert recovered["status"] == "error"
+        assert recovered["stop_reason"] == "scheduled_task_orphan_recovered"
+        result = await asyncio.wait_for(consumer_task, timeout=1.0)
+        if consumer_kind == "wait":
+            assert result is True
+        else:
+            assert result[-1] == "event: end\ndata: null\n\n"
+    finally:
+        if consumer_task is not None and not consumer_task.done():
+            consumer_task.cancel()
+            await asyncio.gather(consumer_task, return_exceptions=True)
+        await close_engine()
 
 
 @pytest.mark.parametrize("route_name", ["stateless_wait", "thread_wait", "cancel_wait", "cancel_stream_wait"])

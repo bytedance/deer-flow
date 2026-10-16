@@ -638,6 +638,94 @@ async def test_whitespace_only_input_is_not_submitted():
 
 
 @pytest.mark.asyncio
+async def test_message_refused_during_a_run_stays_in_the_composer():
+    session = _FakeSession()
+    app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
+    pasted = "    def f():\n        return 1\n"
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._streaming = True
+        app.post_message(events.Paste(pasted))
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        composer = app.query_one("#composer")
+        assert composer.value == pasted
+        assert composer.cursor_position == len(pasted)
+        assert any(r.kind == "system" and "Still working" in r.text for r in app.state.rows)
+        assert session.client.stream_calls == []
+
+        app._streaming = False
+        await pilot.press("enter")
+        await _wait_until(lambda: bool(session.client.stream_calls), pilot)
+        assert composer.value == ""
+
+    assert session.client.stream_calls[0][0] == pasted
+    assert app._history.entries() == [pasted]
+
+
+@pytest.mark.asyncio
+async def test_refused_bare_skill_activation_is_restored_without_reopening_the_palette():
+    """Restoring "/tdd" must not reopen the palette, or Enter would fill it instead of resending."""
+    session = _FakeSession()
+    app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._streaming = True
+        await pilot.press("/", "t", "d", "d", "escape", "enter")
+        await pilot.pause()
+        composer = app.query_one("#composer")
+        assert composer.value == "/tdd"
+        assert app._palette_open is False
+
+        app._streaming = False
+        await pilot.press("enter")
+        await _wait_until(lambda: bool(session.client.stream_calls), pilot)
+        assert composer.value == ""
+
+    assert session.client.stream_calls[0][0] == "/tdd"
+
+
+@pytest.mark.asyncio
+async def test_editing_a_restored_slash_draft_reopens_the_palette():
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._streaming = True
+        await pilot.press("/", "t", "d", "d", "escape", "enter")
+        await pilot.pause()
+        await pilot.press("backspace")
+        await pilot.pause()
+        assert app.query_one("#composer").value == "/td"
+        assert app._palette_open is True
+
+        # Once edited, the draft is ordinary input again, even if retyped back.
+        await pilot.press("d")
+        await pilot.pause()
+        assert app.query_one("#composer").value == "/tdd"
+        assert app._palette_open is True
+
+
+@pytest.mark.asyncio
+async def test_refused_skill_activation_is_restored_as_recorded_in_history():
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._streaming = True
+        app.post_message(events.Paste("  /tdd write tests  "))
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.query_one("#composer").value == "/tdd write tests"
+
+    assert app._history.entries() == ["/tdd write tests"]
+
+
+@pytest.mark.asyncio
 async def test_down_on_last_line_of_multiline_input_falls_back_to_history():
     app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
 

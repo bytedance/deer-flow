@@ -328,7 +328,12 @@ function rememberReconnectRun(
   if (typeof window === "undefined" || !threadId) return;
 
   try {
-    window.sessionStorage.setItem(`lg:stream:${threadId}`, runId);
+    const storage = window.sessionStorage;
+    const key = `lg:stream:${threadId}`;
+    const rememberedRunId = storage.getItem(key);
+    // Another run may claim the pointer while durable state is loading.
+    if (rememberedRunId !== null && rememberedRunId !== runId) return;
+    storage.setItem(key, runId);
   } catch {
     // Ignore storage access failures so gap recovery remains usable.
   }

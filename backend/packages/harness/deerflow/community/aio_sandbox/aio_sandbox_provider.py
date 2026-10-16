@@ -18,7 +18,6 @@ import errno
 import hashlib
 import logging
 import math
-import os
 import signal
 import threading
 import time
@@ -392,7 +391,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         if not isinstance(configured_skills_path, str):
             configured_skills_path = DEFAULT_SKILLS_CONTAINER_PATH
 
-        environment = self._resolve_env_vars(sandbox_config.environment or {})
+        # $VARS in config.yaml are already resolved by AppConfig.resolve_env_variables;
+        # resolving again would rewrite a secret that itself starts with $.
+        environment = dict(sandbox_config.environment or {})
         command_timeout = self._positive_float(
             "bash_command_timeout",
             getattr(sandbox_config, "bash_command_timeout", None),
@@ -459,18 +460,6 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         if not isinstance(self._backend, LocalContainerBackend):
             return False
         return self._backend.decide_network_policy_request(sandbox_id, request_id, decision)
-
-    @staticmethod
-    def _resolve_env_vars(env_config: dict[str, str]) -> dict[str, str]:
-        """Resolve environment variable references (values starting with $)."""
-        resolved = {}
-        for key, value in env_config.items():
-            if isinstance(value, str) and value.startswith("$"):
-                env_name = value[1:]
-                resolved[key] = os.environ.get(env_name, "")
-            else:
-                resolved[key] = str(value)
-        return resolved
 
     # ── Cross-instance ownership leases ───────────────────────────────────
 

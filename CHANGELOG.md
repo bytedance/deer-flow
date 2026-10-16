@@ -851,6 +851,13 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **goal:** External state and run-input writes reject missing or invalid goal
+  objectives, malformed counters and reducer control markers before admission,
+  while retaining valid sparse goal state. Historical
+  checkpoint replay, including regenerate, keeps the current goal and its used
+  continuation budget instead of restoring an older goal; it drops the old answer's
+  completion record. No frontend changes or database migration are required.
+
 - **channels:** IM conversations now keep their DeerFlow thread across Gateway
   replicas. The `ChannelManager` kept its chat-to-thread bindings
   (`channel_name:chat_id[:topic_id]` → `thread_id`) in a per-process JSON file,
@@ -4156,6 +4163,53 @@ This release closes that milestone with **439 merged pull requests**.
   missing; `verify-versions.yml` installs the uv version the backend image pins.
   ([#6588])
 
+- **tui:** A message the TUI refuses to send now stays in the composer. Submitting
+  cleared the composer before the send was checked, so a prompt typed during an
+  active run, while an interrupted run was still stopping, or when the run could
+  not start was replaced by a notice and survived only in input history; a
+  command-line launch message whose run could not start was lost entirely. The
+  composer now gets the text back as input history recorded it, with the cursor
+  at its end and the command palette closed, so `Enter` resends it; accepted
+  messages and local slash commands clear it as before.
+  ([#6666])
+
+- **tui:** `deerflow --print` and `--json` no longer drop words of an unquoted
+  message. Each flag took a single value and never read the positional words,
+  so `deerflow --print summarize this repo` sent only `summarize`,
+  `deerflow summarize this repo --print` exited 2 asking for a message on a
+  terminal, and with piped stdin the typed words were silently ignored. Both flags now take every word
+  that follows them and fall back to words given before them, as `--cli` does;
+  a typed message wins over piped stdin. A message split around the flag
+  (`deerflow hello --print there`) exits 2 with a hint to quote it, since its
+  word order cannot be recovered. Passing both `--print` and `--json` now exits
+  2 instead of running `--print` and dropping the `--json` message. ([#6636])
+
+- **frontend:** Signing in after a workspace session ends now returns to the
+  page that was open, query string and fragment included. Opening a workspace
+  page without a valid session (for example a scheduled-task notification link,
+  `/workspace/scheduled-tasks?task_id=...`, after the session expired) sent the
+  user to a bare `/login`, so signing in landed on the default workspace; the
+  workspace layout cannot read the request URL, so it now hands the redirect to
+  the browser, which keeps the full address in `next`. The client-side session
+  checks (`AuthProvider.refreshUser`, `useRequireAuth`) kept the path but
+  dropped the query string, and the shared fetcher dropped the fragment; all of
+  them now keep the full address. ([#6681])
+- **sandbox:** The AIO, E2B and OpenSandbox providers and ACP agents no longer
+  resolve `sandbox.environment` / `acp_agents.<name>.env` values a second time.
+  `config.yaml` loading already replaces each `$VAR`, so a resolved secret that
+  itself starts with `$` (a bcrypt hash such as `$2b$12$...`, a generated
+  password) was looked up again as a variable name and reached the sandbox or
+  agent as an empty string, or as an unrelated host variable's value when that
+  name existed. Values are now passed through as loaded, as BoxLite and the
+  local provider already did. ([#6673])
+
+- **frontend:** A one-time scheduled task whose `run_at` is a bare date
+  (`"2026-12-07"`, which a chat-created task can carry) now shows midnight of
+  that day in the task's timezone, which is when the server runs it. The UI read
+  the trailing `-07` as a UTC offset and displayed UTC midnight instead: 08:00 in
+  `Asia/Shanghai`, and the previous evening west of UTC, in the task list,
+  detail, chat card and the edit form's prefilled time. ([#6692])
+
 ### Security
 
 - **authz:** Enforce permission checks on routes that only had authentication, and
@@ -4387,6 +4441,17 @@ This release closes that milestone with **439 merged pull requests**.
   **Behavior change:** a local stack opened from another device needs
   `BIND_HOST` (e.g. `BIND_HOST=0.0.0.0` in `.env`) and the `2026` entry; the
   Gateway and frontend ports are no longer reachable from other machines.
+
+- **scripts:** Reject local `BIND_HOST` values that nginx would misread. The
+  local nginx helper checked only for address and hostname characters, so
+  `BIND_HOST=0` rendered `listen 0:2026;`, which nginx resolves to `0.0.0.0`
+  and binds on every IPv4 interface, and `1.2.3` bound `1.2.0.3`. Values nginx
+  rejects outright, such as `[[fd00::1]]` or `-foo`, passed the `serve.sh`
+  preflight and failed only after the running stack had been stopped. The
+  helper now accepts exactly a dotted-quad IPv4 address, an IPv6 address
+  (bracketed or not), or an RFC 1123 hostname. Returning to the loopback
+  default also removes the `temp/nginx.local.conf` rendered for an earlier
+  value. ([#6635])
 
 - **skills:** Stop `review_skill_package` from reading other users' skills.
   Local path targets were allowed anywhere under the Gateway cwd or `/tmp`,
@@ -9553,3 +9618,9 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6595]: https://github.com/bytedance/deer-flow/pull/6595
 [#6611]: https://github.com/bytedance/deer-flow/pull/6611
 [#6613]: https://github.com/bytedance/deer-flow/pull/6613
+[#6635]: https://github.com/bytedance/deer-flow/pull/6635
+[#6636]: https://github.com/bytedance/deer-flow/pull/6636
+[#6666]: https://github.com/bytedance/deer-flow/pull/6666
+[#6673]: https://github.com/bytedance/deer-flow/pull/6673
+[#6681]: https://github.com/bytedance/deer-flow/pull/6681
+[#6692]: https://github.com/bytedance/deer-flow/pull/6692

@@ -9,6 +9,7 @@ from typing import Literal
 from langchain_core.tools import StructuredTool
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
 
+from deerflow.community.provider_credentials import redact_secret, reject_url_userinfo, resolve_api_key
 from deerflow.config import get_app_config
 
 from .client import LightRAGAPIError, LightRAGClient, LightRAGConnectionError, LightRAGProtocolError
@@ -41,27 +42,13 @@ class _LightRAGRetrievalSettings(BaseModel):
     @field_validator("base_url")
     @classmethod
     def _reject_url_userinfo(cls, value: AnyHttpUrl) -> AnyHttpUrl:
-        if value.username is not None or value.password is not None:
-            raise ValueError("base_url must not contain username or password information")
-        return value
+        return reject_url_userinfo(value)
 
 
 def _api_key(settings: _LightRAGRetrievalSettings) -> str | None:
     # LightRAG may run without authentication, so a missing key stays valid;
     # blank values are treated as unconfigured rather than rejected.
-    value = settings.api_key
-    if isinstance(value, SecretStr):
-        value = value.get_secret_value()
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    return None
-
-
-def _redact_api_key(value: object, api_key: str | None) -> str:
-    text = str(value)
-    if api_key:
-        text = text.replace(api_key, "[REDACTED]")
-    return text
+    return resolve_api_key(settings.api_key)
 
 
 def _settings_from_extra(extra: Mapping[str, object]) -> _LightRAGRetrievalSettings:
@@ -90,8 +77,8 @@ def _build_client(settings: _LightRAGRetrievalSettings) -> LightRAGClient:
 
 def _tool_error(exc: Exception, settings: _LightRAGRetrievalSettings) -> str:
     key = _api_key(settings)
-    safe_detail = _redact_api_key(exc, key)
-    base_url = _redact_api_key(str(settings.base_url).rstrip("/"), key)
+    safe_detail = redact_secret(exc, key)
+    base_url = redact_secret(str(settings.base_url).rstrip("/"), key)
 
     if isinstance(exc, LightRAGAPIError):
         logger.warning("LightRAG API rejected a read-only tool request: %s", safe_detail)
@@ -137,7 +124,7 @@ async def knowledge_search(query: str) -> str:
         )
         # API-key redaction remains mandatory on the success path; chunk and
         # reference identifiers never enter the formatted text at all.
-        return _redact_api_key(formatted, _api_key(settings))
+        return redact_secret(formatted, _api_key(settings))
     except Exception as exc:
         return _tool_error(exc, settings)
 

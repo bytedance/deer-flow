@@ -431,7 +431,9 @@ class E2BSandboxProvider(SandboxProvider):
             "acquire_timeout": acquire_timeout,
             "burst_limit": burst_limit,
             "mounts": _opt("mounts") or [],
-            "environment": self._resolve_env_vars(_opt("environment") or {}),
+            # $VARS in config.yaml are already resolved by AppConfig.resolve_env_variables;
+            # resolving again would rewrite a secret that itself starts with $.
+            "environment": dict(_opt("environment") or {}),
             "ownership": _opt("ownership"),
             "stream_bridge": getattr(app_config, "stream_bridge", None),
             "reconciliation_interval_seconds": max(
@@ -460,16 +462,6 @@ class E2BSandboxProvider(SandboxProvider):
             ),
             "mount_upload_deadline_seconds": self._resolve_mount_upload_deadline(_opt),
         }
-
-    @staticmethod
-    def _resolve_env_vars(env_config: dict[str, str]) -> dict[str, str]:
-        resolved: dict[str, str] = {}
-        for key, value in env_config.items():
-            if isinstance(value, str) and value.startswith("$"):
-                resolved[key] = os.environ.get(value[1:], "")
-            else:
-                resolved[key] = "" if value is None else str(value)
-        return resolved
 
     @staticmethod
     def _resolve_mount_upload_deadline(_opt: Callable[[str, Any], Any]) -> int:

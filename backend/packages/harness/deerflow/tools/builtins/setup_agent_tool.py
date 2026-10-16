@@ -1,4 +1,8 @@
 import logging
+import os
+import stat
+import tempfile
+from pathlib import Path
 
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
@@ -12,6 +16,39 @@ from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.types import Runtime
 
 logger = logging.getLogger(__name__)
+
+
+def _publish_text(target: Path, text: str) -> None:
+    """Publish *text* at *target* so no reader ever observes a half-written file.
+
+    A truncating write destroys the previous file before the new content
+    lands, so an interrupted write leaves a truncated SOUL.md — the persona
+    file the prompt builder reads on every run — instead of the old one. The
+    custom-agent store already publishes the same file through a staged
+    temporary plus ``os.replace``; the default agent's copy must not be the
+    one that can tear.
+
+    The temporary carries the target's mode (0644 for a first publish) before
+    the replace, so a re-publish keeps the mode an operator set on the file,
+    and one try/finally spans staging and publishing so a failure in either
+    phase cannot orphan the temporary in ``base_dir``.
+    """
+    try:
+        mode = stat.S_IMODE(os.stat(target).st_mode)
+    except OSError:
+        mode = 0o644
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=target.parent, suffix=".tmp", delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write(text)
+            handle.flush()
+            os.chmod(temporary, mode)
+            os.fsync(handle.fileno())
+        temporary.replace(target)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 @tool(parse_docstring=True)
@@ -80,7 +117,7 @@ def setup_agent(
             # regardless of the agent-storage backend.
             paths = get_paths()
             paths.base_dir.mkdir(parents=True, exist_ok=True)
-            (paths.base_dir / SOUL_FILENAME).write_text(soul, encoding="utf-8")
+            _publish_text(paths.base_dir / SOUL_FILENAME, soul)
 
         logger.info(f"[agent_creator] Created agent '{agent_name}'")
         return Command(

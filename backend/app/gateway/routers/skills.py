@@ -41,6 +41,7 @@ from deerflow.config.extensions_config import (
 )
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills import Skill
+from deerflow.skills.diagnostics import SkillLoadDiagnostic
 from deerflow.skills.export import SkillExportError, build_skill_export, export_manifest
 from deerflow.skills.installer import SkillAlreadyExistsError, SkillSecurityScanError
 from deerflow.skills.security_scanner import scan_skill_content
@@ -110,6 +111,10 @@ class SkillsListResponse(BaseModel):
     """Response model for listing all skills."""
 
     skills: list[SkillResponse]
+
+
+class SkillDiagnosticsResponse(BaseModel):
+    diagnostics: list[SkillLoadDiagnostic]
 
 
 class SkillUpdateRequest(BaseModel):
@@ -650,6 +655,21 @@ async def list_custom_skills(request: Request, config: AppConfig = Depends(get_c
     except Exception as e:
         logger.error("Failed to list custom skills: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to list custom skills: {str(e)}")
+
+
+@router.get("/skills/diagnostics/custom", response_model=SkillDiagnosticsResponse, summary="List Owned Custom Skill YAML Errors")
+async def list_custom_skill_diagnostics(request: Request, response: Response, config: AppConfig = Depends(get_config)) -> SkillDiagnosticsResponse:
+    await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+    response.headers["Cache-Control"] = "no-store"
+
+    def scan() -> list[SkillLoadDiagnostic]:
+        return _get_user_skill_storage(config).load_custom_skill_diagnostics()
+
+    try:
+        return SkillDiagnosticsResponse(diagnostics=await asyncio.to_thread(scan))
+    except Exception as exc:
+        logger.error("Failed to load custom skill diagnostics (%s)", type(exc).__name__)
+        raise HTTPException(status_code=500, detail="Failed to load custom skill diagnostics.") from exc
 
 
 @router.get("/skills/custom/{skill_name}/export-manifest", response_model=SkillExportManifestResponse, response_model_exclude_unset=True, summary="Preview Custom Skill Export")

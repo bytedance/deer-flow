@@ -3,13 +3,13 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useTheme } from "next-themes";
-import { useEffect, useState } from "react";
+import { useEffect, useContext, useState } from "react";
 
 import { RememberSessionOption } from "@/components/auth/remember-session-option";
 import { Button } from "@/components/ui/button";
 import { FlickeringGrid } from "@/components/ui/flickering-grid";
 import { Input } from "@/components/ui/input";
-import { useAuth } from "@/core/auth/AuthProvider";
+import { AuthDisabledContext, useAuth } from "@/core/auth/AuthProvider";
 import { resolveAuthNextPath } from "@/core/auth/next-path";
 import {
   loadRememberLoginPreference,
@@ -47,11 +47,17 @@ export default function LoginPage() {
 
   // Extract error from query params (e.g., ?error=sso_failed)
   const errorParam = searchParams.get("error");
+  // Direct auth-page entry with a suspended session: the layout hands the
+  // SSR account_disabled verdict down through context — the only place the
+  // reason is known before a (deliberately generic) login attempt.
+  const ssrDisabled = useContext(AuthDisabledContext);
   const [error, setError] = useState(
     errorParam
       ? (t.login.errors[errorParam as keyof typeof t.login.errors] ??
           t.login.authFailed)
-      : "",
+      : ssrDisabled
+        ? t.login.errors.account_disabled
+        : "",
   );
   // Soft hint shown after a failed login when SSO is configured: an SSO-only
   // account has no local password, so the backend returns a generic
@@ -179,7 +185,15 @@ export default function LoginPage() {
       if (!res.ok) {
         const data = await res.json();
         const authError = parseAuthError(data);
-        setError(authError.message);
+        // account_disabled is the one code with user-facing copy of its own
+        // (#4063 gap 3): the backend message is not localized. Login-only:
+        // sign-up keeps the backend message verbatim so a suspended
+        // account's email cannot be probed through the register surface.
+        setError(
+          isLogin && authError.code === "account_disabled"
+            ? t.login.errors.account_disabled
+            : authError.message,
+        );
         // On a failed login with SSO configured, surface a hint pointing at the
         // SSO buttons — the "wrong password" may really mean "this is an SSO account".
         if (isLogin && ssoProviders.length > 0) {

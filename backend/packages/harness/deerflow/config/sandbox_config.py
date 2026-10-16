@@ -182,9 +182,10 @@ class SandboxConfig(BaseModel):
             process-local accounting.
         idle_timeout: Idle timeout in seconds before released warm sandboxes/VMs are stopped (default: 600 = 10 minutes). Set to 0 to disable.
         environment: Environment variables to inject into the sandbox (values starting with $ are
-            resolved from host env). Injected entries bypass the env-policy scrubber as
-            operator-authorized values; LocalSandboxProvider masks injected credentials from bash
-            tool output and command errors while preserving benign configuration values.
+            resolved from host env when config is loaded; providers use them verbatim). Injected
+            entries bypass the env-policy scrubber as operator-authorized values;
+            LocalSandboxProvider masks injected credentials from bash tool output and command
+            errors while preserving benign configuration values.
 
     BoxliteProvider specific options:
         health_check_skip_seconds: Optional reclaim-time skip window in seconds for recently released warm VMs. Default behavior is 0.0 = always validate before reuse.

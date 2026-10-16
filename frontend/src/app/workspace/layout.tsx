@@ -4,9 +4,10 @@ import "streamdown/styles.css";
 import { redirect } from "next/navigation";
 
 import { GatewayOfflineFallback } from "@/components/workspace/gateway-offline-fallback";
+import { WorkspaceLoginRedirect } from "@/components/workspace/workspace-login-redirect";
 import { AuthProvider } from "@/core/auth/AuthProvider";
 import { getServerSideUser } from "@/core/auth/server";
-import { assertNever } from "@/core/auth/types";
+import { ACCOUNT_DISABLED_LOGIN_URL, assertNever } from "@/core/auth/types";
 import { I18nProvider } from "@/core/i18n/context";
 import { detectLocaleServer } from "@/core/i18n/server";
 
@@ -35,7 +36,14 @@ export default async function WorkspaceLayout({
     case "system_setup_required":
       redirect("/setup");
     case "unauthenticated":
-      redirect("/login");
+      // Not redirect(): a layout cannot read the request URL, so the browser
+      // carries the page it is on into `next`.
+      content = <WorkspaceLoginRedirect />;
+      break;
+    case "account_disabled":
+      // The login page renders the disabled-account reason from the error
+      // param instead of a plain sign-in form the user cannot complete.
+      redirect(ACCOUNT_DISABLED_LOGIN_URL);
     case "gateway_unavailable":
       // GatewayOfflineFallback supplies the AuthProvider; WorkspaceContent
       // already mounts the banner inside its sidebar layout, so renderBanner

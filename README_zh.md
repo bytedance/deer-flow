@@ -71,6 +71,7 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
     - [Session Goals](#session-goals)
     - [手动上下文压缩](#手动上下文压缩)
     - [Sub-Agents](#sub-agents)
+    - [账号管理](#账号管理)
     - [Sandbox 与文件系统](#sandbox-与文件系统)
     - [Agentic Browser Control](#agentic-browser-control)
     - [Context Engineering](#context-engineering)
@@ -540,6 +541,7 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 2. 添加权限：`im:message`、`im:message.p2p_msg:readonly`、`im:resource`。
 3. 在 **事件订阅** 中订阅 `im.message.receive_v1`，连接方式选择 **长连接**。
 4. 复制 App ID 和 App Secret，在 `.env` 中设置 `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET`，并在 `config.yaml` 中启用该渠道。
+5. _（可选）_ 交互式澄清卡片：在 `channels.feishu` 下设置 `card_interaction_enabled: true`，让 agent 的选项式提问渲染为可点击的按钮卡片，并在问题前保留背景说明。随后在开发者后台打开 **回调配置**（与「事件订阅」是不同的标签页），订阅 `card.action.trigger` 并选择 **长连接**，最后发布新版本。点击按钮等同于输入该选项作答；只有触发该次提问的用户才能操作对应卡片。按钮答案会保存到对话历史中，后续澄清继续在同一会话内进行。
 
 **WeChat 配置**
 
@@ -764,6 +766,8 @@ Web UI 输入框支持浏览器侧语音听写。浏览器提供 Web Speech API 
 
 每次 Gateway 驱动的 run 结束后，DeerFlow 会用一个 non-thinking 的评估模型，把可见的对话内容（包括助手的工具调用和截短的工具结果）拿去和激活的 goal 比对。工具调用成功本身不代表 goal 已完成；如果助手不得不猜测缺失或含糊的信息，评估模型会报告 `needs_user_input`。评估模型必须返回一个带类型的 blocker（`missing_evidence`、`needs_user_input`、`run_failed`、`external_wait` 或 `goal_not_met_yet`），并附上可见证据。只有在最近一轮 assistant 回复已被持久化 checkpoint、blocker 是 `goal_not_met_yet`、评估期间 thread 没有变化、且无进展熔断器没有触发时，DeerFlow 才会注入一次 hidden continuation。安全上限默认是 8 次 hidden continuation；连续两次相同的无进展评估后就会停止。`/goal clear` 以及任何用户手动输入的新内容，优先级都高于排队中的 continuation。当 goal 被满足时，DeerFlow 会自动清除它，并发布更新后的 thread 状态。同一个 checkpoint 会把这次达成记为 `goal_outcome`，保留到下一次修改 goal。
 
+重新生成此前的回答时，会沿用当前对话的 goal 和已用续跑预算，不会恢复已清除或已达成的旧 goal。重放历史 checkpoint 时会移除旧回答的达成记录，避免把它当作新回答已经达成的证明。
+
 Web UI 会在输入框上方展示当前激活的 goal，说明自动续跑为什么停下，并在 goal 达成后显示「目标已达成」提示；设置了 goal 时不能编辑最后一条消息。同样的命令在 TUI 和受支持的 IM 渠道里也可用。在 Web UI 和受支持的 IM 渠道里，设置 `/goal <完成条件>` 还会以该条件作为任务启动一次 run；状态查询和清除命令则只管理 goal 状态本身。
 
 ### 手动上下文压缩
@@ -789,6 +793,10 @@ lead agent 只会在委派具有明确净收益时动态拉起 sub-agents，例�
 管理员可以在**设置 → 子智能体**中添加、修改、停用和删除可复用的工作智能体；内置项和 `config.yaml` 项会在同一目录中以只读方式展示。默认 Lead Agent 可以使用全部已启用的运行时 sub-agents；页面创建的每个 Custom Agent 则可以选择允许全部、全部禁用或仅允许指定项。该范围同时约束模型可见目录和服务端 `task` 工具，不能通过直接填写名称绕过。当前版本的设置页管理定义是部署级全局数据，并跟随 `agent_storage.backend`：单机使用原子文件，多实例使用共享应用数据库。
 
 例如，彼此独立的只读研究可以在并行节省的时间明显高于重复检索和结果合并成本时并发执行；而会修改相同文件、依赖连续测试反馈的仓库重构则由 lead agent 直接完成。当 `max_concurrent_subagents` 为 `1` 时，提示词会关闭并行和多批次路由指导，仅在专业能力或上下文隔离具有明确收益时保留委派。
+
+### 账号管理
+
+管理员可以在**设置 → 用户**中停用和恢复账号（仅管理员可见该入口，普通用户不显示）。页面列出每个账号的邮箱、角色和状态，提供与 `PATCH /api/v1/admin/users/{id}` 相同的启用/停用操作；最后一个活跃管理员不允许被停用，网关返回的拒绝原因会原样展示。被停用的账号在所有认证入口都会被拒绝，其现有会话在下一次请求时终止，登录页会提示"账号已停用，请联系管理员"。持有密码者对停用账号发起密码登录时，仍会刻意返回"邮箱或密码错误"，避免向凭据持有者泄露账号状态。
 
 ### Sandbox 与文件系统
 

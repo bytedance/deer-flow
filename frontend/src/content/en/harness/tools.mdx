@@ -113,7 +113,7 @@ Community tools connect the agent to external services. They are configured in `
 
 ### Web search
 
-<Tabs items={["DuckDuckGo (default)", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya"]}>
+<Tabs items={["DuckDuckGo (default)", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "You.com"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -205,6 +205,22 @@ tools:
     api_key: $SOFYA_API_KEY
 ```
 Results include the content of each page, not only a snippet. Requires a [Sofya](https://sofya.co) API key. `max_results` is capped at 20, and each result's content is capped at `contents_max_characters` (default 2000, set 0 for no cap). Also supports `web_fetch`.
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.youcom.tools:web_search_tool
+    # api_key: $YDC_API_KEY # optional; omit to use the keyless free tier
+```
+Results from You.com's own index, each carrying extracted page snippets rather than a
+single meta description. Without a key it uses the keyless endpoint (free tier, currently
+100 searches/day); set `YDC_API_KEY` and it switches to the full Search API with higher
+limits. `max_results` is capped at 100.
+
+Optional API key from [You.com](https://you.com/platform).
+
+No extra dependency required.
+
   </Tabs.Tab>
 </Tabs>
 

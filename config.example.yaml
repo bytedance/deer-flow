@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 58
+config_version: 59
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -1053,6 +1053,18 @@ tools:
   #   # search_depth: basic         # basic reads the result pages, snippets returns snippets only
   #   contents_max_characters: 2000 # per-result content cap; 0 disables it
   #   # api_key: $SOFYA_API_KEY     # Optional explicit env-var reference
+
+  # Web search tool (uses You.com; YDC_API_KEY optional)
+  # You.com runs its own web index and returns extracted page snippets rather
+  # than a single meta description, so results are usable without a follow-up
+  # fetch. With no key it uses the keyless endpoint (free tier, currently 100
+  # searches/day); set YDC_API_KEY and it switches to the full Search API.
+  # Get a key at https://you.com/platform
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.youcom.tools:web_search_tool
+  #   max_results: 5                  # Clamped to 1-100 by You.com
+  #   # api_key: $YDC_API_KEY         # Omit to use the keyless free tier
 
   # Web fetch tool (uses Browserless - headless Chrome, self-hosted or cloud)
   # Browserless renders pages with a real headless Chrome, ideal for JavaScript-heavy
@@ -2264,7 +2276,8 @@ summarization:
 #                         filesystems; peers would rebuild or delete each other's index).
 #   model               - LLM config for memory extraction: {provider, model, api_key, base_url,
 #                         temperature}. Omit all fields = no extraction (non-LLM ops still work).
-#   debounce_seconds    - Debounce wait before processing queued updates (default: 30)
+#   debounce_seconds    - Per-conversation quiet period (default: 30)
+#   max_wait_seconds    - Maximum debounce deferral; not a completion timeout (default: 300)
 #   max_facts           - Maximum facts to store (default: 100)
 #   fact_confidence_threshold - Minimum confidence for storing facts (default: 0.7)
 #   max_injection_tokens     - Token budget for memory injection (default: 2000)
@@ -2415,7 +2428,8 @@ memory:
     file_lock_timeout_seconds: 10 # per-scope cross-process advisory lock timeout (single-machine local filesystem)
     retrieval_adapter: fts5     # fts5 (default), empty to disable, or a dotted RetrievalPort factory(config)
     retrieval_index_path: ""    # empty = {storage_path}/.retrieval; relative = below storage_path; absolute as-is. Rebuildable derived data: keep it instance-local when Gateway instances share storage_path (the Helm chart uses an emptyDir)
-    debounce_seconds: 30 # Wait time before processing queued updates
+    debounce_seconds: 30 # Per-conversation quiet period before extraction is eligible
+    max_wait_seconds: 300 # Cap debounce deferral from first pending update; not an LLM/completion timeout
     # Backpressure cap on pending items. 0 = unlimited. At the cap, new
     # non-signal updates are rejected (QueueFull); signal updates are always
     # admitted so important memories are never shed.
@@ -3062,6 +3076,11 @@ run_ownership:
 #     app_secret: $FEISHU_APP_SECRET
 #     # domain: https://open.feishu.cn       # China (default)
 #     # domain: https://open.larksuite.com   # International
+#     # card_interaction_enabled: false      # render option clarifications as clickable button
+#                                            # cards; requires subscribing card.action.trigger
+#                                            # under the console's callback-configuration tab
+#                                            # (separate from event subscriptions) and
+#                                            # publishing a new app version
 #
 #   slack:
 #     enabled: false
