@@ -521,11 +521,13 @@ def test_cancelled_conversion_drains_write_and_removes_partial(tmp_path, monkeyp
     out = tmp_path / "doc.md"
     src.write_text("hello")
 
+    # Isolate write cancellation from parser imports and conversion latency.
+    monkeypatch.setattr("deerflow.utils.file_conversion._do_convert", lambda _path, _converter: "hello")
     monkeypatch.setattr(Path, "write_text", _blocking_write_text)
 
     async def _scenario():
         task = asyncio.create_task(convert_file_to_markdown(src, output_path=out))
-        await asyncio.to_thread(started.wait, 10)
+        assert await asyncio.to_thread(started.wait, 10), "the write worker never started"
         task.cancel()
         # Release the worker only after the cancel is in flight, so the
         # ordering (cancel first, then the write settles) is forced and the
