@@ -43,6 +43,7 @@ from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.persistence.user.im_notifications import ImNotificationPreferenceRow
 from deerflow.persistence.user.model import UserPreferenceRow, UserRow
 from deerflow.runtime import RunStatus
 from deerflow.runtime.runs.manager import RunRecord
@@ -52,7 +53,7 @@ NOW = datetime(2026, 10, 6, 8, tzinfo=UTC)
 _OWNER = User(id=UUID("6c1f3d0e-8a8f-4a35-9a51-0d2f5d1b7c11"), email="events@example.com", password_hash="unused", system_role="user")
 _OTHER = User(id=UUID("0b9d2c47-55e3-4d47-8f0c-a3b0f1f4d222"), email="other@example.com", password_hash="unused", system_role="user")
 OWNER = str(_OWNER.id)
-_TABLES = [ScheduledTaskRow, ScheduledTaskRunRow, RunRow, ThreadMetaRow, ScheduledTaskEventRow, NotificationDeliveryRow, ChannelConnectionRow, UserRow, UserPreferenceRow]
+_TABLES = [ScheduledTaskRow, ScheduledTaskRunRow, RunRow, ThreadMetaRow, ScheduledTaskEventRow, NotificationDeliveryRow, ChannelConnectionRow, UserRow, UserPreferenceRow, ImNotificationPreferenceRow]
 _API_FIELDS = {"id", "task_id", "event", "reason_code", "task_title", "stop_condition", "run_thread_id", "run_agent_name", "run_number", "run_status", "max_runs", "end_at", "schedule_type", "after_run_id", "created_at"}
 
 

@@ -117,14 +117,24 @@ def _clip(value: object, limit: int) -> str:
 
 
 def _response_results(data: dict) -> list[dict] | None:
-    """Return the result dicts of a Sofya response, or None if malformed."""
+    """Return the result dicts of a Sofya response, or None if malformed.
+
+    A missing or null ``results`` is an empty search. A non-list container, or a
+    non-empty list holding no objects, is malformed: the caller reports a format
+    error rather than "No results found", which would tell the agent the query
+    legitimately matched nothing.
+    """
     results = data.get("results")
     if results is None:
         return []
     if not isinstance(results, list):
         logger.error("Sofya returned an unexpected 'results' payload type: %s", type(results).__name__)
         return None
-    return [item for item in results if isinstance(item, dict)]
+    usable = [item for item in results if isinstance(item, dict)]
+    if results and not usable:
+        logger.error("Sofya returned 'results' with no usable result objects")
+        return None
+    return usable
 
 
 @tool("web_search", parse_docstring=True)

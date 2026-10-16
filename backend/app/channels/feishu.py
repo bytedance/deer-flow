@@ -16,7 +16,7 @@ from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypeVar
 
-from app.channels.base import Channel, ChannelStopTimeout
+from app.channels.base import Channel, ChannelStopTimeout, ChannelUnavailable, abort_connection_transport, shutdown_private_loop
 from app.channels.commands import is_known_channel_command, strip_leading_mentions
 from app.channels.connection_identity import attach_connection_identity, lookup_thread_id
 from app.channels.feishu_card_interaction import (
@@ -36,6 +36,7 @@ from app.channels.message_bus import (
     OutboundMessage,
     ResolvedAttachment,
 )
+from app.channels.notification_groups import is_feishu_notification_group, notification_group_display_name
 from app.channels.sandbox_files import sync_file_to_thread_sandbox
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
@@ -49,6 +50,10 @@ from deerflow.uploads.manager import (
 
 logger = logging.getLogger(__name__)
 PENDING_CLARIFICATION_TTL_SECONDS = 30 * 60
+# stop() budget for the lark-oapi thread: ask its private loop to close the
+# socket (bounded by the close timeout) and stop, then join the thread.
+FEISHU_STOP_TIMEOUT_SECONDS = 5
+FEISHU_WS_CLOSE_TIMEOUT_SECONDS = 2
 _PENDING_CARD_METADATA_KEY = "_feishu_pending_card_id"
 # Channel-store deadlines. ``_on_message`` runs on lark-oapi's private event loop,
 # which also carries the SDK's websocket reads, pongs and its 120s ping loop:
@@ -167,6 +172,11 @@ class FeishuChannel(Channel):
         super().__init__(name="feishu", bus=bus, config=config)
         self._thread: threading.Thread | None = None
         self._main_loop: asyncio.AbstractEventLoop | None = None
+        # The SDK thread's private loop and client, published under _ws_lock once
+        # constructed so stop() can shut them down from the Gateway loop.
+        self._ws_loop: asyncio.AbstractEventLoop | None = None
+        self._ws_client: Any = None
+        self._ws_lock = threading.Lock()
         self._api_client = None
         self._CreateMessageReactionRequest = None
         self._CreateMessageReactionRequestBody = None
@@ -189,6 +199,7 @@ class FeishuChannel(Channel):
         self._CreateImageRequest = None
         self._CreateImageRequestBody = None
         self._GetMessageResourceRequest = None
+        self._GetChatRequest = None
         self._thread_lock = threading.Lock()
         # Per-chat FIFO of messages whose routing is deferred to the Gateway loop
         # (unresolved store lookups); guarded by ``_thread_lock``. A chat with a
@@ -286,6 +297,7 @@ class FeishuChannel(Channel):
                 CreateMessageRequest,
                 CreateMessageRequestBody,
                 Emoji,
+                GetChatRequest,
                 GetMessageResourceRequest,
                 PatchMessageRequest,
                 PatchMessageRequestBody,
@@ -318,6 +330,7 @@ class FeishuChannel(Channel):
         self._CreateImageRequest = CreateImageRequest
         self._CreateImageRequestBody = CreateImageRequestBody
         self._GetMessageResourceRequest = GetMessageResourceRequest
+        self._GetChatRequest = GetChatRequest
 
         app_id = self.config.get("app_id", "")
         app_secret = self.config.get("app_secret", "")
@@ -359,6 +372,13 @@ class FeishuChannel(Channel):
         We work around this by creating a plain asyncio event loop for this
         thread and patching the SDK's module-level reference before calling
         ``start()``.
+
+        ``stop()`` ends this thread through ``_request_ws_shutdown``: lark-oapi
+        1.7 has no public stop, so ``start()`` only returns once this loop is
+        stopped from a callback scheduled on it — and only after that callback
+        disarmed ``_auto_reconnect``, because otherwise ``start()`` swallows the
+        interrupted ``run_until_complete`` in its reconnect branch and dials
+        again.
         """
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -379,11 +399,93 @@ class FeishuChannel(Channel):
                 log_level=lark.LogLevel.INFO,
                 domain=domain,
             )
+            with self._ws_lock:
+                if not self._running:
+                    # stop() ran before the client existed: never dial.
+                    return
+                self._ws_loop = loop
+                self._ws_client = ws_client
             ws_client.start()
         except Exception:
             if self._running:
                 logger.exception("Feishu WebSocket error")
+            else:
+                logger.debug("[Feishu] SDK loop exited after stop", exc_info=True)
             self._running = False
+        finally:
+            with self._ws_lock:
+                if self._ws_loop is loop:
+                    self._ws_loop = None
+                    self._ws_client = None
+            shutdown_private_loop(loop)
+
+    def _request_ws_shutdown(self) -> None:
+        """Ask the SDK thread to close its socket and stop its loop (non-blocking)."""
+        with self._ws_lock:
+            loop = self._ws_loop
+            ws_client = self._ws_client
+        if loop is None:
+            return
+        try:
+            loop.call_soon_threadsafe(self._begin_ws_shutdown, loop, ws_client)
+        except RuntimeError:
+            # The loop closed between the snapshot and the call: the thread is
+            # already on its way out and the join below observes that.
+            logger.debug("[Feishu] SDK loop already closed before shutdown could be scheduled")
+
+    def _begin_ws_shutdown(self, loop: asyncio.AbstractEventLoop, ws_client: Any) -> None:
+        loop.create_task(self._shutdown_ws(loop, ws_client))
+
+    async def _shutdown_ws(self, loop: asyncio.AbstractEventLoop, ws_client: Any) -> None:
+        """Runs on the SDK loop: disarm reconnects, close the socket, stop the loop."""
+        try:
+            if ws_client is not None:
+                # Must precede any await: once the loop stops, start() lands in
+                # its ``except Exception`` branch and consults this flag.
+                ws_client._auto_reconnect = False
+                deadline = loop.time() + FEISHU_WS_CLOSE_TIMEOUT_SECONDS
+                # _disconnect() clears _conn in its finally (also when cancelled
+                # mid-acquire), so take the handle first — once any in-flight
+                # dial has settled — and release the socket here if the close
+                # handshake does not finish, rather than whenever the
+                # connection object happens to be garbage-collected.
+                connection = await self._settled_ws_connection(ws_client, deadline)
+                disconnect = getattr(ws_client, "_disconnect", None)
+                if disconnect is not None:
+                    try:
+                        async with asyncio.timeout_at(deadline):
+                            await disconnect()
+                    except Exception:
+                        logger.debug("[Feishu] WebSocket close did not complete cleanly", exc_info=True)
+                if abort_connection_transport(connection):
+                    logger.warning("[Feishu] WebSocket close handshake did not finish within %ss; transport aborted", FEISHU_WS_CLOSE_TIMEOUT_SECONDS)
+                    await asyncio.sleep(0)  # let connection_lost run before the loop stops
+        except asyncio.CancelledError:
+            # The thread is already draining this loop; leave it to that.
+            raise
+        loop.stop()
+
+    @staticmethod
+    async def _settled_ws_connection(ws_client: Any, deadline: float) -> Any:
+        """Return the SDK's live connection once any in-flight ``_connect()`` has settled.
+
+        lark holds ``_lock`` across the whole dial and assigns ``_conn`` under
+        it, so a stop that lands mid-handshake would otherwise snapshot
+        ``None`` and leave the socket the dial produces to the SDK's cancelled
+        close. Waiting for the lock is bounded by the close deadline.
+        """
+        lock = getattr(ws_client, "_lock", None)
+        if lock is None:
+            return getattr(ws_client, "_conn", None)
+        try:
+            async with asyncio.timeout_at(deadline):
+                await lock.acquire()
+        except TimeoutError:
+            return getattr(ws_client, "_conn", None)
+        try:
+            return getattr(ws_client, "_conn", None)
+        finally:
+            lock.release()
 
     def _on_ignored_message_event(self, event) -> None:
         logger.debug("[Feishu] ignoring non-content message event: %s", type(event).__name__)
@@ -391,6 +493,9 @@ class FeishuChannel(Channel):
     async def stop(self) -> None:
         self._running = False
         self.bus.unsubscribe_outbound(self._on_outbound)
+        # Signal the SDK thread first so its loop winds down while the
+        # Gateway-side drain below runs.
+        self._request_ws_shutdown()
         await self._close_and_drain_threadsafe_futures()
 
         background_tasks = tuple(self._background_tasks)
@@ -404,14 +509,17 @@ class FeishuChannel(Channel):
         self._background_tasks.clear()
         self._running_card_tasks.clear()
         if self._thread:
-            # The SDK thread only returns on a fatal error, so this join
-            # normally waits out its full timeout; keep it off the event loop.
+            # The thread exits once its loop has stopped; keep the join off the
+            # event loop because a wedged SDK call can still use up the budget.
             thread = self._thread
-            await asyncio.to_thread(thread.join, timeout=5)
+            await asyncio.to_thread(thread.join, timeout=FEISHU_STOP_TIMEOUT_SECONDS)
             if thread.is_alive():
                 raise ChannelStopTimeout("Feishu SDK thread is still running after stop timeout")
             if self._thread is thread:
                 self._thread = None
+        with self._ws_lock:
+            self._ws_loop = None
+            self._ws_client = None
         logger.info("Feishu channel stopped")
 
     async def send(self, msg: OutboundMessage, *, _max_retries: int = 3) -> None:
@@ -431,6 +539,74 @@ class FeishuChannel(Channel):
             max_retries=_max_retries,
             log_prefix="[Feishu]",
         )
+
+    async def send_notification(self, *, target: str, text_markdown: str) -> None:
+        """Send a static card to a bound user's open ID and await its ACK."""
+        await self._send_notification_card(receive_id=target, receive_id_type="open_id", text_markdown=text_markdown)
+
+    async def send_notification_for_owner(self, *, owner_user_id: str | None, target: str, text_markdown: str) -> None:
+        """Prefer a verified private chat when direct user delivery is restricted."""
+        if self._connection_repo is not None and owner_user_id:
+            try:
+                connections = await self._connection_repo.list_connections(owner_user_id)
+            except Exception as exc:
+                raise ChannelUnavailable("Feishu notification binding lookup is unavailable") from exc
+            matching_binding = False
+            for connection in connections:
+                if connection.get("owner_user_id") != owner_user_id or connection.get("provider") != self.name or connection.get("status") != "connected" or connection.get("external_account_id") != target:
+                    continue
+                matching_binding = True
+                metadata = connection.get("metadata")
+                if not isinstance(metadata, dict) or metadata.get("chat_type") != "p2p":
+                    continue
+                chat_id = self._non_empty_str(metadata.get("chat_id"))
+                if chat_id and chat_id == connection.get("workspace_id"):
+                    await self._send_notification_card(receive_id=chat_id, receive_id_type="chat_id", text_markdown=text_markdown)
+                    return
+            if not matching_binding:
+                raise RuntimeError("Feishu notification identity is no longer connected")
+        # Legacy and group bindings do not prove that their chat is private.
+        await self.send_notification(target=target, text_markdown=text_markdown)
+
+    async def _send_notification_card(self, *, receive_id: str, receive_id_type: Literal["open_id", "chat_id"], text_markdown: str) -> None:
+        """Send once and wait for the SDK ACK.
+
+        The notification outbox owns retries. Transport failures park its row;
+        a platform rejection remains a counted delivery attempt.
+        """
+        if not self.is_running or not self._api_client:
+            raise ChannelUnavailable("Feishu channel is not running")
+
+        from requests.exceptions import ConnectionError as RequestsConnectionError
+        from requests.exceptions import Timeout as RequestsTimeout
+
+        request = (
+            self._CreateMessageRequest.builder()
+            .receive_id_type(receive_id_type)
+            .request_body(self._CreateMessageRequestBody.builder().receive_id(receive_id).msg_type("interactive").content(self._build_card_content(text_markdown)).build())
+            .build()
+        )
+        try:
+            response = await asyncio.to_thread(self._api_client.im.v1.message.create, request)
+        except (RequestsConnectionError, RequestsTimeout, ConnectionError, TimeoutError, OSError) as exc:
+            raise ChannelUnavailable("Feishu notification transport is unavailable") from exc
+        if not response.success():
+            raise RuntimeError(f"Feishu notification rejected: code={response.code}")
+
+    async def send_group_notification_for_owner(self, *, owner_user_id: str | None, target: str, text_markdown: str) -> None:
+        if self._connection_repo is None or not owner_user_id:
+            raise ChannelUnavailable("Feishu notification binding lookup is unavailable")
+        try:
+            connections = await self._connection_repo.list_connections(owner_user_id)
+        except Exception as exc:
+            raise ChannelUnavailable("Feishu notification binding lookup is unavailable") from exc
+        for connection in connections:
+            if connection.get("owner_user_id") != owner_user_id or connection.get("id") != target:
+                continue
+            if is_feishu_notification_group(provider=connection.get("provider"), status=connection.get("status"), workspace_id=connection.get("workspace_id"), metadata=connection.get("metadata")):
+                await self._send_notification_card(receive_id=connection["workspace_id"], receive_id_type="chat_id", text_markdown=text_markdown)
+                return
+        raise RuntimeError("Feishu notification group is no longer connected")
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
         if not self._api_client:
@@ -1626,7 +1802,20 @@ class FeishuChannel(Channel):
             workspace_id=inbound.chat_id,
         )
 
-    async def _bind_connection_from_connect_code(self, *, message_id: str, chat_id: str, user_id: str, code: str) -> bool:
+    async def _get_group_name(self, chat_id: str) -> str | None:
+        """Best-effort display name; missing read permission must not break binding."""
+        if not self._api_client or not self._GetChatRequest:
+            return None
+        try:
+            request = self._GetChatRequest.builder().chat_id(chat_id).build()
+            response = await asyncio.to_thread(self._api_client.im.v1.chat.get, request)
+            if response.success():
+                return self._non_empty_str(getattr(response.data, "name", None))
+        except Exception:
+            logger.debug("[Feishu] group name lookup unavailable; binding without a display name")
+        return None
+
+    async def _bind_connection_from_connect_code(self, *, message_id: str, chat_id: str, user_id: str, code: str, chat_type: str | None = None) -> bool:
         if self._connection_repo is None or not code:
             return False
 
@@ -1644,9 +1833,11 @@ class FeishuChannel(Channel):
             provider="feishu",
             external_account_id=user_id,
             workspace_id=chat_id,
+            workspace_name=(notification_group_display_name(state.get("metadata")) or await self._get_group_name(chat_id)) if chat_type == "group" else None,
             metadata={
                 "chat_id": chat_id,
                 "message_id": message_id,
+                "chat_type": chat_type,
             },
             status="connected",
         )
@@ -1767,6 +1958,7 @@ class FeishuChannel(Channel):
                             chat_id=chat_id,
                             user_id=sender_id,
                             code=connect_code,
+                            chat_type=parsed.chat_type,
                         ),
                         self._main_loop,
                         name="bind_connection",

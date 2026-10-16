@@ -2,18 +2,24 @@
 
 import { DownloadIcon } from "lucide-react";
 import dynamic from "next/dynamic";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { defaultUrlTransform, type UrlTransform } from "streamdown";
 
 import { Button } from "@/components/ui/button";
+import { prepareHtmlPreview } from "@/core/artifacts/html-assets";
 import {
   getTabularDelimiter,
-  appendHtmlPreviewBaseHref,
   appendHtmlPreviewScrollRestoration,
   createHtmlPreviewScrollKey,
   HTML_PREVIEW_SCROLL_MESSAGE_SOURCE,
 } from "@/core/artifacts/preview";
-import { urlOfArtifact } from "@/core/artifacts/utils";
+import {
+  type ArtifactImageContext,
+  resolveArtifactImageURL,
+  urlOfArtifact,
+} from "@/core/artifacts/utils";
 import { extractCitationSources } from "@/core/citations/sources";
+import { useI18n } from "@/core/i18n/hooks";
 import {
   SafeStreamdown,
   toStreamdownComponents,
@@ -129,6 +135,7 @@ export function ArtifactFilePreview({
   language,
   scrollKey,
   url,
+  artifact,
   truncated = false,
   active = true,
 }: {
@@ -136,16 +143,41 @@ export function ArtifactFilePreview({
   language: string;
   scrollKey: string;
   url?: string;
+  artifact?: ArtifactImageContext;
   truncated?: boolean;
   active?: boolean;
 }) {
+  const { t } = useI18n();
+  const { filepath, threadId, isMock } = artifact ?? {};
+  const transformUrl = useCallback<UrlTransform>(
+    (src, key, node) =>
+      defaultUrlTransform(
+        node.tagName === "img" && key === "src" && filepath && threadId
+          ? resolveArtifactImageURL(src, { filepath, threadId, isMock })
+          : src,
+        key,
+        node,
+      ),
+    [filepath, threadId, isMock],
+  );
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const scrollPositionRef = useRef({ x: 0, y: 0 });
   const scrollMessageKey = useMemo(
     () => createHtmlPreviewScrollKey(scrollKey),
     [scrollKey],
   );
-  const [htmlPreviewUrl, setHtmlPreviewUrl] = useState<string>();
+  const previewIdentity = useMemo(
+    () => ({ content, language, scrollKey, url }),
+    [content, language, scrollKey, url],
+  );
+  const [htmlPreview, setHtmlPreview] = useState<{
+    identity: typeof previewIdentity;
+    url?: string;
+    failedResources?: number;
+    error?: boolean;
+  }>();
+  const currentPreview =
+    htmlPreview?.identity === previewIdentity ? htmlPreview : undefined;
   const citationSources = useMemo(
     () =>
       language === "markdown" ? extractCitationSources(content ?? "") : [],
@@ -197,24 +229,39 @@ export function ArtifactFilePreview({
 
   useEffect(() => {
     if (language !== "html") {
-      setHtmlPreviewUrl(undefined);
       return;
     }
-
-    const previewContent = appendHtmlPreviewScrollRestoration(
-      appendHtmlPreviewBaseHref(content ?? "", url),
-      scrollKey,
+    const controller = new AbortController();
+    let objectUrl: string | undefined;
+    void prepareHtmlPreview(content ?? "", url, controller.signal).then(
+      (prepared) => {
+        if (controller.signal.aborted) {
+          return;
+        }
+        const previewContent = appendHtmlPreviewScrollRestoration(
+          prepared.content,
+          scrollKey,
+        );
+        objectUrl = URL.createObjectURL(
+          new Blob([previewContent], { type: "text/html;charset=utf-8" }),
+        );
+        setHtmlPreview({
+          identity: previewIdentity,
+          url: objectUrl,
+          failedResources: prepared.failedResources,
+        });
+      },
+      () => {
+        if (!controller.signal.aborted)
+          setHtmlPreview({ identity: previewIdentity, error: true });
+      },
     );
-    const blob = new Blob([previewContent], {
-      type: "text/html;charset=utf-8",
-    });
-    const objectUrl = URL.createObjectURL(blob);
-    setHtmlPreviewUrl(objectUrl);
 
     return () => {
-      URL.revokeObjectURL(objectUrl);
+      controller.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [content, language, scrollKey, url]);
+  }, [content, language, scrollKey, url, previewIdentity]);
 
   const delimiter = getTabularDelimiter(language);
   if (delimiter !== null) {
@@ -232,8 +279,11 @@ export function ArtifactFilePreview({
     return (
       <div className="size-full overflow-auto px-4 py-3">
         <SafeStreamdown
+          // Streamdown memoizes blocks by content, not the image URL resolver.
+          key={JSON.stringify([scrollKey, filepath, threadId, Boolean(isMock)])}
           className="min-w-0"
           {...artifactMarkdownPlugins}
+          urlTransform={transformUrl}
           components={toStreamdownComponents({ a: ArtifactLink })}
         >
           {content ?? ""}
@@ -244,18 +294,29 @@ export function ArtifactFilePreview({
   }
   if (language === "html") {
     return (
-      <iframe
-        ref={iframeRef}
-        className="size-full"
-        title="Artifact preview"
-        // allow-scripts is needed for the scroll-restoration injected
-        // script (appendHtmlPreviewScrollRestoration) which communicates
-        // via postMessage. allow-same-origin is deliberately omitted: the
-        // opaque origin prevents access to parent.document and cookies,
-        // and postMessage(..., "*") works fine from it.
-        sandbox="allow-scripts allow-forms"
-        src={htmlPreviewUrl}
-      />
+      <div className="flex size-full flex-col">
+        {(!currentPreview?.url || !!currentPreview.failedResources) && (
+          <p className="text-muted-foreground px-4 py-2 text-sm" role="status">
+            {currentPreview?.error
+              ? t.artifactPreview.previewFailed
+              : currentPreview?.failedResources
+                ? t.artifactPreview.resourcesUnavailable
+                : t.artifactPreview.loadingPreview}
+          </p>
+        )}
+        <iframe
+          ref={iframeRef}
+          className="min-h-0 w-full flex-1"
+          title="Artifact preview"
+          // allow-scripts is needed for the scroll-restoration injected
+          // script (appendHtmlPreviewScrollRestoration) which communicates
+          // via postMessage. allow-same-origin is deliberately omitted: the
+          // opaque origin prevents access to parent.document and cookies,
+          // and postMessage(..., "*") works fine from it.
+          sandbox="allow-scripts allow-forms"
+          src={currentPreview?.url}
+        />
+      </div>
     );
   }
   return null;

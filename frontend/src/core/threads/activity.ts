@@ -1,7 +1,6 @@
 import {
   useQuery,
   useQueryClient,
-  type InfiniteData,
   type QueryClient,
 } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef } from "react";
@@ -14,6 +13,7 @@ import { useThreadActivityFeature } from "@/core/features/hooks";
 import {
   INFINITE_THREADS_QUERY_KEY_PREFIX,
   mapInfiniteThreadsCache,
+  type InfiniteThreadsData,
 } from "./hooks";
 import { isThreadOriginKind, type ThreadOriginKind } from "./origin";
 import type { AgentThread } from "./types";
@@ -311,10 +311,10 @@ export function cachedThreadUnread(
       data.forEach(visit);
     }
   }
-  for (const [, data] of queryClient.getQueriesData<
-    InfiniteData<AgentThread[]>
-  >({ queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX })) {
-    data?.pages.forEach((page) => page.forEach(visit));
+  for (const [, data] of queryClient.getQueriesData<InfiniteThreadsData>({
+    queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+  })) {
+    data?.pages.forEach((page) => page.threads.forEach(visit));
   }
   return known;
 }
@@ -333,7 +333,7 @@ export function setThreadUnreadInCaches(
     { queryKey: THREAD_SEARCH_QUERY_KEY, exact: false },
     (data) => (Array.isArray(data) ? data.map(patch) : data),
   );
-  queryClient.setQueriesData<InfiniteData<AgentThread[]>>(
+  queryClient.setQueriesData<InfiniteThreadsData>(
     { queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX, exact: false },
     (data) => mapInfiniteThreadsCache(data, patch),
   );

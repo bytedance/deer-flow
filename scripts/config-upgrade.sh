@@ -22,9 +22,27 @@ fi
 # backend/config.yaml present, `make dev` reads the checkout copy. The import
 # loads .env as the Gateway does; DEER_FLOW_PROJECT_ROOT then defaults to the
 # checkout, as in serve.sh. Prints nothing when no config exists yet.
-CONFIG="$(cd "$REPO_ROOT/backend" && REPO_ROOT_WIN_PATH="$REPO_ROOT_WIN" uv run python -c "
+# Pass the payload on stdin instead of `python -c`: on Windows setups where
+# python/uv resolve through pyenv-win shim layers, arguments cross a cmd.exe
+# reparse boundary that mangles multi-line argv (observed as a bogus
+# "IndentationError: unexpected indent" on '|| goto :error'). stdin is safe.
+CONFIG="$(cd "$REPO_ROOT/backend" && REPO_ROOT_WIN_PATH="$REPO_ROOT_WIN" uv run python - <<'DEERFLOW_UPGRADE_PY'
 import os
 import sys
+
+from deerflow.env import load_selected_env_file
+
+# Honor an explicit DEER_FLOW_ENV_FILE selection first: values loaded here
+# keep precedence over anything app_config's import-time load discovers,
+# matching the Gateway. Only with no selector do we load the checkout .env
+# explicitly, so the probe does not depend on dotenv's frame-based discovery
+# anchoring inside the harness package. Bonus: loading before the import
+# below lets DEER_FLOW_PROJECT_ROOT in the checkout .env win over the
+# setdefault, as it does for the Gateway.
+if not load_selected_env_file():
+    from dotenv import load_dotenv
+
+    load_dotenv(os.path.join(os.environ['REPO_ROOT_WIN_PATH'], '.env'))
 
 from deerflow.config.app_config import AppConfig
 
@@ -38,7 +56,8 @@ except FileNotFoundError as exc:
         sys.exit(f'ERROR {exc}')
 except ValueError as exc:
     sys.exit(f'ERROR {exc}')
-")"
+DEERFLOW_UPGRADE_PY
+)"
 
 if [ ! -f "$EXAMPLE" ]; then
     echo "✗ config.example.yaml not found at $EXAMPLE"
@@ -61,7 +80,7 @@ else
     EXAMPLE_WIN="$EXAMPLE"
 fi
 
-cd "$REPO_ROOT/backend" && CONFIG_WIN_PATH="$CONFIG_WIN" EXAMPLE_WIN_PATH="$EXAMPLE_WIN" uv run python -c "
+cd "$REPO_ROOT/backend" && CONFIG_WIN_PATH="$CONFIG_WIN" EXAMPLE_WIN_PATH="$EXAMPLE_WIN" uv run python - <<'DEERFLOW_UPGRADE_PY'
 import os
 import sys, shutil, copy, re, secrets
 from pathlib import Path
@@ -231,7 +250,7 @@ if migrated:
 added = []
 
 def merge(target, source, path=''):
-    \"\"\"Recursively merge source into target, adding missing keys only.\"\"\"
+    """Recursively merge source into target, adding missing keys only."""
     for key, value in source.items():
         key_path = f'{path}.{key}' if path else key
         if key not in target:
@@ -265,4 +284,4 @@ if not migrated and not added:
 print()
 print(f'OK config.yaml upgraded to version {example_version}.')
 print('  Please review the changes and set any new required values.')
-"
+DEERFLOW_UPGRADE_PY

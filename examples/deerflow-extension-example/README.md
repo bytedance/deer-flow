@@ -1,5 +1,8 @@
 # DeerFlow extension example
 
+For the shared edit → test → packaging check → install workflow, see the
+[existing-example guide](../README.md).
+
 This directory is a compact, standalone Python package showing five of the
 eight DeerFlow extension contribution kinds: middleware, task lifecycle,
 system-model observer, service, and router. It depends on the public

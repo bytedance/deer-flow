@@ -119,6 +119,7 @@ export function ArtifactViewer({
             content={content}
             language={language}
             scrollKey={`${threadId}:${filepath}`}
+            artifact={{ filepath, threadId, isMock }}
             truncated={truncated}
             url={url}
           />

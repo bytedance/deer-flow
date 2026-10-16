@@ -653,7 +653,7 @@ def _run_config_upgrade_in_checkout(checkout: Path, **env_overrides: str):
     shutil.copy2(repo_root / "scripts" / "config-upgrade.sh", checkout / "scripts" / "config-upgrade.sh")
     shutil.copy2(repo_root / "config.example.yaml", checkout / "config.example.yaml")
 
-    env = {key: value for key, value in os.environ.items() if key not in {"DEER_FLOW_CONFIG_PATH", "DEER_FLOW_PROJECT_ROOT"}}
+    env = {key: value for key, value in os.environ.items() if key not in {"DEER_FLOW_CONFIG_PATH", "DEER_FLOW_PROJECT_ROOT", "DEER_FLOW_ENV_FILE"}}
     env["UV_PROJECT"] = str(repo_root / "backend")
     env.update(env_overrides)
     return subprocess.run(
@@ -776,3 +776,63 @@ def test_config_upgrade_creates_checkout_config_when_none_exists(tmp_path):
 
     assert "creating from example" in result.stdout
     assert (checkout / "config.yaml").read_bytes() == (checkout / "config.example.yaml").read_bytes()
+
+
+def test_config_upgrade_feeds_inline_python_on_stdin():
+    """The upgrade script must not pass its inline Python via a `python -c` argv payload.
+
+    On Windows setups where python/uv resolve through shim layers that reparse
+    arguments with cmd.exe (e.g. pyenv-win), multi-line argv payloads get
+    mangled mid-flight (observed as `IndentationError: unexpected indent` on
+    `|| goto :error`) and `make dev` fails before the Gateway starts. Feeding
+    the payload on stdin is safe across every spawn chain.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    script = (repo_root / "scripts" / "config-upgrade.sh").read_text(encoding="utf-8")
+    assert 'python -c "' not in script
+    assert script.count("<<'DEERFLOW_UPGRADE_PY'") == 2
+
+
+@pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
+def test_config_upgrade_honors_deer_flow_env_file_over_checkout_dotenv(tmp_path):
+    """An explicit DEER_FLOW_ENV_FILE selection must win over the checkout .env.
+
+    The Gateway loads the selected env file and upgrades the config it points
+    at; this script must not pre-load the checkout .env first, or its values
+    would shadow the selected file's (load_dotenv uses override=False).
+    """
+    checkout = tmp_path / "checkout"
+    live = tmp_path / "live" / "config.yaml"
+    other = tmp_path / "other" / "config.yaml"
+    _write_outdated_config(checkout / "config.yaml")
+    _write_outdated_config(live)
+    _write_outdated_config(other)
+    (checkout / ".env").write_text(f"DEER_FLOW_CONFIG_PATH={other}\n", encoding="utf-8")
+    stage = checkout / "stage.env"
+    stage.write_text(f"DEER_FLOW_CONFIG_PATH={live}\n", encoding="utf-8")
+
+    result = _run_config_upgrade_in_checkout(checkout, DEER_FLOW_ENV_FILE=str(stage))
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    assert yaml.safe_load(live.read_text(encoding="utf-8"))["config_version"] > 1
+    assert yaml.safe_load(other.read_text(encoding="utf-8"))["config_version"] == 1
+
+
+@pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
+def test_config_upgrade_checkout_helper_ignores_inherited_env_file(tmp_path, monkeypatch):
+    """A developer's exported selector must not redirect a fixture's upgrade."""
+    checkout = tmp_path / "checkout"
+    _write_outdated_config(checkout / "config.yaml")
+    developer_config = tmp_path / "developer" / "config.yaml"
+    developer_text = _write_outdated_config(developer_config)
+    developer_env = tmp_path / "developer.env"
+    developer_env.write_text(f"DEER_FLOW_CONFIG_PATH={developer_config}\n", encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_ENV_FILE", str(developer_env))
+
+    result = _run_config_upgrade_in_checkout(checkout)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    assert developer_config.read_text(encoding="utf-8") == developer_text
+    assert not developer_config.with_suffix(".yaml.bak").exists()
+    expected_version = yaml.safe_load((checkout / "config.example.yaml").read_text(encoding="utf-8"))["config_version"]
+    assert yaml.safe_load((checkout / "config.yaml").read_text(encoding="utf-8"))["config_version"] == expected_version

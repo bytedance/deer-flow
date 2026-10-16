@@ -321,24 +321,33 @@ export function ArtifactFileDetail({
       return;
     }
 
+    const submittedDraftContent = activeDraft.draftContent;
+    const submittedBaselineSha256 = activeDraft.baselineSha256;
     setIsSaving(true);
     try {
       const result = await updateArtifactContent({
         threadId,
         filepath,
-        content: activeDraft.draftContent,
-        expectedSha256: activeDraft.baselineSha256,
+        content: submittedDraftContent,
+        expectedSha256: submittedBaselineSha256,
       });
-      const savedContent = activeDraft.draftContent;
       setDrafts((current) => ({
         ...current,
-        [filepath]: {
-          filepath,
-          baselineContent: savedContent,
-          baselineSha256: result.sha256,
-          draftContent: savedContent,
-          conflict: false,
-        },
+        [filepath]: (() => {
+          const currentDraft = current[filepath] ?? activeDraft;
+          const changedSinceSubmit =
+            currentDraft.draftContent !== submittedDraftContent ||
+            currentDraft.baselineSha256 !== submittedBaselineSha256;
+          return {
+            ...currentDraft,
+            baselineContent: submittedDraftContent,
+            baselineSha256: result.sha256,
+            draftContent: changedSinceSubmit
+              ? currentDraft.draftContent
+              : submittedDraftContent,
+            conflict: false,
+          };
+        })(),
       }));
       queryClient.setQueryData(
         ["artifact", filepathFromProps, threadId, isMock, fullContentRequested],
@@ -348,7 +357,7 @@ export function ArtifactFileDetail({
             | undefined,
         ) => ({
           ...current,
-          content: savedContent,
+          content: submittedDraftContent,
           sha256: result.sha256,
         }),
       );
@@ -698,6 +707,7 @@ export function ArtifactFileDetail({
                 content={editorContent}
                 language={language ?? "text"}
                 scrollKey={`${threadId}:${filepathFromProps}`}
+                artifact={{ filepath, threadId, isMock }}
                 url={url}
                 truncated={truncated}
                 active={effectiveViewMode === "preview" && !isLoading}

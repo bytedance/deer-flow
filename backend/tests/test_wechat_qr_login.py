@@ -138,6 +138,26 @@ async def test_browser_transport_closes_http_client_without_starting_channel(mon
 
 
 @pytest.mark.asyncio
+async def test_browser_status_request_uses_channel_qrcode_timeout(monkeypatch):
+    from app.channels.wechat import WechatChannel
+
+    assert WechatChannel.DEFAULT_QRCODE_ADMIN_STATUS_TIMEOUT == 35.0
+    request = AsyncMock(return_value={"status": "wait"})
+    stop = AsyncMock()
+    monkeypatch.setattr(WechatChannel, "request_login_status", request)
+    monkeypatch.setattr(WechatChannel, "stop", stop)
+
+    await WechatQRLogin().request({}, "qr-token")
+
+    request.assert_awaited_once_with(
+        "qr-token",
+        timeout=WechatChannel.DEFAULT_QRCODE_ADMIN_STATUS_TIMEOUT,
+        verify_code=None,
+    )
+    stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_concurrent_polls_only_apply_once(login):
     session = await login.start("alice", {})
     entered, release = asyncio.Event(), asyncio.Event()

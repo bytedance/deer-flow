@@ -19,6 +19,7 @@ import {
 } from "@/core/auth/admin-users";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { enUS } from "@/core/i18n/locales/en-US";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
 
 rs.mock("@/core/auth/AuthProvider", () => ({ useAuth: rs.fn() }));
 rs.mock("@/core/i18n/hooks", () => ({ useI18n: () => ({ t: enUS }) }));
@@ -27,6 +28,7 @@ rs.mock("@/core/auth/admin-users", () => ({
   loadAdminUsers: rs.fn(),
   updateUserAccount: rs.fn(),
 }));
+rs.mock("@/core/static-mode", () => ({ isStaticWebsiteOnly: rs.fn() }));
 
 const admin: AdminUser = {
   id: "u-admin",
@@ -66,6 +68,9 @@ function rowFor(email: string) {
 
 beforeEach(() => {
   rs.mocked(useAuth).mockReturnValue(auth("admin"));
+  // Seed the static-mode gate per test so a `true` override cannot leak into
+  // the next case via a surviving mock implementation.
+  rs.mocked(isStaticWebsiteOnly).mockReturnValue(false);
   rs.mocked(loadAdminUsers).mockResolvedValue([admin, suspended, legacyRow]);
 });
 afterEach(() => {
@@ -87,6 +92,15 @@ function mount() {
 
 test("non-admin sees the admin-only note and loads nothing", () => {
   rs.mocked(useAuth).mockReturnValue(auth("user"));
+  mount();
+  expect(screen.getByText(enUS.settings.users.adminOnly)).toBeTruthy();
+  expect(loadAdminUsers).not.toHaveBeenCalled();
+});
+
+test("static-website demo shows the admin-only note and loads nothing", () => {
+  // The static demo user is nominally an admin; only the mode gate stops
+  // the doomed /api/v1/admin/users query.
+  rs.mocked(isStaticWebsiteOnly).mockReturnValue(true);
   mount();
   expect(screen.getByText(enUS.settings.users.adminOnly)).toBeTruthy();
   expect(loadAdminUsers).not.toHaveBeenCalled();

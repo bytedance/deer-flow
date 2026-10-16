@@ -15,6 +15,34 @@ export type RetrievalCatalogPage = {
   total: number;
 };
 
+export type KnowledgeOperation =
+  | "search"
+  | "sources"
+  | "catalog"
+  | "documents"
+  | "dataset_filter"
+  | "document_filter";
+
+export type KnowledgeProviderCapabilities = {
+  operations: KnowledgeOperation[];
+  scope_selection_enabled: boolean;
+};
+
+export async function fetchKnowledgeProviderCapabilities(
+  agentName: string,
+): Promise<KnowledgeProviderCapabilities> {
+  const query = new URLSearchParams({ agent_name: agentName });
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/knowledge/capabilities?${query}`,
+  );
+  if (!response.ok)
+    await throwGatewayApiError(
+      response,
+      "Failed to load knowledge capabilities.",
+    );
+  return (await response.json()) as KnowledgeProviderCapabilities;
+}
+
 function catalogUrl(path: string): string {
   return `${getBackendBaseURL()}/api/knowledge/retrieval-catalog${path}`;
 }

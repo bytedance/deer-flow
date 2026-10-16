@@ -54,6 +54,69 @@ _MOCKED_MODULE_NAMES = [
 _LANGGRAPH_HAS_ROOT_LINEAGE_STREAM_REGRESSION = Version(package_version("langgraph")) >= Version("1.2.6")
 
 
+def test_knowledge_sources_survive_compaction_and_terminal_publication(_setup_executor_classes):
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    from deerflow.knowledge import KnowledgeSource, RetrievalHit, RetrievalResult, format_result
+
+    classes = _setup_executor_classes
+    source = KnowledgeSource(provider="demo", title="Guide", excerpt="real evidence")
+    content, artifact = format_result(RetrievalResult(hits=[RetrievalHit(content=source.excerpt, source=source)]))
+    result = classes["SubagentResult"](task_id="task", trace_id="trace", status=classes["SubagentStatus"].RUNNING)
+    result.update_knowledge_sources([ToolMessage(content=content, tool_call_id="call", artifact=artifact)])
+    result.update_knowledge_sources([AIMessage(content="compacted")])
+    assert len(result.knowledge_sources) == 1
+    result.try_set_terminal(classes["SubagentStatus"].COMPLETED, result=content)
+    result.update_knowledge_sources([])
+    assert len(result.knowledge_sources) == 1
+
+
+def test_knowledge_accumulator_scans_only_changed_tail(_setup_executor_classes, monkeypatch):
+    import deerflow.knowledge as knowledge
+
+    classes = _setup_executor_classes
+    scanned = []
+    monkeypatch.setattr(knowledge, "sources_from_messages", lambda messages: scanned.append(list(messages)) or [])
+    result = classes["SubagentResult"](task_id="task", trace_id="trace", status=classes["SubagentStatus"].RUNNING)
+    first, second, compacted = {"type": "ai", "content": "first"}, {"type": "ai", "content": "second"}, {"type": "ai", "content": "summary"}
+    result.update_knowledge_sources([first])
+    result.update_knowledge_sources([first, second])
+    result.update_knowledge_sources([first, second])
+    result.update_knowledge_sources([compacted])
+    result.update_knowledge_sources(None)
+    assert scanned == [[first], [second], [compacted]]
+
+
+@pytest.mark.anyio
+async def test_knowledge_provider_receives_real_subagent_execution_identity(classes, base_config, monkeypatch):
+    from langchain_core.messages import AIMessage
+
+    from deerflow.knowledge import KnowledgeCapabilities, RetrievalResult, tools
+
+    provider = SimpleNamespace(capabilities=KnowledgeCapabilities(operations={"search", "dataset_filter"}), search_scoped=AsyncMock(return_value=RetrievalResult()))
+    monkeypatch.setattr(tools, "get_app_config", _default_app_config)
+    monkeypatch.setattr(tools, "resolve_knowledge_provider", lambda *args, **kwargs: provider)
+    scope = {"version": 1, "mode": "selected", "dataset_ids": ["private"]}
+
+    async def capturing_astream(state, *, context, **kwargs):
+        assert context["is_subagent"] is True
+        assert context["agent_id"] == base_config.name
+        content, _ = await tools._knowledge_search_entrypoint("q", SimpleNamespace(context=context))
+        assert not content.startswith("Error:")
+        yield {"messages": [AIMessage(content="Done", id="knowledge-result")]}
+
+    agent = MagicMock()
+    agent.astream = capturing_astream
+    executor = classes["SubagentExecutor"](config=base_config, tools=[], thread_id="knowledge-thread", user_id="alice", knowledge_scope=scope)
+    with patch.object(executor, "_create_agent", return_value=agent):
+        result = await executor._aexecute("Search private knowledge")
+    assert result.status == classes["SubagentStatus"].COMPLETED
+    context = provider.search_scoped.await_args.kwargs["context"]
+    assert context.agent_name == base_config.name
+    assert context.user_id == "alice"
+    assert context.scope == scope
+
+
 def _default_app_config():
     return SimpleNamespace(
         tool_search=SimpleNamespace(enabled=False),
@@ -6259,6 +6322,41 @@ class TestBashExecutionHarvest:
         assert entry["command"] == "make test"
         assert entry["status"] == "success"
         assert "12 passed" in entry["output_tail"]
+
+    @pytest.mark.parametrize(
+        "output,checked,holds",
+        [
+            ("[INFO] BUILD SUCCESS", False, False),
+            ("Tests run: 3, Failures: 0, Errors: 0, Skipped: 3\nBUILD SUCCESS", False, False),
+            ("Tests run: 3, Failures: 1, Errors: 0, Skipped: 0\nBUILD SUCCESS", True, False),
+            ("Tests run: 3, Failures: 0, Errors: 0, Skipped: 0\nBUILD SUCCESS", True, True),
+        ],
+    )
+    def test_build_summary_reaches_acceptance_through_stamped_tool_messages(self, classes, monkeypatch, output, checked, holds):
+        from deerflow.subagents.acceptance_checks import check_acceptance_criteria, render_acceptance_section
+
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_result_meta", _module("deerflow.agents.middlewares.tool_result_meta", TOOL_META_KEY="deerflow_tool_meta"))
+        sandbox = SimpleNamespace(persistent_shell_sessions=False)
+        monkeypatch.setattr("deerflow.sandbox.sandbox_provider.get_sandbox_provider", lambda: SimpleNamespace(get=lambda _id: sandbox))
+        state = self._final_state(classes)
+        state["sandbox"] = {"sandbox_id": "sb-jvm"}
+        state["messages"][1].tool_calls[0]["args"]["command"] = "mvn test"
+        state["messages"][2].content = output
+        state["messages"][2].additional_kwargs["deerflow_tool_meta"] = {"status": "success"}
+
+        executions = executor_module._harvest_bash_executions(state)
+        assert executions[0]["shell_persistent"] is False
+        verdict = check_acceptance_criteria(
+            ["tests_passed:mvn test"],
+            bash_executions=executions,
+            content_reader=lambda *_args: pytest.fail("test-summary acceptance must not read files"),
+        )
+        leaf = verdict["leaves"][0]
+        assert (leaf["checked"], leaf["holds"]) == (checked, holds)
+        assert verdict["all_hold"] is holds
+        if not checked:
+            assert "[UNVERIFIED]" in render_acceptance_section(verdict)
 
     def test_status_comes_from_tool_meta_when_present(self, classes, monkeypatch):
         executor_module = importlib.import_module("deerflow.subagents.executor")

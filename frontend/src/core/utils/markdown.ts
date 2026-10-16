@@ -5,7 +5,7 @@ export function extractTitleFromMarkdown(markdown: string) {
   if (firstLine === undefined) {
     return undefined;
   }
-  const headingPrefix = /^ {0,3}# /.exec(firstLine);
+  const headingPrefix = /^ {0,3}#[ \t]/.exec(firstLine);
   if (!headingPrefix) {
     return undefined;
   }

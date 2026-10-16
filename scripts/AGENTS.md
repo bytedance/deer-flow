@@ -25,11 +25,14 @@ path variables and compare storage defaults with the launcher's actual shell blo
 
 ## Dependency Check Diagnostics
 
-`check.py` captures tool output as UTF-8 with replacement for malformed bytes,
-independently of the host locale. Its Python pnpm runner inherits the environment
-with `PYTHONIOENCODING=utf-8:backslashreplace`, matching the capture encoding.
-Keep Unicode failure diagnostics and exit status available to `make check`.
-Real subprocess regressions live in `backend/tests/test_check_script.py`.
+`check_extension.py` checks wheels with Gateway's asset validator.
+CI builds and checks all bundled examples in `extension-package-check.yml`.
+Tests: `backend/tests/test_extension_check_script.py`.
+
+`check.py` decodes captured output as UTF-8 with replacement and runs pnpm with
+`PYTHONIOENCODING=utf-8:backslashreplace`. Preserve Unicode diagnostics and exit
+status in `make check`, independently of the host locale.
+Tests: `backend/tests/test_check_script.py`.
 
 ## Manual Claude OAuth Export
 
@@ -172,6 +175,9 @@ Only "no config anywhere" creates `<checkout>/config.yaml` from the example.
 `dev_multi_instance.{sh,py}` must keep the rendered config passing the real
 multi-instance gate and every endpoint/data root inside its state dir
 (`backend/tests/test_dev_multi_instance_script.py`).
+Unless `keep_channels` is requested, disable provider flags in both `channels`
+and `channel_connections`; UI credentials can otherwise connect a bot
+later. Preserve `channels.leader_lease` and connection metadata.
 
 ## Shell Script Invocation Contract
 

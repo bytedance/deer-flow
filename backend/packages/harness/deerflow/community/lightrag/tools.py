@@ -11,9 +11,14 @@ from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr, Valida
 
 from deerflow.community.provider_credentials import redact_secret, reject_url_userinfo, resolve_api_key
 from deerflow.config import get_app_config
+from deerflow.knowledge import format_result
+from deerflow.knowledge.providers import validate_scope_capabilities
+from deerflow.knowledge.sources import redact_strings, source_artifact
+from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY
+from deerflow.tools.types import Runtime
 
 from .client import LightRAGAPIError, LightRAGClient, LightRAGConnectionError, LightRAGProtocolError
-from .formatting import format_retrieval_result
+from .formatting import CAPABILITIES, format_retrieval_result, normalize_retrieval_result
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +99,7 @@ def _tool_error(exc: Exception, settings: _LightRAGRetrievalSettings) -> str:
     return "Error: An unexpected LightRAG retrieval error occurred; try again later."
 
 
-async def knowledge_search(query: str) -> str:
+async def _search(query: str, *, with_sources: bool = False) -> str | tuple[str, dict]:
     """Search the operator-configured LightRAG instance.
 
     LightRAG has no dataset catalog to scope: the deployment's single indexed
@@ -117,6 +122,9 @@ async def knowledge_search(query: str) -> str:
             top_k=settings.top_k,
             chunk_top_k=settings.chunk_top_k,
         )
+        if with_sources:
+            normalized = normalize_retrieval_result(redact_strings(result, _api_key(settings)))
+            return format_result(normalized, max_chars_per_chunk=settings.max_chars_per_chunk, max_total_chars=settings.max_total_chars)
         formatted = format_retrieval_result(
             result,
             max_chars_per_chunk=settings.max_chars_per_chunk,
@@ -129,18 +137,35 @@ async def knowledge_search(query: str) -> str:
         return _tool_error(exc, settings)
 
 
+async def knowledge_search(query: str) -> str:
+    """Legacy text-only API; graph tool calls additionally carry source artifacts."""
+    result = await _search(query)
+    assert isinstance(result, str)
+    return result
+
+
 def _tool_description() -> str:
     base = "Search the operator-approved LightRAG knowledge base and return compact, citation-numbered source chunks retrieved with the configured graph/vector mode."
+    base += " Cite only returned evidence using the exact [citation:Title](#knowledge-source-ID) links supplied with each chunk; never invent source locators."
     return f"{base} Internal identifiers are never shown to the model."
 
 
-async def _knowledge_search_entrypoint(query: str) -> str:
+async def _knowledge_search_entrypoint(query: str, runtime: Runtime = None) -> tuple[str, dict | None]:
     """Search the operator-configured LightRAG knowledge base.
 
     Args:
         query: Specific question or search terms to retrieve from the configured private documents.
     """
-    return await knowledge_search(query)
+    context = getattr(runtime, "context", None)
+    scope = context.get(KNOWLEDGE_SCOPE_RUNTIME_KEY) if isinstance(context, Mapping) else None
+    try:
+        validated = validate_scope_capabilities(scope, CAPABILITIES) if scope is not None else None
+        if validated is not None and validated["mode"] == "disabled":
+            return "Error: Knowledge retrieval is disabled for this turn.", None
+    except ValueError:
+        return "Error: LightRAG does not support the selected knowledge scope.", None
+    result = await _search(query, with_sources=True)
+    return result if isinstance(result, tuple) else (result, source_artifact([]))
 
 
 knowledge_search_tool = StructuredTool.from_function(
@@ -148,4 +173,6 @@ knowledge_search_tool = StructuredTool.from_function(
     name="knowledge_search",
     description=_tool_description(),
     parse_docstring=True,
+    response_format="content_and_artifact",
+    metadata={"knowledge_capabilities": CAPABILITIES.model_dump(mode="json")},
 )

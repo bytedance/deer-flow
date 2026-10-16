@@ -7,11 +7,16 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 
+from app.gateway.auth_middleware import AuthMiddleware
 from app.gateway.deps import _validate_agent_storage
+from app.gateway.routers import agents as agents_router
 from deerflow.config.agent_storage_config import AgentStorageConfig
-from deerflow.config.app_config import reset_app_config
+from deerflow.config.agents_api_config import load_agents_api_config_from_dict
+from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.extensions_config import reset_extensions_config
 from deerflow.persistence.agents import get_agent_store, make_agent_store
@@ -23,6 +28,7 @@ from deerflow.persistence.managed_subagents.base import ManagedSubagentDefinitio
 from deerflow.persistence.managed_subagents.file import FileManagedSubagentStore
 from deerflow.persistence.managed_subagents.model import ManagedSubagentRow
 from deerflow.persistence.managed_subagents.sql import SqlManagedSubagentStore
+from deerflow.tools.builtins.update_agent_tool import update_agent
 
 
 def _cfg(agent_backend: str, db_backend: str, sqlite_dir: str = "/tmp/agent-store-test") -> SimpleNamespace:
@@ -154,6 +160,78 @@ def test_importer_dry_run_writes_nothing(file_home, monkeypatch):
     dest = SqlAgentStore(cfg.database.app_sync_sqlalchemy_url)
     assert dest.list_all() == []
     assert SqlManagedSubagentStore(cfg.database.app_sync_sqlalchemy_url).list() == []
+
+
+@pytest.mark.parametrize("backend", ["file", "db"])
+@pytest.mark.parametrize("memory_only", [False, True], ids=["no-user-dir", "memory-only-user-dir"])
+@pytest.mark.parametrize("surface", ["http", "tool"])
+def test_legacy_source_only_blocks_file_backed_updates(tmp_path, monkeypatch, backend, memory_only, surface):
+    """Retained migration sources must not override the active SQL store (#6743)."""
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+    monkeypatch.setenv("DEER_FLOW_ENV", "test")
+    monkeypatch.setenv("ENVIRONMENT", "test")
+    legacy = tmp_path / "agents" / "reviewer"
+    legacy.mkdir(parents=True)
+    original_config = "name: reviewer\ndescription: original\n"
+    (legacy / "config.yaml").write_text(original_config, encoding="utf-8")
+    (legacy / "SOUL.md").write_text("Review carefully.", encoding="utf-8")
+    user_dir = tmp_path / "users" / "default" / "agents" / "reviewer"
+    if memory_only:
+        user_dir.mkdir(parents=True)
+        (user_dir / "memory.json").write_text("{}", encoding="utf-8")
+
+    cfg = AppConfig(
+        models=[],
+        sandbox={"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+        database={"backend": "sqlite", "sqlite_dir": str(tmp_path / "db")},
+        agent_storage={"backend": backend},
+    )
+    set_app_config(cfg)
+    load_agents_api_config_from_dict({"enabled": True})
+    try:
+        if backend == "db":
+            # Real file discovery, import and SQL writes; only the unrelated
+            # schema bootstrap is replaced by the fixture's real SQLite DDL.
+            importer = _patch_importer(monkeypatch, cfg)
+            monkeypatch.setattr(sys, "argv", ["migrate_agents_to_db"])
+            assert importer.main() == 0
+        store = get_agent_store()
+        assert store.get("reviewer", user_id="default").description == "original"
+        if backend == "db":
+            store.create("reviewer", {"name": "reviewer", "description": "other owner"}, "Other soul", user_id="other-user")
+
+        if surface == "http":
+            app = FastAPI()
+            app.add_middleware(AuthMiddleware)
+            app.include_router(agents_router.router)
+            with TestClient(app) as client:
+                assert client.get("/api/agents/reviewer").status_code == 200
+                response = client.put("/api/agents/reviewer", json={"description": "updated"})
+            assert response.status_code == (200 if backend == "db" else 409), response.text
+            if backend == "file":
+                assert "legacy shared layout" in response.json()["detail"]
+        else:
+            runtime = SimpleNamespace(context={"agent_name": "reviewer", "user_id": "default"}, tool_call_id="update-1")
+            message = update_agent.func(runtime=runtime, description="updated").update["messages"][0]
+            assert message.status == ("success" if backend == "db" else "error"), message.content
+            if backend == "file":
+                assert "legacy shared layout" in message.content
+
+        assert store.get("reviewer", user_id="default").description == ("updated" if backend == "db" else "original")
+        assert store.get_soul("reviewer", user_id="default") == "Review carefully."
+        if backend == "db":
+            assert store.get("reviewer", user_id="other-user").description == "other owner"
+            assert store.get_soul("reviewer", user_id="other-user") == "Other soul"
+        assert (legacy / "config.yaml").read_text(encoding="utf-8") == original_config
+        assert (legacy / "SOUL.md").read_text(encoding="utf-8") == "Review carefully."
+        assert not (user_dir / "config.yaml").exists()
+        if memory_only:
+            assert (user_dir / "memory.json").read_text(encoding="utf-8") == "{}"
+    finally:
+        load_agents_api_config_from_dict({})
+        reset_app_config()
 
 
 def test_importer_runs_when_only_managed_subagents_exist(tmp_path, monkeypatch):

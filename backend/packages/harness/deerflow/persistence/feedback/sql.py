@@ -9,11 +9,14 @@ import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy import case, delete, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.feedback.model import FeedbackRow
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import coerce_iso
+
+_UPSERT_MAX_ATTEMPTS = 3
 
 
 class FeedbackRepository:
@@ -133,36 +136,48 @@ class FeedbackRepository:
         user_id: str | None | _AutoSentinel = AUTO,
         comment: str | None = None,
     ) -> dict:
-        """Create or update feedback for (thread_id, run_id, user_id). rating must be +1 or -1."""
+        """Create or update feedback for (thread_id, run_id, user_id). rating must be +1 or -1.
+
+        Two first submissions for one key can both miss the SELECT, and the
+        later INSERT then violates ``uq_feedback_thread_run_user``. That writer
+        rolls back and retries, so it re-reads the committed row and updates it
+        instead of failing the request.
+        """
         if rating not in (1, -1):
             raise ValueError(f"rating must be +1 or -1, got {rating}")
         resolved_user_id = resolve_user_id(user_id, method_name="FeedbackRepository.upsert")
+        stmt = select(FeedbackRow).where(
+            FeedbackRow.thread_id == thread_id,
+            FeedbackRow.run_id == run_id,
+            FeedbackRow.user_id == resolved_user_id,
+        )
         async with self._sf() as session:
-            stmt = select(FeedbackRow).where(
-                FeedbackRow.thread_id == thread_id,
-                FeedbackRow.run_id == run_id,
-                FeedbackRow.user_id == resolved_user_id,
-            )
-            result = await session.execute(stmt)
-            row = result.scalar_one_or_none()
-            if row is not None:
-                row.rating = rating
-                row.comment = comment
-                row.created_at = datetime.now(UTC)
-            else:
-                row = FeedbackRow(
-                    feedback_id=str(uuid.uuid4()),
-                    run_id=run_id,
-                    thread_id=thread_id,
-                    user_id=resolved_user_id,
-                    rating=rating,
-                    comment=comment,
-                    created_at=datetime.now(UTC),
-                )
-                session.add(row)
-            await session.commit()
-            await session.refresh(row)
-            return self._row_to_dict(row)
+            last_error: IntegrityError | None = None
+            for _ in range(_UPSERT_MAX_ATTEMPTS):
+                try:
+                    row = (await session.execute(stmt)).scalar_one_or_none()
+                    if row is not None:
+                        row.rating = rating
+                        row.comment = comment
+                        row.created_at = datetime.now(UTC)
+                    else:
+                        row = FeedbackRow(
+                            feedback_id=str(uuid.uuid4()),
+                            run_id=run_id,
+                            thread_id=thread_id,
+                            user_id=resolved_user_id,
+                            rating=rating,
+                            comment=comment,
+                            created_at=datetime.now(UTC),
+                        )
+                        session.add(row)
+                    await session.commit()
+                    await session.refresh(row)
+                    return self._row_to_dict(row)
+                except IntegrityError as exc:
+                    last_error = exc
+                    await session.rollback()
+            raise last_error  # type: ignore[misc]  # loop runs at least once
 
     async def delete_by_run(
         self,

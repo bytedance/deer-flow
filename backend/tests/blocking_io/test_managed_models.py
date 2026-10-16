@@ -72,3 +72,40 @@ async def test_deepseek_probe_offloads_credentials_and_client_construction(tmp_p
     assert result == {"ok": True, "message": "success"}
     assert constructed == ["PatchedChatDeepSeek"]
     assert await asyncio.to_thread(store.path.read_bytes) == original_catalog
+
+
+@pytest.mark.asyncio
+async def test_preset_catalog_registration_and_native_client_stay_off_loop(tmp_path, monkeypatch):
+    from langchain_anthropic import ChatAnthropic
+
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    monkeypatch.setenv("LANGSMITH_TRACING", "false")
+    base = AppConfig.model_validate({"sandbox": {"use": "test"}})
+    monkeypatch.setattr(router, "get_app_config", lambda: base)
+    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")))
+    providers = await router.list_model_providers(request)
+    assert any(item["id"] == "anthropic" for item in providers["providers"])
+    result = await router.save_model(request, router.SaveModelRequest(config=ManagedModel(provider="anthropic", model="arbitrary", api_key="test-secret")))
+    assert result["name"] and result["provider"] == "anthropic"
+    assert "test-secret" not in str(await router.list_managed_models(request))
+    original = ChatAnthropic.__init__
+    built = []
+
+    def initialize(self, *args, **kwargs):
+        with pytest.raises(RuntimeError, match="no running event loop"):
+            asyncio.get_running_loop()
+        original(self, *args, **kwargs)
+        built.append(True)
+
+    monkeypatch.setattr(ChatAnthropic, "__init__", initialize)
+
+    # Stop at the wire boundary; constructing the actual native SDK is the
+    # assertion here. The real streaming wire test lives in the offline suite.
+    async def send(client, outbound, **kwargs):
+        assert outbound.headers["x-api-key"] == "test-secret"
+        return httpx.Response(401, request=outbound, json={"error": {"type": "authentication_error", "message": "private provider detail"}})
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
+    profile = ManagedModel(name=result["name"], provider="anthropic", model="arbitrary")
+    assert await router.test_model(request, router.SaveModelRequest(config=profile, expected_revision=result["revision"])) == {"ok": False, "message": "authentication_failed"}
+    assert built == [True]

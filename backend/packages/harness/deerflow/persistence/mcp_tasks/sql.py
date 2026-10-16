@@ -306,33 +306,49 @@ class McpTaskRepository:
         limit: int,
     ) -> list[dict[str, Any]]:
         lease_expires_at = now + timedelta(seconds=lease_seconds)
-        stmt = (
-            select(McpTaskRow)
-            .where(
-                McpTaskRow.status.in_(_POLLABLE_STATUS_VALUES),
-                McpTaskRow.cancel_requested_at.is_(None),
-                McpTaskRow.next_poll_at.is_not(None),
-                McpTaskRow.next_poll_at <= now,
-                or_(
-                    McpTaskRow.lease_expires_at.is_(None),
-                    McpTaskRow.lease_expires_at < now,
-                ),
-            )
-            .order_by(McpTaskRow.next_poll_at.asc(), McpTaskRow.id.asc())
-            .limit(limit)
-            .with_for_update(skip_locked=True)
+        claimable = (
+            McpTaskRow.status.in_(_POLLABLE_STATUS_VALUES),
+            McpTaskRow.cancel_requested_at.is_(None),
+            McpTaskRow.next_poll_at.is_not(None),
+            McpTaskRow.next_poll_at <= now,
+            or_(
+                McpTaskRow.lease_expires_at.is_(None),
+                McpTaskRow.lease_expires_at < now,
+            ),
         )
+        stmt = select(McpTaskRow.id).where(*claimable).order_by(McpTaskRow.next_poll_at.asc(), McpTaskRow.id.asc()).limit(limit).with_for_update(skip_locked=True)
         async with self._sf() as session:
-            result = await session.execute(stmt)
-            rows = list(result.scalars())
-            for row in rows:
-                row.lease_owner = lease_owner
-                row.lease_expires_at = lease_expires_at
-                row.lease_token = _new_claim_token()
-                row.poll_attempt_count += 1
-                row.updated_at = now
+            candidate_ids = list((await session.execute(stmt)).scalars())
+            # Atomic fence: ``with_for_update()`` is a no-op on SQLite, so a
+            # cancel request can commit between the SELECT and the claim. It
+            # clears the poll lease for the cancellation worker; writing the
+            # lease back would hold off the remote cancel until it expires.
+            # Each conditional UPDATE re-checks the claim predicates, and a
+            # row that stopped being claimable is skipped. It is not replaced
+            # from beyond the LIMIT: such a batch comes back short (SQLite
+            # only; Postgres row locks keep candidates claimable) and the
+            # remaining due rows are claimed on the next poll cycle.
+            claimed_ids: list[str] = []
+            for task_id in candidate_ids:
+                update_result = await session.execute(
+                    update(McpTaskRow)
+                    .where(McpTaskRow.id == task_id, *claimable)
+                    .values(
+                        lease_owner=lease_owner,
+                        lease_expires_at=lease_expires_at,
+                        lease_token=_new_claim_token(),
+                        poll_attempt_count=McpTaskRow.poll_attempt_count + 1,
+                        updated_at=now,
+                    )
+                )
+                if update_result.rowcount:
+                    claimed_ids.append(task_id)
+            claimed: list[dict[str, Any]] = []
+            if claimed_ids:
+                rows = {row.id: row for row in (await session.execute(select(McpTaskRow).where(McpTaskRow.id.in_(claimed_ids)))).scalars()}
+                claimed = [self._row_to_dict(rows[task_id], include_internal=True) for task_id in claimed_ids]
             await session.commit()
-            return [self._row_to_dict(row, include_internal=True) for row in rows]
+            return claimed
 
     async def apply_snapshot(
         self,

@@ -13,10 +13,9 @@ import stat
 import subprocess
 import sys
 import tempfile
-import time
 import tomllib
 import urllib.parse
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,10 +24,11 @@ from typing import Any
 import yaml
 from packaging.requirements import InvalidRequirement, Requirement
 
+from deerflow.utils.file_lock import retry_until_locked as _retry_until_locked
+
 logger = logging.getLogger(__name__)
 
 _ENTRY_POINT_GROUP = "deerflow.extensions"
-_LOCK_RETRY_INTERVAL_SECONDS = 0.2
 _SNAPSHOT_IGNORES = (".git", ".venv", "venv", "__pycache__", "*.pyc")
 _DISTRIBUTION_NAME = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
 _SENSITIVE_FILENAMES = {".npmrc", ".pypirc", "credentials.json"}
@@ -529,22 +529,6 @@ def _normalize_distribution(name: str) -> str:
     if not _DISTRIBUTION_NAME.fullmatch(name):
         raise ValueError(f"invalid extension distribution name: {name!r}")
     return re.sub(r"[-_.]+", "-", name).lower()
-
-
-def _retry_until_locked(acquire: Callable[[], None], *, sleep: Callable[[float], None] = time.sleep) -> None:
-    """Retry a non-blocking lock acquisition until the region is free.
-
-    Windows' blocking mode (``msvcrt.LK_LOCK``) gives up after roughly ten
-    seconds. A real install holds this lock across ``uv add`` plus a full
-    ``uv sync``, so blocking mode reports contention as ``Permission denied``
-    instead of serializing the two operations.
-    """
-    while True:
-        try:
-            acquire()
-            return
-        except OSError:
-            sleep(_LOCK_RETRY_INTERVAL_SECONDS)
 
 
 @contextmanager

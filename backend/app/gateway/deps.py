@@ -31,6 +31,7 @@ from langgraph.types import Checkpointer
 from app.gateway.auth.errors import AuthErrorCode
 from deerflow.community.browser_automation.session import browser_multi_worker_error
 from deerflow.config.app_config import AppConfig, get_app_config
+from deerflow.config.channel_leader_lease_config import CHANNEL_LEADER_LEASE_FIELD, ChannelLeaderLeaseConfig, ChannelLeaderLeaseConfigError, channel_leader_lease_from_app_config
 from deerflow.config.credentials_key import CREDENTIALS_KEY_ENV_VAR, CREDENTIALS_KEY_FILENAME, GENERATE_KEY_COMMAND, CredentialsKeyError, parse_credentials_keys
 from deerflow.config.deployment_config import multi_instance_declaration
 from deerflow.persistence.feedback import FeedbackRepository
@@ -160,6 +161,17 @@ def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
     7. ``sandbox.ownership.type`` must not be an explicit ``memory``: an
        in-process ownership store cannot see peers, so reconciliation would
        adopt and idle-destroy another instance's live containers (#4206).
+    8. ``channels.leader_lease.enabled`` must not be ``false`` while an IM
+       channel other than GitHub is enabled: every instance would open the
+       platform connection with the same bot credentials (Telegram rejects
+       the second poller with 409, Discord answers every message twice).
+       ``auto`` (the default) and ``true`` hand each provider's connection to
+       the one instance holding its ``channel_leases`` row.
+
+    On a single instance only one lease rule applies: an explicit
+    ``channels.leader_lease.enabled: true`` needs a SQL database for its lease
+    table, so ``database.backend: memory`` is refused while a channel the lease
+    arbitrates is enabled.
 
     This gate runs once at startup before any persistence engine is
     initialised so the error message is clear and the process exits
@@ -180,8 +192,20 @@ def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
     if multi_instance_requested and (run_ownership is None or not run_ownership.heartbeat_enabled):
         raise SystemExit("scheduler.multi_instance=true requires run_ownership.heartbeat_enabled=true so peer runs retain a valid lease. Set scheduler.multi_instance=false or enable run ownership heartbeats.")
 
+    # A malformed channels.leader_lease block is refused on every topology:
+    # ChannelService would otherwise raise the same error later in the
+    # lifespan, after the persistence engine is already up.
+    leader_lease = _channel_leader_lease(config)
+
     signal = _multi_process_signal(config)
     if signal is None:
+        if leader_lease.enabled is True and backend not in ("sqlite", "postgres"):
+            providers = _enabled_channel_transport_providers(config)
+            if providers:
+                raise SystemExit(
+                    f"{CHANNEL_LEADER_LEASE_FIELD}.enabled=true needs the shared application database for its lease table, but database.backend is '{backend}' "
+                    f"while IM channels {', '.join(providers)} are enabled. Set database.backend to sqlite or postgres, or set {CHANNEL_LEADER_LEASE_FIELD}.enabled to auto."
+                )
         return
     reason, rollback = signal
 
@@ -227,6 +251,45 @@ def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
             "peer instances, so startup reconciliation would adopt and idle-destroy containers another instance is "
             "using (#4206). Set sandbox.ownership.type='redis', or omit the section so it is inferred from the redis stream bridge."
         )
+
+    if leader_lease.explicitly_disabled:
+        providers = _enabled_channel_transport_providers(config)
+        if providers:
+            raise SystemExit(
+                f"{reason} cannot run with {CHANNEL_LEADER_LEASE_FIELD}.enabled=false while IM channels {', '.join(providers)} are enabled: "
+                "every instance would open the platform connection with the same bot credentials (Telegram rejects the second poller "
+                "with 409 Conflict, Discord answers every message twice, and per-process channel state diverges). "
+                f"Set {CHANNEL_LEADER_LEASE_FIELD}.enabled to auto (the default) or true so one instance holds each provider's connection; "
+                f"alternatively {rollback[0].lower()}{rollback[1:]}, or disable those channels (channels.<provider>.enabled=false and channel_connections.<provider>.enabled=false)."
+            )
+
+
+def multi_process_deployment(config: AppConfig) -> bool:
+    """Whether this process must assume peer Gateway processes (the gate's multi-process signal).
+
+    ``channels.leader_lease: auto`` follows exactly this signal, so the lease
+    turns on wherever the gate enforced the multi-process prerequisites.
+    """
+    return _multi_process_signal(config) is not None
+
+
+def _channel_leader_lease(config: AppConfig) -> ChannelLeaderLeaseConfig:
+    """Parse ``channels.leader_lease``; a malformed block exits with the dotted path in the message."""
+    try:
+        return channel_leader_lease_from_app_config(config)
+    except ChannelLeaderLeaseConfigError as exc:
+        raise SystemExit(str(exc)) from None
+
+
+def _enabled_channel_transport_providers(config: AppConfig) -> list[str]:
+    """Non-GitHub IM providers whose platform connection this deployment may open.
+
+    Imported lazily: ``app.channels.service`` pulls in every channel module and
+    the gate runs before the lifespan has any reason to load them.
+    """
+    from app.channels.service import enabled_transport_providers
+
+    return enabled_transport_providers(config)
 
 
 def credentials_key_consumers(config: AppConfig) -> list[str]:

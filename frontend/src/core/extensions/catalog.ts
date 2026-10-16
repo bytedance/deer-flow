@@ -30,6 +30,21 @@ export const extensionCatalog = [
     package: "deerflow-extension-jev-screening",
     namespace: null,
   },
+  {
+    key: "workflows",
+    package: "deerflow-extension-workflows",
+    namespace: "community.workflows",
+  },
+  {
+    key: "retrieval",
+    package: "deerflow-extension-retrieval",
+    namespace: "example.retrieval",
+  },
+  {
+    key: "knowledge",
+    package: "deerflow-extension-knowledge",
+    namespace: null,
+  },
   { key: "example", package: "deerflow-extension-example", namespace: null },
 ] as const;
 

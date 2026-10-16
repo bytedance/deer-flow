@@ -1449,9 +1449,10 @@ async def test_terminal_cycle_collection_is_coalesced_contextless_and_off_loop(m
 
 
 @pytest.mark.anyio
-async def test_run_agent_releases_terminal_runtime_callbacks():
+async def test_run_agent_releases_terminal_runtime_callbacks(caplog):
     from deerflow.runtime.journal import RunJournal
 
+    caplog.set_level(logging.DEBUG, logger="deerflow.runtime.runs.worker")
     run_manager = RunManager()
     record = await run_manager.create("thread-runtime-release")
     bridge = SimpleNamespace(
@@ -1469,6 +1470,11 @@ async def test_run_agent_releases_terminal_runtime_callbacks():
             captured["journal"] = next(callback for callback in callbacks if isinstance(callback, RunJournal))
             yield {"messages": []}
 
+        async def aget_state(self, _config):
+            # Finalization reads checkpoint messages. A missing-method traceback
+            # retained by DEBUG log capture would itself keep the journal alive.
+            return SimpleNamespace(values={"messages": []})
+
     await run_agent(
         bridge,
         run_manager,
@@ -1484,6 +1490,7 @@ async def test_run_agent_releases_terminal_runtime_callbacks():
 
     stream_config = captured["config"]
     journal = captured["journal"]
+    assert "Failed to inspect trailing human_input_request" not in caplog.text
     assert "__pregel_runtime" not in stream_config["configurable"]
     assert "__run_journal" not in stream_config["context"]
     assert journal not in (stream_config.get("callbacks") or [])

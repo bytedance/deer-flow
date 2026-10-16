@@ -1,6 +1,7 @@
 """Unit tests for the Tencent Cloud Web Search API community provider."""
 
 import json
+import logging
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -262,6 +263,69 @@ class TestTencentWsaSearch:
             "query": "腾讯云",
             "request_id": "request-123",
         }
+
+    @pytest.mark.parametrize("pages", [["junk", 3, None], [12345], [[]], [False], ["not-json"]])
+    def test_pages_without_any_usable_objects_return_format_error(self, pages, caplog):
+        """A non-empty Pages container holding no usable page is malformed, not an empty search.
+
+        Reporting "No results found" for it would tell the agent the query
+        legitimately matched nothing, hiding a broken upstream payload.
+        """
+        http_response = MagicMock()
+        http_response.json.return_value = _response(pages)
+        _, context_manager = _mock_http_client(http_response)
+
+        with (
+            patch("deerflow.community.tencent_wsa.tools.get_app_config") as get_config,
+            patch("deerflow.community.tencent_wsa.tools.httpx.Client", return_value=context_manager),
+            caplog.at_level(logging.ERROR),
+        ):
+            get_config.return_value.get_tool_config.return_value = _tool_config({"api_key": "test-key"})
+
+            from deerflow.community.tencent_wsa.tools import web_search_tool
+
+            result = json.loads(web_search_tool.run({"query": "腾讯云"}))
+
+        assert result["error"] == "Tencent Cloud WSA returned an unexpected response format"
+        assert any("no usable page objects" in r.getMessage() for r in caplog.records if r.levelno == logging.ERROR)
+
+    def test_pages_with_some_usable_objects_keep_them(self):
+        """One usable page among malformed entries keeps the existing skip-and-keep behavior."""
+        http_response = MagicMock()
+        http_response.json.return_value = _response(["not-json", 42, {"title": "Kept", "url": "https://example.com", "content": "Body"}])
+        _, context_manager = _mock_http_client(http_response)
+
+        with (
+            patch("deerflow.community.tencent_wsa.tools.get_app_config") as get_config,
+            patch("deerflow.community.tencent_wsa.tools.httpx.Client", return_value=context_manager),
+        ):
+            get_config.return_value.get_tool_config.return_value = _tool_config({"api_key": "test-key"})
+
+            from deerflow.community.tencent_wsa.tools import web_search_tool
+
+            result = json.loads(web_search_tool.run({"query": "腾讯云"}))
+
+        assert result["total_results"] == 1
+        assert result["results"][0]["title"] == "Kept"
+
+    def test_empty_and_missing_pages_keep_no_results(self):
+        """A missing or empty Pages container stays a legitimate empty search."""
+        for pages in ([], None):
+            http_response = MagicMock()
+            http_response.json.return_value = _response(pages)
+            _, context_manager = _mock_http_client(http_response)
+
+            with (
+                patch("deerflow.community.tencent_wsa.tools.get_app_config") as get_config,
+                patch("deerflow.community.tencent_wsa.tools.httpx.Client", return_value=context_manager),
+            ):
+                get_config.return_value.get_tool_config.return_value = _tool_config({"api_key": "test-key"})
+
+                from deerflow.community.tencent_wsa.tools import web_search_tool
+
+                result = json.loads(web_search_tool.run({"query": "腾讯云"}))
+
+            assert result == {"error": "No results found", "query": "腾讯云", "request_id": "request-123"}
 
 
 class TestTencentWsaConfiguration:

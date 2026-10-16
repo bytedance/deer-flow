@@ -1,6 +1,7 @@
 """Standalone package through the real extension isolation/graph/checkpoint path."""
 
 import asyncio
+import html
 import json
 import logging
 import runpy
@@ -14,7 +15,7 @@ from deerflow_extension_api.auth import ExtensionPrincipal
 from deerflow_extension_api.plugins import ActionContext
 from langchain.agents import create_agent
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, get_buffer_string
 from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.checkpoint.memory import InMemorySaver
@@ -134,7 +135,13 @@ def test_native_summary_still_handles_disabled_or_failed_pruning(jev, monkeypatc
     requests = transport(monkeypatch, error=httpx.ReadTimeout("private upstream details") if failure else None)
     graph, _, summary, _ = build_graph(jev, enabled=enabled)
     graph.invoke({"messages": history()}, {"configurable": {"thread_id": "fallback"}})
-    assert len(summary._seen) == 1
+    assert summary._seen
+    source = ""
+    for messages in summary._seen:
+        prompt = "\n".join(str(message.content) for message in messages)
+        source += html.unescape(prompt.split("<new_messages>\n", 1)[1].split("\n</new_messages>", 1)[0])
+    assert source == get_buffer_string(history()[:3])
+    assert graph.get_state({"configurable": {"thread_id": "fallback"}}).values["summary_text"] == "ORCHID"
     assert len(requests) == int(enabled)
 
 

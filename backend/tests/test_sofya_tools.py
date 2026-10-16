@@ -437,6 +437,33 @@ class TestWebSearchTool:
 
         assert parsed["error"] == "Sofya returned an unexpected response format"
 
+    @pytest.mark.parametrize("results", [["a", "b"], [None, None], [1, 2], [[]], [False]])
+    def test_results_without_any_objects_returns_format_error(self, mock_config_with_key, results, caplog):
+        """A non-empty `results` holding no objects is malformed, not an empty search."""
+        with patch("deerflow.community.sofya.tools.httpx.Client") as mock_client_cls:
+            mock_client_cls.return_value.__enter__.return_value.post.return_value = _make_search_response(results)
+
+            from deerflow.community.sofya.tools import web_search_tool
+
+            with caplog.at_level(logging.ERROR):
+                parsed = json.loads(web_search_tool.invoke({"query": "test"}))
+
+        assert parsed["error"] == "Sofya returned an unexpected response format"
+        assert any("no usable result objects" in r.getMessage() for r in caplog.records if r.levelno == logging.ERROR)
+
+    def test_mixed_results_keep_the_object_entries(self, mock_config_with_key):
+        results = ["junk", {"title": "Kept", "url": "https://example.com/1", "content": "Body"}, 7]
+
+        with patch("deerflow.community.sofya.tools.httpx.Client") as mock_client_cls:
+            mock_client_cls.return_value.__enter__.return_value.post.return_value = _make_search_response(results)
+
+            from deerflow.community.sofya.tools import web_search_tool
+
+            parsed = json.loads(web_search_tool.invoke({"query": "test"}))
+
+        assert parsed["total_results"] == 1
+        assert parsed["results"][0] == {"title": "Kept", "url": "https://example.com/1", "content": "Body"}
+
     def test_http_error_returns_error_json(self, mock_config_with_key):
         request = httpx.Request("POST", "https://sofya.co/v1/search")
         response = httpx.Response(402, text="Insufficient credits", request=request)
@@ -568,6 +595,36 @@ class TestWebFetchTool:
             result = web_fetch_tool.invoke({"url": "https://example.com"})
 
         assert result == "Error: No results found"
+
+    def test_results_without_any_objects_returns_format_error(self, mock_config_with_key):
+        """A non-empty `results` holding no objects is malformed, not an empty fetch."""
+        with patch("deerflow.community.sofya.tools.httpx.Client") as mock_client_cls:
+            mock_client_cls.return_value.__enter__.return_value.post.return_value = _make_fetch_response(["a", 3])
+
+            from deerflow.community.sofya.tools import web_fetch_tool
+
+            result = web_fetch_tool.invoke({"url": "https://example.com"})
+
+        assert result == "Error: Sofya returned an unexpected response format"
+
+    def test_mixed_results_returns_first_object_content(self, mock_config_with_key):
+        results = [
+            "junk",
+            None,
+            {"title": "First page", "content": "First body", "success": True},
+            7,
+            {"title": "Second page", "content": "Second body", "success": True},
+            False,
+        ]
+
+        with patch("deerflow.community.sofya.tools.httpx.Client") as mock_client_cls:
+            mock_client_cls.return_value.__enter__.return_value.post.return_value = _make_fetch_response(results)
+
+            from deerflow.community.sofya.tools import web_fetch_tool
+
+            result = web_fetch_tool.invoke({"url": "https://example.com"})
+
+        assert result == "# First page\n\nFirst body"
 
     def test_http_error_returns_error_string(self, mock_config_with_key):
         request = httpx.Request("POST", "https://sofya.co/v1/fetch")

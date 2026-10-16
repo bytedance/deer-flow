@@ -58,6 +58,7 @@ from deerflow.runtime.checkpoint_state import graph_reducer_channels, graph_stat
 from deerflow.runtime.context_compaction import (
     ContextCompactionDisabled,
     ContextCompactionFailed,
+    ContextCompactionPendingWork,
     ThreadCompactionResult,
     compact_thread_context,
 )
@@ -1557,6 +1558,8 @@ async def compact_thread(thread_id: ThreadId, body: ThreadCompactRequest, reques
             )
     except ConflictError:
         raise HTTPException(status_code=409, detail="Thread has a run in flight. Compact after the run finishes.") from None
+    except ContextCompactionPendingWork as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
     except _CHECKPOINT_MODE_ERRORS as exc:
         raise _checkpoint_mode_http_error(exc, thread_id) from exc
     except ContextCompactionDisabled:

@@ -4,6 +4,7 @@ import json
 
 import pytest
 from langchain_core.messages import ToolMessage
+from langchain_core.messages.content import create_file_block, create_image_block
 
 from deerflow.agents.thread_state import merge_tool_artifacts
 from deerflow.tools.artifact_registry import (
@@ -192,7 +193,55 @@ def test_extract_from_image_block():
     assert entries[0]["real_ref"] == "/mnt/user-data/outputs/chart.png"
 
 
-def test_file_block_rejects_data_and_blob_urls():
+@pytest.mark.parametrize("make_block,artifact_type,mime", [(create_file_block, "file", "application/pdf"), (create_image_block, "image", "image/png")])
+def test_extract_from_standard_url_block(make_block, artifact_type, mime):
+    url = "https://example.com/report?download=1#page=2"
+    result = ToolMessage(content=[make_block(url=url, mime_type=mime)], tool_call_id="call_1")
+
+    (entry,) = extract_artifacts_from_result(result, thread_id="thread-1")
+
+    assert (entry["real_ref"], entry["artifact_type"], entry["mime_type"]) == (url, artifact_type, mime)
+
+
+@pytest.mark.parametrize("source", [{"url": "https://example.com/legacy.png", "mime_type": "image/jpeg"}, "malformed"])
+@pytest.mark.parametrize("mime", ["image/png", None])
+def test_standard_url_and_mime_take_precedence_over_legacy_source(source, mime):
+    block = create_image_block(url="https://example.com/chart.png", mime_type=mime)
+    block["source"] = source
+    result = ToolMessage(content=[block], tool_call_id="call_1")
+
+    (entry,) = extract_artifacts_from_result(result, thread_id="thread-1")
+
+    assert entry["real_ref"] == "https://example.com/chart.png"
+    assert entry.get("mime_type") == mime
+
+
+@pytest.mark.parametrize("url", [None, "", "relative.png", "data:image/png;base64,AAAA", "blob:https://example.com/id"])
+def test_invalid_standard_url_does_not_fall_back_to_conflicting_legacy_source(url):
+    block = {"type": "image", "url": url, "source": {"url": "https://example.com/legacy.png"}}
+    result = ToolMessage(content=[block], tool_call_id="call_1")
+
+    assert extract_artifacts_from_result(result, thread_id="thread-1") == []
+
+
+def test_standard_and_legacy_blocks_deduplicate_the_same_reference():
+    url = "https://example.com/chart.png"
+    result = ToolMessage(
+        content=[
+            create_image_block(url=url, mime_type="image/png"),
+            {"type": "file", "source": {"url": url, "mime_type": "application/octet-stream"}},
+            {"type": "text", "text": f"Chart: {url}"},
+        ],
+        tool_call_id="call_1",
+    )
+
+    (entry,) = extract_artifacts_from_result(result, thread_id="thread-1")
+
+    assert (entry["real_ref"], entry["artifact_type"], entry["mime_type"]) == (url, "image", "image/png")
+
+
+@pytest.mark.parametrize("standard", [False, True])
+def test_file_block_rejects_data_and_blob_urls(standard):
     """Embedded-resource URIs must never enter the registry or tool args."""
     result = ToolMessage(
         content=[
@@ -204,6 +253,8 @@ def test_file_block_rejects_data_and_blob_urls():
         tool_call_id="call-2b",
         name="mcp_embedded",
     )
+    if standard:
+        result.content = [{"type": block["type"], "url": block["source"]["url"]} for block in result.content]
     entries = extract_artifacts_from_result(result, thread_id="thread-1")
     refs = {entry["real_ref"] for entry in entries}
     assert refs == {"/mnt/user-data/outputs/real.txt"}

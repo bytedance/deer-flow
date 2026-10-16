@@ -173,6 +173,8 @@ class SubagentResult:
     admission_failure: bool = False
     tool_receipts: list[dict[str, Any]] | None = field(default=None, kw_only=True)
     bash_executions: list[dict[str, Any]] | None = field(default=None, kw_only=True)
+    knowledge_sources: list[dict[str, Any]] = field(default_factory=list, kw_only=True)
+    _knowledge_messages: list[Any] = field(default_factory=list, init=False, repr=False)
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
     _state_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
@@ -223,6 +225,29 @@ class SubagentResult:
             if self.tool_receipts is None:
                 return None
             return [dict(receipt) for receipt in self.tool_receipts]
+
+    def update_knowledge_sources(self, messages: list[Any] | None) -> None:
+        """Accumulate validated retrieval evidence before terminal publication."""
+        from deerflow.knowledge import sources_from_messages
+
+        with self._state_lock:
+            if self.status.is_terminal:
+                return
+            if messages is None:
+                return
+            # Values histories grow cumulatively, but compaction/replacements
+            # can change the prefix. Rescan from the first changed message.
+            start = 0
+            for previous, current in zip(self._knowledge_messages, messages):
+                if previous != current:
+                    break
+                start += 1
+            sources = sources_from_messages(messages[start:]) if start < len(messages) else []
+            self._knowledge_messages = list(messages)
+            merged = {source["id"]: source for source in self.knowledge_sources}
+            for source in sources:
+                merged[source.id] = source.model_dump(mode="json", exclude_none=True)
+            self.knowledge_sources = list(merged.values())[-100:]
 
     def try_set_terminal(
         self,
@@ -1826,6 +1851,7 @@ class SubagentExecutor:
                     # harvesting includes a tool result that completed while the
                     # cancellation request was in flight.
                     final_state = chunk
+                    result.update_knowledge_sources(chunk.get("messages") or [])
                     result.update_tool_receipts(terminal_receipts())
                     result.update_bash_executions(current_bash_executions())
 
@@ -1845,7 +1871,7 @@ class SubagentExecutor:
                     # several ToolMessages when the model emits multiple tool calls in
                     # one turn, so capturing only messages[-1] would drop all but the
                     # last output (#3779). Dedup/serialization live in capture_step_message.
-                    messages = chunk.get("messages", [])
+                    messages = chunk.get("messages") or []
                     previous_count = len(ai_messages)
                     processed_message_count = capture_new_step_messages(messages, ai_messages, seen_message_ids, processed_message_count)
                     if len(ai_messages) > previous_count:

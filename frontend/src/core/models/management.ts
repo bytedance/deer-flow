@@ -5,12 +5,13 @@ import { getBackendBaseURL } from "@/core/config";
 export type ModelDraft = {
   name: string;
   display_name: string;
-  provider: "openai-compatible";
+  provider: string;
   model: string;
-  base_url: string;
+  base_url?: string | null;
   api_key?: string;
   enabled: boolean;
-  supports_vision: boolean;
+  supports_vision: boolean | null;
+  reasoning?: Record<string, unknown> | null;
   context_window: number | null;
   max_tokens: number | null;
 };
@@ -20,6 +21,20 @@ export type ManagedModel = Omit<ModelDraft, "api_key"> & {
   has_api_key: boolean;
   conflict?: boolean;
 };
+export type ManagedModelProvider = {
+  id: string;
+  display_name: string;
+  requires_api_key: boolean;
+  custom_endpoint: boolean;
+};
+export const loadManagedModelProviders = (signal?: AbortSignal) =>
+  request<{ providers: ManagedModelProvider[] }>(
+    "/providers",
+    "GET",
+    undefined,
+    signal,
+  );
+
 export type ConfigModel = {
   name: string;
   display_name: string;
@@ -71,18 +86,27 @@ export const testManagedModel = (
 ) =>
   request<{
     ok: boolean;
-    message: "success" | "tool_call_missing" | "connection_failed";
+    message:
+      | "success"
+      | "tool_call_missing"
+      | "connection_failed"
+      | "authentication_failed"
+      | "missing_api_key"
+      | "response_limit";
   }>("/test", "POST", body, signal);
 
 export function modelDraft(model?: ManagedModel): ModelDraft {
   return {
     name: model?.name ?? "",
     display_name: model?.display_name ?? "",
-    provider: "openai-compatible",
+    provider: model?.provider ?? "openai",
     model: model?.model ?? "",
-    base_url: model?.base_url ?? "",
+    ...(model?.provider === "openai-compatible"
+      ? { base_url: model.base_url ?? "" }
+      : {}),
     enabled: model?.enabled ?? true,
-    supports_vision: model?.supports_vision ?? false,
+    supports_vision: model?.supports_vision ?? null,
+    ...(model?.reasoning ? { reasoning: model.reasoning } : {}),
     context_window: model?.context_window ?? null,
     max_tokens: model?.max_tokens ?? null,
   };

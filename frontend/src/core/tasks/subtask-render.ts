@@ -1,3 +1,5 @@
+import type { Message } from "@langchain/langgraph-sdk";
+
 import { extractTextFromMessage, type MessageGroup } from "../messages/utils";
 
 import { resolveSubtaskDescription } from "./presentation";
@@ -11,6 +13,32 @@ import type { Subtask } from "./types";
 export interface RenderedSubtasks {
   tasks: Map<string, Subtask>;
   updates: Array<Partial<Subtask> & { id: string }>;
+}
+
+/** Only this group's matching result after the task invocation supplies evidence. */
+export function findSubtaskResultMessage(
+  group: MessageGroup,
+  taskId: string,
+): Message | undefined {
+  if (group.type !== "assistant:subagent") return undefined;
+  let invoked = false;
+  for (const message of group.messages) {
+    if (
+      message.type === "ai" &&
+      message.tool_calls?.some(
+        (call) => call.name === "task" && call.id === taskId,
+      )
+    )
+      invoked = true;
+    if (
+      invoked &&
+      message.type === "tool" &&
+      message.name === "task" &&
+      message.tool_call_id === taskId
+    )
+      return message;
+  }
+  return undefined;
 }
 
 export function resolveRenderedSubtask(

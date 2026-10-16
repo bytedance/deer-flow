@@ -327,10 +327,10 @@ class SandboxConfig(BaseModel):
             "(1.9.3+, recommended 1.11.0) enforce it server-side through "
             "`hard_timeout`; the frozen legacy `all-in-one-sandbox:latest` image "
             "only gets the bounded host-side request. `bash_command_timeout` is "
-            "used by providers that explicitly wire this setting (currently "
-            "LocalSandbox, AioSandbox, and OpenSandbox). Other providers retain "
-            "their provider-specific command defaults unless a caller supplies an "
-            "explicit timeout."
+            "forwarded to each provider's command API. LocalSandbox, AioSandbox, "
+            "OpenSandbox, E2B, BoxLite, and Tenki apply it to bash commands; "
+            "providers without per-command timeout support retain their own "
+            "defaults."
         ),
     )
 

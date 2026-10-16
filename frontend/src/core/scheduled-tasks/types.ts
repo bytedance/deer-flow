@@ -35,6 +35,8 @@ export type ScheduledTask = {
   standing_notes?: string[] | null;
   /** The user's "stop when …" rule, stored in its own column. */
   stop_condition?: string | null;
+  /** One additional owner-bound Feishu group; personal notifications are unchanged. */
+  notification_group_connection_id?: string | null;
   /** Launched scheduled runs counted against `max_runs` (trial runs excluded). */
   automatic_runs_used?: number;
   /**

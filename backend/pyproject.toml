@@ -67,6 +67,9 @@ dev = [
     "pytest>=9.0.3",
     "pytest-asyncio>=1.3.0",
     "pytest-split>=0.11.0",
+    # Optional POSIX workflow worker. Wheels: CPython 3.12 macOS/Linux x86_64;
+    # other Python/CPU combinations need a C compiler + Python headers (see extension README).
+    "quickjs==1.19.4; sys_platform != 'win32'",
     "ruff>=0.14.11",
     # Monocle tracer (also the deerflow-harness[monocle] extra); kept in the dev
     # group so the tracing tests can import it without forcing it onto installs.

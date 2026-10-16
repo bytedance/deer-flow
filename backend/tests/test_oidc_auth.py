@@ -1,5 +1,6 @@
 import time
 from unittest.mock import AsyncMock
+from urllib.parse import parse_qs, urlsplit
 
 import jwt
 import pytest
@@ -32,6 +33,110 @@ def _identity(**overrides):
     }
     values.update(overrides)
     return OIDCIdentity(**values)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "endpoint_query",
+    [
+        "",
+        "?",
+        "?prompt=login",
+        "?login_hint=user%2Btag%40example.com&empty=&resource=first&resource=second",
+    ],
+)
+@pytest.mark.parametrize("with_pkce_and_nonce", [False, True])
+async def test_oidc_authorization_url_preserves_endpoint_query(endpoint_query, with_pkce_and_nonce):
+    service = OIDCService()
+    metadata = OIDCMetadata(
+        issuer="https://issuer.example.com",
+        authorization_endpoint=f"https://issuer.example.com/auth{endpoint_query}",
+        token_endpoint="https://issuer.example.com/token",
+        userinfo_endpoint=None,
+        jwks_uri="https://issuer.example.com/jwks",
+    )
+    try:
+        url = service.build_authorization_url(
+            metadata=metadata,
+            client_id="deer-flow",
+            redirect_uri="https://app.example.com/api/auth/callback/test",
+            scopes=["openid", "email"],
+            state="state+with&reserved=characters",
+            nonce="test-nonce" if with_pkce_and_nonce else None,
+            code_challenge="test-challenge" if with_pkce_and_nonce else None,
+        )
+    finally:
+        await service.close()
+
+    parsed = urlsplit(url)
+    expected = parse_qs(endpoint_query.lstrip("?"), keep_blank_values=True)
+    expected.update(
+        response_type=["code"],
+        client_id=["deer-flow"],
+        redirect_uri=["https://app.example.com/api/auth/callback/test"],
+        scope=["openid email"],
+        state=["state+with&reserved=characters"],
+    )
+    if with_pkce_and_nonce:
+        expected.update(nonce=["test-nonce"], code_challenge=["test-challenge"], code_challenge_method=["S256"])
+    assert (parsed.scheme, parsed.netloc, parsed.path) == ("https", "issuer.example.com", "/auth")
+    assert parse_qs(parsed.query, keep_blank_values=True) == expected
+    if endpoint_query.lstrip("?"):
+        assert parsed.query.startswith(endpoint_query[1:] + "&")
+
+
+@pytest.mark.asyncio
+async def test_oidc_login_redirect_preserves_configured_endpoint_query(monkeypatch):
+    from types import SimpleNamespace
+
+    import httpx
+    from fastapi import FastAPI
+
+    import deerflow.config.app_config as app_config_module
+    from app.gateway.auth import oidc_state
+    from app.gateway.auth.config import AuthConfig
+    from app.gateway.routers import auth as auth_router
+
+    service = OIDCService()
+    provider = _provider_config(authorization_endpoint="https://issuer.example.com/auth?prompt=login")
+    config = SimpleNamespace(auth=SimpleNamespace(oidc=SimpleNamespace(enabled=True, providers={"keycloak": provider})))
+    monkeypatch.setattr(app_config_module, "get_app_config", lambda: config)
+    monkeypatch.setattr(auth_router, "_get_oidc_service", lambda: service)
+    monkeypatch.setattr(oidc_state, "get_auth_config", lambda: AuthConfig(jwt_secret="test-secret-for-oidc-query-parameters-min-32"))
+
+    async def discovery_get(url):
+        assert url == "https://issuer.example.com/.well-known/openid-configuration"
+        return httpx.Response(
+            200,
+            request=httpx.Request("GET", url),
+            json={
+                "issuer": provider.issuer,
+                "authorization_endpoint": "https://issuer.example.com/auth",
+                "token_endpoint": "https://issuer.example.com/token",
+                "jwks_uri": "https://issuer.example.com/jwks",
+            },
+        )
+
+    monkeypatch.setattr(service._http, "get", discovery_get)
+    app = FastAPI()
+    app.include_router(auth_router.router)
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="https://app.example.com") as client:
+            response = await client.get("/api/v1/auth/oauth/keycloak", follow_redirects=False)
+    finally:
+        await service.close()
+
+    assert response.status_code == 302
+    query = parse_qs(urlsplit(response.headers["location"]).query)
+    assert query["prompt"] == ["login"]
+    assert query["response_type"] == ["code"]
+    assert query["client_id"] == [provider.client_id]
+    assert query["code_challenge_method"] == ["S256"]
+    state = oidc_state._verify_state_signed(response.cookies["df_oidc_state_keycloak"])
+    assert state is not None
+    assert query["state"] == [state.state]
+    assert query["nonce"] == [state.nonce]
+    assert query["code_challenge"] == [oidc_state.compute_code_challenge(state.code_verifier)]
 
 
 @pytest.mark.asyncio

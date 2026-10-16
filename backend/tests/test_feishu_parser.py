@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import tempfile
 import threading
 import time
@@ -205,6 +206,242 @@ def test_feishu_stop_retains_live_ws_thread_after_join_timeout():
 
         thread.join.assert_called_once_with(timeout=5)
         assert channel._thread is thread
+
+    asyncio.run(go())
+
+
+class _FakeLarkWsClient:
+    """Stand-in for ``lark_oapi.ws.Client`` (1.7.x) with the same ``start()`` shape.
+
+    The SDK drives the module-level ``lark_oapi.ws.client.loop`` itself: it runs
+    ``_connect()`` to completion, falls into a reconnect branch that swallows
+    *any* exception while ``_auto_reconnect`` is set, then parks forever in
+    ``_select()``. A stop that only calls ``loop.stop()`` is therefore absorbed
+    by that reconnect branch; the channel has to disarm it first.
+    """
+
+    def __init__(self, *, connect_forever: bool = False, construct_gate: threading.Event | None = None, **_kwargs) -> None:
+        self._auto_reconnect = True
+        self.connect_forever = connect_forever
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self.start_calls = 0
+        self.disconnect_calls = 0
+        self.reconnect_calls = 0
+        self.connecting = threading.Event()
+        self.selected = threading.Event()
+        if construct_gate is not None:
+            construct_gate.wait(timeout=5)
+
+    async def _connect(self) -> None:
+        self.connecting.set()
+        if self.connect_forever:
+            await asyncio.Event().wait()
+
+    async def _disconnect(self) -> None:
+        self.disconnect_calls += 1
+
+    async def _reconnect(self) -> None:
+        self.reconnect_calls += 1
+        await asyncio.Event().wait()
+
+    async def _select(self) -> None:
+        self.selected.set()
+        while True:
+            await asyncio.sleep(3600)
+
+    def start(self) -> None:
+        import lark_oapi.ws.client as ws_client_mod
+
+        loop = ws_client_mod.loop
+        self.loop = loop
+        self.start_calls += 1
+        try:
+            loop.run_until_complete(self._connect())
+        except Exception:
+            loop.run_until_complete(self._disconnect())
+            if self._auto_reconnect:
+                loop.run_until_complete(self._reconnect())
+            else:
+                raise
+        loop.run_until_complete(self._select())
+
+
+def _feishu_channel_with_fake_ws(monkeypatch, **client_kwargs):
+    import lark_oapi
+
+    created: list[_FakeLarkWsClient] = []
+    constructed = threading.Event()
+
+    def factory(**_kwargs):
+        client = _FakeLarkWsClient(**client_kwargs)
+        created.append(client)
+        constructed.set()
+        return client
+
+    monkeypatch.setattr(lark_oapi.ws, "Client", factory)
+    channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+    return channel, created, constructed
+
+
+def test_feishu_stop_disconnects_sdk_and_exits_its_thread(monkeypatch):
+    async def go():
+        channel, created, constructed = _feishu_channel_with_fake_ws(monkeypatch)
+        await channel.start()
+        thread = channel._thread
+        assert thread is not None and thread.is_alive()
+        assert await asyncio.to_thread(constructed.wait, 5)
+        client = created[0]
+        assert await asyncio.to_thread(client.selected.wait, 5)
+        assert channel.is_running is True
+
+        started = time.monotonic()
+        await channel.stop()
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 5, f"stop() took {elapsed:.2f}s"
+        assert not thread.is_alive()
+        assert channel._thread is None
+        assert channel.is_running is False
+        assert client.start_calls == 1
+        assert client._auto_reconnect is False
+        assert client.disconnect_calls >= 1
+        assert client.reconnect_calls == 0
+        assert client.loop is not None and client.loop.is_closed()
+
+    asyncio.run(go())
+
+
+def test_feishu_stop_interrupts_sdk_connect_without_reconnecting(monkeypatch):
+    async def go():
+        channel, created, constructed = _feishu_channel_with_fake_ws(monkeypatch, connect_forever=True)
+        await channel.start()
+        thread = channel._thread
+        assert await asyncio.to_thread(constructed.wait, 5)
+        client = created[0]
+        assert await asyncio.to_thread(client.connecting.wait, 5)
+
+        started = time.monotonic()
+        await channel.stop()
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 5, f"stop() took {elapsed:.2f}s"
+        assert not thread.is_alive()
+        assert channel._thread is None
+        assert client._auto_reconnect is False
+        assert client.reconnect_calls == 0
+        assert client.loop is not None and client.loop.is_closed()
+
+    asyncio.run(go())
+
+
+def test_feishu_stop_before_sdk_client_exists_never_starts_it(monkeypatch):
+    async def go():
+        gate = threading.Event()
+        channel, created, constructed = _feishu_channel_with_fake_ws(monkeypatch, construct_gate=gate)
+        await channel.start()
+        thread = channel._thread
+
+        stop_task = asyncio.create_task(channel.stop())
+        await asyncio.sleep(0.05)
+        assert not stop_task.done()
+        gate.set()
+        await stop_task
+
+        assert await asyncio.to_thread(constructed.wait, 5)
+        assert created[0].start_calls == 0
+        assert not thread.is_alive()
+        assert channel._thread is None
+
+    asyncio.run(go())
+
+
+def _point_lark_at(monkeypatch, ws_url: str) -> None:
+    """Skip lark's endpoint-discovery POST and dial ``ws_url`` with the real client."""
+    import lark_oapi.ws.client as ws_client_mod
+
+    monkeypatch.setattr(ws_client_mod.Client, "_get_conn_url", lambda self: f"{ws_url}?device_id=d1&service_id=1")
+
+
+def test_feishu_stop_closes_real_sdk_connection(monkeypatch):
+    from websockets.asyncio.server import serve
+
+    async def go():
+        connected = asyncio.Event()
+        closed = asyncio.Event()
+
+        async def handler(websocket):
+            connected.set()
+            try:
+                async for _ in websocket:
+                    pass
+            finally:
+                closed.set()
+
+        async with serve(handler, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            _point_lark_at(monkeypatch, f"ws://127.0.0.1:{port}/")
+            channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+            await channel.start()
+            thread = channel._thread
+            await asyncio.wait_for(connected.wait(), 5)
+
+            started = time.monotonic()
+            await channel.stop()
+            elapsed = time.monotonic() - started
+
+            assert elapsed < 5, f"stop() took {elapsed:.2f}s"
+            await asyncio.wait_for(closed.wait(), 5)
+            assert not thread.is_alive()
+            assert channel._thread is None
+
+    asyncio.run(go())
+
+
+def test_feishu_stop_aborts_transport_when_peer_never_acks_close(monkeypatch, caplog):
+    """Real lark-oapi client against a peer that completes the handshake but never answers the close frame.
+
+    The bounded ``_disconnect()`` wait is cancelled before websockets' own
+    ``close_timeout`` abort runs, so the channel must release the socket itself;
+    ``peer.closed`` only fires once the TCP connection is actually gone.
+    """
+    from support.local_sockets import StalledWebSocketServer, transport_socket, wait_until
+
+    caplog.set_level(logging.WARNING, logger="app.channels.feishu")
+
+    async def go():
+        async with StalledWebSocketServer() as peer:
+            _point_lark_at(monkeypatch, peer.url)
+            monkeypatch.setattr(feishu_module, "FEISHU_WS_CLOSE_TIMEOUT_SECONDS", 0.5)
+            channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+            await channel.start()
+            thread = channel._thread
+            await asyncio.wait_for(peer.accepted.wait(), 5)
+            # Wait for lark to finish its dial (it assigns _conn under _lock).
+            connection = await wait_until(lambda: channel._ws_client is not None and not channel._ws_client._lock.locked() and channel._ws_client._conn)
+            sock = transport_socket(connection)
+            assert sock.fileno() != -1
+
+            started = time.monotonic()
+            await channel.stop()
+            elapsed = time.monotonic() - started
+
+            assert elapsed < 5, f"stop() took {elapsed:.2f}s"
+            assert not thread.is_alive()
+            assert channel._thread is None
+            # The socket is released by stop() itself, not by a later GC pass.
+            assert sock.fileno() == -1
+            assert "transport aborted" in caplog.text
+            await asyncio.wait_for(peer.closed.wait(), 5)
+
+    asyncio.run(go())
+
+
+def test_feishu_stop_without_sdk_thread_is_a_no_op_for_the_loop_signal():
+    async def go():
+        channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+        channel._running = True
+        await channel.stop()
+        assert channel._thread is None
 
     asyncio.run(go())
 

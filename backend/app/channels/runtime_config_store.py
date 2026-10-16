@@ -4,14 +4,53 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import tempfile
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 RUNTIME_CHANNEL_DISABLED_FLAG = "_runtime_disabled"
+
+
+@contextmanager
+def _runtime_config_file_lock(path: Path) -> Iterator[None]:
+    """Exclude read-modify-write cycles of this file in other Gateway processes.
+
+    The lock is an advisory sidecar next to the store file, so it covers every
+    worker and embedded client that resolves the same ``DEER_FLOW_HOME``. The
+    path is normalized first, as in ``extensions_config_file_lock``, so a
+    symlinked spelling of the file shares the lock of the file it points to.
+    """
+    target_path = path.resolve(strict=False) if path.is_symlink() else path.absolute()
+    lock_path = target_path.parent / f".{target_path.name}.lock"
+    with open(lock_path, "a+b") as lock_file:
+        if os.name == "nt":
+            import msvcrt
+
+            lock_file.seek(0, os.SEEK_END)
+            if lock_file.tell() == 0:
+                lock_file.write(b"\0")
+                lock_file.flush()
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 class ChannelRuntimeConfigStore:
@@ -32,18 +71,39 @@ class ChannelRuntimeConfigStore:
         self._data: dict[str, dict[str, Any]] = self._load()
         self._lock = threading.Lock()
 
-    def _load(self) -> dict[str, dict[str, Any]]:
+    def _load(self, fallback: dict[str, dict[str, Any]] | None = None) -> dict[str, dict[str, Any]]:
         if self._path.exists():
             try:
                 raw = json.loads(self._path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
+                if fallback is not None:
+                    logger.warning("Corrupt channel runtime config store at %s, rewriting it from this process's copy", self._path)
+                    return {name: dict(config) for name, config in fallback.items()}
                 logger.warning("Corrupt channel runtime config store at %s, starting fresh", self._path)
                 return {}
             if isinstance(raw, dict):
                 return {str(name): dict(value) for name, value in raw.items() if isinstance(value, dict)}
         return {}
 
-    def _save(self) -> None:
+    @contextmanager
+    def _mutation(self) -> Iterator[dict[str, dict[str, Any]]]:
+        """Yield the file's current providers for one read-modify-write cycle.
+
+        Each Gateway worker keeps its own store, loaded when that worker first
+        needed it. Saving that snapshot would overwrite providers a peer worker
+        saved since, so every mutation reloads the file while holding the
+        thread lock and the cross-process file lock, changes one provider, and
+        saves. An unreadable file falls back to this process's copy rather
+        than an empty one. The snapshot this process serves is refreshed only
+        after the cycle completes; a failed save leaves the previous one in
+        place.
+        """
+        with self._lock, _runtime_config_file_lock(self._path):
+            data = self._load(fallback=self._data)
+            yield data
+            self._data = data
+
+    def _save(self, data: dict[str, dict[str, Any]]) -> None:
         fd = tempfile.NamedTemporaryFile(
             mode="w",
             encoding="utf-8",
@@ -56,7 +116,7 @@ class ChannelRuntimeConfigStore:
                 Path(fd.name).chmod(0o600)
             except OSError:
                 logger.debug("Unable to chmod temporary channel runtime config store at %s", fd.name, exc_info=True)
-            json.dump(self._data, fd, indent=2, ensure_ascii=False)
+            json.dump(data, fd, indent=2, ensure_ascii=False)
             fd.close()
             Path(fd.name).replace(self._path)
             try:
@@ -78,24 +138,24 @@ class ChannelRuntimeConfigStore:
             return dict(config) if isinstance(config, dict) else None
 
     def set_provider_config(self, provider: str, config: dict[str, Any]) -> None:
-        with self._lock:
-            self._data[provider] = dict(config)
-            self._save()
+        with self._mutation() as data:
+            data[provider] = dict(config)
+            self._save(data)
 
     def set_provider_disconnected(self, provider: str) -> None:
-        with self._lock:
-            self._data[provider] = {
+        with self._mutation() as data:
+            data[provider] = {
                 "enabled": False,
                 RUNTIME_CHANNEL_DISABLED_FLAG: True,
             }
-            self._save()
+            self._save(data)
 
     def remove_provider_config(self, provider: str) -> bool:
-        with self._lock:
-            if provider not in self._data:
+        with self._mutation() as data:
+            if provider not in data:
                 return False
-            del self._data[provider]
-            self._save()
+            del data[provider]
+            self._save(data)
             return True
 
 

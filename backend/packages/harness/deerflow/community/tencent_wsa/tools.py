@@ -159,6 +159,16 @@ def _get_response(data: dict[str, Any], query: str) -> tuple[dict[str, Any] | No
 
 
 def _parse_results(response: dict[str, Any], *, max_results: int) -> list[dict[str, Any]] | None:
+    """Return the result rows of a WSA response, or None if malformed.
+
+    A missing or null ``Pages`` is an empty search. A non-list container, or a
+    non-empty container holding no usable page, is malformed: the caller
+    reports the provider's format error rather than "No results found", which
+    would tell the agent the query legitimately matched nothing — the
+    containment rule the sibling providers already apply (brave, groundroute,
+    tavily, sofya). Individual malformed entries in an otherwise valid
+    container are still skipped so the valid rows survive.
+    """
     pages = response.get("Pages")
     if pages is None:
         return []
@@ -202,6 +212,9 @@ def _parse_results(response: dict[str, Any], *, max_results: int) -> list[dict[s
         results.append(result)
         if len(results) >= max_results:
             break
+    if pages and not results:
+        logger.error("Tencent Cloud WSA returned 'Pages' with no usable page objects")
+        return None
     return results
 
 

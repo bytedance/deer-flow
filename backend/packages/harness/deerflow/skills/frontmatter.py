@@ -29,7 +29,9 @@ ALLOWED_FRONTMATTER_PROPERTIES = {
 # `\ufeff` is the UTF-8 byte-order mark that Windows Notepad and PowerShell's
 # `Set-Content -Encoding UTF8` prepend to a saved file. It is consumed by the match, so
 # neither the front matter nor the body carries it downstream.
-_FRONTMATTER_RE = re.compile(r"^\ufeff?---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
+# Delimiter whitespace must stay on its own line; do not consume body
+# indentation or accept a closing line that merely starts with three hyphens.
+_FRONTMATTER_RE = re.compile(r"^\ufeff?---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|$)", re.DOTALL)
 
 
 @dataclass(frozen=True)

@@ -22,6 +22,7 @@ export interface FeaturesResponse {
     available?: boolean;
     running?: boolean;
     tool_enabled?: boolean;
+    group_notifications?: boolean;
     min_interval_seconds?: number;
   };
   thread_activity?: {
@@ -36,6 +37,8 @@ export interface ScheduledTasksFeature {
   running: boolean;
   /** Chats can create and manage tasks, and runs can pause their own schedule. */
   toolEnabled: boolean;
+  /** Explicit support is required before submitting an additional Feishu group. */
+  groupNotifications: boolean;
   /** Shortest interval and earliest one-time delay, in seconds. */
   minIntervalSeconds: number;
 }
@@ -49,6 +52,7 @@ export const DEFAULT_SCHEDULED_TASKS_FEATURE: ScheduledTasksFeature = {
   available: true,
   running: true,
   toolEnabled: false,
+  groupNotifications: false,
   minIntervalSeconds: 60,
 };
 
@@ -147,6 +151,7 @@ export async function fetchScheduledTasksFeature(): Promise<ScheduledTasksFeatur
       typeof feature?.tool_enabled === "boolean"
         ? feature.tool_enabled
         : defaults.toolEnabled,
+    groupNotifications: feature?.group_notifications === true,
     minIntervalSeconds:
       typeof minInterval === "number" &&
       Number.isInteger(minInterval) &&

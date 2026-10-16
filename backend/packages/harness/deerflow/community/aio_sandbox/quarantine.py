@@ -21,7 +21,13 @@ class SandboxQuarantine:
 
     @staticmethod
     def _key(value: str) -> str:
-        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+        # Truncate to 16 hex chars (64 bits). The quarantine nests three hashed
+        # components (scope, sandbox id, container id); three full 64-char
+        # SHA-256 hexdigests exceed Windows' 260-char MAX_PATH when the root
+        # lives under a long path, failing record creation with ENOENT. 64 bits
+        # is far beyond what non-adversarial sandbox/container ids need, and
+        # matches the sandbox-naming convention elsewhere in this module.
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
 
     def _directory(self, info: SandboxInfo) -> Path:
         return self._root / self._key(info.sandbox_id)

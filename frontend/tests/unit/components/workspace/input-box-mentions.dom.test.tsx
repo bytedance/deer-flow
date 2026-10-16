@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, rs } from "@rstest/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -13,6 +14,8 @@ import { PromptInputProvider } from "@/components/ai-elements/prompt-input";
 import { InputBox } from "@/components/workspace/input-box";
 import {
   focusReferenceAt,
+  readReferenceEditor,
+  referenceCaret,
   referenceToken,
 } from "@/components/workspace/mentions/inline-references";
 import { ThreadContext } from "@/components/workspace/messages/context";
@@ -255,6 +258,100 @@ function enterMention(
   });
   return input;
 }
+
+function holdAnimationFrames() {
+  let nextId = 0;
+  const pending = new Map<number, FrameRequestCallback>();
+  rs.spyOn(globalThis, "requestAnimationFrame").mockImplementation(
+    (callback) => {
+      const id = ++nextId;
+      pending.set(id, callback);
+      return id;
+    },
+  );
+  rs.spyOn(globalThis, "cancelAnimationFrame").mockImplementation((id) => {
+    pending.delete(id);
+  });
+  return {
+    flush() {
+      const callbacks = [...pending.values()];
+      pending.clear();
+      for (const callback of callbacks) callback(performance.now());
+    },
+  };
+}
+
+describe("mention selection focus", () => {
+  it("focuses the replacement editor at the canonical insertion caret before the next animation frame", () => {
+    const { container } = renderComposer("mention-focus-before-frame");
+    const input = enterMention(container, "Use @res carefully", 8);
+    act(() => input.focus());
+    holdAnimationFrames();
+
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    const editor = container.querySelector<HTMLElement>(
+      '[contenteditable="true"]',
+    )!;
+    const token = referenceToken("skill", "research", "research");
+    expect({
+      focused: document.activeElement === editor,
+      caret: referenceCaret(editor),
+      text: readReferenceEditor(editor),
+    }).toEqual({
+      focused: true,
+      caret: "Use ".length + token.length + 1,
+      text: `Use ${token}  carefully`,
+    });
+  });
+
+  it("does not overwrite a user's subsequent caret move with a late mention callback", () => {
+    const { container } = renderComposer("mention-late-frame-caret");
+    const input = enterMention(container, "Use @res carefully", 8);
+    act(() => input.focus());
+    const frames = holdAnimationFrames();
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    const editor = container.querySelector<HTMLElement>(
+      '[contenteditable="true"]',
+    )!;
+    act(() => focusReferenceAt(editor, 1));
+    fireEvent.keyUp(editor, { key: "ArrowLeft" });
+    expect(referenceCaret(editor)).toBe(1);
+
+    act(() => frames.flush());
+
+    expect(document.activeElement).toBe(editor);
+    expect(referenceCaret(editor)).toBe(1);
+  });
+
+  it("keeps focus and the canonical caret when the last selected reference is toggled off", () => {
+    const token = referenceToken("skill", "research", "research");
+    saveDraft("last-reference-focus", `Start ${token} end`);
+    const { container } = renderComposer("last-reference-focus");
+    const editor = container.querySelector<HTMLElement>(
+      '[contenteditable="true"]',
+    )!;
+    act(() => focusReferenceAt(editor, 2));
+    const picker = screen.getByTestId("add-attachments-button");
+    act(() => picker.focus());
+    holdAnimationFrames();
+    fireEvent.click(picker);
+    fireEvent.click(
+      screen.getByRole("option", { name: "research Research a topic" }),
+    );
+
+    // The composer intentionally retains its inline editor after the last
+    // reference; no textarea remount is required to preserve native undo.
+    expect(screen.queryByTestId("inline-skill-reference")).toBeNull();
+    expect(container.querySelector('[contenteditable="true"]')).toBe(editor);
+    expect({
+      focused: document.activeElement === editor,
+      caret: referenceCaret(editor),
+      text: readReferenceEditor(editor),
+    }).toEqual({ focused: true, caret: 2, text: "Start  end" });
+  });
+});
 
 describe("unified composer mentions", () => {
   it("submits a plugin selection as readable text and structured metadata", async () => {

@@ -25,6 +25,7 @@ from sqlalchemy import create_engine
 
 from app.gateway.knowledge_scope_admission import RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER
 from app.gateway.routers import knowledge
+from deerflow.community.ragflow import provider as ragflow_provider
 from deerflow.config.paths import get_paths
 from deerflow.persistence.agents.model import AgentRow
 from deerflow.persistence.agents.sql import SqlAgentStore
@@ -114,7 +115,7 @@ def _fake_ragflow(monkeypatch) -> SimpleNamespace:
             }
         ),
     )
-    monkeypatch.setattr(knowledge, "_build_retrieval_client", lambda settings: ragflow)
+    monkeypatch.setattr(ragflow_provider, "build_ragflow_retrieval_client", lambda settings: ragflow)
     return ragflow
 
 
@@ -123,7 +124,7 @@ async def test_catalog_handlers_do_not_block_event_loop(monkeypatch) -> None:
     _fake_ragflow(monkeypatch)
 
     datasets = await _list_datasets(
-        request=None,
+        request=SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace())),
         agent_name=_AGENT,
         page=1,
         page_size=20,
@@ -132,7 +133,7 @@ async def test_catalog_handlers_do_not_block_event_loop(monkeypatch) -> None:
     )
     documents = await _list_documents(
         "dataset-1",
-        request=None,
+        request=SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace())),
         agent_name=_AGENT,
         page=1,
         page_size=20,
@@ -149,7 +150,7 @@ async def test_unknown_agent_is_not_found_without_blocking_event_loop(monkeypatc
 
     with pytest.raises(HTTPException) as exc_info:
         await _list_datasets(
-            request=None,
+            request=SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace())),
             agent_name="missing-agent",
             page=1,
             page_size=20,

@@ -1330,6 +1330,7 @@ async def _notices(env):
 
 async def _deliver_all(env, *, default_locale="en-US"):
     """Send every queued notice through the real worker with a fake WeCom channel; return the texts."""
+    from app.channels.base import Channel as BaseChannel
     from app.scheduler.notification_delivery import NotificationDeliveryWorker
     from deerflow.persistence.run import RunRepository
 
@@ -1337,6 +1338,7 @@ async def _deliver_all(env, *, default_locale="en-US"):
 
     class Channel:
         is_running = True
+        send_notification_for_owner = BaseChannel.send_notification_for_owner
 
         async def send_notification(self, *, target, text_markdown):
             sent.append(text_markdown)
@@ -1354,14 +1356,93 @@ async def _deliver_all(env, *, default_locale="en-US"):
 
 
 @pytest.mark.asyncio
-async def test_unsupported_provider_gets_no_outbox_row(outbox):
+async def test_only_push_capable_connected_providers_get_outbox_rows(outbox):
     await _task(outbox)
     await _bind(outbox, "feishu", "ou_feishu")
     await _bind(outbox, "wecom", "wecom-user")
+    await _bind(outbox, "slack", "U123")
+    await _bind(outbox, "feishu", "ou_revoked", status="revoked")
     await _bind(outbox, "wecom", "revoked-user", status="revoked")
     occurrence_id, run_id = await _occurrence(outbox)
     assert await _complete(outbox, occurrence_id, run_id) is True
-    assert [(row["event"], row["provider"], row["target"]) for row in await _notices(outbox)] == [("run_completed", "wecom", "wecom-user")]
+    assert sorted((row["event"], row["provider"], row["target"]) for row in await _notices(outbox)) == [
+        ("run_completed", "feishu", "ou_feishu"),
+        ("run_completed", "wecom", "wecom-user"),
+    ]
+    assert await _complete(outbox, occurrence_id, run_id) is False
+    assert len(await _notices(outbox)) == 2
+
+
+@pytest.mark.asyncio
+async def test_selected_group_notice_is_additional_and_deduplicated(outbox):
+    from deerflow.persistence.channel_connections.model import ChannelConnectionRow
+
+    await _task(outbox, notification_group_connection_id="selected-group")
+    await _bind(outbox, "feishu", "ou_feishu")
+    await _bind(outbox, "wecom", "wecom-user")
+    async with outbox.sf() as session:
+        session.add(
+            ChannelConnectionRow(id="selected-group", owner_user_id=NOTICE_OWNER, provider="feishu", status="connected", external_account_id="ou_feishu", workspace_id="oc_group", metadata_json={"chat_id": "oc_group", "chat_type": "group"})
+        )
+        await session.commit()
+    occurrence_id, run_id = await _occurrence(outbox)
+    assert await _complete(outbox, occurrence_id, run_id) is True
+    assert await _complete(outbox, occurrence_id, run_id) is False
+    notices = await _notices(outbox)
+    assert sorted((row["provider"], row["target"]) for row in notices) == [("feishu", "ou_feishu"), ("feishu", "selected-group"), ("wecom", "wecom-user")]
+    (group,) = [row for row in notices if row["target"] == "selected-group"]
+    assert group["payload"]["target_type"] == "group"
+    assert all("target_type" not in row["payload"] for row in notices if row is not group)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("revoked_binding", [False, True])
+async def test_selected_group_still_enqueues_if_binding_was_removed(outbox, revoked_binding):
+    from types import SimpleNamespace
+
+    from sqlalchemy import select
+
+    from app.scheduler.notification_delivery import NotificationDeliveryWorker
+    from deerflow.persistence.channel_connections.model import ChannelConnectionRow
+    from deerflow.persistence.notification_deliveries import NotificationDeliveryRow
+
+    await _task(outbox, notification_group_connection_id="selected-group")
+    if revoked_binding:
+        async with outbox.sf() as session:
+            session.add(
+                ChannelConnectionRow(
+                    id="selected-group", owner_user_id=NOTICE_OWNER, provider="feishu", status="revoked", external_account_id="ou_feishu", workspace_id="oc_group", metadata_json={"chat_id": "oc_group", "chat_type": "group"}
+                )
+            )
+            await session.commit()
+    occurrence_id, run_id = await _occurrence(outbox)
+    await _complete(outbox, occurrence_id, run_id)
+    notices = await _notices(outbox)
+    assert [(row["provider"], row["target"], row["payload"]["target_type"]) for row in notices] == [("feishu", "selected-group", "group")]
+    worker = NotificationDeliveryWorker(delivery_repo=outbox.deliveries, resolve_channel=lambda provider: SimpleNamespace(is_running=True), resolve_connections=outbox.service._connection_repo.list_connections)
+    await worker.run_once(now=datetime.now(UTC) + timedelta(days=1))
+    async with outbox.sf() as session:
+        row = await session.scalar(select(NotificationDeliveryRow))
+        assert row.status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_group_binding_without_task_selection_keeps_personal_notice_only(outbox):
+    from deerflow.persistence.channel_connections.model import ChannelConnectionRow
+
+    await _task(outbox)
+    async with outbox.sf() as session:
+        session.add(
+            ChannelConnectionRow(
+                id="group-not-selected", owner_user_id=NOTICE_OWNER, provider="feishu", status="connected", external_account_id="ou_feishu", workspace_id="oc_group", metadata_json={"chat_id": "oc_group", "chat_type": "group"}
+            )
+        )
+        await session.commit()
+    occurrence_id, run_id = await _occurrence(outbox)
+    await _complete(outbox, occurrence_id, run_id)
+    notices = await _notices(outbox)
+    assert [(row["provider"], row["target"]) for row in notices] == [("feishu", "ou_feishu")]
+    assert "target_type" not in notices[0]["payload"]
 
 
 @pytest.mark.asyncio

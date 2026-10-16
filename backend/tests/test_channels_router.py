@@ -84,3 +84,29 @@ def test_get_channels_status_remains_read_only(monkeypatch):
     assert response.status_code == 200
     assert response.json()["service_running"] is True
     assert response.json()["channels"]["slack"]["running"] is True
+
+
+def test_restart_on_a_non_holder_names_the_lease_holder(monkeypatch):
+    """channels.leader_lease: a restart that reaches an instance without the provider's lease says where it runs."""
+    service = SimpleNamespace(restart_channel=AsyncMock(return_value=False), leader_of=lambda name: "pod-b:worker", lease_owner_id="pod-a:worker")
+    monkeypatch.setattr("app.channels.service.get_channel_service", lambda: service)
+    app = make_authed_test_app(user_factory=_admin_user)
+    app.include_router(channels.router)
+
+    with TestClient(app) as client:
+        response = client.post("/api/channels/telegram/restart")
+
+    assert response.status_code == 200
+    assert response.json() == {"success": False, "message": "Channel telegram is connected by another Gateway instance (pod-b:worker); it can only be restarted there"}
+
+
+def test_a_failed_restart_on_the_holder_keeps_the_generic_message(monkeypatch):
+    service = SimpleNamespace(restart_channel=AsyncMock(return_value=False), leader_of=lambda name: "pod-a:worker", lease_owner_id="pod-a:worker")
+    monkeypatch.setattr("app.channels.service.get_channel_service", lambda: service)
+    app = make_authed_test_app(user_factory=_admin_user)
+    app.include_router(channels.router)
+
+    with TestClient(app) as client:
+        response = client.post("/api/channels/telegram/restart")
+
+    assert response.json() == {"success": False, "message": "Failed to restart channel telegram"}

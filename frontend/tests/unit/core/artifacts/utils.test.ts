@@ -57,6 +57,105 @@ describe("artifact URL helpers", () => {
     restoreEnv(saved);
   });
 
+  describe("Markdown artifact image destinations", () => {
+    const context = {
+      filepath: "/mnt/user-data/outputs/reports/report.md",
+      threadId: "thread/1",
+    };
+
+    test.each([
+      ["chart.png", "/mnt/user-data/outputs/reports/chart.png"],
+      ["./charts/a.png", "/mnt/user-data/outputs/reports/charts/a.png"],
+      ["../chart.png", "/mnt/user-data/outputs/chart.png"],
+      ["%2e%2e/chart.png", "/mnt/user-data/outputs/chart.png"],
+      ["/mnt/user-data/uploads/chart.png", "/mnt/user-data/uploads/chart.png"],
+      ["chart%20one.png", "/mnt/user-data/outputs/reports/chart%20one.png"],
+      ["chart%2520one.png", "/mnt/user-data/outputs/reports/chart%2520one.png"],
+      [
+        "chart%23%3F.png?v=2#crop",
+        "/mnt/user-data/outputs/reports/chart%23%3F.png?v=2#crop",
+      ],
+      ["chart%.png", "/mnt/user-data/outputs/reports/chart%25.png"],
+      ["%E5%9B%BE.png", "/mnt/user-data/outputs/reports/%E5%9B%BE.png"],
+    ])("resolves %s against the report directory", async (src, path) => {
+      const { resolveArtifactImageURL } = await loadFreshArtifactUtils();
+      expect(resolveArtifactImageURL(src, context)).toBe(
+        `/api/threads/thread%2F1/artifacts${path}`,
+      );
+    });
+
+    test.each([
+      "https://example.com/chart.png",
+      "//example.com/chart.png",
+      "data:image/png;base64,abc",
+      "blob:https://example.com/123",
+      "javascript:alert(1)",
+      "/api/other.png",
+      "",
+      "#chart",
+      "?v=2",
+      "../../../../api/secret.png",
+      "%2F%2Fexample.com/chart.png",
+      "..%5Cchart.png",
+      "\ud800.png",
+    ])("does not remap %s into the artifact route", async (src) => {
+      const { resolveArtifactImageURL } = await loadFreshArtifactUtils();
+      expect(resolveArtifactImageURL(src, context)).toBe(src);
+    });
+
+    test("preserves raw percent sequences in the report directory", async () => {
+      const { resolveArtifactImageURL } = await loadFreshArtifactUtils();
+      expect(
+        resolveArtifactImageURL("chart.png", {
+          ...context,
+          filepath: "/mnt/user-data/outputs/report%20folder/report.md",
+        }),
+      ).toBe(
+        "/api/threads/thread%2F1/artifacts/mnt/user-data/outputs/report%2520folder/chart.png",
+      );
+    });
+
+    test("uses the configured backend and mock route", async () => {
+      setEnv("NEXT_PUBLIC_BACKEND_BASE_URL", "https://backend.example/root");
+      const { resolveArtifactImageURL } = await loadFreshArtifactUtils();
+      expect(
+        resolveArtifactImageURL("chart.png", { ...context, isMock: true }),
+      ).toBe(
+        "https://backend.example/root/mock/api/threads/thread%2F1/artifacts/mnt/user-data/outputs/reports/chart.png",
+      );
+    });
+
+    test("uses bundled demo paths in static mode", async () => {
+      setEnv("NEXT_PUBLIC_STATIC_WEBSITE_ONLY", "true");
+      const { resolveArtifactImageURL } = await loadFreshArtifactUtils();
+      expect(resolveArtifactImageURL("../chart.png", context)).toBe(
+        "/demo/threads/thread%2F1/user-data/outputs/chart.png",
+      );
+    });
+
+    test("bases skill previews on their embedded SKILL.md", async () => {
+      const { resolveArtifactImageURL } = await loadFreshArtifactUtils();
+      expect(
+        resolveArtifactImageURL("images/chart.png", {
+          ...context,
+          filepath: "/mnt/user-data/outputs/example.skill",
+        }),
+      ).toBe(
+        "/api/threads/thread%2F1/artifacts/mnt/user-data/outputs/example.skill/images/chart.png",
+      );
+    });
+
+    test("does not invent a virtual path for a non-artifact document", async () => {
+      const { resolveArtifactImageURL } = await loadFreshArtifactUtils();
+      expect(
+        resolveArtifactImageURL("chart.png", {
+          ...context,
+          filepath: "report.md",
+        }),
+      ).toBe("chart.png");
+    });
+  });
+
   test("maps static demo artifact paths to bundled public files", async () => {
     setEnv("NEXT_PUBLIC_STATIC_WEBSITE_ONLY", "true");
 

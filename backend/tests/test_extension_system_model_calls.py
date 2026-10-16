@@ -377,12 +377,13 @@ async def test_async_summarization_observes_each_provider_attempt_and_live_store
 
     middleware = DeerFlowSummarizationMiddleware.__new__(DeerFlowSummarizationMiddleware)
     middleware._extensions = extensions
-    middleware._prepare_summary_prompt = lambda messages, previous_summary=None: "prompt"
+    middleware._app_config = None
+    middleware.trim_tokens_to_summarize = None
     middleware._generation_candidate_names = lambda: ["first", "second"]
     models = {"first": _Failing(), "second": _Working()}
     middleware._model_for = lambda name: models[name]
 
-    result = await middleware._asummarize_with(["message"], task_store=store)
+    result = await middleware._asummarize_prompt("prompt", task_store=store)
 
     assert result == "compact summary"
     assert [call[2].error is None for call in observer.calls] == [False, True]

@@ -218,7 +218,10 @@ function readStructuredStatus(
   const rawStatus = additionalKwargs[SUBAGENT_STATUS_KEY];
   if (typeof rawStatus !== "string") return null;
   const mapped = STRUCTURED_STATUS_TO_SUBTASK[rawStatus];
-  if (mapped === undefined) {
+  if (
+    mapped === undefined ||
+    !Object.hasOwn(STRUCTURED_STATUS_TO_SUBTASK, rawStatus)
+  ) {
     return null;
   }
   const rawError = additionalKwargs[SUBAGENT_ERROR_KEY];

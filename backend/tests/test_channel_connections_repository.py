@@ -6,15 +6,19 @@ import logging
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from _repository_race_helpers import miss_select_factory
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from deerflow.persistence.channel_connections import (
     ChannelConnectionRepository,
     ChannelConnectionRow,
+    ChannelConversationRow,
     ChannelCredentialCipher,
     ChannelCredentialRow,
     ChannelOAuthStateRow,
 )
+from deerflow.persistence.channel_connections.sql import _UPSERT_MAX_ATTEMPTS
 
 
 @pytest.fixture
@@ -456,6 +460,55 @@ class TestChannelConnectionRepository:
         assert consumed[0]["owner_user_id"] == "alice"
 
     @pytest.mark.anyio
+    async def test_set_thread_id_retries_as_update_when_concurrent_insert_wins(self, repo):
+        """A losing conversation-binding INSERT retries as an UPDATE instead of raising IntegrityError."""
+        connection = await repo.upsert_connection(owner_user_id="alice", provider="slack", external_account_id="U1", workspace_id="T1")
+        binding = {
+            "connection_id": connection["id"],
+            "owner_user_id": "alice",
+            "provider": "slack",
+            "external_conversation_id": "C-race",
+            "external_topic_id": "1700000000.000100",
+        }
+        await repo.set_thread_id(**binding, thread_id="thread-from-first-message")
+
+        real_factory = repo.session_factory
+
+        repo.session_factory, _ = miss_select_factory(real_factory)
+        try:
+            await repo.set_thread_id(**binding, thread_id="thread-from-new-command")
+        finally:
+            repo.session_factory = real_factory
+
+        assert await repo.get_thread_id(connection["id"], "C-race", "1700000000.000100") == "thread-from-new-command"
+        async with real_factory() as session:
+            rows = (await session.execute(select(ChannelConversationRow).where(ChannelConversationRow.external_conversation_id == "C-race"))).scalars().all()
+        assert len(rows) == 1
+
+    @pytest.mark.anyio
+    async def test_set_thread_id_raises_the_integrity_error_once_retries_are_exhausted(self, repo):
+        """If every attempt still collides, the original IntegrityError propagates instead of being swallowed."""
+        connection = await repo.upsert_connection(owner_user_id="alice", provider="slack", external_account_id="U1", workspace_id="T1")
+        binding = {
+            "connection_id": connection["id"],
+            "owner_user_id": "alice",
+            "provider": "slack",
+            "external_conversation_id": "C-exhausted",
+        }
+        await repo.set_thread_id(**binding, thread_id="thread-original")
+
+        real_factory = repo.session_factory
+        repo.session_factory, sessions = miss_select_factory(real_factory, misses=None)
+        try:
+            with pytest.raises(IntegrityError, match="channel_conversations.connection_id"):
+                await repo.set_thread_id(**binding, thread_id="thread-never-written")
+        finally:
+            repo.session_factory = real_factory
+
+        assert [session.missed for session in sessions] == [_UPSERT_MAX_ATTEMPTS]
+        assert await repo.get_thread_id(connection["id"], "C-exhausted") == "thread-original"
+
+    @pytest.mark.anyio
     async def test_upsert_connection_retries_as_update_when_concurrent_insert_wins(self, repo):
         """A losing concurrent INSERT retries as an UPDATE instead of raising IntegrityError."""
         first = await repo.upsert_connection(
@@ -468,36 +521,7 @@ class TestChannelConnectionRepository:
 
         real_factory = repo.session_factory
 
-        class _EmptyResult:
-            @staticmethod
-            def scalar_one_or_none():
-                return None
-
-        class MissFirstSelectSession:
-            """Make the initial identity SELECT miss, as if a concurrent writer inserted after it."""
-
-            def __init__(self, session):
-                self._session = session
-                self._missed = False
-
-            def __getattr__(self, name):
-                return getattr(self._session, name)
-
-            async def execute(self, *args, **kwargs):
-                result = await self._session.execute(*args, **kwargs)
-                if not self._missed:
-                    self._missed = True
-                    return _EmptyResult()
-                return result
-
-            async def __aenter__(self):
-                await self._session.__aenter__()
-                return self
-
-            async def __aexit__(self, *args):
-                return await self._session.__aexit__(*args)
-
-        repo.session_factory = lambda: MissFirstSelectSession(real_factory())
+        repo.session_factory, _ = miss_select_factory(real_factory)
         try:
             second = await repo.upsert_connection(
                 owner_user_id="alice",

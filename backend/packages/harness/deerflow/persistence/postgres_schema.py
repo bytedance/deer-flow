@@ -178,9 +178,11 @@ def dsn_with_search_path(dsn: str, schema: str) -> str:
     does NOT treat ``+`` as a space (that is an HTML-form convention). So
     the space MUST be encoded as ``%20`` rather than ``+``, otherwise libpq
     sees a single broken token ``-c+search_path=...`` and the search_path is
-    never applied. Existing query parameters are preserved. Empty *schema*
-    returns *dsn* unchanged.
+    never applied. Existing query parameters are preserved. The DSN first goes
+    through :func:`normalize_libpq_dsn`, so a SQLAlchemy ``+driver`` suffix is
+    dropped even when *schema* is empty. Empty *schema* adds no option.
     """
+    dsn = normalize_libpq_dsn(dsn)
     if not schema:
         return dsn
     parts = urlsplit(dsn)
@@ -191,14 +193,6 @@ def dsn_with_search_path(dsn: str, schema: str) -> str:
         params = conninfo_to_dict(dsn)
         params["options"] = _merge_search_path_option(params.get("options", ""), schema)
         return make_conninfo(**params)
-
-    # DatabaseConfig.postgres_url may carry a SQLAlchemy driver suffix such as
-    # ``postgresql+asyncpg://``. psycopg's libpq only understands the bare
-    # ``postgres``/``postgresql`` scheme, so accept the compound form but emit
-    # a psycopg-consumable DSN by dropping the ``+driver`` part.
-    scheme_base = parts.scheme.split("+", 1)[0]
-    if scheme_base not in {"postgres", "postgresql"}:
-        raise ValueError(f"Unsupported PostgreSQL DSN scheme for schema injection: {parts.scheme!r}")
 
     # Rebuild the query by hand rather than with parse_qsl/urlencode: parse_qsl
     # decodes '+' as a space (an HTML-form rule libpq does not apply), so
@@ -220,7 +214,7 @@ def dsn_with_search_path(dsn: str, schema: str) -> str:
     # quote() encodes space as %20 (libpq-safe) and a literal '+' as %2B, so the
     # merged value keeps both distinctions.
     query = "&".join([*preserved, f"options={quote(options, safe='')}"])
-    return urlunsplit((scheme_base, parts.netloc, parts.path, query, parts.fragment))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
 
 
 def ensure_postgres_schema(conn_string: str, schema: str, *, install_hint: str) -> None:

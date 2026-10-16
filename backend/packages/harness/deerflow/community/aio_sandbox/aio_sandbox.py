@@ -1,5 +1,4 @@
 import base64
-import errno
 import logging
 import math
 import threading
@@ -9,8 +8,11 @@ from dataclasses import dataclass, field
 import httpx
 from agent_sandbox import Sandbox as AioSandboxClient
 from agent_sandbox.core.api_error import ApiError
+from pydantic import ValidationError
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT as _MAX_DOWNLOAD_SIZE
+from deerflow.sandbox.download import download_limit, read_download_stream
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path_under_root, truncate_line
@@ -18,8 +20,6 @@ from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path_
 from .backend import sandbox_http_trust_env
 
 logger = logging.getLogger(__name__)
-
-_MAX_DOWNLOAD_SIZE = 100 * 1024 * 1024  # 100 MB
 
 _ERROR_OBSERVATION_SIGNATURE = "'ErrorObservation' object has no attribute 'exit_code'"
 
@@ -1030,11 +1030,21 @@ class AioSandbox(Sandbox):
                 kwargs["end_line"] = max(end_line, 0)
             result = self._client.file.read_file(file=path, **kwargs)
             return result.data.content if result.data else ""
+        except ValidationError as e:
+            # The server reports read failures (e.g. ENOENT) as an error
+            # envelope with ``data: {}``, which cannot satisfy the required
+            # ``content``/``file`` fields of the SDK's FileReadResult model,
+            # so the SDK raises a ValidationError. A missing file is an
+            # expected outcome (ReadBeforeWrite probes every new-file write),
+            # so log quietly and return an explicit, model-actionable result
+            # instead of leaking the pydantic error text.
+            logger.debug("Sandbox read_file validation failure for %r: %s", path, e)
+            return f"Error: file not found or unreadable: {path}"
         except Exception as e:
             logger.error(f"Failed to read file in sandbox: {e}")
             return f"Error: {e}"
 
-    def download_file(self, path: str) -> bytes:
+    def download_file(self, path: str, *, max_bytes: int | None = None) -> bytes:
         """Download file bytes from the sandbox.
 
         Raises:
@@ -1042,6 +1052,7 @@ class AioSandbox(Sandbox):
                 outside ``VIRTUAL_PATH_PREFIX``.
             OSError: If the file cannot be retrieved from the sandbox.
         """
+        limit = download_limit(max_bytes, _MAX_DOWNLOAD_SIZE)
         # Reject path traversal before sending to the container API.
         # LocalSandbox gets this implicitly via _resolve_path;
         # here the path is forwarded verbatim so we must check explicitly.
@@ -1057,20 +1068,14 @@ class AioSandbox(Sandbox):
             logger.error("Refused download outside allowed directory: path=%s, allowed_prefix=%s", path, VIRTUAL_PATH_PREFIX)
             raise PermissionError(f"Access denied: path must be under '{VIRTUAL_PATH_PREFIX}': '{path}'")
 
+        # Keep the lock through iteration and stream cleanup: the SDK iterator
+        # opens its HTTP response lazily, and close() detaches this client under
+        # the same lock before closing its pooled connections. Request-level
+        # concurrency does not make a download safe against concurrent close.
         with self._lock:
             try:
-                chunks: list[bytes] = []
-                total = 0
-                for chunk in self._client.file.download_file(path=path):
-                    total += len(chunk)
-                    if total > _MAX_DOWNLOAD_SIZE:
-                        raise OSError(
-                            errno.EFBIG,
-                            f"File exceeds maximum download size of {_MAX_DOWNLOAD_SIZE} bytes",
-                            path,
-                        )
-                    chunks.append(chunk)
-                return b"".join(chunks)
+                stream = self._client.file.download_file(path=path)
+                return read_download_stream(stream, limit, path)
             except OSError:
                 raise
             except Exception as e:

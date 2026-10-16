@@ -97,11 +97,27 @@ export function AgentSettingsDialog({
   const [initialSelections] = useState(() => ({
     plugins: agent.mcp_plugins ?? null,
     skills: agent.skills ?? null,
+    toolGroups: agent.tool_groups ?? null,
   }));
   const [plugins, setPlugins] = useState<string[] | null>(
     agent.mcp_plugins ?? null,
   );
   const [skills, setSkills] = useState<string[] | null>(agent.skills ?? null);
+  const [toolGroups, setToolGroups] = useState<string[] | null>(
+    agent.tool_groups ?? null,
+  );
+  const toolGroupsChanged = !sameSelection(
+    toolGroups,
+    initialSelections.toolGroups,
+  );
+  const knowledgeAllowed =
+    toolGroups === null || toolGroups.includes("knowledge");
+  const clearKnowledgeDefault = toolGroupsChanged && !knowledgeAllowed;
+  // Catalog reads authorize against saved groups, never the dialog's draft.
+  const knowledgeAccessNeedsSave =
+    knowledgeAllowed &&
+    agent.tool_groups != null &&
+    !agent.tool_groups.includes("knowledge");
   const [displayName, setDisplayName] = useState(agent.display_name ?? "");
 
   const [model, setModel] = useState(agent.model ?? DEFAULT_MODEL_VALUE);
@@ -194,9 +210,9 @@ export function AgentSettingsDialog({
         name: agent.name,
         request: {
           display_name: displayName.trim() || null,
-          ...(knowledgeChanged && {
+          ...((knowledgeChanged || clearKnowledgeDefault) && {
             knowledge_scope:
-              knowledgeSelection.mode === "all"
+              clearKnowledgeDefault || knowledgeSelection.mode === "all"
                 ? null
                 : buildKnowledgeScopeSnapshot(knowledgeSelection),
           }),
@@ -204,6 +220,9 @@ export function AgentSettingsDialog({
             mcp_plugins: plugins,
           }),
           ...(!sameSelection(skills, initialSelections.skills) && { skills }),
+          ...(toolGroupsChanged && {
+            tool_groups: toolGroups,
+          }),
           model: model === DEFAULT_MODEL_VALUE ? null : model,
           model_settings: parsedSettings.modelSettings,
           thinking_enabled: supportsThinking
@@ -239,8 +258,10 @@ export function AgentSettingsDialog({
           <AgentCapabilitySelection
             plugins={plugins}
             skills={skills}
+            toolGroups={toolGroups}
             onPluginsChange={setPlugins}
             onSkillsChange={setSkills}
+            onToolGroupsChange={setToolGroups}
           />
           {(scopeSelectionEnabled || agent.knowledge_scope) && (
             <div className="space-y-1.5 rounded-md border p-3">
@@ -259,16 +280,22 @@ export function AgentSettingsDialog({
                 unavailableReason={
                   !scopeSelectionEnabled
                     ? t.knowledge.scope.loadFailed
-                    : agent.tool_groups != null &&
-                        !agent.tool_groups.includes("knowledge")
+                    : !knowledgeAllowed
                       ? t.knowledge.scope.agentUnavailable
-                      : undefined
+                      : knowledgeAccessNeedsSave
+                        ? t.agents.settingsKnowledgeSaveToolAccess
+                        : undefined
                 }
                 onChange={(selection) => {
                   setKnowledgeSelection(selection);
                   setKnowledgeChanged(true);
                 }}
               />
+              {scopeSelectionEnabled && knowledgeAccessNeedsSave && (
+                <p className="text-muted-foreground text-xs">
+                  {t.agents.settingsKnowledgeSaveToolAccess}
+                </p>
+              )}
               {knowledgeSelection.mode === "selected" && (
                 <p className="text-muted-foreground text-xs [overflow-wrap:anywhere]">
                   {knowledgeSelection.datasets

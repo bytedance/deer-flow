@@ -80,7 +80,7 @@ Environment overrides:
   DEERFLOW_MI_FRONTEND_PORT, DEERFLOW_MI_POSTGRES_PORT, DEERFLOW_MI_REDIS_PORT
   DEERFLOW_MI_POSTGRES_CONTAINER, DEERFLOW_MI_REDIS_CONTAINER,
   DEERFLOW_MI_POSTGRES_IMAGE, DEERFLOW_MI_REDIS_IMAGE
-  DEERFLOW_MI_KEEP_CHANNELS=1 keep IM channels enabled (both Gateways then connect every bot)
+  DEERFLOW_MI_KEEP_CHANNELS=1 keep IM channels enabled (the leader lease gives each bot to one Gateway)
   DEERFLOW_MI_HEALTH_TIMEOUT  seconds to wait for each Gateway's /health (default 180)
 
 'make stop' and 'make dev' reclaim port 8001 and this checkout's Gateways, so

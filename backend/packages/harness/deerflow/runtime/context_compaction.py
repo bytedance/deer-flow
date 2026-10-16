@@ -46,6 +46,20 @@ class ContextCompactionFailed(RuntimeError):
     """Raised when a compressible thread cannot be summarized."""
 
 
+class ContextCompactionPendingWork(RuntimeError):
+    """Raised when pending execution cannot be ruled out before compaction.
+
+    A thread paused at a static breakpoint (e.g. ``interrupt_before=["tools"]``)
+    keeps the pending node send in the checkpoint's ``__pregel_tasks`` channel.
+    The state-mutation write below schedules no tasks and LangGraph drops
+    pending sends whose target node is unknown to the mutation graph, so
+    compacting such a thread would silently discard the pending send and a
+    resumed run would finish without ever executing it. Fail closed instead.
+    An unavailable raw checkpoint also fails closed: its pending sends cannot
+    be checked.
+    """
+
+
 @dataclass(frozen=True)
 class ThreadCompactionResult:
     """Result returned after a manual context-compaction attempt."""
@@ -148,6 +162,12 @@ async def compact_thread_context(
     checkpoint_id = snapshot_config.get("configurable", {}).get("checkpoint_id")
     if not checkpoint_id:
         raise LookupError(f"Thread {thread_id} checkpoint not found")
+    checkpoint_tuple = await accessor.aget_tuple(read_config)
+    if checkpoint_tuple is None:
+        raise ContextCompactionPendingWork("Thread checkpoint is unavailable. Cannot verify pending execution before compacting.")
+    pending_sends = (checkpoint_tuple.checkpoint.get("channel_values") or {}).get("__pregel_tasks")
+    if pending_sends:
+        raise ContextCompactionPendingWork("Thread has pending execution. Resume the interrupted run before compacting.")
 
     binding_known, checkpoint_agent_name = _checkpoint_agent_binding(getattr(snapshot, "metadata", None))
     # The body hint may still select a compatible summarization model for

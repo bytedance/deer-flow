@@ -196,6 +196,16 @@ class ExtensionRegistry(Protocol):
         """Return True when accepted; False means this host lacks plugin UI support."""
         return False
 
+    def knowledge_provider(self, name: str, provider: Any) -> bool:
+        """Register a read-only ``deerflow.knowledge.RetrievalProvider``.
+
+        The host validates its KnowledgeCapabilities and optional catalog,
+        documents and contextual search implementations. The value stays Any
+        here to keep extension-api independent of the harness and Pydantic.
+        False means the host does not support this contribution.
+        """
+        return False
+
     def middlewares(self, contributor: MiddlewareContributor) -> None:
         return None
 

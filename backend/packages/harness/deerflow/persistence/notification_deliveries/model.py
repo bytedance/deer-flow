@@ -27,8 +27,10 @@ class NotificationDeliveryRow(Base):
     __tablename__ = "notification_deliveries"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    task_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    task_run_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    source_kind: Mapped[str] = mapped_column(String(32), nullable=False, default="scheduled_task")
+    source_key: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    task_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    task_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     event: Mapped[str] = mapped_column(String(64), nullable=False)
     provider: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -60,11 +62,21 @@ class NotificationDeliveryRow(Base):
 
     __table_args__ = (
         UniqueConstraint(
-            "task_run_id",
+            "source_kind",
+            "source_key",
             "event",
             "provider",
             "target",
-            name="uq_notification_delivery_run_event_target",
+            name="uq_notification_delivery_source_event_target",
         ),
         Index("ix_notification_deliveries_due", "status", "available_at"),
     )
+
+    def __init__(self, **kwargs):
+        if kwargs.get("source_kind") is None:
+            kwargs["source_kind"] = "scheduled_task" if kwargs.get("task_run_id") or kwargs.get("task_id") else "run"
+        if kwargs.get("source_key") is None:
+            source_key = kwargs.get("task_run_id") or kwargs.get("run_id") or kwargs.get("id")
+            if source_key is not None:
+                kwargs["source_key"] = str(source_key)
+        super().__init__(**kwargs)

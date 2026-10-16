@@ -493,6 +493,21 @@ describe("utcToZonedLocalInput", () => {
 });
 
 describe("zonedLocalToUtcIso DST transitions", () => {
+  // Expected instants match scheduler.next_run_at's ZoneInfo(fold=0) reading.
+  test.each([
+    ["America/Santiago", "2026-09-06T00:00", "2026-09-06T04:00:00+00:00"],
+    ["America/Santiago", "2026-09-06T00:30", "2026-09-06T04:30:00+00:00"],
+    ["America/New_York", "2026-03-08T02:30", "2026-03-08T07:30:00+00:00"],
+    ["Europe/Berlin", "2026-03-29T02:30", "2026-03-29T01:30:00+00:00"],
+    ["Europe/Berlin", "2026-10-25T02:30", "2026-10-25T00:30:00+00:00"],
+    ["Australia/Lord_Howe", "2026-10-04T02:15", "2026-10-03T15:45:00+00:00"],
+    ["Australia/Lord_Howe", "2026-04-05T01:45", "2026-04-04T14:45:00+00:00"],
+    ["Pacific/Apia", "2011-12-30T12:00", "2011-12-30T22:00:00+00:00"],
+  ])("matches the scheduler at %s %s", (timezone, local, expected) => {
+    expect(zonedLocalToUtcIso(local, timezone)).toBe(expected);
+    expect(onceRunAtInstant(local, timezone)).toBe(expected);
+  });
+
   // US spring-forward 2026: clocks jump 02:00 -> 03:00 EST->EDT on 2026-03-08.
   test("New_York wall time after spring-forward uses the post-transition offset", () => {
     // 03:30 EDT (-4) is 07:30Z; the stale pre-transition offset (-5) would say 08:30Z.
@@ -654,6 +669,19 @@ describe("describeTaskSchedule", () => {
 });
 
 describe("describeTaskSchedule for a chat-created one-time task", () => {
+  test("a stored skipped midnight displays when the scheduler will run it", () => {
+    const task = {
+      schedule_type: "once" as const,
+      schedule_spec: { run_at: "2026-09-06" },
+      timezone: "America/Santiago",
+    };
+    expect(
+      describeTaskSchedule(task, "en-US", {
+        now: new Date("2026-08-01T00:00:00Z"),
+      }).text,
+    ).toBe("Once, Sep 6 01:00 (America/Santiago)");
+  });
+
   test("reads the agent's local run_at in the task's zone, whatever the viewer's zone", () => {
     const task = {
       schedule_type: "once" as const,

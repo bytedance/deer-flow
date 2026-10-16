@@ -35,7 +35,16 @@ class _FakeModel(FakeMessagesListChatModel):
         return self
 
 
-async def test_before_agent_uploads_scan_does_not_block_event_loop(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "files,size,size_label",
+    [
+        (None, None, None),
+        ([{"filename": 42}, {"filename": "existing.txt", "size": "1" + "0" * 400}], 0, "0.0 KB"),
+        ([{"filename": "existing.txt", "size": 10**308}], 10**308, ">= 1 TB"),
+    ],
+    ids=["no-current-files", "malformed-with-valid-sibling", "huge-finite-size"],
+)
+async def test_before_agent_uploads_scan_does_not_block_event_loop(tmp_path: Path, files, size, size_label) -> None:
     from langchain.agents import create_agent
 
     from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
@@ -49,8 +58,12 @@ async def test_before_agent_uploads_scan_does_not_block_event_loop(tmp_path: Pat
     agent = await asyncio.to_thread(lambda: create_agent(model=_FakeModel(responses=[AIMessage(content="ok")]), tools=[], middleware=[mw]))
 
     result = await agent.ainvoke(
-        {"messages": [HumanMessage(content="hi")]},
+        {"messages": [HumanMessage(content="hi", additional_kwargs={"files": files})]},
         {"configurable": {"thread_id": "t1"}},
     )
 
     assert result["messages"]
+    if files:
+        assert [file["filename"] for file in result["uploaded_files"]] == ["existing.txt"]
+        assert result["uploaded_files"][0]["size"] == size
+        assert f"existing.txt ({size_label})" in result["messages"][0].content

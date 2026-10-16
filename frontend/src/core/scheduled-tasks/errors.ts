@@ -30,6 +30,7 @@ export const SCHEDULED_TASK_ERROR_KEYS: Readonly<
   invalid_goal: "invalidGoal",
   goal_requires_fresh_thread: "goalRequiresFreshThread",
   invalid_stop_condition: "invalidStopCondition",
+  invalid_notification_group: "invalidNotificationGroup",
   invalid_max_runs: "invalidMaxRuns",
   end_at_in_past: "endAtInPast",
   end_at_before_first_run: "endAtBeforeFirstRun",

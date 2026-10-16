@@ -63,7 +63,7 @@ def test_admission_canonicalizes_custom_agent_human_message() -> None:
     ("assistant_id", "provider", "tool_groups"),
     [
         (None, "deerflow.community.ragflow.tools:knowledge_search_tool", None),
-        ("agent", "deerflow.community.lightrag.tools:knowledge_search_tool", None),
+        ("agent", "unknown:knowledge_search_tool", None),
         ("agent", "deerflow.community.ragflow.tools:knowledge_search_tool", []),
         ("agent", "deerflow.community.ragflow.tools:knowledge_search_tool", ["web"]),
     ],

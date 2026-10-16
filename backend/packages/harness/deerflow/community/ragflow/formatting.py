@@ -2,16 +2,35 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from deerflow.knowledge import KnowledgeCapabilities, KnowledgeSource, RetrievalHit, RetrievalResult
+from deerflow.knowledge.sources import truncate as _truncate
 
-def _truncate(value: str, max_chars: int, *, marker: str = "…") -> str:
-    if len(value) <= max_chars:
-        return value
-    if max_chars <= len(marker):
-        return marker[:max_chars]
-    return f"{value[: max_chars - len(marker)].rstrip()}{marker}"
+CAPABILITIES = KnowledgeCapabilities(operations=frozenset({"search", "sources", "catalog", "documents", "dataset_filter", "document_filter"}))
+
+
+def normalize_retrieval_result(result: Mapping[str, Any], *, dataset_names_by_id: Mapping[str, str]) -> RetrievalResult:
+    """Map public retrieval fields to attributable evidence, without locators."""
+    aggregates = _document_aggregates(result.get("doc_aggs"))
+    names = {str(item["doc_id"]): item["doc_name"] for item in aggregates if item.get("doc_id") and isinstance(item.get("doc_name"), str)}
+    hits = []
+    chunks = result.get("chunks")
+    for chunk in chunks if isinstance(chunks, list) else []:
+        if not isinstance(chunk, Mapping) or not isinstance(chunk.get("content"), str):
+            continue
+        content = chunk["content"].strip()
+        if not content:
+            continue
+        title = chunk.get("document_keyword") or names.get(str(chunk.get("document_id")))
+        source = None
+        if isinstance(title, str) and title.strip():
+            source = KnowledgeSource(provider="ragflow", title=title.strip()[:500], excerpt=content[:100_000], dataset_name=dataset_names_by_id.get(str(chunk.get("dataset_id"))))
+        score = _score(chunk.get("similarity"))
+        hits.append(RetrievalHit(content=content[:100_000], source=source, score=score if score is not None and math.isfinite(score) else None))
+    return RetrievalResult(hits=hits)
 
 
 def _document_aggregates(value: object) -> list[Mapping[str, Any]]:

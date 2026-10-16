@@ -266,6 +266,66 @@ class TestWebSearchTool:
             mock_client.return_value.__enter__.return_value.get.return_value = _make_response(["not", "a", "dict"])
             assert "unexpected response format" in _run("q")["error"]
 
+    @pytest.mark.parametrize("rows", [["junk", "more junk"], [None, None], [1, 2], [[]], [False]])
+    def test_rows_without_any_objects_return_format_error(self, mock_config_with_key, rows, caplog):
+        """A non-empty rows container holding no objects is malformed, not an empty search.
+
+        Reporting "No results found" for it would tell the agent the query
+        legitimately matched nothing, hiding a broken upstream payload.
+        """
+        with patch("deerflow.community.serply.tools.httpx.Client") as mock_client:
+            mock_client.return_value.__enter__.return_value.get.return_value = _make_response({"results": rows})
+
+            with caplog.at_level(logging.ERROR):
+                result = _run("q")
+
+        assert "unexpected response format" in result["error"]
+        assert any("no usable result objects" in r.getMessage() for r in caplog.records if r.levelno == logging.ERROR)
+
+    def test_mixed_rows_keep_the_object_entries(self, mock_config_with_key):
+        rows = ["junk", {"title": "Kept", "link": "https://example.com/kept", "description": "Body"}, 7]
+
+        with patch("deerflow.community.serply.tools.httpx.Client") as mock_client:
+            mock_client.return_value.__enter__.return_value.get.return_value = _make_response({"results": rows})
+            result = _run("q")
+
+        assert result["total_results"] == 1
+        assert result["results"][0] == {"title": "Kept", "url": "https://example.com/kept", "content": "Body"}
+
+    @pytest.mark.parametrize(
+        ("vertical", "rows_key"),
+        [("news", "entries"), ("scholar", "articles")],
+    )
+    def test_vertical_rows_without_any_objects_return_format_error(self, vertical, rows_key):
+        """The news and scholar verticals share the helper, so they contain malformed rows too."""
+        patcher, _ = _patch_config({"api_key": "test-serply-key", "max_results": 5, "vertical": vertical})
+        try:
+            with patch("deerflow.community.serply.tools.httpx.Client") as mock_client:
+                mock_client.return_value.__enter__.return_value.get.return_value = _make_response({rows_key: ["junk", 3]})
+                result = _run("q")
+        finally:
+            patcher.stop()
+
+        assert "unexpected response format" in result["error"]
+
+    @pytest.mark.parametrize(
+        ("vertical", "rows_key"),
+        [("news", "entries"), ("scholar", "articles")],
+    )
+    def test_vertical_missing_and_empty_rows_keep_no_results(self, vertical, rows_key):
+        """A missing or empty vertical container stays a legitimate empty search."""
+        patcher, _ = _patch_config({"api_key": "test-serply-key", "max_results": 5, "vertical": vertical})
+        try:
+            with patch("deerflow.community.serply.tools.httpx.Client") as mock_client:
+                mock_client.return_value.__enter__.return_value.get.return_value = _make_response({rows_key: []})
+                assert _run("nothing")["error"] == "No results found"
+
+            with patch("deerflow.community.serply.tools.httpx.Client") as mock_client:
+                mock_client.return_value.__enter__.return_value.get.return_value = _make_response({})
+                assert _run("nothing")["error"] == "No results found"
+        finally:
+            patcher.stop()
+
     def test_missing_api_key_returns_error_json_and_warns_once(self, mock_config_no_key, caplog):
         with patch.dict("os.environ", {}, clear=True), caplog.at_level(logging.WARNING):
             first = _run("q")

@@ -16,12 +16,35 @@ import {
   initialFormState,
   type TaskFormRequest,
 } from "@/components/workspace/scheduled-tasks/task-form-dialog";
+import type { ChannelConnection } from "@/core/channels/types";
 import { I18nProvider } from "@/core/i18n/context";
 import type { ScheduledTask } from "@/core/scheduled-tasks/types";
 
-const { createTask, updateTask } = rs.hoisted(() => ({
+function group(overrides: Partial<ChannelConnection> = {}): ChannelConnection {
+  return {
+    id: "group-binding",
+    provider: "feishu",
+    status: "connected",
+    workspace_id: "oc_private_group_id",
+    workspace_name: "Planning team",
+    metadata: { chat_id: "oc_private_group_id", chat_type: "group" },
+    scopes: [],
+    ...overrides,
+  };
+}
+
+const {
+  createTask,
+  updateTask,
+  listConnections,
+  connectProvider,
+  groupNotifications,
+} = rs.hoisted(() => ({
   createTask: rs.fn(),
   updateTask: rs.fn(),
+  listConnections: rs.fn(async (): Promise<ChannelConnection[]> => []),
+  connectProvider: rs.fn(),
+  groupNotifications: { value: true as boolean | undefined, isLoading: false },
 }));
 
 rs.mock("@/core/scheduled-tasks/api", () => ({
@@ -31,6 +54,16 @@ rs.mock("@/core/scheduled-tasks/api", () => ({
 rs.mock("@/core/agents/api", () => ({
   fetchAgentsApiEnabled: async () => false,
   listAgents: async () => [],
+}));
+rs.mock("@/core/channels/api", () => ({
+  listChannelConnections: listConnections,
+  connectChannelProvider: connectProvider,
+}));
+rs.mock("@/core/features/hooks", () => ({
+  useScheduledTasksFeature: () => ({
+    groupNotifications: groupNotifications.value,
+    isLoading: groupNotifications.isLoading,
+  }),
 }));
 rs.mock("sonner", () => ({
   toast: { success: rs.fn(), error: rs.fn(), info: rs.fn() },
@@ -42,6 +75,11 @@ afterEach(() => {
   clients.splice(0).forEach((client) => client.clear());
   createTask.mockReset();
   updateTask.mockReset();
+  listConnections.mockReset();
+  listConnections.mockResolvedValue([]);
+  connectProvider.mockReset();
+  groupNotifications.value = true;
+  groupNotifications.isLoading = false;
   document.cookie = "locale=; max-age=0; path=/";
 });
 
@@ -86,7 +124,7 @@ function renderForm(
     defaultOptions: { queries: { retry: false } },
   });
   clients.push(client);
-  return render(
+  const tree = () => (
     <QueryClientProvider client={client}>
       <I18nProvider initialLocale={locale}>
         <TaskFormDialog
@@ -95,11 +133,446 @@ function renderForm(
           onOpenChange={rs.fn()}
         />
       </I18nProvider>
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
+  const view = render(tree());
+  return { ...view, rerenderForm: () => view.rerender(tree()) };
 }
 
 describe("TaskFormDialog", () => {
+  test("a pending capability preserves the saved group through a title edit and then shows the enabled selector", async () => {
+    groupNotifications.value = false;
+    groupNotifications.isLoading = true;
+    listConnections.mockResolvedValue([group()]);
+    updateTask.mockResolvedValue(task());
+    const view = renderForm({
+      mode: "edit",
+      task: task({ notification_group_connection_id: "group-binding" }),
+    });
+
+    expect(screen.getByText("Loading groups…")).toBeTruthy();
+    expect(
+      screen.queryByText(
+        "This task has a saved group destination, but group notifications are unavailable on this server.",
+      ),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Clear group notification" }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("combobox", {
+        name: "Also notify a group (optional)",
+      }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Bind a Feishu group" }),
+    ).toBeNull();
+    expect(listConnections).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Title" }), {
+      target: { value: "Updated title" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() =>
+      expect(updateTask).toHaveBeenCalledWith("task-1", {
+        title: "Updated title",
+      }),
+    );
+
+    groupNotifications.value = true;
+    groupNotifications.isLoading = false;
+    view.rerenderForm();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("combobox", {
+          name: "Also notify a group (optional)",
+        }).textContent,
+      ).toBe("Planning team"),
+    );
+    expect(
+      screen.queryByRole("button", { name: "Clear group notification" }),
+    ).toBeNull();
+  });
+
+  test("a saved group can be explicitly cleared only after the capability resolves as disabled", async () => {
+    groupNotifications.value = false;
+    groupNotifications.isLoading = true;
+    updateTask.mockResolvedValue(task());
+    const view = renderForm({
+      mode: "edit",
+      task: task({ notification_group_connection_id: "group-binding" }),
+    });
+
+    expect(screen.getByText("Loading groups…")).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: "Clear group notification" }),
+    ).toBeNull();
+    groupNotifications.isLoading = false;
+    view.rerenderForm();
+
+    expect(
+      screen.getByText(
+        "This task has a saved group destination, but group notifications are unavailable on this server.",
+      ),
+    ).toBeTruthy();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Clear group notification" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() =>
+      expect(updateTask).toHaveBeenCalledWith("task-1", {
+        notification_group_connection_id: null,
+      }),
+    );
+    expect(listConnections).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    [
+      "en-US",
+      "This task has a saved group destination, but group notifications are unavailable on this server.",
+      "Clear group notification",
+      "Create",
+    ],
+    ["zh-CN", "已有群通知配置，当前服务未启用群通知。", "清除群通知", "创建"],
+  ] as const)(
+    "a duplicate can explicitly drop an old group when the capability is off (%s)",
+    async (locale, notice, clear, create) => {
+      groupNotifications.value = false;
+      createTask.mockResolvedValue(task({ id: "task-copy" }));
+      renderForm(
+        {
+          mode: "duplicate",
+          task: task({ notification_group_connection_id: "existing-binding" }),
+        },
+        { locale },
+      );
+      expect(screen.getByText(notice)).toBeTruthy();
+      expect(document.body.textContent).not.toContain("existing-binding");
+      expect(listConnections).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("button", { name: clear }));
+      fireEvent.click(screen.getByRole("button", { name: create }));
+      await waitFor(() => expect(createTask).toHaveBeenCalledTimes(1));
+      expect(createTask.mock.calls[0]![0]).not.toHaveProperty(
+        "notification_group_connection_id",
+      );
+      expect(createTask.mock.calls[0]![0]).toMatchObject({
+        schedule_spec: { cron: "0 9 * * *" },
+      });
+    },
+  );
+
+  test("clearing a saved group with the capability off sends only null in an edit", async () => {
+    groupNotifications.value = false;
+    updateTask.mockResolvedValue(task());
+    renderForm({
+      mode: "edit",
+      task: task({ notification_group_connection_id: "existing-binding" }),
+    });
+    expect(
+      screen.queryByRole("button", { name: "Bind a Feishu group" }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("combobox", {
+        name: "Also notify a group (optional)",
+      }),
+    ).toBeNull();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Clear group notification" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() =>
+      expect(updateTask).toHaveBeenCalledWith("task-1", {
+        notification_group_connection_id: null,
+      }),
+    );
+  });
+
+  test("an older backend without the group capability hides selection and binding while preserving the saved field", async () => {
+    groupNotifications.value = undefined;
+    updateTask.mockResolvedValue(task());
+    renderForm({
+      mode: "edit",
+      task: task({ notification_group_connection_id: "existing-binding" }),
+    });
+    expect(
+      screen.queryByRole("combobox", {
+        name: "Also notify a group (optional)",
+      }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Bind a Feishu group" }),
+    ).toBeNull();
+    expect(listConnections).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByRole("textbox", { name: "Title" }), {
+      target: { value: "Updated title" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() =>
+      expect(updateTask).toHaveBeenCalledWith("task-1", {
+        title: "Updated title",
+      }),
+    );
+  });
+
+  test("group binding keeps a copyable command visible without changing the saved destination", async () => {
+    connectProvider.mockResolvedValue({
+      provider: "feishu",
+      mode: "binding_code",
+      code: "test-group-code",
+      instruction: "unused",
+      expires_in: 600,
+    });
+    const writeText = rs.fn(async () => undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    updateTask.mockResolvedValue(task());
+    renderForm({
+      mode: "edit",
+      task: task({ notification_group_connection_id: "saved-group-binding" }),
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Bind a Feishu group" }),
+    );
+    const command = await screen.findByRole("textbox", {
+      name: "Group binding command",
+    });
+    expect(command).toHaveProperty("value", "/connect test-group-code");
+    expect(command).toHaveProperty("readOnly", true);
+    expect(connectProvider).toHaveBeenCalledWith("feishu");
+    expect(
+      screen.getByText(
+        "Add the bot to the group, then mention the bot and send this command in that group. Refresh the group list after binding.",
+      ),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Copy command" }));
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith("/connect test-group-code"),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Close binding instructions" }),
+    );
+    fireEvent.change(screen.getByRole("textbox", { name: "Title" }), {
+      target: { value: "Checklist v2" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() =>
+      expect(updateTask).toHaveBeenCalledWith("task-1", {
+        title: "Checklist v2",
+      }),
+    );
+  });
+
+  test("WeCom and QQ group bind buttons request provider-specific binding codes", async () => {
+    connectProvider.mockImplementation(async (provider: string) => ({
+      provider,
+      mode: "binding_code",
+      code: `${provider}-group-code`,
+      instruction: "unused",
+      expires_in: 600,
+    }));
+    renderForm({ mode: "create" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Bind a WeCom group" }));
+    fireEvent.change(
+      await screen.findByRole("textbox", { name: "Group name" }),
+      {
+        target: { value: "Release team" },
+      },
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Generate a new code" }),
+    );
+    const command = await screen.findByRole("textbox", {
+      name: "Group binding command",
+    });
+    await waitFor(() =>
+      expect(command).toHaveProperty("value", "/connect wecom-group-code"),
+    );
+    expect(connectProvider).toHaveBeenCalledWith("wecom", {
+      groupName: "Release team",
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Bind a QQ group" }));
+    expect(screen.getByRole("textbox", { name: "Group name" })).toHaveProperty(
+      "value",
+      "",
+    );
+    expect(
+      screen.queryByRole("textbox", { name: "Group binding command" }),
+    ).toBeNull();
+    fireEvent.change(screen.getByRole("textbox", { name: "Group name" }), {
+      target: { value: "Support team" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Generate a new code" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("textbox", { name: "Group binding command" }),
+      ).toHaveProperty("value", "/connect qq-group-code"),
+    );
+    expect(connectProvider).toHaveBeenCalledWith("qq", {
+      groupName: "Support team",
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Bind a Feishu group" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("textbox", { name: "Group binding command" }),
+      ).toHaveProperty("value", "/connect feishu-group-code"),
+    );
+    expect(screen.queryByRole("textbox", { name: "Group name" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Bind a WeCom group" }));
+    expect(
+      screen.getByRole("textbox", { name: "Group binding command" }),
+    ).toHaveProperty("value", "/connect wecom-group-code");
+    expect(connectProvider).toHaveBeenCalledTimes(3);
+    fireEvent.change(screen.getByRole("textbox", { name: "Group name" }), {
+      target: { value: "Operations" },
+    });
+    expect(
+      screen.queryByRole("textbox", { name: "Group binding command" }),
+    ).toBeNull();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Generate a new code" }),
+    );
+    await waitFor(() =>
+      expect(connectProvider).toHaveBeenLastCalledWith("wecom", {
+        groupName: "Operations",
+      }),
+    );
+    await screen.findByRole("textbox", { name: "Group binding command" });
+  });
+
+  test("refreshing after binding discovers the group without changing the task automatically", async () => {
+    listConnections.mockResolvedValueOnce([]).mockResolvedValue([group()]);
+    renderForm({ mode: "create" });
+    await screen.findByText("Bind a group below, then refresh the list.");
+    fireEvent.click(screen.getByRole("button", { name: "Refresh group list" }));
+    await waitFor(() => expect(listConnections).toHaveBeenCalledTimes(2));
+    fireEvent.keyDown(
+      screen.getByRole("combobox", {
+        name: "Also notify a group (optional)",
+      }),
+      { key: "ArrowDown" },
+    );
+    expect(
+      await screen.findByRole("option", { name: "Planning team" }),
+    ).toBeTruthy();
+    expect(createTask).not.toHaveBeenCalled();
+    expect(updateTask).not.toHaveBeenCalled();
+  });
+
+  test("choosing a named Feishu group sends only the new destination", async () => {
+    listConnections.mockResolvedValue([group()]);
+    updateTask.mockResolvedValue(task());
+    renderForm({ mode: "edit", task: task() });
+    await waitFor(() => expect(listConnections).toHaveBeenCalled());
+    fireEvent.keyDown(
+      screen.getByRole("combobox", {
+        name: "Also notify a group (optional)",
+      }),
+      { key: "ArrowDown" },
+    );
+    fireEvent.click(
+      await screen.findByRole("option", { name: "Planning team" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(updateTask).toHaveBeenCalledTimes(1));
+    expect(updateTask).toHaveBeenCalledWith("task-1", {
+      notification_group_connection_id: "group-binding",
+    });
+  });
+
+  test("a failed groups query preserves the stored destination when editing another field", async () => {
+    listConnections.mockRejectedValue(new Error("offline"));
+    updateTask.mockResolvedValue(task());
+    renderForm({
+      mode: "edit",
+      task: task({ notification_group_connection_id: "saved-group-binding" }),
+    });
+    await screen.findByText(
+      "Could not load groups. Your selection is kept; you can save other changes or remove it.",
+    );
+    expect(
+      screen.getByRole("combobox", {
+        name: "Also notify a group (optional)",
+      }).textContent,
+    ).toBe("Selected group unavailable");
+    expect(document.body.textContent).not.toContain("saved-group-binding");
+    fireEvent.change(screen.getByRole("textbox", { name: "Title" }), {
+      target: { value: "Checklist v2" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(updateTask).toHaveBeenCalledTimes(1));
+    expect(updateTask).toHaveBeenCalledWith("task-1", {
+      title: "Checklist v2",
+    });
+  });
+
+  test("an unavailable selected group can be explicitly cleared even while the list fails", async () => {
+    listConnections.mockRejectedValue(new Error("offline"));
+    updateTask.mockResolvedValue(task());
+    renderForm({
+      mode: "edit",
+      task: task({ notification_group_connection_id: "saved-group-binding" }),
+    });
+    await screen.findByText(
+      "Could not load groups. Your selection is kept; you can save other changes or remove it.",
+    );
+    fireEvent.keyDown(
+      screen.getByRole("combobox", {
+        name: "Also notify a group (optional)",
+      }),
+      { key: "ArrowDown" },
+    );
+    fireEvent.click(
+      await screen.findByRole("option", { name: "No additional group" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(updateTask).toHaveBeenCalledTimes(1));
+    expect(updateTask).toHaveBeenCalledWith("task-1", {
+      notification_group_connection_id: null,
+    });
+  });
+
+  test("unnamed groups are disabled without exposing identifiers", async () => {
+    listConnections.mockResolvedValue([group({ workspace_name: null })]);
+    renderForm({ mode: "create" });
+    await screen.findByText(
+      "Bind the group again with a recognizable name before selecting it.",
+    );
+    fireEvent.keyDown(
+      screen.getByRole("combobox", {
+        name: "Also notify a group (optional)",
+      }),
+      { key: "ArrowDown" },
+    );
+    expect(
+      (
+        await screen.findByRole("option", { name: "Group name unavailable" })
+      ).getAttribute("aria-disabled"),
+    ).toBe("true");
+    expect(document.body.textContent).not.toContain("oc_private_group_id");
+    expect(document.body.textContent).not.toContain("group-binding");
+  });
+
+  test("the Chinese group field explains that personal notifications stay unchanged", async () => {
+    renderForm({ mode: "create" }, { locale: "zh-CN" });
+    expect(
+      screen.getByRole("combobox", { name: "额外通知到群聊（可选）" })
+        .textContent,
+    ).toBe("仅通知本人");
+    expect(
+      screen.getByText("你现有的个人通知保持不变，所选群也会收到任务更新。"),
+    ).toBeTruthy();
+    await screen.findByText("先在下方绑定群聊，再刷新群列表。");
+  });
+
   test("every field resolves by its label", () => {
     renderForm({ mode: "edit", task: task() });
     expect(screen.getByRole("textbox", { name: "Title" })).toHaveProperty(
@@ -316,6 +789,62 @@ describe("TaskFormDialog", () => {
 });
 
 describe("form payload helpers", () => {
+  test("duplicate retains an additional group, while an untouched edit omits it", () => {
+    const source = task({ notification_group_connection_id: "group-binding" });
+    const { state } = initialFormState(
+      { mode: "duplicate", task: source },
+      "(copy)",
+    );
+    const valid = validateForm(state, source.end_at);
+    expect(valid.ok).toBe(true);
+    if (!valid.ok) return;
+    expect(createPayload(state, valid).notification_group_connection_id).toBe(
+      "group-binding",
+    );
+    expect(
+      updatePayload(source, { ...state, title: source.title }, valid, {
+        includeStopCondition: true,
+      }),
+    ).toEqual({});
+  });
+
+  test("changing only a notification group never sends the schedule; clearing sends null", () => {
+    const source = task({ notification_group_connection_id: "old-binding" });
+    const { state } = initialFormState({ mode: "edit", task: source }, "");
+    const valid = validateForm(state, source.end_at);
+    expect(valid.ok).toBe(true);
+    if (!valid.ok) return;
+    expect(
+      updatePayload(
+        source,
+        { ...state, notificationGroupConnectionId: "new-binding" },
+        valid,
+        {
+          includeStopCondition: true,
+        },
+      ),
+    ).toEqual({ notification_group_connection_id: "new-binding" });
+    expect(
+      updatePayload(
+        source,
+        { ...state, notificationGroupConnectionId: "" },
+        valid,
+        {
+          includeStopCondition: true,
+        },
+      ),
+    ).toEqual({ notification_group_connection_id: null });
+  });
+
+  test("new tasks have no additional group by default", () => {
+    const { state } = initialFormState({ mode: "create" }, "");
+    expect(state.notificationGroupConnectionId).toBe("");
+    expect(
+      createPayload(state, { maxRuns: null, endAt: null })
+        .notification_group_connection_id,
+    ).toBeUndefined();
+  });
+
   test("an untouched form produces an empty update", () => {
     const source = task({ end_at: "2099-12-31T10:00:30Z" });
     const { state } = initialFormState(

@@ -110,3 +110,38 @@ test("preserves custom deployment extensions and module failures", () => {
     failed.title,
   );
 });
+
+test("workflow metadata is localized, explains Phase 1 limits and merges its registration", () => {
+  const workflow: LoadedContribution = {
+    ...contribution,
+    namespace: "community.workflows",
+    title: "Deployment workflow title",
+    settings: { enabled: true },
+  };
+  for (const [copy, title, limitations] of [
+    [
+      enUS.extensions.catalog,
+      "Script workflows",
+      "no resume, human approval or hard monetary budget",
+    ],
+    [zhCN.extensions.catalog, "脚本工作流", "不支持恢复、人工审批或硬金额预算"],
+  ] as const) {
+    const catalogOnly = extensionDirectory([], copy).find(
+      (entry) => entry.package === "deerflow-extension-workflows",
+    );
+    expect(catalogOnly).toMatchObject({
+      id: workflow.namespace,
+      title,
+      guide:
+        "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-workflows#readme",
+    });
+    expect(catalogOnly?.description).toContain(limitations);
+    expect(catalogOnly?.loaded).toBeUndefined();
+    const matches = extensionDirectory([workflow], copy).filter(
+      (entry) => entry.id === workflow.namespace,
+    );
+    expect(matches).toHaveLength(1);
+    expect(matches[0]?.title).toBe(title);
+    expect(matches[0]?.loaded).toBe(workflow);
+  }
+});

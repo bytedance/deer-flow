@@ -1,8 +1,7 @@
 # AGENTS.md
 
-This is the source of truth for repository agent guidance; `CLAUDE.md` imports it via `@AGENTS.md`.
-
-This **monorepo orientation layer** maps the repo. For module details, read its guide:
+Repository guidance source of truth; `CLAUDE.md` imports `@AGENTS.md`.
+Module guides:
 
 - **[backend/AGENTS.md](backend/AGENTS.md)** — backend depth: harness/app split, agent &
   middleware chain, sandbox, MCP, skills, memory, IM channels, persistence/migrations,
@@ -85,6 +84,8 @@ compaction, or authentication. If existing hooks cannot express the feature, add
 generic hook to the extension contract plus an extension that uses it — do not
 hard-code business logic into core. Working examples:
 `examples/deerflow-extension-{example,bookmarks,agent-teams}`.
+[Script workflows guide](examples/deerflow-extension-workflows/AGENTS.md): public
+AgentRuns; POSIX, one process/store; no resume/replay or hard currency budget.
 
 Runtime config lives at the **repo root**: copy `config.example.yaml` → `config.yaml`
 (main app config) and `extensions_config.example.json` → `extensions_config.json` (MCP
@@ -116,7 +117,7 @@ Scheduled-task note:
 
 ## Commands: Root vs. Module
 
-**Root `make` targets drive the whole stack** (run from the repo root):
+**Root stack commands** (from repo root):
 
 ```bash
 make setup       # Interactive setup wizard (recommended for new users)
@@ -138,18 +139,16 @@ make up / down   # Build/stop the production Docker stack (browser at localhost:
 make docker-start / docker-stop / docker-logs   # Docker development environment
 ```
 
-Production startup uses the image's pre-built Python environment with `uv run
---no-sync`, gives the Gateway a real `/health` probe, and makes `make up` wait
-for that probe before printing its success banner. A readiness failure must
-surface Compose status and recent Gateway logs instead of claiming the stack is
-running.
+Production uses image Python (`uv run --no-sync`) and `exec` for SIGTERM;
+Compose sets `init: true` (`backend/tests/test_gateway_sigterm_delivery.py`).
+`make up` waits for Gateway `/health`; failures show Compose status and Gateway logs.
 
-Docker log and restart commands resolve `DEER_FLOW_ROOT` from the current
-checkout before invoking Compose, matching the start and stop commands.
+Docker logs/restarts resolve `DEER_FLOW_ROOT` from this checkout before Compose,
+as start/stop do.
 
-Run `make help` for the full list.
+Full list: `make help`.
 
-**Per-module commands drive a single module** (run inside that module):
+**Module commands** (from each module):
 
 ```bash
 # Backend (see backend/AGENTS.md for the full set)
@@ -165,8 +164,7 @@ cd frontend && pnpm check     # Lint + type check (run before committing)
 cd frontend && pnpm test      # Unit tests
 ```
 
-Rule of thumb: **root `make` = the full application**; **`backend/Makefile` and `frontend/`
-(`pnpm`) = per-module work.**
+Root `make` drives the stack; backend `make` and frontend `pnpm` drive their modules.
 
 Host pnpm calls use `scripts/pnpm.py`: native Windows tries `pnpm.cmd` before
 `pnpm`; POSIX reverses the order. Its Corepack fallback applies the same ordering
@@ -175,7 +173,7 @@ Corepack honors its pinned package-manager version.
 
 ### Prerequisites before `make dev`
 
-`make dev` does **not** generate config files. First-time setup order:
+First-time setup (`make dev` does not generate config):
 
 ```bash
 make config      # copy config.example.yaml -> config.yaml and extensions_config.example.json -> extensions_config.json (both gitignored)
@@ -183,8 +181,8 @@ make install     # install frontend + backend deps and pre-commit hooks
 make dev         # then start everything
 ```
 
-Without `config.yaml` present, services fail to boot. `config.yaml` / `extensions_config.json`
-may be edited at runtime via the Gateway API but are gitignored, so never commit them.
+Services require `config.yaml`. Both runtime configs are API-editable and gitignored;
+never commit them.
 
 ### Run a single test
 
@@ -204,31 +202,30 @@ cd frontend && pnpm rstest run <pattern>     # e.g. pnpm rstest run my-component
   `logs/gateway.log` and `logs/frontend.log` in the repository root.
   Run `tail -f logs/gateway.log logs/frontend.log` there to follow both.
 
-## Where to Go Next
+## References
 
 - Backend work → **[backend/AGENTS.md](backend/AGENTS.md)**
 - Frontend work → **[frontend/AGENTS.md](frontend/AGENTS.md)**
 - Setup & install → **[Install.md](Install.md)**, **[CONTRIBUTING.md](CONTRIBUTING.md)**
 - Project overview & usage → **[README.md](README.md)** (translations: `README_zh.md`,
-  `README_ja.md`, `README_fr.md`, `README_ru.md`, `README_pt.md`)
+  `README_ja.md`, `README_fr.md`, `README_ru.md`, `README_pt.md`, `README_ko.md`)
 - Security policy → **[SECURITY.md](SECURITY.md)**
 - Changes → **[CHANGELOG.md](CHANGELOG.md)**
 - Cutting a release → **[RELEASING.md](RELEASING.md)**
 
 ## Cross-Cutting Conventions
 
-These apply repo-wide; module guides own the module-specific detail.
+Repo-wide conventions:
 
-- **Documentation update policy** — keep docs in sync with code: update `README.md` for
-  user-facing changes and the relevant `AGENTS.md` for development/architecture changes in
-  the same change set.
+- Update `README.md` for user-facing changes and the relevant `AGENTS.md` for
+  development/architecture changes in the same change set.
 - **Test-driven development** — features and bug fixes ship with tests. Backend tests live
   in `backend/tests/` (TDD is mandatory there; see [backend/AGENTS.md](backend/AGENTS.md));
   frontend tests live in `frontend/tests/`.
   Public skill script regressions live in `tests/skills/`; exercise dependency fallbacks
   with the optional import unavailable and mock HTTP transport to keep tests offline.
-- **Format before pushing** — run `make format` (backend) / `pnpm check` (frontend). Backend
-  CI enforces `ruff format --check`, so formatting must be clean before a push.
+- **Before pushing** — backend `make format`, frontend `pnpm check`.
+  Backend CI enforces `ruff format --check`.
 - **Skill text encoding** — treat `SKILL.md` and other textual skill resources as UTF-8;
   Python utilities that read or write them must pass `encoding="utf-8"` rather than
   relying on the platform locale.

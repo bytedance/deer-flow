@@ -27,7 +27,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 from uuid import UUID
 
 from langchain_core.callbacks import BaseCallbackHandler
@@ -47,15 +47,18 @@ from deerflow.runtime.events.catalog import (
     RUN_ERROR_EVENT,
     RUN_START_EVENT,
 )
+from deerflow.runtime.events.store.base import RunEventStore, RunEventStoreNotCommittedError
 from deerflow.utils.llm_text import strip_leading_think_blocks
 from deerflow.utils.messages import message_to_text, restore_original_human_message
-
-if TYPE_CHECKING:
-    from deerflow.runtime.events.store.base import RunEventStore
 
 logger = logging.getLogger(__name__)
 
 _LEGACY_SUMMARY_MESSAGE_NAME = "summary"
+# A cancelled owned write may not stop a store that ignores cancellation.
+# The wrapper waits this long for the inner call to end before returning, so
+# lease-loss close cannot hang forever on an uncooperative backend. This is a
+# bound on waiting, not proof the underlying I/O stopped.
+_WRITE_SETTLE_TIMEOUT_SECONDS = 5.0
 _PERSISTED_HIDDEN_HUMAN_INPUT_RESPONSE_SOURCES = frozenset({"ask_clarification", "sandbox_network"})
 _MAX_RUN_SKILL_SNAPSHOTS = 64
 
@@ -334,8 +337,27 @@ class RunJournal(BaseCallbackHandler):
         # Write buffer
         self._buffer: list[dict] = []
         self._pending_llm_response: _PendingLlmResponse | None = None
-        self._pending_flush_tasks: set[asyncio.Task[None]] = set()
-        self._explicit_flush_in_progress = False
+        # Journal-owned in-flight writes: task -> original batch. A live drain
+        # classifies and re-raises; the done callback only handles a write that
+        # settles with no drain waiting (so its exception is never unretrieved).
+        self._owned_writes: dict[asyncio.Task[None], list[dict]] = {}
+        self._draining_tasks: set[asyncio.Task[None]] = set()
+        # Serialises explicit persistence operations (flush and
+        # close(flush=True)) for this journal instance. close(flush=False) never
+        # queues on it.
+        self._operation_lock = asyncio.Lock()
+        # Set by close(flush=False) before its first await. It revokes write
+        # ownership so no flush/callback may start or revive a write.
+        self._abandoned = False
+        # Inner store tasks that outlived a bounded writer teardown (a backend
+        # that ignored cancellation). Held strongly until they settle so their
+        # late result is retrieved and logged rather than dropped. This is not a
+        # termination guarantee: it only keeps settlement responsibility.
+        self._abandoned_store_tasks: dict[asyncio.Task[None], int] = {}
+        # Batches whose outcome is UNKNOWN (a generic store failure) must never
+        # be replayed: the store may have committed before losing its ACK.
+        # Keeping them here also fences every successor write for this run.
+        self._quarantined_batches: list[tuple[list[dict], BaseException]] = []
         self._pending_progress_task: asyncio.Task[None] | None = None
         self._pending_progress_delayed = False
         self._progress_dirty = False
@@ -1060,45 +1082,214 @@ class RunJournal(BaseCallbackHandler):
         self._commit_pending_llm_response()
         if not self._buffer:
             return
-        # Skip if a flush is already in flight — avoids concurrent writes
-        # to the same SQLite file from multiple fire-and-forget tasks.
-        if self._pending_flush_tasks or self._explicit_flush_in_progress:
-            return
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            # No event loop — keep events in buffer for later async flush.
+        # Skip while another owned write is in flight, a normal persistence
+        # operation holds the operation lock, a batch is quarantined, or the
+        # journal has been force-closed. This keeps the batch in the buffer
+        # instead of starting an overlapping write.
+        if self._owned_writes or self._operation_lock.locked() or self._quarantined_batches or self._abandoned:
             return
         batch = self._buffer.copy()
         self._buffer.clear()
-        task = loop.create_task(self._flush_async(batch))
-        self._pending_flush_tasks.add(task)
-        task.add_done_callback(self._on_flush_done)
-
-    async def _flush_async(self, batch: list[dict]) -> None:
-        try:
-            store = self._store
-            if store is None:
-                return
-            await store.put_batch(batch)
-            self._feed_generation += 1
-        except Exception:
-            logger.warning(
-                "Failed to flush %d events for run %s — returning to buffer",
-                len(batch),
-                self.run_id,
-                exc_info=True,
-            )
-            # Return failed events to buffer for retry on next flush
+        task = self._start_write(batch)
+        if task is None:
             self._buffer = batch + self._buffer
 
-    def _on_flush_done(self, task: asyncio.Task) -> None:
-        self._pending_flush_tasks.discard(task)
-        if task.cancelled():
+    def _start_write(self, batch: list[dict]) -> asyncio.Task[None] | None:
+        """Create a journal-owned write task, or None when no loop is running.
+
+        The caller must have already removed ``batch`` from ``_buffer``.
+        """
+        if self._abandoned:
+            return None
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return None
+        task: asyncio.Task[None] = loop.create_task(self._write_batch(batch))
+        self._owned_writes[task] = batch
+        task.add_done_callback(self._reap_settled_write)
+        return task
+
+    async def _write_batch(self, batch: list[dict]) -> None:
+        """Run one owned ``put_batch`` isolated from caller cancellation.
+
+        A dedicated inner task performs the store call; the outer owned task
+        only bookkeeps it. Cancelling a waiter never cancels the store task, and
+        the store result is classified by the drain or the reap callback.
+        """
+        store = self._store
+        if store is None:
             return
-        exc = task.exception()
-        if exc:
-            logger.warning("Journal flush task failed: %s", exc)
+        store_task: asyncio.Task[None] = asyncio.ensure_future(store.put_batch(batch))
+        try:
+            await asyncio.shield(store_task)
+        except asyncio.CancelledError:
+            # The waiter (or an explicit lease-loss close) abandoned durability.
+            # Ask the inner store task to stop, but bound the wait: Task.cancelled()
+            # only reflects the Python task, not whether the underlying I/O stopped,
+            # and a backend may swallow cancellation. We never claim the I/O was
+            # force-terminated; when the store outlives the bound we hand it to an
+            # explicit supervisor so its late result is still observed.
+            store_task.cancel()
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(store_task),
+                    timeout=_WRITE_SETTLE_TIMEOUT_SECONDS,
+                )
+            except (TimeoutError, asyncio.CancelledError):
+                pass
+            except Exception as exc:
+                logger.warning(
+                    "Journal store write for run %s failed while the writer was being torn down (%s: %s)",
+                    self.run_id,
+                    type(exc).__name__,
+                    exc,
+                )
+            if not store_task.done():
+                self._supervise_abandoned_store_task(store_task, len(batch))
+            raise
+
+    def _supervise_abandoned_store_task(self, store_task: asyncio.Task, batch_size: int) -> None:
+        """Hold and settle an inner store task that outlived writer teardown.
+
+        The task is kept strongly referenced until it settles, so it is neither
+        garbage-collected nor silently dropped, and its eventual result is
+        retrieved and logged. Bounded teardown is not a claim that the
+        underlying I/O has stopped.
+        """
+        self._abandoned_store_tasks[store_task] = batch_size
+        store_task.add_done_callback(self._on_abandoned_store_task_settled)
+
+    def _on_abandoned_store_task_settled(self, store_task: asyncio.Task) -> None:
+        batch_size = self._abandoned_store_tasks.pop(store_task, 0)
+        if store_task.cancelled():
+            return
+        exc = store_task.exception()
+        if exc is not None:
+            logger.warning(
+                "Journal store write for run %s failed after the writer was abandoned (%d event(s), %s: %s)",
+                self.run_id,
+                batch_size,
+                type(exc).__name__,
+                exc,
+            )
+        else:
+            # Observability only: a late successful return is reported but does
+            # NOT clear quarantine, replay events, release successor writes, or
+            # make close(flush=False) report durability. "completed successfully"
+            # describes put_batch() returning, not an independent commit proof.
+            logger.warning(
+                "Journal store write for run %s completed successfully after writer abandonment (%d event(s)); quarantine policy remains unchanged",
+                self.run_id,
+                batch_size,
+            )
+
+    async def _drain_pending_writes(self) -> None:
+        """Settle every journal-owned write before any successor may start.
+
+        Each owned task is awaited through ``asyncio.shield`` so a cancelled
+        caller detaches the waiter, never the durable write. Classification uses
+        the ``(task, batch)`` snapshot taken here, so a concurrent force close
+        clearing the registry can never turn a real outcome into a silent
+        success.
+        """
+        if not self._owned_writes:
+            return
+        pending = list(self._owned_writes.items())
+        tasks = [task for task, _batch in pending]
+        self._draining_tasks.update(tasks)
+        try:
+            result = await asyncio.gather(
+                *(asyncio.shield(task) for task in tasks),
+                return_exceptions=True,
+            )
+        except asyncio.CancelledError:
+            self._draining_tasks.difference_update(tasks)
+            raise
+        failures: list[BaseException] = []
+        first_not_committed: BaseException | None = None
+        for (task, batch), outcome in zip(pending, result):
+            self._draining_tasks.discard(task)
+            self._owned_writes.pop(task, None)
+            if self._abandoned:
+                # Ownership was revoked by a force close: never re-buffer,
+                # quarantine, or count a successor. Report non-success instead.
+                failures.append(RuntimeError(f"RunJournal for run {self.run_id} was force-closed during flush"))
+                continue
+            if isinstance(outcome, asyncio.CancelledError):
+                if task.done():
+                    self._quarantined_batches.append((batch, RuntimeError("journal write outcome is unknown after cancellation")))
+                    failures.append(outcome)
+                else:
+                    # The caller's cancellation is still propagating; put the
+                    # task back so the done callback settles it later.
+                    self._owned_writes[task] = batch
+            elif isinstance(outcome, RunEventStoreNotCommittedError):
+                self._buffer = batch + self._buffer
+                if first_not_committed is None:
+                    first_not_committed = outcome
+            elif isinstance(outcome, BaseException):
+                self._quarantined_batches.append((batch, outcome))
+                failures.append(outcome)
+            else:
+                self._feed_generation += 1
+        if failures:
+            raise failures[0]
+        if first_not_committed is not None:
+            raise first_not_committed
+
+    def _reap_settled_write(self, task: asyncio.Task) -> None:
+        """Settle a write whose task finished with no drain waiting on it.
+
+        This runs on every completion but is a no-op for the normal drained
+        path (the drain removes the task first). It exists so a write that
+        settles after the caller detached does not leave an unretrieved task
+        exception or an unquarantined result.
+        """
+        if task in self._draining_tasks:
+            return
+        try:
+            batch = self._owned_writes.pop(task, None)
+            if batch is None:
+                return
+            if task.cancelled():
+                self._quarantined_batches.append((batch, RuntimeError("journal write outcome is unknown after cancellation")))
+                logger.warning(
+                    "Journal write for run %s was cancelled before its outcome was known (%d event(s)); quarantined and not retried",
+                    self.run_id,
+                    len(batch),
+                )
+                return
+            exc = task.exception()
+            if exc is None:
+                self._feed_generation += 1
+            elif isinstance(exc, RunEventStoreNotCommittedError):
+                if self._abandoned:
+                    logger.warning(
+                        "Journal write for run %s came back not-committed after a force close (%d event(s)); not re-buffered",
+                        self.run_id,
+                        len(batch),
+                    )
+                    return
+                self._buffer = batch + self._buffer
+                logger.warning(
+                    "Journal write for run %s came back not-committed (%d event(s), %s: %s); re-buffered for a later flush",
+                    self.run_id,
+                    len(batch),
+                    type(exc).__name__,
+                    exc,
+                )
+            else:
+                self._quarantined_batches.append((batch, exc))
+                logger.warning(
+                    "Journal write for run %s has an unknown outcome (%d event(s), %s: %s); quarantined and not retried",
+                    self.run_id,
+                    len(batch),
+                    type(exc).__name__,
+                    exc,
+                )
+        except Exception:
+            logger.exception("Failed to reap a settled journal write for run %s", self.run_id)
 
     def _identify_caller(self, tags: list[str] | None) -> str:
         _tags = tags or []
@@ -1352,54 +1543,104 @@ class RunJournal(BaseCallbackHandler):
 
     async def flush(self) -> None:
         """Force flush remaining buffer. Called in worker's finally block."""
+        if self._abandoned:
+            raise RuntimeError(f"RunJournal for run {self.run_id} was force-closed; flush cannot report success")
         if self._closed:
             return
+        async with self._operation_lock:
+            if self._abandoned:
+                raise RuntimeError(f"RunJournal for run {self.run_id} was force-closed; flush cannot report success")
+            if self._closed:
+                return
+            await self._flush_locked()
+
+    async def _flush_locked(self) -> None:
+        """Drain the buffer to quiescence while the operation lock is held.
+
+        Callers MUST hold ``self._operation_lock``. It deliberately does not
+        re-acquire the lock, so ``close(flush=True)`` can run flush and detach as
+        one indivisible protected operation. Returns only when every accepted
+        event has settled and nothing is quarantined; raises otherwise.
+        """
+        if self._abandoned:
+            raise RuntimeError(f"RunJournal for run {self.run_id} was force-closed; flush cannot report success")
         # Events recorded from worker threads reach this loop through
         # call_soon_threadsafe (see record_middleware). Since Python 3.13 an
-        # awaited run_in_executor()/to_thread() may complete without yielding
-        # to the loop when the worker finished before its future was chained,
-        # so such callbacks can still be queued when flush() starts. Yield once
-        # so they land in the buffer instead of being dropped after detach.
+        # awaited run_in_executor()/to_thread() may complete without yielding to
+        # the loop when the worker finished before its future was chained, so
+        # such callbacks can still be queued when the flush starts. Yield once
+        # so they land in the buffer instead of being dropped after detach. This
+        # lives here so close(flush=True), which calls this directly under the
+        # operation lock, gets the same guarantee.
         await asyncio.sleep(0)
-        if self._closed:
-            return
-        self._explicit_flush_in_progress = True
+        if self._abandoned:
+            raise RuntimeError(f"RunJournal for run {self.run_id} was force-closed; flush cannot report success")
+        if self._quarantined_batches:
+            _batch, error = self._quarantined_batches[0]
+            raise RuntimeError(f"RunJournal flush refused: {len(_batch)} event(s) for run {self.run_id} have an unknown durable outcome") from error
+        self._commit_pending_llm_response()
         try:
-            self._commit_pending_llm_response()
-            if self._pending_flush_tasks:
-                await asyncio.gather(*tuple(self._pending_flush_tasks), return_exceptions=True)
-            while self._pending_progress_task is not None:
-                pending_progress_task = self._pending_progress_task
-                if pending_progress_task.done():
-                    if self._pending_progress_task is pending_progress_task:
-                        self._pending_progress_task = None
-                    break
-                if self._pending_progress_delayed:
-                    pending_progress_task.cancel()
-                    await asyncio.gather(pending_progress_task, return_exceptions=True)
-                    if self._pending_progress_task is pending_progress_task:
-                        self._pending_progress_task = None
-                    self._progress_dirty = False
-                    self._pending_progress_delayed = False
-                    break
+            await self._drain_pending_writes()
+        except asyncio.CancelledError:
+            # A caller cancelled a flush that already started a durable write.
+            # Let the journal-owned write settle before propagating the
+            # cancellation so the batch can never be lost between the task and
+            # the buffer. Do NOT call uncancel(): we are propagating the
+            # cancellation, not suppressing it, and touching the task's cancel
+            # count would corrupt the caller's cancellation accounting.
+            try:
+                await self._drain_pending_writes()
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.warning(
+                    "Journal write failed while flushing after cancellation for run %s",
+                    self.run_id,
+                    exc_info=True,
+                )
+            raise
+        while self._pending_progress_task is not None:
+            pending_progress_task = self._pending_progress_task
+            if pending_progress_task.done():
+                if self._pending_progress_task is pending_progress_task:
+                    self._pending_progress_task = None
+                break
+            if self._pending_progress_delayed:
+                pending_progress_task.cancel()
                 await asyncio.gather(pending_progress_task, return_exceptions=True)
                 if self._pending_progress_task is pending_progress_task:
                     self._pending_progress_task = None
+                self._progress_dirty = False
+                self._pending_progress_delayed = False
+                break
+            await asyncio.gather(pending_progress_task, return_exceptions=True)
+            if self._pending_progress_task is pending_progress_task:
+                self._pending_progress_task = None
 
-            while self._buffer:
-                batch = self._buffer[: self._flush_threshold]
-                del self._buffer[: self._flush_threshold]
-                try:
-                    store = self._store
-                    if store is None:
-                        return
-                    await store.put_batch(batch)
-                    self._feed_generation += 1
-                except Exception:
-                    self._buffer = batch + self._buffer
-                    raise
-        finally:
-            self._explicit_flush_in_progress = False
+        # Only batches already accepted before this flush are attempted; a
+        # NOT_COMMITTED batch re-buffered by the drain waits for a later explicit
+        # flush instead of being retried in a tight loop. A force close revokes
+        # ownership, so no further batch may start.
+        while self._buffer:
+            if self._abandoned or self._quarantined_batches:
+                break
+            batch = self._buffer[: self._flush_threshold]
+            del self._buffer[: self._flush_threshold]
+            if self._store is None or self._abandoned:
+                self._buffer = batch + self._buffer
+                break
+            task = self._start_write(batch)
+            if task is None:
+                # No running loop (or write ownership was revoked): keep the batch.
+                self._buffer = batch + self._buffer
+                break
+            await self._drain_pending_writes()
+
+        if self._abandoned:
+            raise RuntimeError(f"RunJournal for run {self.run_id} was force-closed during flush")
+        if self._quarantined_batches:
+            _batch, error = self._quarantined_batches[0]
+            raise RuntimeError(f"RunJournal flush refused: {len(_batch)} event(s) for run {self.run_id} have an unknown durable outcome") from error
 
     def _detach_runtime_dependencies(self) -> None:
         """Drop every external or potentially cyclic run-scoped reference."""
@@ -1410,8 +1651,10 @@ class RunJournal(BaseCallbackHandler):
         self._progress_reporter = None
         self._buffer.clear()
         self._pending_llm_response = None
-        self._pending_flush_tasks.clear()
-        self._explicit_flush_in_progress = False
+        self._owned_writes = {}
+        self._draining_tasks = set()
+        # Intentionally NOT cleared: abandoned inner store tasks stay strongly
+        # referenced here until they settle and their result is logged.
         self._pending_progress_task = None
         self._pending_progress_delayed = False
         self._progress_dirty = False
@@ -1432,29 +1675,46 @@ class RunJournal(BaseCallbackHandler):
 
     async def close(self, *, flush: bool = True) -> None:
         """Release run-scoped references, optionally flushing buffered events."""
-        if self._closed:
-            return
         if flush:
-            # A failed terminal write returns its batch to ``_buffer``. Keep the
-            # store and all buffered state attached so a later close/flush can retry
-            # instead of silently discarding the tail of the run event stream.
-            await self.flush()
-            self._detach_runtime_dependencies()
+            # A normal close is one protected operation: it serialises with every
+            # other flush / close(True) and detaches only after the whole buffer
+            # has settled, so no concurrent waiter can observe a
+            # settled-but-detached journal or start a successor batch that nobody
+            # drains.
+            if self._abandoned:
+                raise RuntimeError(f"RunJournal for run {self.run_id} was force-closed; close cannot report success")
+            async with self._operation_lock:
+                # ABORT is checked before the closed flag: a force close sets
+                # both, so a normal close that queued behind the lock must fail
+                # rather than observe `_closed` and report a false success.
+                if self._abandoned:
+                    raise RuntimeError(f"RunJournal for run {self.run_id} was force-closed; close cannot report success")
+                if self._closed:
+                    return
+                await self._flush_locked()
+                self._detach_runtime_dependencies()
             return
 
-        # A worker that lost its lease must detach without starting another
-        # durable write. Drop dependencies before cancelling already-scheduled
-        # work so tasks that have not begun observe the detached state. The
-        # final detach must survive a second cancellation while those tasks stop.
+        # Force / lease-loss close. It must NOT queue behind a possibly-stuck
+        # normal operation, so it does not take the operation lock. It marks
+        # ABORT before its first await, then cancels and reaps every owned write
+        # (bounded, with late-result supervision) before detaching.
+        # Terminal-state monotonicity: a journal that already closed durably must
+        # not be re-marked ABORT (which would flip flush() from a no-op to an
+        # error). A force close still preempts an in-flight normal close, where
+        # `_closed` is not yet set.
+        if self._closed:
+            return
+        self._abandoned = True
         self._closed = True
         self._store = None
         self._progress_reporter = None
         try:
-            pending_flush_tasks = tuple(self._pending_flush_tasks)
-            for task in pending_flush_tasks:
+            pending_owned = tuple(self._owned_writes)
+            for task in pending_owned:
                 task.cancel()
-            if pending_flush_tasks:
-                await asyncio.gather(*pending_flush_tasks, return_exceptions=True)
+            if pending_owned:
+                await asyncio.gather(*pending_owned, return_exceptions=True)
             pending_progress_task = self._pending_progress_task
             if pending_progress_task is not None:
                 pending_progress_task.cancel()

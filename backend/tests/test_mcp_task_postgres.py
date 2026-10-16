@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
+from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import pytest
@@ -236,3 +237,83 @@ async def test_postgres_repository_holds_share_lock_until_task_commit(postgres_r
     assert thread.user_id == "user-2"
     assert task is not None
     assert task.thread_incarnation == created["incarnation"]
+
+
+@pytest.mark.asyncio
+async def test_postgres_cancel_request_waits_for_poll_claim_and_then_releases_it(postgres_repositories) -> None:
+    """On Postgres the poll claim's row lock orders a concurrent cancel after it.
+
+    The cancel then clears the fresh poll lease, so the cancel worker can claim
+    right away. This pins that the conditional claim UPDATE runs under the
+    ``FOR UPDATE SKIP LOCKED`` row lock rather than replacing it.
+    """
+    thread_repo, task_repo, _session_factory = postgres_repositories
+    created = await thread_repo.create("thread-1", user_id="user-1")
+    now = datetime.now(UTC)
+    await task_repo.create(
+        task_id="task-claim-vs-cancel",
+        user_id="user-1",
+        thread_id="thread-1",
+        expected_thread_incarnation=created["incarnation"],
+        run_id=None,
+        tool_call_id=None,
+        server_name="reports",
+        driver_name="fake",
+        remote_task_id="remote-task-claim-vs-cancel",
+        task_name="Generate report",
+        status="working",
+        result=None,
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required=None,
+        next_poll_at=now - timedelta(seconds=1),
+    )
+    engine = get_engine()
+    assert engine is not None
+    selected = asyncio.Event()
+    resume = asyncio.Event()
+
+    class PauseAfterClaimSelectSession(AsyncSession):
+        paused = False
+
+        async def execute(self, statement, *args, **kwargs):
+            result = await super().execute(statement, *args, **kwargs)
+            if not self.paused and getattr(statement, "is_select", False):
+                self.paused = True
+                selected.set()
+                await resume.wait()
+            return result
+
+    claim_repo = McpTaskRepository(async_sessionmaker(engine, expire_on_commit=False, class_=PauseAfterClaimSelectSession))
+    claim = asyncio.create_task(claim_repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=120, limit=1))
+    cancel = None
+    try:
+        await asyncio.wait_for(selected.wait(), timeout=5)
+        cancel = asyncio.create_task(
+            task_repo.request_cancel(
+                "task-claim-vs-cancel",
+                user_id="user-1",
+                thread_id="thread-1",
+                thread_incarnation=created["incarnation"],
+                requested_at=now,
+            )
+        )
+        await asyncio.sleep(0.2)
+        assert not cancel.done()
+        resume.set()
+        claimed = await asyncio.wait_for(claim, timeout=5)
+        requested = await asyncio.wait_for(cancel, timeout=5)
+    finally:
+        resume.set()
+        for pending in (claim, cancel):
+            if pending is not None and not pending.done():
+                pending.cancel()
+        await asyncio.gather(claim, *([cancel] if cancel is not None else []), return_exceptions=True)
+
+    assert [(row["id"], row["lease_owner"]) for row in claimed] == [("task-claim-vs-cancel", "poller")]
+    assert requested is not None
+    assert requested["lease_owner"] is None
+    cancel_claims = await task_repo.claim_cancel_requests(now=now + timedelta(seconds=1), lease_owner="canceller", lease_seconds=60, limit=1)
+    assert [row["id"] for row in cancel_claims] == ["task-claim-vs-cancel"]

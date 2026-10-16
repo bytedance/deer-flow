@@ -276,6 +276,19 @@ describe("parseSubtaskResult — structured additional_kwargs (preferred path)",
     expect(parsed.status).toBe("in_progress");
   });
 
+  it.each(["constructor", "toString", "__proto__"])(
+    "keeps prototype-named unknown status %s in progress",
+    (status) => {
+      expect(
+        parseSubtaskResult("Task Succeeded. Result: misleading text", {
+          [SUBAGENT_STATUS_KEY]: status,
+          [SUBAGENT_RESULT_BRIEF_KEY]: "not a valid completed result",
+          [SUBAGENT_ERROR_KEY]: "not a valid failure",
+        }),
+      ).toEqual({ status: "in_progress" });
+    },
+  );
+
   it("structured status overrides misleading content", () => {
     const parsed = parseSubtaskResult("Task Succeeded. Result: this is a lie", {
       [SUBAGENT_STATUS_KEY]: "failed",

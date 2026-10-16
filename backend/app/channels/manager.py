@@ -11,7 +11,9 @@ import stat
 import time
 import uuid
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from html import escape
 from pathlib import Path
@@ -100,6 +102,74 @@ STREAM_UPDATE_MIN_CHARS = 60  # flush immediately when this many chars accumulat
 STREAM_MODES = ["messages-tuple", "values"]
 MESSAGE_STREAM_EVENTS = ("messages-tuple", "messages")
 THREAD_BUSY_MESSAGE = "This conversation is already processing another request. Please wait for it to finish and try again."
+
+# IM runs must outlive the request that created them. The manager holds a
+# ``runs.wait`` / ``runs.stream`` request open for the whole run, and that
+# request dies with this Gateway instance: a leader hand-off, a rolling
+# restart, a crash. The Gateway's default ``on_disconnect="cancel"`` would then
+# cancel the run itself; ``continue`` lets it finish and persist its thread
+# state, so the user still finds the answer in the Web UI even though the IM
+# reply is lost with the transport. ``runs.create`` (fire-and-forget) needs no
+# such policy: its request returns as soon as the run is pending.
+CHANNEL_RUN_ON_DISCONNECT = "continue"
+
+
+@dataclass
+class _RunAdmission:
+    """How far one inbound message's run request got, for dedupe release.
+
+    ``requested`` flips right before the run request leaves the manager;
+    ``confirmed`` once the Gateway proved it admitted the run (a run id, a
+    stream frame, a completed response). See ``_keep_dedupe_key_after``.
+    """
+
+    requested: bool = False
+    confirmed: bool = False
+
+
+_RUN_ADMISSION: ContextVar[_RunAdmission | None] = ContextVar("deerflow_channel_run_admission", default=None)
+
+# Transport failures that can only happen after the Gateway read the request:
+# the run was admitted and continues (``on_disconnect: continue``), so a
+# provider redelivery must stay a duplicate. Connection failures and HTTP
+# status errors mean the Gateway never admitted it.
+_RUN_REQUEST_REACHED_GATEWAY_ERRORS = (httpx.ReadTimeout, httpx.ReadError, httpx.RemoteProtocolError)
+
+
+class _RunFailedFrame(RuntimeError):
+    """The stream's ``error`` frame: the run ended, so a retry is not a duplicate."""
+
+
+@contextmanager
+def _run_admission_scope(*, fresh: bool = False) -> Iterator[_RunAdmission]:
+    """Install the admission record for one inbound message.
+
+    The worker loop installs a fresh one per message; direct callers of
+    ``_handle_message`` get one only when none is installed yet.
+    """
+    existing = _RUN_ADMISSION.get()
+    if existing is not None and not fresh:
+        yield existing
+        return
+    admission = _RunAdmission()
+    token = _RUN_ADMISSION.set(admission)
+    try:
+        yield admission
+    finally:
+        _RUN_ADMISSION.reset(token)
+
+
+def _note_run_requested() -> None:
+    if (admission := _RUN_ADMISSION.get()) is not None:
+        admission.requested = True
+
+
+def _note_run_confirmed() -> None:
+    if (admission := _RUN_ADMISSION.get()) is not None:
+        admission.requested = True
+        admission.confirmed = True
+
+
 # Recovery replies must say the turn was dropped: the run was rejected before
 # starting, so the triggering message never reached the agent.
 _STALE_PIN_RETRY_NOTE = "Your message was not processed — please send it again."
@@ -2261,7 +2331,7 @@ class ChannelManager:
             # for them. Scope one trace id per message here -- the worker task
             # is long-lived and reused, so the scope must close with the
             # message rather than leak into the next one.
-            with ensure_trace_context():
+            with ensure_trace_context(), _run_admission_scope(fresh=True):
                 dedupe_recorded = False
                 try:
                     # Dedupe before logging "received" so a provider retrying an
@@ -2280,24 +2350,25 @@ class ChannelManager:
                     )
                     # Deliberately awaited inline: never create a task per message.
                     await self._handle_message(msg)
-                except asyncio.CancelledError:
+                except asyncio.CancelledError as exc:
                     # A cancellation after dedupe admission must make provider
                     # redelivery retryable rather than retaining a TTL-long key for
-                    # work that never completed.
-                    if dedupe_recorded:
+                    # work that never completed -- unless the Gateway may already
+                    # be executing the run, which outlives this worker.
+                    if dedupe_recorded and not self._keep_dedupe_key_after(msg, exc):
                         try:
                             await self._release_inbound_dedupe_key(msg)
                         except Exception:
                             logger.exception("[Manager] failed to release inbound dedupe key during worker cancellation")
                     raise
-                except Exception:
+                except Exception as exc:
                     logger.exception(
                         "[Manager] inbound worker %d failed handling channel=%s chat_id=%s",
                         worker_index,
                         msg.channel_name,
                         msg.chat_id,
                     )
-                    if dedupe_recorded:
+                    if dedupe_recorded and not self._keep_dedupe_key_after(msg, exc):
                         try:
                             await self._release_inbound_dedupe_key(msg)
                         except Exception:
@@ -2368,10 +2439,42 @@ class ChannelManager:
         recorded on receipt so retries arriving *while* the message is being
         handled are still deduped, but if handling fails we must not turn a
         recoverable error into a TTL-long black hole for the same message_id.
+        Generic failure paths ask ``_keep_dedupe_key_after`` first; sites that
+        know the Gateway rejected the run (busy thread, stale pin) release
+        unconditionally.
         """
         key = self._inbound_dedupe_key(msg)
         if key is not None:
             await self._inbound_dedupe_store.release(key)
+
+    @staticmethod
+    def _keep_dedupe_key_after(msg: InboundMessage, exc: BaseException | None) -> bool:
+        """Whether *msg*'s dedupe key must outlive a failed or cancelled handling.
+
+        Runs are created with ``on_disconnect: continue``, so once the Gateway
+        may have admitted this message's run, the run outlives the request and
+        a provider redelivery must stay a duplicate: a second run would repeat
+        the first one's side effects. The key is released, so the redelivery
+        can retry, only while the manager still owns the outcome: before the
+        run request leaves it, when the Gateway provably rejected the request
+        (an HTTP status error, a connection that never opened), or after a
+        terminal ``error`` frame ended the run. ``/wait`` confirms admission
+        only with its final response, so a cancellation or a post-request
+        transport failure while it is in flight counts as admitted rather than
+        risking a duplicate run.
+        """
+        admission = _RUN_ADMISSION.get()
+        if admission is None or not admission.requested or isinstance(exc, _RunFailedFrame):
+            return False
+        if admission.confirmed or isinstance(exc, (asyncio.CancelledError, *_RUN_REQUEST_REACHED_GATEWAY_ERRORS)):
+            logger.info(
+                "[Manager] keeping inbound dedupe key, the run may continue on the Gateway: channel=%s, chat_id=%s, cause=%s",
+                msg.channel_name,
+                msg.chat_id,
+                type(exc).__name__ if exc is not None else "completed",
+            )
+            return True
+        return False
 
     @staticmethod
     def _log_task_error(task: asyncio.Task) -> None:
@@ -2383,6 +2486,10 @@ class ChannelManager:
             logger.error("[Manager] unhandled error in message task: %s", exc, exc_info=exc)
 
     async def _handle_message(self, msg: InboundMessage) -> None:
+        with _run_admission_scope():
+            await self._dispatch_message(msg)
+
+    async def _dispatch_message(self, msg: InboundMessage) -> None:
         msg = _apply_effective_owner(msg)
         try:
             # Commands are handled below because provider adapters consume
@@ -2415,7 +2522,7 @@ class ChannelManager:
                 exc,
             )
             await self._send_error(msg, str(exc))
-        except Exception:
+        except Exception as exc:
             logger.exception(
                 "Error handling message from %s (chat=%s)",
                 msg.channel_name,
@@ -2423,9 +2530,11 @@ class ChannelManager:
             )
             # Transient/unexpected failure: release the dedupe key so a provider
             # redelivery of the same message can recover instead of being dropped
-            # for the dedupe TTL. Stale /model pin admission failures are handled
-            # at the run-creation sites, which know the selection the run used.
-            await self._release_inbound_dedupe_key(msg)
+            # for the dedupe TTL -- unless the run may already be executing.
+            # Stale /model pin admission failures are handled at the
+            # run-creation sites, which know the selection the run used.
+            if not self._keep_dedupe_key_after(msg, exc):
+                await self._release_inbound_dedupe_key(msg)
             await self._send_error(msg, "An internal error occurred. Please try again.")
 
     # -- chat handling -----------------------------------------------------
@@ -3005,6 +3114,7 @@ class ChannelManager:
                 thread_id,
                 len(msg.text or ""),
             )
+            _note_run_requested()
             try:
                 # Capturing the return value is new (issue #4121 Slice 2):
                 # it carries ``run_id``, which the follow-up watcher below
@@ -3029,11 +3139,15 @@ class ChannelManager:
                     await self._release_inbound_dedupe_key(msg)
                     return
                 raise
+            _note_run_confirmed()
             if policy.buffer_followups_on_busy:
                 self._maybe_spawn_followup_watcher(thread_id, result, msg)
             return
 
+        # Only now: ``runs.create`` above has no ``on_disconnect`` parameter.
+        run_kwargs["on_disconnect"] = CHANNEL_RUN_ON_DISCONNECT
         logger.info("[Manager] invoking runs.wait(thread_id=%s, text_len=%d)", thread_id, len(msg.text or ""))
+        _note_run_requested()
         try:
             result = await client.runs.wait(
                 thread_id,
@@ -3053,6 +3167,7 @@ class ChannelManager:
                 await self._send_error(msg, recovery.text)
                 return
             raise
+        _note_run_confirmed()
 
         response_text = _extract_response_text(result)
         pending_clarification = _has_current_turn_clarification(result)
@@ -3121,17 +3236,21 @@ class ChannelManager:
             "context": run_context,
             "stream_mode": list(STREAM_MODES),
             "multitask_strategy": "reject",
+            "on_disconnect": CHANNEL_RUN_ON_DISCONNECT,
         }
         _apply_run_origin(stream_kwargs, msg)
         if owner_headers := _owner_headers(msg):
             stream_kwargs["headers"] = owner_headers
 
+        _note_run_requested()
         try:
             async for chunk in client.runs.stream(
                 thread_id,
                 assistant_id,
                 **stream_kwargs,
             ):
+                # Any frame proves the Gateway admitted the run.
+                _note_run_confirmed()
                 event = getattr(chunk, "event", "")
                 data = getattr(chunk, "data", None)
 
@@ -3149,7 +3268,7 @@ class ChannelManager:
                     )
                     # The v1 SDK yields backend errors as frames, not exceptions.
                     # Keep draining the stream and use the existing failure path.
-                    stream_error = RuntimeError("Agent run failed.")
+                    stream_error = _RunFailedFrame("Agent run failed.")
                 elif event == "values" and isinstance(data, (dict, list)):
                     last_values = data
                     # Clarification text is only in the values snapshot;
@@ -3241,11 +3360,12 @@ class ChannelManager:
                     metadata=_response_metadata_with_clarification(result, msg.metadata, pending_clarification=pending_clarification),
                 )
             )
-            if stream_error is not None:
+            if stream_error is not None and not self._keep_dedupe_key_after(msg, stream_error):
                 # This path swallows its own errors, so _handle_message's generic
                 # handler never runs and never releases the key. Release only
                 # after publishing the final outbound so a provider redelivery
-                # cannot overtake this attempt's terminal reply.
+                # cannot overtake this attempt's terminal reply. A stream that
+                # broke after the run was admitted keeps the key: the run goes on.
                 await self._release_inbound_dedupe_key(msg)
 
     # -- command handling --------------------------------------------------

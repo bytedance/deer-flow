@@ -37,11 +37,21 @@ _INVALID_PROGRAM = textwrap.dedent(
 
     calls = {"n": 0}
 
-    async def _fake_get_mcp_tools(**_kwargs):
-        calls["n"] += 1
-        return ["should-not-publish"]
+    from deerflow.mcp.client import build_servers_config
+    from deerflow.mcp.session_pool import normalized_connection_fingerprint
+    from deerflow.mcp.tools import ServerDiscoveryResult
 
-    tools_module.get_mcp_tools = _fake_get_mcp_tools
+    async def _fake_by_server(*, extensions_config, server_names=None, session_pool=None, personal_user_id=None):
+        calls["n"] += 1
+        groups = {}
+        for name, connection in build_servers_config(extensions_config).items():
+            binding = None
+            if connection.get("transport", "stdio") == "stdio":
+                binding = session_pool.ensure_binding(name, normalized_connection_fingerprint(connection), domain="deployment")
+            groups[name] = ServerDiscoveryResult(tools=("should-not-publish",), pool=session_pool if binding is not None else None, binding=binding)
+        return groups
+
+    tools_module.get_mcp_tools_by_server = _fake_by_server
 
     result = cache_module.get_cached_mcp_tools()
     print(json.dumps({
@@ -66,11 +76,21 @@ _RECOVERY_PROGRAM = textwrap.dedent(
     cfg = Path(os.environ["DEER_FLOW_EXTENSIONS_CONFIG_PATH"])
     calls = {"n": 0}
 
-    async def _fake_get_mcp_tools(**_kwargs):
-        calls["n"] += 1
-        return ["tool"]
+    from deerflow.mcp.client import build_servers_config
+    from deerflow.mcp.session_pool import normalized_connection_fingerprint
+    from deerflow.mcp.tools import ServerDiscoveryResult
 
-    tools_module.get_mcp_tools = _fake_get_mcp_tools
+    async def _fake_by_server(*, extensions_config, server_names=None, session_pool=None, personal_user_id=None):
+        calls["n"] += 1
+        groups = {}
+        for name, connection in build_servers_config(extensions_config).items():
+            binding = None
+            if connection.get("transport", "stdio") == "stdio":
+                binding = session_pool.ensure_binding(name, normalized_connection_fingerprint(connection), domain="deployment")
+            groups[name] = ServerDiscoveryResult(tools=("tool",), pool=session_pool if binding is not None else None, binding=binding)
+        return groups
+
+    tools_module.get_mcp_tools_by_server = _fake_by_server
 
     first = cache_module.get_cached_mcp_tools()
     first_calls = calls["n"]

@@ -187,6 +187,44 @@ def test_execute_command_appends_exit_marker_when_failure_has_output(monkeypatch
     assert box.execute_command("make test") == "5 passed, 1 error\n\nExit Code: 1"
 
 
+def test_execute_command_bridge_timeout_appends_exit_marker() -> None:
+    """The real loop-bridge deadline produces exit code 124 (#6847)."""
+    from deerflow.community.boxlite.provider import _EventLoopThread
+
+    started, cancelled = threading.Event(), threading.Event()
+    terminal_failures = []
+
+    class SlowBox:
+        async def exec(self, *argv, env=None, timeout=None):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+    loop_thread = _EventLoopThread()
+    box = BoxliteBox("box-id", box=SlowBox(), run=loop_thread.run, on_terminal_failure=lambda *args: terminal_failures.append(args))
+    try:
+        assert box.execute_command("sleep 9999", timeout=0.05) == "Error: command timed out\nExit Code: 124"
+        assert started.wait(1)
+        assert cancelled.wait(1), "bridge timeout must cancel its submitted coroutine"
+        assert terminal_failures == []
+    finally:
+        loop_thread.close()
+
+
+@pytest.mark.parametrize("error_message", [None, "execution timed out"])
+def test_execute_command_preserves_sdk_wait_failure_exit_code(error_message: str | None) -> None:
+    """SDK-returned failure results are distinct from bridge TimeoutError."""
+
+    class FailedBox:
+        async def exec(self, *argv, env=None, timeout=None):
+            return types.SimpleNamespace(exit_code=-1, stdout="partial output", stderr="", error_message=error_message)
+
+    box = BoxliteBox("box-id", box=FailedBox(), run=_fake_run)
+    assert box.execute_command("sleep 9999", timeout=5) == "partial output\nExit Code: -1"
+
+
 def test_read_file_supports_optional_line_ranges(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[str, ...]] = []
 

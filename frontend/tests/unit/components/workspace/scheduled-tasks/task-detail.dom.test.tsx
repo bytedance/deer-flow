@@ -11,6 +11,7 @@ import {
 import type { ReactNode } from "react";
 
 import { TaskDetail } from "@/components/workspace/scheduled-tasks/task-detail";
+import type { ChannelConnection } from "@/core/channels/types";
 import { I18nProvider } from "@/core/i18n/context";
 import type {
   ScheduledTask,
@@ -20,7 +21,14 @@ import type {
 import { expectNoRawIdentifiers } from "../../../helpers/readable";
 import { loadLiveMinuteTask } from "../../../helpers/scheduled-fixtures";
 
-const { fetchRuns } = rs.hoisted(() => ({ fetchRuns: rs.fn() }));
+const { fetchRuns, listConnections } = rs.hoisted(() => ({
+  fetchRuns: rs.fn(),
+  listConnections: rs.fn(async (): Promise<ChannelConnection[]> => []),
+}));
+
+rs.mock("@/core/channels/api", () => ({
+  listChannelConnections: listConnections,
+}));
 
 rs.mock("@/core/scheduled-tasks/api", () => ({
   fetchScheduledTaskRuns: fetchRuns,
@@ -55,6 +63,8 @@ afterEach(() => {
   cleanup();
   clients.splice(0).forEach((client) => client.clear());
   fetchRuns.mockReset();
+  listConnections.mockReset();
+  listConnections.mockResolvedValue([]);
   document.cookie = "locale=; max-age=0; path=/";
 });
 
@@ -154,6 +164,40 @@ function renderDetail(
 }
 
 describe("TaskDetail", () => {
+  test("shows the additional group's name, never its binding or chat identifier", async () => {
+    listConnections.mockResolvedValue([
+      {
+        id: "connection-secret-id",
+        provider: "feishu",
+        status: "connected",
+        workspace_id: "oc_secret_chat",
+        workspace_name: "Planning team",
+        scopes: [],
+        metadata: { chat_id: "oc_secret_chat", chat_type: "group" },
+      },
+    ]);
+    renderDetail(
+      task({ notification_group_connection_id: "connection-secret-id" }),
+    );
+    await screen.findByText("Planning team");
+    const section = screen.getByTestId("scheduled-task-notification-group");
+    expect(section.textContent).toContain(
+      "Your personal notifications stay unchanged",
+    );
+    expect(section.textContent).not.toContain("connection-secret-id");
+    expect(section.textContent).not.toContain("oc_secret_chat");
+  });
+
+  test("retains an unavailable group indication when its connection is missing", async () => {
+    renderDetail(
+      task({ notification_group_connection_id: "missing-connection-id" }),
+    );
+    await screen.findByText("Selected group unavailable");
+    expect(
+      screen.getByTestId("scheduled-task-notification-group").textContent,
+    ).not.toContain("missing-connection-id");
+  });
+
   test("an active task shows Runs, Stops when, goal, Does, notes and history without raw identifiers", async () => {
     const view = renderDetail(
       task({

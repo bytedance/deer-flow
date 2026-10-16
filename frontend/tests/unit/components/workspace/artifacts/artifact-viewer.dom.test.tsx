@@ -83,6 +83,38 @@ describe("ArtifactViewer", () => {
     });
   });
 
+  it("resolves local report images without changing external images or links", async () => {
+    mockedLoadArtifactContent.mockResolvedValue({
+      content: [
+        "![Absolute](/mnt/user-data/outputs/chart.png)",
+        "![Relative](./chart.png)",
+        "![External](https://example.com/chart.png)",
+        "[External link](https://example.com/report)",
+      ].join("\n\n"),
+      url: urlOfArtifact({ filepath, threadId }),
+      truncated: false,
+      previewBytes: 200,
+      sha256: undefined,
+      totalBytes: 200,
+    });
+    renderViewer();
+    for (const alt of ["Absolute", "Relative"]) {
+      const image = await screen.findByAltText(alt);
+      expect(image.getAttribute("src")).toBe(
+        urlOfArtifact({
+          filepath: "/mnt/user-data/outputs/chart.png",
+          threadId,
+        }),
+      );
+    }
+    expect((await screen.findByAltText("External")).getAttribute("src")).toBe(
+      "https://example.com/chart.png",
+    );
+    expect(
+      screen.getByRole("link", { name: "External link" }).getAttribute("href"),
+    ).toBe("https://example.com/report");
+  });
+
   it("fetches the whole file when a truncated preview is expanded", async () => {
     mockedLoadArtifactContent.mockImplementation(async ({ full }) => ({
       content: full ? "# Full report\n\nEverything." : "# Full rep",

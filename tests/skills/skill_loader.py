@@ -3,6 +3,7 @@
 Skills live in skills/public/<name>/scripts/generate.py and are NOT a package,
 so tests load them via importlib. Tests then mock the module's `requests`.
 """
+
 import importlib.util
 import sys
 from pathlib import Path
@@ -19,7 +20,16 @@ def load(skill_name: str):
     spec = importlib.util.spec_from_file_location(mod_name, path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[mod_name] = module  # standard pattern; lets the module resolve itself
-    spec.loader.exec_module(module)
+    # Bytecode caching would drop a scripts/__pycache__ directory into the
+    # committed skill tree, and the skill review scans the live directory, so
+    # local runs would permanently fail the package review with a
+    # package-undecodable-script finding on the .pyc.
+    previous_dont_write_bytecode = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = previous_dont_write_bytecode
     return module
 
 

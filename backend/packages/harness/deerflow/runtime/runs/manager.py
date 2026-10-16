@@ -254,6 +254,8 @@ class RunRecord:
     ownership_lost: bool = False
     stop_reason: str | None = None
     goal_verdict: dict[str, Any] | None = None
+    human_input_request: dict[str, Any] | None = None
+    terminal_status_persisted: bool = True
     # Process-local finalization barrier for a worker-installed scheduled goal.
     scheduled_goal_cleanup_pending: bool = False
     # Process-local renewal barrier: the worker stages its terminal status in
@@ -581,6 +583,9 @@ class RunManager:
             if updated is False:
                 existing = await self._store.get(run_id)
                 requested_status = kwargs.get("status")
+                if existing is not None and existing.get("status") == requested_status:
+                    if record is not None and requested_status == record.status.value:
+                        record.terminal_status_persisted = True
                 if existing is not None and existing.get("status") != requested_status:
                     existing_status = existing.get("status")
                     logger.warning(
@@ -607,6 +612,9 @@ class RunManager:
                 )
                 if recovered is False:
                     logger.warning("Run completion update for %s affected no rows after row recreation", run_id)
+                    return
+            if record is not None and kwargs.get("status") in (None, record.status.value):
+                record.terminal_status_persisted = True
         except Exception:
             logger.warning("Failed to persist run completion for %s", run_id, exc_info=True)
 
@@ -1059,6 +1067,8 @@ class RunManager:
                 return
             record.status = status
             record.updated_at = _now_iso()
+            if status not in (RunStatus.pending, RunStatus.running):
+                record.terminal_status_persisted = self._store is None
             if error is not None:
                 record.error = error
             if stop_reason is not None:
@@ -1067,6 +1077,9 @@ class RunManager:
                 record.goal_verdict = copy.deepcopy(goal_verdict)
         if persist:
             persisted = await self._persist_status(record, status, error=error, stop_reason=stop_reason)
+            if status not in (RunStatus.pending, RunStatus.running):
+                async with self._lock:
+                    record.terminal_status_persisted = persisted
             if not persisted and self.heartbeat_enabled and status == RunStatus.success and not record.ownership_lost:
                 await self._mark_ownership_lost(
                     record,
@@ -1088,6 +1101,9 @@ class RunManager:
             error = record.error
             stop_reason = record.stop_reason
         persisted = await self._persist_status(record, status, error=error, stop_reason=stop_reason)
+        if status not in (RunStatus.pending, RunStatus.running):
+            async with self._lock:
+                record.terminal_status_persisted = persisted
         if not persisted and self.heartbeat_enabled and status == RunStatus.success and not record.ownership_lost:
             await self._mark_ownership_lost(
                 record,
@@ -1133,6 +1149,8 @@ class RunManager:
         except Exception:
             async with self._lock:
                 record = self._runs.get(run_id)
+                if record is not None:
+                    record.terminal_status_persisted = False
             if record is not None:
                 await self._mark_ownership_lost(
                     record,
@@ -1157,6 +1175,11 @@ class RunManager:
             goal_verdict=goal_verdict,
             persist=not result.finalized,
         )
+        if result.finalized:
+            async with self._lock:
+                record = self._runs.get(run_id)
+                if record is not None:
+                    record.terminal_status_persisted = True
         return None
 
     async def _ensure_delivery_receipt(self, record: RunRecord) -> bool:
@@ -2529,11 +2552,10 @@ class RunManager:
         during the drain keeps its real terminal status instead of being
         blanket-overwritten. Runs whose terminal status is staged in memory with
         a deferred commit are still writing their final duration checkpoint and
-        then commit that status, so they are awaited in the same bounded drain —
-        without cancellation, which would skip their terminal tail (#5542),
-        exactly as ``_renew_leases`` keeps them active through
-        ``_awaits_terminal_commit``. The whole drain, including the trailing status
-        persistence, is bounded by ``timeout`` so a run stuck in cleanup (or a
+        then commit that status. Committed terminal workers may still be running
+        hooks, publishing END or closing resources. Both remain visible in this
+        bounded drain and are awaited without cancellation (#5542). The whole
+        drain, including the trailing status persistence, is bounded by ``timeout`` so a run stuck in cleanup (or a
         slow store under DB pressure) cannot hang worker shutdown — the
         precondition for the signal-reentrancy deadlock guarded by
         ``app.gateway.app._SHUTDOWN_HOOK_TIMEOUT_SECONDS``. Runs still active
@@ -2544,12 +2566,11 @@ class RunManager:
 
         async with self._lock:
             inflight = [record for record in self._runs.values() if record.status in (RunStatus.pending, RunStatus.running) and record.task is not None and not record.task.done()]
-            # A run whose terminal status is staged in memory (deferred commit)
-            # keeps writing the duration checkpoint before committing that
-            # status. Drain it too — but never cancel it — so the write lands
-            # while the checkpointer is still open. ``_renew_leases`` already
-            # treats these runs as active through ``_awaits_terminal_commit``.
-            finalizing = [record for record in self._runs.values() if self._awaits_terminal_commit(record) and record.status not in (RunStatus.pending, RunStatus.running) and record.task is not None and not record.task.done()]
+            # Terminal workers still own finalization, including after the
+            # durable commit (hooks, END and journal/sandbox cleanup). Await them
+            # without cancellation so resource teardown cannot overtake a worker
+            # that settles within this drain's budget.
+            finalizing = [record for record in self._runs.values() if record.status not in (RunStatus.pending, RunStatus.running) and record.task is not None and not record.task.done()]
             finalizing_ids = {record.run_id for record in finalizing}
             for record in inflight:
                 record.abort_action = "interrupt"
