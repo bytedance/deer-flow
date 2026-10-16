@@ -164,6 +164,7 @@ export type MockAPIOptions = {
   features?: {
     agentsApiEnabled?: boolean;
     browserControlEnabled?: boolean;
+    imageGenerationManagementEnabled?: boolean;
     mcpTasksEnabled?: boolean;
     knowledgeScopeSelectionEnabled?: boolean;
     /** Existing task flags default to true; optional group notifications default to false. */
@@ -650,6 +651,8 @@ export function mockLangGraphAPI(
   const featureFlags = {
     agentsApiEnabled: options?.features?.agentsApiEnabled ?? true,
     browserControlEnabled: options?.features?.browserControlEnabled ?? true,
+    imageGenerationManagementEnabled:
+      options?.features?.imageGenerationManagementEnabled ?? true,
     mcpTasksEnabled: options?.features?.mcpTasksEnabled ?? true,
     knowledgeScopeSelectionEnabled:
       options?.features?.knowledgeScopeSelectionEnabled ?? false,
@@ -2369,6 +2372,9 @@ export function mockLangGraphAPI(
         body: JSON.stringify({
           agents_api: { enabled: featureFlags.agentsApiEnabled },
           browser_control: { enabled: featureFlags.browserControlEnabled },
+          image_generation_management: {
+            enabled: featureFlags.imageGenerationManagementEnabled,
+          },
           mcp_tasks: { enabled: featureFlags.mcpTasksEnabled },
           knowledge_base: {
             scope_selection_enabled:

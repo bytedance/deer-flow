@@ -672,6 +672,7 @@ def test_policy_scoped_create_excludes_local_config_mounts_below_skills_root(
 
     backend.create = _create
     provider._backend = backend
+    monkeypatch.setattr(provider, "_managed_image_profile", lambda: None)
     monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready", lambda *_a, **_k: True)
     monkeypatch.setattr(provider, "_get_extra_mounts", lambda *_a, **_k: [])
     monkeypatch.setattr(

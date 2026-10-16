@@ -710,6 +710,17 @@ async def test_editing_a_restored_slash_draft_reopens_the_palette():
 
 
 @pytest.mark.asyncio
+async def test_spinner_does_not_render_after_test_screen_is_removed():
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._streaming = True
+
+    # Textual can deliver one queued interval tick while run_test exits.
+    app._tick_spinner()
+
+
+@pytest.mark.asyncio
 async def test_refused_skill_activation_is_restored_as_recorded_in_history():
     app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
 
