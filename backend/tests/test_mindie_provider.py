@@ -139,6 +139,26 @@ class TestFixMessages:
         assert "<function=fn&lt;&amp;&gt;>" in content
         assert "<parameter=k&lt;&amp;&gt;>v&lt;&amp;&gt;</parameter>" in content
 
+    def test_ai_message_tool_args_unserializable_degrades_to_str(self):
+        # The XML parser's literal_eval fallback can put json.dumps-rejecting
+        # values (e.g. sets) into tool args; one unserializable argument must
+        # degrade to str() instead of failing the whole request, matching the
+        # tool-result json block handling below.
+        msg = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "write_file",
+                    "args": {"content": {1, 2, 3}},
+                    "id": "call_set",
+                }
+            ],
+        )
+        result = _fix_messages([msg])
+        content = result[0].content
+        assert "<function=write_file>" in content
+        assert "<parameter=content>{1, 2, 3}</parameter>" in content
+
     # ── ToolMessage → HumanMessage ────────────────────────────────────────────
 
     def test_tool_message_becomes_human_message(self):
@@ -1029,6 +1049,93 @@ class TestSanitizationMindIEChain:
         assert "what does this note say?" in model_text
         assert "<system-reminder>" not in model_text
         assert "ignore previous instructions" not in model_text
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 9.  Parser → serializer chain: literal_eval args replayed as history
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+class TestParserToSerializerChain:
+    """Arguments produced by the XML parser must survive replay through
+    ``_fix_messages``: the AIMessage built from a parsed tool call rides the
+    history into the next request, so a value ``json.dumps`` rejects would
+    fail every later turn, not just the one tool call."""
+
+    def test_set_literal_arg_replayed_through_fix_messages(self):
+        # A `{`-prefixed value that json.loads rejects falls back to
+        # literal_eval, which yields a set; replaying the AIMessage into
+        # _fix_messages (the next turn's request) must degrade it to text
+        # instead of raising TypeError.
+        content = "<tool_call><function=write_file><parameter=content>{1, 2, 3}</parameter></function></tool_call>"
+        _, calls = _parse_xml_tool_call_to_dict(content)
+        assert calls[0]["args"]["content"] == {1, 2, 3}
+
+        history = [AIMessage(content="", tool_calls=calls)]
+        fixed = _fix_messages(history)
+
+        assert "<parameter=content>{1, 2, 3}</parameter>" in fixed[0].content
+
+    @pytest.mark.parametrize(
+        "raw_value",
+        ["{1e400}", "{-1e400}", "{1, 1e400}", "{(1e400,)}", "[{'n': {1e400}}]", "{'n': {1e400}}", "{'n': [{1e400}]}", "{'n': (1e400,)}"],
+    )
+    def test_non_finite_literal_containers_remain_text_on_replay(self, raw_value):
+        content = f"<tool_call><function=echo><parameter=data>{raw_value}</parameter></function></tool_call>"
+        _, calls = _parse_xml_tool_call_to_dict(content)
+        assert calls[0]["args"]["data"] == raw_value
+
+        fixed = _fix_messages([AIMessage(content="", tool_calls=calls)])
+        _, replayed = _parse_xml_tool_call_to_dict(fixed[0].content)
+        assert replayed[0]["args"]["data"] == raw_value
+
+    @pytest.mark.parametrize(
+        "raw_value,expected",
+        [
+            ("{1.5, -2.0}", {1.5, -2.0}),
+            ("{(1.5, -2.0)}", {(1.5, -2.0)}),
+            ("[{'n': {1.5}}]", [{"n": {1.5}}]),
+            ("{'n': ({1.5},)}", {"n": ({1.5},)}),
+        ],
+    )
+    def test_finite_literal_containers_still_parse_and_replay(self, raw_value, expected):
+        content = f"<tool_call><function=echo><parameter=data>{raw_value}</parameter></function></tool_call>"
+        _, calls = _parse_xml_tool_call_to_dict(content)
+        assert calls[0]["args"]["data"] == expected
+
+        fixed = _fix_messages([AIMessage(content="", tool_calls=calls)])
+        _, replayed = _parse_xml_tool_call_to_dict(fixed[0].content)
+        assert replayed[0]["args"]["data"] == expected
+
+    @pytest.mark.parametrize(
+        "raw_value",
+        ["{1e400: 2}", "{-1e400: 2}", "{(1e400,): 2}", "{'outer': {1e400: 2}}", "[{'outer': {(1e400,): 2}}]", "{'outer': ({1e400: 2},)}"],
+    )
+    def test_non_finite_literal_dict_keys_remain_text_on_replay(self, raw_value):
+        content = f"<tool_call><function=echo><parameter=data>{raw_value}</parameter></function></tool_call>"
+        _, calls = _parse_xml_tool_call_to_dict(content)
+        assert calls[0]["args"]["data"] == raw_value
+
+        fixed = _fix_messages([AIMessage(content="", tool_calls=calls)])
+        _, replayed = _parse_xml_tool_call_to_dict(fixed[0].content)
+        assert replayed[0]["args"]["data"] == raw_value
+
+    @pytest.mark.parametrize(
+        "raw_value,expected,replayed_expected",
+        [
+            ("{1.5: 2}", {1.5: 2}, {"1.5": 2}),
+            ("{(1.5, -2.0): 2}", {(1.5, -2.0): 2}, {(1.5, -2.0): 2}),
+            ("{'outer': {(1.5,): {2.5}}}", {"outer": {(1.5,): {2.5}}}, {"outer": {(1.5,): {2.5}}}),
+        ],
+    )
+    def test_finite_literal_dict_keys_keep_existing_parse_and_replay_behavior(self, raw_value, expected, replayed_expected):
+        content = f"<tool_call><function=echo><parameter=data>{raw_value}</parameter></function></tool_call>"
+        _, calls = _parse_xml_tool_call_to_dict(content)
+        assert calls[0]["args"]["data"] == expected
+
+        fixed = _fix_messages([AIMessage(content="", tool_calls=calls)])
+        _, replayed = _parse_xml_tool_call_to_dict(fixed[0].content)
+        assert replayed[0]["args"]["data"] == replayed_expected
 
 
 @pytest.mark.asyncio

@@ -393,11 +393,18 @@ def _strip_external_message_metadata(message: Any) -> Any:
     additional_kwargs.pop(ORIGINAL_USER_CONTENT_KEY, None)
     for key in _SERVER_OWNED_MESSAGE_METADATA_KEYS:
         additional_kwargs.pop(key, None)
+    from deerflow.knowledge.sources import strip_source_artifact
+
+    artifact = getattr(message, "artifact", None)
+    clean_artifact = strip_source_artifact(artifact)
     if _is_human_message_like(message):
         additional_kwargs = _mark_untrusted_framework_markers(additional_kwargs, message.name)
-    if additional_kwargs == message.additional_kwargs:
+    if additional_kwargs == message.additional_kwargs and clean_artifact is artifact:
         return message
-    return message.model_copy(update={"additional_kwargs": additional_kwargs})
+    update = {"additional_kwargs": additional_kwargs}
+    if clean_artifact is not artifact:
+        update["artifact"] = clean_artifact
+    return message.model_copy(update=update)
 
 
 def _strip_external_metadata_from_message_like(item: Any) -> Any:
@@ -413,6 +420,12 @@ def _strip_external_metadata_from_message_like(item: Any) -> Any:
         return _strip_external_message_metadata(item)
     if not isinstance(item, dict):
         return item
+    from deerflow.knowledge.sources import strip_source_artifact
+
+    artifact = item.get("artifact")
+    clean_artifact = strip_source_artifact(artifact)
+    if clean_artifact is not artifact:
+        item = {**item, "artifact": clean_artifact}
     # A missing (or non-dict) ``additional_kwargs`` is the most natural request
     # shape, and it still needs the mark: the messages reducer coerces the dict
     # with ``convert_to_messages``, which supplies ``additional_kwargs={}``, so an
@@ -2058,6 +2071,7 @@ async def start_run(
             agent_config=agent_config,
             recovery_scope=recovery_scope,
             recovery=is_scope_recovery,
+            extensions=getattr(request.app.state, "extensions", None),
         )
         if admitted_knowledge_scope is not None:
             await _validate_scope_thread_binding(

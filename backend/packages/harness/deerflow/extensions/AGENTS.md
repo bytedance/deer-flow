@@ -1,5 +1,16 @@
 ### Python Extension System (Runtime and Distribution)
 
+`registry.knowledge_provider(name, provider)` (extension-api 0.2.7) adds an
+operator-installed read-only `deerflow.knowledge.RetrievalProvider`. The host
+validates advertised async operations, attributes entries and rolls them back
+positionally with every other contribution. Provider configuration, API calls
+and response mapping stay in extensions; core owns capabilities, Scope
+admission and source validation. Catalog and execution resolve the same loaded
+snapshot, with run-bound snapshots taking precedence over the singleton.
+See [the contract](../../../../docs/KNOWLEDGE.md) and the packaged
+`examples/deerflow-extension-knowledge` sample. Older registry implementations
+return False; never silently ignore unsupported registration.
+
 Third-party Python packages can expose an `install(registry, config)` function and be
 loaded, in deterministic order, from the startup-only top-level `plugins:` list in
 `config.yaml`. Keep this list out of `extensions_config.json`: the latter is writable
@@ -418,14 +429,16 @@ Tests for hook behavior must create and invoke their own hook fixtures.
 
 ## Full-stack contributions
 
-`registry.plugin(PluginContribution(...))` registers optional browser code, backend actions
-and model tools under one deployment-owned namespace. The public method defaults to False
-for older hosts; accepted contributions share source attribution and positional rollback.
-`plugins.py` in Gateway serves descriptors, hashed JS assets and authenticated action calls.
-No online settings write API is added. `plugin_tools.py` joins normal tool assembly with
-the run's extension snapshot; task delegation passes that snapshot explicitly. Browser
-public-field projection is an allowlist. Package code is trusted, not sandboxed. See
-`docs/full-stack-plugins.md` and the independently packaged bookmark example.
+`registry.plugin(PluginContribution(...))` adds browser/backend/tools under one
+namespace; old hosts return False. Preserve source attribution and positional rollback.
+Gateway `plugins.py`: descriptors, hashed JS, authenticated actions; no online
+settings write API. `plugin_tools.py` uses the run snapshot, passed explicitly
+to delegation. Browser fields are allowlisted. Code is trusted, not sandboxed.
+
+`ModelTool` defaults to JSON content. Opt-in `content_and_artifact` requires
+`PluginToolResult`. Require string artifact keys throughout; validate JSON jointly
+within 64 KiB and snapshot artifacts. Keep identity, policy/deadline and citation
+gates. Test ToolNode and checkpoint replay. See `docs/full-stack-plugins.md`.
 
 Full Agent run control is an optional `deerflow_extension_api.AgentRuns` handle
 on action/tool contexts and the request resolver. Gateway owns principal binding,

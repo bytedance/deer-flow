@@ -435,6 +435,46 @@ def test_legacy_non_mapping_template_values_are_forwarded_not_rejected(monkeypat
     assert captured["extra_body"] == expected_extra_body
 
 
+@pytest.mark.parametrize(
+    ("thinking_enabled", "when_thinking_enabled", "expected"),
+    [
+        (False, {"extra_body": None, "thinking": {"type": "enabled"}}, {"thinking": {"type": "disabled"}}),
+        (True, {"extra_body": None, "thinking": {"type": "enabled"}}, {"extra_body": None, "thinking": {"type": "enabled"}}),
+        (False, {"extra_body": None}, {}),
+        (False, {"thinking": None}, {}),
+        (False, {"extra_body": {"thinking": None}}, {}),
+        (True, {"extra_body": {"thinking": None}}, {"extra_body": {"thinking": None}}),
+        (False, {"extra_body": {"thinking": None}, "thinking": {"type": "enabled"}}, {"thinking": {"type": "disabled"}}),
+        (
+            False,
+            {"extra_body": {"thinking": None, "chat_template_kwargs": {"enable_thinking": True}}},
+            {"extra_body": {"chat_template_kwargs": {"enable_thinking": False}}},
+        ),
+    ],
+    ids=["thinking-off", "thinking-on", "extra-body-null", "thinking-null", "nested-null-off", "nested-null-on", "nested-null-native-fallback", "nested-null-vllm-fallback"],
+)
+def test_legacy_null_template_values_build_on_both_thinking_paths(monkeypatch, thinking_enabled, when_thinking_enabled, expected):
+    """A template key left blank in ``config.yaml`` (``extra_body:``, ``thinking:``) loads as an
+    explicit ``None`` — and ``dict.get(key, {})`` only defaults an *absent* key. The legacy
+    disable path therefore called ``.get`` on ``None`` and every ``create_chat_model`` for the
+    profile crashed with ``AttributeError`` — on the default ``thinking_enabled=False`` path,
+    i.e. title generation, summarization, subagent and lead-agent builds. A null template
+    value must fall through the disable-path dialect heuristics like an absent one, as the
+    guarded sibling accesses (``_infer_dialect``, the contract path) already do, while the
+    enable path keeps forwarding the template unchanged."""
+    model = _make_model("legacy-null", supports_thinking=True, when_thinking_enabled=when_thinking_enabled)
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="legacy-null", thinking_enabled=thinking_enabled)
+
+    for key in ("extra_body", "thinking"):
+        if key in expected:
+            assert captured[key] == expected[key]
+        else:
+            assert key not in captured
+
+
 @pytest.mark.parametrize("thinking_enabled", [True, False], ids=["thinking-on", "thinking-off"])
 def test_legacy_when_thinking_enabled_deep_merges_into_the_base_extra_body(monkeypatch, thinking_enabled):
     """The legacy enable path used ``dict.update``, so ``when_thinking_enabled.extra_body``
@@ -2512,3 +2552,229 @@ def test_legacy_profiles_are_untouched_by_the_contract_machinery(monkeypatch):
 
     assert captured["extra_body"] == {"thinking": {"type": "disabled"}}
     assert captured["reasoning_effort"] == "minimal"
+
+
+# ---------------------------------------------------------------------------
+# gpt-6 → OpenAI Responses API default routing (issue #6841)
+# ---------------------------------------------------------------------------
+
+
+def test_gpt6_model_routes_through_responses_api_by_default(monkeypatch):
+    """A gpt-6 model configured with ``langchain_openai:ChatOpenAI`` must receive
+    ``use_responses_api=true`` + ``output_version=responses/v1`` by default, so
+    tool use goes through ``/v1/responses`` instead of the chat-completions
+    endpoint that OpenAI rejects for the gpt-6 family (locked
+    langchain-openai==1.2.1 has no gpt-6 routing branch).
+    """
+    from langchain_openai import ChatOpenAI
+
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_BASE", raising=False)
+
+    model = _make_model("gpt-6.1-sol", use="langchain_openai:ChatOpenAI")
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
+    factory_module.create_chat_model(name="gpt-6.1-sol")
+
+    assert captured.get("use_responses_api") is True
+    assert captured.get("output_version") == "responses/v1"
+
+
+def test_gpt6_explicit_responses_config_not_overridden(monkeypatch):
+    """If the operator already set ``use_responses_api``/``output_version`` on a
+    gpt-6 model, the factory must not clobber the explicit value.
+    """
+    from langchain_openai import ChatOpenAI
+
+    model = ModelConfig(
+        name="gpt-6-custom",
+        display_name="GPT-6 custom",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="gpt-6.1-sol",
+        use_responses_api=False,  # operator deliberately opted out
+        output_version=None,
+    )
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
+    factory_module.create_chat_model(name="gpt-6-custom")
+
+    assert captured.get("use_responses_api") is False
+    assert captured.get("output_version") is None
+
+
+def test_non_gpt6_openai_model_not_rerouted(monkeypatch):
+    """The default must not fire for non-gpt-6 OpenAI models (gpt-4o, gpt-5, …),
+    which keep their historical chat-completions routing.
+    """
+    from langchain_openai import ChatOpenAI
+
+    model = _make_model("gpt-4o", use="langchain_openai:ChatOpenAI")
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
+    factory_module.create_chat_model(name="gpt-4o")
+
+    assert captured.get("use_responses_api") is None
+    assert captured.get("output_version") is None
+
+
+def test_gpt6_custom_base_url_not_rerouted(monkeypatch):
+    """A gpt-6 model pointed at an OpenAI-compatible gateway/proxy via ``base_url``
+    must not be silently re-pointed at ``/responses`` — many gateways (LiteLLM,
+    vLLM, one-api, …) do not implement it, so the operator owns routing there.
+    """
+    from langchain_openai import ChatOpenAI
+
+    model = ModelConfig(
+        name="gpt-6-gateway",
+        display_name="GPT-6 via gateway",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="gpt-6.1-sol",
+        base_url="https://my-gateway.example.com/v1",
+    )
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
+    factory_module.create_chat_model(name="gpt-6-gateway")
+
+    assert captured.get("use_responses_api") is None
+    assert captured.get("output_version") is None
+
+
+def test_gpt6_openai_api_base_alias_not_rerouted(monkeypatch):
+    """The legacy ``openai_api_base`` alias is treated like a custom endpoint:
+    after ``_normalize_openai_base_url`` it is the canonical key the gate reads.
+    """
+    from langchain_openai import ChatOpenAI
+
+    model = ModelConfig(
+        name="gpt-6-alias",
+        display_name="GPT-6 alias endpoint",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="gpt-6.1-sol",
+        openai_api_base="https://my-gateway.example.com/v1",
+    )
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
+    factory_module.create_chat_model(name="gpt-6-alias")
+
+    assert captured.get("use_responses_api") is None
+    assert captured.get("output_version") is None
+
+
+def test_gpt6_azure_not_rerouted(monkeypatch):
+    """``AzureChatOpenAI`` is a ``BaseChatOpenAI`` subclass, but Azure's Responses
+    API additionally requires ``api-version >= 2025-04-01-preview``; an Azure
+    gpt-6 deployment must not be silently flipped.
+    """
+    from langchain_openai import AzureChatOpenAI
+
+    model = ModelConfig(
+        name="gpt-6-azure",
+        display_name="GPT-6 Azure",
+        description=None,
+        use="langchain_openai:AzureChatOpenAI",
+        model="gpt-6.1-sol",
+        azure_endpoint="https://example.openai.azure.com/",
+        azure_deployment="gpt-6-deploy",
+        api_version="2024-02-01",
+    )
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(AzureChatOpenAI, captured))
+    factory_module.create_chat_model(name="gpt-6-azure")
+
+    assert captured.get("use_responses_api") is None
+    assert captured.get("output_version") is None
+
+
+def test_gpt6_output_version_only_still_routes(monkeypatch):
+    """An operator who pinned only ``output_version`` (implying Responses
+    formatting) without ``use_responses_api`` must still get Responses routing —
+    otherwise gpt-6 stays on /v1/chat/completions and the issue #6841 400s
+    silently reappear. The explicit ``output_version`` is preserved.
+    """
+    from langchain_openai import ChatOpenAI
+
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_BASE", raising=False)
+
+    model = ModelConfig(
+        name="gpt-6-output-version",
+        display_name="GPT-6 pinned output version",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="gpt-6.1-sol",
+        output_version="responses/v1",
+    )
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
+    factory_module.create_chat_model(name="gpt-6-output-version")
+
+    assert captured.get("use_responses_api") is True
+    assert captured.get("output_version") == "responses/v1"
+
+
+@pytest.mark.parametrize("endpoint_env", ["OPENAI_BASE_URL", "OPENAI_API_BASE"])
+def test_gpt6_env_var_base_url_not_rerouted(monkeypatch, endpoint_env):
+    """A gpt-6 model with no ``base_url`` in settings but a gateway wired purely
+    via either supported endpoint env var must not be re-pointed at ``/responses``.
+    Clear both variables first so each case exercises its own gate.
+    """
+    from langchain_openai import ChatOpenAI
+
+    model = _make_model("gpt-6.1-sol", use="langchain_openai:ChatOpenAI")
+    cfg = _make_app_config([model])
+
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_BASE", raising=False)
+    monkeypatch.setenv(endpoint_env, "https://env-gateway.example.com/v1")
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
+    factory_module.create_chat_model(name="gpt-6.1-sol")
+
+    assert captured.get("use_responses_api") is None
+    assert captured.get("output_version") is None
+
+
+def test_gpt6_explicit_responses_config_wins_on_custom_endpoint(monkeypatch):
+    """An explicit ``use_responses_api`` is the operator's routing decision and
+    must win even on a custom endpoint: the explicit-key check precedes the
+    endpoint gate, so a ``base_url``-configured gpt-6 model keeps its explicit
+    value instead of being silently left on default chat-completions routing.
+    """
+    from langchain_openai import ChatOpenAI
+
+    model = ModelConfig(
+        name="gpt-6-gateway-explicit",
+        display_name="GPT-6 gateway with explicit routing",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="gpt-6.1-sol",
+        base_url="https://my-gateway.example.com/v1",
+        use_responses_api=True,
+        output_version="responses/v1",
+    )
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
+    factory_module.create_chat_model(name="gpt-6-gateway-explicit")
+
+    assert captured.get("use_responses_api") is True
+    assert captured.get("output_version") == "responses/v1"

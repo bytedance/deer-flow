@@ -1,5 +1,6 @@
 """Tests for AioSandbox concurrent command serialization (#1433)."""
 
+import logging
 import os
 import shlex
 import subprocess
@@ -2901,6 +2902,77 @@ class TestDownloadFile:
 class TestClose:
     """Verify AioSandbox.close() tears down the host-side HTTP client (#2872)."""
 
+    def test_close_waits_for_download_stream_cleanup(self, sandbox):
+        reading = threading.Event()
+        allow_read = threading.Event()
+        closing = threading.Event()
+        stream_closed = threading.Event()
+        close_observed_cleanup = []
+        outcomes = []
+
+        class ObservedLock:
+            def __init__(self):
+                self.lock = threading.Lock()
+                self.waited_for_reader = False
+
+            def __enter__(self):
+                if threading.current_thread().name == "download-close":
+                    if self.lock.acquire(blocking=False):
+                        closing.set()
+                        return
+                    self.waited_for_reader = True
+                    closing.set()
+                self.lock.acquire()
+
+            def __exit__(self, *args):
+                self.lock.release()
+
+        def stream():
+            try:
+                reading.set()
+                assert allow_read.wait(timeout=5)
+                yield b"data"
+            finally:
+                stream_closed.set()
+
+        def close_client():
+            close_observed_cleanup.append(stream_closed.is_set())
+
+        http_client = MagicMock(spec=["close"])
+        http_client.close.side_effect = close_client
+        sandbox._client._client_wrapper = SimpleNamespace(httpx_client=SimpleNamespace(httpx_client=http_client))
+        sandbox._client.file.download_file.return_value = stream()
+        sandbox._lock = ObservedLock()
+
+        def download():
+            try:
+                outcomes.append(sandbox.download_file("/mnt/user-data/outputs/image.png", max_bytes=4))
+            except BaseException as error:
+                outcomes.append(error)
+
+        reader = threading.Thread(target=download)
+        closer = threading.Thread(target=sandbox.close, name="download-close")
+        reader.start()
+        try:
+            assert reading.wait(timeout=5)
+            closer.start()
+            assert closing.wait(timeout=5)
+            assert sandbox._lock.waited_for_reader
+            http_client.close.assert_not_called()
+            assert not stream_closed.is_set()
+        finally:
+            allow_read.set()
+            reader.join(timeout=5)
+            if closer.ident is not None:
+                closer.join(timeout=5)
+        assert not reader.is_alive()
+        assert not closer.is_alive()
+        assert outcomes == [b"data"]
+        assert stream_closed.is_set()
+        assert close_observed_cleanup == [True]
+        http_client.close.assert_called_once_with()
+        assert sandbox._client is None
+
     def test_close_calls_real_nested_httpx_client(self, sandbox):
         """close() must close the real httpx.Client at the bottom of the chain.
 
@@ -3009,3 +3081,67 @@ def test_list_dir_preserves_trailing_space_in_filename(sandbox):
     sandbox._client.shell.exec_command = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(output="/test/notes.txt \n/test/sub\n\n__DF_FIND_STATUS__:0\n", exit_code=0)))
 
     assert sandbox.list_dir("/test") == ["/test/notes.txt ", "/test/sub"]
+
+
+def _sdk_file_read_validation_error() -> Exception:
+    """The exact exception the SDK raises for a server failure envelope.
+
+    The AIO server reports read failures (e.g. ENOENT) as
+    ``{"success": false, "message": ..., "data": {}}``; the empty ``data``
+    cannot satisfy the required fields of the SDK's ``FileReadResult`` model,
+    so parsing raises a ``ValidationError`` with two "Field required" errors.
+    Building it from the real SDK models keeps the test faithful to what
+    production raises.
+    """
+    from agent_sandbox.file.client import ResponseFileReadResult
+    from pydantic import ValidationError
+
+    try:
+        ResponseFileReadResult.model_validate({"success": False, "message": "file not found", "data": {}})
+    except ValidationError as e:
+        return e
+    raise AssertionError("model_validate should fail on data: {}")
+
+
+def test_read_file_missing_file_returns_actionable_error(sandbox, caplog):
+    """A server failure envelope must not leak the SDK's pydantic
+    validation-error text to the model. The result must state the file is
+    missing/unreadable so the agent can act on it (create it, pick another
+    path) instead of retrying the same read or "fixing" a nonexistent file."""
+    sandbox._client.file.read_file.side_effect = _sdk_file_read_validation_error()
+
+    with caplog.at_level(logging.DEBUG, logger="deerflow.community.aio_sandbox.aio_sandbox"):
+        result = sandbox.read_file("/workspace/new_file.py")
+
+    assert result == "Error: file not found or unreadable: /workspace/new_file.py"
+    assert "validation errors" not in result
+
+
+def test_read_file_missing_file_does_not_log_error_noise(sandbox, caplog):
+    """Missing files are an expected outcome — ReadBeforeWriteMiddleware
+    probes every new-file write — so the validation failure must stay out of
+    the error-level gateway log."""
+    sandbox._client.file.read_file.side_effect = _sdk_file_read_validation_error()
+
+    with caplog.at_level(logging.DEBUG, logger="deerflow.community.aio_sandbox.aio_sandbox"):
+        sandbox.read_file("/workspace/new_file.py")
+
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
+
+
+def test_read_file_success_returns_content(sandbox):
+    sandbox._client.file.read_file.return_value = SimpleNamespace(data=SimpleNamespace(content="hello\n", file="/workspace/a.txt"))
+    assert sandbox.read_file("/workspace/a.txt") == "hello\n"
+    sandbox._client.file.read_file.assert_called_once_with(file="/workspace/a.txt")
+
+
+def test_read_file_unexpected_error_still_logged(sandbox, caplog):
+    """Non-validation failures keep the error log and the generic error
+    string; only the server failure envelope is downgraded to debug."""
+    sandbox._client.file.read_file.side_effect = RuntimeError("connection reset")
+
+    with caplog.at_level(logging.ERROR, logger="deerflow.community.aio_sandbox.aio_sandbox"):
+        result = sandbox.read_file("/workspace/a.txt")
+
+    assert result == "Error: connection reset"
+    assert any(record.levelno >= logging.ERROR for record in caplog.records)

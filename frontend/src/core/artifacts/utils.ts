@@ -105,6 +105,54 @@ export function resolveMarkdownArtifactURL(src: string, threadId: string) {
   return `${resolveArtifactURL(decodeRelativeArtifactPath(path), threadId)}${suffix}`;
 }
 
+export interface ArtifactImageContext {
+  filepath: string;
+  threadId: string;
+  isMock?: boolean;
+}
+
+export function resolveArtifactImageURL(
+  src: string,
+  { filepath, threadId, isMock }: ArtifactImageContext,
+) {
+  const { path, suffix } = splitPathSuffix(src);
+  if (
+    !path ||
+    !filepath.startsWith("/mnt/") ||
+    (path.startsWith("/") && !path.startsWith("/mnt/")) ||
+    /^[a-z][a-z\d+.-]*:/i.test(path)
+  ) {
+    return src;
+  }
+
+  try {
+    const decodedPath = decodeRelativeArtifactPath(path);
+    if (decodedPath.includes("\\")) return src;
+    // Skill previews read SKILL.md inside the archive, as loadArtifactContent does.
+    const documentPath = filepath.endsWith(".skill")
+      ? `${filepath}/SKILL.md`
+      : filepath;
+    const base = new URL(
+      encodeArtifactPath(documentPath),
+      "https://artifact.invalid",
+    );
+    const resolved = new URL(encodeArtifactPath(decodedPath), base);
+    if (
+      resolved.origin !== base.origin ||
+      !resolved.pathname.startsWith("/mnt/")
+    ) {
+      return src;
+    }
+    return `${urlOfArtifact({
+      filepath: decodeRelativeArtifactPath(resolved.pathname),
+      threadId,
+      isMock,
+    })}${suffix}`;
+  } catch {
+    return src;
+  }
+}
+
 export function resolveMessageImageURL(
   src: string,
   threadId: string,
