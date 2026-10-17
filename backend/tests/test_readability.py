@@ -70,7 +70,7 @@ def test_availability_probe_failure_uses_fallback_and_is_cached(monkeypatch, cap
         calls += 1
         raise subprocess.CalledProcessError(1, "npm install")
 
-    readability._readability_js_available.cache_clear()
+    readability._reset_readability_probe()
     monkeypatch.setattr(readability, "have_node", fail_probe)
     html = '<html><head><title>Guide</title></head><body><a href="/next">Next</a></body></html>'
 
@@ -78,11 +78,35 @@ def test_availability_probe_failure_uses_fallback_and_is_cached(monkeypatch, cap
         article = ReadabilityExtractor().extract_article(html, url="https://example.com/current")
         ReadabilityExtractor().extract_article(html, url="https://example.com/current")
     finally:
-        readability._readability_js_available.cache_clear()
+        readability._reset_readability_probe()
 
     assert calls == 1
     assert "[Next](https://example.com/next)" in article.to_markdown()
     assert "availability probe failed" in caplog.text
+
+
+def test_negative_probe_result_is_retried_after_ttl(monkeypatch):
+    """A negative probe must not downgrade a process forever: once the
+    short-lived cache expires the probe runs again."""
+    from deerflow.utils import readability
+
+    calls = 0
+
+    def probe():
+        nonlocal calls
+        calls += 1
+        return False
+
+    monkeypatch.setattr(readability, "have_node", probe)
+    monkeypatch.setattr(readability, "_NEGATIVE_PROBE_TTL", 0.0)
+
+    try:
+        ReadabilityExtractor().extract_article("<html><body><p>a</p></body></html>")
+        ReadabilityExtractor().extract_article("<html><body><p>a</p></body></html>")
+    finally:
+        readability._reset_readability_probe()
+
+    assert calls == 2
 
 
 def test_article_to_message_with_images():
