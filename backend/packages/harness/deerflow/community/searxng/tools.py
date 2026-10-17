@@ -4,6 +4,7 @@ import logging
 from langchain.tools import tool
 
 from deerflow.community.search_time_range import SearchTimeRange
+from deerflow.community.url_safety import safe_public_result_url
 from deerflow.config import get_app_config
 
 from .searxng_client import SearxngClient
@@ -62,7 +63,7 @@ async def web_search_tool(query: str, time_range: SearchTimeRange | None = None)
         normalized = [
             {
                 "title": r.get("title", ""),
-                "url": r.get("url", ""),
+                "url": safe_public_result_url(r.get("url")),
                 "snippet": r.get("content", ""),
             }
             for r in results
