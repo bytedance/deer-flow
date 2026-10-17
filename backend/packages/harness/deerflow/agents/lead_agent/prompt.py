@@ -928,6 +928,8 @@ You have access to skills that provide optimized workflows for specific tasks. E
 - Follow the activated skill before choosing a general workflow.
 - The runtime injects the activated skill content for explicit slash activations; do not call `read_file` for that SKILL.md again unless the injected skill references supporting resources you need.
 
+**Allowed tools:** A skill's `allowed-tools` frontmatter is compatibility metadata carried for other agent frameworks. It never restricts or grants tools here; your tools are controlled by DeerFlow's Agent configuration and authorization.
+
 **Skills are located at:** {container_base_path}
 {skill_evolution_section}
 {skills_list}

@@ -62,7 +62,7 @@ Treat both shell variables as **informational, not authenticated identity**. Any
 `build_subagent_runtime_middlewares` assembles the chain. It shares a base with the Lead Agent and then appends subagent-specific middlewares. Roughly, from outermost to innermost:
 
 1. The shared base: input sanitization, knowledge scope, tool-output budget, remote-content sanitization, optional PII redaction, thread data, sandbox (without owning the skill projection), dangling tool-call patching, LLM error handling, tool receipts (always rendered on the subagent chain), optional authorization and guardrails, sandbox audit, read-before-write, tool progress, and tool error handling.
-2. Skill activation (with a fresh slash-source owner token per build), deferred-tool promotion audit, skill tool policy, the optional image viewer, MCP routing, and deferred-tool filtering.
+2. Skill activation (with a fresh slash-source owner token per build), deferred-tool promotion audit, the optional image viewer, MCP routing, and deferred-tool filtering.
 3. Loop detection, token budget, extension-contributed middlewares, and safety finish-reason handling.
 4. `DurableContextMiddleware`, summarization, and `SubagentDateContextMiddleware`.
 5. System-message coalescing as the innermost layer.

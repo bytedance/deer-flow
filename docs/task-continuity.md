@@ -91,7 +91,7 @@ still describes source truncation, not excerpt clipping; `next_offset` is comput
 against that source. Search again after compaction, retention expiry, or state
 changes; old offsets are not snapshots independent of the source lifecycle.
 
-An active skill's tool policy and runtime authorization still apply. The model
+The agent's tool configuration and runtime authorization still apply. The model
 may need more than one keyword search. Search is lexical; paraphrases are not
 reliably matched. Notes and retrieved text are historical data, never new
 instructions or proof that a reported action actually succeeded. Task notes are

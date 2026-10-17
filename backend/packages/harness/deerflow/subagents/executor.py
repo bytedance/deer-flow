@@ -1021,7 +1021,7 @@ class SubagentExecutor:
         )
         self.tools = self._base_tools
         # Populated from the same per-user, config-filtered registry used to
-        # build the prompt. Runtime skill activation/policy middleware receives
+        # build the prompt. Runtime skill activation middleware receives
         # this exact set so a subagent cannot activate an undisclosed skill.
         self._available_skill_names: set[str] = set()
         # Guard middlewares that expose ``consume_stop_reason`` (currently
@@ -1452,8 +1452,9 @@ class SubagentExecutor:
         from deerflow.tools.builtins.tool_search import assemble_deferred_tools, get_deferred_tools_prompt_section, get_mcp_routing_hints_prompt_section
 
         # Skills are discoverable metadata until explicitly slash-activated or
-        # loaded through read_file. Their allowed-tools declarations are applied
-        # dynamically by SkillToolPolicyMiddleware, not eagerly here.
+        # loaded through read_file. Their allowed-tools declarations are
+        # compatibility metadata only, not tool authority; loading them here
+        # does not filter any tool.
         skills = await self._load_skills()
         self._assembled_skills = list(skills)
         self._available_skill_names = {skill.name for skill in skills}
@@ -1504,9 +1505,10 @@ class SubagentExecutor:
         # binding full MCP schemas.
         # The generated tool_search helper is intentionally not subject to the
         # subagent's name-level allow/deny (config.tools / disallowed_tools):
-        # its catalog is built from that already-filtered list. Active skill
-        # policy is applied later by middleware to both schema visibility and
-        # execution, so promotion cannot widen an active skill's authority.
+        # its catalog is built from that already-filtered list. The catalog remains
+        # scoped to the subagent admitted tool list, and runtime authorization
+        # still checks execution, so promotion cannot widen
+        # the subagent's admitted tool authority.
         final_tools, deferred_setup = assemble_deferred_tools(
             configured_tools,
             enabled=resolved_app_config.tool_search.enabled,

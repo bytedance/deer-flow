@@ -278,12 +278,11 @@ def build_tool_search_tool(catalog: DeferredToolCatalog) -> BaseTool:
 def build_deferred_tool_setup(candidate_tools: list[BaseTool], *, enabled: bool) -> DeferredToolSetup:
     """Build deferred-tool setup from one agent build's candidate tools.
 
-    Lead agents pass their full configured tool list; ``SkillToolPolicyMiddleware``
-    later filters model-visible schemas, execution, and ``tool_search`` results
-    for the active skill while keeping the discovery tool itself available.
-    Subagents may pass a statically policy-filtered list because their configured
-    skills are loaded at startup. The downstream deferred-schema middleware still
-    hides unpromoted MCP schemas in either case.
+    Lead agents and subagents pass their authorized tool list. Skill
+    `allowed-tools` declarations are compatibility metadata and never filter
+    this assembly; agent assembly/execution authorization owns the ceiling.
+    The downstream deferred-schema middleware still hides unpromoted MCP
+    schemas in either case.
 
     Returns an empty setup (see :class:`DeferredToolSetup`) in two distinct
     cases: deferral is disabled, or it is enabled but no MCP tool survived
@@ -305,9 +304,9 @@ def assemble_deferred_tools(candidate_tools: list[BaseTool], *, enabled: bool) -
 
     Fail closed on deferral assembly itself: if tool_search is enabled and MCP
     candidates exist but no deferred set was recovered, raise rather than silently
-    binding their full schemas to the model. Lead-agent authorization is enforced
-    separately at runtime by ``SkillToolPolicyMiddleware``; subagents may already
-    have applied their static skill policy to ``candidate_tools``.
+    binding their full schemas to the model. Agent authorization (provider
+    filtering plus runtime Guardrails) owns the permission ceiling; skill
+    `allowed-tools` is compatibility metadata and does not participate.
 
     Shared by every agent-build path (lead, embedded client, subagent) so they
     all get the same fail-closed guarantee from one place.
@@ -388,8 +387,8 @@ def get_deferred_tools_prompt_section(*, deferred_names: frozenset[str] = frozen
     Lists only names so the agent knows what exists and can use tool_search to
     load them. Returns empty string when there are no deferred tools. The set is
     computed at agent build time and passed in. Lead-agent sets contain the full
-    configured MCP catalog because active skill policy is applied at runtime;
-    subagent sets may already have been filtered by their startup skill policy.
+    configured MCP catalog; subagent sets may already have been narrowed by the
+    subagent's tool configuration and authorization.
 
     Lives here, next to the assembly that produces ``deferred_names``, so every
     agent-build path (lead, embedded client, subagent) renders the section the

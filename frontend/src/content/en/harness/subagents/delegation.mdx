@@ -123,7 +123,7 @@ Progress, item queries, pause / resume / cancel, retrying failed items, and JSON
 
 - A subagent loads the skill catalog under the parent run's user identity: the skills that user has enabled, including custom skills and same-name shadowing. Without a user identity it falls back to the default user.
 - The `skills` allowlist decides what the subagent can discover and activate: `null` inherits everything, `[]` exposes nothing.
-- Skills are **lazily activated**: the system prompt contains only the skill index. The body is loaded when the skill is activated by slash command or read with `read_file`, and only then does its `allowed-tools` apply. A passive skill that was never selected does not strip the subagent's ordinary tools.
+- Skills are **lazily activated**: the system prompt contains only the skill index. The body is loaded when the skill is activated by slash command or read with `read_file`. `allowed-tools` is compatibility metadata only and never restricts the subagent's tools, even after activation.
 - The allowlist scopes discovery and activation; it is not filesystem isolation. Concurrent subagents share the Lead Agent's thread sandbox, and the `/mnt/skills` projection is owned by the Lead Agent's run.
 
 ## MCP tools inside a subagent

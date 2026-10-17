@@ -1800,9 +1800,9 @@ Custom agents can restrict which skills they discover and activate by defining a
 - **`[]` (empty list)**: Disables all skills for this specific agent.
 - **`["skill-name"]`**: Makes only the explicitly specified skills available.
 
-This field is a discovery and activation allowlist; it does not activate every listed skill's `allowed-tools` policy when the agent is constructed. Use `tool_groups` to define the agent's baseline tools. A listed skill's policy applies only after slash activation or an actual `SKILL.md` load.
+This field is a discovery and activation allowlist; a listed skill's `allowed-tools` frontmatter is compatibility metadata only and never filters the agent's tools. Use `tool_groups` to define the agent's baseline tools.
 
-The same semantics apply to `subagents.agents.<name>.skills` and `subagents.custom_agents.<name>.skills`: omitted or `null` exposes all enabled skills, `[]` exposes none, and a list limits discovery and activation. A passive subagent skill never removes baseline tools; its `allowed-tools` declaration becomes active only after slash activation or a completed `SKILL.md` read.
+The same semantics apply to `subagents.agents.<name>.skills` and `subagents.custom_agents.<name>.skills`: omitted or `null` exposes all enabled skills, `[]` exposes none, and a list limits discovery and activation. A skill's `allowed-tools` declaration never removes baseline tools; it is compatibility metadata for other agent frameworks.
 
 `LocalSandboxProvider` enforces this filesystem view through its managed virtual
 path mappings only. Explicit per-Agent skill policies therefore fail closed when
