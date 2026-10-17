@@ -72,7 +72,9 @@ class WarmPoolLifecycleMixin[WarmEntryT]:
         if timeout <= 0:
             return
 
-        now = time.time()
+        # Idle age is a duration. Wall-clock steps (NTP, VM resume, manual
+        # correction) must neither expire fresh entries nor preserve old ones.
+        now = time.monotonic()
         expired: list[tuple[str, WarmEntryT]] = []
         with self._lock:
             for sandbox_id, (entry, timestamp) in self._warm_pool.items():
