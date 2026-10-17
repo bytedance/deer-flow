@@ -9,6 +9,7 @@ const batchState = rs.hoisted(() => ({
   batches: [] as Array<Record<string, unknown>>,
   control: rs.fn(),
   itemPages: [] as Array<Array<Record<string, unknown>>>,
+  detailData: undefined as Record<string, unknown> | undefined,
   fetchNextPage: rs.fn(),
   hasNextPage: false,
 }));
@@ -39,6 +40,17 @@ rs.mock("@/core/i18n/hooks", () => ({
         cancel: "Cancel",
         retryItem: "Retry",
         exportResults: "Export JSONL",
+        viewResult: "Review result",
+        resultTitle: "Batch result",
+        resultDescription: "Stored report and captured evidence for this item.",
+        report: "Report",
+        evidence: "Captured evidence",
+        noEvidence: "No captured evidence",
+        acceptance: "Acceptance",
+        noReport: "No report has been stored yet.",
+        loadResultFailed: "Couldn't load batch result",
+        truncated: "Report truncated",
+        omittedEvidence: (count: number) => `${count} evidence entries omitted`,
         viewItems: "View items",
         hideItems: "Hide items",
         itemsFailed: "Items failed",
@@ -65,6 +77,11 @@ rs.mock("@/core/subagent-batches", () => ({
     ["queued", "running", "paused"].includes(batch.status),
   subagentBatchProgress: () => 50,
   subagentBatchResultsUrl: () => "/results.jsonl",
+  useSubagentBatchItemDetail: () => ({
+    isLoading: false,
+    isError: false,
+    data: batchState.detailData,
+  }),
   useControlSubagentBatch: () => ({
     isPending: false,
     variables: undefined,
@@ -122,6 +139,7 @@ afterEach(() => {
   batchState.batches = [];
   batchState.control.mockReset();
   batchState.itemPages = [];
+  batchState.detailData = undefined;
   batchState.fetchNextPage.mockReset();
   batchState.hasNextPage = false;
 });
@@ -163,6 +181,7 @@ describe("ThreadSubagentBatches capability gating", () => {
         {
           id: "item-1",
           item_key: "record-1",
+          position: 0,
           status: "succeeded",
           result_preview: "done",
         },
@@ -176,5 +195,65 @@ describe("ThreadSubagentBatches capability gating", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Load more" }));
 
     expect(batchState.fetchNextPage).toHaveBeenCalledTimes(1);
+  });
+
+  it("reviews a stored report and captured evidence", async () => {
+    batchState.batches = [HISTORICAL_BATCH];
+    batchState.itemPages = [
+      [
+        {
+          id: "item-1",
+          item_key: "record-1",
+          position: 0,
+          status: "succeeded",
+          result_preview: "preview",
+        },
+      ],
+    ];
+    batchState.detailData = {
+      id: "item-1",
+      item_key: "record-1",
+      position: 0,
+      status: "succeeded",
+      attempt: 1,
+      model_name: "model-a",
+      report: "Stored report",
+      report_truncated: false,
+      error: null,
+      stop_reason: null,
+      acceptance_criteria: null,
+      acceptance_verdict: null,
+      evidence: {
+        version: 1,
+        omitted_count: 0,
+        sources: [
+          {
+            id: "source-1",
+            provider: "ragflow",
+            dataset_id: "dataset-1",
+            document_id: "document-1",
+            chunk_id: "chunk-1",
+            dataset_name: "Private KB",
+            document_name: "report.md",
+            text: "Captured excerpt",
+            pages: [2],
+            truncated: false,
+          },
+        ],
+      },
+      started_at: null,
+      completed_at: null,
+      updated_at: "2026-08-24T00:01:00Z",
+    };
+    render(<ThreadSubagentBatches threadId="thread-1" />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Batches" }));
+    fireEvent.click(screen.getByRole("button", { name: "View items" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Review result" }),
+    );
+
+    expect(await screen.findByText("Stored report")).toBeDefined();
+    expect(screen.getByText("Captured excerpt")).toBeDefined();
   });
 });
