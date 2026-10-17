@@ -1413,8 +1413,12 @@ are rejected without truncation.
 RAGFlow keeps its existing configuration and citations, and search-only
 Providers remain usable without a catalog or management page. See the
 [offline Provider example](examples/deerflow-extension-knowledge/README.md)
-for extension registration and configuration. WeKnora's adapter is planned for
-the next phase.
+for extension registration and configuration. The installable
+[WeKnora read-only extension](examples/deerflow-extension-weknora/README.md)
+targets WeKnora v0.8.3 and adds knowledge-base/document selection and shared
+retrieval citations. Configure explicit user-to-workspace credential bindings;
+resource authorization remains with WeKnora. The extension directory includes
+its installation guide in English and Chinese.
 
 Skills are what make DeerFlow do *almost anything*.
 
