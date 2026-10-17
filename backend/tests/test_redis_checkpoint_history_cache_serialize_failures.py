@@ -38,9 +38,7 @@ class _Redis:
 async def test_redis_cache_skips_unserializable_entry_but_writes_other_entries(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     fake = _Redis()
     monkeypatch.setattr(redis_mod, "_create_client", lambda *_args, **_kwargs: fake)
-    cache = redis_mod.RedisCheckpointHistoryCache(
-        "redis://unused", serde=_Serde(), ttl_seconds=60
-    )
+    cache = redis_mod.RedisCheckpointHistoryCache("redis://unused", serde=_Serde(), ttl_seconds=60)
 
     with caplog.at_level("WARNING"):
         await cache.aset_many(
