@@ -1270,14 +1270,21 @@ async def run_agent(
         if ctx.app_config is not None and _agent_factory_supports_app_config(agent_factory):
             agent_factory_kwargs["app_config"] = ctx.app_config
         from deerflow.extensions import bind_agent_build_extensions
+        from deerflow.runtime.assembly_evidence import capture_assembly, project_assembly_evidence
 
-        with bind_agent_build_extensions(extensions):
+        with bind_agent_build_extensions(extensions), capture_assembly():
             # Assemble off-loop: agent construction re-enters
             # get_available_tools(), which may block on MCP cache
             # initialization — it must not stall the calling event loop
             # (issue #5172).
             agent_result = await run_assembly(agent_factory, **agent_factory_kwargs)
             agent = _agent_graph(agent_result)
+        from deerflow.agents.lead_agent.agent import LeadAgentAssembly
+
+        if isinstance(agent_result, LeadAgentAssembly):
+            evidence = project_assembly_evidence(agent_result.descriptor, thread_id=thread_id, run_id=run_id)
+            if evidence is not None:
+                await run_manager.record_assembly_evidence(run_id, evidence)
 
         # Assembly resolves request, agent, and authorization fallbacks. Trace the
         # model that will run, rather than the model name originally requested.
