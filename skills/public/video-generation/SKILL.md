@@ -124,6 +124,10 @@ python /mnt/skills/public/video-generation/scripts/generate.py \
 
 ## Output Handling
 
+The generation command exits with status 1 and writes errors to stderr when
+generation fails, including missing provider credentials. Only present the video
+after the command succeeds; a file left by an earlier run is not a new result.
+
 After generation:
 
 - Videos are typically saved in `/mnt/user-data/outputs/`
