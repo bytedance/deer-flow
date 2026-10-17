@@ -38,3 +38,7 @@ critical section to preserve history ordering. Keep the sidecar distinct from
 the nested projection lock, retain it across requests, and acquire/release both
 off-loop inside the drained worker. Unrelated users retain independent locks;
 external filesystem writers do not participate in this history guarantee.
+
+Plugin actions stamp `ActionContext.interaction=session` only from authenticated
+session provenance. Never accept it from payloads or propagate it to model tools;
+extensions use it to distinguish owner review from model/tool output.
