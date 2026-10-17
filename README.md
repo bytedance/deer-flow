@@ -451,6 +451,11 @@ frontend retain their own environment loading. Values they already export win.
 It does not select `ENV` profiles or isolate databases, storage or tenants.
 See [backend dotenv selection](backend/docs/CONFIGURATION.md#backend-dotenv-selection).
 
+Custom blob storage backends accept `blob_storage.backend: module.Class` or
+`module:Class`, including a single `.py` module importable by the Gateway.
+The selected class must implement `BlobStore`; backend options go under
+`blob_storage.backend_config`. See [blob storage](backend/docs/blob-storage.md).
+
 ### Running the Application
 
 #### Deployment Sizing

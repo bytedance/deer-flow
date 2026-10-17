@@ -10,6 +10,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import json
+import sys
 import threading
 from pathlib import Path
 
@@ -447,6 +448,31 @@ def test_dotted_import_path_backend(tmp_path: Path):
     )
     reset_blob_store()
     assert isinstance(get_blob_store(), LocalFsBlobStore)
+
+
+@pytest.mark.parametrize("separator", [".", ":"])
+def test_single_module_import_path_backend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, separator: str):
+    module_name = "deployment_blob_backend"
+    (tmp_path / f"{module_name}.py").write_text(
+        "from deerflow.storage.backends.local_fs import LocalFsBlobStore\n\nclass DeploymentBlobStore(LocalFsBlobStore):\n    pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    bsc.set_blob_storage_config(
+        bsc.BlobStorageConfig(
+            enabled=True,
+            backend=f"{module_name}{separator}DeploymentBlobStore",
+            backend_config={"root": str(tmp_path / "blobs")},
+        )
+    )
+    try:
+        store = get_blob_store()
+        assert type(store).__module__ == module_name
+        ref = store.put_bytes(b"custom backend content", kind="tool-output")
+        assert store.get_bytes(ref) == b"custom backend content"
+        assert get_blob_store_if_enabled() is store
+    finally:
+        sys.modules.pop(module_name, None)
 
 
 def test_relative_root_is_resolved_against_runtime_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
