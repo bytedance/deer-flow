@@ -11,6 +11,14 @@ Other releases require verification. Offline tests use explicitly synthetic resp
 with Ollama `bge-m3` has also passed; see [the validation record](VALIDATION.md)
 for the exact environment, checks and limits.
 
+## Choosing this extension or MCP
+
+Use [WeKnora's built-in MCP server](https://github.com/Tencent/WeKnora/blob/3e22822c1d2397be730c458c7539d0eb8c113a24/website-docs/03-features/08-mcp.md)
+when you want to expose WeKnora tools to DeerFlow or another MCP client.
+Choose this read-only extension when you want DeerFlow's native knowledge-base
+and document scope selector, shared citations, and retrieval evidence preserved
+across delegated tasks and conversation replay.
+
 ## Install and configure
 
 Requires a host containing phase 2 (#6904), extension-api >=0.2.7, and an indexed
