@@ -674,6 +674,13 @@ def test_skill_manage_cancelled_lock_waiter_neither_waits_nor_strands_the_skill(
     assert ("alice", "cancel-skill") not in skill_manage_module._skill_locks
 
 
+def test_skill_manage_lock_rejects_release_when_unlocked():
+    # Like asyncio.Lock: releasing a lock nobody holds is an error, not a no-op.
+    lock = skill_manage_module._get_lock("alice", "unlocked-skill")
+    with pytest.raises(RuntimeError):
+        asyncio.run(lock.__aexit__(None, None, None))
+
+
 def test_skill_manage_same_skill_waiters_keep_arrival_order(monkeypatch):
     # Same-turn calls on one skill can depend on each other (patch a->b, then
     # b->c). The gateway runs them on one loop, where they must take the lock in
@@ -696,5 +703,52 @@ def test_skill_manage_same_skill_waiters_keep_arrival_order(monkeypatch):
             await lock.__aexit__(None, None, None)
             await asyncio.wait_for(asyncio.gather(*waiters, return_exceptions=True), 5)
         assert storage.callers == calls
+
+    asyncio.run(scenario())
+
+
+def test_skill_manage_later_call_does_not_overtake_a_parked_waiter(monkeypatch):
+    # The storage lookup runs before the lock, so a later call can reach the
+    # lock in the same loop step as a release. As with asyncio.Lock, it must
+    # queue behind the call already waiting instead of taking the lock first.
+    async def scenario():
+        lock = skill_manage_module._get_lock("alice", "fair-skill")
+        await lock.__aenter__()
+        arrived = asyncio.Event()
+        storage = _park_skill_mutations(monkeypatch, arrived.set)
+        storage.entered.set()
+        to_thread = skill_manage_module._to_thread
+        lookup_parked = asyncio.Event()
+        finish_lookup = asyncio.Event()
+        late = None
+
+        async def gated_to_thread(func, /, *args, **kwargs):
+            if func is skill_manage_module.get_or_new_user_skill_storage and asyncio.current_task() is late:
+                lookup_parked.set()
+                await finish_lookup.wait()
+                # Resume straight into the lock, with no thread hop in between.
+                return func(*args, **kwargs)
+            return await to_thread(func, *args, **kwargs)
+
+        monkeypatch.setattr(skill_manage_module, "_to_thread", gated_to_thread)
+        waiter = asyncio.create_task(_delete("alice", "fair-skill", thread_id="queued"))
+        tasks = [waiter]
+        held = True
+        try:
+            await asyncio.wait_for(arrived.wait(), 5)
+            late = asyncio.create_task(_delete("alice", "fair-skill", thread_id="late"))
+            tasks.append(late)
+            await asyncio.wait_for(lookup_parked.wait(), 5)
+            # Release while the later call's lookup completes in the same step.
+            finish_lookup.set()
+            held = False
+            await lock.__aexit__(None, None, None)
+            await asyncio.wait_for(asyncio.gather(*tasks), 5)
+        finally:
+            if held:
+                await lock.__aexit__(None, None, None)
+            finish_lookup.set()
+            await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 5)
+        assert storage.callers == ["queued", "late"]
 
     asyncio.run(scenario())

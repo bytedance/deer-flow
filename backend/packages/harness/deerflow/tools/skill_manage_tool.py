@@ -8,6 +8,8 @@ import logging
 import shutil
 import tempfile
 import threading
+from collections import deque
+from concurrent.futures import Future
 from pathlib import Path
 from typing import Any, NoReturn
 from weakref import WeakValueDictionary
@@ -15,7 +17,6 @@ from weakref import WeakValueDictionary
 from langchain.tools import tool
 
 from deerflow.agents.lead_agent.prompt import refresh_user_skills_system_prompt_cache_async
-from deerflow.agents.middlewares.read_before_write_middleware import _GateLock
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.skills.security_scanner import scan_skill_content
 from deerflow.skills.security_static_scanner import (
@@ -33,19 +34,60 @@ from deerflow.tools.types import Runtime
 logger = logging.getLogger(__name__)
 
 
-class _SkillLock(_GateLock):
+class _SkillLock:
     """Per-(user, skill) lock shared by every event loop that runs this tool.
 
     The sync wrapper gives each call its own ``asyncio.run`` loop; an
     ``asyncio.Lock`` binds to one of them and strands waiters on the others
-    (#5846). The read-before-write gate wakes each waiter on its own loop.
+    (#5846). Each waiter here parks on its own future, woken on its own loop,
+    so waiting holds no executor thread. Like ``asyncio.Lock``, release hands
+    the lock straight to the oldest waiter, so a later call cannot overtake it.
     """
 
+    def __init__(self) -> None:
+        self._state = threading.Lock()
+        self._locked = False
+        self._waiters: deque[tuple[Future[None], asyncio.AbstractEventLoop]] = deque()
+
+    def locked(self) -> bool:
+        with self._state:
+            return self._locked
+
     async def __aenter__(self) -> None:
-        await self.acquire_async()
+        with self._state:
+            if not self._locked:
+                self._locked = True
+                return
+            waiter: Future[None] = Future()
+            self._waiters.append((waiter, asyncio.get_running_loop()))
+        try:
+            await asyncio.wrap_future(waiter)
+        except BaseException:
+            # cancel() fails only once release has handed us the lock: pass it
+            # on, or the callers queued behind us would wait forever.
+            if not waiter.cancel():
+                self._release()
+            raise
 
     async def __aexit__(self, *_exc: object) -> None:
-        self.release()
+        self._release()
+
+    def _release(self) -> None:
+        with self._state:
+            if not self._locked:
+                raise RuntimeError("release unlocked skill lock")
+            while self._waiters:
+                waiter, loop = self._waiters.popleft()
+                # Claiming the future makes a racing cancellation a no-op, so
+                # the lock is either handed over here or skipped to the next.
+                if not loop.is_closed() and waiter.set_running_or_notify_cancel():
+                    break
+            else:
+                self._locked = False
+                return
+        # Outside the state lock: the result callback schedules the waiter's
+        # wakeup on its own loop.
+        waiter.set_result(None)
 
 
 # Lock granularity: (user_id, skill_name) to avoid cross-user blocking.
