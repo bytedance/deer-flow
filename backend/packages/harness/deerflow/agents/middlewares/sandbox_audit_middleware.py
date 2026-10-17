@@ -46,10 +46,16 @@ _RISKY_SUBSTITUTION = rf"(?:[$<]\(\s*|`\s*){_RISKY_SUBSTITUTION_EXECUTABLES}"
 _CODE_STRING_INTERPRETERS = r"(?:(?:ba|da|k|z)?sh|python[\d.]*|perl|ruby|node|php)"
 _LEADING_FLAGS = r"(?:-\w+\s+){0,4}"
 
+# ``$HOME`` and ``${HOME}`` name the same directory as ``~``, so a destructive
+# target written with a variable is the same command. Quotes need no branch of
+# their own: ``_split_compound_command`` already folds the command down to the
+# shell words it matches, which is why a quoted ``rm -rf "~/"`` blocks on main.
+_HOME_TARGET = r"(?:~|\$HOME|\$\{HOME\})"
+
 # Each pattern is compiled once at import time.
 _HIGH_RISK_PATTERNS: list[re.Pattern[str]] = [
     # --- original rules (retained) ---
-    re.compile(r"rm\s+-[^\s]*r[^\s]*\s+(/\*?|~/?\*?|/home\b|/root\b)\s*$"),
+    re.compile(rf"rm\s+-[^\s]*r[^\s]*\s+(/\*?|{_HOME_TARGET}/?\*?|/home\b|/root\b)\s*$"),
     re.compile(r"dd\s+if="),
     re.compile(r"mkfs"),
     re.compile(r"cat\s+/etc/shadow"),
@@ -66,7 +72,7 @@ _HIGH_RISK_PATTERNS: list[re.Pattern[str]] = [
     # --- overwrite system binaries ---
     re.compile(r">+\s*(/usr/bin/|/bin/|/sbin/)"),
     # --- overwrite shell startup files ---
-    re.compile(r">+\s*~/?\.(bashrc|profile|zshrc|bash_profile)"),
+    re.compile(rf">+\s*{_HOME_TARGET}/?\.(bashrc|profile|zshrc|bash_profile)"),
     # --- process environment leakage ---
     re.compile(r"/proc/[^/]+/environ"),
     # --- dynamic linker hijack (one-step escalation) ---
