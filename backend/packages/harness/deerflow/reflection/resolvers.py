@@ -50,7 +50,13 @@ def resolve_variable[T](
     # extra colon leaves it inside the module part, where the failed import is
     # reported as a missing dependency with an unusable `uv add json:loads`
     # hint. Both are path mistakes, so they get the path-format message.
-    if not module_path or not variable_name or ":" in module_path:
+    #
+    # A leading dot is the third shape: it is a relative import, and
+    # import_module raises TypeError ("the 'package' argument is required")
+    # rather than ImportError, so callers that catch ImportError -- every
+    # provider/extension/middleware loader -- would see an unhandled crash.
+    # These paths are absolute by construction, so reject it here too.
+    if not module_path or not variable_name or ":" in module_path or module_path.startswith("."):
         raise ImportError(f"{variable_path} doesn't look like a variable path. Example: parent_package_name.sub_package_name.module_name:variable_name")
 
     try:

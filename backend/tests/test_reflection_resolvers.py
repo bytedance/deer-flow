@@ -78,3 +78,26 @@ def test_resolve_variable_rejects_extra_colons_instead_of_blaming_a_dependency()
     message = str(exc_info.value)
     assert "doesn't look like a variable path" in message
     assert "uv add" not in message
+
+
+def test_resolve_variable_rejects_a_relative_module_path():
+    """A leading dot would escape the ImportError contract entirely.
+
+    ``import_module(".foo")`` raises ``TypeError``, not ``ImportError``, so a
+    provider/extension/middleware loader that catches ``ImportError`` crashed
+    instead of reporting a bad path. These paths are absolute by construction.
+    """
+    with pytest.raises(ImportError) as exc_info:
+        resolve_variable(".foo:bar")
+
+    message = str(exc_info.value)
+    assert "doesn't look like a variable path" in message
+
+
+def test_resolve_variable_rejects_an_empty_module_half():
+    """``":attr"`` used to reach ``import_module("")`` and surface ValueError."""
+    with pytest.raises(ImportError) as exc_info:
+        resolve_variable(":attr")
+
+    message = str(exc_info.value)
+    assert "doesn't look like a variable path" in message
