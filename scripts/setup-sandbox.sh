@@ -14,7 +14,15 @@ CONFIGURED=1
 if [ -f "config.yaml" ]; then
     # Strip a leading UTF-8 BOM and CRLF line endings before matching.
     # Bash expands the bytes so this works with both GNU and BSD sed.
-    IMAGE=$(sed $'1s/^\xef\xbb\xbf//;s/\r$//' config.yaml 2>/dev/null | grep -A 20 "^sandbox:" | grep "^  image:" | awk '{print $2}' | head -1 || true)
+    IMAGE=$(sed $'1s/^\xef\xbb\xbf//;s/\r$//' config.yaml 2>/dev/null | grep -A 20 "^sandbox:" | grep "^  image:" | awk '{
+        image = $2
+        quote = substr(image, 1, 1)
+        # Image references cannot contain whitespace; the next field may be a YAML comment.
+        if ((quote == "\"" || quote == "\047") && substr(image, length(image), 1) == quote) {
+            image = substr(image, 2, length(image) - 2)
+        }
+        print image
+    }' | head -1 || true)
 fi
 
 if [ -z "$IMAGE" ]; then

@@ -662,7 +662,7 @@ such a checkout, use `bash ./scripts/<name>.sh ...`.
    # Recommended if using Docker/Container-based sandbox
    make setup-sandbox
    ```
-   Reads the configured sandbox image from UTF-8 `config.yaml`, with or without a leading BOM, using LF or CRLF line endings.
+   Reads the configured sandbox image from UTF-8 `config.yaml`, with or without a leading BOM, using LF or CRLF line endings. The image can be unquoted, single-quoted, or double-quoted, with an optional trailing YAML comment.
    On macOS, a successful Apple Container pull completes this step even when Docker is not installed. If Docker is available, its image is also pulled.
 
 4. **Start services**:
