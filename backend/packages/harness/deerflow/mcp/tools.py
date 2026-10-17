@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -66,7 +66,8 @@ _VALID_MCP_TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 # references may be absolute paths, ``file://`` URIs, or paths relative to the
 # server process cwd (e.g. ``temp/page.yml``, ``./shot.png``). Each match is
 # only rewritten when it resolves to an existing file inside the thread's
-# user-data tree, so an over-eager match is harmless (left untouched).
+# user-data tree. URL spans are excluded before applying the path matchers so
+# a URL query/fragment cannot be mistaken for a generated local file.
 _LOCAL_PATH_IN_TEXT_RE = re.compile(
     r"(?:file://)?/[^\s'\"<>|*?]+"  # POSIX absolute path or file:// URI
     r"|file://[A-Za-z]:[^\s'\"<>|*?]+"  # file://C:/… — some Windows tools skip the third slash
@@ -76,6 +77,10 @@ _LOCAL_PATH_IN_TEXT_RE = re.compile(
     # path relative to the server cwd (Windows servers print "\" separators)
     r"|(?:\.{0,2}[\\/]|[\w.-]+[\\/])[^\s'\"<>|*?]+"
 )
+
+# Require :// so labels such as "Saved:temp/page.yml" remain local references.
+# At least two scheme characters leave Windows drive paths to local handling.
+_URL_SCHEME_IN_TEXT_RE = re.compile(r"(?<![\w.+/\\-])(?P<scheme>[A-Za-z][A-Za-z0-9+.-]+)://")
 
 # Trailing characters that are punctuation/markup rather than part of a path.
 _TEXT_PATH_TRAILING_CHARS = ".,;:!?)]}>\"'`"
@@ -249,6 +254,51 @@ def _result_has_text_content(call_tool_result: Any) -> bool:
     return False
 
 
+def _sub_outside_remote_urls(pattern: re.Pattern[str], replacement: Callable[[re.Match[str]], str], text: str) -> tuple[str, int]:
+    """Apply a local-file substitution outside explicit non-file URLs."""
+    parts: list[str] = []
+    previous_end = 0
+    count = 0
+    search_from = 0
+    while match := _URL_SCHEME_IN_TEXT_RE.search(text, search_from):
+        end = match.end()
+        prefix_start = match.start()
+        single_quoted = prefix_start > 0 and text[prefix_start - 1] == "'"
+        while prefix_start > 0 and text[prefix_start - 1].isspace():
+            prefix_start -= 1
+        in_markdown_link = text[max(0, prefix_start - 2) : prefix_start] == "]("
+        depth = 0
+        escaped = False
+        while end < len(text):
+            char = text[end]
+            if char.isspace() or (char in '<>"`|' and not escaped):
+                break
+            # An apostrophe is a delimiter only for a single-quoted URL.
+            if single_quoted and char == "'" and not escaped:
+                break
+            # Stop at the Markdown destination's closing paren, not at balanced
+            # or escaped parentheses inside the URL. Adjacent links stay local.
+            if in_markdown_link and not escaped:
+                if char == "(":
+                    depth += 1
+                elif char == ")":
+                    if depth == 0:
+                        break
+                    depth -= 1
+            escaped = char == "\\" and not escaped
+            end += 1
+        search_from = end
+        if match.group("scheme").lower() == "file":
+            continue
+        rewritten, substitutions = pattern.subn(replacement, text[previous_end : match.start()])
+        parts.extend((rewritten, text[match.start() : end]))
+        count += substitutions
+        previous_end = end
+    rewritten, substitutions = pattern.subn(replacement, text[previous_end:])
+    parts.append(rewritten)
+    return "".join(parts), count + substitutions
+
+
 def _rewrite_unique_bare_filenames(
     text: str,
     *,
@@ -292,7 +342,7 @@ def _rewrite_unique_bare_filenames(
         # A callable replacement, not a template: the virtual path is built from
         # the real file's relative path, where a backslash is an ordinary
         # character, so it must never be read as a regex escape.
-        rewritten_text, count = pattern.subn(lambda _match: unique[name], rewritten)
+        rewritten_text, count = _sub_outside_remote_urls(pattern, lambda _match: unique[name], rewritten)
         if count:
             logger.debug("MCP bare filename rewrite: %s -> %s", name, unique[name])
         rewritten = rewritten_text
@@ -339,7 +389,7 @@ def _rewrite_changed_paths_with_spaces(
         # Require punctuation or the end of the text instead of rewriting a prefix.
         pattern = re.compile(rf"(?<![\w./\\-]){re.escape(spelling)}(?!(?:[\w\s/\\-]|\.[\w]))")
         replacement = next(iter(destinations))
-        rewritten = pattern.sub(lambda _match: replacement, rewritten)
+        rewritten, _ = _sub_outside_remote_urls(pattern, lambda _match: replacement, rewritten)
     return rewritten
 
 
@@ -360,7 +410,8 @@ def _rewrite_local_paths_in_text(
     token is handed to :func:`_local_uri_to_virtual_path`, which only rewrites
     it when it resolves to an existing file inside this thread's user-data tree.
     Tokens that are not real paths (or point elsewhere) are left exactly as they
-    were, so an over-eager regex match has no harmful effect.
+    were. Explicit non-file URLs are preserved in every pass, even if a query or
+    fragment happens to contain a path or filename that exists locally.
     """
     translated_by_source: dict[str, str | None] = {}
 
@@ -392,7 +443,7 @@ def _rewrite_local_paths_in_text(
             source_base_dir=source_base_dir,
         )
 
-    rewritten = _LOCAL_PATH_IN_TEXT_RE.sub(_replace, text)
+    rewritten, _ = _sub_outside_remote_urls(_LOCAL_PATH_IN_TEXT_RE, _replace, text)
     if changed_files is None:
         return rewritten
     return _rewrite_unique_bare_filenames(
