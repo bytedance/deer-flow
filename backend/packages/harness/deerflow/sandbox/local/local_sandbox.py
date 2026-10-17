@@ -157,6 +157,19 @@ def _trim_trailing_partial_utf8(data: bytes) -> bytes:
     return data
 
 
+def _match_ends_before_a_colon(match: re.Match) -> bool:
+    """Whether the subject continues with a ``:`` right after ``match``.
+
+    The forward path-tail patterns stop at ``:`` so substitution resumes at
+    every entry of a colon-joined list, but such a match can also be a
+    truncated component of one POSIX filename (``cache:old.txt``) — the
+    caller must not canonicalize the truncated prefix, because it can be an
+    unrelated symlink (``cache -> data``) and the reassembled path would name
+    a different file (``data:old.txt``).
+    """
+    return match.end() < len(match.string) and match.string[match.end()] == ":"
+
+
 @dataclass(frozen=True)
 class PathMapping:
     """A path mapping from a container path to a local path with optional read-only flag."""
@@ -446,6 +459,27 @@ class LocalSandbox(Sandbox):
     def _resolve_path(self, path: str) -> str:
         return self._resolve_path_with_mapping(path).path
 
+    def _resolve_path_textually(self, path: str) -> str:
+        """Resolve ``path``'s mapped root while keeping its original tail spelling.
+
+        ``_resolve_path`` canonicalizes the joined path, which is right for a
+        complete path but wrong for one truncated right before a ``:`` that
+        belongs to a single POSIX filename (``cache:old.txt``): following an
+        unrelated symlink at the truncated prefix (``cache -> data``)
+        reassembles a path that names a different file (``data:old.txt``).
+        Substitute only the mapped root and keep the matched tail verbatim.
+        """
+        # The canonical resolution still runs so its containment check keeps
+        # rejecting ``..`` escapes exactly like ``_resolve_path``; only its
+        # spelling is discarded.
+        self._resolve_path(path)
+        mapping_match = self._find_path_mapping(path)
+        if mapping_match is None:
+            return path
+        mapping, relative = mapping_match
+        root = self._resolved_local_paths[mapping]
+        return f"{root}/{relative}" if relative else root
+
     def _is_resolved_path_read_only(self, resolved: ResolvedPath) -> bool:
         return bool(resolved.mapping and resolved.mapping.read_only) or self._is_read_only_path(resolved.path)
 
@@ -543,6 +577,13 @@ class LocalSandbox(Sandbox):
 
         def replace_match(match: re.Match) -> str:
             matched_path = match.group(0)
+            if _match_ends_before_a_colon(match):
+                # The match may be a truncated component of one POSIX
+                # filename (``cache:old.txt``), not a complete list entry:
+                # canonicalizing the truncated prefix would follow an
+                # unrelated symlink and reassemble a path to a different
+                # file, so substitute textually there.
+                return self._resolve_path_textually(matched_path).replace("\\", "/")
             # Normalize to forward slashes so bash doesn't interpret Windows
             # backslash sequences (\\U, \\a, \\d, \\s, \\n, \\t) as escapes.
             return self._resolve_path(matched_path).replace("\\", "/")
@@ -570,6 +611,12 @@ class LocalSandbox(Sandbox):
 
         def replace_match(match: re.Match) -> str:
             matched_path = match.group(0)
+            if _match_ends_before_a_colon(match):
+                # Same truncated-component case as ``_resolve_paths_in_command``:
+                # a ``:`` can sit inside one POSIX filename (``cache:old.txt``),
+                # and canonicalizing the truncated prefix follows an unrelated
+                # symlink, so the stored file would point at a different one.
+                return self._resolve_path_textually(matched_path).replace("\\", "/")
             resolved = self._resolve_path(matched_path)
             # Normalize to forward slashes so that Windows backslash paths
             # don't create invalid escape sequences in source files.
