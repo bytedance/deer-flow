@@ -399,6 +399,15 @@ def test_skill_activation_middleware_activates_once_across_tool_loop(monkeypatch
     assert sum(1 for kwargs in recorded if kwargs.get("action") == "activate") == 1
 
 
+def test_read_skill_content_strips_utf8_bom(tmp_path):
+    # A SKILL.md saved with a UTF-8 BOM must not leak U+FEFF into the model (#6983).
+    skill_file = tmp_path / "SKILL.md"
+    skill_file.write_text("\ufeff---\nname: data-analysis\n---\n\nbody", encoding="utf-8")
+    content = SkillActivationMiddleware._read_skill_content(skill_file, tmp_path)
+    assert content.startswith("---")
+    assert "\ufeff" not in content
+
+
 class _ProviderUnavailable(Exception):
     def __init__(self) -> None:
         super().__init__("503 Service Unavailable")

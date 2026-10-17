@@ -126,6 +126,12 @@ class TestWriteAndRead:
         with pytest.raises(FileNotFoundError):
             user_storage.read_custom_skill("nonexistent")
 
+    def test_read_custom_skill_strips_utf8_bom(self, user_storage: UserScopedSkillStorage):
+        # A custom SKILL.md saved with a UTF-8 BOM must not leak U+FEFF (#6983).
+        body = _skill_content("demo-skill")
+        user_storage.write_custom_skill("demo-skill", "SKILL.md", "\ufeff" + body)
+        assert user_storage.read_custom_skill("demo-skill") == body
+
     def test_write_makes_path_sandbox_readable(self, user_storage: UserScopedSkillStorage, base_dir: Path):
         user_storage.write_custom_skill("demo-skill", "references/ref.md", "# ref")
         skill_dir = base_dir / "users" / "test-user" / "skills" / "custom" / "demo-skill"

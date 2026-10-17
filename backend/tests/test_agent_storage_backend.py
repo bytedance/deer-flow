@@ -305,6 +305,32 @@ def test_file_create_race_maps_file_exists_to_agent_exists(tmp_path, monkeypatch
         fs.create("racy", {"name": "racy"}, "soul", user_id="u1")
 
 
+def test_default_agent_soul_strips_utf8_bom(tmp_path, monkeypatch):
+    # A SOUL.md saved with a UTF-8 BOM must not leak U+FEFF into the prompt (#6985).
+    from deerflow.config.agents_config import SOUL_FILENAME, load_agent_soul
+
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "_paths", None)
+    (tmp_path / SOUL_FILENAME).write_text("\ufeffReview carefully.", encoding="utf-8")
+    assert load_agent_soul(None) == "Review carefully."
+
+
+def test_file_store_get_soul_strips_utf8_bom(tmp_path, monkeypatch):
+    # The file store must strip a UTF-8 BOM from a per-user agent's SOUL.md (#6985).
+    from deerflow.config.agents_config import SOUL_FILENAME, resolve_agent_dir
+
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "_paths", None)
+    fs = FileAgentStore()
+    fs.create("reviewer", {"name": "reviewer", "description": "reviews"}, "Review carefully.", user_id="u1")
+    (resolve_agent_dir("reviewer", user_id="u1") / SOUL_FILENAME).write_text("\ufeffReview carefully.", encoding="utf-8")
+    assert fs.get_soul("reviewer", user_id="u1") == "Review carefully."
+
+
 # -- graph-subprocess config resolution (db backend's core cross-process invariant) --
 
 
