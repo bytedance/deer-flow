@@ -61,6 +61,7 @@ IGNORE_PATTERNS = [
 
 DEFAULT_MAX_FILE_SIZE_BYTES = 1_000_000
 DEFAULT_LINE_SUMMARY_LENGTH = 200
+_GREP_RACE_ERRNOS = {errno.ENOENT, errno.ENOTDIR, errno.ELOOP, errno.EISDIR, getattr(errno, "ESTALE", errno.ENOENT)}
 
 
 @dataclass(frozen=True)
@@ -223,12 +224,17 @@ def find_grep_matches(
     # Skip lines longer than this to prevent ReDoS on minified / no-newline files.
     _max_line_chars = line_summary_length * 10
 
+    def handle_search_error(error: OSError) -> None:
+        # Entries may disappear or change type during enumeration or reading.
+        if error.errno not in _GREP_RACE_ERRNOS:
+            raise error
+
     def candidate_files():
         if root_is_file:
             yield root, root.name
             return
 
-        for current_root, dirs, files in os.walk(root):
+        for current_root, dirs, files in os.walk(root, onerror=handle_search_error):
             dirs[:] = [name for name in dirs if not should_ignore_name(name)]
             rel_dir = Path(current_root).relative_to(root)
             for name in files:
@@ -273,10 +279,6 @@ def find_grep_matches(
                             truncated = True
                             return matches, truncated
         except OSError as exc:
-            # A candidate may disappear after enumeration. Other failures leave
-            # the search incomplete and must not become a false no-match result.
-            if exc.errno in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
-                continue
-            raise
+            handle_search_error(exc)
 
     return matches, truncated
