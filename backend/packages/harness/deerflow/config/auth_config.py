@@ -5,7 +5,9 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
+
+from deerflow.config._boolean_guards import reject_boolean
 
 from deerflow.config.reload_boundary import format_field_description
 
@@ -143,6 +145,16 @@ class LocalAuthConfig(BaseModel):
             ),
         ),
     )
+
+    @field_validator("max_login_attempts", mode="before")
+    @classmethod
+    def _reject_boolean_login_threshold(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="an integer")
+
+    @field_validator("lockout_seconds", mode="before")
+    @classmethod
+    def _reject_boolean_lockout_window(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="a number")
 
 
 class AuthAppConfig(BaseModel):
