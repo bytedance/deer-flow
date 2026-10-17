@@ -1,3 +1,10 @@
+### Checkpoint Cache Concurrency
+
+The memory history cache is shared by sync saver wrappers. Its threading lock
+serializes lookup/LRU promotion, population/eviction, thread purge, close, and
+statistics snapshots. Keep cache critical sections free of awaits and saver I/O;
+immutable histories do not make the mutable LRU registry thread-safe.
+
 ### Redis Checkpoint Cache Purge
 
 Thread purge escapes Redis glob metacharacters in the complete literal key stem
