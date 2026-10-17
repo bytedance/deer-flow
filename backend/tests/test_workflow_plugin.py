@@ -26,6 +26,9 @@ class Runs:
         self.starts = []
         self.active = 0
         self.peak = 0
+        # Extra delay before answering an Agent run, so tests can stretch a
+        # step across multiple supervisor poll iterations.
+        self.answer_delay = 0
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
         self.admission = asyncio.Event()
@@ -84,6 +87,8 @@ class Runs:
         self.peak = max(self.peak, self.active)
         self.entered.set()
         try:
+            if self.answer_delay:
+                await asyncio.sleep(self.answer_delay)
             if task == "blocked":
                 await self.release.wait()
             else:
@@ -1013,3 +1018,43 @@ agent({stepId:args.second,agentRef:'lead_agent',task:'read',artifacts:[f.artifac
     assert len(result["steps"]) <= 2
     assert len(runs.starts) <= 2
     assert len({s["step_id"] for s in result["steps"]}) == len(result["steps"])
+
+
+@pytest.mark.asyncio
+async def test_pending_agent_polls_do_not_consume_worker_turn_budget(plugin, monkeypatch):
+    """Poll round trips while an Agent call is pending must not burn the turn
+    cap; otherwise any workflow whose Agent steps keep the supervisor waiting
+    ~209s in total fails with "Worker turn limit" regardless of
+    timeout_seconds (#7022)."""
+    import deerflow_extension_workflows.service as workflow_service
+
+    monkeypatch.setattr(workflow_service, "MAX_WORKER_TURNS", 3)
+    plugin[3].answer_delay = 0.15  # spans several 20ms supervisor poll iterations
+    result = await launch(
+        plugin,
+        """
+      const r = await agent({stepId:'slow',agentRef:'lead_agent',task:'take your time'});
+      return {out: r.output};
+    """,
+    )
+    final = await done(plugin, result["run_id"])
+    assert final["status"] == "completed", final
+
+
+@pytest.mark.asyncio
+async def test_work_frames_still_count_against_worker_turn_budget(plugin, monkeypatch):
+    """The cap still bites when frames carrying real work exceed it."""
+    import deerflow_extension_workflows.service as workflow_service
+
+    monkeypatch.setattr(workflow_service, "MAX_WORKER_TURNS", 2)
+    result = await launch(
+        plugin,
+        """
+      await agent({stepId:'a',agentRef:'lead_agent',task:'one'});
+      await agent({stepId:'b',agentRef:'lead_agent',task:'two'});
+      return 1;
+    """,
+    )
+    final = await done(plugin, result["run_id"])
+    assert final["status"] == "failed", final
+    assert "Worker turn limit" in final["error"]
