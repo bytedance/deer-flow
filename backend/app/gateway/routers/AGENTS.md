@@ -41,3 +41,7 @@ external filesystem writers do not participate in this history guarantee.
 The Windows sidecar acquisition retries only contention through `file_lock.retry_until_locked`; permanent errors propagate.
 This covers the outer mutation lock only. The nested projection lock has its
 own acquisition policy; changing the outer lock does not remove its timeout.
+
+Plugin actions stamp `ActionContext.interaction=session` only from authenticated
+session provenance. Never accept it from payloads or propagate it to model tools;
+extensions use it to distinguish owner review from model/tool output.

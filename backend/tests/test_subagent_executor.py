@@ -6509,15 +6509,28 @@ class TestBashExecutionHarvest:
         assert result.bash_executions is not None
         assert [e["command"] for e in result.bash_executions] == ["make test"]
 
-    def test_output_tail_is_bounded(self, classes, monkeypatch):
+    @pytest.mark.parametrize(
+        "output,expected,status",
+        [
+            ("x" * 5000, "", "success"),
+            ("x" * 5000 + "\n12 passed in 1s", "12 passed in 1s", "success"),
+            ("x" * 5000 + "\n" + "a" * 1000, "a" * 1000, "success"),
+            ("x" * 5000 + "\r\n" + "a" * 1000, "a" * 1000, "success"),
+            ("x" * 5000 + "\n" + "a" * 1001, "", "success"),
+            ("x" * 5000 + "\nExit Code: 3", "Exit Code: 3", "error"),
+        ],
+    )
+    def test_output_tail_is_bounded(self, classes, monkeypatch, output, expected, status):
         executor_module = importlib.import_module("deerflow.subagents.executor")
         monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_result_meta", _module("deerflow.agents.middlewares.tool_result_meta", TOOL_META_KEY="deerflow_tool_meta"))
         state = self._final_state(classes)
-        state["messages"][2].content = "x" * 5000
+        state["messages"][2].content = output
 
         executions = executor_module._harvest_bash_executions(state)
 
-        assert len(executions[0]["output_tail"]) == 1000
+        assert len(executions[0]["output_tail"]) <= 1000
+        assert executions[0]["output_tail"] == expected
+        assert executions[0]["status"] == status
 
     def test_long_command_is_capped_and_flagged_truncated(self, classes, monkeypatch):
         """PR review: the matcher must know the command lost its suffix."""
