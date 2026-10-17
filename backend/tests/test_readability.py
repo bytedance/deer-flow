@@ -66,3 +66,41 @@ def test_article_to_message_with_images():
     art_rel = Article("Test Relative Image", '<img src="/assets/pic.png">', url="https://example.com/base/")
     msg_rel = art_rel.to_message()
     assert any(block.get("type") == "image_url" and block["image_url"]["url"] == "https://example.com/assets/pic.png" for block in msg_rel)
+
+
+@pytest.mark.parametrize("src", ["https://example.com/chart(1).png", "/images/chart(a(b)).png", "https://example.com/image.png"])
+def test_article_image_urls_are_preserved(src):
+    article = Article("Images", f'<p>Before</p><img src="{src}" alt="chart" title="Caption"><p>After</p>', url="https://example.com/page")
+    messages = article.to_message()
+    expected_url = src if src.startswith("https:") else f"https://example.com{src}"
+    assert messages == [
+        {"type": "text", "text": "# Images\n\nBefore"},
+        {"type": "image_url", "image_url": {"url": expected_url}},
+        {"type": "text", "text": "After"},
+    ]
+
+
+@pytest.mark.parametrize("html", ['<img srcset="https://example.com/pic.png 1x">', "<img>", '<img src="">', '<img src="   ">'])
+def test_article_src_less_images_are_not_turned_into_page_urls(html):
+    article = Article("Src-less", f"<p>Before</p>{html}<p>After</p>", url="https://example.com/page")
+    messages = article.to_message()
+    assert [message["type"] for message in messages] == ["text"]
+    assert "https://example.com/page" not in messages[0]["text"]
+    assert "Before" in messages[0]["text"] and "After" in messages[0]["text"]
+
+
+def test_article_skips_src_less_images_without_shifting_valid_ones():
+    article = Article(
+        "Mixed",
+        '<img srcset="https://example.com/skipped.png 1x"><img src="https://example.com/kept.png">',
+        url="https://example.com/page",
+    )
+    messages = article.to_message()
+    assert [message["image_url"]["url"] for message in messages if message["type"] == "image_url"] == ["https://example.com/kept.png"]
+
+
+def test_article_image_syntax_in_code_remains_text():
+    article = Article("Example", "<pre>![example](https://example.com/image.png)</pre>")
+    messages = article.to_message()
+    assert all(message["type"] == "text" for message in messages)
+    assert "![example](https://example.com/image.png)" in messages[0]["text"]

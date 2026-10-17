@@ -4,8 +4,10 @@ import subprocess
 from html import escape, unescape
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse, uses_relative
+from uuid import uuid4
 
 from bs4 import BeautifulSoup
+from markdownify import MarkdownConverter
 from markdownify import markdownify as md
 from readabilipy import simple_json_from_html_string
 
@@ -33,10 +35,33 @@ class Article:
         return markdown
 
     def to_message(self) -> list[dict]:
-        image_pattern = r"!\[.*?\]\((.*?)\)"
+        marker = f"DEERFLOWIMAGE{uuid4().hex}X"
+        image_urls: list[str] = []
+
+        class ImageMessageConverter(MarkdownConverter):
+            def convert_img(self, el, text, parent_tags):
+                # Mirrors the inline-image policy of MarkdownConverter.convert_img
+                # (the "_inline" parent pseudo-tag plus keep_inline_images_in, as of
+                # markdownify >= 1.2.2) so only the images markdownify itself would
+                # render as "![..](..)" are captured. Revisit on a markdownify upgrade.
+                if "_inline" in parent_tags and el.parent.name not in self.options["keep_inline_images_in"]:
+                    return super().convert_img(el, text, parent_tags)
+                src = (el.attrs.get("src") or "").strip()
+                if not src:
+                    # An image with no usable src (empty, bare, or srcset-only) has
+                    # nothing to resolve: urljoin() would turn it into the article
+                    # URL and hand an HTML page to a vision provider.
+                    return ""
+                image_urls.append(src)
+                return f"{marker}{len(image_urls) - 1}END"
+
+        image_pattern = rf"{marker}(\d+)END"
 
         content: list[dict[str, str]] = []
-        markdown = self.to_markdown()
+        if self.html_content is None or not str(self.html_content).strip():
+            markdown = self.to_markdown()
+        else:
+            markdown = f"# {self.title}\n\n{ImageMessageConverter().convert(self.html_content)}"
 
         if not markdown or not markdown.strip():
             return [{"type": "text", "text": "No content available"}]
@@ -45,7 +70,7 @@ class Article:
 
         for i, part in enumerate(parts):
             if i % 2 == 1:
-                image_url = urljoin(self.url, part.strip())
+                image_url = urljoin(self.url, image_urls[int(part)].strip())
                 content.append({"type": "image_url", "image_url": {"url": image_url}})
             else:
                 text_part = part.strip()
