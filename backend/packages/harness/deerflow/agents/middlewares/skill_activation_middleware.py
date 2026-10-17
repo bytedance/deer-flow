@@ -297,7 +297,7 @@ class SkillActivationMiddleware(AgentMiddleware):
                 raise ValueError("Resolved skill file must stay within the configured skills root.") from exc
         if not resolved_file.is_file():
             raise FileNotFoundError(resolved_file)
-        return resolved_file.read_text(encoding="utf-8")
+        return resolved_file.read_text(encoding="utf-8-sig")  # utf-8-sig drops a Windows/PowerShell UTF-8 BOM (U+FEFF)
 
     def _resolve_activation(self, text: str, *, activation_decisions: ActivationDecisions | None = None) -> _ActivationResolution | None:
         reference = parse_slash_skill_reference(text)
