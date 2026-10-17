@@ -43,3 +43,37 @@ def test_image_providers_reject_non_public_results(screen, url):
 def test_image_providers_keep_public_results_without_dns(screen, url):
     with patch("socket.getaddrinfo", side_effect=AssertionError("Result screening must not perform DNS")):
         assert screen(url) == url
+
+
+_METADATA_URL = "http://169.254.169.254/latest/meta-data/"
+_PUBLIC_URL = "https://example.com/report"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("provider", ["tavily", "exa"])
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [(_METADATA_URL, ""), (_PUBLIC_URL, _PUBLIC_URL)],
+)
+async def test_text_search_providers_screen_result_urls(provider, url, expected):
+    """tavily and exa must not hand non-public provider URLs to the model (#7036)."""
+    import json
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    module = importlib.import_module(f"deerflow.community.{provider}.tools")
+    with patch.object(module, "get_app_config") as config:
+        config.return_value.get_tool_config.return_value = None
+        if provider == "tavily":
+            client = MagicMock()
+            client.search = AsyncMock(return_value={"results": [{"title": "t", "url": url, "content": "c"}]})
+            client.close = AsyncMock()
+            with patch.object(module, "_get_tavily_client", return_value=client):
+                raw = await module.web_search_tool.ainvoke({"query": "q"})
+        else:
+            result = SimpleNamespace(title="t", url=url, highlights=["c"])
+            client = MagicMock()
+            client.search.return_value = SimpleNamespace(results=[result])
+            with patch.object(module, "_get_exa_client", return_value=client):
+                raw = module.web_search_tool.invoke({"query": "q"})
+    assert [row["url"] for row in json.loads(raw)] == [expected]
