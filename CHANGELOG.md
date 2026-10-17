@@ -5993,7 +5993,8 @@ This release closes that milestone with **621 merged pull requests**.
   text re-read by `sh -c` or `eval` are still scanned, and commands with a
   heredoc or an `awk` function or alias, programs preceded by any option other
   than `-F`, `-v` or `--` (such as gawk's `--assign`), or programs whose `"`
-  may sit in an awk regex or comment, get no exemption. (issue #7021)
+  may sit in an awk regex literal, get no exemption; `/` and `#` inside an awk
+  string literal (`split($0, p, "/")`) are plain text. (issue #7021)
 
 ### Security
 

@@ -1054,6 +1054,8 @@ def test_validate_local_bash_command_paths_blocks_brace_expansion_host_paths(com
         ('awk \'/"/ {system("cat $HOME/.ssh/id_rsa")}\' /mnt/user-data/workspace/data.txt', "$HOME/.ssh/id_rsa"),
         ('awk \'$0 ~ /"/ {system("cat $HOME/.ssh/id_rsa")}\' /mnt/user-data/workspace/data.txt', "$HOME/.ssh/id_rsa"),
         ('awk \'{print /"/; system("cat $HOME/.ssh/id_rsa")}\' /mnt/user-data/workspace/data.txt', "$HOME/.ssh/id_rsa"),
+        ('awk \'{gsub(/"/, ""); system("cat $HOME/.ssh/id_rsa")}\' /mnt/user-data/workspace/data.txt', "$HOME/.ssh/id_rsa"),
+        ('awk \'{x = "a" # "\nsystem("cat $HOME/.ssh/id_rsa") }\'', "$HOME/.ssh/id_rsa"),
         ('awk \'BEGIN { # "\nsystem("cat $HOME/.ssh/id_rsa") }\'', "$HOME/.ssh/id_rsa"),
         # In awk a ``/`` after ``)`` or at the start of a line opens a regex.
         ('awk \'{ if (1) /"b/; system("cat $HOME/.ssh/id_rsa")}\' /mnt/user-data/workspace/data.txt', "$HOME/.ssh/id_rsa"),
@@ -1111,6 +1113,10 @@ def test_validate_local_bash_command_paths_blocks_variable_prefixed_host_paths(c
         "cat /mnt/user-data/workspace/data.txt | awk -- '{print $NF/2}' && echo done",
         "awk '{print \"avg\", $sum/$n}' /mnt/user-data/workspace/data.txt",
         "awk '{print $NF/2 \" MB\"}' /mnt/user-data/workspace/data.txt",
+        # ``/`` and ``#`` inside an awk string literal are plain text.
+        "awk '{n=split($0,p,\"/\"); print $1/p[n]}' /mnt/user-data/workspace/data.csv",
+        "awk '{split($0, a, \"/\"); print $1/a[1]}' /mnt/user-data/workspace/data.csv",
+        "awk -F'#' '{print \"#\" $NF/2}' /mnt/user-data/workspace/data.txt",
     ],
 )
 def test_validate_local_bash_command_paths_allows_non_path_variable_uses(command: str) -> None:

@@ -1165,30 +1165,50 @@ _AWK_REGEX_KEYWORDS = frozenset({"case", "delete", "do", "else", "exit", "getlin
 _AWK_TRAILING_WORD_PATTERN = re.compile(r"[A-Za-z0-9_]+\Z")
 
 
-def _awk_quote_tracking_is_unreliable(program: str) -> bool:
-    """True when a ``"`` in *program* may sit in a regex literal or comment.
+def _awk_program_code_spans(program: str, offset: int) -> list[tuple[int, int]] | None:
+    """Spans of *program* (shifted by *offset*) that awk reads as code, not string text.
 
-    The string-literal tracker toggles on every ``"``; one inside ``/"/`` or
-    ``# "`` would make it misread a later ``system("...")`` string as awk
-    code. Rather than lex awk, give up the exemption whenever the program has
-    a ``"`` and a ``#`` or a ``/`` that is not clearly division. Division
-    follows an identifier, number or ``]`` on the same line that is not a
-    keyword; after ``)`` (``if (x) /re/``) or a newline awk opens a regex.
+    A ``$NAME/`` in awk code is a field reference; inside a string literal it
+    is text that ``system("...")`` or ``getline < "..."`` may hand to a shell,
+    so string literals are left out. Rather than lex awk fully, walk the
+    program once: a ``"`` toggles a string literal (``\\`` escapes inside),
+    ``#`` outside one starts a comment that runs to the end of the line, and
+    inside a literal ``/`` and ``#`` are plain text (``split($0, p, "/")``).
+    A ``/`` outside a literal must be division, which in awk follows an
+    identifier, number or ``]`` on the same line that is not a keyword; any
+    other ``/`` (``gsub(/"/, ...)``, ``if (x) /re/``, a ``/`` at the start of
+    a line) opens a regex literal whose ``"`` would desynchronise the
+    tracker, so return None and the caller grants no exemption.
     """
-    if '"' not in program:
-        return False
-    if "#" in program:
-        return True
-    for position, char in enumerate(program):
-        if char != "/":
+    spans: list[tuple[int, int]] = []
+    in_string = False
+    segment_start = 0
+    position = 0
+    while position < len(program):
+        char = program[position]
+        if in_string:
+            if char == "\\":
+                position += 1
+            elif char == '"':
+                in_string = False
+                segment_start = position + 1
+        elif char == '"':
+            spans.append((offset + segment_start, offset + position))
+            in_string = True
+        elif char == "#":
+            newline = program.find("\n", position)
+            position = len(program) if newline == -1 else newline
             continue
-        before = program[:position].rstrip(" \t")
-        if before.endswith("]"):
-            continue
-        word = _AWK_TRAILING_WORD_PATTERN.search(before)
-        if word is None or word.group() in _AWK_REGEX_KEYWORDS:
-            return True
-    return False
+        elif char == "/":
+            before = program[:position].rstrip(" \t")
+            if not before.endswith("]"):
+                word = _AWK_TRAILING_WORD_PATTERN.search(before)
+                if word is None or word.group() in _AWK_REGEX_KEYWORDS:
+                    return None
+        position += 1
+    if not in_string:
+        spans.append((offset + segment_start, offset + len(program)))
+    return spans
 
 
 def _scan_shell_words(command: str) -> list[tuple[str, str, list[tuple[int, int]]]] | None:
@@ -1287,7 +1307,7 @@ def _awk_program_field_spans(command: str) -> list[tuple[int, int]]:
     ``eval``, double-quoted programs) never qualifies, because the command
     word there is not awk. Inside the program, awk string literals are left
     out: ``system("cat $HOME/x")`` hands that text to a shell. A program
-    whose quotes may sit in a regex literal or comment gets no exemption.
+    whose ``"`` may sit in a regex literal gets no exemption.
     """
     if _AWK_EXEMPTION_BLOCKER_PATTERN.search(command):
         return []
@@ -1321,22 +1341,7 @@ def _awk_program_field_spans(command: str) -> list[tuple[int, int]]:
         if program is None:
             continue
         start, end = program
-        if _awk_quote_tracking_is_unreliable(command[start:end]):
-            continue
-        segment_start, in_string, position = start, False, start
-        while position < end:
-            char = command[position]
-            if char == '"':
-                if not in_string:
-                    field_spans.append((segment_start, position))
-                else:
-                    segment_start = position + 1
-                in_string = not in_string
-            elif char == "\\" and in_string:
-                position += 1
-            position += 1
-        if not in_string:
-            field_spans.append((segment_start, end))
+        field_spans.extend(_awk_program_code_spans(command[start:end], start) or [])
     return field_spans
 
 
