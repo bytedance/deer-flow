@@ -59,6 +59,7 @@ class RedisCheckpointHistoryCache:
         self._ttl = ttl_seconds if ttl_seconds > 0 else None
         self._hits = 0
         self._misses = 0
+        self._write_serialization_failures = 0
 
     async def aget_many(self, keys: list[str]) -> dict[str, dict[str, Any]]:
         if not keys:
@@ -103,6 +104,7 @@ class RedisCheckpointHistoryCache:
                 try:
                     tag, data = self._serde.dumps_typed(entry)
                 except Exception as exc:
+                    self._write_serialization_failures += 1
                     # Cache writes are optional; one unserializable entry must not
                     # abort authoritative history reads or discard other entries.
                     logger.warning(
@@ -140,7 +142,11 @@ class RedisCheckpointHistoryCache:
             logger.warning("checkpoint history cache thread purge failed; residual entries expire via TTL: %s", exc)
 
     def stats(self) -> CheckpointCacheStats:
-        return CheckpointCacheStats(hits=self._hits, misses=self._misses)
+        return CheckpointCacheStats(
+            hits=self._hits,
+            misses=self._misses,
+            write_serialization_failures=self._write_serialization_failures,
+        )
 
     async def aclose(self) -> None:
         await self._client.aclose()
