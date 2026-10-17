@@ -47,6 +47,9 @@ class FakeRepository:
         self.created.append(kwargs)
         return {"id": kwargs["task_id"], **kwargs}
 
+    async def renew_control_claim(self, *_args, **_kwargs):
+        return True
+
     async def claim_due_tasks(self, **_kwargs):
         if self.claimed:
             return []
@@ -633,6 +636,7 @@ async def test_cancel_task_persists_request_without_calling_remote():
 async def test_cancel_failure_schedules_retry_from_call_completion_time():
     record = {**_claimed_row(), "cancel_attempt_count": 1}
     repo = SimpleNamespace(
+        renew_control_claim=AsyncMock(return_value=True),
         claim_cancel_requests=AsyncMock(return_value=[record]),
         release_cancel_claim=AsyncMock(return_value=True),
         claim_due_tasks=AsyncMock(return_value=[]),
@@ -668,6 +672,7 @@ async def test_cancel_recovery_failures_are_isolated_and_later_phases_continue(c
         return True
 
     repo = SimpleNamespace(
+        renew_control_claim=AsyncMock(return_value=True),
         claim_cancel_requests=AsyncMock(return_value=records),
         release_cancel_claim=AsyncMock(side_effect=release_cancel_claim),
         claim_due_tasks=AsyncMock(return_value=[]),
@@ -3601,6 +3606,9 @@ async def test_batch_completion_cancel_race_releases_once_for_100_rounds():
 
 
 class OrdinaryReleaseBatchRepository:
+    async def renew_control_claim(self, *_args, **_kwargs):
+        return True
+
     def __init__(self, *, phase, outcome):
         self.phase = phase
         self.outcome = outcome

@@ -392,7 +392,7 @@ runtime-internal. Query the current thread through:
 Task toolsets require `database.backend: sqlite` or `postgres`; startup fails
 instead of falling back to a synchronous submit when persistence or the task
 runtime is disabled. Restart recovery also requires the remote service to keep
-the task alive and recognize its ID after DeerFlow reconnects. A stdio server
+the task alive and recognize its ID after DeerFlow reconnects. Status and cancellation calls renew their control lease while executing and saving their result; the lease duration is a crash-recovery window, not a tool-call timeout. See [control-call leases](mcp-control-leases.md) for ownership loss, cancellation cleanup, and SQLite claim serialization. A stdio server
 must therefore persist its own tasks; multi-instance deployments should
 normally use an independently running HTTP/SSE service.
 

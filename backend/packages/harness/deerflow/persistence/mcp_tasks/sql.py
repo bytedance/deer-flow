@@ -4,7 +4,7 @@ import hashlib
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import and_, case, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
@@ -304,6 +304,7 @@ class McpTaskRepository:
         lease_owner: str,
         lease_seconds: int,
         limit: int,
+        exclude_task_ids: tuple[str, ...] = (),
     ) -> list[dict[str, Any]]:
         lease_expires_at = now + timedelta(seconds=lease_seconds)
         claimable = (
@@ -317,6 +318,8 @@ class McpTaskRepository:
             ),
         )
         stmt = select(McpTaskRow.id).where(*claimable).order_by(McpTaskRow.next_poll_at.asc(), McpTaskRow.id.asc()).limit(limit).with_for_update(skip_locked=True)
+        if exclude_task_ids:
+            stmt = stmt.where(McpTaskRow.id.not_in(exclude_task_ids))
         async with self._sf() as session:
             candidate_ids = list((await session.execute(stmt)).scalars())
             # Atomic fence: ``with_for_update()`` is a no-op on SQLite, so a
@@ -349,6 +352,40 @@ class McpTaskRepository:
                 claimed = [self._row_to_dict(rows[task_id], include_internal=True) for task_id in claimed_ids]
             await session.commit()
             return claimed
+
+    async def renew_control_claim(
+        self,
+        task_id: str,
+        *,
+        phase: Literal["poll", "cancel"],
+        lease_owner: str,
+        lease_token: str,
+        now: datetime,
+        lease_seconds: int,
+    ) -> bool:
+        """Extend only the still-live control claim; never resurrect a lease."""
+        if phase not in ("poll", "cancel"):
+            raise ValueError("Unknown MCP control claim phase")
+        expires_at = now + timedelta(seconds=lease_seconds)
+        async with self._sf() as session:
+            result = await session.execute(
+                update(McpTaskRow)
+                .where(
+                    McpTaskRow.id == task_id,
+                    McpTaskRow.lease_owner == lease_owner,
+                    McpTaskRow.lease_token == lease_token,
+                    McpTaskRow.lease_expires_at >= now,
+                    McpTaskRow.status.not_in(_TERMINAL_STATUS_VALUES),
+                    McpTaskRow.cancel_requested_at.is_(None) if phase == "poll" else McpTaskRow.cancel_requested_at.is_not(None),
+                )
+                .values(
+                    # A backward wall-clock correction must not shorten a lease.
+                    lease_expires_at=case((McpTaskRow.lease_expires_at > expires_at, McpTaskRow.lease_expires_at), else_=expires_at),
+                    updated_at=McpTaskRow.updated_at,
+                )
+            )
+            await session.commit()
+            return bool(result.rowcount)
 
     async def apply_snapshot(
         self,
@@ -543,6 +580,7 @@ class McpTaskRepository:
         lease_owner: str,
         lease_seconds: int,
         limit: int,
+        exclude_task_ids: tuple[str, ...] = (),
         task_id: str | None = None,
     ) -> list[dict[str, Any]]:
         stmt = select(McpTaskRow).where(
@@ -555,7 +593,13 @@ class McpTaskRepository:
         if task_id is not None:
             stmt = stmt.where(McpTaskRow.id == task_id)
         stmt = stmt.order_by(McpTaskRow.next_cancel_at.asc(), McpTaskRow.id.asc()).limit(limit).with_for_update(skip_locked=True)
+        if exclude_task_ids:
+            stmt = stmt.where(McpTaskRow.id.not_in(exclude_task_ids))
         async with self._sf() as session:
+            if session.get_bind().dialect.name == "sqlite":
+                # SQLite ignores FOR UPDATE. Reserve its writer before reading
+                # candidates so two workers cannot return the same claim.
+                await session.execute(text("BEGIN IMMEDIATE"))
             rows = list((await session.execute(stmt)).scalars())
             expires_at = now + timedelta(seconds=lease_seconds)
             for row in rows:
