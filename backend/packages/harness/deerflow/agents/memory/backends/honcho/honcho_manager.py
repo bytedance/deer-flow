@@ -89,7 +89,14 @@ def _stable_id(raw: str) -> str:
 
 
 class HonchoMemoryManager(MemoryManager):
-    """MemoryManager backed by a Honcho v3 instance (self-hosted or hosted)."""
+    """MemoryManager backed by a Honcho v3 instance (self-hosted or hosted).
+
+    Known limitation: ``search`` scopes ``category`` server-side to messages
+    stored with ``metadata.category``, but ``add()`` writes plain metadata-less
+    messages and fact CRUD is unsupported, so nothing this backend stores ever
+    carries a category — category queries return empty results here until the
+    write path gains metadata support (see ``search``).
+    """
 
     _config: HonchoConfig = PrivateAttr(default=None)
     _client: Any = PrivateAttr(default=None)
@@ -226,7 +233,14 @@ class HonchoMemoryManager(MemoryManager):
         """``category`` must filter, not label: it scopes the Honcho query itself
         (a ``metadata`` filter the server applies before its ``limit``, per the
         base-class contract), and each result is labeled from its own metadata so
-        hits are never attested to a category they do not have."""
+        hits are never attested to a category they do not have.
+
+        Known limitation: that filter only matches messages stored with
+        ``metadata.category``, and nothing this backend writes has it — ``add()``
+        sends plain ``{"peer_id", "content"}`` messages with no metadata, and
+        fact CRUD is unsupported, so no other write path can set it either. A
+        ``category`` query therefore returns empty results in this backend
+        until the write path gains metadata support."""
         workspace = self._workspace(user_id)
         if workspace is None:
             return []
