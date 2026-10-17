@@ -4,6 +4,7 @@ import logging
 from exa_py import Exa
 from langchain.tools import tool
 
+from deerflow.community.url_safety import safe_public_result_url as _safe_public_url
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -74,7 +75,7 @@ def web_search_tool(query: str) -> str:
         normalized_results = [
             {
                 "title": result.title or "",
-                "url": result.url or "",
+                "url": _safe_public_url(result.url or ""),
                 "snippet": "\n".join(result.highlights) if result.highlights else "",
             }
             for result in res.results
