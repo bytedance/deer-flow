@@ -1610,6 +1610,8 @@ Image result screening also recognizes Unicode hostname separators (`。`, `．`
 `｡`) as dots, matching IDNA client normalization before classifying local/private
 hosts. Accepted result URLs retain their original spelling.
 
+DDG image search reports timeouts, rate limits, and setup failures as search errors with the original query. `No images found` is reserved for a successful search that returns no images.
+
 Stdio MCP servers can set `cwd` in `extensions_config.json` when their entrypoint
 or data files depend on a specific working directory. The setting applies to
 both discovery and tool calls; see [MCP configuration](backend/docs/MCP_SERVER.md#stdio-working-directory).
