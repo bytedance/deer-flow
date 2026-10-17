@@ -50,6 +50,12 @@ legacy provider settings out of `knowledge_base` remains specific to the
 RAGFlow `knowledge_search` tool; LightRAG and other knowledge providers keep
 their tool-local settings unchanged.
 
+Legacy top-level DeerMem settings migrate in `MemoryConfig`'s before-validator,
+before Pydantic can discard them as unknown fields. YAML/AppConfig loading and
+the singleton loader share that migration; explicit `backend_config` values win.
+File-style legacy storage paths ending in `.json` are warned and dropped.
+Regression coverage lives in `tests/test_app_config_reload.py`.
+
 Top-level `recursion_limit` and `max_recursion_limit` are hot-reloaded per Gateway run. The former supplies the default when a request omits or provides an invalid value; the latter caps both configured and client-provided budgets.
 
 `tool_output` character/count limits and every `tool_overrides` value share

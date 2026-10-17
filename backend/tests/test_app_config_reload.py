@@ -1107,3 +1107,68 @@ def test_get_app_config_keeps_config_yaml_extension_override_after_extensions_re
         assert get_app_config().extensions.middlewares == ["pkg.from_yaml:YamlMiddleware"]
     finally:
         _reset_config_singletons()
+
+
+def test_app_config_migrates_legacy_memory_settings_before_validation(tmp_path, monkeypatch, caplog):
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    extensions_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+    _write_config_with_sections(
+        config_path,
+        {"memory": {"max_facts": 17, "model_name": "memory-model", "storage_path": "memory-root"}},
+    )
+    _reset_config_singletons()
+    try:
+        with caplog.at_level("WARNING", logger="deerflow.config.memory_config"):
+            config = AppConfig.from_file(str(config_path))
+        expected = {"max_facts": 17, "model": {"model": "memory-model"}, "storage_path": "memory-root"}
+        assert config.memory.backend_config == expected
+        assert get_memory_config().backend_config == expected
+        assert "Migrated legacy top-level memory fields" in caplog.text
+    finally:
+        _reset_config_singletons()
+
+
+@pytest.mark.parametrize("load_from_yaml", [False, True])
+def test_legacy_memory_migration_preserves_nested_settings(tmp_path, monkeypatch, caplog, load_from_yaml):
+    memory = {
+        "max_facts": 17,
+        "model_name": "legacy-model",
+        "storage_path": "memory.json",
+        "debounce_seconds": "",
+        "max_injection_tokens": None,
+        "backend_config": {"max_facts": 23, "model": {"model": "nested-model", "temperature": 0}},
+    }
+    expected = {"max_facts": 23, "model": {"model": "nested-model", "temperature": 0}}
+    _reset_config_singletons()
+    try:
+        with caplog.at_level("WARNING", logger="deerflow.config.memory_config"):
+            if load_from_yaml:
+                config_path = tmp_path / "config.yaml"
+                extensions_path = tmp_path / "extensions_config.json"
+                extensions_path.write_text("{}", encoding="utf-8")
+                monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+                _write_config_with_sections(config_path, {"memory": memory})
+                config = AppConfig.from_file(str(config_path))
+                assert config.memory.backend_config == expected
+            else:
+                load_memory_config_from_dict(memory)
+        assert get_memory_config().backend_config == expected
+        assert "looks like a file path" in caplog.text
+        # Migration must not rewrite caller-owned dictionaries.
+        assert memory["model_name"] == "legacy-model"
+        assert memory["backend_config"] == expected
+    finally:
+        _reset_config_singletons()
+
+
+@pytest.mark.parametrize("memory", [None, {}])
+def test_memory_singleton_loader_accepts_empty_config(memory):
+    _reset_config_singletons()
+    try:
+        load_memory_config_from_dict(memory)
+        assert get_memory_config().backend_config == {}
+        assert get_memory_config().enabled is True
+    finally:
+        _reset_config_singletons()
