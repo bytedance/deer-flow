@@ -698,6 +698,12 @@ def _sanitize_error(error: Exception, runtime: Runtime | None = None) -> str:
     msg = f"{type(error).__name__}: {error}"
     if runtime is not None and is_local_sandbox(runtime):
         thread_data = get_thread_data(runtime)
+        # OSError renders filenames with repr(), escaping Windows backslashes.
+        if isinstance(error, OSError):
+            for filename in (error.filename, error.filename2):
+                if filename is not None:
+                    masked = mask_local_paths_in_output(os.fsdecode(filename), thread_data)
+                    msg = msg.replace(repr(filename), repr(masked))
         msg = mask_local_paths_in_output(msg, thread_data)
     return msg
 
@@ -2775,8 +2781,9 @@ def grep_tool(
         return f"Error: Path is not a directory: {requested_path}"
     except re.error as e:
         return f"Error: Invalid regex pattern: {e}"
-    except PermissionError:
-        return f"Error: Permission denied: {requested_path}"
+    except PermissionError as e:
+        detail = _sanitize_error(e, runtime) if e.filename is not None else requested_path
+        return f"Error: Permission denied: {detail}"
     except Exception as e:
         return f"Error: Unexpected error searching file contents: {_sanitize_error(e, runtime)}"
 

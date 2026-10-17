@@ -2330,6 +2330,10 @@ For example, independent read-only research can run concurrently when the wall-c
 
 ### Sandbox & File System
 
+Local `grep` reports file permission and I/O failures as errors rather than
+successful empty or partial searches. Binary files and files that disappear
+during scanning remain excluded.
+
 AIO sandboxes recycle after an uncertain implicit-shell outcome or session
 creation; a confirmed `hard_timeout` remains eligible for warm reuse. The Gateway
 waits for all execution and upload holders to finish, including command-session
