@@ -1612,6 +1612,55 @@ class TestAsyncExecutionPath:
     """Test _aexecute() async execution path."""
 
     @pytest.mark.anyio
+    async def test_aexecute_does_not_admit_an_already_terminal_result(
+        self,
+        classes,
+        base_config,
+    ):
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        class ImmediateCapacity:
+            def slot(self):
+                return self
+
+            async def __aenter__(self):
+                return None
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        result = SubagentResult(
+            task_id="timed-out-before-admission",
+            trace_id="trace",
+            status=SubagentStatus.RUNNING,
+        )
+        assert result.try_set_terminal(
+            SubagentStatus.TIMED_OUT,
+            error="Execution timed out before admission settled",
+        )
+        assert not result.execution_done_event.is_set()
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            execution_capacity=ImmediateCapacity(),
+        )
+        admitted = AsyncMock(return_value=result)
+        with patch.object(
+            executor,
+            "_aexecute_admitted",
+            admitted,
+        ):
+            returned = await executor._aexecute("Task", result_holder=result)
+
+        assert returned is result
+        admitted.assert_not_awaited()
+        assert result.execution_done_event.is_set()
+
+    @pytest.mark.anyio
     async def test_aexecute_success(self, classes, base_config, mock_agent, msg):
         """Test successful async execution returns completed result."""
         SubagentExecutor = classes["SubagentExecutor"]
@@ -5738,6 +5787,8 @@ class TestInterruptedTokenUsage:
                 gate["loop"].call_soon_threadsafe(gate["release"].set)
             assert terminal.wait(10), "subagent did not reach a terminal status"
             assert result.status.value == outcome
+            if outcome == "timed_out":
+                assert result.execution_done_event.wait(10), "timed-out execution cleanup did not finish"
             records = result.token_usage_records
             assert len(records) == 2
             assert len({record["source_run_id"] for record in records}) == 2
@@ -6197,6 +6248,113 @@ class TestToolReceiptHarvest:
         result = executor_module._background_tasks[task_id]
         assert result.status == SubagentStatus.TIMED_OUT
         assert result.tool_receipts == harvested
+
+    def test_execute_async_timeout_terminalizes_before_slow_stream_cleanup(self, classes, monkeypatch):
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+        from deerflow.subagents.capacity import SubagentExecutionCapacity
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+        short_config = classes["SubagentConfig"](
+            name="test-agent",
+            description="Test agent",
+            system_prompt="You are a test agent.",
+            max_turns=10,
+            timeout_seconds=0.05,
+        )
+        stream_started = threading.Event()
+        close_started = threading.Event()
+        release_close = threading.Event()
+
+        class Stream:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                stream_started.set()
+                await asyncio.Event().wait()
+
+            async def aclose(self):
+                close_started.set()
+                while not release_close.is_set():
+                    await asyncio.sleep(0.001)
+
+        mock_agent = MagicMock()
+        mock_agent.astream.return_value = Stream()
+        capacity = SubagentExecutionCapacity(
+            SubagentRuntimeConfig(
+                max_running=1,
+                max_queued=1,
+                queue_timeout_seconds=1,
+            )
+        )
+        executor = SubagentExecutor(
+            config=short_config,
+            tools=[],
+            thread_id="test-thread",
+            extensions=SimpleNamespace(
+                needs_task_store=False,
+                has_task_lifecycle=False,
+            ),
+            execution_capacity=capacity,
+        )
+        submitter = self._ThreadSubmitter()
+        task_id = None
+        result = None
+        try:
+            with (
+                patch.object(
+                    executor_module,
+                    "_submit_to_isolated_loop_in_context",
+                    side_effect=submitter.submit,
+                ),
+                patch.object(executor_module, "build_tracing_callbacks", return_value=[]),
+                patch.object(executor_module, "inject_langfuse_metadata"),
+                patch.object(
+                    executor,
+                    "_build_initial_state",
+                    new=AsyncMock(return_value=({}, [], None)),
+                ),
+                patch.object(
+                    executor,
+                    "_create_agent",
+                    return_value=mock_agent,
+                ),
+            ):
+                task_id = executor.execute_async("Do something")
+                assert stream_started.wait(timeout=3)
+                assert close_started.wait(timeout=3)
+
+                deadline = time.monotonic() + 1
+                result = executor_module._background_tasks[task_id]
+                while not result.status.is_terminal and time.monotonic() < deadline:
+                    time.sleep(0.01)
+
+                assert result.status is SubagentStatus.TIMED_OUT
+                assert result.cancel_event.is_set()
+                assert not result.execution_done_event.is_set()
+                assert capacity.snapshot().running == 1
+                assert len(executor_module._background_execution_tasks) == 1
+                executor_module.cleanup_background_task(task_id)
+                assert executor_module.get_background_task_result(task_id) is result
+        finally:
+            release_close.set()
+            if result is not None:
+                execution_done = getattr(result, "execution_done_event", None)
+                if execution_done is not None:
+                    assert execution_done.wait(timeout=3)
+                elif task_id is not None:
+                    deadline = time.monotonic() + 3
+                    while task_id in executor_module._background_futures and time.monotonic() < deadline:
+                        time.sleep(0.01)
+            if task_id is not None:
+                executor_module.cleanup_background_task(task_id)
+            submitter.close()
+
+        assert capacity.snapshot().running == 0
+        assert executor_module._background_execution_tasks == set()
+        assert executor_module.get_background_task_result(task_id) is None
 
     @pytest.mark.anyio
     async def test_harvest_skipped_when_receipts_disabled(self, classes, base_config, mock_agent, msg, monkeypatch):

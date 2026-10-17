@@ -373,7 +373,8 @@ class SubagentBatchService:
                     )
                     if not marked_running:
                         request_cancel_background_task(execution_id)
-                if result.status.is_terminal:
+                execution_done = getattr(result, "execution_done_event", None)
+                if result.status.is_terminal and (execution_done is None or execution_done.is_set()):
                     break
                 if not lease.valid:
                     request_cancel_background_task(execution_id)

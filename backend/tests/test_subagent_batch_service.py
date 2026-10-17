@@ -402,6 +402,42 @@ async def _wait_until(predicate, *, timeout: float = 2.0) -> None:
 
 
 @pytest.mark.asyncio
+async def test_terminal_item_waits_for_execution_cleanup_before_finalizing(monkeypatch) -> None:
+    registry = _Registry()
+    terminal_published = asyncio.Event()
+
+    async def mark_item_running():
+        result = registry.results["execution-1"]
+        result.status = FakeStatus.COMPLETED
+        result.result = "done"
+        terminal_published.set()
+        return True
+
+    service, finalized = _running_item_service(
+        monkeypatch,
+        registry,
+        mark_item_running=mark_item_running,
+    )
+    execution_done = asyncio.Event()
+    registry.results["execution-1"].execution_done_event = execution_done
+
+    await service.run_once(now=service_module.datetime.now(service_module.UTC))
+    await asyncio.wait_for(terminal_published.wait(), timeout=1)
+    await asyncio.sleep(0.15)
+    assert finalized.kwargs is None
+
+    execution_done.set()
+    await asyncio.wait_for(
+        asyncio.gather(*list(service._executions.values())),
+        timeout=1,
+    )
+
+    assert finalized.kwargs is not None
+    assert finalized.kwargs["succeeded"] is True
+    assert finalized.kwargs["result"] == "done"
+
+
+@pytest.mark.asyncio
 async def test_stopped_item_releases_its_execution_once_it_turns_terminal(monkeypatch) -> None:
     # stop() cancels the item task while its subagent is still running, so the
     # finally-block cleanup alone saw a live entry, kept it, and nothing ever

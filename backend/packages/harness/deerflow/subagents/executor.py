@@ -156,6 +156,9 @@ class SubagentResult:
             execution. ``None`` when the delegation carried no acceptance
             criteria, the run ended before streaming, or harvesting failed;
             an empty list means the stream carried no bash-family tool calls.
+        execution_done_event: Internal lifecycle fence set only after stream,
+            sandbox, extension, and capacity cleanup has settled. A configured
+            timeout may publish ``TIMED_OUT`` before this fence opens.
     """
 
     task_id: str
@@ -176,17 +179,23 @@ class SubagentResult:
     knowledge_sources: list[dict[str, Any]] = field(default_factory=list, kw_only=True)
     _knowledge_messages: list[Any] = field(default_factory=list, init=False, repr=False)
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
+    execution_done_event: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
     _state_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def __post_init__(self):
         """Initialize mutable defaults."""
         if self.ai_messages is None:
             self.ai_messages = []
+        if self.status.is_terminal or self.completed_at is not None:
+            self.execution_done_event.set()
 
     def update_token_usage_records(self, records: list[dict[str, int | str | None]]) -> None:
-        """Publish the latest cumulative collector snapshot while still running."""
+        """Publish cumulative usage, including timeout/cancel cleanup tails."""
         with self._state_lock:
-            if not self.status.is_terminal:
+            if not self.status.is_terminal or self.status in {
+                SubagentStatus.CANCELLED,
+                SubagentStatus.TIMED_OUT,
+            }:
                 self.token_usage_records = list(records)
 
     def update_tool_receipts(self, receipts: list[dict[str, Any]] | None) -> None:
@@ -411,6 +420,10 @@ _background_tasks: dict[str, SubagentResult] = {}
 _background_tasks_lock = threading.Lock()
 
 _background_futures: dict[str, Future[SubagentResult]] = {}
+_background_cleanup_requested: set[str] = set()
+# A timed-out public result can precede stream/resource cleanup. Keep the
+# execution task alive and observed until that cleanup settles on its owner loop.
+_background_execution_tasks: set[asyncio.Task[SubagentResult]] = set()
 
 
 def _harvest_tool_receipts(
@@ -1620,9 +1633,10 @@ class SubagentExecutor:
                 capacity = self.execution_capacity or get_subagent_execution_capacity()
                 async with capacity.slot():
                     with result._state_lock:
-                        if not result.status.is_terminal:
-                            result.status = SubagentStatus.RUNNING
-                            result.started_at = _utcnow()
+                        if result.status.is_terminal:
+                            return result
+                        result.status = SubagentStatus.RUNNING
+                        result.started_at = _utcnow()
                     return await self._aexecute_admitted(task, result)
             except SubagentCapacityError as exc:
                 result.try_set_terminal(
@@ -1631,6 +1645,8 @@ class SubagentExecutor:
                     admission_failure=True,
                 )
                 return result
+            finally:
+                result.execution_done_event.set()
 
     async def _aexecute_admitted(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
         """Execute a task asynchronously.
@@ -2200,21 +2216,44 @@ class SubagentExecutor:
             _background_tasks[execution_id] = result
 
         async def run_with_timeout() -> SubagentResult:
+            execution_task = asyncio.create_task(
+                self._aexecute(task, result),
+                name=f"subagent-{self.config.name}-execution",
+            )
             try:
-                return await asyncio.wait_for(
-                    self._aexecute(task, result),
+                done, _ = await asyncio.wait(
+                    {execution_task},
                     timeout=self.config.timeout_seconds,
                 )
-            except TimeoutError:
+                if execution_task in done:
+                    return execution_task.result()
+
+                # Publish the configured hard timeout without waiting for
+                # cancellation-resistant stream cleanup. The detached execution
+                # still owns its capacity slot and sandbox lease until its
+                # supervisor observes full teardown.
                 result.cancel_event.set()
                 result.try_set_terminal(
                     SubagentStatus.TIMED_OUT,
                     error=f"Execution timed out after {self.config.timeout_seconds} seconds",
                     tool_receipts=result.snapshot_tool_receipts(),
                 )
+                execution_task.cancel()
+                _supervise_background_execution(
+                    execution_id,
+                    result,
+                    execution_task,
+                )
+                execution_task = None
                 return result
             except asyncio.CancelledError:
                 result.cancel_event.set()
+                if not execution_task.done():
+                    execution_task.cancel()
+                try:
+                    await execution_task
+                except asyncio.CancelledError:
+                    pass
                 result.try_set_terminal(
                     SubagentStatus.CANCELLED,
                     error="Cancelled by user",
@@ -2223,8 +2262,19 @@ class SubagentExecutor:
                 return result
             except Exception as exc:
                 logger.exception("[trace=%s] Subagent %s async execution failed", self.trace_id, self.config.name)
+                if not execution_task.done():
+                    execution_task.cancel()
+                    _supervise_background_execution(
+                        execution_id,
+                        result,
+                        execution_task,
+                    )
+                    execution_task = None
                 result.try_set_terminal(SubagentStatus.FAILED, error=str(exc))
                 return result
+            finally:
+                if execution_task is not None:
+                    _mark_background_execution_done(execution_id, result)
 
         try:
             execution_future = _submit_to_isolated_loop_in_context(parent_context, run_with_timeout)
@@ -2241,7 +2291,9 @@ class SubagentExecutor:
         with _background_tasks_lock:
             _background_futures[execution_id] = execution_future
 
-        def forget_future(_future: Future[SubagentResult]) -> None:
+        def forget_future(completed_future: Future[SubagentResult]) -> None:
+            if not completed_future.cancelled():
+                completed_future.exception()
             with _background_tasks_lock:
                 _background_futures.pop(execution_id, None)
 
@@ -2298,14 +2350,55 @@ def list_background_tasks() -> list[SubagentResult]:
         return list(_background_tasks.values())
 
 
+def _remove_background_task_locked(execution_id: str) -> None:
+    _background_tasks.pop(execution_id, None)
+    _background_futures.pop(execution_id, None)
+    _background_cleanup_requested.discard(execution_id)
+
+
+def _mark_background_execution_done(
+    execution_id: str,
+    result: SubagentResult,
+) -> None:
+    result.execution_done_event.set()
+    with _background_tasks_lock:
+        if execution_id in _background_cleanup_requested and _background_tasks.get(execution_id) is result:
+            _remove_background_task_locked(execution_id)
+
+
+def _supervise_background_execution(
+    execution_id: str,
+    result: SubagentResult,
+    task: asyncio.Task[SubagentResult],
+) -> None:
+    """Own a timed-out/cancelled execution until resource teardown settles."""
+    _background_execution_tasks.add(task)
+
+    def settled(completed: asyncio.Task[SubagentResult]) -> None:
+        _background_execution_tasks.discard(completed)
+        if not completed.cancelled():
+            try:
+                completed.result()
+            except BaseException as exc:
+                logger.error(
+                    "Detached cleanup for background execution %s failed",
+                    execution_id,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+        _mark_background_execution_done(execution_id, result)
+
+    task.add_done_callback(settled)
+
+
 def cleanup_background_task(execution_id: str) -> None:
     """Remove a completed task from background tasks.
 
     Should be called by task_tool after it finishes polling and returns the result.
     This prevents memory leaks from accumulated completed tasks.
 
-    Only removes tasks that are in a terminal state (COMPLETED/FAILED/TIMED_OUT)
-    to avoid race conditions with the background executor still updating the task entry.
+    Only removes a terminal task after its execution-cleanup fence opens. A hard
+    timeout may publish its business outcome first; cleanup requested in that
+    window is completed by the detached execution supervisor.
 
     Args:
         execution_id: The execution ID to remove.
@@ -2314,15 +2407,20 @@ def cleanup_background_task(execution_id: str) -> None:
         result = _background_tasks.get(execution_id)
         if result is None:
             # Nothing to clean up; may have been removed already.
+            _background_cleanup_requested.discard(execution_id)
             logger.debug("Requested cleanup for unknown background execution %s", execution_id)
             return
 
-        # Only clean up tasks that are in a terminal state to avoid races with
-        # the background executor still updating the task entry.
-        if result.status.is_terminal or result.completed_at is not None:
-            del _background_tasks[execution_id]
-            _background_futures.pop(execution_id, None)
+        terminal = result.status.is_terminal or result.completed_at is not None
+        if terminal and result.execution_done_event.is_set():
+            _remove_background_task_locked(execution_id)
             logger.debug("Cleaned up background execution: %s", execution_id)
+        elif terminal:
+            _background_cleanup_requested.add(execution_id)
+            logger.debug(
+                "Deferred cleanup for background execution %s until teardown completes",
+                execution_id,
+            )
         else:
             logger.debug(
                 "Skipping cleanup for non-terminal background execution %s (status=%s)",
@@ -2347,6 +2445,5 @@ def force_cleanup_background_task(execution_id: str) -> None:
         execution_id: The execution ID to remove.
     """
     with _background_tasks_lock:
-        _background_tasks.pop(execution_id, None)
-        _background_futures.pop(execution_id, None)
+        _remove_background_task_locked(execution_id)
     logger.warning("Force-cleaned background execution %s after unreadable status", execution_id)
