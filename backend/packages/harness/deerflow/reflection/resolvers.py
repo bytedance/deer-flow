@@ -44,6 +44,14 @@ def resolve_variable[T](
         module_path, variable_name = variable_path.rsplit(":", 1)
     except ValueError as err:
         raise ImportError(f"{variable_path} doesn't look like a variable path. Example: parent_package_name.sub_package_name.module_name:variable_name") from err
+    # A path carries exactly one colon. Without this check the split above
+    # misfiles the two realistic typos: a trailing colon yields an empty
+    # attribute name ("Module json does not define a  attribute/class"), and an
+    # extra colon leaves it inside the module part, where the failed import is
+    # reported as a missing dependency with an unusable `uv add json:loads`
+    # hint. Both are path mistakes, so they get the path-format message.
+    if not module_path or not variable_name or ":" in module_path:
+        raise ImportError(f"{variable_path} doesn't look like a variable path. Example: parent_package_name.sub_package_name.module_name:variable_name")
 
     try:
         module = import_module(module_path)
