@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -89,7 +90,7 @@ def test_non_execution_text_does_not_speculate(text):
 
 
 @pytest.mark.anyio
-async def test_denied_prewarm_never_acquires(setup, monkeypatch):
+async def test_denied_prewarm_never_acquires(setup, monkeypatch, caplog):
     provider, _ = setup
 
     async def deny(**kwargs):
@@ -97,10 +98,32 @@ async def test_denied_prewarm_never_acquires(setup, monkeypatch):
 
     monkeypatch.setattr(prewarm, "authorize_sandbox_execution_async", deny, raising=False)
     rt = runtime()
-    handle = start(rt)
-    await handle.task
+    with caplog.at_level(logging.DEBUG, logger=prewarm.__name__):
+        handle = start(rt)
+        await handle.task
     await release_sandbox_execution_lease_async(rt.context)
     assert provider.calls == []
+    records = [record for record in caplog.records if record.name == prewarm.__name__]
+    assert len(records) == 1
+    assert records[0].levelno == logging.DEBUG
+    assert records[0].exc_info is None
+
+
+@pytest.mark.anyio
+async def test_unexpected_prewarm_failure_retains_diagnostic_traceback(setup, caplog):
+    provider, _ = setup
+    provider.fail_once = True
+    rt = runtime()
+    with caplog.at_level(logging.INFO, logger=prewarm.__name__):
+        handle = start(rt)
+        await handle.task
+    await release_sandbox_execution_lease_async(rt.context)
+
+    records = [record for record in caplog.records if record.name == prewarm.__name__]
+    assert len(records) == 1
+    assert records[0].levelno == logging.INFO
+    assert records[0].exc_info[0] is RuntimeError
+    assert not prewarm._permits
 
 
 @pytest.mark.anyio

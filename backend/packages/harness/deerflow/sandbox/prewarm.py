@@ -15,6 +15,7 @@ from deerflow.authz.sandbox_authz import authorize_sandbox_execution_async, safe
 from deerflow.config import get_app_config
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.acquire_serialization import AcquireSerializerClosed
+from deerflow.sandbox.exceptions import SandboxAuthorizationError
 from deerflow.sandbox.lease import (
     SANDBOX_PREWARM_CONTEXT_KEY,
     SandboxLeaseManager,
@@ -135,6 +136,9 @@ class SandboxPrewarm:
             sandbox_id = await self.manager.acquire_async(self.owner_id, self.thread_id, user_id=self.user_id)
             ready = True
             return sandbox_id
+        except SandboxAuthorizationError:
+            logger.debug("Sandbox prewarm skipped: sandbox execution denied")
+            return None
         except Exception:
             logger.info("Sandbox prewarm unavailable; normal tool acquisition remains authoritative", exc_info=True)
             return None
