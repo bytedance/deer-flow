@@ -6,6 +6,7 @@ import {
   CirclePlayIcon,
   CircleStopIcon,
   DownloadIcon,
+  EyeIcon,
   Layers3Icon,
   LoaderCircleIcon,
   RotateCcwIcon,
@@ -14,6 +15,13 @@ import { useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Progress } from "@/components/ui/progress";
 import {
   Sheet,
@@ -31,7 +39,9 @@ import {
   subagentBatchProgress,
   subagentBatchResultsUrl,
   type SubagentBatch,
+  type SubagentBatchItemDetail,
   type SubagentBatchItem,
+  useSubagentBatchItemDetail,
   useControlSubagentBatch,
   useRetrySubagentBatchItem,
   useSubagentBatchItems,
@@ -282,6 +292,8 @@ function BatchItems({
     <div className="border-border mt-3 max-h-72 space-y-2 overflow-y-auto border-t pt-3">
       {(query.data?.pages.flat() ?? []).map((item) => (
         <BatchItemRow
+          threadId={threadId}
+          batchId={batch.id}
           key={item.id}
           item={item}
           workerRunning={workerRunning}
@@ -309,17 +321,25 @@ function BatchItems({
 }
 
 function BatchItemRow({
+  threadId,
+  batchId,
   item,
   workerRunning,
   retrying,
   onRetry,
 }: {
+  threadId: string;
+  batchId: string;
   item: SubagentBatchItem;
   workerRunning: boolean;
   retrying: boolean;
   onRetry: () => void;
 }) {
   const { t } = useI18n();
+  const [detailOpen, setDetailOpen] = useState(false);
+  const detail = useSubagentBatchItemDetail(threadId, batchId, item.position, {
+    enabled: detailOpen,
+  });
   return (
     <div className="bg-muted/40 rounded-lg p-2 text-xs">
       <div className="flex items-center justify-between gap-2">
@@ -336,22 +356,115 @@ function BatchItemRow({
       {item.error && (
         <p className="text-destructive mt-1 break-words">{item.error}</p>
       )}
-      {item.status === "failed" && (
+      <div className="mt-1 flex flex-wrap gap-1">
         <Button
           type="button"
           size="sm"
           variant="ghost"
-          disabled={!workerRunning || retrying}
-          className="mt-1"
-          onClick={onRetry}
+          onClick={() => setDetailOpen(true)}
         >
-          {retrying ? (
-            <LoaderCircleIcon className="animate-spin" />
-          ) : (
-            <RotateCcwIcon />
-          )}
-          {t.subagentBatches.retryItem}
+          <EyeIcon /> {t.subagentBatches.viewResult}
         </Button>
+        {item.status === "failed" && (
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            disabled={!workerRunning || retrying}
+            onClick={onRetry}
+          >
+            {retrying ? (
+              <LoaderCircleIcon className="animate-spin" />
+            ) : (
+              <RotateCcwIcon />
+            )}
+            {t.subagentBatches.retryItem}
+          </Button>
+        )}
+      </div>
+      <Dialog open={detailOpen} onOpenChange={setDetailOpen}>
+        <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>{t.subagentBatches.resultTitle}</DialogTitle>
+            <DialogDescription>
+              {t.subagentBatches.resultDescription}
+            </DialogDescription>
+          </DialogHeader>
+          {detail.isLoading ? (
+            <div className="text-muted-foreground flex items-center gap-2 py-8 text-sm">
+              <LoaderCircleIcon className="size-4 animate-spin" />
+              {t.common.loading}
+            </div>
+          ) : detail.isError ? (
+            <div className="text-destructive rounded-md border p-3 text-sm">
+              {t.subagentBatches.loadResultFailed}: {detail.error.message}
+            </div>
+          ) : detail.data ? (
+            <BatchItemDetail detail={detail.data} />
+          ) : null}
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+function BatchItemDetail({ detail }: { detail: SubagentBatchItemDetail }) {
+  const { t } = useI18n();
+  const evidence = detail.evidence;
+  return (
+    <div className="space-y-4 text-sm">
+      <section>
+        <h3 className="mb-2 font-medium">{t.subagentBatches.report}</h3>
+        <div className="bg-muted/40 max-h-72 overflow-y-auto rounded-md p-3 whitespace-pre-wrap">
+          {detail.report ?? t.subagentBatches.noReport}
+        </div>
+        {detail.report_truncated && (
+          <p className="text-muted-foreground mt-1 text-xs">
+            {t.subagentBatches.truncated}
+          </p>
+        )}
+      </section>
+      <section>
+        <h3 className="mb-2 font-medium">{t.subagentBatches.evidence}</h3>
+        {!evidence || evidence.sources.length === 0 ? (
+          <p className="text-muted-foreground text-xs">
+            {t.subagentBatches.noEvidence}
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {evidence.sources.map((source) => (
+              <article
+                className="border-border rounded-md border p-2"
+                key={source.id}
+              >
+                <p className="font-medium">
+                  {source.dataset_name} / {source.document_name}
+                </p>
+                <p className="text-muted-foreground mt-1 whitespace-pre-wrap">
+                  {source.text}
+                </p>
+                {source.pages.length > 0 && (
+                  <p className="text-muted-foreground mt-1 text-xs">
+                    Pages: {source.pages.join(", ")}
+                  </p>
+                )}
+              </article>
+            ))}
+            {evidence.omitted_count > 0 && (
+              <p className="text-muted-foreground text-xs">
+                {t.subagentBatches.omittedEvidence(evidence.omitted_count)}
+              </p>
+            )}
+          </div>
+        )}
+      </section>
+      {detail.acceptance_verdict && (
+        <section>
+          <h3 className="mb-2 font-medium">{t.subagentBatches.acceptance}</h3>
+          <pre className="bg-muted/40 overflow-x-auto rounded-md p-3 text-xs">
+            {JSON.stringify(detail.acceptance_verdict, null, 2)}
+          </pre>
+        </section>
       )}
     </div>
   );

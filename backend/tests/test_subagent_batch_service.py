@@ -60,6 +60,97 @@ def _request(**overrides) -> BatchSubmitRequest:
 
 
 @pytest.mark.asyncio
+async def test_read_browser_batch_item_projects_report_and_captured_evidence() -> None:
+    repository = SimpleNamespace(
+        get_batch=AsyncMock(return_value={"id": "batch-1", "thread_id": "thread-1"}),
+        list_items=AsyncMock(
+            return_value=[
+                {
+                    "id": "item-1",
+                    "item_key": "record-1",
+                    "position": 0,
+                    "status": "succeeded",
+                    "attempt": 1,
+                    "model_name": "model-a",
+                    "result": "A report",
+                    "result_truncated": False,
+                    "error": None,
+                    "stop_reason": None,
+                    "acceptance_criteria": ["file:answer.md exists"],
+                    "acceptance_verdict": {"status": "passed"},
+                    "result_artifact": {
+                        "knowledge_sources": {
+                            "version": 1,
+                            "sources": [
+                                {
+                                    "id": "a" * 32 + "-1",
+                                    "provider": "ragflow",
+                                    "dataset_id": "dataset-1",
+                                    "document_id": "document-1",
+                                    "chunk_id": "chunk-1",
+                                    "dataset_name": "Private KB",
+                                    "document_name": "report.md",
+                                    "text": "Captured excerpt",
+                                    "pages": [2, True, 0, 3],
+                                    "truncated": True,
+                                    "secret": "must not escape",
+                                },
+                                {"provider": "other", "text": "drop me"},
+                            ],
+                            "omitted_count": 1,
+                        }
+                    },
+                    "started_at": "2026-10-17T00:00:00Z",
+                    "completed_at": "2026-10-17T00:01:00Z",
+                    "updated_at": "2026-10-17T00:01:00Z",
+                }
+            ]
+        ),
+    )
+    service = SubagentBatchService(
+        repository=repository,
+        config=SubagentBatchesConfig(),
+        runtime_config=SubagentRuntimeConfig(),
+    )
+
+    detail = await service.read_browser_batch_item(
+        batch_id="batch-1",
+        user_id="user-1",
+        thread_id="thread-1",
+        position=0,
+    )
+
+    assert detail["report"] == "A report"
+    assert detail["acceptance_verdict"] == {"status": "passed"}
+    assert detail["evidence"] == {
+        "version": 1,
+        "sources": [
+            {
+                "id": "a" * 32 + "-1",
+                "provider": "ragflow",
+                "dataset_id": "dataset-1",
+                "document_id": "document-1",
+                "chunk_id": "chunk-1",
+                "dataset_name": "Private KB",
+                "document_name": "report.md",
+                "text": "Captured excerpt",
+                "pages": [2, 3],
+                "truncated": True,
+            }
+        ],
+        "omitted_count": 1,
+    }
+    assert "secret" not in detail["evidence"]["sources"][0]
+    repository.list_items.assert_awaited_once_with(
+        "batch-1",
+        user_id="user-1",
+        offset=0,
+        limit=1,
+        include_result=True,
+    )
+
+
+@pytest.mark.asyncio
 async def test_submit_keeps_batch_running_limit_separate_from_one_process_capacity() -> None:
     repository = SimpleNamespace(create_batch=AsyncMock(return_value={"id": "batch-1"}))
     service = SubagentBatchService(

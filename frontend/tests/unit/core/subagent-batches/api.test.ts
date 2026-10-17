@@ -6,6 +6,7 @@ rs.mock("@/core/config", () => ({ getBackendBaseURL: () => "" }));
 import { fetch } from "@/core/api/fetcher";
 import {
   controlSubagentBatch,
+  fetchSubagentBatchItemDetail,
   fetchSubagentBatchItems,
   fetchSubagentBatches,
   retrySubagentBatchItem,
@@ -41,6 +42,12 @@ describe("subagent batch API", () => {
     });
     expect(mockedFetch).toHaveBeenLastCalledWith(
       "/api/threads/thread%20%2F%201/subagent-batches/batch%20%2F%201/items?offset=100&limit=50&status=failed",
+    );
+
+    mockedFetch.mockResolvedValueOnce(jsonResponse({}));
+    await fetchSubagentBatchItemDetail("thread / 1", "batch / 1", 3);
+    expect(mockedFetch).toHaveBeenLastCalledWith(
+      "/api/threads/thread%20%2F%201/subagent-batches/batch%20%2F%201/items/3",
     );
   });
 

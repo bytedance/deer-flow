@@ -8,6 +8,7 @@ import { toast } from "sonner";
 
 import {
   controlSubagentBatch,
+  fetchSubagentBatchItemDetail,
   fetchSubagentBatchItems,
   fetchSubagentBatches,
   retrySubagentBatchItem,
@@ -18,6 +19,11 @@ export const subagentBatchesKey = (threadId: string) =>
   ["subagent-batches", threadId] as const;
 export const subagentBatchItemsKey = (threadId: string, batchId: string) =>
   [...subagentBatchesKey(threadId), batchId, "items"] as const;
+export const subagentBatchItemDetailKey = (
+  threadId: string,
+  batchId: string,
+  position: number,
+) => [...subagentBatchItemsKey(threadId, batchId), position, "detail"] as const;
 const SUBAGENT_BATCH_ITEMS_PAGE_SIZE = 100;
 
 export function useSubagentBatches(
@@ -62,6 +68,26 @@ export function useSubagentBatchItems(
       return (query.state.data?.pages.length ?? 0) <= 1 ? 3000 : false;
     },
     refetchIntervalInBackground: false,
+  });
+}
+
+export function useSubagentBatchItemDetail(
+  threadId: string,
+  batchId: string,
+  position: number | null,
+  options: { enabled?: boolean } = {},
+) {
+  return useQuery({
+    queryKey:
+      position === null
+        ? [...subagentBatchItemsKey(threadId, batchId), "detail", "closed"]
+        : subagentBatchItemDetailKey(threadId, batchId, position),
+    queryFn: () => fetchSubagentBatchItemDetail(threadId, batchId, position!),
+    enabled:
+      options.enabled !== false &&
+      Boolean(threadId) &&
+      Boolean(batchId) &&
+      position !== null,
   });
 }
 
