@@ -99,7 +99,7 @@ def _lock_for(path: Path) -> threading.RLock:
 
 @contextmanager
 def _projection_lock(root: Path) -> Iterator[None]:
-    """Serialize projection replacement in-process and across POSIX workers."""
+    """Serialize projection replacement in-process and across workers."""
     lock_path = root.parent / f".{root.name}.projection.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     process_lock = _lock_for(lock_path)
@@ -108,7 +108,12 @@ def _projection_lock(root: Path) -> Iterator[None]:
             fcntl.flock(lock_file, fcntl.LOCK_EX)
         else:  # pragma: no cover - Windows
             lock_file.seek(0)
-            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+            # Windows' blocking lock mode (``msvcrt.LK_LOCK``) gives up after
+            # roughly ten seconds and surfaces contention as Permission
+            # denied, while staging and copying a projection can legitimately
+            # take longer. Retry the non-blocking acquisition until the region
+            # frees, mirroring the POSIX ``flock`` branch above.
+            retry_until_locked(lambda: msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1))
         try:
             yield
         finally:
