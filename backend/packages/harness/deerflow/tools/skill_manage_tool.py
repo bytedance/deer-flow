@@ -7,6 +7,7 @@ import json
 import logging
 import shutil
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any, NoReturn
 from weakref import WeakValueDictionary
@@ -14,6 +15,7 @@ from weakref import WeakValueDictionary
 from langchain.tools import tool
 
 from deerflow.agents.lead_agent.prompt import refresh_user_skills_system_prompt_cache_async
+from deerflow.agents.middlewares.read_before_write_middleware import _GateLock
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.skills.security_scanner import scan_skill_content
 from deerflow.skills.security_static_scanner import (
@@ -30,17 +32,35 @@ from deerflow.tools.types import Runtime
 
 logger = logging.getLogger(__name__)
 
+
+class _SkillLock(_GateLock):
+    """Per-(user, skill) lock shared by every event loop that runs this tool.
+
+    The sync wrapper gives each call its own ``asyncio.run`` loop; an
+    ``asyncio.Lock`` binds to one of them and strands waiters on the others
+    (#5846). The read-before-write gate wakes each waiter on its own loop.
+    """
+
+    async def __aenter__(self) -> None:
+        await self.acquire_async()
+
+    async def __aexit__(self, *_exc: object) -> None:
+        self.release()
+
+
 # Lock granularity: (user_id, skill_name) to avoid cross-user blocking.
-_skill_locks: WeakValueDictionary[tuple[str, str], asyncio.Lock] = WeakValueDictionary()
+_skill_locks: WeakValueDictionary[tuple[str, str], _SkillLock] = WeakValueDictionary()
+_skill_locks_guard = threading.Lock()
 
 
-def _get_lock(user_id: str, name: str) -> asyncio.Lock:
+def _get_lock(user_id: str, name: str) -> _SkillLock:
     key = (user_id, name)
-    lock = _skill_locks.get(key)
-    if lock is None:
-        lock = asyncio.Lock()
-        _skill_locks[key] = lock
-    return lock
+    with _skill_locks_guard:
+        lock = _skill_locks.get(key)
+        if lock is None:
+            lock = _SkillLock()
+            _skill_locks[key] = lock
+        return lock
 
 
 def _get_thread_id(runtime: Runtime | None) -> str | None:

@@ -97,7 +97,8 @@ class _GateLock:
     def __init__(self) -> None:
         self._condition = threading.Condition(threading.Lock())
         self._locked = False
-        self._waiters: set[Future[None]] = set()
+        # Insertion-ordered, so waiters on one loop re-acquire in arrival order.
+        self._waiters: dict[Future[None], None] = {}
 
     def acquire(self) -> bool:
         with self._condition:
@@ -112,14 +113,14 @@ class _GateLock:
                     self._locked = True
                     return
                 waiter: Future[None] = Future()
-                self._waiters.add(waiter)
+                self._waiters[waiter] = None
             try:
                 # Each caller owns its signal, so cancellation cannot cancel
                 # another loop's waiter or leave an eventual lock acquisition.
                 await asyncio.wrap_future(waiter)
             finally:
                 with self._condition:
-                    self._waiters.discard(waiter)
+                    self._waiters.pop(waiter, None)
 
     def release(self) -> None:
         with self._condition:
