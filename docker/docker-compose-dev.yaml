@@ -17,8 +17,10 @@
 # Running Compose yourself works too, but export DEER_FLOW_ROOT as the absolute
 # checkout path first (see CONTRIBUTING.md for the Windows form). Unset, the
 # DEER_FLOW_HOST_BASE_DIR and THREADS_HOST_PATH values below render as
-# /backend/.deer-flow, so the provisioner bind-mounts the wrong host paths:
+# /backend/.deer-flow, so the provisioner bind-mounts the wrong host paths.
+# The default stack does not need Kubernetes:
 #   DEER_FLOW_ROOT="$PWD" docker compose -f docker/docker-compose-dev.yaml up --build
+# Add `--profile provisioner` when using provisioner/Kubernetes sandbox mode.
 # The -f path resolves against your shell's directory, not against this file:
 # from the repository root use docker/docker-compose-dev.yaml; from inside
 # docker/ use the bare docker-compose-dev.yaml, as make docker-start does.
@@ -57,6 +59,8 @@ services:
   # cluster via the K8s API.
   # Backend accesses sandboxes directly via host.docker.internal:{NodePort}.
   provisioner:
+    profiles:
+      - provisioner
     build:
       context: ./provisioner
       dockerfile: Dockerfile
