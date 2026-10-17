@@ -13,7 +13,7 @@ import pytest
 from deerflow.config.paths import Paths
 from deerflow.skills.installer import SkillSecurityScanError
 from deerflow.skills.security_scanner import ScanResult
-from deerflow.skills.storage import reset_skill_storage, reset_user_skill_storage
+from deerflow.skills.storage import get_or_new_user_skill_storage, reset_skill_storage, reset_user_skill_storage, user_should_see_legacy_skills
 from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
 from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
 from deerflow.skills.types import SkillCategory
@@ -101,6 +101,33 @@ class TestPathRedirection:
 
     def test_user_id_property(self, user_storage: UserScopedSkillStorage):
         assert user_storage.user_id == "test-user"
+
+
+class TestFactoryContainerPath:
+    """get_or_new_user_skill_storage must mount skills at the configured root,
+    same as the public-storage factory."""
+
+    def test_factory_honors_configured_container_path(self, base_dir: Path, skills_root: Path, config):
+        config.skills.container_path = "/custom/skills/root"
+        with patch("deerflow.config.paths.get_paths", return_value=Paths(base_dir=base_dir)):
+            with patch("deerflow.config.paths._paths", None):
+                storage = get_or_new_user_skill_storage("test-user", app_config=config)
+        assert storage.get_container_root() == "/custom/skills/root"
+
+    def test_factory_explicit_container_path_wins(self, base_dir: Path, skills_root: Path, config):
+        with patch("deerflow.config.paths.get_paths", return_value=Paths(base_dir=base_dir)):
+            with patch("deerflow.config.paths._paths", None):
+                storage = get_or_new_user_skill_storage("test-user", app_config=config, container_path="/explicit/root")
+        assert storage.get_container_root() == "/explicit/root"
+
+    def test_legacy_visibility_kwargs_branch_seeds_container_path(self, config):
+        """user_should_see_legacy_skills must not fall back to the default root
+        when a caller passes kwargs while a custom root is configured."""
+        config.skills.container_path = "/custom/skills/root"
+        with patch("deerflow.skills.storage.UserScopedSkillStorage") as mock_storage_cls:
+            mock_storage_cls.return_value.load_skills.return_value = []
+            assert user_should_see_legacy_skills("test-user", app_config=config) is False
+        assert mock_storage_cls.call_args.kwargs["container_path"] == "/custom/skills/root"
 
 
 class TestWriteAndRead:
