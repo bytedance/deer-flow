@@ -21,6 +21,11 @@ from .store import TERMINAL, Store
 
 NAMESPACE = "community.workflows"
 FRAME = 48 * 1024
+
+# Hard cap on worker turns that carry real work (messages or an outcome). Poll
+# round trips while an Agent call is pending do not consume this budget; the
+# wall-clock guard is `timeout_seconds` (#7022).
+MAX_WORKER_TURNS = 10_000
 logger = logging.getLogger(__name__)
 
 
@@ -538,9 +543,6 @@ class Workflows(Lifecycle, Artifacts):
                 while True:
                     if entry["cancel"].is_set() or entry["fault"]:
                         raise ValueError(entry["fault"] or "Cancelled")
-                    turns += 1
-                    if turns > 10000:
-                        raise ValueError("Worker turn limit")
                     raw = await process.stdout.readline()
                     if not raw or len(raw) > FRAME:
                         raise ValueError("Worker exited or exceeded frame limit")
@@ -550,6 +552,13 @@ class Workflows(Lifecycle, Artifacts):
                     messages = frame["messages"]
                     if not isinstance(messages, list) or len(messages) > 64:
                         raise ValueError("Worker message limit")
+                    # Only frames carrying work count against the turn budget;
+                    # a poll round trip while an Agent call is pending is not a
+                    # turn, so long-running Agent steps cannot hit the cap.
+                    if messages or frame["outcome"] is not None:
+                        turns += 1
+                        if turns > MAX_WORKER_TURNS:
+                            raise ValueError("Worker turn limit")
                     if any(m.get("type") in ("pause", "humanCheckpoint") for m in messages):
                         if len(messages) != 1 or entry["tasks"] or frame["outcome"] is not None:
                             raise ValueError("Checkpoint must be awaited alone, after all Agent calls")
