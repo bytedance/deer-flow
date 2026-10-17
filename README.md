@@ -3296,6 +3296,9 @@ untouched when no input history is available.
 Recalling identical history text or a saved draft also preserves the cursor and
 undo history.
 
+Thread visibility and title updates remain best-effort. If a database update times out,
+the TUI requests cancellation of the pending update; already committed writes are not rolled back.
+
 See [backend/docs/TUI.md](backend/docs/TUI.md) for the full guide.
 
 ## Documentation
