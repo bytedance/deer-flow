@@ -43,7 +43,8 @@ def _get_api_key(tool_name: str = "web_search", *, extras: Mapping[str, Any] | N
 def _coerce_max_results(value: object, *, default: int = _DEFAULT_MAX_RESULTS) -> int:
     """Coerce configured/tool max_results into a bounded positive int.
 
-    Rejects bools and non-integral floats (same contract as the existing tests).
+    Bools and all floats (including integral ones such as 2.0) fall back to
+    the default; only ints and integer strings are accepted.
     String parsing uses ``int(...)`` inside a try/except so digit-class Unicode
     that ``str.isdigit()`` accepts but ``int`` rejects (e.g. ``"²"``, ``"1²"``)
     falls back to the default instead of raising, matching Brave/Serply/etc.
