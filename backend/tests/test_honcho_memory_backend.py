@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import httpx
@@ -336,6 +337,26 @@ class TestHonchoClient:
         assert b'"alice"' in seen[2][2] and b'"deerflow"' in seen[2][2]
         assert b'"messages"' in seen[3][2]
 
+    def test_search_payload_carries_filters_only_when_present(self):
+        """``filters`` must reach the wire exactly as given (Honcho applies
+        ``metadata`` filters server-side, before its ``limit``), while the
+        unfiltered payload stays byte-identical to the pre-filter shape so
+        deployed Honcho versions see no change on unscoped searches."""
+
+        seen: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/search"):
+                seen.append(json.loads(request.content))
+                return httpx.Response(200, json=[])
+            return httpx.Response(200, json={"id": "x"})
+
+        c = _client_with_handler(handler)
+        c.search("ws1", "q", limit=5)
+        assert seen == [{"query": "q", "limit": 5}]
+        c.search("ws1", "q", limit=5, filters={"metadata": {"category": "preference"}})
+        assert seen[-1] == {"query": "q", "limit": 5, "filters": {"metadata": {"category": "preference"}}}
+
     def test_errors_wrap_as_honcho_request_error(self):
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(500, text="boom")
@@ -380,6 +401,7 @@ class _FakeClient:
         # not narrowly typed to the client's own exception class.
         self.raise_exc_cls: type[BaseException] = HonchoRequestError
         self.closed = False
+        self.search_results = [{"content": "found", "peer_id": "deerflow", "session_id": "df-t", "created_at": "2026-01-01"}]
 
     def _maybe_raise(self, name):
         if self.raise_on == name:
@@ -406,10 +428,10 @@ class _FakeClient:
         self.calls.append(("rep", (ws, pid)))
         return self.representation_text
 
-    def search(self, ws, query, *, limit=5):
+    def search(self, ws, query, *, limit=5, filters=None):
         self._maybe_raise("search")
-        self.calls.append(("search", (ws, query, limit)))
-        return [{"content": "found", "peer_id": "deerflow", "session_id": "df-t", "created_at": "2026-01-01"}]
+        self.calls.append(("search", (ws, query, limit, filters)))
+        return self.search_results[:limit]
 
     def close(self):
         self.closed = True
@@ -573,6 +595,39 @@ class TestHonchoManagerRead:
         mgr, _ = _manager()
         results = mgr.search("deploy", top_k=3, user_id="u1")
         assert results[0]["content"] == "found"
+
+    def test_search_category_scopes_the_wire_request(self):
+        """Regression: ``category`` used to be dropped from the request entirely
+        -- the manager.py contract wants it to filter BEFORE the ``top_k`` slice
+        and memory_search (tools.py) promises "Only facts with this exact
+        category are returned". It must reach Honcho as a ``metadata`` filter,
+        which the server applies to its ranked query before its ``limit``."""
+        mgr, fake = _manager(workspace_overrides={"u1": "shared"})
+        mgr.search("tell me about the user", top_k=5, user_id="u1", category="preference")
+        assert fake.calls[-1] == ("search", ("shared", "tell me about the user", 5, {"metadata": {"category": "preference"}}))
+
+    def test_search_labels_results_from_their_own_metadata(self):
+        """Regression: every unfiltered hit used to come back stamped with the
+        *requested* category; labels must come from each record's own metadata
+        (default ``memory``), never from the request."""
+        mgr, fake = _manager(workspace_overrides={"u1": "shared"})
+        fake.search_results = [
+            {"content": "User works at Acme on backend systems", "peer_id": "alice", "session_id": "df-t1", "created_at": "2026-01-01"},
+            {"content": "User likes hiking in the mountains", "metadata": {"category": "preference"}, "peer_id": "alice", "session_id": "df-t2", "created_at": "2026-01-02"},
+        ]
+        results = mgr.search("tell me about the user", top_k=5, user_id="u1", category="preference")
+        assert [(r["category"], r["content"]) for r in results] == [
+            ("memory", "User works at Acme on backend systems"),
+            ("preference", "User likes hiking in the mountains"),
+        ]
+
+    def test_search_without_category_keeps_the_wire_request_and_labels_unchanged(self):
+        """Guard for the unfiltered path the fix must not disturb: no ``filters``
+        key is sent and the neutral ``memory`` label stays."""
+        mgr, fake = _manager(workspace_overrides={"u1": "shared"})
+        results = mgr.search("q", top_k=3, user_id="u1")
+        assert fake.calls[-1] == ("search", ("shared", "q", 3, None))
+        assert results == [{"content": "found", "category": "memory", "session_id": "df-t", "peer_id": "deerflow", "created_at": "2026-01-01"}]
 
     def test_search_without_user_is_empty(self):
         mgr, _ = _manager()

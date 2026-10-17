@@ -66,6 +66,9 @@ class HonchoClient:
             return str(data.get("representation") or "")
         return ""
 
-    def search(self, workspace: str, query: str, *, limit: int = 5) -> list[dict[str, Any]]:
-        data = self._post(f"/v3/workspaces/{workspace}/search", {"query": query, "limit": limit})
+    def search(self, workspace: str, query: str, *, limit: int = 5, filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        payload: dict[str, Any] = {"query": query, "limit": limit}
+        if filters:
+            payload["filters"] = filters
+        data = self._post(f"/v3/workspaces/{workspace}/search", payload)
         return list(data) if isinstance(data, list) else []
