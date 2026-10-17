@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import json
+import logging
 import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1892,16 +1893,19 @@ class TestNullConfidenceDoesNotBlockUpdates:
 
 
 class TestOutOfRangeExtractionConfidenceDoesNotBlockUpdates:
-    """A model-emitted confidence outside [0, 1] must drop only that fact.
+    """A model-emitted confidence outside [0, 1] must not fail the whole update.
 
     Storage rejects an out-of-range confidence, so an unchecked proposal made
     the whole extraction batch fail on every turn (the watermark never
     advanced and the same paid call repeated). The extraction normalizer now
-    treats the range like every other malformed shape: the item is dropped and
-    the rest of the update still applies.
+    treats the range like every other malformed shape: the item is dropped with
+    a warning and the rest of the update still applies — except when the same
+    batch proposes ``factsToRemove``, where dropping a fact invalidates
+    ``replacementFactIndex`` positions and the parse still fails closed
+    (pinned below).
     """
 
-    @pytest.mark.parametrize("confidence", [1.5, 95, -0.1], ids=["above-one", "percent", "negative"])
+    @pytest.mark.parametrize("confidence", [1.5, 95, -0.1, 10**400], ids=["above-one", "percent", "negative", "unbounded-int"])
     def test_normalize_rule_drops_out_of_range_confidence(self, confidence: object) -> None:
         normalized = _normalize_memory_update_fact({**_DURABLE_USER_FACT, "content": "User lives in Berlin", "confidence": confidence})
         assert normalized is None
@@ -1942,6 +1946,25 @@ class TestOutOfRangeExtractionConfidenceDoesNotBlockUpdates:
 
         stored = storage.load(agent_name="__default__")
         assert [fact["content"] for fact in stored["facts"]] == ["User prefers dark mode"]
+
+    def test_out_of_range_drop_logs_the_raw_confidence(self, caplog) -> None:
+        with caplog.at_level(logging.WARNING, logger="deerflow.agents.memory.backends.deermem.deermem.core.updater"):
+            normalized = _normalize_memory_update_fact({**_DURABLE_USER_FACT, "content": "User lives in Berlin", "confidence": 95})
+        assert normalized is None
+        assert any("out-of-range confidence" in message and "95" in message for message in caplog.messages)
+
+    def test_removal_batch_still_fails_closed_when_a_fact_is_dropped(self) -> None:
+        payload = {
+            "user": {},
+            "history": {},
+            "factsToRemove": [{"id": "fact_old", "scope": "user", "reason": "Retracted by the user"}],
+            "newFacts": [
+                {**_DURABLE_USER_FACT, "content": "User prefers dark mode", "confidence": 0.9},
+                {**_DURABLE_USER_FACT, "content": "User lives in Berlin", "confidence": 1.5},
+            ],
+        }
+        with pytest.raises(json.JSONDecodeError, match="Unsafe partial"):
+            _parse_memory_update_response(json.dumps(payload))
 
 
 class TestParseMemoryUpdateFactsToRemoveGate:
