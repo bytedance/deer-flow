@@ -6,7 +6,7 @@ from unittest.mock import patch
 import pytest
 
 
-@pytest.fixture(params=["url_safety", "brave.tools", "serper.tools"])
+@pytest.fixture(params=["url_safety", "brave.tools", "serper.tools", "infoquest.infoquest_client"])
 def screen(request):
     module = importlib.import_module(f"deerflow.community.{request.param}")
     return module.safe_public_result_url if request.param == "url_safety" else module._safe_public_url
