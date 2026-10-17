@@ -144,12 +144,16 @@ def test_saving_credentials_without_an_encryption_key_is_refused(tmp_path, runti
 
 class FakeTransport:
     started: list[FakeTransport] = []
+    #: Credentials the platform rejects: a transport started on one of them never comes up.
+    rejected_tokens: set[str] = set()
 
     def __init__(self, *, bus: object, config: dict) -> None:
         self.config = config
         self.is_running = False
 
     async def start(self) -> None:
+        if self.config.get("bot_token") in FakeTransport.rejected_tokens:
+            return
         self.is_running = True
         FakeTransport.started.append(self)
 
@@ -160,6 +164,7 @@ class FakeTransport:
 @pytest.fixture
 def fake_transports(monkeypatch):
     FakeTransport.started = []
+    FakeTransport.rejected_tokens = set()
     monkeypatch.setattr(reflection, "resolve_class", lambda *_args, **_kwargs: FakeTransport)
     yield
 
@@ -231,6 +236,33 @@ async def test_the_holder_reconnects_with_credentials_saved_on_a_peer(lease_engi
         await _round(holder)
         await _round(peer)
         assert len(FakeTransport.started) == starts + 1  # applied once, on the holder only
+        assert "telegram" not in peer._channels
+    finally:
+        await holder.stop()
+        await peer.stop()
+
+
+@pytest_lease
+@pytest.mark.asyncio
+async def test_a_holder_whose_transport_is_down_connects_on_new_credentials_in_the_same_round(lease_engine, runtime_sessions, tmp_path):
+    shared = _runtime_store(runtime_sessions)
+    shared.set_provider_config("telegram", {"enabled": True, "bot_token": "revoked"})
+    FakeTransport.rejected_tokens = {"revoked"}
+    holder, peer = _service(lease_engine, "A", tmp_path, shared), _service(lease_engine, "B", tmp_path, shared)
+    await holder.start()
+    await peer.start()
+    try:
+        # The holder took the lease but its transport cannot start on the old credentials.
+        await _round(holder)
+        assert holder.get_status()["channels"]["telegram"]["leader_here"] is True
+        assert not holder._transport_running("telegram")
+
+        shared.set_provider_config("telegram", {"enabled": True, "bot_token": "t-2"})
+        await _round(holder)  # one renewal interval, not one to apply the config and another to start
+
+        assert holder._channels["telegram"].is_running
+        assert holder._channels["telegram"].config["bot_token"] == "t-2"
+        assert "telegram" not in holder._lease_start_backoff
         assert "telegram" not in peer._channels
     finally:
         await holder.stop()

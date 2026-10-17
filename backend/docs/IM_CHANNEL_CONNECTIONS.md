@@ -644,7 +644,7 @@ state, so the connect flow works on any instance; `GET /api/channels/` names
 each provider's `leader`. Runtime credentials saved, or a disconnect made, on
 any instance reach the holder within one lease renewal interval: it compares
 each provider's `version` in `channel_runtime_configs` on every tick and
-restarts (or stops) its transport when the config changed. Channel runs are created with `on_disconnect: continue`, so a run
+restarts, starts or stops its transport when the config changed. Channel runs are created with `on_disconnect: continue`, so a run
 keeps executing when the request that created it dies with its instance (a
 leader hand-off, a rolling restart, a crash): its thread state is persisted
 and the answer stays readable in the web UI, while the IM reply itself is

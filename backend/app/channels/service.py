@@ -988,10 +988,12 @@ class ChannelService:
         Acts only when the freshly read config differs from the one this
         instance runs on: a transport running here restarts with it, or stops
         and hands its lease back when the provider was disabled or
-        disconnected. Without a transport here only the cached config changes,
-        so the next lease round competes for the provider (or leaves it) on
-        current credentials. A read that races a local reconfiguration is
-        dropped unrecorded, and so is a failed one: the next round retries.
+        disconnected, and a held lease whose transport is down (a start that
+        failed on the old credentials) starts it now rather than on the next
+        round. Without a lease here only the cached config changes, so the
+        next lease round competes for the provider (or leaves it) on current
+        credentials. A read that races a local reconfiguration is dropped
+        unrecorded, and so is a failed one: the next round retries.
         """
         if not self._running:
             return
@@ -1003,6 +1005,7 @@ class ChannelService:
             current = self._config.get(name)
             if config is not None and current is None and runtime_channel_disconnected(config):
                 config = None  # a disconnect this instance already applied by never loading the provider
+            started = False
             if config != current:
                 self._bump_config_epoch(name)
                 try:
@@ -1018,12 +1021,18 @@ class ChannelService:
                             await self._restart_channel_locked(name, reload_config=False)
                         else:
                             await self._stop_and_discard_channel(name, channel)
+                    elif self._wants_transport(name) and self._leadership.has_record(name):
+                        await self._restart_channel_locked(name, reload_config=False)
+                        started = True
                     if name not in self._channels:
                         await self._release_idle_lease(name)
                 finally:
                     self._bump_config_epoch(name)
                 logger.info("Applied runtime config version %d of channel %s", version, name)
             self._runtime_config_versions[name] = version
+        if started:
+            # Same retry bookkeeping as a start from the lease round.
+            self._record_lease_start(name, ok=self._transport_running(name) or not self._wants_transport(name))
 
     def _schedule_lease_action(self, name: str, action: Callable[[], Awaitable[None]], *, preempt: bool) -> None:
         current = self._lease_actions.get(name)
