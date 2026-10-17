@@ -181,48 +181,7 @@ load_proxy_env_from_dotenv() {
 }
 
 detect_sandbox_mode() {
-    local config_file="$PROJECT_ROOT/config.yaml"
-    local sandbox_use=""
-    local provisioner_url=""
-
-    if [ ! -f "$config_file" ]; then
-        echo "local"
-        return
-    fi
-
-    sandbox_use=$(awk '
-        /^[[:space:]]*sandbox:[[:space:]]*$/ { in_sandbox=1; next }
-        in_sandbox && /^[^[:space:]#]/ { in_sandbox=0 }
-        in_sandbox && /^[[:space:]]*use:[[:space:]]*/ {
-            line=$0
-            sub(/^[[:space:]]*use:[[:space:]]*/, "", line)
-            print line
-            exit
-        }
-    ' "$config_file")
-
-    provisioner_url=$(awk '
-        /^[[:space:]]*sandbox:[[:space:]]*$/ { in_sandbox=1; next }
-        in_sandbox && /^[^[:space:]#]/ { in_sandbox=0 }
-        in_sandbox && /^[[:space:]]*provisioner_url:[[:space:]]*/ {
-            line=$0
-            sub(/^[[:space:]]*provisioner_url:[[:space:]]*/, "", line)
-            print line
-            exit
-        }
-    ' "$config_file")
-
-    if [[ "$sandbox_use" == *"deerflow.sandbox.local:LocalSandboxProvider"* ]]; then
-        echo "local"
-    elif [[ "$sandbox_use" == *"deerflow.community.aio_sandbox:AioSandboxProvider"* ]]; then
-        if [ -n "$provisioner_url" ]; then
-            echo "provisioner"
-        else
-            echo "aio"
-        fi
-    else
-        echo "local"
-    fi
+    bash "$SCRIPT_DIR/sandbox-mode.sh" "$PROJECT_ROOT/config.yaml"
 }
 
 # Cleanup function for Ctrl+C
