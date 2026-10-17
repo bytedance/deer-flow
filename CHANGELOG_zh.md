@@ -4538,6 +4538,12 @@
   因为它会把相对路径的 `cd` 移出工作区。`$PWD/...` 仍然允许，因为它与对应的相对路径
   指向同一文件，除非命令自己重新绑定了 `PWD`。URL 中的变量不受影响。该守卫仍是尽力
   而为的检查，并非隔离边界。([#6930])
+- **沙箱：** 在本地沙箱中，`ls` 现在接受 `/mnt/user-data` 根目录本身，并像 AIO 一样
+  列出 `workspace`、`uploads` 和 `outputs`。提供方有意映射了这个根目录，但工具层只允许
+  其下的路径，因此返回 `Permission denied`（带结尾斜杠时来自内部的
+  “path traversal detected” 检查）。列表只包含这三个目录，直接存放在根目录下的其他内容
+  仍然不可见。`glob`、`grep`、`read_file` 和写入仍然拒绝根目录，因为搜索会读取其下的
+  所有文件。([#6991])
 
 ### 安全
 
@@ -9391,3 +9397,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6897]: https://github.com/bytedance/deer-flow/pull/6897
 [#6909]: https://github.com/bytedance/deer-flow/pull/6909
 [#6930]: https://github.com/bytedance/deer-flow/pull/6930
+[#6991]: https://github.com/bytedance/deer-flow/pull/6991
