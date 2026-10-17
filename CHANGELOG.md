@@ -5982,6 +5982,18 @@ This release closes that milestone with **621 merged pull requests**.
   names the same file as the equivalent relative path, unless the command
   rebinds `PWD` itself. Variables inside URLs are unaffected. The guard
   remains best-effort and is not an isolation boundary. ([#6930])
+- **sandbox:** With host bash enabled, the local path guard accepts awk
+  field arithmetic again, such as `awk '{print $NF/2}' data.txt` and
+  `awk '{print $sum/$n}' data.txt`. Since [#6930] every `$NAME/` was treated
+  as a variable-prefixed host path unless both sides were digits. A `$` inside
+  the single-quoted inline program of `awk`, `gawk`, `mawk` or `nawk` (after
+  options such as `-F` and `-v`) is now exempt, because bash expands nothing
+  there and awk reads it as a field reference. Text inside awk string
+  literals, options such as `-v`, input operands, double-quoted programs and
+  text re-read by `sh -c` or `eval` are still scanned, and commands with a
+  heredoc or an `awk` function or alias, programs preceded by any option other
+  than `-F`, `-v` or `--` (such as gawk's `--assign`), or programs whose `"`
+  may sit in an awk regex or comment, get no exemption. (issue #7021)
 
 ### Security
 

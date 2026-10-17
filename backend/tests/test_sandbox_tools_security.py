@@ -1044,6 +1044,32 @@ def test_validate_local_bash_command_paths_blocks_brace_expansion_host_paths(com
         ("cat ~root/.ssh/id_rsa", "~root/.ssh/id_rsa"),
         ("ls ~deploy/", "~deploy/"),
         ("make --directory=~deploy/app", "~deploy/app"),
+        # The awk exemption covers only the single-quoted inline program.
+        ("awk '{print $1}' $HOME/.ssh/id_rsa", "$HOME/.ssh/id_rsa"),
+        ("awk -f prog.awk '$HOME/.ssh/id_rsa'", "$HOME/.ssh/id_rsa"),
+        ("awk -v 'cmd=cat $HOME/.ssh/id_rsa' 'BEGIN{system(cmd)}'", "$HOME/.ssh/id_rsa"),
+        # A string literal inside the program can reach a shell via system().
+        ("awk 'BEGIN{system(\"cat $HOME/.ssh/id_rsa\")}'", "$HOME/.ssh/id_rsa"),
+        # A quote inside an awk regex or comment must not hide a later string.
+        ('awk \'/"/ {system("cat $HOME/.ssh/id_rsa")}\' /mnt/user-data/workspace/data.txt', "$HOME/.ssh/id_rsa"),
+        ('awk \'$0 ~ /"/ {system("cat $HOME/.ssh/id_rsa")}\' /mnt/user-data/workspace/data.txt', "$HOME/.ssh/id_rsa"),
+        ('awk \'{print /"/; system("cat $HOME/.ssh/id_rsa")}\' /mnt/user-data/workspace/data.txt', "$HOME/.ssh/id_rsa"),
+        ('awk \'BEGIN { # "\nsystem("cat $HOME/.ssh/id_rsa") }\'', "$HOME/.ssh/id_rsa"),
+        # In awk a ``/`` after ``)`` or at the start of a line opens a regex.
+        ('awk \'{ if (1) /"b/; system("cat $HOME/.ssh/id_rsa")}\' /mnt/user-data/workspace/data.txt', "$HOME/.ssh/id_rsa"),
+        ('awk \'{ while (0) /"b/; system("cat $HOME/.ssh/id_rsa")}\' /mnt/user-data/workspace/data.txt', "$HOME/.ssh/id_rsa"),
+        ('awk \'NR==1\n/"b/{system("cat $HOME/.ssh/id_rsa")}\' /mnt/user-data/workspace/data.txt', "$HOME/.ssh/id_rsa"),
+        # An unrecognised option may take the next word as its value (gawk's
+        # ``--assign`` is ``-v``), so the following word is not the program.
+        ("gawk --assign 'cmd=cat $HOME/.ssh/id_rsa' 'BEGIN{system(cmd)}'", "$HOME/.ssh/id_rsa"),
+        ("awk --assign 'cmd=cat $HOME/.ssh/id_rsa' 'BEGIN{system(cmd)}'", "$HOME/.ssh/id_rsa"),
+        # Re-interpreted or expanded program text is not exempt.
+        ("sh -c 'awk \"{print \\$HOME/x}\"'", "$HOME/x"),
+        ("bash -c 'awk {print $HOME/.ssh/id_rsa}'", "$HOME/.ssh/id_rsa"),
+        ("eval awk '{print $HOME/.ssh/id_rsa}'", "$HOME/.ssh/id_rsa"),
+        ('awk "{print $HOME/.ssh/id_rsa}"', "$HOME/.ssh/id_rsa"),
+        ("bash <<EOF\nawk '{print $HOME/.ssh/id_rsa}'\nEOF", "$HOME/.ssh/id_rsa"),
+        ("awk() { bash -c \"$1\"; }; awk 'cat $HOME/.ssh/id_rsa'", "$HOME/.ssh/id_rsa"),
     ],
 )
 def test_validate_local_bash_command_paths_blocks_variable_prefixed_host_paths(command: str, rejected: str) -> None:
@@ -1073,6 +1099,18 @@ def test_validate_local_bash_command_paths_blocks_variable_prefixed_host_paths(c
         # awk field arithmetic is not a path.
         "du -k /mnt/user-data/workspace | awk '{print $1/1024}'",
         "awk -F, '{print $1/$2}' /mnt/user-data/uploads/data.csv",
+        # Inside a single-quoted awk program bash expands nothing and ``$``
+        # is awk's field operator (#7021).
+        "awk '{print $NF/2}' /mnt/user-data/workspace/data.txt",
+        "awk '{print $sum/$n}' /mnt/user-data/workspace/data.txt",
+        "awk -F, '{total+=$3} END {print total/NR}' /mnt/user-data/workspace/data.csv",
+        "gawk '{print $NF/2}' /mnt/user-data/workspace/data.txt",
+        "mawk '{print $NF/2}' /mnt/user-data/workspace/data.txt",
+        "nawk '{print $NF/2}' /mnt/user-data/workspace/data.txt",
+        "awk -F: -v n=2 '{print $NF/n}' /mnt/user-data/workspace/data.txt",
+        "cat /mnt/user-data/workspace/data.txt | awk -- '{print $NF/2}' && echo done",
+        "awk '{print \"avg\", $sum/$n}' /mnt/user-data/workspace/data.txt",
+        "awk '{print $NF/2 \" MB\"}' /mnt/user-data/workspace/data.txt",
     ],
 )
 def test_validate_local_bash_command_paths_allows_non_path_variable_uses(command: str) -> None:
@@ -1092,6 +1130,11 @@ def test_validate_local_bash_command_paths_allows_non_path_variable_uses(command
 def test_validate_local_bash_command_paths_rejects_cdpath_relocation(command: str) -> None:
     with pytest.raises(PermissionError, match="Unsafe working directory change via CDPATH"):
         validate_local_bash_command_paths(command, _THREAD_DATA)
+
+
+def test_validate_local_bash_command_paths_rejects_absolute_path_after_awk_program() -> None:
+    with pytest.raises(PermissionError, match="/etc/passwd"):
+        validate_local_bash_command_paths("awk '{print $NF/2}' /etc/passwd", _THREAD_DATA)
 
 
 def test_validate_local_bash_command_paths_rejects_pwd_traversal_like_relative_traversal() -> None:
