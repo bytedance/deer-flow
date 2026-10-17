@@ -212,6 +212,8 @@ Repo-wide conventions:
   frontend tests live in `frontend/tests/`.
   Public skill script regressions live in `tests/skills/`; exercise dependency fallbacks
   with the optional import unavailable and mock HTTP transport to keep tests offline.
+  Video-generation CLI failures must exit non-zero and write diagnostics to stderr;
+  keep success output on stdout and test the CLI boundary with offline transport.
 - **Before pushing** — backend `make format`, frontend `pnpm check`.
   Backend CI enforces `ruff format --check`.
 - **Skill text encoding** — treat `SKILL.md` and other textual skill resources as UTF-8;
