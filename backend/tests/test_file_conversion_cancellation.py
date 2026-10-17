@@ -11,10 +11,11 @@ from deerflow.utils import file_conversion
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("file_size", [100, 1024 * 1024 + 1], ids=["small", "large"])
 @pytest.mark.parametrize("conversion_fails", [False, True], ids=["success", "failure"])
-async def test_cancelled_conversion_drains_worker_before_source_cleanup(tmp_path, monkeypatch, conversion_fails):
-    source = tmp_path / "large.pdf"
-    source.write_bytes(b"x" * (file_conversion._ASYNC_THRESHOLD_BYTES + 1))
+async def test_cancelled_conversion_drains_worker_before_source_cleanup(tmp_path, monkeypatch, conversion_fails, file_size):
+    source = tmp_path / "document.pdf"
+    source.write_bytes(b"x" * file_size)
     output = tmp_path / "converted.md"
     started = threading.Event()
     release = threading.Event()
@@ -24,11 +25,18 @@ async def test_cancelled_conversion_drains_worker_before_source_cleanup(tmp_path
     loop = asyncio.get_running_loop()
     worker_started = asyncio.Event()
 
+    loop_thread = threading.get_ident()
+    worker_threads = []
+
     def convert(path, _converter):
+        worker_threads.append(threading.get_ident())
         started.set()
         loop.call_soon_threadsafe(worker_started.set)
         try:
-            assert release.wait(timeout=10), "test did not release conversion worker"
+            # An inline regression must reach the test body's diagnostic
+            # instead of parking the event loop waiting for its own release.
+            if worker_threads[0] != loop_thread:
+                assert release.wait(timeout=10), "test did not release conversion worker"
             # A converter may reopen/read the source throughout conversion.
             assert path.read_bytes().startswith(b"x")
             source_read.set()
@@ -53,6 +61,8 @@ async def test_cancelled_conversion_drains_worker_before_source_cleanup(tmp_path
     try:
         await asyncio.wait_for(worker_started.wait(), timeout=10)
         assert started.is_set()
+        assert len(worker_threads) == 1
+        assert worker_threads[0] != loop_thread, "converter must not block the event loop"
         task.cancel()
         # Yield scheduler turns, not a wall-clock delay, so cancellation reaches
         # the suspended await while the worker is held by the release event.
@@ -61,11 +71,14 @@ async def test_cancelled_conversion_drains_worker_before_source_cleanup(tmp_path
         await asyncio.sleep(0)
         assert not cleanup_before_finish, "caller cleaned the source while the converter was still running"
         assert not task.done()
-    finally:
         release.set()
         with pytest.raises(asyncio.CancelledError):
             await task
         assert await asyncio.to_thread(finished.wait, 10)
+    finally:
+        release.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
     assert cleanup_before_finish == [False]
     assert source_read.is_set()
