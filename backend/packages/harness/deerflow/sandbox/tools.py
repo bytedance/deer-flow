@@ -77,6 +77,10 @@ _ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![:\w])(?<!:/)/(?:[^\s\"'`;&|<>()]+)")
 # through the absolute-path regex because ``}``, ``~``, ``@`` and ``?`` are not
 # word chars. The remainder is captured in a lookahead so a skipped prefix does
 # not hide a later one (``$1/$2/etc/passwd``).
+# The one structural exemption is a ``$`` inside the single-quoted inline
+# program of an awk-family command (``awk '{print $NF/2}'``): bash expands
+# nothing there and awk reads ``$NAME`` as a field reference. See
+# ``_awk_program_field_spans`` for what keeps that exemption narrow.
 _SHELL_VARIABLE_PATH_PATTERN = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*|[0-9])/(?=([^\s\"'`;&|<>()]*))")
 # ``~name/`` expands to that user's home (``~root/.ssh/id_rsa``) and slips the
 # absolute-path regex for the same reason. Tilde expansion only applies at the
@@ -1146,6 +1150,200 @@ def _split_shell_tokens(command: str) -> list[str]:
 
 _SHELL_PATH_HARD_TERMINATORS = frozenset("\"'`;&|<>()")
 
+_AWK_COMMAND_NAMES = frozenset({"awk", "gawk", "mawk", "nawk"})
+# awk options whose value is the next word. ``-f`` is handled separately: it
+# means there is no inline program, so the first operand is an input file. Any
+# other option (gawk's ``--assign``, ``-e``, ...) may also consume the next
+# word, so it forfeits the exemption.
+_AWK_OPTIONS_WITH_VALUE = frozenset({"-F", "-v"})
+# Constructs that make bash re-read single-quoted awk text: an unquoted heredoc
+# expands ``$NAME`` in its body, and an ``awk`` function or alias can hand its
+# argument to another shell.
+_AWK_EXEMPTION_BLOCKER_PATTERN = re.compile(r"<<|\balias\b|\bfunction\s+[gmn]?awk\b|\b[gmn]?awk\s*\(\s*\)")
+# awk keywords after which ``/`` opens a regex literal (``print /re/``).
+_AWK_REGEX_KEYWORDS = frozenset({"case", "delete", "do", "else", "exit", "getline", "in", "print", "printf", "return"})
+_AWK_TRAILING_WORD_PATTERN = re.compile(r"[A-Za-z0-9_]+\Z")
+
+
+def _awk_program_code_spans(program: str, offset: int) -> list[tuple[int, int]] | None:
+    """Spans of *program* (shifted by *offset*) that awk reads as code, not string text.
+
+    A ``$NAME/`` in awk code is a field reference; inside a string literal it
+    is text that ``system("...")`` or ``getline < "..."`` may hand to a shell,
+    so string literals are left out. Rather than lex awk fully, walk the
+    program once: a ``"`` toggles a string literal (``\\`` escapes inside),
+    ``#`` outside one starts a comment that runs to the end of the line, and
+    inside a literal ``/`` and ``#`` are plain text (``split($0, p, "/")``).
+    A ``/`` outside a literal must be division, which in awk follows an
+    identifier, number or ``]`` on the same line that is not a keyword; any
+    other ``/`` (``gsub(/"/, ...)``, ``if (x) /re/``, a ``/`` at the start of
+    a line) opens a regex literal whose ``"`` would desynchronise the
+    tracker, so return None and the caller grants no exemption.
+    """
+    spans: list[tuple[int, int]] = []
+    in_string = False
+    segment_start = 0
+    position = 0
+    while position < len(program):
+        char = program[position]
+        if in_string:
+            if char == "\\":
+                position += 1
+            elif char == '"':
+                in_string = False
+                segment_start = position + 1
+        elif char == '"':
+            spans.append((offset + segment_start, offset + position))
+            in_string = True
+        elif char == "#":
+            newline = program.find("\n", position)
+            position = len(program) if newline == -1 else newline
+            continue
+        elif char == "/":
+            before = program[:position].rstrip(" \t")
+            if not before.endswith("]"):
+                word = _AWK_TRAILING_WORD_PATTERN.search(before)
+                if word is None or word.group() in _AWK_REGEX_KEYWORDS:
+                    return None
+        position += 1
+    if not in_string:
+        spans.append((offset + segment_start, offset + len(program)))
+    return spans
+
+
+def _scan_shell_words(command: str) -> list[tuple[str, str, list[tuple[int, int]]]] | None:
+    """Split *command* into ``(kind, text, single_quoted_spans)`` items.
+
+    ``kind`` is ``"word"``, ``"sep"`` (command separator) or ``"redir"``.
+    Spans are offsets of single-quoted content in *command*. Returns None on
+    unbalanced quotes so callers fall back to the strict path.
+    """
+    items: list[tuple[str, str, list[tuple[int, int]]]] = []
+    text: list[str] = []
+    spans: list[tuple[int, int]] = []
+    in_word = False
+
+    def flush() -> None:
+        nonlocal text, spans, in_word
+        if in_word:
+            items.append(("word", "".join(text), spans))
+        text, spans, in_word = [], [], False
+
+    i, n = 0, len(command)
+    while i < n:
+        char = command[i]
+        if char in " \t":
+            flush()
+            i += 1
+        elif char in "\r\n;&|()<>":
+            flush()
+            j = i + 1
+            group = "&|" if char in "&|" else "<>&" if char in "<>" else ""
+            while j < n and command[j] in group:
+                j += 1
+            items.append(("redir" if char in "<>" else "sep", command[i:j], []))
+            i = j
+        elif char == "'":
+            end = command.find("'", i + 1)
+            if end == -1:
+                return None
+            spans.append((i + 1, end))
+            text.append(command[i + 1 : end])
+            in_word = True
+            i = end + 1
+        elif char == '"':
+            end = i + 1
+            while end < n and command[end] != '"':
+                end += 2 if command[end] == "\\" else 1
+            if end >= n:
+                return None
+            text.append(command[i + 1 : end])
+            in_word = True
+            i = end + 1
+        elif char == "\\":
+            text.append(command[i + 1 : i + 2])
+            in_word = True
+            i += 2
+        else:
+            text.append(char)
+            in_word = True
+            i += 1
+    flush()
+    return items
+
+
+def _awk_inline_program_span(items: list[tuple[str, str, list[tuple[int, int]]]], index: int) -> tuple[tuple[int, int] | None, int]:
+    """Return the span of a wholly single-quoted awk program and the next index."""
+    while index < len(items):
+        kind, text, _ = items[index]
+        if kind == "sep":
+            break
+        if kind == "redir" or text in _AWK_OPTIONS_WITH_VALUE:
+            index += 2
+            continue
+        if text == "--file" or text.startswith(("-f", "--file=")):
+            return None, index + 1
+        if text == "--":
+            index += 1
+            break
+        if not text.startswith("-") or text == "-":
+            break
+        if not text.startswith(("-F", "-v")):
+            return None, index + 1
+        index += 1
+    if index < len(items) and items[index][0] == "word":
+        _, text, spans = items[index]
+        if len(spans) == 1 and spans[0][1] - spans[0][0] == len(text):
+            return spans[0], index + 1
+    return None, index + 1
+
+
+def _awk_program_field_spans(command: str) -> list[tuple[int, int]]:
+    """Spans where ``$NAME/`` is an awk field reference rather than a path.
+
+    Only the single-quoted inline program of an awk-family command qualifies:
+    bash performs no expansion inside single quotes and awk reads ``$`` as its
+    field operator. Text re-interpreted by another shell (``sh -c '...'``,
+    ``eval``, double-quoted programs) never qualifies, because the command
+    word there is not awk. Inside the program, awk string literals are left
+    out: ``system("cat $HOME/x")`` hands that text to a shell. A program
+    whose ``"`` may sit in a regex literal gets no exemption.
+    """
+    if _AWK_EXEMPTION_BLOCKER_PATTERN.search(command):
+        return []
+    items = _scan_shell_words(command)
+    if items is None:
+        return []
+
+    field_spans: list[tuple[int, int]] = []
+    at_command_start = True
+    index = 0
+    while index < len(items):
+        kind, text, _ = items[index]
+        if kind == "sep":
+            at_command_start = True
+            index += 1
+            continue
+        if not at_command_start:
+            index += 1
+            continue
+        if kind == "redir":
+            index += 2
+            continue
+        if text in _LOCAL_BASH_COMMAND_PREFIX_KEYWORDS or text in _LOCAL_BASH_COMMAND_WRAPPERS:
+            index += 1
+            continue
+        at_command_start = False
+        if text not in _AWK_COMMAND_NAMES:
+            index += 1
+            continue
+        program, index = _awk_inline_program_span(items, index + 1)
+        if program is None:
+            continue
+        start, end = program
+        field_spans.extend(_awk_program_code_spans(command[start:end], start) or [])
+    return field_spans
+
 
 def _absolute_path_token_occurrences(command: str, tokens: list[str]) -> list[tuple[int, int, str]]:
     """Locate contiguous occurrences of path-bearing shell tokens in *command*.
@@ -1439,7 +1637,9 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
     validated whole, so a space inside quotes is not treated as a new segment.
     A shell variable used as a path prefix (``$HOME/...``, ``$1/...``) or a named
     home (``~root/...``) is rejected like ``${HOME}/...`` and ``~/...``, since its
-    runtime value is unknown here;
+    runtime value is unknown here, except inside the single-quoted inline
+    program of awk/gawk/mawk/nawk (outside awk string literals), where bash
+    expands nothing and ``$NF/2`` is field arithmetic;
     ``$PWD/...`` is checked like the relative path it is equivalent to.
     A windows-incompatible segment still rejects a path that is not already
     stored on the host; an existing host file may be read or renamed.
@@ -1480,8 +1680,9 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
     # The prose exemption used above does not apply: ``$HOME/文档`` is a real
     # host directory.
     pwd_is_workspace = not _PWD_REBIND_PATTERN.search(command)
+    awk_field_spans = _awk_program_field_spans(command)
     for match in _SHELL_VARIABLE_PATH_PATTERN.finditer(command):
-        if _is_in_spans(match.start(), url_spans):
+        if _is_in_spans(match.start(), url_spans) or _is_in_spans(match.start(), awk_field_spans):
             continue
         name, remainder = match.group(1), match.group(2)
         if name == "PWD" and pwd_is_workspace:
