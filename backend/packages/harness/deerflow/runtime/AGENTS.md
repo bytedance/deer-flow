@@ -9,6 +9,15 @@ to sibling namespaces. Keep the cursor loop and outage/TTL fallback unchanged.
 
 Observed Redis streams removed during replay yield `StreamGap` with empty bounds; initially empty streams still wait. After this gap, `/wait` refreshes store-only status and completes only for a terminal run with no retained stream.
 
+Memory stream cleanup retires the captured stream generation, clears its retained
+payloads and wakes its Condition. Established readers emit one empty-bound
+`StreamGap` and stop if replay is unfinished, including on bridge close. Fully
+consumed terminal streams keep END, using the retired generation's tail offset;
+readers never attach to a recreated stream. An unpublished stream without explicit
+cleanup still heartbeats.
+New readers that capture a generation but acquire its Condition only after
+retirement always receive a gap, including cursor-less terminal reattachments.
+
 Memory/Redis bridges keep startup-only `stream_bridge.heartbeat_interval_seconds`; explicit `subscribe(..., heartbeat_interval=...)` overrides it. Provider contexts drain owned cache/bridge/checkpointer/Store teardown across cancellation. `close_agent_stream()` shields close to completion: preserve counts, defer host cancellation, balance repeats, keep active errors, log attached close failures at callers, map close cancellation to failure, never time out.
 
 ### Checkpoint Channel Modes (`full` / `delta`)
