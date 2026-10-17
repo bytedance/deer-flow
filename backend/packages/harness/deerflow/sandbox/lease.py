@@ -28,12 +28,15 @@ logger = logging.getLogger(__name__)
 
 
 SANDBOX_PREWARM_CONTEXT_KEY = "__deerflow_sandbox_prewarm"
+SANDBOX_PREWARM_CLEANUP_CONTEXT_KEY = "__deerflow_sandbox_prewarm_cleanup"
+_PREWARM_CLEANUP_MARKER = object()
 SANDBOX_LEASE_OWNER_CONTEXT_KEY = "sandbox_lease_owner_id"
 SANDBOX_COMMAND_SCOPE_CONTEXT_KEY = "sandbox_command_scope_id"
 SANDBOX_SERVER_OWNED_CONTEXT_KEYS = frozenset(
     {
         SANDBOX_LEASE_OWNER_CONTEXT_KEY,
         SANDBOX_PREWARM_CONTEXT_KEY,
+        SANDBOX_PREWARM_CLEANUP_CONTEXT_KEY,
         SANDBOX_COMMAND_SCOPE_CONTEXT_KEY,
     }
 )
@@ -736,6 +739,16 @@ def discard_sandbox_lease_manager(provider: SandboxProvider) -> None:
         manager.close()
 
 
+def register_sandbox_prewarm_cleanup(context: dict[str, Any]) -> None:
+    """Admit prewarm only inside an unconditional async lease-release finally."""
+    context[SANDBOX_PREWARM_CLEANUP_CONTEXT_KEY] = _PREWARM_CLEANUP_MARKER
+
+
+def sandbox_prewarm_cleanup_registered(context: Any) -> bool:
+    """Do not accept a serialized caller flag as an execution cleanup boundary."""
+    return isinstance(context, dict) and context.get(SANDBOX_PREWARM_CLEANUP_CONTEXT_KEY) is _PREWARM_CLEANUP_MARKER
+
+
 def ensure_sandbox_lease_owner(context: Any) -> str | None:
     """Create one ephemeral owner id in a mutable runtime context."""
     if not isinstance(context, dict):
@@ -794,6 +807,8 @@ async def release_sandbox_execution_lease_async(context: Any) -> None:
     """Drain speculative work before releasing the ordinary execution lease."""
     from deerflow.sandbox.prewarm import close_sandbox_prewarm_context
 
+    if isinstance(context, dict):
+        context.pop(SANDBOX_PREWARM_CLEANUP_CONTEXT_KEY, None)
     try:
         await close_sandbox_prewarm_context(context)
     finally:

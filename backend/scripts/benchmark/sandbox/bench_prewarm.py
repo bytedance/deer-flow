@@ -37,7 +37,7 @@ from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddlew
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config import get_app_config
 from deerflow.sandbox import tools as sandbox_tools
-from deerflow.sandbox.lease import get_sandbox_lease_manager, release_sandbox_execution_lease_async, sandbox_lease_owner
+from deerflow.sandbox.lease import get_sandbox_lease_manager, register_sandbox_prewarm_cleanup, release_sandbox_execution_lease_async, sandbox_lease_owner
 from deerflow.sandbox.middleware import SandboxMiddleware
 from deerflow.sandbox.sandbox_provider import set_sandbox_provider, shutdown_sandbox_provider
 from scripts.benchmark.sandbox.bench_provider import _evict_from_warm, _make_aio_provider, _pool_counts
@@ -186,6 +186,7 @@ async def run_case(provider, app_config, *, case: str, prewarm: bool, model_dela
     async def invoke():
         token = _TRACE.set(trace)
         try:
+            register_sandbox_prewarm_cleanup(context)
             return await graph.ainvoke({"messages": [HumanMessage(content=PROMPTS[case])]}, context=context, config={"configurable": {"thread_id": thread_id}, "recursion_limit": 10})
         finally:
             trace.mark("cleanup_started")

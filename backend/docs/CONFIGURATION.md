@@ -1350,7 +1350,10 @@ is attempted, and the container is recycled instead of being returned to the
 warm pool. Session-level cleanup does not clear that quarantine because a
 timed-out create may commit after cleanup has already returned.
 
-`prewarm` is disabled by default and applies only to asynchronous AIO runs.
+`prewarm` is disabled by default and applies only to asynchronous AIO runs with
+an unconditional outer execution-lease cleanup: the Gateway/embedded run worker
+and native subagent executor. Direct `create_deerflow_agent(...).ainvoke()` and
+`.astream()` calls retain ordinary lazy acquisition even when this setting is on.
 For likely sandbox turns (for example, code fences or explicit shell commands),
 startup can overlap the first model call. Authorization is checked before
 speculation and checked again when a tool uses the sandbox. The acquisition
@@ -1358,6 +1361,11 @@ belongs to the run's execution lease; cancellation, model failure, and turns
 without a sandbox tool drain startup and release that owner. Unused sandboxes
 follow the provider's normal warm-pool/idle cleanup policy, so false positives
 can still consume resources until eviction.
+
+Internal prewarm handles and the non-serializable cleanup marker belong only in
+server-owned runtime context, never checkpoint state. Register the marker only
+inside an unconditional async execution-lease cleanup; revoke it during cleanup,
+which must drain startup and release the owner even if no sandbox ID was published.
 
 `prewarm_max_concurrent` is a positive integer, default `1`. It bounds pending
 and ready-but-unused prewarms for each provider instance in a process. When

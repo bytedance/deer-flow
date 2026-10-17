@@ -818,8 +818,8 @@ that no port is available instead of attempting an out-of-range bind.
 
 See the [Sandbox Configuration Guide](backend/docs/CONFIGURATION.md#sandbox) to configure your preferred mode.
 
-Async AIO runs can opt into bounded sandbox prewarming to overlap startup with
-the first model call. It defaults off; see the guide and
+Managed async AIO runs can opt into bounded sandbox prewarming to overlap startup
+with the first model call. Direct SDK graphs keep lazy acquisition. It defaults off; see the guide and
 [sandbox benchmarks](backend/scripts/benchmark/sandbox/README.md) before enabling it on a shared host.
 
 Remote directory listings report traversal failures (for example, unreadable

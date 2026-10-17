@@ -19,6 +19,7 @@ from deerflow.sandbox.exceptions import SandboxAuthorizationError, SandboxRuntim
 from deerflow.sandbox.lease import (
     ensure_sandbox_lease_owner,
     get_sandbox_lease_manager,
+    register_sandbox_prewarm_cleanup,
     release_sandbox_execution_lease,
     release_sandbox_execution_lease_async,
 )
@@ -482,8 +483,9 @@ async def test_prewarm_overlaps_model_call_and_is_claimed_by_first_tool(monkeypa
     )
     try:
         middleware = SandboxMiddleware()
+        register_sandbox_prewarm_cleanup(context)
         await middleware.abefore_model({"messages": [HumanMessage(content="```sh\ngit status\n```")]}, runtime)
-        await provider.started.wait()
+        await asyncio.wait_for(provider.started.wait(), timeout=5)
         tool_task = asyncio.create_task(ensure_sandbox_initialized_async(tool_runtime))
         await asyncio.sleep(0)
         assert provider.thread_ids == ["thread-prewarm"]
@@ -507,11 +509,14 @@ async def test_unused_prewarm_is_released_after_run(monkeypatch: pytest.MonkeyPa
     runtime = Runtime(context={"thread_id": "thread-unused", "user_id": "owner-unused"})
     ensure_sandbox_lease_owner(runtime.context)
     try:
+        register_sandbox_prewarm_cleanup(runtime.context)
         middleware = SandboxMiddleware()
         await middleware.abefore_model({"messages": [HumanMessage(content="Traceback (most recent call last):")]}, runtime)
         await runtime.context["__deerflow_sandbox_prewarm"].task
         await middleware.aafter_agent({}, runtime)
+        assert provider.released_ids == ["async-sandbox"]
     finally:
+        await release_sandbox_execution_lease_async(runtime.context)
         reset_sandbox_provider()
 
     assert provider.thread_ids == ["thread-unused"]
@@ -530,10 +535,14 @@ async def test_prewarm_skips_messages_without_structured_signal(monkeypatch: pyt
     provider = _AsyncOnlyProvider()
     monkeypatch.setattr("deerflow.sandbox.prewarm.get_app_config", _aio_prewarm_config)
     set_sandbox_provider(provider)
+    runtime = Runtime(context={"thread_id": "thread-no-prewarm"})
+    ensure_sandbox_lease_owner(runtime.context)
     try:
-        await SandboxMiddleware().abefore_model({"messages": [HumanMessage(content=content)]}, Runtime(context={"thread_id": "thread-no-prewarm"}))
+        register_sandbox_prewarm_cleanup(runtime.context)
+        await SandboxMiddleware().abefore_model({"messages": [HumanMessage(content=content)]}, runtime)
         await asyncio.sleep(0)
     finally:
+        await release_sandbox_execution_lease_async(runtime.context)
         reset_sandbox_provider()
 
     assert provider.thread_ids == []

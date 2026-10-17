@@ -21,6 +21,7 @@ from deerflow.sandbox.lease import (
     get_sandbox_lease_manager,
     run_sync_lifecycle_operation,
     sandbox_lease_owner,
+    sandbox_prewarm_cleanup_registered,
 )
 from deerflow.sandbox.sandbox_provider import SandboxProvider, get_initialized_sandbox_provider, get_sandbox_provider
 from deerflow.utils.file_io import await_drained
@@ -195,7 +196,7 @@ class SandboxPrewarm:
 def start_sandbox_prewarm(state: dict[str, Any], runtime: Any) -> None:
     """Start at most one optional acquisition within an admitted async run."""
     context = getattr(runtime, "context", None)
-    if not isinstance(context, dict) or SANDBOX_PREWARM_CONTEXT_KEY in context or state.get("sandbox") is not None:
+    if not sandbox_prewarm_cleanup_registered(context) or SANDBOX_PREWARM_CONTEXT_KEY in context or state.get("sandbox") is not None:
         return
     owner_id = sandbox_lease_owner(context)
     thread_id = context.get("thread_id")

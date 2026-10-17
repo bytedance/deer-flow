@@ -80,6 +80,9 @@ uv run python -m scripts.benchmark.sandbox.bench_prewarm \
 This uses a scripted model with production thread/sandbox middleware, the bash
 tool, authorization, and execution-lease cleanup. Containers and commands are
 real; model delays and users are synthetic. No paid model is called, and this is
+not a standalone SDK prewarm example: the driver explicitly registers its
+unconditional execution cleanup, as the Gateway/embedded worker and native
+subagent executor do. Direct SDK graphs retain lazy acquisition. This is
 not a Gateway HTTP/SSE or live-model latency measurement. Each A/B pair has the
 same prompt and predetermined tool intent, randomized variant order, fresh thread
 IDs, and exact-resource destruction between batches. Output paths must be new.

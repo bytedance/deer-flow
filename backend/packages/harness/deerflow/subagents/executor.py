@@ -1823,6 +1823,9 @@ class SubagentExecutor:
             context[_SANDBOX_LEASE_OWNER_CONTEXT_KEY] = sandbox_lease_owner_id
             context[_SANDBOX_COMMAND_SCOPE_CONTEXT_KEY] = sandbox_lease_owner_id
             execution_context = context
+            from deerflow.sandbox.lease import register_sandbox_prewarm_cleanup
+
+            register_sandbox_prewarm_cleanup(context)
             context["agent_id"] = self.config.name
             if self.loop_detection_recorder is not None:
                 context[LOOP_DETECTION_RECORDER_CONTEXT_KEY] = self.loop_detection_recorder

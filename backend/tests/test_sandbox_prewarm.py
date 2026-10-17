@@ -10,7 +10,14 @@ from langchain_core.messages import HumanMessage
 
 from deerflow.sandbox import prewarm
 from deerflow.sandbox.exceptions import SandboxAuthorizationError
-from deerflow.sandbox.lease import ensure_sandbox_lease_owner, get_sandbox_lease_manager, release_sandbox_execution_lease_async
+from deerflow.sandbox.lease import (
+    SANDBOX_PREWARM_CLEANUP_CONTEXT_KEY,
+    ensure_sandbox_lease_owner,
+    get_sandbox_lease_manager,
+    register_sandbox_prewarm_cleanup,
+    release_sandbox_execution_lease_async,
+    sandbox_prewarm_cleanup_registered,
+)
 from deerflow.sandbox.sandbox_provider import SandboxProvider, reset_sandbox_provider, set_sandbox_provider
 from deerflow.sandbox.tools import ensure_sandbox_initialized_async
 
@@ -67,6 +74,7 @@ def setup(monkeypatch):
 def runtime(user="alice", thread="thread"):
     context = {"user_id": user, "thread_id": thread}
     ensure_sandbox_lease_owner(context)
+    register_sandbox_prewarm_cleanup(context)
     return SimpleNamespace(context=context, state={})
 
 
@@ -312,7 +320,8 @@ async def test_compiled_graph_model_outcome_cleans_unclaimed_prewarm(setup, monk
 
 
 @pytest.mark.anyio
-async def test_gateway_worker_finally_cleans_prewarm_without_context_sandbox_id(setup):
+@pytest.mark.parametrize("cancelled", [False, True], ids=["model-error", "cancel"])
+async def test_gateway_worker_finally_cleans_prewarm_without_context_sandbox_id(setup, cancelled):
     from unittest.mock import AsyncMock
 
     from deerflow.runtime.runs.manager import RunManager
@@ -322,6 +331,8 @@ async def test_gateway_worker_finally_cleans_prewarm_without_context_sandbox_id(
     manager = RunManager()
     record = await manager.create("gateway-prewarm-error")
     contexts = []
+    ready = asyncio.Event()
+    blocked = asyncio.Event()
 
     class FailingAgent:
         async def astream(self, graph_input, config=None, **kwargs):
@@ -330,13 +341,26 @@ async def test_gateway_worker_finally_cleans_prewarm_without_context_sandbox_id(
             ensure_sandbox_lease_owner(context)
             await start(SimpleNamespace(context=context)).task
             assert "sandbox_id" not in context
+            ready.set()
+            if cancelled:
+                await blocked.wait()
             raise RuntimeError("failure after speculative startup")
             yield
 
     bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
-    await run_agent(bridge, manager, record, ctx=RunContext(checkpointer=None), agent_factory=lambda **kwargs: FailingAgent(), graph_input={}, config={})
+    task = asyncio.create_task(run_agent(bridge, manager, record, ctx=RunContext(checkpointer=None), agent_factory=lambda **kwargs: FailingAgent(), graph_input={}, config={}))
+    try:
+        await asyncio.wait_for(ready.wait(), timeout=5)
+        if cancelled:
+            task.cancel()
+        await task
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
     assert len(provider.calls) == len(provider.released) == 1
     assert not prewarm._permits
+    assert not sandbox_prewarm_cleanup_registered(contexts[0])
 
 
 @pytest.mark.anyio
@@ -627,3 +651,120 @@ def test_compiled_sync_graph_keeps_lazy_path_without_speculation(setup, monkeypa
     assert "__deerflow_sandbox_prewarm" not in context
     assert provider.calls == []
     assert not prewarm._permits
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("outcome", ["success", "model-error", "cancel", "tool"])
+@pytest.mark.parametrize("method", ["ainvoke", "astream"])
+async def test_direct_sdk_graph_does_not_leak_speculation(setup, monkeypatch, enabled, outcome, method):
+    from langchain_core.language_models import BaseChatModel
+    from langchain_core.messages import AIMessage, ToolMessage
+    from langchain_core.outputs import ChatGeneration, ChatResult
+    from langchain_core.tools import StructuredTool
+
+    from deerflow.agents.factory import create_deerflow_agent
+    from deerflow.agents.features import RuntimeFeatures
+    from deerflow.sandbox.middleware import SandboxMiddleware
+
+    provider, config = setup
+    config.sandbox.prewarm = enabled
+    context = {"thread_id": "direct-graph", "user_id": "alice", "app_config": config}
+    entered = asyncio.Event()
+    blocked = asyncio.Event()
+
+    class Model(BaseChatModel):
+        @property
+        def _llm_type(self):
+            return "direct-sdk-prewarm-test"
+
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+        def _generate(self, *args, **kwargs):
+            raise AssertionError("async model required")
+
+        async def _agenerate(self, *args, **kwargs):
+            messages = args[0] if args else kwargs["messages"]
+            handle = context.get("__deerflow_sandbox_prewarm")
+            if handle is not None:
+                await handle.task
+            entered.set()
+            if outcome == "model-error":
+                raise RuntimeError("direct model failed")
+            if outcome == "cancel":
+                await blocked.wait()
+            if outcome == "tool" and not any(isinstance(message, ToolMessage) for message in messages):
+                return ChatResult(generations=[ChatGeneration(message=AIMessage(content="", tool_calls=[{"name": "use_sandbox", "args": {}, "id": "sandbox-call"}]))])
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="No execution needed"))])
+
+    monkeypatch.setattr(SandboxMiddleware, "_prepare_agent_skill_projection", lambda *args, **kwargs: None)
+
+    async def use_sandbox():
+        sandbox = await ensure_sandbox_initialized_async(SimpleNamespace(context=context, state={}))
+        return sandbox.id
+
+    tool = StructuredTool.from_function(coroutine=use_sandbox, name="use_sandbox", description="Acquire a sandbox for a real tool call")
+    graph = create_deerflow_agent(Model(), tools=[tool] if outcome == "tool" else [], features=RuntimeFeatures(loop_detection=False))
+    state = {"messages": [HumanMessage(content="```sh\npytest tests\n```")]}
+
+    async def invoke():
+        if method == "ainvoke":
+            return await graph.ainvoke(state, context=context)
+        return [chunk async for chunk in graph.astream(state, context=context, stream_mode="values")][-1]
+
+    task = asyncio.create_task(invoke())
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        if outcome == "cancel":
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        elif outcome == "model-error":
+            with pytest.raises(RuntimeError, match="direct model failed"):
+                await task
+        else:
+            result = await task
+            assert result["messages"][-1].content == "No execution needed"
+
+        # Observe the graph's own terminal state, before test teardown.
+        assert provider.clients == {}
+        assert get_sandbox_lease_manager(provider).binding_for(context["sandbox_lease_owner_id"]) is None
+        assert not prewarm._permits
+        if outcome == "tool":
+            assert provider.calls == [("alice", "direct-graph")]
+            assert provider.released == ["alice/direct-graph"]
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        # Failure-only hygiene does not supply the graph's execution boundary.
+        handle = context.get("__deerflow_sandbox_prewarm")
+        if handle is not None:
+            await handle.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("marker", ["missing", None, True, "registered", {}])
+async def test_prewarm_requires_registered_execution_cleanup(setup, marker):
+    provider, _ = setup
+    rt = runtime()
+    rt.context.pop(SANDBOX_PREWARM_CLEANUP_CONTEXT_KEY)
+    if marker != "missing":
+        rt.context[SANDBOX_PREWARM_CLEANUP_CONTEXT_KEY] = marker
+
+    prewarm.start_sandbox_prewarm({"messages": [HumanMessage(content="```sh\npytest tests\n```")]}, rt)
+
+    assert "__deerflow_sandbox_prewarm" not in rt.context
+    assert provider.calls == []
+    assert not prewarm._permits
+
+
+@pytest.mark.anyio
+async def test_execution_cleanup_revokes_prewarm_admission(setup):
+    rt = runtime()
+    assert sandbox_prewarm_cleanup_registered(rt.context)
+
+    await release_sandbox_execution_lease_async(rt.context)
+
+    assert not sandbox_prewarm_cleanup_registered(rt.context)
