@@ -1002,6 +1002,28 @@
 
 ### 修复
 
+- **llm：** 流式响应已返回 `200` 之后才在流内报告的 provider 错误，现在会像以 HTTP
+  状态码返回的同一错误一样重试。为了用 SSE keepalive 维持慢请求而提前返回 `200` 的
+  OpenAI 兼容网关，会把之后发生的 504 作为 SSE `error` 事件发出；openai SDK 将其抛出为
+  不带状态码的 `APIError`，因此 `LLMErrorHandlingMiddleware` 此前把它归为普通错误，
+  运行在第一次尝试后即失败。现在这类不带状态码的错误会依次从数字型 `code` 或 `status`
+  字段、消息中明确写出的 `[504]`、`HTTP 502` 或 `status 503`（`messages[502]` 这类
+  数组下标不算）、以及 `type: server_error`（视为 500）中取得 4xx 或 5xx 状态码；都
+  取不到时，繁忙判断才会额外匹配 `rate-limit`、`RATE_LIMIT_…` 等写法。重试预算、退避
+  和熔断器按对应的 HTTP 错误处理；带状态码的错误分类不变。 (issue #6896, [#6897])
+
+- **渠道：** 从 IM 渠道发起的运行不再随接收消息的 Gateway 实例一起消亡。manager 在整个
+  运行期间保持 `runs.wait` / `runs.stream` 请求打开，而 Gateway 会在创建请求断开时取消
+  运行，除非该请求声明了 `on_disconnect: continue`；因此 leader 切换、滚动重启或接收
+  实例崩溃都会取消所有进行中的 IM 运行。渠道运行现在声明 `continue`，运行会在执行它的
+  Gateway 上完成并持久化对话线程状态——即使 IM 回复随旧传输丢失，答案仍可在 Web UI
+  中查看。同一策略也覆盖 Slack/Discord `runs.wait` 遇到 SDK 300 秒读超时的情况：聊天里
+  仍会收到错误回复，但运行会在后台完成而不再被取消。由于运行会继续，manager 现在在运行
+  请求发出之后保留入站去重键（worker 被取消、读超时、连接断开）：provider 在新持有者上的
+  重投递会被丢弃，而不是把这一轮再执行一遍；Gateway 拒绝的请求或发送前的失败仍会释放该键
+  以便重试。即发即弃渠道（GitHub）不受影响：`runs.create` 在运行进入 pending 后即返回。
+  ([#6876])
+
 - **前端：** 用户管理设置页不再在静态网站演示中发出注定失败的查询，非管理员的
   `?settings=users` 深链接也不再打开仅管理员可见的面板。该页面此前只以
   `system_role === "admin"` 判断，而演示用户名义上是管理员，静态响应层又没有
@@ -4494,6 +4516,28 @@
   `(thread, run, user)` 唯一约束；在 Postgres 上，80 个这样的请求中有 26 个失败。
   IM 会话绑定中的同类竞争（例如首条消息与 `/new` 同时到达）也不再导致消息处理失败。
   落后的写入现在会更新另一方创建的记录。([#6852])
+- **MCP：** 在 SQLite 上取消后台 MCP 任务时，取消请求现在会在下一个轮询周期发往远程服务器，
+  而不是最多延迟 `mcp_tasks.lease_seconds`（默认 120 秒）。由于 SQLite 上 `FOR UPDATE`
+  不起作用，在轮询器认领任务期间提交的取消请求所清除的轮询租约会被写回；取消工作器
+  随后要等该租约过期，任务还会被多轮询一次，而结果会被丢弃。现在每次认领在写入租约时
+  都会重新确认任务仍可认领。Postgres 不受影响。([#6859])
+- **持久化：** 启动时的 schema 升级不再为已与模型一致的列记录虚假的
+  `safe_add_column ... drifts from the model definition` 警告。该检查拿模型的通用类型名
+  和默认值写法（`STRING`、`BIGINTEGER`、`DefaultClause('0')`）去比较数据库自己的写法
+  （`VARCHAR`、`BIGINT`、`'0'`），因此 revision 0023 之前创建的 Postgres 或 SQLite
+  数据库升级时都会记录一条，丢失 head stamp 的 schema 会记录 29 条（SQLite）或
+  36 条（Postgres），淹没了这个警告本应发现的真实类型不一致。现在两侧都按所连接
+  数据库的写法进行比较。([#6865])
+- **沙箱：** 启用 host bash 时，本地路径守卫现在会拒绝把 shell 变量用作路径前缀的
+  命令，例如 `cat $HOME/.ssh/id_rsa`。`~/`、`${HOME}/` 和 `"$HOME"/` 原本就会被拒绝，
+  但绝对路径扫描会跳过紧跟在单词字符之后的 `/`，因此不带花括号的 `$HOME/...`
+  （无论是否加引号）会直达主机。位置参数同样会被检查：`bash -c` 不带位置参数，
+  因此 `$1/etc/passwd` 会打开 `/etc/passwd`；awk 风格的 `$1/1024` 和 `$1/$2` 仍然
+  允许。`~root/.ssh/id_rsa` 这类指定用户的主目录同样会被拒绝，变量之后的非 ASCII
+  路径段（`$HOME/文档`）按路径处理，不再视为普通文本。提及 `CDPATH` 的命令会被拒绝，
+  因为它会把相对路径的 `cd` 移出工作区。`$PWD/...` 仍然允许，因为它与对应的相对路径
+  指向同一文件，除非命令自己重新绑定了 `PWD`。URL 中的变量不受影响。该守卫仍是尽力
+  而为的检查，并非隔离边界。([#6930])
 
 ### 安全
 
@@ -4815,6 +4859,10 @@
 
 ### 文档
 
+- **文档：** 新增韩语 README（`README_ko.md`），完整翻译当前英文 README。标题、表格和
+  链接与英文版一一对应，所有代码块和行内代码保持逐字节一致，只翻译正文。`README.md`
+  及其他译本的语言切换行和 `AGENTS.md` 的译本列表现已链接到该文件。
+  ([#6909])
 - **文档：** 配置检查与迁移命令现在在 backend 环境中运行。文档中的示例此前用
   系统 Python 执行，无法导入已安装的 backend workspace 包；用
   `uv run --directory backend` 选择环境会改变工作目录，导出的相对路径因此可能
@@ -9337,3 +9385,9 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6843]: https://github.com/bytedance/deer-flow/pull/6843
 [#6844]: https://github.com/bytedance/deer-flow/pull/6844
 [#6852]: https://github.com/bytedance/deer-flow/pull/6852
+[#6859]: https://github.com/bytedance/deer-flow/pull/6859
+[#6865]: https://github.com/bytedance/deer-flow/pull/6865
+[#6876]: https://github.com/bytedance/deer-flow/pull/6876
+[#6897]: https://github.com/bytedance/deer-flow/pull/6897
+[#6909]: https://github.com/bytedance/deer-flow/pull/6909
+[#6930]: https://github.com/bytedance/deer-flow/pull/6930

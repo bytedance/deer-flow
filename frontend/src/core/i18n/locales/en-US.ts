@@ -40,6 +40,11 @@ export const enUS: Translations = {
       "This entry comes from the repository extension catalog. Ask your deployment administrator to confirm its installation and activation status.",
     installationGuide: "Installation guide",
     catalog: {
+      workflows: {
+        title: "Script workflows",
+        description:
+          "Save versioned Agent workflows, resume within the same Gateway process and review exact retained output versions. No restart replay or hard monetary budget.",
+      },
       agentTeams: {
         title: "Agent teams",
         description:
@@ -74,6 +79,11 @@ export const enUS: Translations = {
         title: "Local retrieval example",
         description:
           "Demonstrate read-only retrieval and structured tool results using fixed sample documents, without an external knowledge service.",
+      },
+      knowledge: {
+        title: "Knowledge scope example",
+        description:
+          "Search sample documents within selected knowledge bases or files and inspect source citations.",
       },
     },
     pageUnavailable: "Extension page unavailable",
@@ -292,6 +302,9 @@ export const enUS: Translations = {
   },
 
   artifactPreview: {
+    loadingPreview: "Preparing preview...",
+    resourcesUnavailable:
+      "Some preview resources could not be loaded. View the source or download the files for the complete content.",
     limited: (previewSize, totalSize) =>
       totalSize
         ? `Showing the first ${previewSize} of ${totalSize}.`
@@ -1029,6 +1042,11 @@ export const enUS: Translations = {
         "This task has a saved group destination, but group notifications are unavailable on this server.",
       clearSaved: "Clear group notification",
       bind: "Bind a Feishu group",
+      bindWecom: "Bind a WeCom group",
+      bindQq: "Bind a QQ group",
+      name: "Group name",
+      nameHint:
+        "Name this group so you can recognize it when choosing a notification destination. Rebind a group to change its name.",
       refresh: "Refresh group list",
       bindInstructions:
         "Add the bot to the group, then mention the bot and send this command in that group. Refresh the group list after binding.",
@@ -1041,19 +1059,19 @@ export const enUS: Translations = {
       copyFailed: "Could not copy. Select and copy the command above.",
       newCode: "Generate a new code",
       close: "Close binding instructions",
-      label: "Also notify a Feishu group (optional)",
-      detailLabel: "Additional Feishu group",
+      label: "Also notify a group (optional)",
+      detailLabel: "Additional group",
       none: "No additional group",
       personalHint:
         "Your personal notifications stay unchanged. The selected group also receives task updates.",
-      emptyHint: "Bind a Feishu group below, then refresh the list.",
+      emptyHint: "Bind a group below, then refresh the list.",
       loading: "Loading groups…",
       unavailable: "Selected group unavailable",
       unavailableHint:
         "The selected group is no longer available. Keep it, remove it, or choose another group.",
       unnamed: "Group name unavailable",
       unnamedHint:
-        "Check the app's group-information permission, then bind the group again to load its name.",
+        "Bind the group again with a recognizable name before selecting it.",
       loadFailed:
         "Could not load groups. Your selection is kept; you can save other changes or remove it.",
     },
@@ -1416,6 +1434,13 @@ export const enUS: Translations = {
       "Save tool access before choosing default knowledge bases.",
     settingsModel: "Default model",
     settingsModelDefault: "Use global default",
+    settingsModelSwitchNeedsCatalog:
+      "Load the selected model before saving this model change. Retry loading, or restore the original model to save other changes.",
+    settingsReasoningUnsupported: "not supported",
+    settingsThinkingRequiredHint:
+      "This model requires thinking. The saved Off setting can prevent runs from starting. Choose Inherit or On to replace it.",
+    settingsReasoningUnsupportedHint:
+      "This saved value is not supported by the selected model. Choose Inherit or a supported value to replace it.",
     settingsTemperature: "Temperature",
     settingsTemperatureHint: "0 = deterministic, higher = more creative (0–2).",
     settingsMaxTokens: "Max output tokens",
@@ -2406,6 +2431,15 @@ export const enUS: Translations = {
         },
         toggleLabel: (provider: string) =>
           `${provider} scheduled task notifications`,
+        eventsTitle: "Task & goal run notifications",
+        eventsDescription:
+          "Optional IM reminders for ordinary web or background task runs and goals on your enabled apps above (off by default).",
+        events: {
+          run_completed: "Task or goal completed",
+          run_failed: "Task or goal failed",
+          human_input_requested: "Needs your input",
+        },
+        eventToggleLabel: (event: string) => `${event} notifications`,
         loading: "Loading notification preferences…",
         saving: "Saving…",
         loadFailed:

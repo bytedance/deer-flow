@@ -27,6 +27,7 @@ EXPECTED_GUIDANCE_PATHS = {
     "backend/packages/harness/deerflow/community/ragflow/AGENTS.md",
     "backend/packages/harness/deerflow/community/serper/AGENTS.md",
     "backend/packages/harness/deerflow/community/tavily/AGENTS.md",
+    "backend/packages/harness/deerflow/community/ddg_search/AGENTS.md",
     "backend/packages/harness/deerflow/community/e2b_sandbox/AGENTS.md",
     "backend/packages/harness/deerflow/community/aio_sandbox/AGENTS.md",
     "backend/packages/harness/deerflow/community/opensandbox/AGENTS.md",
@@ -52,6 +53,7 @@ EXPECTED_GUIDANCE_PATHS = {
     "frontend/src/AGENTS.md",
     "scripts/AGENTS.md",
     "examples/deerflow-extension-agent-teams/AGENTS.md",
+    "examples/deerflow-extension-workflows/AGENTS.md",
 }
 
 
@@ -210,3 +212,8 @@ def test_repository_exposes_one_local_and_one_ci_entrypoint() -> None:
     assert "fetch-depth: 0" in workflow
     assert "--base-ref" in workflow
     assert "--before" in workflow
+
+
+def test_repository_guidance_chains_fit_hard_budget() -> None:
+    files = {PurePosixPath(relative): (REPO_ROOT / relative).read_text(encoding="utf-8") for relative in EXPECTED_GUIDANCE_PATHS}
+    assert not [finding for finding in checker.analyze(REPO_ROOT, files) if finding.severity == "error"]

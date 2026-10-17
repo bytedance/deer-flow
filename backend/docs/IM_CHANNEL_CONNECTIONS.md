@@ -474,22 +474,26 @@ can retry an ambiguously acknowledged send; it does not promise exactly-once
 messages at the provider. Record whether domestic Feishu or international Lark
 was actually exercised.
 
-### Feishu group notifications
+### Group notifications
 
-Tasks may explicitly select one additional connected Feishu group. Personal
+Tasks may explicitly select one additional connected Feishu, QQ or WeCom group. Personal
 notifications keep their existing recipients. The task stores the chosen
 `notification_group_connection_id`; a group notice stores that connection ID as
 its outbox target with `payload.target_type="group"`. It never infers a group
 destination from all of the owner's bindings.
 
-Add the app bot to a test or work group, grant `im:chat:read` for the group-name
-lookup, and publish the app changes. In the task form choose **Bind a Feishu
-group**, mention the bot and send the displayed `/connect` command in that
-group, then refresh and select its name. Name lookup failure does not discard
-the binding, but unnamed groups cannot be newly selected in the form: check
-the read permission and bind again. API selection and each delivery verify the
+In the task form select the supported channel's group-binding button. For QQ
+and WeCom, enter a recognizable group name before generating the code; the
+browser sends optional `group_name` to `POST /api/channels/{provider}/connect`,
+which stores the name with the single-use OAuth state. Send the unchanged
+`/connect` command in that group, then refresh and select the saved name.
+Bindings for two groups remain distinct from each other and from private chats.
+Feishu can retrieve its group name using `im:chat:read`; grant that permission
+and publish the app changes. A failed lookup does not discard the binding,
+but unnamed groups cannot be newly selected: fix the permission or name and
+bind again. API selection and each delivery verify the
 task owner, connection ID, connected status, and recorded group/chat identity.
-The provider sends to that verified `chat_id`; a lost binding cannot fall back
+The adapter resolves its verified group identity; a lost binding cannot fall back
 to another group or a private chat. A bot removed from the group produces a
 normal platform rejection handled by the existing retry budget.
 
@@ -631,7 +635,16 @@ platform connection to one instance: the holder of the provider's row in
 state, so the connect flow works on any instance; `GET /api/channels/` names
 each provider's `leader`. Runtime credentials saved on an instance that does
 not hold the provider apply on the holder only when it next starts the
-channel. See
+channel. Channel runs are created with `on_disconnect: continue`, so a run
+keeps executing when the request that created it dies with its instance (a
+leader hand-off, a rolling restart, a crash): its thread state is persisted
+and the answer stays readable in the web UI, while the IM reply itself is
+lost with the old holder's transport state. Because that run survives, the
+manager keeps the inbound dedupe key once a run request has left it (a
+cancelled worker, a read timeout, a dropped connection), so the provider's
+redelivery of the same message on the new holder is dropped instead of
+executing the turn twice; a request the Gateway rejected, or a failure before
+the request was sent, still releases the key for a retry. See
 [IM channel leader lease](CONFIGURATION.md#im-channel-leader-lease-channelsleader_lease).
 
 ## Security Notes
@@ -658,7 +671,7 @@ channel. See
 
 ## Proactive notification settings
 
-The shared scheduler outbox sends result/lifecycle notices to bound private
+The shared outbox sends scheduled result/lifecycle notices to bound private
 identities on WeCom, Feishu/Lark, WeChat and QQ. **Settings → Notifications → IM
 notifications** lists connected, push-capable apps with the same per-provider
 control. The setting is durable and owner-scoped, and also works in local
@@ -666,12 +679,27 @@ control. The setting is durable and owner-scoped, and also works in local
 account or stop a scheduled task. Browser notifications have a separate switch.
 
 Opting out stops new enqueueing and permanently closes pending/retrying notices
-for that owner/provider, including any selected Feishu group. Re-enabling does
+for that owner/provider, including any selected group. Re-enabling does
 not replay these notices. A platform send already in progress may still arrive.
 Preference lookup failures park instead of sending; ordinary binding revocation,
 localized summaries, redaction, deduplication and retry budgets remain shared.
 Upgrade every Gateway worker before relying on an opt-out during a rolling
 upgrade. Downgrading below `0041_im_notice_preferences` removes the choices.
+
+The same settings page has three default-off ordinary task/goal event controls:
+completion, terminal failure and requests for input. These use the same outbox,
+ownership checks, localized renderer and send/retry opt-out. An unanswered
+Human Input Card takes precedence over completion and is rechecked before
+sending; an answered or superseded request is dropped. Ordinary goal stand-downs,
+recoverable tool errors and interrupted runs do not become failure or input
+notices. IM-originated runs retain their normal conversation replies. Migration
+`0043_runtime_im_notices` adds real source identities for non-scheduled notices;
+downgrading that revision deletes the runtime notices and retains scheduled ones.
+
+WeCom groups bound before group destinations were introduced keep their legacy
+chat identity. That compatibility applies only to the old group-binding shape;
+a new private binding never authorizes messages from an unbound group. Bind a
+specific group again with a name to make it available as a notification target.
 
 ### WeChat private notifications
 
@@ -702,5 +730,8 @@ Transport failures park; platform rejections use the shared retry budget.
 
 Current official rules are in the [QQ message overview](https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/overview.html).
 Older GitHub bot-docs snapshots say proactive sending was discontinued; use the
-current live documentation and verify the actual bot account. QQ group
-notification destinations remain separate from the existing group chat replies.
+current live documentation and verify the actual bot account. QQ group notices
+use the selected connection's current-App `group_openid`, not a member OpenID
+or the passive reply context. WeCom group notices use the selected current-bot
+`chatid` through the same smart-bot WebSocket sender; neither path falls back to
+a private destination when a group binding is unavailable.
