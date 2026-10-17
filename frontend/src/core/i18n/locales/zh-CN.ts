@@ -43,7 +43,7 @@ export const zhCN: Translations = {
       workflows: {
         title: "脚本工作流",
         description:
-          "通过可检查的脚本编排 Agent，支持受限并发、进度与取消。第一阶段不支持恢复、人工审批或硬金额预算。",
+          "保存版本化 Agent 工作流，在同一 Gateway 进程内恢复，并确认确切的保留输出版本。不支持重启回放或硬金额预算。",
       },
       agentTeams: {
         title: "Agent 团队",
@@ -75,6 +75,10 @@ export const zhCN: Translations = {
         title: "本地检索示例",
         description:
           "使用固定示例文档演示只读检索与结构化工具结果，不连接外部知识库。",
+      },
+      knowledge: {
+        title: "知识范围选择示例",
+        description: "用示例文档演示知识库和文件范围选择、检索及来源引用。",
       },
     },
     pageUnavailable: "扩展页面不可用",
@@ -1337,6 +1341,13 @@ export const zhCN: Translations = {
     settingsKnowledgeSaveToolAccess: "请先保存工具权限，再选择默认知识库。",
     settingsModel: "默认模型",
     settingsModelDefault: "使用全局默认",
+    settingsModelSwitchNeedsCatalog:
+      "请先加载所选模型，再保存模型切换。你可以重试加载，或恢复原模型后保存其他修改。",
+    settingsReasoningUnsupported: "不支持",
+    settingsThinkingRequiredHint:
+      "此模型必须开启思考，已保存的关闭设置可能导致运行无法开始。请选择继承或开启以替换该值。",
+    settingsReasoningUnsupportedHint:
+      "所选模型不支持此已保存值。请选择继承或支持的值以替换它。",
     settingsTemperature: "温度",
     settingsTemperatureHint: "0 = 确定性输出，越高越发散（0–2）。",
     settingsMaxTokens: "最大输出 token",

@@ -5968,6 +5968,20 @@ This release closes that milestone with **621 merged pull requests**.
   whose head stamp was lost logged 29 (SQLite) or 36 (Postgres), burying the
   real type mismatch the warning exists to catch. Both sides are now compared
   as the connected database spells them. ([#6865])
+- **sandbox:** With host bash enabled, the local path guard now rejects a
+  shell variable used as a path prefix, such as `cat $HOME/.ssh/id_rsa`.
+  `~/`, `${HOME}/` and `"$HOME"/` were already rejected, but the
+  absolute-path scan skips a `/` that follows a word character, so the
+  bare `$HOME/...` form (quoted or not) reached the host. Positional
+  parameters are covered too: `bash -c` gets none, so `$1/etc/passwd`
+  opens `/etc/passwd`; awk-style `$1/1024` and `$1/$2` stay allowed. A
+  named home such as `~root/.ssh/id_rsa` is rejected the same way, and a
+  non-ASCII segment after a variable (`$HOME/文档`) is treated as a path,
+  not prose. Commands that mention `CDPATH` are rejected, because it moves
+  a relative `cd` outside the workspace. `$PWD/...` stays allowed because it
+  names the same file as the equivalent relative path, unless the command
+  rebinds `PWD` itself. Variables inside URLs are unaffected. The guard
+  remains best-effort and is not an isolation boundary. ([#6930])
 
 ### Security
 
@@ -6364,6 +6378,12 @@ This release closes that milestone with **621 merged pull requests**.
 
 ### Documentation
 
+- **docs:** Add a Korean README (`README_ko.md`), a complete translation of the
+  current English README. Headings, tables, and links mirror the English
+  one-to-one, and every code block and inline code span stays byte-identical;
+  only the prose is translated. The language switcher in `README.md` and the
+  other translations, and the translations list in `AGENTS.md`, now link to it.
+  ([#6909])
 - **docs:** Configuration checks and migration commands now run in the
   backend environment. The documented examples ran with system Python,
   which cannot import the installed backend workspace packages; selecting
@@ -11756,3 +11776,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6865]: https://github.com/bytedance/deer-flow/pull/6865
 [#6876]: https://github.com/bytedance/deer-flow/pull/6876
 [#6897]: https://github.com/bytedance/deer-flow/pull/6897
+[#6909]: https://github.com/bytedance/deer-flow/pull/6909
+[#6930]: https://github.com/bytedance/deer-flow/pull/6930

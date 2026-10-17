@@ -34,6 +34,7 @@ export interface Translations {
       | "classify"
       | "screening"
       | "retrieval"
+      | "knowledge"
       | "example",
       { title: string; description: string }
     >;
@@ -1167,6 +1168,10 @@ export interface Translations {
     settingsKnowledgeSaveToolAccess: string;
     settingsModel: string;
     settingsModelDefault: string;
+    settingsModelSwitchNeedsCatalog: string;
+    settingsReasoningUnsupported: string;
+    settingsThinkingRequiredHint: string;
+    settingsReasoningUnsupportedHint: string;
     settingsTemperature: string;
     settingsTemperatureHint: string;
     settingsMaxTokens: string;

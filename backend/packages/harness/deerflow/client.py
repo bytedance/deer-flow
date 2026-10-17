@@ -1088,39 +1088,41 @@ class DeerFlowClient:
         # arguments only parse once the message is complete, so their
         # tool_calls event is emitted from the values snapshot instead.
         pending_tool_call_ids: set[str] = set()
-        # The same message id carries identical cumulative ``usage_metadata``
-        # in both the final ``messages`` chunk and the values snapshot —
-        # count it only on whichever arrives first.
+        # Chunks carry additive usage; complete messages carry the total.
+        # Reconcile that total once, without counting the streamed part again.
+        streamed_usage_by_id: dict[str, dict[str, int]] = {}
         counted_usage_ids: set[str] = set()
         sent_additional_kwargs_by_id: dict[str, dict[str, Any]] = {}
         cumulative_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
-        def _account_usage(msg_id: str | None, usage: Any) -> dict | None:
-            """Add *usage* to cumulative totals if this id has not been counted.
+        def _account_usage(msg_id: str | None, usage: Any, *, is_chunk: bool = False) -> dict | None:
+            """Accumulate chunk deltas or reconcile a complete message once.
 
             ``usage`` is a ``langchain_core.messages.UsageMetadata`` TypedDict
             or ``None``; typed as ``Any`` because TypedDicts are not
             structurally assignable to plain ``dict`` under strict type
-            checking.  Returns the normalized usage dict (for attaching
+            checking.  Returns the newly accounted usage (for attaching
             to an event) when we accepted it, otherwise ``None``.
             """
             if not usage:
                 return None
             if msg_id and msg_id in counted_usage_ids:
                 return None
+            delta = {key: usage.get(key, 0) or 0 for key in cumulative_usage}
             if msg_id:
-                counted_usage_ids.add(msg_id)
-            input_tokens = usage.get("input_tokens", 0) or 0
-            output_tokens = usage.get("output_tokens", 0) or 0
-            total_tokens = usage.get("total_tokens", 0) or 0
-            cumulative_usage["input_tokens"] += input_tokens
-            cumulative_usage["output_tokens"] += output_tokens
-            cumulative_usage["total_tokens"] += total_tokens
-            return {
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "total_tokens": total_tokens,
-            }
+                if is_chunk:
+                    streamed = streamed_usage_by_id.setdefault(msg_id, {})
+                    for key, value in delta.items():
+                        streamed[key] = streamed.get(key, 0) + value
+                else:
+                    counted_usage_ids.add(msg_id)
+                    streamed = streamed_usage_by_id.pop(msg_id, {})
+                    # State rewrites may lower totals; do not retract streamed usage.
+                    # Signed provider corrections remain valid in the chunk path.
+                    delta = {key: max(value - streamed.get(key, 0), 0) for key, value in delta.items()}
+            for key, value in delta.items():
+                cumulative_usage[key] += value
+            return delta
 
         def _unsent_additional_kwargs(msg_id: str | None, additional_kwargs: dict[str, Any] | None) -> dict[str, Any] | None:
             if not additional_kwargs:
@@ -1167,7 +1169,7 @@ class DeerFlowClient:
                 if isinstance(msg_chunk, AIMessage):
                     text = self._extract_text(msg_chunk.content)
                     additional_kwargs = self._serialize_additional_kwargs(msg_chunk)
-                    counted_usage = _account_usage(msg_id, msg_chunk.usage_metadata)
+                    counted_usage = _account_usage(msg_id, msg_chunk.usage_metadata, is_chunk=isinstance(msg_chunk, AIMessageChunk))
                     sent_additional_kwargs = False
 
                     if text:

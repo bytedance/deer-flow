@@ -4528,6 +4528,16 @@
   数据库升级时都会记录一条，丢失 head stamp 的 schema 会记录 29 条（SQLite）或
   36 条（Postgres），淹没了这个警告本应发现的真实类型不一致。现在两侧都按所连接
   数据库的写法进行比较。([#6865])
+- **沙箱：** 启用 host bash 时，本地路径守卫现在会拒绝把 shell 变量用作路径前缀的
+  命令，例如 `cat $HOME/.ssh/id_rsa`。`~/`、`${HOME}/` 和 `"$HOME"/` 原本就会被拒绝，
+  但绝对路径扫描会跳过紧跟在单词字符之后的 `/`，因此不带花括号的 `$HOME/...`
+  （无论是否加引号）会直达主机。位置参数同样会被检查：`bash -c` 不带位置参数，
+  因此 `$1/etc/passwd` 会打开 `/etc/passwd`；awk 风格的 `$1/1024` 和 `$1/$2` 仍然
+  允许。`~root/.ssh/id_rsa` 这类指定用户的主目录同样会被拒绝，变量之后的非 ASCII
+  路径段（`$HOME/文档`）按路径处理，不再视为普通文本。提及 `CDPATH` 的命令会被拒绝，
+  因为它会把相对路径的 `cd` 移出工作区。`$PWD/...` 仍然允许，因为它与对应的相对路径
+  指向同一文件，除非命令自己重新绑定了 `PWD`。URL 中的变量不受影响。该守卫仍是尽力
+  而为的检查，并非隔离边界。([#6930])
 
 ### 安全
 
@@ -4849,6 +4859,10 @@
 
 ### 文档
 
+- **文档：** 新增韩语 README（`README_ko.md`），完整翻译当前英文 README。标题、表格和
+  链接与英文版一一对应，所有代码块和行内代码保持逐字节一致，只翻译正文。`README.md`
+  及其他译本的语言切换行和 `AGENTS.md` 的译本列表现已链接到该文件。
+  ([#6909])
 - **文档：** 配置检查与迁移命令现在在 backend 环境中运行。文档中的示例此前用
   系统 Python 执行，无法导入已安装的 backend workspace 包；用
   `uv run --directory backend` 选择环境会改变工作目录，导出的相对路径因此可能
@@ -9375,3 +9389,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6865]: https://github.com/bytedance/deer-flow/pull/6865
 [#6876]: https://github.com/bytedance/deer-flow/pull/6876
 [#6897]: https://github.com/bytedance/deer-flow/pull/6897
+[#6909]: https://github.com/bytedance/deer-flow/pull/6909
+[#6930]: https://github.com/bytedance/deer-flow/pull/6930
