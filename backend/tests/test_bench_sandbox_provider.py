@@ -511,6 +511,61 @@ def test_summary_failed_data_exits_nonzero(tmp_path, capsys):
     assert json.loads(capsys.readouterr().out)[0]["errors"] == 1
 
 
+@pytest.mark.parametrize("success", [True, False])
+def test_summary_ignores_non_provider_records(tmp_path, capsys, success):
+    records = [
+        {"record_type": "configuration", "prewarm": True},
+        {"record_type": "prewarm_case", "success": True},
+        {"record_type": "batch_cleanup", "success": False},
+        {"provider": "aio-docker", "success": success, "acquire_ms": 1, "total_ms": 2},
+    ]
+    path = tmp_path / "mixed.jsonl"
+    path.write_text("\n".join(json.dumps(row) for row in records), encoding="utf-8")
+
+    assert summarize.main([str(path), "--json"]) == int(not success)
+
+    output = capsys.readouterr()
+    summary = json.loads(output.out)
+    assert len(summary) == 1
+    assert summary[0]["count"] == 1
+    assert summary[0]["errors"] == int(not success)
+    assert "non-provider" in output.err
+
+
+@pytest.mark.parametrize(
+    "records",
+    [
+        [{"record_type": "configuration"}],
+        [{"record_type": "prewarm_case", "success": True}],
+        [{"record_type": "configuration"}, {"record_type": "prewarm_case", "success": True}, {"record_type": "batch_cleanup", "success": True}],
+    ],
+    ids=["configuration-only", "prewarm-case-only", "prewarm-run"],
+)
+def test_summary_rejects_prewarm_only_input_without_traceback(tmp_path, capsys, records):
+    path = tmp_path / "prewarm.jsonl"
+    path.write_text("\n".join(json.dumps(row) for row in records), encoding="utf-8")
+
+    assert summarize.main([str(path), "--json"]) == 1
+
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "bench_provider.py" in output.err
+
+
+@pytest.mark.parametrize("missing", ["acquire_ms", "total_ms"])
+def test_summary_reports_incomplete_provider_timings(tmp_path, capsys, missing):
+    row = {"provider": "aio-docker", "success": True, "acquire_ms": 1, "total_ms": 2}
+    row.pop(missing)
+    path = tmp_path / "incomplete.jsonl"
+    path.write_text(json.dumps(row), encoding="utf-8")
+
+    assert summarize.main([str(path), "--json"]) == 1
+
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert missing in output.err
+
+
 @pytest.mark.parametrize(
     "output",
     [

@@ -21,6 +21,11 @@ uv run python scripts/benchmark/sandbox/bench_provider.py \
 uv run python scripts/benchmark/sandbox/summarize.py cold.jsonl pressure.jsonl
 ```
 
+`summarize.py` summarizes only `bench_provider.py` results. It reports and ignores
+metadata and typed prewarm/resource records before aggregation and exit-status
+checks. Inputs containing no provider results fail with a format diagnostic;
+failed provider rows still make the summary exit nonzero.
+
 Each invocation gets an independent run/thread namespace and AIO container prefix.
 `--run-id` makes that namespace explicit. AIO cleanup uses the actual acquired ID
 and the provider's destruction path, checking that destruction completed. Fault
@@ -62,6 +67,11 @@ resource use. Record host/daemon capacity separately and do not compare stripped
 code-only images with a browser-enabled image as equivalent functionality.
 
 ## First-tool overlap and unused prewarming
+
+The prewarm driver uses a different JSONL format; do not pass its output to
+`summarize.py`. Its exit status checks case outcomes and batch cleanup. Inspect
+`prewarm_case` and `batch_cleanup` records for their separate `success` fields;
+the `configuration` record has no outcome and must not count as a failed case.
 
 The provider microbenchmark does not measure first-tool overlap. For that, use
 the compiled-agent experiment with the same isolated config/home and pinned image:

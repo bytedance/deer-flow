@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Aggregate JSONL benchmark results into summary tables.
+"""Aggregate bench_provider JSONL results into summary tables.
+
+Prewarm cases and resource samples use separate formats and are not summarized.
 
 Usage::
 
@@ -148,7 +150,7 @@ def _print_table(rows: list[dict[str, Any]], fmt: str = "plain") -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description="Aggregate JSONL benchmark results")
+    p = argparse.ArgumentParser(description="Aggregate bench_provider.py JSONL results (not prewarm cases or resource samples)")
     p.add_argument("inputs", nargs="+", help="JSONL file(s) from sandbox/bench_provider.py")
     p.add_argument(
         "--group",
@@ -176,6 +178,19 @@ def main(argv: list[str] | None = None) -> int:
     if not rows:
         print("No valid JSONL rows found.", file=sys.stderr)
         return 1
+
+    provider_rows = [row for row in rows if isinstance(row, dict) and row.get("record_type") is None and "success" in row]
+    if len(provider_rows) != len(rows):
+        print(f"Ignored {len(rows) - len(provider_rows)} non-provider record(s); summarize.py reports provider results only.", file=sys.stderr)
+    rows = provider_rows
+    if not rows:
+        print("No bench_provider.py result rows found. Prewarm and resource JSONL use separate formats.", file=sys.stderr)
+        return 1
+    for index, row in enumerate(rows, start=1):
+        missing = [field for field in ("acquire_ms", "total_ms") if field not in row]
+        if row.get("success") and missing:
+            print(f"Provider result {index} is missing timing fields: {', '.join(missing)}.", file=sys.stderr)
+            return 1
 
     group_by = [g.strip() for g in args.group.split(",") if g.strip()]
     summary = _summarize(rows, group_by)
