@@ -77,6 +77,8 @@ It also clears deterministic local proxy/network leftovers before recreation;
 unknown cleanup errors retain the quarantine record.
 Explicit stop failures use that same generation-bound quarantine before dropping
 tracking. Failed record writes retain metadata and fence cached lookups in memory.
+Warm-to-active promotion clears an obsolete in-memory fence under the metadata
+lock, only for the entry that passed reuse checks; a changed entry must retry.
 Partial shutdown raises and remains retryable; successful resources are not retried,
 and cleanup infrastructure closes only after every owned teardown completes.
 

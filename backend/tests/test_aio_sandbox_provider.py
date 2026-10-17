@@ -7,6 +7,7 @@ import importlib
 import os
 import stat
 import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
@@ -3355,6 +3356,103 @@ def test_destroy_retry_preserves_a_different_runtime_generation(tmp_path):
         assert not provider._quarantine_store().contains(new)
     finally:
         provider.reset()
+
+
+@pytest.mark.parametrize("admission", ["discovery", "orphan-adoption"])
+@pytest.mark.parametrize("via_lease", [False, True], ids=["provider", "lease-manager"])
+def test_failed_destroy_allows_replacement_acquisition(failure_recovery_lifecycle, admission, via_lease):
+    from deerflow.sandbox.lease import SandboxLeaseManager
+
+    provider, _, _, old = failure_recovery_lifecycle
+    running = _observe_destroy_target(provider, old)
+    provider._backend.destroy.side_effect = RuntimeError("stop failed")
+    with pytest.raises(RuntimeError, match="stop failed"):
+        provider.destroy(old.sandbox_id)
+
+    replacement = type(old)(old.sandbox_id, old.sandbox_url, container_id="replacement-generation")
+    running[old.sandbox_id] = replacement
+    provider._backend.discover = MagicMock(return_value=replacement)
+    provider._backend.list_running = MagicMock(return_value=[replacement])
+    if admission == "orphan-adoption":
+        provider._reconcile_orphans()
+        assert provider._warm_pool[old.sandbox_id][0] is replacement
+
+    manager = SandboxLeaseManager(provider)
+    try:
+        if via_lease:
+            acquired = manager.acquire("new-execution", "thread-failure-recovery", user_id="alice")
+        else:
+            acquired = provider.acquire("thread-failure-recovery", user_id="alice")
+        assert acquired == old.sandbox_id
+        assert provider._sandbox_infos[acquired] is replacement
+        assert provider.get(acquired) is not None
+        assert provider.get_scoped(acquired, thread_id="thread-failure-recovery", user_id="alice") is not None
+        assert acquired not in provider._cleanup_retry_ids
+        assert provider._quarantine_store().contains(old)
+        assert not provider._quarantine_store().contains(replacement)
+        provider._backend.destroy.assert_called_once_with(old)
+
+        if via_lease:
+            manager.release("new-execution")
+            reacquired = manager.acquire("next-execution", "thread-failure-recovery", user_id="alice")
+        else:
+            provider.release(acquired)
+            reacquired = provider.acquire("thread-failure-recovery", user_id="alice")
+        assert reacquired == acquired
+        assert provider.get(reacquired) is not None
+        assert provider._sandbox_infos[reacquired] is replacement
+        provider._backend.destroy.assert_called_once_with(old)
+    finally:
+        manager.close()
+
+
+@pytest.mark.parametrize("generation", ["container-generation-1", None], ids=["quarantined", "unknown"])
+def test_warm_reclaim_keeps_failed_stop_fence_for_unsafe_generation(failure_recovery_lifecycle, generation):
+    provider, _, _, old = failure_recovery_lifecycle
+    _observe_destroy_target(provider, old)
+    provider._backend.destroy.side_effect = RuntimeError("stop failed")
+    with pytest.raises(RuntimeError, match="stop failed"):
+        provider.destroy(old.sandbox_id)
+    candidate = type(old)(old.sandbox_id, old.sandbox_url, container_id=generation)
+    provider._warm_pool[old.sandbox_id] = (candidate, time.time())
+    provider._warm_pool_identity[old.sandbox_id] = None
+    provider_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+
+    with pytest.raises(provider_mod.SandboxPolicyReplacementDeferredError):
+        provider._reclaim_warm_pool_sandbox("thread-failure-recovery", old.sandbox_id, user_id="alice")
+
+    assert old.sandbox_id in provider._cleanup_retry_ids
+    assert provider._quarantine_store().contains(candidate)
+    assert provider.get(old.sandbox_id) is None
+    assert old.sandbox_id not in provider._sandboxes
+
+
+@pytest.mark.parametrize("generation", ["container-generation-1", None], ids=["quarantined", "unknown"])
+def test_warm_reclaim_does_not_clear_fence_if_entry_changes(failure_recovery_lifecycle, monkeypatch, generation):
+    provider, _, _, old = failure_recovery_lifecycle
+    _observe_destroy_target(provider, old)
+    provider._backend.destroy.side_effect = RuntimeError("stop failed")
+    with pytest.raises(RuntimeError, match="stop failed"):
+        provider.destroy(old.sandbox_id)
+    replacement = type(old)(old.sandbox_id, old.sandbox_url, container_id="replacement-generation")
+    provider._backend.list_running = MagicMock(return_value=[replacement])
+    provider._reconcile_orphans()
+    assert provider._warm_pool[old.sandbox_id][0] is replacement
+    unvalidated = type(old)(old.sandbox_id, old.sandbox_url, container_id=generation)
+    publish = provider._publish_ownership
+
+    def swap_during_publish(sandbox_id):
+        publish(sandbox_id)
+        with provider._lock:
+            provider._warm_pool[sandbox_id] = (unvalidated, time.time())
+
+    monkeypatch.setattr(provider, "_publish_ownership", swap_during_publish)
+    assert provider._reclaim_warm_pool_sandbox("thread-failure-recovery", old.sandbox_id, user_id="alice") is None
+    assert provider._warm_pool[old.sandbox_id][0] is unvalidated
+    assert old.sandbox_id in provider._cleanup_retry_ids
+    assert provider._quarantine_store().contains(unvalidated)
+    assert provider.get(old.sandbox_id) is None
+    assert old.sandbox_id not in provider._sandboxes
 
 
 def test_failed_destroy_record_write_blocks_cached_reuse_until_retry(tmp_path, monkeypatch):

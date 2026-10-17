@@ -1888,11 +1888,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 logger.info("Warm-pool sandbox %s was claimed for teardown while publishing ownership; not reclaiming it", sandbox_id)
                 return None
             self._assert_warm_identity_available_locked(sandbox_id, key)
-            warm_item = self._warm_pool.pop(sandbox_id, None)
-            if warm_item is None:
+            warm_item = self._warm_pool.get(sandbox_id)
+            if warm_item is None or warm_item[0] is not info:
+                # A different entry has not passed the reuse checks above.
                 return None
+            self._warm_pool.pop(sandbox_id)
             self._warm_pool_identity.pop(sandbox_id, None)
-            info, _ = warm_item
             sandbox = AioSandbox(
                 id=sandbox_id,
                 base_url=info.sandbox_url,
@@ -1902,6 +1903,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             )
             self._sandboxes[sandbox_id] = sandbox
             self._sandbox_infos[sandbox_id] = info
+            getattr(self, "_cleanup_retry_ids", set()).discard(sandbox_id)
             self._active_sandbox_identity[sandbox_id] = key
             self._last_activity[sandbox_id] = time.time()
             self._thread_sandboxes[key] = sandbox_id

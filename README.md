@@ -818,7 +818,8 @@ that no port is available instead of attempting an out-of-range bind.
 
 AIO teardown failures retain a generation-bound cleanup record. Partial shutdown
 reports failure and can be retried; retries verify the runtime identity and absence
-before completing cleanup, preserving a replacement with the same logical ID.
+before completing cleanup. Healthy replacements with the same logical ID remain
+reusable, including after background recovery into the warm pool.
 
 See the [Sandbox Configuration Guide](backend/docs/CONFIGURATION.md#sandbox) to configure your preferred mode.
 

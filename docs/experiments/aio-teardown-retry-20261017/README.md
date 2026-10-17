@@ -7,7 +7,7 @@ opt-in prewarming work in [#6998](https://github.com/bytedance/deer-flow/pull/69
 The existing behavior also reproduces without prewarming enabled or installed.
 
 - Baseline: `34316550dffbe8fbaed5678a6be87c5d3c65155b`.
-- Fix and final production code: `997cb9bc30a0aec5804d1cd55bda3b87f36f5c31`.
+- Initial teardown fix and Docker probe revision: `997cb9bc30a0aec5804d1cd55bda3b87f36f5c31`.
 - Environment: macOS arm64, Python 3.12.13, Docker client/server 29.7.2.
 - Image: `enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:1.11.0`.
 - Local Docker image ID: `sha256:6328d7fd2f0ff0b4c147c3d05b3df1ce331f4a482eb6e550ecd64ed1fcf906e7`
@@ -16,7 +16,8 @@ The existing behavior also reproduces without prewarming enabled or installed.
 [evidence.json](evidence.json) contains allowlisted observations and production
 source hashes. Host paths, account names, random container prefixes, container
 IDs, Pod identifiers, and raw exception messages are omitted. The local raw
-observations were checked against the final production source hashes.
+observations were checked against the production source hashes from that initial
+probe revision.
 
 ## Method
 
@@ -74,7 +75,7 @@ completion even after the container was absent. Three new regressions failed
 before the parser fix. The fix accepts only this optional terminal line;
 wrong targets, different exit codes, and additional diagnostics remain errors.
 
-## Automated verification
+## Initial teardown verification
 
 | Check | Result |
 | --- | --- |
@@ -137,3 +138,48 @@ PATH, `NO_COLOR` unset, and no `UV_NO_SYNC` override. No acceptance assertions
 were weakened. Kubernetes, Apple Container, and Redis multi-Gateway deployments
 were not exercised as live environments; their contracts retain existing unit
 coverage. No new authorization, prewarming, or configuration behavior is claimed.
+
+## Replacement admission follow-up
+
+[Review #5557122845](https://github.com/bytedance/deer-flow/pull/7001#discussion_r4302123092)
+identified a regression in the initial fix: after a failed stop, a healthy new
+generation with the same logical ID could be adopted into the warm pool, then
+promoted without clearing the old in-memory retry marker. Acquisition returned
+an ID, but cached client lookup failed; the execution lease manager therefore
+raised `SandboxClientUnavailableError`.
+
+Warm-to-active promotion now clears that obsolete marker in the same metadata
+critical section as client registration, after reuse and ownership checks. If
+the warm entry changes during those checks, promotion defers rather than
+admitting an unvalidated entry. Generation-bound quarantine records are retained.
+
+Eight offline regressions cover:
+
+- Direct discovery and orphan adoption, each through the provider and the real
+  execution lease manager. All four cases also release and reacquire the new
+  generation and verify that no extra stop occurs.
+- Retaining the retry fence for quarantined and unknown generations.
+- Retaining that fence when either unsafe entry replaces the validated warm
+  entry during ownership publication.
+
+Before the follow-up, four cases failed and four passed; afterward all eight
+passed. These tests use real provider, quarantine and lease-manager methods with
+mocked backend and SDK transport. The original Docker results above remain tied
+to their recorded revision; Docker was unavailable for this follow-up.
+
+Follow-up validation against the working tree based on `673304c7`:
+
+| Check | Result |
+| --- | --- |
+| Eight new regression cases | 8 passed |
+| Seven relevant offline files | 641 passed, 3 live tests deselected |
+| Strict blocking-I/O suite, before and after | 256 passed, 1 skipped in each run |
+| `make format`, `make lint`, frontend `pnpm check` | Passed |
+| Agent guidance size check | 0 errors, 0 warnings |
+| Standard `make test`, before follow-up | 32,520 passed, 565 skipped, 1 failed |
+| Standard `make test`, after follow-up | 32,528 passed, 565 skipped, 1 failed |
+
+Both full runs fail only the unchanged native Cargo acceptance case
+`unit-with-empty-doc`, already observed in the initial local verification. Its
+isolated run without inherited Make flags passes. The full local suite is not
+green; there are no additional failures after the follow-up.
