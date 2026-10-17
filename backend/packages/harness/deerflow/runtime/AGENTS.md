@@ -11,6 +11,15 @@ Observed Redis streams removed during replay yield `StreamGap` with empty bounds
 
 Memory/Redis bridges keep startup-only `stream_bridge.heartbeat_interval_seconds`; explicit `subscribe(..., heartbeat_interval=...)` overrides it. Provider contexts drain owned cache/bridge/checkpointer/Store teardown across cancellation. `close_agent_stream()` shields close to completion: preserve counts, defer host cancellation, balance repeats, keep active errors, log attached close failures at callers, map close cancellation to failure, never time out.
 
+### Memory Stream Replay
+
+Memory keeps the exact last evicted event ID as bounded per-run metadata. A
+reconnect from that known predecessor replays all retained successors and END,
+matching a live subscriber at the same position. Older or unverifiable evicted
+cursors still emit `StreamGap`; Redis replay policy is unchanged. Coverage in
+`tests/test_memory_stream_reconnect_boundary.py` includes the Gateway SSE consumer
+with real ASGI requests and LangGraph SDK decoding.
+
 ### Checkpoint Channel Modes (`full` / `delta`)
 
 Checkpointer storage runs in one of two channel modes, selected by `checkpoint_channel_mode` in `config.yaml` (default `full`). `delta` mode adopts LangGraph 1.2's `DeltaChannel` for `messages`: checkpoints store a sentinel + per-step writes instead of the full message list, so storage/serde grows O(N) instead of O(N²) in turns. All checkpointer backends (memory/sqlite/postgres) serve both modes unchanged — the semantics live in the compiled graph's channel table, not in the saver.

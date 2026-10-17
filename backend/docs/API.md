@@ -1866,7 +1866,13 @@ bounded by `stream_bridge.queue_maxsize` (default `256`) and, for Redis, by the
 rolling `stream_ttl_seconds`. A retained cursor resumes after that event with no
 additional control frame.
 
-When a syntactically valid cursor is older than the retained watermark, the
+The Memory bridge also remembers its exact last evicted event ID. Reconnecting
+from that known predecessor replays every retained successor without a `gap`,
+because none of the events after the cursor has been lost. This uses one ID per
+run and does not increase the retained event count. Redis keeps its conservative
+trimmed-cursor policy.
+
+For other syntactically valid cursors older than the retained watermark, the
 server sends exactly one `gap` event before any retained data and closes that
 subscription without an `end` event:
 
