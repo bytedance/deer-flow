@@ -149,17 +149,17 @@ class TestGeminiSafetyDetector:
 
 
 class TestDefaultDetectorSet:
-    def test_default_set_returns_three_detectors(self):
+    def test_default_set_returns_four_detectors(self):
         dets = default_detectors()
         names = {d.name for d in dets}
-        assert names == {"openai_compatible_content_filter", "anthropic_refusal", "gemini_safety"}
+        assert names == {"openai_compatible_content_filter", "openai_responses_content_filter", "anthropic_refusal", "gemini_safety"}
 
     def test_default_set_returns_fresh_list(self):
         # Caller mutation must not affect later calls.
         first = default_detectors()
         first.clear()
         second = default_detectors()
-        assert len(second) == 3
+        assert len(second) == 4
 
 
 class TestProtocolConformance:
