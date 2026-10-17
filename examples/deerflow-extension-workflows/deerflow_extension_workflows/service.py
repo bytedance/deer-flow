@@ -21,6 +21,7 @@ from .store import TERMINAL, Store
 
 NAMESPACE = "community.workflows"
 FRAME = 48 * 1024
+TURN_LIMIT = 10000
 logger = logging.getLogger(__name__)
 
 
@@ -539,7 +540,7 @@ class Workflows(Lifecycle, Artifacts):
                     if entry["cancel"].is_set() or entry["fault"]:
                         raise ValueError(entry["fault"] or "Cancelled")
                     turns += 1
-                    if turns > 10000:
+                    if turns > TURN_LIMIT:
                         raise ValueError("Worker turn limit")
                     raw = await process.stdout.readline()
                     if not raw or len(raw) > FRAME:
@@ -587,13 +588,17 @@ class Workflows(Lifecycle, Artifacts):
                         encoded(outcome["value"], 12000)
                         record.update(status="completed", result=outcome["value"])
                         break
-                    # Poll the supervisor while a response is pending; do not block cancel on a child.
+                    # Poll cancel/fault while a response is pending. An idle worker can only progress
+                    # on a response, so keep waiting here instead of sending empty frames (turns).
                     if entry["tasks"]:
-                        await asyncio.wait(
-                            entry["tasks"],
-                            timeout=0.02,
-                            return_when=asyncio.FIRST_COMPLETED,
-                        )
+                        while True:
+                            finished, _ = await asyncio.wait(
+                                entry["tasks"],
+                                timeout=0.02,
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                            if finished or not frame["idle"] or entry["cancel"].is_set() or entry["fault"]:
+                                break
                     else:
                         await asyncio.sleep(0.002)
                     finished = [t for t in entry["tasks"] if t.done()]
