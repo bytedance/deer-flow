@@ -199,8 +199,8 @@ async def test_cancellation_while_waiting_for_lock_never_starts_write(tmp_path):
 async def test_cancelled_snapshot_keeps_thread_lock_until_read_finishes(tmp_path, monkeypatch, cancellations):
     store = JsonlRunEventStore(tmp_path)
     await store.put(**_event())
-    paused = _PausedIO(store._read_thread_events)
-    monkeypatch.setattr(store, "_read_thread_events", paused)
+    paused = _PausedIO(store._iter_thread_events)
+    monkeypatch.setattr(store, "_iter_thread_events", paused)
     lookup = asyncio.create_task(store.find_latest_ai_message_run_ids("t1", {"missing"}))
     writer = None
     try:
@@ -235,7 +235,7 @@ async def test_snapshot_read_failure_preserves_error_precedence_and_releases_loc
         raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
 
     paused = _PausedIO(fail_read)
-    monkeypatch.setattr(store, "_read_thread_events", paused)
+    monkeypatch.setattr(store, "_iter_thread_events", paused)
     lookup = asyncio.create_task(store.find_latest_ai_message_run_ids("t1", {"missing"}))
     writer = None
     try:

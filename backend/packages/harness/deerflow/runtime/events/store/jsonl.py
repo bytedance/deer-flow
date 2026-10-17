@@ -17,7 +17,9 @@ writes within a single process to prevent interleaved JSONL lines.
 
 Known trade-off: ``list_messages()`` must scan all run files for a
 thread since messages from multiple runs need unified seq ordering.
-``list_events()`` reads only one file -- the fast path.
+``list_events()`` scans only one file. Queries stream decoded records into
+bounded page selectors or scalar reductions rather than retaining full logs.
+This bounds retained payloads, not disk scan time or individual record size.
 
 Read records using physical newline boundaries, not ``str.splitlines()``:
 Unicode line separators are valid JSON string content and must stay inside
@@ -29,13 +31,14 @@ records without discarding existing bytes.
 from __future__ import annotations
 
 import asyncio
+import heapq
 import json
 import logging
 import os
 import re
 import tempfile
 import weakref
-from collections.abc import Callable, Coroutine, Iterator
+from collections.abc import Callable, Coroutine, Iterable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -196,25 +199,46 @@ class JsonlRunEventStore(RunEventStore):
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     logger.debug("Skipping malformed JSONL line in %s", path)
 
-    def _read_thread_events(self, thread_id: str) -> list[dict]:
-        """Read all events for a thread, sorted by seq (blocking I/O)."""
-        events = []
+    def _iter_thread_events(self, thread_id: str) -> Iterator[dict]:
+        """Stream files in deterministic order; seq order need not match it."""
         thread_dir = self._thread_dir(thread_id)
-        if not thread_dir.exists():
-            return events
-        for f in sorted(thread_dir.glob("*.jsonl")):
-            events.extend(self._iter_records(f))
-        events.sort(key=lambda e: e.get("seq", 0))
-        return events
+        if thread_dir.exists():
+            for path in sorted(thread_dir.glob("*.jsonl")):
+                yield from self._iter_records(path)
 
-    def _read_run_events(self, thread_id: str, run_id: str) -> list[dict]:
-        """Read events for a specific run file (blocking I/O)."""
+    def _iter_run_events(self, thread_id: str, run_id: str) -> Iterator[dict]:
         path = self._existing_run_file(thread_id, run_id)
-        if path is None:
-            return []
-        events = list(self._iter_records(path))
-        events.sort(key=lambda e: e.get("seq", 0))
-        return events
+        if path is not None:
+            yield from self._iter_records(path)
+
+    @staticmethod
+    def _select_page(events: Iterable[dict], limit: int, *, latest: bool) -> list[dict]:
+        """Retain only a page, preserving the old stable full-sort semantics.
+
+        Legacy files may be out of seq order. Including the encounter position
+        in the rank also keeps the correct end of a group of equal seqs when
+        selecting the latest page. Never compare event dictionaries in a heap.
+        """
+        if limit <= 0:
+            # Preserve historical Python-slice behavior for direct callers.
+            # These non-positive limits can request an unbounded result.
+            ordered = sorted(events, key=lambda event: event.get("seq", 0))
+            return ordered[-limit:] if latest else ordered[:limit]
+        ranked = ((event.get("seq", 0), index, event) for index, event in enumerate(events))
+
+        def key(item: tuple[int, int, dict]) -> tuple[int, int]:
+            return item[0], item[1]
+
+        if latest:
+            selected = heapq.nlargest(limit, ranked, key=key)
+            selected.reverse()
+        else:
+            selected = heapq.nsmallest(limit, ranked, key=key)
+        return [event for _, _, event in selected]
+
+    def _message_page(self, events: Iterable[dict], limit: int, before_seq: int | None, after_seq: int | None) -> list[dict]:
+        matching = (event for event in events if event.get("category") == "message" and (before_seq is None or event.get("seq", 0) < before_seq) and (after_seq is None or event.get("seq", 0) > after_seq))
+        return self._select_page(matching, limit, latest=after_seq is None)
 
     def _delete_thread_files(self, thread_id: str) -> None:
         thread_dir = self._thread_dir(thread_id)
@@ -288,10 +312,13 @@ class JsonlRunEventStore(RunEventStore):
         created_at=None,
     ):
         async def mutate():
-            existing = await asyncio.to_thread(self._read_run_events, thread_id, run_id)
-            for event in existing:
-                if event.get("event_type") == event_type:
-                    return event, False
+            def find_existing():
+                matching = (event for event in self._iter_run_events(thread_id, run_id) if event.get("event_type") == event_type)
+                return self._select_page(matching, 1, latest=False)
+
+            existing = await asyncio.to_thread(find_existing)
+            if existing:
+                return existing[0], False
             await self._ensure_seq_loaded(thread_id)
             record = {
                 "thread_id": thread_id,
@@ -371,16 +398,21 @@ class JsonlRunEventStore(RunEventStore):
             raise
 
     async def list_messages(self, thread_id, *, limit=50, before_seq=None, after_seq=None, user_id: str | None | _AutoSentinel = AUTO):
-        all_events = await asyncio.to_thread(self._read_thread_events, thread_id)
-        messages = [e for e in all_events if e.get("category") == "message"]
+        return await asyncio.to_thread(self._message_page, self._iter_thread_events(thread_id), limit, before_seq, after_seq)
 
-        if before_seq is not None:
-            messages = [e for e in messages if e["seq"] < before_seq]
-        if after_seq is not None:
-            messages = [e for e in messages if e["seq"] > after_seq]
-            return messages[:limit]
-        else:
-            return messages[-limit:]
+    def _find_latest_ai_message_run_ids(self, thread_id: str, wanted: set[str]) -> dict[str, str]:
+        # Keep only one scalar candidate per target. A later physical file can
+        # contain an earlier seq, so finding every ID does not end the scan.
+        found: dict[str, tuple[int, str]] = {}
+        for event in self._iter_thread_events(thread_id):
+            match = match_ai_message_run_id(event, wanted)
+            if match is None:
+                continue
+            message_id, run_id = match
+            seq = event.get("seq", 0)
+            if message_id not in found or seq >= found[message_id][0]:
+                found[message_id] = (seq, run_id)
+        return {message_id: run_id for message_id, (_, run_id) in found.items()}
 
     async def find_latest_ai_message_run_ids(
         self,
@@ -389,30 +421,18 @@ class JsonlRunEventStore(RunEventStore):
         *,
         user_id: str | None | _AutoSentinel = AUTO,
     ) -> dict[str, str]:
-        pending = normalize_message_ids(message_ids)
-        if not pending:
+        wanted = normalize_message_ids(message_ids)
+        if not wanted:
             return {}
 
-        # Keep the one-pass view stable against this backend's supported
-        # single-process writers. Without the write lock, reading run files one
-        # by one can mix events from opposite sides of a concurrent append.
+        # Consume the whole iterator inside the owned off-thread task. Merely
+        # creating an iterator under the lock would not fence its disk reads.
         async with self._get_write_lock(thread_id):
             task = asyncio.create_task(
-                asyncio.to_thread(self._read_thread_events, thread_id),
+                asyncio.to_thread(self._find_latest_ai_message_run_ids, thread_id, wanted),
                 name=f"jsonl-snapshot:{thread_id}",
             )
-            events = await self._await_owned_task(task)
-        result: dict[str, str] = {}
-        for event in reversed(events):
-            match = match_ai_message_run_id(event, pending)
-            if match is None:
-                continue
-            message_id, run_id = match
-            result[message_id] = run_id
-            pending.remove(message_id)
-            if not pending:
-                break
-        return result
+            return await self._await_owned_task(task)
 
     async def list_events(
         self,
@@ -425,66 +445,60 @@ class JsonlRunEventStore(RunEventStore):
         after_seq=None,
         user_id: str | None | _AutoSentinel = AUTO,
     ):
-        events = await asyncio.to_thread(self._read_run_events, thread_id, run_id)
-        if event_types is not None:
-            events = [e for e in events if e.get("event_type") in event_types]
-        if task_id is not None:
-            events = [e for e in events if (e.get("metadata") or {}).get("task_id") == task_id]
-        if after_seq is not None:
-            events = [e for e in events if e.get("seq", 0) > after_seq]
-        return events[:limit]
+        def select():
+            matching = (
+                event
+                for event in self._iter_run_events(thread_id, run_id)
+                if (event_types is None or event.get("event_type") in event_types) and (task_id is None or (event.get("metadata") or {}).get("task_id") == task_id) and (after_seq is None or event.get("seq", 0) > after_seq)
+            )
+            return self._select_page(matching, limit, latest=False)
+
+        return await asyncio.to_thread(select)
 
     async def list_messages_by_run(self, thread_id, run_id, *, limit=50, before_seq=None, after_seq=None, user_id: str | None | _AutoSentinel = AUTO):
-        events = await asyncio.to_thread(self._read_run_events, thread_id, run_id)
-        filtered = [e for e in events if e.get("category") == "message"]
-        if before_seq is not None:
-            filtered = [e for e in filtered if e.get("seq", 0) < before_seq]
-        if after_seq is not None:
-            filtered = [e for e in filtered if e.get("seq", 0) > after_seq]
-        if after_seq is not None:
-            return filtered[:limit]
-        else:
-            return filtered[-limit:] if len(filtered) > limit else filtered
+        return await asyncio.to_thread(self._message_page, self._iter_run_events(thread_id, run_id), limit, before_seq, after_seq)
 
     async def get_last_visible_ai_seq_by_run(self, thread_id, run_ids, *, user_id: str | None | _AutoSentinel = AUTO):
-        def _scan() -> dict[str, int]:
+        def scan() -> dict[str, int]:
             result: dict[str, int] = {}
             for run_id in run_ids:
-                for event in reversed(self._read_run_events(thread_id, run_id)):
+                for event in self._iter_run_events(thread_id, run_id):
                     caller = str((event.get("metadata") or {}).get("caller", ""))
                     if event.get("category") == "message" and event.get("event_type") in {"llm.ai.response", "ai_message"} and not caller.startswith("middleware:"):
-                        result[run_id] = event["seq"]
-                        break
+                        seq = event["seq"]
+                        if run_id not in result or seq > result[run_id]:
+                            result[run_id] = seq
             return result
 
-        return await asyncio.to_thread(_scan)
+        return await asyncio.to_thread(scan)
 
     async def count_messages(self, thread_id):
-        all_events = await asyncio.to_thread(self._read_thread_events, thread_id)
-        return sum(1 for e in all_events if e.get("category") == "message")
+        def count():
+            return sum(1 for event in self._iter_thread_events(thread_id) if event.get("category") == "message")
+
+        return await asyncio.to_thread(count)
 
     async def get_message_seqs(self, thread_id, identities, *, user_id: str | None | _AutoSentinel = AUTO):
         wanted = set(identities)
         if not wanted:
             return {}
-        all_events = await asyncio.to_thread(self._read_thread_events, thread_id)
-        found: dict[str, int] = {}
-        for event in all_events:
-            if event.get("category") != "message":
-                continue
-            content = event.get("content")
-            if not isinstance(content, dict):
-                continue
-            identity = message_identity(content)
-            # Earliest seq wins: a message re-persisted later keeps the position
-            # it first occupied in the feed.
-            if identity in wanted and identity not in found:
-                found[identity] = event["seq"]
-                # Later events can only be re-persisted copies that already lose
-                # that tiebreak, so the scan ends with the last wanted seq.
-                if len(found) == len(wanted):
-                    break
-        return found
+
+        def scan() -> dict[str, int]:
+            found: dict[str, int] = {}
+            for event in self._iter_thread_events(thread_id):
+                if event.get("category") != "message":
+                    continue
+                content = event.get("content")
+                if not isinstance(content, dict):
+                    continue
+                identity = message_identity(content)
+                if identity in wanted:
+                    seq = event["seq"]
+                    if identity not in found or seq < found[identity]:
+                        found[identity] = seq
+            return found
+
+        return await asyncio.to_thread(scan)
 
     async def delete_by_thread(self, thread_id, *, user_id: str | None | _AutoSentinel = AUTO):
         """Delete every event of a thread.
@@ -495,8 +509,7 @@ class JsonlRunEventStore(RunEventStore):
         """
 
         async def mutate():
-            all_events = await asyncio.to_thread(self._read_thread_events, thread_id)
-            count = len(all_events)
+            count = await asyncio.to_thread(lambda: sum(1 for _ in self._iter_thread_events(thread_id)))
             await asyncio.to_thread(self._delete_thread_files, thread_id)
             self._seq_counters.pop(thread_id, None)
             # Mutations already queued on this lock resume after deletion; with
@@ -509,8 +522,7 @@ class JsonlRunEventStore(RunEventStore):
         """Delete one run's events; ``user_id`` is accepted for parity only."""
 
         async def mutate():
-            events = await asyncio.to_thread(self._read_run_events, thread_id, run_id)
-            count = len(events)
+            count = await asyncio.to_thread(lambda: sum(1 for _ in self._iter_run_events(thread_id, run_id)))
             if count:
                 await self._ensure_seq_loaded(thread_id)
                 await asyncio.to_thread(self._save_seq_watermark, thread_id, self._seq_counters[thread_id], run_id)
