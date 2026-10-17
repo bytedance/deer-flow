@@ -2,6 +2,7 @@ import errno
 import fnmatch
 import os
 import re
+import stat
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -245,7 +246,10 @@ def find_grep_matches(
             file_path = candidate_path.resolve()
             if not root_is_file and not file_path.is_relative_to(root):
                 continue
-            if file_path.stat().st_size > max_file_size or is_binary_file(file_path):
+            file_stat = file_path.stat()
+            if not stat.S_ISREG(file_stat.st_mode):
+                continue
+            if file_stat.st_size > max_file_size or is_binary_file(file_path):
                 continue
             # newline="\n" ends lines where LocalSandbox.read_file does, so a
             # hit's line_number is the start_line that reads it back; a bare

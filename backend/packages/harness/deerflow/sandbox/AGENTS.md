@@ -2,7 +2,7 @@
 
 Sandbox restore requires a thread ID, even forks.
 
-Local `grep` propagates file read errors; only `ENOENT`/`ENOTDIR`/`ELOOP` races are skipped.
+Local `grep` skips non-regular entries before reading. Regular-file read errors propagate, except `ENOENT`/`ENOTDIR`/`ELOOP` races.
 
 **Network approval policy**: `SandboxMiddleware` uses
 `resolve_run_interaction_policy()`. Autonomous, webhook, scheduled, legacy

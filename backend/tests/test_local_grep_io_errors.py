@@ -3,6 +3,7 @@
 import ctypes
 import errno
 import os
+import socket
 from contextlib import contextmanager
 from ctypes import wintypes
 from pathlib import Path
@@ -88,6 +89,20 @@ def test_grep_still_excludes_binary_and_glob_filtered_files(search_file):
     assert "No matches found" in invoke()
     target.write_bytes(b"needle\n")
     assert "No matches found" in invoke(glob="*.py")
+
+
+@pytest.mark.skipif(os.name == "nt" or not hasattr(socket, "AF_UNIX"), reason="requires POSIX Unix-domain socket stat semantics")
+@pytest.mark.parametrize("pattern, expected", [("needle", "Found 1 matches"), ("absent", "No matches found")])
+def test_grep_skips_real_socket_and_searches_regular_files(search_file, monkeypatch, pattern, expected):
+    target, invoke = search_file
+    # Bind a short relative path to stay within Unix socket path length limits.
+    monkeypatch.chdir(target.parent)
+    with socket.socket(socket.AF_UNIX) as server:
+        server.bind("service.sock")
+        assert expected in invoke(pattern=pattern)
+        matches, truncated = find_grep_matches(target.parent, pattern)
+        assert [match.path for match in matches] == ([str(target)] if pattern == "needle" else [])
+        assert not truncated
 
 
 def test_grep_does_not_publish_partial_hits_after_read_error(search_file, monkeypatch):
