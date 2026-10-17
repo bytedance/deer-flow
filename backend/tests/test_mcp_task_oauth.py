@@ -264,24 +264,15 @@ def test_separate_managers_deduplicate_refresh_across_event_loops(task_config, r
     release = threading.Event()
     start = threading.Barrier(3)
     handle = rotating_server.handle
-    state = managers[0]._states["reports"]
-    original_lock = state.lock
     arrivals_lock = threading.Lock()
     arrivals = 0
 
-    class ObservedLock:
-        def acquire(self):
-            nonlocal arrivals
-            with arrivals_lock:
-                arrivals += 1
-                if arrivals == len(managers):
-                    all_acquiring.set()
-            return original_lock.acquire()
-
-        def release(self):
-            original_lock.release()
-
-    monkeypatch.setattr(state, "lock", ObservedLock())
+    def caller_started():
+        nonlocal arrivals
+        with arrivals_lock:
+            arrivals += 1
+            if arrivals == len(managers):
+                all_acquiring.set()
 
     async def held_response(request):
         if request.url.path == "/token":
@@ -293,13 +284,19 @@ def test_separate_managers_deduplicate_refresh_across_event_loops(task_config, r
 
     def fetch(manager):
         start.wait(timeout=5)
-        return asyncio.run(manager.get_authorization_header("reports"))
+
+        async def request():
+            caller = asyncio.create_task(manager.get_authorization_header("reports"))
+            asyncio.get_running_loop().call_soon(caller_started)
+            return await caller
+
+        return asyncio.run(request())
 
     with ThreadPoolExecutor(max_workers=3) as executor:
         futures = [executor.submit(fetch, manager) for manager in managers]
         try:
             assert entered.wait(5), "token request did not start"
-            assert all_acquiring.wait(5), "callers did not contend on the shared refresh lock"
+            assert all_acquiring.wait(5), "callers did not reach the shared refresh"
         finally:
             release.set()
         assert [future.result(timeout=5) for future in futures] == ["Bearer access-1"] * 3
@@ -310,39 +307,41 @@ def test_separate_managers_deduplicate_refresh_across_event_loops(task_config, r
 async def test_cancelled_waiter_does_not_strand_shared_refresh_lock(task_config, rotating_server, monkeypatch):
     first = task_runtime.get_mcp_task_oauth_token_manager(ExtensionsConfig.from_file())
     second = task_runtime.get_mcp_task_oauth_token_manager(ExtensionsConfig.from_file())
-    state = first._states["reports"]
-    original_lock = state.lock
-    entered = threading.Event()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    handle = rotating_server.handle
 
-    class ObservedLock:
-        def acquire(self):
+    async def held_response(request):
+        if request.url.path == "/token":
             entered.set()
-            return original_lock.acquire()
+            await release.wait()
+        return handle(request)
 
-        def release(self):
-            original_lock.release()
-
-    monkeypatch.setattr(state, "lock", ObservedLock())
-    original_lock.acquire()
-    waiter = asyncio.create_task(first.get_authorization_header("reports"))
+    monkeypatch.setattr(rotating_server, "handle", held_response)
+    owner = asyncio.create_task(first.get_authorization_header("reports"))
+    callers = [owner]
     try:
-        assert await asyncio.to_thread(entered.wait, 5), "waiter never reached lock acquisition"
+        await asyncio.wait_for(entered.wait(), 5)
+        waiter = asyncio.create_task(first.get_authorization_header("reports"))
+        following = asyncio.create_task(second.get_authorization_header("reports"))
+        callers.extend([waiter, following])
+        waiting = asyncio.get_running_loop().create_future()
+        asyncio.get_running_loop().call_soon(waiting.set_result, None)
+        await waiting
         waiter.cancel()
+        done, _pending = await asyncio.wait({waiter}, timeout=1)
+        assert waiter in done, "cancelling a waiter must not wait for the token endpoint"
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        assert not owner.done()
+        assert not following.done(), "a cancelled caller must not cancel another manager's wait"
+        release.set()
+        assert await asyncio.wait_for(asyncio.gather(owner, following), 5) == ["Bearer access-1"] * 2
     finally:
-        original_lock.release()
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(waiter, 5)
-    following = asyncio.create_task(second.get_authorization_header("reports"))
-    try:
-        # asyncio.wait has a bounded return even if cancellation cleanup must
-        # wait for an executor thread stuck acquiring a leaked lock.
-        done, _pending = await asyncio.wait({following}, timeout=5)
-        assert following in done, "cancelled waiter leaked the shared refresh lock"
-        assert following.result() == "Bearer access-1"
-    finally:
-        if original_lock.locked():
-            original_lock.release()
-        await asyncio.gather(following, return_exceptions=True)
+        release.set()
+        for caller in callers:
+            caller.cancel()
+        await asyncio.gather(*callers, return_exceptions=True)
     assert rotating_server.refresh_requests == ["refresh-0"]
 
 
