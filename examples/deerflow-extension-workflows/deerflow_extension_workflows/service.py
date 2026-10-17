@@ -597,7 +597,7 @@ class Workflows(Lifecycle, Artifacts):
                                 timeout=0.02,
                                 return_when=asyncio.FIRST_COMPLETED,
                             )
-                            if finished or not frame["idle"] or entry["cancel"].is_set() or entry["fault"]:
+                            if finished or not frame.get("idle", False) or entry["cancel"].is_set() or entry["fault"]:
                                 break
                     else:
                         await asyncio.sleep(0.002)

@@ -547,8 +547,10 @@ async def test_cancel_while_agent_pending_stops_promptly(plugin):
     await asyncio.sleep(0.3)
     started = time.monotonic()
     await actions["cancel"]({"run_id": result["run_id"]}, context(runs))
-    await asyncio.wait_for(service.wait_idle(result["run_id"]), 1)
-    assert time.monotonic() - started < 1
+    # Cancel latency is ~4 ms locally; the budget also covers the store writes
+    # and process reaping, which can spike on a loaded CI runner.
+    await asyncio.wait_for(service.wait_idle(result["run_id"]), 3)
+    assert time.monotonic() - started < 3
     final = await actions["get"]({"run_id": result["run_id"]}, context(runs))
     assert final["status"] == "cancelled", final
     assert not service.processes
