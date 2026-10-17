@@ -13,6 +13,24 @@ This release closes that milestone with **621 merged pull requests**.
 
 ### Added
 
+- **channels:** IM bot credentials entered in the web UI now live in the shared
+  `channel_runtime_configs` table (migration `0044_channel_runtime_configs`)
+  instead of each host's plaintext `channels/runtime-config.json`. Each
+  provider's config is encrypted with `DEER_FLOW_CREDENTIALS_KEY`, a disconnect
+  is a plaintext tombstone that still overrides `config.yaml`, and every save
+  bumps a per-provider `version`. Every Gateway instance re-reads the table on
+  each request (the router no longer caches the merged config on `app.state`),
+  and under `channels.leader_lease` the holder compares the versions on every
+  renewal tick, so credentials saved or a disconnect made on any instance reach
+  the platform connection within one renewal interval instead of on the
+  holder's next restart; an instance taking a lease over reads a disconnect
+  instead of reviving cached credentials. The first start imports an existing
+  `runtime-config.json` (providers already in the table keep their row) and
+  deletes the plaintext file, so a downgrade must re-enter UI-configured bots.
+  Without a usable key, saving credentials answers `503` instead of storing
+  plaintext, and rows the key cannot decrypt read as not configured.
+  `database.backend: memory` keeps the JSON file. ([#6988])
+
 - **channels:** Option-based clarifications on the Feishu channel render as an
   interactive button card instead of plain text: each option becomes a button
   (up to 4 — beyond that the plain-text path reads better), a click resolves
@@ -11778,3 +11796,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6897]: https://github.com/bytedance/deer-flow/pull/6897
 [#6909]: https://github.com/bytedance/deer-flow/pull/6909
 [#6930]: https://github.com/bytedance/deer-flow/pull/6930
+[#6988]: https://github.com/bytedance/deer-flow/pull/6988
