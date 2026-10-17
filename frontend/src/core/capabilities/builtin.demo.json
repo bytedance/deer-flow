@@ -468,6 +468,42 @@
     }
   },
   {
+    "id": "capybrowser",
+    "category": "development",
+    "name": { "en-US": "Baizhi Cloud Browser", "zh-CN": "百智云云浏览器" },
+    "description": {
+      "en-US": "Manage Baizhi Cloud Browser sessions for agent work; page actions require a CDP client.",
+      "zh-CN": "为 Agent 管理百智云云浏览器运行；页面导航与点击需另配 CDP 客户端。"
+    },
+    "setup": {
+      "en-US": "Add the Baizhi Cloud Browser endpoint https://capybrowser.app.baizhi.cloud/mcp as an HTTP MCP server. In the Authorization password field, enter only Bearer <your API Key>; DeerFlow supplies the Authorization header name. Do not include the Authorization: prefix. Check pricing before creating a Session, and end each paid Session when done. Page actions require a separate CDP client; this does not configure DeerFlow's Browser automation.",
+      "zh-CN": "将百智云云浏览器地址 https://capybrowser.app.baizhi.cloud/mcp 添加为 HTTP MCP 服务。在“授权请求头”密码框中只填写 Bearer <自己的 API Key>；DeerFlow 会自动添加 Authorization 请求头名称，不要填 Authorization: 前缀。创建运行前先查价格，完成后明确结束计费 Session。网页操作需另配 CDP 客户端；此条目不会配置 DeerFlow 内置浏览器自动化。"
+    },
+    "kind": "mcp",
+    "source": "https://capybrowser.app.baizhi.cloud/docs/installation.md",
+    "aliases": ["capybrowser", "百智云云浏览器"],
+    "schema_version": 1,
+    "version": "1",
+    "adapter": "mcp",
+    "auth_methods": ["api_key"],
+    "icon": null,
+    "contributions": ["tools"],
+    "config_schema": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "title": "Connection name" },
+        "url": { "type": "string", "title": "Server URL" },
+        "authorization": {
+          "type": "string",
+          "title": "Authorization header",
+          "format": "password"
+        }
+      },
+      "required": ["name", "url", "authorization"],
+      "additionalProperties": false
+    }
+  },
+  {
     "id": "browser",
     "category": "development",
     "name": { "en-US": "Browser automation", "zh-CN": "浏览器自动化" },
