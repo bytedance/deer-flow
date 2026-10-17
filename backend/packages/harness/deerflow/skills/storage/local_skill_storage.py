@@ -93,7 +93,10 @@ class LocalSkillStorage(SkillStorage):
     def read_custom_skill(self, name: str) -> str:
         if not self.custom_skill_exists(name):
             raise FileNotFoundError(f"Custom skill '{name}' not found.")
-        return (self.get_custom_skill_dir(name) / SKILL_MD_FILE).read_text(encoding="utf-8")
+        # ``utf-8-sig`` drops a leading BOM (Notepad / PowerShell 5.1 prepend one):
+        # the read-back API returns skill text, and the frontmatter parser already
+        # tolerates the BOM at parse time, so it must not survive into the content.
+        return (self.get_custom_skill_dir(name) / SKILL_MD_FILE).read_text(encoding="utf-8-sig")
 
     def write_custom_skill(self, name: str, relative_path: str, content: str) -> None:
         with self._skill_projection_mutation():
