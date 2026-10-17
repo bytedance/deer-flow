@@ -221,7 +221,9 @@ def find_grep_matches(
     flags = 0 if case_sensitive else re.IGNORECASE
     regex = re.compile(regex_source, flags)
 
-    # Skip lines longer than this to prevent ReDoS on minified / no-newline files.
+    # Bound regex work on minified / no-newline files. Escaped literal patterns
+    # cannot introduce backtracking, so fixed-string searches can scan those
+    # lines while retaining the file-size and returned-summary limits.
     _max_line_chars = line_summary_length * 10
 
     def candidate_files():
@@ -257,7 +259,7 @@ def find_grep_matches(
                 for line_number, line in enumerate(handle, start=1):
                     if line.endswith("\r\n"):
                         line = line[:-2] + "\n"
-                    if len(line) > _max_line_chars:
+                    if not literal and len(line) > _max_line_chars:
                         continue
                     if regex.search(line):
                         matches.append(
