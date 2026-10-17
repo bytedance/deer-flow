@@ -89,7 +89,11 @@ class SearxngClient:
         reverse proxy or captive portal answers an HTML or plain-text error page
         with HTTP 200, and reporting "No results found" for it would tell the
         agent the query legitimately matched nothing. Non-object entries in an
-        otherwise valid list are skipped in order so the valid rows survive.
+        otherwise valid list are skipped in order so the valid rows survive, and
+        each skip is logged with the entry index: this is the provider where
+        drift is most expected (a self-hosted instance serves whatever sits
+        behind its reverse proxy), and with ``_MAX_PAGES`` requests per search a
+        drifting instance would otherwise shed rows with no trace at all.
         """
         if not isinstance(data, dict):
             logger.error("SearXNG returned an unexpected payload type: %s", type(data).__name__)
@@ -100,7 +104,12 @@ class SearxngClient:
         if not isinstance(results, list):
             logger.error("SearXNG returned an unexpected 'results' payload type: %s", type(results).__name__)
             raise SearxngResponseError("SearXNG returned an unexpected response format")
-        usable = [row for row in results if isinstance(row, dict)]
+        usable: list[dict[str, Any]] = []
+        for index, row in enumerate(results):
+            if not isinstance(row, dict):
+                logger.warning("Skipping malformed SearXNG result entry at results[%d]", index)
+                continue
+            usable.append(row)
         if results and not usable:
             logger.error("SearXNG returned 'results' with no usable result objects")
             raise SearxngResponseError("SearXNG returned an unexpected response format")

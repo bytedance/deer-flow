@@ -1,6 +1,7 @@
 """Tests for SearXNG community tools."""
 
 import json
+import logging
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
@@ -314,6 +315,30 @@ class TestSearxngClient:
 
         assert [row["title"] for row in result] == ["ok"]
 
+    async def test_search_logs_the_index_of_a_skipped_row(self, caplog):
+        """Every skipped entry is logged with its position.
+
+        The merged sibling #6932 reports the same drift for InfoQuest
+        (``Skipping malformed InfoQuest result entry at results[1]``); SearXNG is
+        the provider where drift is most expected and where a single search can
+        span ``_MAX_PAGES`` requests, so the skip must leave a trace.
+        """
+        rows = [
+            {"title": "kept-0", "url": "https://example.com/0", "content": "c"},
+            7,
+            {"title": "kept-2", "url": "https://example.com/2", "content": "c"},
+        ]
+
+        with _searxng_pages({1: rows}):
+            client = SearxngClient(base_url="http://searxng:8080")
+            with caplog.at_level(logging.WARNING, logger="deerflow.community.searxng.searxng_client"):
+                result = await client.search("test query", max_results=5)
+
+        assert [row["title"] for row in result] == ["kept-0", "kept-2"]
+        warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+        assert any("results[1]" in message for message in warnings), warnings
+        assert not any("example.com" in message for message in warnings), warnings
+
     async def test_search_non_json_body_reports_a_format_error(self):
         """A 200 body that is not JSON at all is a format error, not a crash."""
         with patch("deerflow.community.searxng.searxng_client.httpx.AsyncClient") as mock_cls:
@@ -493,3 +518,27 @@ class TestSearxngTools:
         data = json.loads(result)
         assert "unexpected response format" not in data["error"]
         assert mock_client.search.call_args.kwargs["max_results"] == 5
+
+    @patch("deerflow.community.searxng.tools._get_searxng_client")
+    async def test_web_search_tool_routes_the_format_error_before_the_generic_handler(self, mock_get_client, caplog):
+        """The format-error reply comes from its own handler, not the generic one.
+
+        ``SearxngResponseError`` is a ``ValueError`` whose message is already the
+        format-error string, so the generic ``except Exception`` below would
+        return byte-identical JSON. What distinguishes the two paths is the log
+        line: the generic branch records ``Error in web_search_tool: ...`` first.
+        Without this assertion the dedicated handler could be deleted (or the
+        exception message changed) with every test still green.
+        """
+        mock_client = MagicMock()
+        mock_client.search = AsyncMock(side_effect=SearxngResponseError("SearXNG returned an unexpected response format"))
+        mock_get_client.return_value = mock_client
+
+        with patch("deerflow.community.searxng.tools._get_tool_config", return_value=None):
+            with caplog.at_level(logging.ERROR, logger="deerflow.community.searxng.tools"):
+                result = await tools.web_search_tool.ainvoke("test query")
+
+        data = json.loads(result)
+        assert data["error"] == "SearXNG returned an unexpected response format"
+        assert data["query"] == "test query"
+        assert "Error in web_search_tool" not in caplog.text
