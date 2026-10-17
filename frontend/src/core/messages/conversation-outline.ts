@@ -1,5 +1,6 @@
 import {
   extractTextFromMessage,
+  hasStructuredUploadContext,
   stripUploadedFilesTag,
   type MessageGroup,
 } from "./utils";
@@ -13,8 +14,14 @@ export type ConversationChapter = {
   title: string;
 };
 
-function normalizeChapterTitle(content: string, fallbackTitle: string): string {
-  const normalized = stripUploadedFilesTag(content).replace(/\s+/g, " ").trim();
+function normalizeChapterTitle(
+  content: string,
+  fallbackTitle: string,
+  structured = false,
+): string {
+  const normalized = (structured ? content : stripUploadedFilesTag(content))
+    .replace(/\s+/g, " ")
+    .trim();
   if (!normalized) {
     return fallbackTitle;
   }
@@ -50,7 +57,11 @@ export function buildConversationChapters(
     chapters.push({
       id: group.id ?? message?.id ?? `human-turn:${groupIndex}`,
       groupIndex,
-      title: normalizeChapterTitle(text, fallbackTitle),
+      title: normalizeChapterTitle(
+        text,
+        fallbackTitle,
+        !!message && hasStructuredUploadContext(message),
+      ),
     });
   });
 

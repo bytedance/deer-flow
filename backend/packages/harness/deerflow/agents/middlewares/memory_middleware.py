@@ -18,6 +18,7 @@ from deerflow.config.pii_redaction_config import PiiRedactionConfig
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, resolve_trace_id
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+from deerflow.utils.upload_context import UPLOAD_CONTEXT_KEY
 
 if TYPE_CHECKING:
     from deerflow.config.memory_config import MemoryConfig
@@ -58,6 +59,10 @@ def redact_queued_messages(messages: list, pii_redaction_config: PiiRedactionCon
         additional_kwargs = getattr(message, "additional_kwargs", None)
         if isinstance(additional_kwargs, dict):
             new_additional_kwargs = additional_kwargs
+            # File outlines are model context, not durable user memory. Memory
+            # adapters may retain all metadata even when content is pristine.
+            if UPLOAD_CONTEXT_KEY in additional_kwargs:
+                new_additional_kwargs = {key: value for key, value in additional_kwargs.items() if key != UPLOAD_CONTEXT_KEY}
             for field in ("tool_calls", "function_call"):
                 if additional_kwargs.get(field):
                     rewritten = _redact_strings(additional_kwargs[field], redactor)

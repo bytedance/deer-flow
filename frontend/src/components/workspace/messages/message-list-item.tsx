@@ -48,6 +48,7 @@ import {
   getMessageCopyData,
   parseUploadedFiles,
   stripUploadedFilesTag,
+  hasStructuredUploadContext,
   type FileInMessage,
 } from "@/core/messages/utils";
 import { readReferenceMessageContexts } from "@/core/sidecar";
@@ -457,14 +458,16 @@ function MessageContent_({
   );
 
   const rawContent = extractContentFromMessage(message);
+  const structuredUploadContext = hasStructuredUploadContext(message);
   const reasoningContent = extractReasoningContentFromMessage(message);
 
   const files = useMemo(() => {
     const files = message.additional_kwargs?.files;
     if (!Array.isArray(files) || files.length === 0) {
       if (
-        rawContent.includes("<current_uploads>") ||
-        rawContent.includes("<uploaded_files>")
+        !structuredUploadContext &&
+        (rawContent.includes("<current_uploads>") ||
+          rawContent.includes("<uploaded_files>"))
       ) {
         // If the content contains an upload context tag, we return the parsed files from the content for backward compatibility.
         // <uploaded_files> is display-only compat for pre-#4174 history (#4212).
@@ -477,7 +480,7 @@ function MessageContent_({
       return null;
     }
     return files as FileInMessage[];
-  }, [message.additional_kwargs?.files, rawContent]);
+  }, [message.additional_kwargs?.files, rawContent, structuredUploadContext]);
   const referenceAttachments = useMemo(
     () =>
       readReferenceMessageContexts(message.additional_kwargs).map(
@@ -495,10 +498,14 @@ function MessageContent_({
 
   const contentToDisplay = useMemo(() => {
     if (isHuman) {
-      return rawContent ? stripUploadedFilesTag(rawContent) : "";
+      return structuredUploadContext
+        ? rawContent
+        : rawContent
+          ? stripUploadedFilesTag(rawContent)
+          : "";
     }
     return rawContent ?? "";
-  }, [rawContent, isHuman]);
+  }, [rawContent, isHuman, structuredUploadContext]);
   const citationSources = useMemo(
     () =>
       isHuman ? [] : extractCitationSources(contentToDisplay, knowledgeSources),

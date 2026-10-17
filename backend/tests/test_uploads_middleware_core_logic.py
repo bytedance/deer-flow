@@ -19,6 +19,7 @@ from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
 from deerflow.config.paths import Paths
 from deerflow.uploads.companions import register_companion
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text
+from deerflow.utils.upload_context import project_upload_context
 
 THREAD_ID = "thread-abc123"
 CONTEXT_SECTION_LIMIT = 10
@@ -289,7 +290,7 @@ class TestBeforeAgent:
         assert result is not None
         assert [f["filename"] for f in result["uploaded_files"]] == ["present.txt"]
         assert result["uploaded_files"][0]["size"] == 0
-        block = _current_uploads_block(result["messages"][0].content)
+        block = _current_uploads_block(project_upload_context(result["messages"][0]).content)
         assert "present.txt" in block
 
     def test_clears_uploaded_files_when_all_files_missing_from_disk(self, tmp_path):
@@ -323,7 +324,7 @@ class TestBeforeAgent:
         assert result is not None
         assert result["uploaded_files"][0]["filename"] == "data.csv"
 
-    def test_injects_current_uploads_tag_into_string_content(self, tmp_path):
+    def test_projects_upload_context_into_string_model_content(self, tmp_path):
         mw = _middleware(tmp_path)
         uploads_dir = _uploads_dir(tmp_path)
         (uploads_dir / "report.pdf").write_bytes(b"pdf")
@@ -333,13 +334,14 @@ class TestBeforeAgent:
         result = mw.before_agent(state, _runtime())
 
         assert result is not None
-        updated_msg = result["messages"][-1]
+        assert result["messages"][-1].content == msg.content
+        updated_msg = project_upload_context(result["messages"][-1])
         assert isinstance(updated_msg.content, str)
         assert "<current_uploads>" in updated_msg.content
         assert "report.pdf" in updated_msg.content
         assert "please analyse" in updated_msg.content
 
-    def test_injects_current_uploads_tag_into_list_content(self, tmp_path):
+    def test_projects_upload_context_into_multimodal_model_content(self, tmp_path):
         mw = _middleware(tmp_path)
         uploads_dir = _uploads_dir(tmp_path)
         (uploads_dir / "data.csv").write_bytes(b"a,b")
@@ -352,7 +354,8 @@ class TestBeforeAgent:
         result = mw.before_agent(state, _runtime())
 
         assert result is not None
-        updated_msg = result["messages"][-1]
+        assert result["messages"][-1].content == msg.content
+        updated_msg = project_upload_context(result["messages"][-1])
         assert isinstance(updated_msg.content, list)
         combined_text = "\n".join(block.get("text", "") for block in updated_msg.content if isinstance(block, dict))
         assert "<current_uploads>" in combined_text
@@ -398,7 +401,7 @@ class TestBeforeAgent:
         result = mw.before_agent(state, _runtime())
 
         assert result is not None
-        updated_msg = result["messages"][-1]
+        updated_msg = project_upload_context(result["messages"][-1])
         content = updated_msg.content if isinstance(updated_msg.content, str) else "\n".join(block.get("text", "") for block in updated_msg.content if isinstance(block, dict))
         # The <current_uploads> wrapper must survive untouched
         assert content.count("<current_uploads>") == 1
@@ -504,7 +507,8 @@ class TestBeforeAgent:
 
         assert result is not None
         updated_msg = result["messages"][-1]
-        assert updated_msg.content.startswith("<current_uploads>")
+        assert updated_msg.content == msg.content
+        assert project_upload_context(updated_msg).content.startswith("<current_uploads>")
         assert updated_msg.additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "/data-analysis 分析这个文档"
 
     def test_preserves_existing_original_user_content_marker(self, tmp_path):
@@ -537,7 +541,8 @@ class TestBeforeAgent:
         assert result is not None
         updated_msg = result["messages"][-1]
         assert updated_msg.additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "/data-analysis run"
-        assert updated_msg.content.startswith("<current_uploads>")
+        assert updated_msg.content == msg.content
+        assert project_upload_context(updated_msg).content.startswith("<current_uploads>")
 
     def test_uploaded_files_returned_in_state_update(self, tmp_path):
         mw = _middleware(tmp_path)
@@ -571,7 +576,7 @@ class TestBeforeAgent:
         result = mw.before_agent(self._state(_human("compare these files", files=files)), _runtime())
 
         assert result is not None
-        content = result["messages"][-1].content
+        content = project_upload_context(result["messages"][-1]).content
         assert "current_09.txt" in content
         assert "current_10.txt" not in content
         assert "current_11.txt" not in content
@@ -594,7 +599,7 @@ class TestBeforeAgent:
         result = mw.before_agent(self._state(_human("please inspect current_11.txt", files=files)), _runtime())
 
         assert result is not None
-        content = _current_uploads_block(result["messages"][-1].content)
+        content = _current_uploads_block(project_upload_context(result["messages"][-1]).content)
         assert "current_00.txt" in content
         assert "current_10.txt" not in content
         assert "2 more file(s) from this message omitted from this context" in content
@@ -619,7 +624,7 @@ class TestBeforeAgent:
         result = mw.before_agent(self._state(msg), _runtime())
 
         assert result is not None
-        content = _current_uploads_block(result["messages"][-1].content)
+        content = _current_uploads_block(project_upload_context(result["messages"][-1]).content)
         assert "current_00.txt" in content
         assert "current_10.txt" not in content
 
@@ -634,7 +639,7 @@ class TestBeforeAgent:
         result = mw.before_agent(self._state(msg), _runtime())
 
         assert result is not None
-        content = result["messages"][-1].content
+        content = project_upload_context(result["messages"][-1]).content
         assert "new.txt" in content
         assert "previous messages" not in content
         assert "old.txt" not in content
@@ -667,7 +672,7 @@ class TestBeforeAgent:
         result = mw.before_agent(self._state(msg), _runtime())
 
         assert result is not None
-        content = result["messages"][-1].content
+        content = project_upload_context(result["messages"][-1]).content
         assert "current.txt" in content
         assert "previous messages" not in content
         assert "history_00.txt" not in content
@@ -685,7 +690,7 @@ class TestBeforeAgent:
         result = mw.before_agent(self._state(_human("analyze recent_09.txt", files=files)), _runtime())
 
         assert result is not None
-        content = _current_uploads_block(result["messages"][-1].content)
+        content = _current_uploads_block(project_upload_context(result["messages"][-1]).content)
         assert "recent_00.txt" in content
         assert "selected because" not in content.lower()
 
@@ -697,7 +702,7 @@ class TestBeforeAgent:
         msg = _human("go", files=[{"filename": "only.txt", "size": 1, "path": "/mnt/user-data/uploads/only.txt"}])
         result = mw.before_agent(self._state(msg), _runtime())
 
-        content = result["messages"][-1].content
+        content = project_upload_context(result["messages"][-1]).content
         assert "previous messages" not in content
 
     def test_no_history_scan_when_thread_id_is_none(self, tmp_path):
@@ -705,7 +710,7 @@ class TestBeforeAgent:
         msg = _human("go", files=[{"filename": "f.txt", "size": 1, "path": "/mnt/user-data/uploads/f.txt"}])
         result = mw.before_agent(self._state(msg), _runtime(thread_id=None))
         assert result is not None
-        content = result["messages"][-1].content
+        content = project_upload_context(result["messages"][-1]).content
         assert "previous messages" not in content
 
     def test_message_id_preserved_on_updated_message(self, tmp_path):
@@ -735,7 +740,7 @@ class TestBeforeAgent:
         result = mw.before_agent(self._state(msg), _runtime())
 
         assert result is not None
-        content = result["messages"][-1].content
+        content = project_upload_context(result["messages"][-1]).content
         assert "Document outline" in content
         assert "PART I" in content
         assert "ITEM 1. BUSINESS" in content
@@ -752,7 +757,7 @@ class TestBeforeAgent:
         result = mw.before_agent(self._state(msg), _runtime())
 
         assert result is not None
-        content = result["messages"][-1].content
+        content = project_upload_context(result["messages"][-1]).content
         assert "Document outline" not in content
 
     def test_outline_truncation_hint_shown(self, tmp_path):
@@ -771,7 +776,7 @@ class TestBeforeAgent:
         result = mw.before_agent(self._state(msg), _runtime())
 
         assert result is not None
-        content = result["messages"][-1].content
+        content = project_upload_context(result["messages"][-1]).content
         assert f"showing first {MAX_OUTLINE_ENTRIES} headings" in content
         assert "use `read_file` to explore further" in content
 
@@ -786,7 +791,7 @@ class TestBeforeAgent:
         result = mw.before_agent(self._state(msg), _runtime())
 
         assert result is not None
-        content = result["messages"][-1].content
+        content = project_upload_context(result["messages"][-1]).content
         assert "showing first" not in content
 
     def test_fallback_preview_shown_when_outline_empty(self, tmp_path):
@@ -805,7 +810,7 @@ class TestBeforeAgent:
         result = mw.before_agent(self._state(msg), _runtime())
 
         assert result is not None
-        content = result["messages"][-1].content
+        content = project_upload_context(result["messages"][-1]).content
         # Outline section must NOT appear
         assert "Document outline" not in content
         # Preview lines must appear
@@ -824,6 +829,6 @@ class TestBeforeAgent:
         result = mw.before_agent(self._state(msg), _runtime())
 
         assert result is not None
-        content = result["messages"][-1].content
+        content = project_upload_context(result["messages"][-1]).content
         assert "Document outline" not in content
         assert "grep" in content

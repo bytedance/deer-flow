@@ -14,9 +14,11 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from pydantic import Field
 
 from app.gateway.services import _normalize_input_messages
+from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
 from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
 from deerflow.tools.builtins.list_uploaded_files_tool import _list_uploaded_files_impl
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text
+from deerflow.utils.upload_context import project_upload_context
 
 
 @pytest.fixture
@@ -49,7 +51,7 @@ def test_gateway_metadata_keeps_valid_siblings_when_a_filename_is_not_text(uploa
 
     assert [file["filename"] for file in result["uploaded_files"]] == ["current.md"]
     assert "# Current document" not in message.content
-    assert "Current document" in result["messages"][-1].content
+    assert "Current document" in project_upload_context(result["messages"][-1]).content
     assert message.additional_kwargs["files"] == original
     assert result["messages"][-1].additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "Read the attachment"
 
@@ -79,8 +81,8 @@ def test_parseable_size_cannot_overflow_context_rendering(upload_context, size):
     result = middleware.before_agent({"messages": [message]}, SimpleNamespace(context=context))
 
     assert result["uploaded_files"][0]["size"] == 0
-    assert "current.md (0.0 KB)" in result["messages"][-1].content
-    assert "Current document" in result["messages"][-1].content
+    assert "current.md (0.0 KB)" in project_upload_context(result["messages"][-1]).content
+    assert "Current document" in project_upload_context(result["messages"][-1]).content
 
 
 @pytest.mark.parametrize("size", [1024**4, 1024**4 + 1, 10**308], ids=["display-boundary", "above-boundary", "huge-finite"])
@@ -89,7 +91,7 @@ def test_large_renderable_size_keeps_metadata_with_a_bounded_display(upload_cont
     message = _gateway_message([{"filename": "current.md", "size": size}])
     result = middleware.before_agent({"messages": [message]}, SimpleNamespace(context=context))
     assert result["uploaded_files"][0]["size"] == size
-    assert "current.md (>= 1 TB)" in result["messages"][-1].content
+    assert "current.md (>= 1 TB)" in project_upload_context(result["messages"][-1]).content
     assert message.additional_kwargs["files"][0]["size"] == size
 
 
@@ -108,7 +110,7 @@ def test_file_probe_failure_does_not_drop_a_valid_sibling(upload_context, monkey
     with caplog.at_level(logging.DEBUG, logger="deerflow.agents.middlewares.uploads_middleware"):
         result = middleware.before_agent({"messages": [message]}, SimpleNamespace(context=context))
     assert [file["filename"] for file in result["uploaded_files"]] == ["current.md"]
-    assert "unavailable.md" not in result["messages"][-1].content
+    assert "unavailable.md" not in project_upload_context(result["messages"][-1]).content
     dropped = [record for record in caplog.records if "unavailable.md" in record.getMessage()]
     assert len(dropped) == 1
     assert dropped[0].levelno == logging.DEBUG
@@ -177,7 +179,7 @@ async def test_agent_graph_consumes_only_valid_owner_upload_context(upload_conte
     other_directory.mkdir(parents=True)
     (other_directory / "other-owner.md").write_text("# Private other-owner evidence", encoding="utf-8")
     model = _UploadModel(responses=[AIMessage(content="Processed")])
-    agent = create_agent(model=model, tools=[], middleware=[middleware])
+    agent = create_agent(model=model, tools=[], middleware=[InputSanitizationMiddleware(), middleware])
     message = _gateway_message(
         [{"filename": 42}, {"filename": "current.md", "size": size}, {"filename": "other-owner.md"}],
     )
@@ -192,7 +194,7 @@ async def test_agent_graph_consumes_only_valid_owner_upload_context(upload_conte
     assert result["messages"][-1].content == "Processed"
     assert [file["filename"] for file in result["uploaded_files"]] == ["current.md"]
     rendered = message_content_to_text(result["messages"][0].content)
-    assert "Current document" in rendered
+    assert rendered == "Read the attachment"
     assert "Private other-owner evidence" not in rendered
     assert len(model.seen_messages) == 1
     model_input = message_content_to_text(model.seen_messages[0][0].content)

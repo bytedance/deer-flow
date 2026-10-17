@@ -3385,6 +3385,13 @@ immediately after starting any deployment that is not loopback-only.
 
 We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, workflow, and guidelines.
 
+New upload turns keep the user's message separate from server-generated file
+context. Models, conversation summaries and delegated agents still receive the
+validated file descriptions, while chat, copy and export preserve the original
+user text, including literal tag examples. Existing inline-upload history remains
+readable. See the [upload context contract](docs/upload-context.md) for storage,
+compatibility and integration details.
+
 Backend `make test` runs four duration-balanced shards concurrently and reports
 failure if any shard fails. Use `make test TEST_JOBS=1` to run the shards sequentially.
 It excludes live external-API and blocking-I/O coverage.
