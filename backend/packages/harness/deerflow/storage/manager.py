@@ -62,12 +62,12 @@ def _resolve_store_class(backend: str) -> type[BlobStore]:
 
     * a registered backend name -- a folder under ``storage/backends/`` whose
       ``__init__`` exposes ``STORE_CLASS``;
-    * a dotted import path -- ``pkg.mod.Class`` for a backend that lives
-      outside this package (an extension or a deployment-local backend).
+    * an import path -- ``module.Class`` or ``module:Class`` -- for a backend
+      outside this package, including a single-file deployment-local module.
     """
     global _backends_cache
 
-    if "." not in backend:
+    if "." not in backend and ":" not in backend:
         if _backends_cache is None:
             _backends_cache = _scan_backends()
         cls = _backends_cache.get(backend)
