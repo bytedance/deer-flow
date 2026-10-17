@@ -22,6 +22,88 @@ async def _finish(bridge, streams, pending=()):
     await bridge.close()
 
 
+async def _attach_behind_retirement(bridge, run_id, stream, operation, monkeypatch):
+    """Queue retirement before attachment on the real Condition's fair lock."""
+    condition = bridge._streams[run_id].condition
+    real_acquire = condition.acquire
+    retirement_queued = asyncio.Event()
+    attachment_queued = asyncio.Event()
+    tasks = []
+
+    async def observe_acquire():
+        if asyncio.current_task() is tasks[0]:
+            retirement_queued.set()
+        else:
+            attachment_queued.set()
+        return await real_acquire()
+
+    try:
+        async with condition:
+            monkeypatch.setattr(condition, "acquire", observe_acquire)
+            retirement = bridge.cleanup(run_id) if operation == "cleanup" else bridge.close()
+            tasks.append(asyncio.create_task(retirement))
+            await asyncio.wait_for(retirement_queued.wait(), 1)
+            tasks.append(asyncio.create_task(anext(stream)))
+            await asyncio.wait_for(attachment_queued.wait(), 1)
+        await asyncio.wait_for(asyncio.shield(tasks[0]), 1)
+        return await asyncio.wait_for(asyncio.shield(tasks[1]), 1)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["cleanup", "close"])
+@pytest.mark.parametrize("ended", [False, True])
+@pytest.mark.parametrize("with_cursor", [False, True])
+async def test_attachment_queued_behind_retirement_reports_gap(monkeypatch, operation, ended, with_cursor):
+    bridge = MemoryStreamBridge()
+    await bridge.publish("attach-window", "messages", "earlier")
+    await bridge.publish("attach-window", "messages", "unread")
+    cursor = bridge._streams["attach-window"].events[0].id if with_cursor else None
+    if ended:
+        await bridge.publish_end("attach-window")
+    stream = bridge.subscribe("attach-window", last_event_id=cursor)
+    try:
+        assert await _attach_behind_retirement(bridge, "attach-window", stream, operation, monkeypatch) == StreamGap(cursor, None, None)
+        with pytest.raises(StopAsyncIteration):
+            await anext(stream)
+    finally:
+        await _finish(bridge, [stream])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("observer", [False, True])
+@pytest.mark.parametrize("emit_gap_on_missing_stream", [False, True])
+async def test_gateway_late_attachment_reloads_instead_of_reporting_an_empty_run(monkeypatch, observer, emit_gap_on_missing_stream):
+    from app.gateway.services import sse_consumer
+
+    manager = RunManager()
+    bridge = MemoryStreamBridge()
+    record = await manager.create("retirement-attach")
+    await manager.set_status(record.run_id, RunStatus.success)
+    monkeypatch.setattr(manager, "cancel", AsyncMock())
+    request = SimpleNamespace(headers={}, is_disconnected=AsyncMock(return_value=False))
+    await bridge.publish(record.run_id, "messages", "saved answer")
+    await bridge.publish_end(record.run_id)
+    stream = sse_consumer(bridge, record, request, manager, apply_on_disconnect=not observer, emit_gap_on_missing_stream=emit_gap_on_missing_stream)
+    try:
+        frame = await _attach_behind_retirement(bridge, record.run_id, stream, "cleanup", monkeypatch)
+        assert "event: gap" in frame and "event: end" not in frame
+        payload = json.loads(next(line[6:] for line in frame.splitlines() if line.startswith("data: ")))
+        assert payload["recovery"] == "reload_durable_state"
+        assert payload["requested_event_id"] is None
+        assert payload["earliest_available_event_id"] is None
+        assert payload["latest_available_event_id"] is None
+        with pytest.raises(StopAsyncIteration):
+            await anext(stream)
+        manager.cancel.assert_not_awaited()
+    finally:
+        await _finish(bridge, [stream])
+        await manager.shutdown()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["cleanup", "close"])
 @pytest.mark.parametrize("published", [False, True])

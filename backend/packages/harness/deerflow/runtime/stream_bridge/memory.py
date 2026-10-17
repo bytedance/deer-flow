@@ -74,6 +74,9 @@ class MemoryStreamBridge(StreamBridge):
         )
 
     def _resolve_start_offset(self, stream: _RunStream, last_event_id: str | None) -> int | StreamGap:
+        # Cleanup can win the Condition after a new reader captures this generation.
+        if stream.retired:
+            return StreamGap(last_event_id, None, None)
         if last_event_id is None:
             return stream.start_offset
 
