@@ -25,6 +25,11 @@ def is_genuine_user_message(message: object) -> bool:
     return True
 
 
+def latest_genuine_user_message(messages: list[object]) -> HumanMessage | None:
+    """Return the latest user-authored message that defines the active turn."""
+    return next((message for message in reversed(messages) if is_genuine_user_message(message)), None)
+
+
 def requires_input_sanitization(message: object) -> bool:
     """Return True for message content the input guardrail must neutralize.
 
