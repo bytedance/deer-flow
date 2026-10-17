@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -14,6 +16,195 @@ from support.shell import find_script_bash
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "docker.sh"
 BASH_EXECUTABLE = find_script_bash()
+
+# These fixtures are YAML source text, not Python values: quoting must remain
+# observable (e.g. null is empty, but "null" is a nonempty string).
+PROVISIONER_VALUES = [
+    pytest.param(None, "aio", id="omitted"),
+    pytest.param('""', "aio", id="double-quoted-empty"),
+    pytest.param("''", "aio", id="single-quoted-empty"),
+    pytest.param("null", "aio", id="null"),
+    pytest.param("Null", "aio", id="title-case-null"),
+    pytest.param("NULL", "aio", id="upper-case-null"),
+    pytest.param("~", "aio", id="tilde"),
+    pytest.param("", "aio", id="blank"),
+    pytest.param("   ", "aio", id="whitespace"),
+    pytest.param("# not configured", "aio", id="comment-only"),
+    pytest.param('"" # not configured', "aio", id="double-empty-comment"),
+    pytest.param("'' # not configured", "aio", id="single-empty-comment"),
+    pytest.param("null # not configured", "aio", id="null-comment"),
+    pytest.param("~ # not configured", "aio", id="tilde-comment"),
+    pytest.param("http://provisioner:8002", "provisioner", id="url"),
+    pytest.param('"http://provisioner:8002" # configured', "provisioner", id="quoted-url-comment"),
+    pytest.param('"null"', "provisioner", id="quoted-null"),
+    pytest.param("'null'", "provisioner", id="single-quoted-null"),
+    pytest.param('"~"', "provisioner", id="double-quoted-tilde"),
+    pytest.param("'~'", "provisioner", id="quoted-tilde"),
+    pytest.param('"null" # literal', "provisioner", id="quoted-null-comment"),
+    pytest.param('" # not a comment"', "provisioner", id="quoted-hash"),
+    pytest.param('" "', "provisioner", id="quoted-space"),
+    pytest.param("nullish", "provisioner", id="nonempty-string"),
+]
+
+
+def _sandbox_config(value: str | None, provider: str = "deerflow.community.aio_sandbox:AioSandboxProvider") -> str:
+    config = f"sandbox:\n  use: {provider}\n"
+    return config if value is None else config + f"  provisioner_url: {value}\n"
+
+
+def _isolated_shell_env(tmp_path: Path) -> dict[str, str]:
+    # Do not inherit developer credentials, config selectors or shell startup
+    # hooks. Keep only the platform variables needed to find/run Git Bash.
+    env = {key: os.environ[key] for key in ("PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT") if key in os.environ}
+    env.update(HOME=str(tmp_path), TMPDIR=str(tmp_path), TEMP=str(tmp_path), TMP=str(tmp_path))
+    return env
+
+
+def _run_detector(script_name: str, tmp_path: Path, config: str | None) -> str:
+    """Execute the real function, never deploy.sh's top-level setup."""
+    config_path = tmp_path / "config.yaml"
+    if config is not None:
+        config_path.write_text(config, encoding="utf-8")
+    script = (REPO_ROOT / "scripts" / script_name).read_text(encoding="utf-8")
+    match = re.search(r"^detect_sandbox_mode\(\) \{\n.*?^\}", script, re.M | re.S)
+    assert match is not None, f"{script_name} has no detector"
+    command = f"""
+set -eu
+SCRIPT_DIR={shlex.quote(str(REPO_ROOT / "scripts"))}
+REPO_ROOT={shlex.quote(str(REPO_ROOT))}
+PROJECT_ROOT={shlex.quote(str(tmp_path))}
+DEER_FLOW_CONFIG_PATH={shlex.quote(str(config_path))}
+{match.group()}
+detect_sandbox_mode
+"""
+    result = subprocess.run([BASH_EXECUTABLE, "-c", command], cwd=tmp_path, env=_isolated_shell_env(tmp_path), capture_output=True, text=True, encoding="utf-8", timeout=10)
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+@pytest.mark.parametrize("script_name", ["docker.sh", "deploy.sh"])
+@pytest.mark.parametrize(("value", "expected"), PROVISIONER_VALUES)
+def test_provisioner_scalar_detection(script_name, value, expected, tmp_path):
+    assert _run_detector(script_name, tmp_path, _sandbox_config(value)) == expected
+
+
+@pytest.mark.parametrize(("value", "expected"), PROVISIONER_VALUES)
+def test_provisioner_helper_scalar_detection(value, expected, tmp_path):
+    config_path = tmp_path / "synthetic config.yaml"
+    config_path.write_text(_sandbox_config(value), encoding="utf-8")
+    result = subprocess.run(
+        [BASH_EXECUTABLE, str(REPO_ROOT / "scripts" / "sandbox-mode.sh"), str(config_path)],
+        cwd=tmp_path,
+        env=_isolated_shell_env(tmp_path),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == expected
+
+
+@pytest.mark.parametrize("script_name", ["docker.sh", "deploy.sh"])
+@pytest.mark.parametrize(
+    "config",
+    [
+        None,
+        _sandbox_config("null", "deerflow.sandbox.local:LocalSandboxProvider"),
+        _sandbox_config("http://provisioner:8002", "deerflow.sandbox.local:LocalSandboxProvider"),
+        _sandbox_config("http://provisioner:8002", "custom:UnknownProvider"),
+    ],
+)
+def test_provisioner_detection_local_fallback(script_name, config, tmp_path):
+    assert _run_detector(script_name, tmp_path, config) == "local"
+
+
+@pytest.mark.parametrize("script_name", ["docker.sh", "deploy.sh"])
+@pytest.mark.parametrize(
+    "config",
+    [
+        _sandbox_config(None) + "  # provisioner_url: http://ignored:8002\n",
+        _sandbox_config(None) + "other:\n  provisioner_url: http://ignored:8002\n",
+        "other:\n  provisioner_url: http://ignored:8002\n" + _sandbox_config("null"),
+        _sandbox_config("'' # empty\t").replace("\n", "\r\n"),
+    ],
+    ids=["commented-key", "following-section", "preceding-section", "crlf"],
+)
+def test_provisioner_detection_preserves_section_boundaries(script_name, config, tmp_path):
+    assert _run_detector(script_name, tmp_path, config) == "aio"
+
+
+@pytest.mark.parametrize("script_name", ["docker.sh", "deploy.sh"])
+@pytest.mark.parametrize(("value", "expected"), [*PROVISIONER_VALUES, pytest.param(None, "local", id="local-provider")])
+def test_provisioner_start_selects_services_and_overlay(script_name, value, expected, tmp_path):
+    """Run both launchers in a synthetic checkout; all external commands are doubles."""
+    checkout = tmp_path / "synthetic checkout"
+    shutil.copytree(REPO_ROOT / "scripts", checkout / "scripts")
+    docker_dir = checkout / "docker"
+    docker_dir.mkdir()
+    for filename in ("docker-compose-dev.yaml", "docker-compose.yaml", "docker-compose.dood.yaml"):
+        (docker_dir / filename).write_text("services: {}\n", encoding="utf-8")
+    (checkout / "frontend").mkdir()
+    for filename in (".env", "frontend/.env"):
+        (checkout / filename).write_text("# synthetic, no credentials\n", encoding="utf-8")
+    extensions = checkout / "extensions_config.json"
+    extensions.write_text("{}\n", encoding="utf-8")
+    config = _sandbox_config(value, "deerflow.sandbox.local:LocalSandboxProvider") if expected == "local" else _sandbox_config(value)
+    root_config = checkout / "config.yaml"
+    selected_config = checkout / "selected config.yaml"
+    # Dev must keep using PROJECT_ROOT/config.yaml; prod must honor its selector.
+    decoy = _sandbox_config("http://decoy:8002") if expected != "provisioner" else _sandbox_config(None)
+    root_config.write_text(config if script_name == "docker.sh" else decoy, encoding="utf-8")
+    selected_config.write_text(config if script_name == "deploy.sh" else decoy, encoding="utf-8")
+    capture = tmp_path / "compose-args"
+    shell_env = tmp_path / "stubs.sh"
+    shell_env.write_text(
+        """docker() {
+    if [ "$*" = 'compose version --short' ]; then echo '2.24.0'; return; fi
+    if [ "$*" = info ]; then return 0; fi
+    if [ "$1" = compose ]; then
+        printf '%s\\n' "$@" >> "$CAPTURE_COMPOSE_ARGS"
+        return 0
+    fi
+    echo "Unexpected Docker call: $*" >&2; return 97
+}
+# Exercise the existing Windows socket preflight without requiring a host socket.
+uname() { echo MINGW64_NT; }
+python() { return 97; }
+python3() { return 97; }
+uv() { return 97; }
+pnpm() { return 97; }
+kubectl() { return 97; }
+openssl() { return 97; }
+""",
+        encoding="utf-8",
+    )
+    env = _isolated_shell_env(tmp_path)
+    env.update(
+        BASH_ENV=str(shell_env),
+        CAPTURE_COMPOSE_ARGS=str(capture),
+        DEER_FLOW_HOME=str(tmp_path / "runtime"),
+        DEER_FLOW_CONFIG_PATH=str(selected_config),
+        DEER_FLOW_EXTENSIONS_CONFIG_PATH=str(extensions),
+        BETTER_AUTH_SECRET="synthetic-test-secret",
+        DEER_FLOW_INTERNAL_AUTH_TOKEN="synthetic-test-token",
+        DEER_FLOW_CREDENTIALS_KEY="synthetic-test-key",
+        UV_EXTRAS="redis",
+    )
+    result = subprocess.run([BASH_EXECUTABLE, str(checkout / "scripts" / script_name), "start"], cwd=tmp_path, env=env, capture_output=True, text=True, encoding="utf-8", timeout=15)
+    assert result.returncode == 0, result.stdout + result.stderr
+    args = capture.read_text(encoding="utf-8").splitlines()
+    assert args.count("up") == 1, args
+    assert ("provisioner" in args) == (expected == "provisioner"), args
+    files = [Path(args[index + 1]).name for index, arg in enumerate(args) if arg == "-f"]
+    base = "docker-compose-dev.yaml" if script_name == "docker.sh" else "docker-compose.yaml"
+    assert files == [base] + (["docker-compose.dood.yaml"] if expected == "aio" else [])
+    assert root_config.read_text(encoding="utf-8") == (config if script_name == "docker.sh" else decoy)
+    assert selected_config.read_text(encoding="utf-8") == (config if script_name == "deploy.sh" else decoy)
+    assert not any((tmp_path / "runtime").glob(".*secret*"))
+    assert not (tmp_path / "runtime" / ".internal-auth-token").exists()
+    assert not (tmp_path / "runtime" / ".credentials_key").exists()
+
 
 if BASH_EXECUTABLE is None:
     pytestmark = pytest.mark.skip(reason="Git Bash is required for docker.sh detection tests")

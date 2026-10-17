@@ -589,6 +589,288 @@ class TestRewriteLocalPathsInText:
 
         assert result == text
 
+    @pytest.mark.parametrize("filename", ["report.pdf", "report with spaces.pdf"])
+    @pytest.mark.parametrize("spelling", ["relative", "bare", "absolute", "file_uri"])
+    def test_colon_label_does_not_hide_local_file_reference(self, paths: Paths, filename: str, spelling: str):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        src = _workspace_file(paths, f"temp/{filename}")
+        reference = {"relative": f"temp/{filename}", "bare": filename, "absolute": str(src), "file_uri": src.as_uri()}[spelling]
+
+        with _patch_paths(paths):
+            content, _ = mcp_tools._convert_call_tool_result(
+                CallToolResult(content=[TextContent(type="text", text=f"Saved:{reference}")]),
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+                changed_files=[src],
+            )
+
+        assert content[0]["text"] == f"Saved:{VIRTUAL_PATH_PREFIX}/workspace/temp/{filename}"
+
+    @pytest.mark.parametrize("separator", ["|", ""])
+    @pytest.mark.parametrize("leading_whitespace", ["", "  ", "\n"])
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://example.com/download",
+            "https://example.com/download?filename=temp/report.pdf",
+            "https://example.com/download?filter=(original(nested))&filename=report.pdf",
+            r"https://example.com/download?filter=original\)&filename=report.pdf",
+        ],
+    )
+    def test_remote_markdown_link_does_not_hide_adjacent_local_link(self, paths: Paths, url: str, separator: str, leading_whitespace: str):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        src = _workspace_file(paths, "temp/report.pdf")
+        text = f"[remote]({leading_whitespace}{url}){separator}[local](temp/report.pdf)"
+
+        with _patch_paths(paths):
+            content, _ = mcp_tools._convert_call_tool_result(
+                CallToolResult(content=[TextContent(type="text", text=text)]),
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+                changed_files=[src],
+            )
+
+        assert content[0]["text"] == f"[remote]({leading_whitespace}{url}){separator}[local]({VIRTUAL_PATH_PREFIX}/workspace/temp/report.pdf)"
+
+    @pytest.mark.parametrize("quote", ["'", '"'])
+    @pytest.mark.parametrize("query", ["filename=report.pdf", "label=owner's&filename=report.pdf"])
+    def test_quoted_remote_url_does_not_hide_local_file_reference(self, paths: Paths, quote: str, query: str):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        src = _workspace_file(paths, "temp/report.pdf")
+        url = f"https://example.com/download?{query}".replace(quote, f"\\{quote}")
+        remote_field = f"{quote}url{quote}:{quote}{url}{quote}"
+        text = f"{{{remote_field},{quote}file{quote}:{quote}temp/report.pdf{quote}}}"
+
+        with _patch_paths(paths):
+            content, _ = mcp_tools._convert_call_tool_result(
+                CallToolResult(content=[TextContent(type="text", text=text)]),
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+                changed_files=[src],
+            )
+
+        assert content[0]["text"] == f"{{{remote_field},{quote}file{quote}:{quote}{VIRTUAL_PATH_PREFIX}/workspace/temp/report.pdf{quote}}}"
+
+    @pytest.mark.parametrize(
+        "url, markup",
+        [
+            (r"https://example.com/download?label=\"q\"&filename=report.pdf", '{{"url":"{}","file":"temp/report.pdf"}}'),
+            (r"https://example.com/a\|b?filename=report.pdf", "| {} | temp/report.pdf |"),
+        ],
+    )
+    def test_escaped_remote_url_delimiters_do_not_hide_local_file_reference(self, paths: Paths, url: str, markup: str):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        src = _workspace_file(paths, "temp/report.pdf")
+
+        with _patch_paths(paths):
+            content, _ = mcp_tools._convert_call_tool_result(
+                CallToolResult(content=[TextContent(type="text", text=markup.format(url))]),
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+                changed_files=[src],
+            )
+
+        assert content[0]["text"] == markup.replace("temp/report.pdf", f"{VIRTUAL_PATH_PREFIX}/workspace/temp/report.pdf").format(url)
+
+    @pytest.mark.parametrize("delimiter", ['"', "<", ">", "`", "|"])
+    @pytest.mark.parametrize("backslash_count", [0, 1, 2, 3])
+    def test_remote_url_delimiter_respects_escape_parity(self, paths: Paths, delimiter: str, backslash_count: int):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        src = _workspace_file(paths, "temp/report.pdf")
+        prefix = "https://example.com/download" + "\\" * backslash_count + delimiter
+
+        with _patch_paths(paths):
+            content, _ = mcp_tools._convert_call_tool_result(
+                CallToolResult(content=[TextContent(type="text", text=f"{prefix}report.pdf")]),
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+                changed_files=[src],
+            )
+
+        expected_reference = "report.pdf" if backslash_count % 2 else f"{VIRTUAL_PATH_PREFIX}/workspace/temp/report.pdf"
+        assert content[0]["text"] == f"{prefix}{expected_reference}"
+
+    @pytest.mark.parametrize("whitespace", [" ", "\t", "\n"])
+    def test_remote_url_whitespace_boundary_is_not_escaped(self, paths: Paths, whitespace: str):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        src = _workspace_file(paths, "temp/report.pdf")
+        prefix = f"https://example.com/download\\{whitespace}"
+
+        with _patch_paths(paths):
+            content, _ = mcp_tools._convert_call_tool_result(
+                CallToolResult(content=[TextContent(type="text", text=f"{prefix}report.pdf")]),
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+                changed_files=[src],
+            )
+
+        assert content[0]["text"] == f"{prefix}{VIRTUAL_PATH_PREFIX}/workspace/temp/report.pdf"
+
+    def test_adjacent_remote_markdown_links_preserve_each_destination(self, paths: Paths):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        src = _workspace_file(paths, "temp/report.pdf")
+        links = "[source](https://example.com/download?filename=report.pdf)[mirror](https://example.org/download?filename=temp/report.pdf)"
+        text = f"{links}|[local](temp/report.pdf)"
+
+        with _patch_paths(paths):
+            content, _ = mcp_tools._convert_call_tool_result(
+                CallToolResult(content=[TextContent(type="text", text=text)]),
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+                changed_files=[src],
+            )
+
+        assert content[0]["text"] == f"{links}|[local]({VIRTUAL_PATH_PREFIX}/workspace/temp/report.pdf)"
+
+    def test_remote_markdown_link_does_not_hide_adjacent_spaced_local_path(self, paths: Paths):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        src = _workspace_file(paths, "final reports/report.pdf")
+        link = "[remote](https://example.com/download?filename=final%20reports/report.pdf)"
+        text = f"{link}|[local](final reports/report.pdf)"
+
+        with _patch_paths(paths):
+            content, _ = mcp_tools._convert_call_tool_result(
+                CallToolResult(content=[TextContent(type="text", text=text)]),
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+                changed_files=[src],
+            )
+
+        assert content[0]["text"] == f"{link}|[local]({VIRTUAL_PATH_PREFIX}/workspace/final reports/report.pdf)"
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://example.com/download?filename=report.pdf",
+            "https://example.com/download#report.pdf",
+            "https://example.com/download?filename=temp/report.pdf",
+            "https://example.com/download?filename=temp/report.pdf&signature=unchanged",
+            "https://example.com/download#temp/report.pdf",
+            "https://example.com/download?filter=(original)&filename=report.pdf",
+            "https://example.com/download?label=owner's&filename=report.pdf",
+            "https://example.com/download?label=owner's&filename=temp/report.pdf",
+            "HTTPS://example.com/download?filename=report.pdf",
+            "s3://example-bucket/download?filename=report.pdf",
+            "blob:https://example.com/report.pdf?filename=report.pdf",
+        ],
+    )
+    @pytest.mark.parametrize("markup", ["{}", "[download]({})", "<{}>", "`{}`"])
+    def test_remote_url_is_not_rewritten_as_a_generated_file(self, paths: Paths, url: str, markup: str):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        src = _workspace_file(paths, "temp/report.pdf")
+        link = markup.format(url)
+        text = f"Source: {link}\nSaved as report.pdf. Local copy: [download](temp/report.pdf)"
+
+        with _patch_paths(paths):
+            content, _ = mcp_tools._convert_call_tool_result(
+                CallToolResult(content=[TextContent(type="text", text=text)]),
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+                changed_files=[src],
+            )
+
+        virtual_path = f"{VIRTUAL_PATH_PREFIX}/workspace/temp/report.pdf"
+        assert content[0]["text"] == f"Source: {link}\nSaved as {virtual_path}. Local copy: [download]({virtual_path})"
+
+    def test_remote_url_query_is_preserved_without_changed_files(self, paths: Paths):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        _workspace_file(paths, "temp/report.pdf")
+        url = "https://example.com/download?filename=temp/report.pdf"
+        text = f"Source: {url}\nSaved as temp/report.pdf"
+
+        with _patch_paths(paths):
+            content, _ = mcp_tools._convert_call_tool_result(
+                CallToolResult(content=[TextContent(type="text", text=text)]),
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+            )
+
+        assert content[0]["text"] == f"Source: {url}\nSaved as {VIRTUAL_PATH_PREFIX}/workspace/temp/report.pdf"
+
+    def test_multiple_remote_urls_preserve_nested_file_uri_queries(self, paths: Paths):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        src = _workspace_file(paths, "report.pdf")
+        first_url = f"https://example.com/download?source={src.as_uri()}"
+        second_url = "https://example.org/download?filename=report.pdf"
+        text = f"{first_url}\nSaved as report.pdf; mirror: <{second_url}>\nLocal copy: {src.as_uri()}"
+
+        with _patch_paths(paths):
+            content, _ = mcp_tools._convert_call_tool_result(
+                CallToolResult(content=[TextContent(type="text", text=text)]),
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+                changed_files=[src],
+            )
+
+        virtual_path = f"{VIRTUAL_PATH_PREFIX}/workspace/report.pdf"
+        assert content[0]["text"] == f"{first_url}\nSaved as {virtual_path}; mirror: <{second_url}>\nLocal copy: {virtual_path}"
+
+    def test_remote_url_keeps_a_path_prefix_containing_encoded_spaces(self, paths: Paths):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        spaced = _workspace_file(paths, "final reports/report.pdf")
+        url = "https://example.com/download?filename=final%20reports/report.pdf"
+        text = f"Source: {url}\nSaved as final reports/report.pdf."
+
+        with _patch_paths(paths):
+            content, _ = mcp_tools._convert_call_tool_result(
+                CallToolResult(content=[TextContent(type="text", text=text)]),
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+                changed_files=[spaced],
+            )
+
+        assert content[0]["text"] == f"Source: {url}\nSaved as {VIRTUAL_PATH_PREFIX}/workspace/final reports/report.pdf."
+
+    def test_remote_url_keeps_a_filename_containing_percent_encoded_spaces(self, paths: Paths):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        src = _workspace_file(paths, "report%20final.pdf")
+        url = "https://example.com/download?filename=report%20final.pdf"
+        text = f"Source: {url}\nSaved as report%20final.pdf"
+
+        with _patch_paths(paths):
+            content, _ = mcp_tools._convert_call_tool_result(
+                CallToolResult(content=[TextContent(type="text", text=text)]),
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+                changed_files=[src],
+            )
+
+        assert content[0]["text"] == f"Source: {url}\nSaved as {VIRTUAL_PATH_PREFIX}/workspace/report%20final.pdf"
+
+    def test_embedded_text_preserves_remote_urls_and_local_file_uris(self, paths: Paths):
+        from mcp.types import EmbeddedResource, TextResourceContents
+
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        src = _workspace_file(paths, "report with spaces.pdf")
+        url = "https://example.com/download?filename=report%20with%20spaces.pdf"
+        text = f"Source: {url}\nLocal copy: {src.as_uri()}\nSaved as report with spaces.pdf"
+        result = CallToolResult(content=[EmbeddedResource(type="resource", resource=TextResourceContents(uri="resource://download-result", mimeType="text/plain", text=text))])
+
+        with _patch_paths(paths):
+            content, _ = mcp_tools._convert_call_tool_result(
+                result,
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+                changed_files=[src],
+            )
+
+        virtual_path = f"{VIRTUAL_PATH_PREFIX}/workspace/report with spaces.pdf"
+        assert content[0]["text"] == f"Source: {url}\nLocal copy: {virtual_path}\nSaved as {virtual_path}"
+
     def test_bare_filename_not_rewritten_when_used_as_directory_segment(self, paths: Paths):
         workspace = paths.sandbox_work_dir("t1", user_id="u1")
         src = _workspace_file(paths, "page.yml")

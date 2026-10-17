@@ -1,6 +1,7 @@
 """Tests for InfoQuest client and tools."""
 
 import json
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -420,3 +421,241 @@ class TestRedirectParity:
         await InfoQuestClient().image_search_raw_results("query")
 
         mock_async_client_cls.assert_called_once_with(follow_redirects=True)
+
+
+class TestInfoQuestMalformedSearchPayloads:
+    """A malformed 200 search payload is a format error, not an empty search.
+
+    InfoQuest answers HTTP 200 with a ``search_result`` envelope as its only
+    contract. An error document delivered with the same status used to either
+    end the research loop as "the query matched nothing" or surface a raw
+    Python error string, so the contraction rule the sibling bundled providers
+    already follow applies here too.
+    """
+
+    @staticmethod
+    def _client(payload):
+        if payload is None:
+            # `json=None` omits the body entirely; a literal `null` document is
+            # what actually reaches the outer "is it an object" guard.
+            response = httpx.Response(200, text="null", request=httpx.Request("POST", "https://search.infoquest.bytepluses.com"))
+        else:
+            response = httpx.Response(200, json=payload, request=httpx.Request("POST", "https://search.infoquest.bytepluses.com"))
+        return _mock_async_client(response)
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"search_result": {"results": "maintenance window"}},
+            {"search_result": {"results": {"organic": "x"}}},
+            {"search_result": {"results": [1, 2]}},
+            {"search_result": {"results": [{"content": "x"}]}},
+            {"search_result": {"results": [{"content": {"results": {"organic": "x"}}}]}},
+            {"search_result": {"results": [{"content": {"results": {"organic": {"a": 1}}}}]}},
+            {"search_result": {"results": [{"content": {"results": {"top_stories": {"items": "x"}}}}]}},
+        ],
+        ids=[
+            "results-is-a-string",
+            "organic-is-a-string",
+            "results-entries-not-objects",
+            "content-is-not-an-object",
+            "organic-container-is-not-a-list",
+            "organic-container-is-a-populated-dict",
+            "top-stories-items-is-not-a-list",
+        ],
+    )
+    async def test_web_search_reports_a_format_error(self, payload, monkeypatch):
+        """Each malformed container returns the provider's format error."""
+        monkeypatch.setattr("deerflow.community.infoquest.infoquest_client.httpx.AsyncClient", MagicMock(return_value=self._client(payload)))
+
+        result = await InfoQuestClient().web_search("test query")
+
+        assert result == "Error: InfoQuest returned an unexpected response format"
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            ["not-an-object"],
+            "maintenance window",
+            7,
+            None,
+            {"search_result": "not-an-object"},
+            {"search_result": []},
+            {"search_result": [1, 2]},
+            {"search_result": None},
+        ],
+        ids=[
+            "payload-is-a-list",
+            "payload-is-a-string",
+            "payload-is-an-int",
+            "payload-is-null",
+            "search-result-is-a-string",
+            "search-result-is-a-list",
+            "search-result-is-a-populated-list",
+            "search-result-is-null",
+        ],
+    )
+    async def test_web_search_rejects_non_object_envelopes(self, payload, monkeypatch):
+        """A top-level payload or ``search_result`` that is not an object is malformed.
+
+        The two outermost ``isinstance`` guards were the last uncovered branches:
+        a top-level list/scalar used to reach ``"search_result" in raw_results``
+        and a non-object ``search_result`` used to reach ``.get``, neither of
+        which is the provider's format error.
+        """
+        monkeypatch.setattr("deerflow.community.infoquest.infoquest_client.httpx.AsyncClient", MagicMock(return_value=self._client(payload)))
+
+        result = await InfoQuestClient().web_search("test query")
+
+        assert result == "Error: InfoQuest returned an unexpected response format"
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            ["not-an-object"],
+            "maintenance window",
+            None,
+            {"search_result": "not-an-object"},
+            {"search_result": []},
+            {"search_result": None},
+        ],
+        ids=[
+            "payload-is-a-list",
+            "payload-is-a-string",
+            "payload-is-null",
+            "search-result-is-a-string",
+            "search-result-is-a-list",
+            "search-result-is-null",
+        ],
+    )
+    async def test_image_search_rejects_non_object_envelopes(self, payload, monkeypatch):
+        """The image vertical shares the outer-envelope guards."""
+        monkeypatch.setattr("deerflow.community.infoquest.infoquest_client.httpx.AsyncClient", MagicMock(return_value=self._client(payload)))
+
+        result = await InfoQuestClient().image_search("test query")
+
+        assert result == "Error: InfoQuest returned an unexpected response format"
+
+    @pytest.mark.anyio
+    async def test_web_search_logs_the_container_and_index_of_a_skipped_row(self, monkeypatch, caplog):
+        """A dropped non-object row is reported with its container and position.
+
+        ``_envelope_entries`` already warned this way; ``_rows`` shed the same
+        kind of drift silently, so a payload like ``{"organic": [1, {"url": ...}]}``
+        lost entries with no trace. The README documents logging the container
+        name and entry position only, never the payload values.
+        """
+        payload = {
+            "search_result": {
+                "results": [
+                    {
+                        "content": {
+                            "results": {
+                                "organic": [
+                                    1,
+                                    {"title": "Kept", "desc": "d", "url": "https://example.com/1"},
+                                ]
+                            }
+                        }
+                    }
+                ]
+            }
+        }
+        monkeypatch.setattr("deerflow.community.infoquest.infoquest_client.httpx.AsyncClient", MagicMock(return_value=self._client(payload)))
+
+        with caplog.at_level(logging.WARNING, logger="deerflow.community.infoquest.infoquest_client"):
+            result = await InfoQuestClient().web_search("test query")
+
+        assert [row["title"] for row in json.loads(result)] == ["Kept"]
+        warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+        assert any("organic[0]" in message for message in warnings), warnings
+        assert not any("example.com" in message for message in warnings), warnings
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"search_result": {}},
+            {"search_result": {"results": None}},
+            {"search_result": {"results": []}},
+            {"search_result": {"results": [{"content": {"results": {"organic": []}}}]}},
+        ],
+        ids=["search-result-is-empty", "results-is-null", "results-is-empty-list", "organic-is-empty"],
+    )
+    async def test_web_search_keeps_an_empty_search_empty(self, payload, monkeypatch):
+        """A missing, null or empty container stays an empty search."""
+        monkeypatch.setattr("deerflow.community.infoquest.infoquest_client.httpx.AsyncClient", MagicMock(return_value=self._client(payload)))
+
+        result = await InfoQuestClient().web_search("test query")
+
+        assert json.loads(result) == []
+
+    @pytest.mark.anyio
+    async def test_web_search_keeps_the_valid_rows_of_a_mixed_payload(self, monkeypatch):
+        """A payload with usable rows still answers with those rows."""
+        payload = {
+            "search_result": {
+                "results": [
+                    {"content": {"results": {"organic": [{"title": "Test Page", "desc": "d", "url": "https://example.com/1"}]}}},
+                    "malformed",
+                ]
+            }
+        }
+        monkeypatch.setattr("deerflow.community.infoquest.infoquest_client.httpx.AsyncClient", MagicMock(return_value=self._client(payload)))
+
+        result = await InfoQuestClient().web_search("test query")
+
+        rows = json.loads(result)
+        assert [row["title"] for row in rows] == ["Test Page"]
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"search_result": {"results": "maintenance window"}},
+            {"search_result": {"results": [{"content": {"results": {"images_results": "x"}}}]}},
+            {"search_result": {"results": [{"content": {"results": {"images_results": [1, 2]}}}]}},
+        ],
+        ids=["results-is-a-string", "images-container-is-not-a-list", "images-entries-not-objects"],
+    )
+    async def test_image_search_reports_a_format_error(self, payload, monkeypatch):
+        """The image vertical shares the containment rule."""
+        monkeypatch.setattr("deerflow.community.infoquest.infoquest_client.httpx.AsyncClient", MagicMock(return_value=self._client(payload)))
+
+        result = await InfoQuestClient().image_search("test query")
+
+        assert result == "Error: InfoQuest returned an unexpected response format"
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"search_result": {"results": []}},
+            {"search_result": {"results": [{"content": {"results": {"images_results": []}}}]}},
+        ],
+        ids=["results-is-empty-list", "images-is-empty"],
+    )
+    async def test_image_search_keeps_an_empty_search_empty(self, payload, monkeypatch):
+        """The image vertical keeps empty containers empty as well."""
+        monkeypatch.setattr("deerflow.community.infoquest.infoquest_client.httpx.AsyncClient", MagicMock(return_value=self._client(payload)))
+
+        result = await InfoQuestClient().image_search("test query")
+
+        assert json.loads(result) == []
+
+    @pytest.mark.anyio
+    async def test_web_search_keeps_other_failures_as_their_own_errors(self, monkeypatch):
+        """Transport failures keep their existing error text."""
+        client = MagicMock()
+        client.post = AsyncMock(side_effect=httpx.ConnectError("Connection refused"))
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=None)
+        monkeypatch.setattr("deerflow.community.infoquest.infoquest_client.httpx.AsyncClient", MagicMock(return_value=client))
+
+        result = await InfoQuestClient().web_search("test query")
+
+        assert result.startswith("Error: ")
+        assert "unexpected response format" not in result

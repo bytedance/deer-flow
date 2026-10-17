@@ -937,7 +937,9 @@ def _complete_assembly(
     from deerflow.extensions import get_agent_build_extensions
 
     resolved_extensions = get_agent_build_extensions()
-    if not resolved_extensions.has_agent_assembly_observers:
+    from deerflow.runtime.assembly_evidence import capture_requested
+
+    if not resolved_extensions.has_agent_assembly_observers and not capture_requested():
         return LeadAgentAssembly(graph=graph, descriptor=None, effective_model=effective_model)
 
     from deerflow.agents.assembly_descriptor import build_assembly_descriptor
