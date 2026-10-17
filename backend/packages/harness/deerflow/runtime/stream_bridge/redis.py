@@ -33,7 +33,8 @@ logger = logging.getLogger(__name__)
 
 _KIND_EVENT = "event"
 _KIND_END = "end"
-_REDIS_STREAM_ID_RE = re.compile(r"\d+(-\d+)?")
+_REDIS_STREAM_ID_RE = re.compile(r"[0-9]+(-[0-9]+)?")
+_MAX_STREAM_ID_COMPONENT = 2**64 - 1
 
 # Batch size for ``XREAD``. Reading more than one entry per round-trip collapses
 # a large ``Last-Event-ID`` replay into far fewer calls; live tailing still
@@ -150,7 +151,12 @@ class RedisStreamBridge(StreamBridge):
         if _REDIS_STREAM_ID_RE.fullmatch(event_id) is None:
             return None
         milliseconds, separator, sequence = event_id.partition("-")
-        return int(milliseconds), int(sequence) if separator else 0
+        try:
+            parts = int(milliseconds), int(sequence) if separator else 0
+        except ValueError:
+            return None
+        # Redis stream id components are unsigned 64-bit integers.
+        return parts if max(parts) <= _MAX_STREAM_ID_COMPONENT else None
 
     @classmethod
     def _stream_id_lt(cls, left: str, right: str) -> bool:
@@ -207,7 +213,7 @@ class RedisStreamBridge(StreamBridge):
     async def _resolve_start_stream_id(self, key: str, last_event_id: str | None) -> str:
         if last_event_id is None:
             return "0-0"
-        if _REDIS_STREAM_ID_RE.fullmatch(last_event_id):
+        if self._parse_stream_id(last_event_id) is not None:
             return last_event_id
         entries = await self._redis.xrevrange(key, count=1)
         if not entries:

@@ -11,6 +11,8 @@ Observed Redis streams removed during replay yield `StreamGap` with empty bounds
 
 Memory/Redis bridges keep startup-only `stream_bridge.heartbeat_interval_seconds`; explicit `subscribe(..., heartbeat_interval=...)` overrides it. Provider contexts drain owned cache/bridge/checkpointer/Store teardown across cancellation. `close_agent_stream()` shields close to completion: preserve counts, defer host cancellation, balance repeats, keep active errors, log attached close failures at callers, map close cancellation to failure, never time out.
 
+Reconnect cursor parsing requires ASCII digits and must treat integer-conversion failures as malformed input. Redis cursors additionally require unsigned 64-bit components; use the same parser before sending a cursor to `XREAD` and when detecting replay gaps. Preserve malformed-cursor policy: memory replays retained events, Redis tails active streams and replays ended streams through `end`. `tests/test_stream_bridge.py` directly tests both parsers offline, including oversized sequences, Redis component overflow, non-ASCII digits, and valid uint64 boundaries; integration tests also exercise malformed cursors against real Redis.
+
 ### Checkpoint Channel Modes (`full` / `delta`)
 
 Checkpointer storage runs in one of two channel modes, selected by `checkpoint_channel_mode` in `config.yaml` (default `full`). `delta` mode adopts LangGraph 1.2's `DeltaChannel` for `messages`: checkpoints store a sentinel + per-step writes instead of the full message list, so storage/serde grows O(N) instead of O(N²) in turns. All checkpointer backends (memory/sqlite/postgres) serve both modes unchanged — the semantics live in the compiled graph's channel table, not in the saver.

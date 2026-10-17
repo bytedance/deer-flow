@@ -8,6 +8,7 @@ import os
 import json
 import sys
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 try:
     import requests
@@ -113,10 +114,10 @@ class GitHubAPI:
             raise
 
     def get_file_content(self, owner: str, repo: str, path: str) -> str:
-        """Get content of a specific file."""
+        """Get content of a file using its raw repository-relative path."""
         try:
             return self._get(
-                f"/repos/{owner}/{repo}/contents/{path}",
+                f"/repos/{owner}/{repo}/contents/{quote(path, safe='/')}",
                 accept="application/vnd.github.raw",
             )
         except Exception as e:

@@ -1216,6 +1216,11 @@ mounted directory must be writable only by trusted operators.
 
 Upload one or more files to a thread.
 
+Automatic Office/PDF-to-Markdown conversion is disabled by default. To enable
+host-side parsing in a trusted deployment, set
+`uploads.auto_convert_documents: true` in `config.yaml`. See
+[document conversion configuration](FILE_UPLOAD.md#支持的文档格式).
+
 ```http
 POST /api/threads/{thread_id}/uploads
 Content-Type: multipart/form-data
@@ -1224,7 +1229,7 @@ Content-Type: multipart/form-data
 **Request Body:**
 - `files`: One or more files to upload
 
-**Response:**
+**Response** (example with automatic conversion enabled and successful):
 ```json
 {
   "success": true,
@@ -1248,7 +1253,7 @@ Content-Type: multipart/form-data
 
 **Name collisions:** filenames are claimed unique against the thread's existing uploads and reserved atomically — a same-name upload never replaces the existing file; it lands as `document_1.pdf` (the response's `filename`/`original_filename` reflect the claimed name). Use the artifacts `PUT` endpoint for sanctioned in-place updates.
 
-**Supported Document Formats** (auto-converted to Markdown):
+**Supported Document Formats** (converted to Markdown only when automatic conversion is enabled):
 - PDF (`.pdf`)
 - PowerPoint (`.ppt`, `.pptx`)
 - Excel (`.xls`, `.xlsx`)
