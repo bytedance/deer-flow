@@ -2457,7 +2457,7 @@ def test_reconcile_honors_wall_clock_budget(monkeypatch):
     fake_cls.list_return = [_info("sb-never-probed", "u1", "t1")]
     p._config["reconciliation_max_seconds"] = 0.5
     provider_mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
-    ticks = iter([0.0, 0.0, 1.0, 1.0])
+    ticks = iter([0.0, 0.0, 0.0, 1.0, 1.0])
     monkeypatch.setattr(provider_mod.time, "monotonic", lambda: next(ticks))
 
     stats = p._reconcile_remote_sandboxes(now=100.0)
@@ -2485,7 +2485,7 @@ def test_reconcile_never_probes_or_adopts_a_warm_pool_sandbox(monkeypatch):
     p = _make_provider()
     fake_cls = _install_fake_sdk(monkeypatch, p)
     fake_cls.list_return = [_info("sb-warm", "u1", "t1")]
-    p._warm_pool["sb-warm"] = (p._stable_seed("t1", "u1"), time.time())
+    p._warm_pool["sb-warm"] = (p._stable_seed("t1", "u1"), time.monotonic())
 
     stats = p._reconcile_remote_sandboxes(now=100.0)
 
@@ -2649,7 +2649,7 @@ def test_reconcile_sweeps_expired_warm_pool_entry(monkeypatch):
     fake_cls = _install_fake_sdk(monkeypatch, p)
     store = _install_shared_deployment_capacity(p)
     fake_cls.list_return = []
-    p._warm_pool["sb-old"] = (p._stable_seed("t1", "u1"), time.time() - 601)
+    p._warm_pool["sb-old"] = (p._stable_seed("t1", "u1"), time.monotonic() - 601)
     p._owned_sandbox_ids.add("sb-old")
     p._mount_results["sb-old"] = MagicMock()
     p._ownership.take("sb-old")
@@ -2671,7 +2671,7 @@ def test_reconcile_keeps_unexpired_warm_pool_entry(monkeypatch):
     p = _make_provider(idle_timeout=600)
     fake_cls = _install_fake_sdk(monkeypatch, p)
     fake_cls.list_return = []
-    p._warm_pool["sb-fresh"] = (p._stable_seed("t1", "u1"), time.time())
+    p._warm_pool["sb-fresh"] = (p._stable_seed("t1", "u1"), time.monotonic())
 
     p._reconcile_remote_sandboxes(now=100.0)
 
@@ -2688,7 +2688,7 @@ def test_reconcile_kills_remote_duplicate_of_a_warm_pool_sandbox(monkeypatch):
     ]
     duplicate = FakeClient(sandbox_id="sb-duplicate")
     fake_cls.connect_factory = lambda sid, **_kw: duplicate if sid == "sb-duplicate" else FakeClient(sandbox_id=sid)
-    p._warm_pool["sb-warm"] = (p._stable_seed("t1", "u1"), time.time())
+    p._warm_pool["sb-warm"] = (p._stable_seed("t1", "u1"), time.monotonic())
     p._config["reconciliation_grace_seconds"] = 0.0
 
     stats = p._reconcile_remote_sandboxes(now=100.0)
@@ -2711,7 +2711,7 @@ def test_reconcile_adoption_recheck_treats_warm_pool_as_local(monkeypatch):
     client = FakeClient(sandbox_id="sb-race")
 
     def connect_and_park(sid, **_kw):
-        p._warm_pool[sid] = (p._stable_seed("t1", "u1"), time.time())
+        p._warm_pool[sid] = (p._stable_seed("t1", "u1"), time.monotonic())
         return client
 
     fake_cls.connect_factory = connect_and_park
@@ -3483,7 +3483,7 @@ def test_thread_restore_does_not_overwrite_live_sandbox(monkeypatch, tmp_path, r
         provider._sandboxes[client.sandbox_id] = _make_sandbox(client, sandbox_id=client.sandbox_id)
         provider._thread_sandboxes[provider._thread_key("t1", "u1")] = client.sandbox_id
     elif reuse == "warm":
-        provider._warm_pool[client.sandbox_id] = (provider._stable_seed("t1", "u1"), time.time())
+        provider._warm_pool[client.sandbox_id] = (provider._stable_seed("t1", "u1"), time.monotonic())
     else:
         sdk.list_return = [_info(client.sandbox_id, "u1", "t1")]
     sandbox_id = provider.acquire("t1", user_id="u1")
@@ -5077,7 +5077,7 @@ def test_shutdown_during_initial_eviction_reconnect_failure_tracks_vm(monkeypatc
     """Shutdown must destroy a VM while its first eviction reconnects."""
     p = _make_provider()
     fake_cls = _install_fake_sdk(monkeypatch, p)
-    p._warm_pool["warm-1"] = ("seed", time.time())
+    p._warm_pool["warm-1"] = ("seed", time.monotonic())
 
     reconnect_started = threading.Event()
     allow_failure = threading.Event()
@@ -5117,7 +5117,7 @@ def test_shutdown_during_gone_sandbox_eviction_releases_slot_once(monkeypatch):
     """
     p = _make_provider()
     fake_cls = _install_fake_sdk(monkeypatch, p)
-    p._warm_pool["warm-1"] = ("seed", time.time())
+    p._warm_pool["warm-1"] = ("seed", time.monotonic())
 
     reconnect_started = threading.Event()
     allow_failure = threading.Event()
@@ -6569,7 +6569,7 @@ def test_warm_sweep_cannot_delete_concurrent_discovery_lease(monkeypatch):
     provider = _make_provider(idle_timeout=30)
     sdk = _install_fake_sdk(monkeypatch, provider)
     sdk.list_return = [_info("sb-race", "u1", "t1")]
-    provider._warm_pool["sb-race"] = (provider._stable_seed("t1", "u1"), time.time() - 31)
+    provider._warm_pool["sb-race"] = (provider._stable_seed("t1", "u1"), time.monotonic() - 31)
     provider._ownership.take("sb-race")
     provider._owned_sandbox_ids.add("sb-race")
     cleanup_started, finish_cleanup, acquire_reached = threading.Event(), threading.Event(), threading.Event()
@@ -6615,7 +6615,7 @@ def test_warm_sweep_cannot_delete_concurrent_discovery_lease(monkeypatch):
 
 def test_warm_sweep_serializes_with_lapsed_lease_renewal(monkeypatch):
     provider = _make_provider(idle_timeout=30)
-    provider._warm_pool["sb-race"] = (provider._stable_seed("t1", "u1"), time.time() - 31)
+    provider._warm_pool["sb-race"] = (provider._stable_seed("t1", "u1"), time.monotonic() - 31)
     provider._owned_sandbox_ids.add("sb-race")
     renewal_started, finish_renewal, cleanup_reached = threading.Event(), threading.Event(), threading.Event()
     renew = provider._ownership.renew
@@ -6737,7 +6737,7 @@ def test_reconcile_does_not_readopt_a_release_in_progress(monkeypatch):
 def test_warm_sweep_leaves_shared_capacity_to_inventory(monkeypatch, inventory_complete):
     provider = _make_provider(idle_timeout=30)
     store = _install_shared_deployment_capacity(provider)
-    provider._warm_pool["sb-old"] = (provider._stable_seed("t1", "u1"), time.time() - 31)
+    provider._warm_pool["sb-old"] = (provider._stable_seed("t1", "u1"), time.monotonic() - 31)
     monkeypatch.setattr(provider, "_list_remote_entries", lambda _metadata: ([], False, inventory_complete))
 
     provider._reconcile_remote_sandboxes()
@@ -6825,7 +6825,7 @@ def test_warm_sweep_cannot_release_reacquired_ownership(monkeypatch, acquire_pat
     provider = _make_provider(idle_timeout=30)
     sdk = _install_fake_sdk(monkeypatch, provider)
     sdk.list_return = [_info("sb-race", "u1", "t1")]
-    provider._warm_pool["sb-race"] = (provider._stable_seed("t1", "u1"), time.time() - 31)
+    provider._warm_pool["sb-race"] = (provider._stable_seed("t1", "u1"), time.monotonic() - 31)
     provider._owned_sandbox_ids.add("sb-race")
     provider._ownership.take("sb-race")
     cleaning = threading.Event()
@@ -6876,7 +6876,7 @@ def test_warm_sweep_cannot_release_reacquired_ownership(monkeypatch, acquire_pat
 def test_warm_sweep_rechecks_snapshot_after_lifecycle_wait(monkeypatch, transition):
     provider = _make_provider(idle_timeout=30)
     sid = "sb-stale-snapshot"
-    old_entry = (provider._stable_seed("t1", "u1"), time.time() - 31)
+    old_entry = (provider._stable_seed("t1", "u1"), time.monotonic() - 31)
     provider._warm_pool[sid] = old_entry
     provider._owned_sandbox_ids.add(sid)
     provider._ownership.take(sid)
@@ -6893,7 +6893,7 @@ def test_warm_sweep_rechecks_snapshot_after_lifecycle_wait(monkeypatch, transiti
             # The sweep has already captured old_entry. A competing operation
             # completes before it acquires the lifecycle lock.
             if transition == "repark":
-                provider._warm_pool[sid] = (old_entry[0], time.time())
+                provider._warm_pool[sid] = (old_entry[0], time.monotonic())
             else:
                 provider._publish_ownership(sid)
         with lifecycle(sandbox_id):
@@ -6980,7 +6980,7 @@ def test_warm_sweep_cannot_race_lapsed_lease_reclaim(monkeypatch):
 
     provider = _make_provider(idle_timeout=30)
     sid = "sb-lapsed"
-    provider._warm_pool[sid] = (provider._stable_seed("t1", "u1"), time.time() - 31)
+    provider._warm_pool[sid] = (provider._stable_seed("t1", "u1"), time.monotonic() - 31)
     provider._owned_sandbox_ids.add(sid)
     renewing = threading.Event()
     finish_renewal = threading.Event()

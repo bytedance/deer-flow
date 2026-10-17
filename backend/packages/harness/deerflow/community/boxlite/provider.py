@@ -338,7 +338,6 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
 
     def _adopt_existing_boxes(self) -> int:
         runtime_cls = _import_sync_boxlite_runtime()
-        now = time.time()
         adopted = 0
 
         list_runtime = runtime_cls.default().start()
@@ -372,7 +371,7 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
                 if sandbox_id in self._boxes or sandbox_id in self._warm_pool:
                     box_runtime.stop()
                     continue
-                self._warm_pool[sandbox_id] = (wrapped, now)
+                self._warm_pool[sandbox_id] = (wrapped, time.monotonic())
                 self._warm_pool_identity[sandbox_id] = None
                 adopted += 1
             logger.info("Adopted existing BoxLite box %s (%s) into warm pool", sandbox_id, name)
@@ -524,7 +523,7 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
                 self._skip_health_check_warm_ids.discard(sandbox_id)
                 self._warm_pool_identity.pop(sandbox_id, None)
             else:
-                self._warm_pool[sandbox_id] = (box, time.time())
+                self._warm_pool[sandbox_id] = (box, time.monotonic())
                 self._warm_pool_identity[sandbox_id] = released_keys[0] if released_keys else active_identity
                 self._skip_health_check_warm_ids.add(sandbox_id)
 
@@ -559,7 +558,7 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
             skip_eligible = sandbox_id in self._skip_health_check_warm_ids
 
         skip_seconds = self._config.get("health_check_skip_seconds", 0.0)
-        if skip_eligible and skip_seconds > 0 and (time.time() - released_at) < skip_seconds:
+        if skip_eligible and skip_seconds > 0 and (time.monotonic() - released_at) < skip_seconds:
             # Recently released by this provider — promote directly without a
             # health-check round trip, but never return an adapter that this
             # process already knows is closed.
@@ -595,7 +594,7 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
             logger.debug(
                 "Reclaimed warm-pool box %s (skipped health check, age=%.1fs)",
                 sandbox_id,
-                time.time() - released_at,
+                time.monotonic() - released_at,
             )
             return sandbox_id
 
@@ -675,7 +674,7 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
         reaper and atexit shutdown instead of orphaning them.
         """
         with self._lock:
-            now = time.time()
+            now = time.monotonic()
             for sandbox_id, box in self._boxes.items():
                 self._warm_pool.setdefault(sandbox_id, (box, now))
                 self._warm_pool_identity.setdefault(sandbox_id, self._active_box_identity.get(sandbox_id))
