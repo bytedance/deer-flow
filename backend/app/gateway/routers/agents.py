@@ -639,7 +639,7 @@ async def update_agent(name: str, body: AgentUpdateRequest, request: Request) ->
             # ``github:`` binding — which would otherwise leave the next
             # webhook delivery unable to find the agent in the registry and
             # silently no-op.
-            for key, value in preserve_non_managed_fields(agent_cfg).items():
+            for key, value in preserve_non_managed_fields(agent_cfg, new_tool_groups=new_tool_groups).items():
                 updated.setdefault(key, value)
 
         # Persist config (when changed) and/or soul (when provided) off the

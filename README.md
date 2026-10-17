@@ -1777,7 +1777,10 @@ unavailable only when a successful catalog load confirms it is missing.
 Saving a selection that removes `knowledge` also clears the saved default
 knowledge selection. The in-chat `update_agent` tool applies the same rule
 when it changes the tool groups to a list without `knowledge`, so later
-Gateway turns do not inherit an unusable scope. Unrelated self-updates preserve
+Gateway turns do not inherit an unusable scope. `PUT /api/agents/{name}` also
+clears this inherited default on such a change when `knowledge_scope` is
+omitted; an explicitly supplied scope or `null` still takes precedence.
+Unrelated updates, unchanged groups, and inheriting all tool groups preserve
 the default. When enabling knowledge access for an agent that
 previously lacked it, save the tool access first, then reopen settings to
 choose its default knowledge bases.

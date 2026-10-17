@@ -230,17 +230,15 @@ def update_agent(
     # Preserve every top-level AgentConfig field that this tool does not
     # expose as an argument (currently ``github:``, plus any future field
     # added to :class:`AgentConfig`). The same helper is used by the HTTP
-    # ``PATCH /api/agents/{name}`` route so the two surfaces stay in lockstep.
+    # ``PUT /api/agents/{name}`` route so the two surfaces stay in lockstep.
     # Without this, operators who hand-author a ``github:`` block on a custom
     # agent would silently lose it the next time the agent self-updates via
     # ``update_agent``.
-    preserved = preserve_non_managed_fields(existing_cfg)
+    preserved = preserve_non_managed_fields(existing_cfg, new_tool_groups=new_tool_groups)
     for key, value in preserved.items():
         config_data.setdefault(key, value)
 
-    # Match Agent settings: an inherited scope is invalid without knowledge access.
-    if "tool_groups" in updated_fields and tool_groups is not None and "knowledge" not in tool_groups and existing_cfg.knowledge_scope is not None:
-        config_data["knowledge_scope"] = None
+    if existing_cfg.knowledge_scope is not None and preserved.get("knowledge_scope") is None:
         updated_fields.append("knowledge_scope")
 
     config_changed = bool({"description", "model", "tool_groups", "skills"} & set(updated_fields))
