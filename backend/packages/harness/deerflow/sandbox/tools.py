@@ -1013,6 +1013,7 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
 
     Allowed virtual-path families:
       - ``/mnt/user-data/*``  — always allowed (read + write)
+      - ``/mnt/user-data``    — the bare root, allowed only when *read_only* is True
       - ``/mnt/skills/*``     — allowed only when *read_only* is True
       - ``/mnt/acp-workspace/*`` — allowed only when *read_only* is True
       - Custom mount paths (from config.yaml) — respects per-mount ``read_only`` flag
@@ -1047,8 +1048,10 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
             raise PermissionError(f"Write access to ACP workspace is not allowed: {path}")
         return
 
-    # User-data paths
-    if path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
+    # User-data paths. The bare root passes for reads because the local
+    # provider maps it for parity with AIO; the resolver still rejects it,
+    # and only ls lists it, one allowed directory at a time.
+    if path.startswith(f"{VIRTUAL_PATH_PREFIX}/") or (read_only and path == VIRTUAL_PATH_PREFIX):
         return
 
     # Custom mount paths — respect read_only config
@@ -1098,6 +1101,29 @@ def _resolve_and_validate_user_data_path(path: str, thread_data: ThreadDataState
     resolved = Path(resolved_str).resolve()
     _validate_resolved_user_data_path(resolved, thread_data)
     return str(resolved)
+
+
+def _user_data_root_dirs(path: str, thread_data: ThreadDataState) -> dict[str, str] | None:
+    """Map virtual to host workspace/uploads/outputs when *path* is the user-data root.
+
+    The local provider maps the root so ``ls`` matches AIO, but its host
+    directory can hold more than the three allowed directories. Callers list
+    each of them instead of walking the root. Any other path returns None.
+    """
+    mappings = _thread_virtual_to_actual_mappings(thread_data)
+    user_data_root = mappings.pop(VIRTUAL_PATH_PREFIX, None)
+    if user_data_root is None or Path(replace_virtual_path(path, thread_data)).resolve() != Path(user_data_root).resolve():
+        return None
+    return mappings
+
+
+def _list_user_data_root(sandbox: Sandbox, user_data_dirs: dict[str, str]) -> list[str]:
+    """List each allowed directory and one level below it, matching ls depth 2."""
+    entries: list[str] = []
+    for virtual_dir, actual_dir in user_data_dirs.items():
+        entries.append(f"{virtual_dir}/")
+        entries.extend(sandbox.list_dir(actual_dir, max_depth=1))
+    return entries
 
 
 def _is_non_file_url_token(token: str) -> bool:
@@ -2577,6 +2603,7 @@ def ls_tool(runtime: Runtime, path: str, description: str = "") -> str:
         ensure_thread_directories_exist(runtime)
         requested_path = path
         thread_data = None
+        user_data_dirs = None
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
             validate_local_tool_path(path, thread_data, read_only=True)
@@ -2588,9 +2615,11 @@ def ls_tool(runtime: Runtime, path: str, description: str = "") -> str:
                 # from the sandbox mapping's user_id).
                 pass
             elif not _is_custom_mount_path(path):
-                path = _resolve_and_validate_user_data_path(path, thread_data)
+                user_data_dirs = _user_data_root_dirs(path, thread_data)
+                if user_data_dirs is None:
+                    path = _resolve_and_validate_user_data_path(path, thread_data)
             # Custom mount paths and skills/ACP paths are resolved by LocalSandbox._resolve_path()
-        children = sandbox.list_dir(path)
+        children = _list_user_data_root(sandbox, user_data_dirs) if user_data_dirs is not None else sandbox.list_dir(path)
         if not children:
             return "(empty)"
         output = "\n".join(children)

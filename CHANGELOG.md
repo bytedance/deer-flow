@@ -5982,6 +5982,14 @@ This release closes that milestone with **621 merged pull requests**.
   names the same file as the equivalent relative path, unless the command
   rebinds `PWD` itself. Variables inside URLs are unaffected. The guard
   remains best-effort and is not an isolation boundary. ([#6930])
+- **sandbox:** On the local sandbox, `ls` now accepts the `/mnt/user-data`
+  root itself and lists `workspace`, `uploads` and `outputs` as it does on
+  AIO. The provider maps that root on purpose, but the tool layer allowed
+  only paths below it and answered `Permission denied` (with a trailing
+  slash, from an internal "path traversal detected" check). The listing
+  covers only those three directories, so anything else stored directly
+  under the root stays hidden. `glob`, `grep`, `read_file` and writes still
+  reject the root, because a search would read every file below it. ([#6991])
 
 ### Security
 
@@ -11778,3 +11786,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6897]: https://github.com/bytedance/deer-flow/pull/6897
 [#6909]: https://github.com/bytedance/deer-flow/pull/6909
 [#6930]: https://github.com/bytedance/deer-flow/pull/6930
+[#6991]: https://github.com/bytedance/deer-flow/pull/6991
