@@ -223,14 +223,19 @@ class HonchoMemoryManager(MemoryManager):
         agent_name: str | None = None,
         category: str | None = None,
     ) -> list[dict[str, Any]]:
+        """``category`` must filter, not label: it scopes the Honcho query itself
+        (a ``metadata`` filter the server applies before its ``limit``, per the
+        base-class contract), and each result is labeled from its own metadata so
+        hits are never attested to a category they do not have."""
         workspace = self._workspace(user_id)
         if workspace is None:
             return []
-        results = self._read_or_fallback([], lambda: self._client.search(workspace, query, limit=top_k))
+        filters = {"metadata": {"category": category}} if category else None
+        results = self._read_or_fallback([], lambda: self._client.search(workspace, query, limit=top_k, filters=filters))
         return [
             {
                 "content": item.get("content", ""),
-                "category": category or "memory",
+                "category": (item.get("metadata") or {}).get("category") or "memory",
                 "session_id": item.get("session_id"),
                 "peer_id": item.get("peer_id"),
                 "created_at": item.get("created_at"),
