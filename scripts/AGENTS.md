@@ -46,6 +46,14 @@ trimming its contents. Offline CLI coverage:
 
 ## Service Startup Contracts
 
+Both launchers call `sandbox-mode.sh` via Bash; keep it Bash/awk-only.
+Dev passes `$PROJECT_ROOT/config.yaml`; prod passes `$DEER_FLOW_CONFIG_PATH`.
+For AIO, omitted/blank/empty-quoted/YAML-null URLs (including comments) select
+`aio`; preserve quoting so `"null"` and `"~"` remain nonempty strings.
+This is not a general YAML parser or URL validator; aliases, multiline values
+and environment expansion are out of scope. Offline helper and launcher tests:
+`backend/tests/test_docker_sandbox_mode_detection.py`.
+
 The setup wizard offers Webz.io as a news-only `web_search` provider using
 `deerflow.community.webz.tools:web_search_tool` and `WEBZ_API_KEY`. Keep its
 entry aligned with the credential check in `doctor.py` and the example config.

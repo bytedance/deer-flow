@@ -1434,6 +1434,13 @@ export const enUS: Translations = {
       "Save tool access before choosing default knowledge bases.",
     settingsModel: "Default model",
     settingsModelDefault: "Use global default",
+    settingsModelSwitchNeedsCatalog:
+      "Load the selected model before saving this model change. Retry loading, or restore the original model to save other changes.",
+    settingsReasoningUnsupported: "not supported",
+    settingsThinkingRequiredHint:
+      "This model requires thinking. The saved Off setting can prevent runs from starting. Choose Inherit or On to replace it.",
+    settingsReasoningUnsupportedHint:
+      "This saved value is not supported by the selected model. Choose Inherit or a supported value to replace it.",
     settingsTemperature: "Temperature",
     settingsTemperatureHint: "0 = deterministic, higher = more creative (0–2).",
     settingsMaxTokens: "Max output tokens",

@@ -386,36 +386,7 @@ fi
 # ── detect_sandbox_mode ───────────────────────────────────────────────────────
 
 detect_sandbox_mode() {
-    local sandbox_use=""
-    local provisioner_url=""
-
-    [ -f "$DEER_FLOW_CONFIG_PATH" ] || { echo "local"; return; }
-
-    sandbox_use=$(awk '
-        /^[[:space:]]*sandbox:[[:space:]]*$/ { in_sandbox=1; next }
-        in_sandbox && /^[^[:space:]#]/ { in_sandbox=0 }
-        in_sandbox && /^[[:space:]]*use:[[:space:]]*/ {
-            line=$0; sub(/^[[:space:]]*use:[[:space:]]*/, "", line); print line; exit
-        }
-    ' "$DEER_FLOW_CONFIG_PATH")
-
-    provisioner_url=$(awk '
-        /^[[:space:]]*sandbox:[[:space:]]*$/ { in_sandbox=1; next }
-        in_sandbox && /^[^[:space:]#]/ { in_sandbox=0 }
-        in_sandbox && /^[[:space:]]*provisioner_url:[[:space:]]*/ {
-            line=$0; sub(/^[[:space:]]*provisioner_url:[[:space:]]*/, "", line); print line; exit
-        }
-    ' "$DEER_FLOW_CONFIG_PATH")
-
-    if [[ "$sandbox_use" == *"deerflow.community.aio_sandbox:AioSandboxProvider"* ]]; then
-        if [ -n "$provisioner_url" ]; then
-            echo "provisioner"
-        else
-            echo "aio"
-        fi
-    else
-        echo "local"
-    fi
+    bash "$REPO_ROOT/scripts/sandbox-mode.sh" "$DEER_FLOW_CONFIG_PATH"
 }
 
 # ── down ──────────────────────────────────────────────────────────────────────
