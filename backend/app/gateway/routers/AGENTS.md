@@ -38,6 +38,9 @@ critical section to preserve history ordering. Keep the sidecar distinct from
 the nested projection lock, retain it across requests, and acquire/release both
 off-loop inside the drained worker. Unrelated users retain independent locks;
 external filesystem writers do not participate in this history guarantee.
+The Windows sidecar acquisition retries only contention through `file_lock.retry_until_locked`; permanent errors propagate.
+This covers the outer mutation lock only. The nested projection lock has its
+own acquisition policy; changing the outer lock does not remove its timeout.
 
 Plugin actions stamp `ActionContext.interaction=session` only from authenticated
 session provenance. Never accept it from payloads or propagate it to model tools;

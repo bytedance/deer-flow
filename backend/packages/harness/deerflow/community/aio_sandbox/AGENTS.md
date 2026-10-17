@@ -22,6 +22,8 @@ Regressions: `tests/test_aio_sandbox.py`, `tests/test_lark_broker.py`.
 
 ## Reuse admission
 
+The synchronous cross-process sandbox creation lock uses `file_lock.retry_until_locked` on Windows; asynchronous acquisition already owns its non-blocking retry loop.
+
 An implicit-shell fence is sticky for the container's lifetime, even after a
 successful explicit recovery session. `requires_container_recycle` includes
 that fence and ambiguous shell or bash creation tombstones; a pending creation
