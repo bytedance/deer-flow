@@ -2741,6 +2741,10 @@ become available in the next batch, when rejected additions can be retried.
 
 ### Long-Term Memory
 
+Settings > Memory keeps successful clear, import, and fact edits visible even
+when an older background read finishes afterward. Later reads still refresh
+the view normally; failed actions preserve the existing cached memory.
+
 DeerMem debounces pending updates independently per conversation, user, and agent.
 `memory.backend_config.debounce_seconds` sets the quiet period (default 30 seconds),
 and `max_wait_seconds` caps debounce deferral from the first pending update
