@@ -43,7 +43,7 @@ from deerflow.skills.diagnostics import SkillLoadDiagnostic
 from deerflow.skills.parser import parse_skill_file
 from deerflow.skills.permissions import make_skill_written_path_sandbox_readable
 from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
-from deerflow.skills.storage.skill_storage import SKILL_MD_FILE, walk_skill_directories
+from deerflow.skills.storage.skill_storage import SKILL_MD_FILE, is_skill_support_data_dir, walk_skill_directories
 from deerflow.skills.types import SkillCategory
 
 logger = logging.getLogger(__name__)
@@ -309,7 +309,7 @@ class UserScopedSkillStorage(LocalSkillStorage):
         public_path = self._host_root / SkillCategory.PUBLIC.value
         if public_path.exists() and public_path.is_dir():
             for current_root, dir_names, file_names in walk_skill_directories(public_path):
-                dir_names[:] = sorted(name for name in dir_names if not name.startswith("."))
+                dir_names[:] = sorted(name for name in dir_names if not name.startswith(".") and not is_skill_support_data_dir(Path(current_root), name, category_root=public_path))
                 if SKILL_MD_FILE not in file_names:
                     continue
                 dir_names.clear()
@@ -320,7 +320,7 @@ class UserScopedSkillStorage(LocalSkillStorage):
         integration_path = self._integrations_root
         if integration_path.exists() and integration_path.is_dir():
             for current_root, dir_names, file_names in walk_skill_directories(integration_path):
-                dir_names[:] = sorted(name for name in dir_names if not name.startswith("."))
+                dir_names[:] = sorted(name for name in dir_names if not name.startswith(".") and not is_skill_support_data_dir(Path(current_root), name, category_root=integration_path))
                 if SKILL_MD_FILE not in file_names:
                     continue
                 dir_names.clear()
@@ -331,7 +331,7 @@ class UserScopedSkillStorage(LocalSkillStorage):
         user_custom_path = self._user_custom_root
         if user_custom_path.exists() and user_custom_path.is_dir():
             for current_root, dir_names, file_names in walk_skill_directories(user_custom_path):
-                dir_names[:] = sorted(name for name in dir_names if not name.startswith(".") and name != ".history")
+                dir_names[:] = sorted(name for name in dir_names if not name.startswith(".") and name != ".history" and not is_skill_support_data_dir(Path(current_root), name, category_root=user_custom_path))
                 if SKILL_MD_FILE not in file_names:
                     continue
                 dir_names.clear()
@@ -347,7 +347,7 @@ class UserScopedSkillStorage(LocalSkillStorage):
             global_custom_path = self._global_custom_root
             if global_custom_path.exists() and global_custom_path.is_dir():
                 for current_root, dir_names, file_names in walk_skill_directories(global_custom_path):
-                    dir_names[:] = sorted(name for name in dir_names if not name.startswith(".") and name != ".history")
+                    dir_names[:] = sorted(name for name in dir_names if not name.startswith(".") and name != ".history" and not is_skill_support_data_dir(Path(current_root), name, category_root=global_custom_path))
                     if SKILL_MD_FILE not in file_names:
                         continue
                     dir_names.clear()
