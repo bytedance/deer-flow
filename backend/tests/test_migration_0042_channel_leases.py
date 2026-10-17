@@ -22,7 +22,8 @@ from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 
 REVISION = "0042_channel_leases"
 PREVIOUS = "0041_im_notice_preferences"
-CURRENT_HEAD = "0043_runtime_im_notices"
+RUNTIME_IM_NOTICES = "0043_runtime_im_notices"
+CURRENT_HEAD = "0044_webhook_claim_tokens"
 TABLE = "channel_leases"
 COLUMNS = {"provider", "owner_id", "epoch", "lease_expires_at", "transport_running", "updated_at"}
 pytestmark = pytest.mark.asyncio
@@ -31,7 +32,8 @@ pytestmark = pytest.mark.asyncio
 async def test_0042_remains_in_the_single_migration_chain():
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
     assert script.get_heads() == [CURRENT_HEAD]
-    assert script.get_revision(CURRENT_HEAD).down_revision == REVISION
+    assert script.get_revision(RUNTIME_IM_NOTICES).down_revision == REVISION
+    assert script.get_revision(CURRENT_HEAD).down_revision == RUNTIME_IM_NOTICES
     assert script.get_revision(REVISION).down_revision == PREVIOUS
     # alembic_version.version_num is VARCHAR(32).
     assert len(REVISION) <= 32

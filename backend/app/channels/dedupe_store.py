@@ -12,11 +12,13 @@ from __future__ import annotations
 import logging
 import os
 import time
+import uuid
 from collections import OrderedDict
 from typing import Any, Protocol
 
 from sqlalchemy import text
 
+from app.channels.message_bus import InboundDedupeClaim
 from deerflow.config.deployment_config import multi_instance_declaration
 
 logger = logging.getLogger(__name__)
@@ -32,18 +34,18 @@ InboundDedupeKey = tuple[str, str, str, str]
 class InboundDedupeStore(Protocol):
     """Async contract for recording / releasing inbound dedupe keys.
 
-    ``try_record`` returns ``True`` if the key already existed (duplicate -> drop)
-    and ``False`` if it was newly recorded or its prior entry had expired (proceed).
+    ``try_record`` returns ``None`` for a duplicate, otherwise a per-admission
+    receipt. ``release`` must match that receipt, not just its message key.
     Shared-state implementations must be atomic; the Postgres variant uses a single
     conditional upsert (``INSERT ... ON CONFLICT DO UPDATE ... WHERE first_seen < TTL``).
     """
 
-    async def try_record(self, key: InboundDedupeKey) -> bool: ...
-    async def release(self, key: InboundDedupeKey) -> None: ...
+    async def try_record(self, key: InboundDedupeKey) -> InboundDedupeClaim | None: ...
+    async def release(self, claim: InboundDedupeClaim) -> None: ...
 
 
 class MemoryInboundDedupeStore:
-    """Process-local ``OrderedDict`` store — preserves the pre-#4120 behavior exactly."""
+    """Process-local store with bounded retention and per-admission cleanup."""
 
     def __init__(
         self,
@@ -55,14 +57,14 @@ class MemoryInboundDedupeStore:
         # Insertion order == chronological (keys are never re-inserted), so an
         # OrderedDict lets us evict expired/overflow entries from the front in
         # O(k) instead of scanning all entries on every inbound message.
-        self._store: OrderedDict[InboundDedupeKey, float] = OrderedDict()
+        self._store: OrderedDict[InboundDedupeKey, tuple[float, str]] = OrderedDict()
 
-    async def try_record(self, key: InboundDedupeKey) -> bool:
+    async def try_record(self, key: InboundDedupeKey) -> InboundDedupeClaim | None:
         now = time.monotonic()
         # Entries are in chronological insertion order, so expired ones cluster at
         # the front: pop from the front until we hit a still-live entry.
         while self._store:
-            _, oldest_at = next(iter(self._store.items()))
+            _, (oldest_at, _) = next(iter(self._store.items()))
             if now - oldest_at > self._ttl:
                 self._store.popitem(last=False)
             else:
@@ -71,13 +73,16 @@ class MemoryInboundDedupeStore:
             self._store.popitem(last=False)
 
         if key in self._store:
-            return True
+            return None
 
-        self._store[key] = now
-        return False
+        claim = InboundDedupeClaim(key, uuid.uuid4().hex)
+        self._store[key] = (now, claim.token)
+        return claim
 
-    async def release(self, key: InboundDedupeKey) -> None:
-        self._store.pop(key, None)
+    async def release(self, claim: InboundDedupeClaim) -> None:
+        entry = self._store.get(claim.key)
+        if entry is not None and entry[1] == claim.token:
+            self._store.pop(claim.key)
 
 
 class PostgresInboundDedupeStore:
@@ -87,7 +92,7 @@ class PostgresInboundDedupeStore:
     routed to a different gateway pod hits the same table. The acquire is a single
     atomic conditional upsert:
 
-        INSERT ... ON CONFLICT (4-tuple) DO UPDATE SET first_seen = now()
+        INSERT ... ON CONFLICT (4-tuple) DO UPDATE SET first_seen = now(), claim_token = :token
         WHERE first_seen < now() - TTL RETURNING channel
 
     - No conflict -> row inserted -> proceed.
@@ -119,8 +124,9 @@ class PostgresInboundDedupeStore:
             raise RuntimeError("PostgresInboundDedupeStore requires a Postgres session factory")
         return sf
 
-    async def try_record(self, key: InboundDedupeKey) -> bool:
+    async def try_record(self, key: InboundDedupeKey) -> InboundDedupeClaim | None:
         channel, workspace_id, chat_id, message_id = key
+        claim = InboundDedupeClaim(key, uuid.uuid4().hex)
         try:
             sf = self._resolve_session_factory()
             async with sf() as session:
@@ -147,10 +153,10 @@ class PostgresInboundDedupeStore:
                     result = await session.execute(
                         text(
                             "INSERT INTO webhook_deliveries "
-                            "(channel, workspace_id, chat_id, message_id, first_seen) "
-                            "VALUES (:c, :w, :ch, :m, now()) "
+                            "(channel, workspace_id, chat_id, message_id, first_seen, claim_token) "
+                            "VALUES (:c, :w, :ch, :m, now(), :token) "
                             "ON CONFLICT (channel, workspace_id, chat_id, message_id) "
-                            "DO UPDATE SET first_seen = now() "
+                            "DO UPDATE SET first_seen = now(), claim_token = :token "
                             "WHERE webhook_deliveries.first_seen < now() - make_interval(secs => :ttl) "
                             "RETURNING channel"
                         ),
@@ -160,6 +166,7 @@ class PostgresInboundDedupeStore:
                             "ch": chat_id,
                             "m": message_id,
                             "ttl": INBOUND_DEDUPE_TTL_SECONDS,
+                            "token": claim.token,
                         },
                     )
                     # A returned row means the key was admitted (new delivery, or an
@@ -177,24 +184,23 @@ class PostgresInboundDedupeStore:
                             text("DELETE FROM webhook_deliveries WHERE first_seen < now() - make_interval(secs => :ttl)"),
                             {"ttl": INBOUND_DEDUPE_TTL_SECONDS},
                         )
-            # inserted=True -> admitted (proceed, not a duplicate).
-            return not inserted
+            return claim if inserted else None
         except Exception:
             # Fail-open: if the store is unavailable we must NOT drop the
-            # message. Return False so the caller treats it as a new delivery
-            # and proceeds (at worst a possible duplicate, never silent loss).
+            # message. Retain this attempt's token even if its commit outcome
+            # is unknown: later cleanup can never delete a peer's admission.
             logger.exception("PostgresInboundDedupeStore.try_record failed; proceeding without dedupe (fail-open)")
-            return False
+            return claim
 
-    async def release(self, key: InboundDedupeKey) -> None:
-        channel, workspace_id, chat_id, message_id = key
+    async def release(self, claim: InboundDedupeClaim) -> None:
+        channel, workspace_id, chat_id, message_id = claim.key
         try:
             sf = self._resolve_session_factory()
             async with sf() as session:
                 async with session.begin():
                     await session.execute(
-                        text("DELETE FROM webhook_deliveries WHERE channel = :c AND workspace_id = :w AND chat_id = :ch AND message_id = :m"),
-                        {"c": channel, "w": workspace_id, "ch": chat_id, "m": message_id},
+                        text("DELETE FROM webhook_deliveries WHERE channel = :c AND workspace_id = :w AND chat_id = :ch AND message_id = :m AND claim_token = :token"),
+                        {"c": channel, "w": workspace_id, "ch": chat_id, "m": message_id, "token": claim.token},
                     )
         except Exception:
             logger.exception("PostgresInboundDedupeStore.release failed; key left for TTL expiry (fail-open)")
