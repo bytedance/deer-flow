@@ -791,7 +791,7 @@ def test_multi_worker_release_then_peer_reconcile_cannot_kill():
     worker_a._backend = backend
     worker_a._config["idle_timeout"] = 60
     # A released to warm and holds the lease.
-    worker_a._warm_pool[sid] = (info, time.time())
+    worker_a._warm_pool[sid] = (info, time.monotonic())
     worker_a._publish_ownership(sid)
 
     worker_b = _make_provider_for_reconciliation(worker_id="worker-b", store=shared)
@@ -801,7 +801,7 @@ def test_multi_worker_release_then_peer_reconcile_cannot_kill():
     assert sid not in worker_b._warm_pool
 
     # Even if B somehow had it warm, reap must refuse.
-    worker_b._warm_pool[sid] = (info, time.time() - 61)
+    worker_b._warm_pool[sid] = (info, time.monotonic() - 61)
     worker_b._reap_expired_warm(idle_timeout=60)
     assert sid not in destroyed
     assert sid in running
@@ -1013,7 +1013,7 @@ def test_renewal_keeps_the_sandbox_when_the_store_cannot_answer():
     worker._sandboxes["live02"] = sandbox
     worker._sandbox_infos["live02"] = info
     worker._thread_sandboxes[("u1", "t1")] = "live02"
-    worker._warm_pool["warm02"] = (info, time.time())
+    worker._warm_pool["warm02"] = (info, time.monotonic())
 
     worker._renew_owned_leases()
 
@@ -1161,7 +1161,7 @@ def test_renewal_covers_warm_entries_not_just_active():
         created_at=time.time(),
     )
     worker._sandboxes["active01"] = MagicMock()
-    worker._warm_pool["warm01"] = (info, time.time())
+    worker._warm_pool["warm01"] = (info, time.monotonic())
     worker._publish_ownership("active01")
     worker._publish_ownership("warm01")
 
@@ -1189,7 +1189,7 @@ def test_renewal_does_not_forget_a_warm_entry_mid_teardown():
         container_name="deer-flow-sandbox-warm-stop",
         created_at=time.time(),
     )
-    worker._warm_pool["warm-stop"] = (info, time.time())
+    worker._warm_pool["warm-stop"] = (info, time.monotonic())
     worker._publish_ownership("warm-stop")
 
     stop_started = threading.Event()
@@ -1583,7 +1583,7 @@ def test_teardown_marker_is_held_for_a_stop_that_outlives_the_lease_ttl():
         release_stop.wait(timeout=5)
 
     worker_a._backend.destroy = MagicMock(side_effect=slow_destroy)
-    worker_a._warm_pool["doomed1"] = (info, time.time())
+    worker_a._warm_pool["doomed1"] = (info, time.monotonic())
 
     reaper = threading.Thread(
         target=lambda: worker_a._destroy_warm_entry("doomed1", info, reason="idle_timeout", still_reapable=lambda: True),
@@ -1857,7 +1857,7 @@ def test_teardown_release_waits_for_the_heartbeat_to_exit():
         assert blocking.heartbeat_blocked.wait(timeout=5), "the heartbeat never issued a refresh claim"
 
     worker_a._backend.destroy = MagicMock(side_effect=slow_destroy)
-    worker_a._warm_pool["defer1"] = (info, time.time())
+    worker_a._warm_pool["defer1"] = (info, time.monotonic())
 
     reaper = threading.Thread(
         target=lambda: worker_a._destroy_warm_entry("defer1", info, reason="idle_timeout", still_reapable=lambda: True),
@@ -1900,7 +1900,7 @@ def test_evict_keeps_the_warm_entry_when_the_claim_is_refused():
         container_name="deer-flow-sandbox-peer01",
         created_at=time.time(),
     )
-    worker_a._warm_pool["peer01"] = (info, time.time() - 5)
+    worker_a._warm_pool["peer01"] = (info, time.monotonic() - 5)
     # A peer owns it, so A's eviction claim is refused.
     worker_b._publish_ownership("peer01")
 
@@ -1929,7 +1929,7 @@ def test_reclaim_drops_a_container_a_peer_is_destroying():
         container_name="deer-flow-sandbox-dying02",
         created_at=time.time(),
     )
-    worker_a._warm_pool["dying02"] = (info, time.time())
+    worker_a._warm_pool["dying02"] = (info, time.monotonic())
     worker_a._check_tracked_sandbox_alive = MagicMock(return_value=True)
 
     # B's reaper marks the teardown; its stop is in flight.
@@ -1987,9 +1987,9 @@ def test_shutdown_does_not_stop_a_peers_warm_container():
     mine = SandboxInfo(sandbox_id="mine01", sandbox_url="http://localhost:8080", container_name="c-mine01", created_at=time.time())
     theirs = SandboxInfo(sandbox_id="peer02", sandbox_url="http://localhost:8081", container_name="c-peer02", created_at=time.time())
 
-    worker_a._warm_pool["mine01"] = (mine, time.time())
+    worker_a._warm_pool["mine01"] = (mine, time.monotonic())
     worker_a._publish_ownership("mine01")
-    worker_a._warm_pool["peer02"] = (theirs, time.time())
+    worker_a._warm_pool["peer02"] = (theirs, time.monotonic())
     worker_b._publish_ownership("peer02")  # a live peer owns this one
 
     worker_a.shutdown()
@@ -2018,7 +2018,7 @@ def test_teardown_heartbeat_stops_when_the_stop_returns():
         container_name="deer-flow-sandbox-doomed2",
         created_at=time.time(),
     )
-    worker_a._warm_pool["doomed2"] = (info, time.time())
+    worker_a._warm_pool["doomed2"] = (info, time.monotonic())
 
     assert worker_a._destroy_warm_entry("doomed2", info, reason="idle_timeout", still_reapable=lambda: True) is True
 
@@ -2097,7 +2097,7 @@ def test_refused_idle_destroy_keeps_the_warm_entry():
         container_name="deer-flow-sandbox-warmpeer",
         created_at=time.time(),
     )
-    worker_a._warm_pool["warmpeer"] = (info, time.time() - 999)
+    worker_a._warm_pool["warmpeer"] = (info, time.monotonic() - 999)
     worker_b._publish_ownership("warmpeer")
 
     worker_a._reap_expired_warm(idle_timeout=60)
@@ -2327,7 +2327,7 @@ def test_warm_reaper_does_not_stop_a_container_this_instance_just_reclaimed(reas
     provider._ownership = gate
     info = _info("warm1")
     # Old enough for the idle reaper; the only entry, so also the eviction pick.
-    provider._warm_pool["warm1"] = (info, time.time() - 10_000)
+    provider._warm_pool["warm1"] = (info, time.monotonic() - 10_000)
     provider._ownership._inner.take("warm1")
 
     reap = provider._evict_oldest_warm if reap_name == "_evict_oldest_warm" else lambda: provider._reap_expired_warm(600)
@@ -2829,7 +2829,7 @@ def test_teardown_reservation_is_cleared_once_the_stop_returns():
     """
     provider = _make_provider_for_reconciliation()
     info = _info("cleared")
-    provider._warm_pool["cleared"] = (info, time.time() - 10_000)
+    provider._warm_pool["cleared"] = (info, time.monotonic() - 10_000)
     provider._ownership.take("cleared")
 
     assert provider._destroy_warm_entry("cleared", info, reason="idle_timeout", still_reapable=lambda: True) is True
@@ -2849,7 +2849,7 @@ def test_reclaim_does_not_hand_out_a_container_a_reaper_is_stopping():
     """
     provider = _make_provider_for_reconciliation()
     info = _info("handout")
-    provider._warm_pool["handout"] = (info, time.time() - 10_000)
+    provider._warm_pool["handout"] = (info, time.monotonic() - 10_000)
     provider._ownership.take("handout")
 
     # Park reclaim between its `take()` and its install.
@@ -2899,7 +2899,7 @@ def test_warm_entry_is_removed_before_its_teardown_reservation_is_released():
     """
     provider = _make_provider_for_reconciliation()
     info = _info("ordered")
-    provider._warm_pool["ordered"] = (info, time.time() - 10_000)
+    provider._warm_pool["ordered"] = (info, time.monotonic() - 10_000)
     provider._ownership.take("ordered")
 
     observed = {}
@@ -2927,7 +2927,7 @@ def test_reclaim_short_circuits_a_reserved_entry_without_touching_the_backend():
     """
     provider = _make_provider_for_reconciliation()
     info = _info("shortcut")
-    provider._warm_pool["shortcut"] = (info, time.time())
+    provider._warm_pool["shortcut"] = (info, time.monotonic())
     provider._ownership = MagicMock(wraps=provider._ownership)
     with provider._lock:
         provider._local_teardown.add("shortcut")
@@ -2977,7 +2977,7 @@ def test_registering_a_sandbox_clears_any_stale_warm_entry(register):
     """
     provider = _make_provider_for_reconciliation()
     info = _info("stale")
-    provider._warm_pool["stale"] = (info, time.time())
+    provider._warm_pool["stale"] = (info, time.monotonic())
 
     if register == "discovered":
         provider._register_discovered_sandbox("t1", info, user_id="u")
