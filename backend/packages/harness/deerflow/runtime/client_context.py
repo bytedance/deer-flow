@@ -2,7 +2,7 @@
 
 The HTTP API accepts a broad ``context`` object for compatibility with
 LangGraph SDK clients.  Only a small, explicit subset of client-provided data
-should be preserved for runtime use or rendered into model-visible reminders.
+should be preserved for runtime use or rendered into the model-visible block.
 """
 
 from __future__ import annotations
@@ -14,12 +14,12 @@ from html import escape
 from itertools import islice
 from typing import Any
 
+from deerflow.agents.middlewares.input_sanitization_middleware import frame_untrusted_text
+
 _CLIENT_CONTEXT_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
 _MAX_CLIENT_CONTEXT_ITEMS = 32
 _MAX_CLIENT_NAME_LENGTH = 80
 _MAX_CLIENT_VALUE_LENGTH = 200
-
-_PROMPT_EMPTY_CLIENT_CONTEXT = "<client_context>not provided</client_context>"
 
 
 def _clean_key(value: Any) -> str | None:
@@ -60,7 +60,8 @@ def sanitize_client_context(raw_client: Any) -> dict[str, Any] | None:
     """Return the safe subset of ``context.client`` for runtime use.
 
     Accepted prompt-visible fields:
-    - ``name``: short client identifier
+    - ``name``: short client identifier. It is caller-controlled and
+      informational only: never use it for authorization, and never log it.
     - ``capabilities``: mapping of capability name to boolean support flag
     - ``preferences``: mapping of preference name to a scalar value
 
@@ -111,13 +112,19 @@ def _format_prompt_value(value: str | int | float | bool) -> str:
 
 
 def render_client_context_for_prompt(raw_client: Any) -> str | None:
-    """Render safe client context as a compact model-visible reminder block."""
+    """Render safe client context as a compact model-visible block.
+
+    The value is sanitized again here: direct graph callers can place
+    ``client`` into ``runtime.context`` without passing the Gateway. The
+    values are caller-controlled, so the block frames them as untrusted
+    input, like the user's own message.
+    """
 
     client = sanitize_client_context(raw_client)
     if not client:
         return None
 
-    lines = ["<client_context>"]
+    lines: list[str] = []
 
     name = client.get("name")
     if isinstance(name, str):
@@ -138,11 +145,4 @@ def render_client_context_for_prompt(raw_client: Any) -> str | None:
         if rendered:
             lines.append(f"preferences: {'; '.join(rendered)}")
 
-    lines.append("</client_context>")
-    return "\n".join(lines)
-
-
-def render_empty_client_context_for_prompt() -> str:
-    """Render an explicit reminder that no client context is active."""
-
-    return _PROMPT_EMPTY_CLIENT_CONTEXT
+    return "\n".join(["<client_context>", frame_untrusted_text("\n".join(lines)), "</client_context>"])

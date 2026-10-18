@@ -121,6 +121,10 @@ _BLOCKED_TAG_NAMES: frozenset[str] = frozenset(
         # configuration or fabricates shelf entries/tool-callable IDs.
         "project",
         "documents",
+        # Client context block (runtime/client_context.py): the calling
+        # client's request-scoped capabilities and preferences. Forging it in
+        # untrusted input mimics the run's declared client.
+        "client_context",
         # Common prompt-injection tag patterns
         "system",
         "instruction",

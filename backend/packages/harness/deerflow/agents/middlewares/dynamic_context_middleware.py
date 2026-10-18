@@ -58,7 +58,9 @@ from langchain.agents.middleware.types import ModelCallResult, ModelRequest, Mod
 from langchain_core.messages import HumanMessage, RemoveMessage, SystemMessage
 from langgraph.runtime import Runtime
 
+from deerflow.agents.middlewares.message_utils import insert_after_leading_system_messages
 from deerflow.projects.context import build_project_context_message, is_project_context_message, pinned_project_snapshot, project_context_insertion_index, render_documents_block, render_project_block
+from deerflow.runtime.client_context import render_client_context_for_prompt
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.utils.messages import INJECTED_USER_MESSAGE_ID_SUFFIX, ORIGINAL_USER_CONTENT_KEY, strip_injected_user_message_id_suffix
@@ -753,6 +755,32 @@ class DynamicContextMiddleware(AgentMiddleware):
         message = build_project_context_message(block, run_id)
         return request.override(messages=[*messages[:index], message, *messages[index:]]), project_block, documents_block
 
+    @staticmethod
+    def _assemble_client_request(request: ModelRequest) -> ModelRequest:
+        """Insert the run's ``context.client`` as one transient data message.
+
+        The values come from the request body, so they never enter system
+        text: the block is rendered (and sanitized again — direct graph
+        callers bypass the Gateway) from ``runtime.context["client"]`` into a
+        hidden HumanMessage right after the leading SystemMessages, where an
+        unchanged client keeps the cached prefix stable across runs. Like the
+        project message it is request-only: never a state update and never
+        flagged ``dynamic_context_reminder``, so a later run without
+        ``client`` simply has no block.
+        """
+        context = getattr(getattr(request, "runtime", None), "context", None)
+        block = render_client_context_for_prompt(context.get("client")) if isinstance(context, dict) else None
+        if block is None:
+            return request
+        message = HumanMessage(
+            content=block,
+            additional_kwargs={
+                "hide_from_ui": True,
+                **provenance_kwargs(ContentKind.MIDDLEWARE_INJECTION, "dynamic_context_client"),
+            },
+        )
+        return request.override(messages=insert_after_leading_system_messages(list(request.messages), [message]))
+
     def _record_context_event(self, messages: list, runtime: Runtime | None, project_block: str | None, documents_block: str | None) -> None:
         """Emit the run's single ``context:memory`` audit event, when due.
 
@@ -791,6 +819,7 @@ class DynamicContextMiddleware(AgentMiddleware):
     @override
     def wrap_model_call(self, request: ModelRequest, handler: Callable[[ModelRequest], ModelResponse]) -> ModelCallResult:
         request, project_block, documents_block = self._assemble_project_request(request)
+        request = self._assemble_client_request(request)
         response = handler(request)
         # Record only after the call succeeded: a failed assembly must not
         # claim the context was delivered.
@@ -801,6 +830,7 @@ class DynamicContextMiddleware(AgentMiddleware):
     async def awrap_model_call(self, request: ModelRequest, handler: Callable[[ModelRequest], Awaitable[ModelResponse]]) -> ModelCallResult:
         # Pure in-memory rendering: no I/O, so it stays on the event loop.
         request, project_block, documents_block = self._assemble_project_request(request)
+        request = self._assemble_client_request(request)
         response = await handler(request)
         self._record_context_event(request.messages, getattr(request, "runtime", None), project_block, documents_block)
         return response
