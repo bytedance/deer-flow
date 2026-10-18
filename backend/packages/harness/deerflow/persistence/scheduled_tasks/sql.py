@@ -20,13 +20,46 @@ from deerflow.persistence.scheduled_task_runs.scope import bound_native_run, liv
 from deerflow.persistence.scheduled_tasks.model import ACTIVE_RUN_STATUSES, LIVE_TASK_STATUSES, ONCE_TASK_STATUS_BY_RUN_STATUS, TERMINAL_RUN_STATUSES, TERMINAL_TASK_STATUSES, ScheduledTaskRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
-from deerflow.persistence.workspaces.scope import lock_resource_scope, resolve_resource_scope
+from deerflow.persistence.workspaces.scope import live_workspace_predicate, lock_resource_scope, resolve_resource_scope
 from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 from deerflow.scheduler.host_notes import RUN_ERROR_END_REACHED
 from deerflow.utils.goal_objective import normalize_goal_objective
 from deerflow.utils.time import coerce_iso
 
 logger = logging.getLogger(__name__)
+
+
+def _resource_task_predicate(context):
+    """Current resource access does not renew the task's execution snapshot."""
+
+    def parent(identity, incarnation):
+        owned = ThreadMetaRepository._owned_scope(select(ThreadMetaRow.thread_id).where(ThreadMetaRow.thread_id == identity, ThreadMetaRow.incarnation == incarnation), context.actor_user_id, context).correlate(ScheduledTaskRow).exists()
+        return or_(identity.is_(None), owned)
+
+    return and_(
+        ScheduledTaskRow.workspace_id == context.workspace_id,
+        ScheduledTaskRow.user_id == context.actor_user_id,
+        live_workspace_predicate(context),
+        ScheduledTaskRow.workspace_context_json["workspace_id"].as_string() == ScheduledTaskRow.workspace_id,
+        ScheduledTaskRow.workspace_context_json["actor_user_id"].as_string() == ScheduledTaskRow.user_id,
+        parent(ScheduledTaskRow.origin_thread_id, ScheduledTaskRow.origin_thread_incarnation),
+        parent(ScheduledTaskRow.thread_id, ScheduledTaskRow.thread_incarnation),
+    )
+
+
+def _resource_occurrence_predicate(context):
+    """Filter original child identity and its private execution parent before aggregation."""
+    parent = (
+        ThreadMetaRepository._owned_scope(select(ThreadMetaRow.thread_id).where(ThreadMetaRow.thread_id == ScheduledTaskRunRow.thread_id, ThreadMetaRow.incarnation == ScheduledTaskRunRow.thread_incarnation), context.actor_user_id, context)
+        .correlate(ScheduledTaskRunRow)
+        .exists()
+    )
+    return and_(
+        ScheduledTaskRunRow.workspace_id == ScheduledTaskRow.workspace_id,
+        *(ScheduledTaskRunRow.workspace_context_json[key].as_string() == ScheduledTaskRow.workspace_context_json[key].as_string() for key in ("workspace_id", "actor_user_id")),
+        *(ScheduledTaskRunRow.workspace_context_json[key].as_integer() == ScheduledTaskRow.workspace_context_json[key].as_integer() for key in ("membership_version", "policy_version")),
+        parent,
+    )
 
 
 class ScheduledTaskQuotaExceeded(ValueError):
@@ -241,16 +274,16 @@ class ScheduledTaskRepository:
             return result
 
     async def list_by_user(self, user_id: str) -> list[dict[str, Any]]:
-        if self.workspace_scope_required or get_current_workspace() is not None:
-            raise WorkspaceAccessDenied("Scoped Scheduler listing requires private-parent integration")
-        stmt = select(ScheduledTaskRow).where(ScheduledTaskRow.workspace_id.is_(None)).where(ScheduledTaskRow.user_id == user_id).order_by(ScheduledTaskRow.created_at.desc(), ScheduledTaskRow.id.desc())
+        context = resolve_resource_scope(None, user_id, required=self.workspace_scope_required)
+        scope = _resource_task_predicate(context) if context is not None else ScheduledTaskRow.workspace_id.is_(None)
+        stmt = select(ScheduledTaskRow).where(scope, ScheduledTaskRow.user_id == user_id).order_by(ScheduledTaskRow.created_at.desc(), ScheduledTaskRow.id.desc())
         async with self._sf() as session:
             result = await session.execute(stmt)
             return [self._row_to_dict(row) for row in result.scalars()]
 
     async def get_active_run_status(self, task_id: str) -> str | None:
         if self.workspace_scope_required or get_current_workspace() is not None:
-            raise WorkspaceAccessDenied("Scoped Scheduler status/history requires current private-resource integration")
+            return (await self.active_run_status_for([task_id])).get(task_id)
         stmt = (
             select(ScheduledTaskRunRow.status)
             .where(
@@ -264,17 +297,17 @@ class ScheduledTaskRepository:
             return (await session.execute(stmt)).scalars().first()
 
     async def active_run_status_for(self, task_ids: Sequence[str]) -> dict[str, str]:
-        """Most advanced active occurrence status per task, in one query.
-
-        A recurring task's own ``status`` is ``enabled`` while its occurrence
-        runs, so "is something running or waiting" must come from here.
-        """
-        if self.workspace_scope_required or get_current_workspace() is not None:
-            raise WorkspaceAccessDenied("Scoped Scheduler status/history requires current private-resource integration")
+        """Most advanced authorized active occurrence status per task."""
+        current = get_current_workspace()
+        context = resolve_resource_scope(None, current.actor_user_id if current is not None else None, required=self.workspace_scope_required)
         ids = list(dict.fromkeys(task_ids))
         if not ids:
             return {}
-        stmt = select(ScheduledTaskRunRow.task_id, ScheduledTaskRunRow.status).where(ScheduledTaskRunRow.workspace_id.is_(None), ScheduledTaskRunRow.task_id.in_(ids), ScheduledTaskRunRow.status.in_(("queued", "launching", "running")))
+        stmt = select(ScheduledTaskRunRow.task_id, ScheduledTaskRunRow.status).where(ScheduledTaskRunRow.task_id.in_(ids), ScheduledTaskRunRow.status.in_(("queued", "launching", "running")))
+        if context is not None:
+            stmt = stmt.join(ScheduledTaskRow, ScheduledTaskRow.id == ScheduledTaskRunRow.task_id).where(_resource_task_predicate(context), _resource_occurrence_predicate(context))
+        else:
+            stmt = stmt.where(ScheduledTaskRunRow.workspace_id.is_(None))
         rank = {"queued": 0, "launching": 1, "running": 2}
         result: dict[str, str] = {}
         async with self._sf() as session:
@@ -284,17 +317,18 @@ class ScheduledTaskRepository:
         return result
 
     async def automatic_runs_used_for(self, task_ids: Sequence[str]) -> dict[str, int]:
-        """Launched automatic runs per task (the ``max_runs`` unit); missing ids map to 0."""
-        if self.workspace_scope_required or get_current_workspace() is not None:
-            raise WorkspaceAccessDenied("Scoped Scheduler status/history requires current private-resource integration")
+        """Launched automatic runs; scope and private parents precede the count."""
+        current = get_current_workspace()
+        context = resolve_resource_scope(None, current.actor_user_id if current is not None else None, required=self.workspace_scope_required)
         ids = list(dict.fromkeys(task_ids))
         if not ids:
             return {}
-        stmt = (
-            select(ScheduledTaskRunRow.task_id, func.count())
-            .where(ScheduledTaskRunRow.workspace_id.is_(None), ScheduledTaskRunRow.task_id.in_(ids), ScheduledTaskRunRow.trigger == "scheduled", ScheduledTaskRunRow.launch_accounted.is_(True))
-            .group_by(ScheduledTaskRunRow.task_id)
-        )
+        stmt = select(ScheduledTaskRunRow.task_id, func.count()).where(ScheduledTaskRunRow.task_id.in_(ids), ScheduledTaskRunRow.trigger == "scheduled", ScheduledTaskRunRow.launch_accounted.is_(True))
+        if context is not None:
+            stmt = stmt.join(ScheduledTaskRow, ScheduledTaskRow.id == ScheduledTaskRunRow.task_id).where(_resource_task_predicate(context), _resource_occurrence_predicate(context))
+        else:
+            stmt = stmt.where(ScheduledTaskRunRow.workspace_id.is_(None))
+        stmt = stmt.group_by(ScheduledTaskRunRow.task_id)
         async with self._sf() as session:
             counts = {task_id: int(count) for task_id, count in (await session.execute(stmt)).all()}
         return {task_id: counts.get(task_id, 0) for task_id in ids}

@@ -563,3 +563,5 @@ verify_native_launch_for_receiver resolves the exact pending target from native 
 
 
 Native dispatch poll delegates to poll_envelopes. Scoped launch requires the strict pending-owner SQL read before and after exact pool reservation; general post-adoption control inspection must never sign a launch. Scoped get/report return assignment/control scalars only, with report projections compared before the existing full-snapshot pool CAS. Scoped wait/refuse remain closed until lifecycle integration.
+
+Scoped Scheduler HTTP create/list/detail use `workspace_resource_scope` with native permissions. Resource status/count reads authorize current live workspace/private parents and original occurrence identity before aggregation; they never renew the stored task execution snapshot. History/tool listing/management/manual and full lifecycle remain withheld pending separate integration.

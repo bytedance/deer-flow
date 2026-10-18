@@ -22,6 +22,7 @@ from app.gateway.deps import (
 )
 from app.gateway.scheduled_task_errors import active_occurrence_error, active_occurrence_message, repository_error, scheduler_error
 from app.gateway.scheduled_task_validation import prepare_resume_updates, validate_scheduled_task_create, validate_scheduled_task_update
+from app.gateway.workspaces.dependencies import workspace_resource_scope
 from app.scheduler.service import TASK_CHANGED_ERROR
 from deerflow.config.agents_config import AGENT_NAME_PATTERN, load_agent_config
 from deerflow.persistence.scheduled_tasks import ActiveScheduledTaskMutationConflict, ScheduledTaskQuotaExceeded
@@ -198,6 +199,7 @@ async def preview_cron_schedule(request: Request, body: CronPreviewRequest):
 
 
 @router.get("/scheduled-tasks")
+@workspace_resource_scope()
 @require_permission("threads", "read")
 async def list_scheduled_tasks(request: Request):
     repo = get_scheduled_task_repo(request)
@@ -208,6 +210,7 @@ async def list_scheduled_tasks(request: Request):
 
 
 @router.post("/scheduled-tasks")
+@workspace_resource_scope()
 @require_permission("threads", "write")
 @require_permission("runs", "create")
 async def create_scheduled_task(request: Request, body: ScheduledTaskCreateRequest):
@@ -247,6 +250,7 @@ async def create_scheduled_task(request: Request, body: ScheduledTaskCreateReque
 
 
 @router.get("/scheduled-tasks/{task_id}")
+@workspace_resource_scope()
 @require_permission("threads", "read")
 async def get_scheduled_task(task_id: str, request: Request):
     repo = get_scheduled_task_repo(request)

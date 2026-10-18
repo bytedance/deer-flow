@@ -47,6 +47,7 @@ def main():
             "native-scheduler-main",
             "native-scheduler-boundaries",
             "native-schema-compatibility",
+            "native-scheduler-resource-http",
         ),
         default="revocation",
     )
@@ -149,6 +150,8 @@ def main():
         )
     if args.suite == "native-schema-compatibility":
         tests = "tests/test_workspace_execution_wire.py::test_known_native_schema_starts_scoped_b_and_control[postgres]"
+    if args.suite == "native-scheduler-resource-http":
+        tests = "tests/test_workspace_native_scheduler.py::test_scoped_scheduler_http_create_list_detail_use_current_resource_scope[postgres]"
     rendered = rendered.replace("@@TEST_PATHS@@", tests)
     if "@@" in rendered:
         parser.error("unresolved pipeline marker")

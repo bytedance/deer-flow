@@ -306,3 +306,131 @@ def test_scoped_scheduler_occurrence_keeps_original_workspace(native_engine, exe
         _in_workspace_case(native_engine, scenario, owner_user_id=owner_user_id)
     finally:
         ledger.engine.dispose()
+
+
+@pytest.mark.parametrize("executor_engine", ["postgres"], indirect=True)
+def test_scoped_scheduler_http_create_list_detail_use_current_resource_scope(native_engine, executor_engine, monkeypatch, tmp_path):  # noqa: F811
+    from fastapi import FastAPI
+    from sqlalchemy import select, update
+
+    import deerflow.config as config_facade
+    from app.gateway import deps
+    from app.gateway.auth import config as auth_config
+    from app.gateway.auth import create_access_token
+    from app.gateway.auth.local_provider import LocalAuthProvider
+    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+    from app.gateway.auth_middleware import AuthMiddleware
+    from app.gateway.csrf_middleware import CSRFMiddleware
+    from app.gateway.routers import scheduled_tasks
+    from app.scheduler.service import ScheduledTaskService
+    from deerflow.authz.workspace import get_current_workspace
+    from deerflow.config import app_config
+    from deerflow.config.app_config import AppConfig
+    from deerflow.persistence.run.sql import RunRepository
+    from deerflow.persistence.scheduled_task_runs.sql import ScheduledTaskRunRepository
+    from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
+    from deerflow.persistence.scheduled_tasks.sql import ScheduledTaskRepository
+    from deerflow.persistence.thread_meta import ThreadMetaRepository
+    from deerflow.persistence.workspaces.model import WorkspaceMembershipRow
+
+    assert native_engine.dialect.name == executor_engine.dialect.name == "postgresql"
+    owner = "11111111-1111-4111-8111-111111111111"
+    configuration = AppConfig.model_validate(
+        {
+            "models": [],
+            "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+            "scheduler": {"enabled": True},
+            "authorization": {"enabled": True, "provider": {"use": "deerflow.authz.rbac:RbacAuthorizationProvider", "config": {"roles": {"user": {"routes": {"allow": "*"}}}}}},
+        }
+    )
+    monkeypatch.setattr(config_facade, "get_app_config", lambda: configuration)
+    monkeypatch.setattr(app_config, "get_app_config", lambda: configuration)
+    monkeypatch.setattr(deps, "get_app_config", lambda: configuration)
+    monkeypatch.setattr(auth_config, "_auth_config", auth_config.AuthConfig(jwt_secret="synthetic-scheduler-resource-http-key-64-characters-for-test-only!!"))
+    monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+
+    async def scenario(case):
+        threads = ThreadMetaRepository(case.sf, workspace_required=True)
+        parent = await threads.create("scheduler-resource-parent", user_id=owner)
+        users = SQLiteUserRepository(case.sf)
+        monkeypatch.setattr(deps, "_cached_repo", users)
+        monkeypatch.setattr(deps, "_cached_local_provider", LocalAuthProvider(repository=users))
+        runs = RunRepository(case.sf, workspace_required=True)
+        tasks = ScheduledTaskRepository(case.sf, run_repository=runs, workspace_required=True)
+        occurrences = ScheduledTaskRunRepository(case.sf, run_repository=runs, workspace_required=True)
+
+        async def no_launch(**kwargs):
+            raise AssertionError("Resource requests must not dispatch native execution")
+
+        foreground = ScheduledTaskService(
+            task_repo=tasks, task_run_repo=occurrences, launch_run=no_launch, poll_interval_seconds=1, lease_seconds=120, max_concurrent_runs=1, dispatch_enabled=False, multi_instance=True, own_stop_available=False
+        )
+        app = FastAPI()
+        app.state.workspace_service = case.service
+        app.state.scheduled_task_repo, app.state.scheduled_task_run_repo = tasks, occurrences
+        app.state.scheduled_task_service, app.state.thread_store = foreground, threads
+        app.include_router(scheduled_tasks.router)
+        app.add_middleware(AuthMiddleware)
+        app.add_middleware(CSRFMiddleware)
+        await foreground.start()
+        try:
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost", headers={"Origin": "http://localhost", "X-CSRF-Token": "synthetic-scheduler-csrf"}) as client:
+                client.cookies.set("access_token", create_access_token(owner))
+                client.cookies.set("csrf_token", "synthetic-scheduler-csrf")
+                selected = {"X-Deerflow-Workspace": case.original.workspace_id}
+                response = await client.post(
+                    "/api/scheduled-tasks",
+                    headers=selected,
+                    json={
+                        "thread_id": parent["thread_id"],
+                        "context_mode": "reuse_thread",
+                        "title": "Original private follow-up",
+                        "prompt": "Prepare the private follow-up",
+                        "schedule_type": "once",
+                        "schedule_spec": {"run_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat()},
+                        "timezone": "UTC",
+                    },
+                )
+                assert response.status_code == 200, response.text
+                created = response.json()
+                task_id = created["id"]
+                assert created["active_run_status"] is None and created["automatic_runs_used"] == 0
+                async with case.sf() as session:
+                    task = await session.get(ScheduledTaskRow, task_id)
+                    original_snapshot = dict(task.workspace_context_json)
+                    assert original_snapshot == asdict(case.original) and task.thread_incarnation == parent["incarnation"]
+                # Use the actual due-claim/foreground path to persist a queued
+                # occurrence; no control poller or native Run is started.
+                queue_at = datetime.now(UTC) + timedelta(hours=2)
+                due = await tasks.claim_due_tasks(now=queue_at, lease_owner=foreground._lease_owner, lease_seconds=120, limit=1)
+                assert len(due) == 1 and due[0]["id"] == task_id
+                queued = await foreground.dispatch_task(due[0], now=queue_at, trigger="scheduled")
+                assert queued["outcome"] == "queued" and queued["run_id"] is None
+                for _ in range(2):
+                    listed = await client.get("/api/scheduled-tasks", headers=selected)
+                    detail = await client.get("/api/scheduled-tasks/" + task_id, headers=selected)
+                    assert listed.status_code == detail.status_code == 200
+                    assert [item["id"] for item in listed.json()] == [task_id]
+                    assert detail.json()["id"] == task_id and detail.json()["automatic_runs_used"] == 0
+                    assert detail.json()["active_run_status"] == listed.json()[0]["active_run_status"] == "queued"
+                    assert listed.json()[0]["automatic_runs_used"] == 0
+                    async with case.sf() as session, session.begin():
+                        await session.execute(
+                            update(WorkspaceMembershipRow).where(WorkspaceMembershipRow.workspace_id == case.original.workspace_id, WorkspaceMembershipRow.user_id == owner).values(version=WorkspaceMembershipRow.version + 1)
+                        )
+                other = {"X-Deerflow-Workspace": case.other.workspace_id}
+                listed = await client.get("/api/scheduled-tasks", headers=other)
+                hidden = await client.get("/api/scheduled-tasks/" + task_id, headers=other)
+                assert listed.status_code == 200 and listed.json() == []
+                assert hidden.status_code == 404
+                assert (await client.get("/api/scheduled-tasks/" + task_id, headers=selected)).status_code == 200
+                async with case.sf() as session:
+                    stored = await session.get(ScheduledTaskRow, task_id)
+                    assert stored.workspace_context_json == original_snapshot and stored.thread_incarnation == parent["incarnation"]
+                    assert stored.run_count == 0 and stored.last_run_id is None
+                    assert len((await session.scalars(select(ScheduledTaskRow).where(ScheduledTaskRow.workspace_id == case.original.workspace_id))).all()) == 1
+                assert get_current_workspace() == case.original
+        finally:
+            await foreground.stop()
+
+    _in_workspace_case(native_engine, scenario, owner_user_id=owner)

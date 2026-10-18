@@ -1,4 +1,4 @@
-Scheduler main #123 verified; full Scheduler/M4 acceptance remains open.
+Scheduler main #123, boundaries #125 and HTTP create/list/detail #130 verified; full Scheduler/M4 acceptance remains open.
 
 Implemented for this once/conversation-origin/fresh main:
 - Task create captures current live workspace/user context and pins real origin (and fixed reuse parent when present); context is immutable.
@@ -12,8 +12,8 @@ Implemented for this once/conversation-origin/fresh main:
 - Scoped event writes and reads carry workspace/origin nonce and private parent checks; legacy rows/joins/ID mutations are NULL-isolated.
 
 Withheld / not accepted:
-- Scoped management mutations, public status/history/list and manual trigger are explicitly denied at the reviewed repository/service entries. get alone uses current-resource authority; it never renews original execution context.
-- Task create primitive is scoped, but full HTTP/tool create response flow is not accepted: their response enrichment calls withheld status/history methods. No full transport/UI Scheduler claim is made by this repo/service main.
+- HTTP create/list/detail are scoped and verified in #130. History/thread relations/tool listing, management and manual trigger remain withheld. Current resource reads never renew original execution context.
+- HTTP task creation response enrichment is verified in #130; complete tool/UI and lifecycle acceptance remains open.
 - Page fresh with no origin and reuse branches have identity handling but no runtime acceptance in this single story.
 - Scheduled C->B->C transfer/own-stop and installed dependency_wait_reconciler path are explicitly withheld. The main uses no async dependency reconciler and does not represent the complete installed host.
 - Expired scoped queued work is scanned and explicitly rejected for missing native timeout/NoStart control integration. Unknown/unbound launch recovery remains held.
