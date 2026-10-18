@@ -1002,6 +1002,15 @@
 
 ### 修复
 
+- **浏览器：** `browser_screenshot` 不再替换线程 outputs 目录中已存在的文件。此前以
+  `report.png` 保存的截图会覆盖用户自己的 `report.png`、更早的截图，或同一秒内生成的
+  另一张默认命名截图；现在会像 `web_capture` 一样改用下一个空闲名称（`report-1.png`、
+  `report-2.png`……），工具结果会报告实际使用的名称。完整截图通过硬链接发布到目标名称，
+  因此并发占用的名称会被跳过而不是被替换，最终名称也不会暴露写了一半的文件。与 Gateway
+  上传相同，outputs 目录需要支持硬链接；不支持时工具会报错，而不会覆盖已有文件。发布前
+  被替换的暂存截图（例如换成指向宿主机文件的符号链接）绝不会被链接到 outputs，工具会
+  报错。 ([#6913])
+
 - **llm：** 流式响应已返回 `200` 之后才在流内报告的 provider 错误，现在会像以 HTTP
   状态码返回的同一错误一样重试。为了用 SSE keepalive 维持慢请求而提前返回 `200` 的
   OpenAI 兼容网关，会把之后发生的 504 作为 SSE `error` 事件发出；openai SDK 将其抛出为
@@ -9396,5 +9405,6 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6876]: https://github.com/bytedance/deer-flow/pull/6876
 [#6897]: https://github.com/bytedance/deer-flow/pull/6897
 [#6909]: https://github.com/bytedance/deer-flow/pull/6909
+[#6913]: https://github.com/bytedance/deer-flow/pull/6913
 [#6930]: https://github.com/bytedance/deer-flow/pull/6930
 [#6991]: https://github.com/bytedance/deer-flow/pull/6991

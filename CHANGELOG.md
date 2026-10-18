@@ -1247,6 +1247,19 @@ This release closes that milestone with **621 merged pull requests**.
 
 ### Fixed
 
+- **browser:** `browser_screenshot` no longer replaces a file that already
+  exists in the thread's outputs directory. A screenshot saved as
+  `report.png` used to overwrite the user's own `report.png`, an earlier
+  capture, or another default-named capture taken in the same second; it now
+  takes the next free name (`report-1.png`, `report-2.png`, ...) like
+  `web_capture`, and the tool result reports the name actually used. The
+  complete capture is hard-linked onto the name, so a name taken concurrently
+  is skipped rather than replaced and the final name never shows a partial
+  file. Like Gateway uploads, the outputs directory needs hard-link support;
+  without it the tool reports an error instead of overwriting. A staged
+  capture swapped before publication, for example for a symlink to a host
+  file, is never linked into outputs; the tool reports an error. ([#6913])
+
 - **llm:** A provider error that arrives inside a streaming response that has
   already returned `200` is now retried like the same error sent as an HTTP
   status. An OpenAI-compatible gateway that answers `200` early, to keep slow
@@ -11785,5 +11798,6 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6876]: https://github.com/bytedance/deer-flow/pull/6876
 [#6897]: https://github.com/bytedance/deer-flow/pull/6897
 [#6909]: https://github.com/bytedance/deer-flow/pull/6909
+[#6913]: https://github.com/bytedance/deer-flow/pull/6913
 [#6930]: https://github.com/bytedance/deer-flow/pull/6930
 [#6991]: https://github.com/bytedance/deer-flow/pull/6991
