@@ -1395,16 +1395,11 @@ async def run_agent(
                         graph_input["goal"] = Overwrite(copy.deepcopy(current_values.get("goal")))
                     graph_input["goal_outcome"] = None
 
-        # Capture the effective (resolved) model name from the agent's metadata.
-        # _resolve_model_name in agent.py may return the default model if the
-        # requested name is not in the allowlist — this update ensures the
-        # persisted model_name reflects the actual model used.
-        if record.model_name is not None:
-            resolved = getattr(agent, "metadata", {}) or {}
-            if isinstance(resolved, dict):
-                effective = resolved.get("model_name")
-                if effective and effective != record.model_name:
-                    await run_manager.update_model_name(record.run_id, effective)
+        # Persist the model assembly resolved — the default when the request
+        # named none, or a fallback when the requested model is unavailable —
+        # so the stored model_name reflects the actual model used (#3109).
+        if effective_model and effective_model != record.model_name:
+            await run_manager.update_model_name(record.run_id, effective_model)
 
         # 4. Attach checkpointer and store
         if checkpointer is not None:

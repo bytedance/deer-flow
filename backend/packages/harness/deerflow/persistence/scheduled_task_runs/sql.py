@@ -876,6 +876,13 @@ class ScheduledTaskRunRepository:
                 row = await session.get(ScheduledTaskRunRow, row_id, with_for_update=True)
                 if row is None or row.status != "launching":
                     continue
+                # The scan only identifies candidates. While waiting for the
+                # parent lock, the old launch can requeue and a manual trigger
+                # can claim this same occurrence again, even under the same
+                # lease owner. Revalidate expiry under the write lock before
+                # clearing any claim or reconciling its underlying run.
+                if _lease_is_alive(row.lease_expires_at, now=now, grace_seconds=0):
+                    continue
                 candidate = await self._find_underlying_run(session, row, task)
                 row.lease_owner = None
                 row.lease_expires_at = None

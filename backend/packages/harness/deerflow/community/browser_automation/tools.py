@@ -17,12 +17,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import logging
+import os
 import re
+import stat
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
+from uuid import uuid4
 
 from langchain.tools import InjectedToolCallId, tool
 from langchain_core.messages import ToolMessage
@@ -35,6 +39,7 @@ from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.constants import BROWSER_FRAMES_DIRNAME
 from deerflow.tools.types import Runtime
 from deerflow.utils.atomic_write import publish_bytes_atomically as _publish_bytes_atomically
+from deerflow.utils.output_names import output_name_candidates
 
 from .session import BrowserSession, BrowserSessionManager, PageSnapshot, ScreenshotType, get_browser_session_manager
 
@@ -48,6 +53,8 @@ _OUTPUTS_VIRTUAL_PREFIX = f"{VIRTUAL_PATH_PREFIX}/outputs"
 _BROWSER_FRAMES_DIRNAME = BROWSER_FRAMES_DIRNAME
 _FRAMES_VIRTUAL_PREFIX = f"{_OUTPUTS_VIRTUAL_PREFIX}/{_BROWSER_FRAMES_DIRNAME}"
 _SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+# Without no-follow support, os.link may follow a symlink at the staged name.
+_LINK_CAN_SKIP_SYMLINKS = os.link in os.supports_follow_symlinks
 
 
 @dataclass(frozen=True)
@@ -440,6 +447,64 @@ def _write_screenshot(outputs_path: Path, name: str, content: bytes) -> str:
     return name
 
 
+def _publish_screenshot_no_overwrite(outputs_path: Path, name: str, content: bytes) -> str:
+    """Publish *content* under *name*, or its first free ``-1``, ``-2``, ... variant.
+
+    The outputs directory also holds the user's own deliverables, so a
+    screenshot never replaces an existing file. The complete capture is staged
+    under a hidden, exclusively created sibling (``0666 & ~umask``, like
+    ``Path.write_bytes``), then hard-linked onto each candidate name: the
+    ``os.link`` is the whole no-overwrite guard, failing with
+    :class:`FileExistsError` when the name exists as anything (a file, a
+    symlink, a concurrent capture), so no name is checked before it is claimed.
+    The final name never shows a partial capture. Staging shares the outputs
+    directory, so the link is same-filesystem; like Gateway uploads, outputs
+    need hard-link support and other link failures propagate.
+
+    The sandbox can write ``outputs/`` too, so it could swap the staged name for
+    a symlink to a host file before the link. The link does not follow symlinks
+    where supported, and the published name must be the regular-file inode
+    written here; anything else is removed and the capture fails. The staged
+    descriptor stays open until that check: an unlinked but open inode cannot be
+    freed, so a swapped-in file can never reuse its number (Linux filesystems
+    reuse a freed inode number at once) and pass as the capture.
+    """
+    outputs_path.mkdir(parents=True, exist_ok=True)
+    staged = outputs_path / f".{name}.{uuid4().hex}.tmp"
+    fd = os.open(staged, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0), 0o666)
+    try:
+        try:
+            handle = os.fdopen(fd, "wb")
+        except BaseException:
+            os.close(fd)
+            raise
+        with handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+            staged_stat = os.fstat(handle.fileno())
+            for candidate in output_name_candidates(name):
+                destination = outputs_path / candidate
+                try:
+                    if _LINK_CAN_SKIP_SYMLINKS:
+                        os.link(staged, destination, follow_symlinks=False)
+                    else:
+                        os.link(staged, destination)
+                except FileExistsError:
+                    continue
+                published = os.lstat(destination)
+                if not stat.S_ISREG(published.st_mode) or not os.path.samestat(published, staged_stat):
+                    destination.unlink(missing_ok=True)
+                    raise OSError(f"Staged browser screenshot changed before publication: {staged.name}")
+                return candidate
+        raise FileExistsError(errno.EEXIST, "No free screenshot name", str(outputs_path / name))
+    finally:
+        try:
+            staged.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Failed to remove staged browser screenshot: %s", staged, exc_info=True)
+
+
 @tool("browser_screenshot", parse_docstring=True)
 async def browser_screenshot_tool(
     runtime: Runtime,
@@ -454,7 +519,7 @@ async def browser_screenshot_tool(
     stateless page load.
 
     Args:
-        filename: Optional output filename (extension is forced to .png).
+        filename: Optional output filename (extension is forced to .png). An existing file is never replaced; the screenshot takes the next free name such as report-1.png.
         full_page: Capture the full scrollable page instead of just the viewport.
     """
     try:
@@ -464,7 +529,7 @@ async def browser_screenshot_tool(
         with _resolve_session(runtime, "browser_screenshot") as session:
             content = await session.screenshot_bytes(full_page=full_page)
             name = _safe_screenshot_name(filename)
-            final_name = await asyncio.to_thread(_write_screenshot, outputs_path, name, content)
+            final_name = await asyncio.to_thread(_publish_screenshot_no_overwrite, outputs_path, name, content)
         virtual_path = f"{_OUTPUTS_VIRTUAL_PREFIX}/{final_name}"
         return Command(
             update={
