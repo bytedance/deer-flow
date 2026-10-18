@@ -17,6 +17,118 @@ from deerflow.sandbox.tools import grep_tool
 
 
 @pytest.fixture
+def mounted_search(tmp_path, monkeypatch):
+    from deerflow.config import paths as paths_module
+    from deerflow.config.sandbox_config import SandboxConfig, VolumeMountConfig
+    from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
+
+    monkeypatch.setattr(paths_module, "_paths", paths_module.Paths(tmp_path / "runtime"))
+    source = tmp_path / "private-host-mount"
+    source.mkdir()
+    target = source / "secret.txt"
+    target.write_bytes(b"needle\n")
+    config = SimpleNamespace(
+        skills=SimpleNamespace(container_path="/mnt/skills", get_skills_path=lambda: tmp_path / "skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
+        sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider", mounts=[VolumeMountConfig(host_path=str(source), container_path="/mnt/mounts/data")]),
+    )
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    provider = LocalSandboxProvider()
+    sandbox = provider.get(provider.acquire(None))
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda _: sandbox)
+    runtime = SimpleNamespace(state={"sandbox": {"sandbox_id": "local"}, "thread_data": {}}, context={"thread_id": "mounted-search"})
+
+    def invoke(single=False):
+        path = "/mnt/mounts/data" + ("/secret.txt" if single else "")
+        return grep_tool.func(runtime=runtime, path=path, pattern="needle")
+
+    return target, sandbox, invoke
+
+
+@pytest.mark.parametrize("stage", ["sample", "text", "scan"])
+@pytest.mark.parametrize("error_number", [errno.EACCES, errno.EIO])
+def test_grep_custom_mount_errors_use_virtual_paths(mounted_search, monkeypatch, stage, error_number):
+    target, sandbox, invoke = mounted_search
+    original_open = Path.open
+
+    def fail_open(path, mode="r", *args, **kwargs):
+        if path == target and (mode == "rb") == (stage == "sample"):
+            raise OSError(error_number, "read failed", str(path))
+        return original_open(path, mode, *args, **kwargs)
+
+    def fail_walk(root, *, onerror):
+        onerror(OSError(error_number, "scan failed", str(root)))
+        return iter(())
+
+    if stage == "scan":
+        monkeypatch.setattr("deerflow.sandbox.search.os.walk", fail_walk)
+    else:
+        monkeypatch.setattr(Path, "open", fail_open)
+    expected = "/mnt/mounts/data" + ("" if stage == "scan" else "/secret.txt")
+    result = invoke()
+    assert result.startswith("Error:"), result
+    assert expected in result
+    assert "private-host-mount" not in result
+    with pytest.raises(OSError) as caught:
+        sandbox.grep("/mnt/mounts/data", "needle")
+    assert caught.value.errno == error_number
+    assert caught.value.filename == expected
+
+
+@pytest.mark.skipif(os.name == "nt" or not hasattr(os, "geteuid") or os.geteuid() == 0, reason="requires non-root POSIX permissions")
+@pytest.mark.parametrize("single", [False, True])
+def test_grep_custom_mount_real_permission_failure(mounted_search, single):
+    target, _, invoke = mounted_search
+    target.chmod(0)
+    try:
+        with pytest.raises(PermissionError):
+            target.read_bytes()
+        result = invoke(single)
+        assert result.startswith("Error: Permission denied:"), result
+        assert "/mnt/mounts/data/secret.txt" in result
+        assert "private-host-mount" not in result
+    finally:
+        target.chmod(0o600)
+    result = invoke(single)
+    assert "Found 1 matches" in result
+    assert "/mnt/mounts/data/secret.txt" in result
+    assert "private-host-mount" not in result
+
+
+@pytest.mark.parametrize("with_filenames", [False, True])
+def test_grep_custom_mount_preserves_oserror_details(mounted_search, monkeypatch, with_filenames):
+    target, sandbox, _ = mounted_search
+    error = OSError(errno.EIO, "read failed", str(target), None, str(target.parent / "other's.txt")) if with_filenames else OSError(errno.EIO, "read failed")
+
+    def fail_search(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr("deerflow.sandbox.local.local_sandbox.find_grep_matches", fail_search)
+    with pytest.raises(OSError) as caught:
+        sandbox.grep("/mnt/mounts/data", "needle")
+    assert type(caught.value) is type(error)
+    assert caught.value.errno == error.errno
+    assert caught.value.strerror == error.strerror
+    if with_filenames:
+        assert caught.value.filename == "/mnt/mounts/data/secret.txt"
+        assert caught.value.filename2 == "/mnt/mounts/data/other's.txt"
+        assert "private-host-mount" not in str(caught.value)
+    else:
+        assert caught.value is error
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires real Windows exclusive-share semantics")
+@pytest.mark.parametrize("single", [False, True])
+def test_grep_custom_mount_real_windows_sharing_failure(mounted_search, single):
+    target, _, invoke = mounted_search
+    with _exclusive_windows_file(target):
+        result = invoke(single)
+        assert result.startswith("Error: Permission denied:"), result
+        assert "/mnt/mounts/data/secret.txt" in result
+        assert "private-host-mount" not in result
+    assert "Found 1 matches" in invoke(single)
+
+
+@pytest.fixture
 def search_file(tmp_path, monkeypatch):
     for name in ("workspace", "uploads", "outputs"):
         (tmp_path / name).mkdir()
