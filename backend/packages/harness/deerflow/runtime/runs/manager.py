@@ -1782,6 +1782,7 @@ class RunManager:
         model_name: str | None = None,
         user_id: str | None = None,
         idempotency_key: str | None = None,
+        scheduled_admission=None,
     ) -> RunRecord:
         """Atomically admit a normal agent run for a thread."""
         return await self._admit_thread_operation(
@@ -1795,6 +1796,7 @@ class RunManager:
             model_name=model_name,
             user_id=user_id,
             idempotency_key=idempotency_key,
+            scheduled_admission=scheduled_admission,
         )
 
     async def _close_cancelled_admission(self, record: RunRecord) -> None:
@@ -1855,6 +1857,7 @@ class RunManager:
         model_name: str | None = None,
         user_id: str | None = None,
         idempotency_key: str | None = None,
+        scheduled_admission=None,
     ) -> RunRecord:
         """Atomically check for inflight runs and create a new one.
 
@@ -1920,6 +1923,8 @@ class RunManager:
                             raise WorkspaceAccessDenied("Run idempotency workspace authorization changed")
                     elif existing.workspace_id is not None:
                         raise WorkspaceAccessDenied("Run idempotency requires workspace authority")
+                    if scheduled_admission is not None:
+                        await self._store.validate_scheduled_admission(scheduled_admission, run_id=existing.run_id, workspace_context=workspace_context)
                     existing.idempotency_reused = True
                     return existing
 
@@ -1982,6 +1987,8 @@ class RunManager:
                         "created_at": now,
                         "grace_seconds": grace_seconds,
                     }
+                    if scheduled_admission is not None:
+                        create_kwargs["scheduled_admission"] = scheduled_admission
                     if idempotency_key is not None:
                         create_kwargs["idempotency_key"] = idempotency_key
                     if workspace_context is not None:
@@ -1993,6 +2000,8 @@ class RunManager:
                             lambda: self._store.create_thread_operation_atomic(**create_kwargs),
                         )
                     except RunIdempotencyConflict as exc:
+                        if scheduled_admission is not None:
+                            await self._store.validate_scheduled_admission(scheduled_admission, run_id=exc.existing["run_id"], workspace_context=workspace_context)
                         return reuse_idempotent_run(exc)
                     except (ConflictError, WorkspaceAccessDenied):
                         raise

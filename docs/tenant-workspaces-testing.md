@@ -682,3 +682,9 @@ Jenkins `deerflow-tenant-execution-m4-sql`：#118 主流程 1 passed / 19.91s；
 ### 已派发后撤权的通知收尾
 
 #120 复现滞留，#121 单条 PostgreSQL 回归通过（19.78s），Ruff/50 文件通过。`--suite native-dependency-dispatched-revocation` 只运行 `[dispatched_member-postgres]`。用例先通过真实通知派发，再撤权，调用实际 service `run_once` 两次确认幂等收尾；同时禁止业务读取、checkpoint 访问和再次启动。第二个 Run 保持 pending，容量保持 1。证据：`tenant-workspaces-evidence/native-dispatched-control-121.json`。不重复主流程或扩展数据库矩阵。
+
+## Scheduler 原工作区主干（#123）
+
+`--suite native-scheduler-main` 精确选择 `tests/test_workspace_native_scheduler.py::test_scoped_scheduler_occurrence_keeps_original_workspace[postgres]`。#122 真实创建写NULL空间失败，#123 单次主干通过（19.61s），Ruff/61文件通过。沿用既有上海隔离 PostgreSQL、native工具镜像与资源限额；不运行本地runtime或多数据库矩阵。证据见 `tenant-workspaces-evidence/native-scheduler-123.json`。
+
+真实链：会话来源任务创建→持久队列→切换UI空间→control service dispatch→真实launcher/start_run/原子Run关联→native pool/receiver/graph→真实completion→原会话事件。模型图确定性、无sandbox、控制传输ASGI。必须以 `native-scheduler-entry-matrix.md` 判断完整Scheduler剩余入口，不以此单主干推断全包完成。必要撤权/租约检查随后单独选择。

@@ -1,0 +1,79 @@
+{
+  "red": {
+    "build": 122,
+    "result": "FAILURE",
+    "test_seconds": 16.08,
+    "first_error": "Bound Scheduler create lost its original workspace: workspace_id None"
+  },
+  "green": {
+    "build": 123,
+    "result": "SUCCESS",
+    "duration_ms": 39867,
+    "tests": "1 passed in 19.61s",
+    "static": "Ruff check passed; 61 files formatted"
+  },
+  "scope": "One PostgreSQL conversation-origin/fresh once occurrence through real create/queue/scheduler/launcher/start_run/native pool/receiver/graph/completion/origin event, deterministic no sandbox. Other scoped entry/IM/dependency/recovery domains remain withheld or unaccepted.",
+  "files": {
+    "/private/tmp/m4-native-scheduler-green-20261018-11-source.tar.gz": "38365c971a1477aed246aa747b2f10fd4460cc750e2b665f1de334329374246f",
+    "/private/tmp/Jenkinsfile.m4-native-scheduler-green-20261018-11": "8a2b3588d12c5b99a304315ea35f103b15c6081886b6c5314bfcd8d4f7a5913f",
+    "/private/tmp/m4-native-scheduler-green-20261018-11.log": "11041be1480c0e4f8666c1368eb701db817ee27c628cd0cc8dda5f490f3958d1",
+    "/private/tmp/native-scheduler-main-review-ready.patch": "4f6525be7d04c0a1f9c018114f7db2145a40c039b90ccaad410d20797fc268f3",
+    "/private/tmp/native-scheduler-main-review-ready-files.json": "ffed4dbd410b3889ac317e5376beb9b6c6e3c155b369814eb3b34e3e62e85a88",
+    "/private/tmp/native-scheduler-build123-cleanup.json": "f38f8497da47d3f2303b71d46570ab0825bb5c42e81b32b6e3e47485304e0650"
+  },
+  "source_matches_current_and_review_manifest": true,
+  "source_files": {
+    "backend/app/gateway/deps.py": "42f074d0f54a9048699d124cf275f9da60d43e66f0901e12a22db7b57c1b01ed",
+    "backend/app/gateway/services.py": "7c5a23238155824ef5b2e006b8fef174f98fdc08dd9752f4f88eaebedd5751bf",
+    "backend/app/scheduler/service.py": "31037c3bbdef9ff67fb9520fb22d32cec54fb7c91ea66cbd158eda9ccf18928b",
+    "backend/packages/harness/deerflow/persistence/run/sql.py": "87717ccf9608ac47fb02d893e744528625c0a0481de760a2f94c3b6221313abc",
+    "backend/packages/harness/deerflow/persistence/scheduled_task_events/model.py": "95c0b9a4d2da4739bb18533aa26318d82971a75c3c99f6dcf56f88bf7854e099",
+    "backend/packages/harness/deerflow/persistence/scheduled_task_events/sql.py": "aba19af451068db1eb87dc02e1741208b7e2417059b09458e06c71eaf90c3c6c",
+    "backend/packages/harness/deerflow/persistence/scheduled_task_runs/model.py": "e8d3e00b1f74e84a7d712af6af4e6f311d54869764bac139bfe35c9f67e2ce8b",
+    "backend/packages/harness/deerflow/persistence/scheduled_task_runs/sql.py": "80a39eeef2c1fcb503cb4d8c5ea155beafef6c134bcbec4912ca0c54287fab79",
+    "backend/packages/harness/deerflow/persistence/scheduled_tasks/model.py": "73e7a1a5bfc92cc3d957ffb9a1892a5d1e30e761a137de0412d4c5a137154dba",
+    "backend/packages/harness/deerflow/persistence/scheduled_tasks/sql.py": "c18dcd451a04b69a6797ee0fe274cbc1a0dec4905e8ed2d5c7d9790ca0cd47b2",
+    "backend/packages/harness/deerflow/runtime/runs/manager.py": "896aeb57ec297611f15cd8d19daef3c33b8c4bf08503ca62ba59017fb0527dd8",
+    "examples/ecs-native/deploy/Jenkinsfile.tenant-run-control.in": "f26656a21cd120380eeed11a0a780a2b197d1f3e6d573cc0c4375b45bac2649f",
+    "scripts/render_tenant_run_control_pipeline.py": "3440b8ca34249c824f7673c94143737880b8b00e46fed1f844d0a321708ebc23",
+    "backend/packages/harness/deerflow/persistence/migrations/versions/0041_scheduler_workspace_identity.py": "20892631bb7eae79d468b2b2dd2d9578df07697880371f1282c2dca76aa657ea",
+    "backend/packages/harness/deerflow/persistence/scheduled_task_runs/scope.py": "fc0962474c252b5377c1f10e2aa2679c155236bf7d024a405e2070b9d5b0628d",
+    "backend/tests/test_workspace_native_scheduler.py": "3fdd6b692e432a9d4c22b5e8dfae294d2ca481f88fe89c787970d7f49febfeea"
+  },
+  "cleanup": {
+    "build": 123,
+    "read_only": true,
+    "cleanup": [
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-123",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-123"
+      },
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-123-db",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-123-db"
+      },
+      {
+        "kind": "network",
+        "name": "deerflow-tenant-execution-m4-sql-123",
+        "exit": 1,
+        "stderr": "Error response from daemon: network deerflow-tenant-execution-m4-sql-123 not found"
+      }
+    ]
+  },
+  "job": "deerflow-tenant-execution-m4-sql",
+  "root_archive_comparison": "All 16 reviewed files independently matched to #123 source archive",
+  "native_revision": "0041_scheduler_workspace",
+  "remaining": [
+    "Necessary queued withdrawal and pre-insert lease takeover boundaries",
+    "Scoped HTTP/tool full replies, lists/status/history/management/manual dispatch",
+    "Page fresh/reuse runtime acceptance",
+    "Installed scheduled dependency reconciler, MCP continuation/own-stop",
+    "Expired queue and unknown launch recovery/control",
+    "Workspace-qualified IM delivery and full lifecycle",
+    "Physical B/two-host story and remaining M0–M11 gates"
+  ]
+}

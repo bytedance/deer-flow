@@ -1930,6 +1930,7 @@ async def start_run(
     idempotency_key: str | None = None,
     require_existing_thread: bool = False,
     scheduled_task_runtime: Mapping[str, Any] | None = None,
+    scheduled_admission=None,
     dependency_continuation: Mapping[str, Any] | None = None,
 ) -> RunRecord:
     """Create a RunRecord and launch the background agent task.
@@ -2287,6 +2288,7 @@ async def start_run(
                     model_name=model_name,
                     user_id=owner_user_id,
                     idempotency_key=idempotency_key,
+                    **({"scheduled_admission": scheduled_admission} if scheduled_admission is not None else {}),
                 )
 
                 if record.idempotency_reused:
@@ -2358,6 +2360,7 @@ async def launch_scheduled_thread_run(
     metadata: dict[str, Any] | None = None,
     origin: dict[str, Any] | None = None,
     title: str | None = None,
+    scheduled_admission=None,
 ) -> dict[str, Any]:
     """Start one scheduled occurrence as an internal run.
 
@@ -2366,6 +2369,23 @@ async def launch_scheduled_thread_run(
     ``SCHEDULED_ORIGIN_KEY`` metadata the run thread renders. ``title``
     pre-sets a fresh run thread's title, so no title is generated.
     """
+    from deerflow.authz.workspace import get_current_workspace, reset_current_workspace, set_current_workspace
+    from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
+
+    if request is None and app is None:
+        raise ValueError("launch_scheduled_thread_run requires request or app")
+    target_app = app if request is None else request.app
+    occurrences = getattr(target_app.state, "scheduled_task_run_repo", None)
+    context = None
+    if getattr(occurrences, "workspace_scope_required", False):
+        authority = await occurrences.resolve_launch_authority(scheduled_admission)
+        if authority["thread_id"] != thread_id or authority["user_id"] != owner_user_id:
+            raise WorkspaceAccessDenied("Scheduled launcher differs from original occurrence")
+        if (metadata or {}).get("scheduled_task_id") != scheduled_admission.task_id or (metadata or {}).get("scheduled_task_run_id") != scheduled_admission.occurrence_id:
+            raise WorkspaceAccessDenied("Scheduled metadata differs from canonical occurrence")
+        context = authority["context"]
+    elif scheduled_admission is not None or get_current_workspace() is not None:
+        raise WorkspaceAccessDenied("Legacy Scheduler cannot inherit workspace authority")
     if request is None:
         if app is None:
             raise ValueError("launch_scheduled_thread_run requires request or app")
@@ -2373,7 +2393,7 @@ async def launch_scheduled_thread_run(
             app=app,
             headers=({INTERNAL_OWNER_USER_ID_HEADER_NAME: owner_user_id} if owner_user_id else {}),
             state=SimpleNamespace(
-                user=get_internal_user(),
+                user=get_internal_user(owner_user_id) if context is not None else get_internal_user(),
                 auth_source=AUTH_SOURCE_INTERNAL,
                 # Every trigger (schedule or "Run now") is server-started.
                 run_origin=make_origin("schedule"),
@@ -2430,14 +2450,20 @@ async def launch_scheduled_thread_run(
     # one id. Reached from inside an HTTP request -- a manual trigger, or the
     # scheduler service's own per-occurrence scope -- ensure_trace_context
     # keeps that trace instead of minting a competing one.
-    with ensure_trace_context():
-        record = await start_run(
-            body,
-            thread_id,
-            request,
-            idempotency_key=idempotency_key,
-            scheduled_task_runtime=scheduled_task_runtime,
-        )
+    token = set_current_workspace(context) if context is not None else None
+    try:
+        with ensure_trace_context():
+            record = await start_run(
+                body,
+                thread_id,
+                request,
+                idempotency_key=idempotency_key,
+                scheduled_task_runtime=scheduled_task_runtime,
+                **({"scheduled_admission": scheduled_admission} if scheduled_admission is not None else {}),
+            )
+    finally:
+        if token is not None:
+            reset_current_workspace(token)
     return {"run_id": record.run_id, "thread_id": record.thread_id}
 
 

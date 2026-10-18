@@ -1178,6 +1178,32 @@ class RunRepository(RunStore):
             result = await session.execute(stmt)
             return [self._row_to_dict(r) for r in result.scalars()]
 
+    async def validate_scheduled_admission(self, receipt, *, run_id, workspace_context):
+        from deerflow.persistence.scheduled_task_runs.scope import ScheduledAdmissionReceipt, lock_scheduled_identity
+
+        if type(receipt) is not ScheduledAdmissionReceipt or workspace_context is None:
+            raise WorkspaceAccessDenied("Scheduler idempotent receipt is invalid")
+        async with self._sf() as session:
+            task, occurrence, original = await lock_scheduled_identity(session, self._sf, receipt.task_id, occurrence_id=receipt.occurrence_id)
+            native = await session.get(RunRow, run_id)
+            if (
+                original != workspace_context
+                or occurrence.run_id != run_id
+                or occurrence.attempt_count != receipt.attempt_count
+                or native is None
+                or native.workspace_context_json != asdict(original)
+                or native.workspace_id != task.workspace_id
+                or native.user_id != task.user_id
+                or native.thread_id != occurrence.thread_id
+                or native.thread_incarnation != occurrence.thread_incarnation
+                or native.operation_kind != "run"
+                or native.idempotency_key != "scheduled-task:" + occurrence.id
+                or (native.metadata_json or {}).get("scheduled_task_id") != task.id
+                or (native.metadata_json or {}).get("scheduled_task_run_id") != occurrence.id
+            ):
+                raise WorkspaceAccessDenied("Scheduler idempotent Run binding differs")
+            await session.commit()
+
     async def create_thread_operation_atomic(
         self,
         run_id: str,
@@ -1196,6 +1222,7 @@ class RunRepository(RunStore):
         grace_seconds: int = 10,
         idempotency_key: str | None = None,
         workspace_context: WorkspaceContext | None = None,
+        scheduled_admission=None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Atomically create a run with cross-process thread-uniqueness.
 
@@ -1242,11 +1269,42 @@ class RunRepository(RunStore):
         if context is not None:
             values["workspace_id"] = context.workspace_id
         async with self._sf() as session:
+            if scheduled_admission is not None:
+                from deerflow.persistence.scheduled_task_runs.scope import ScheduledAdmissionReceipt, lock_scheduled_identity
+
+                if type(scheduled_admission) is not ScheduledAdmissionReceipt or context is None or operation_kind != "run" or multitask_strategy != "reject":
+                    raise WorkspaceAccessDenied("Scheduler admission requires a scoped normal Run")
+
+                task, occurrence, original = await lock_scheduled_identity(session, self._sf, scheduled_admission.task_id, occurrence_id=scheduled_admission.occurrence_id, receipt=scheduled_admission)
+                if context != original or occurrence.thread_id != thread_id or idempotency_key != "scheduled-task:" + occurrence.id or task.status not in ("enabled", "running"):
+                    raise WorkspaceAccessDenied("Scheduler native admission identity differs")
+                if occurrence.run_id is not None:
+                    existing = await session.get(RunRow, occurrence.run_id)
+                    if (
+                        existing is None
+                        or existing.operation_kind != "run"
+                        or existing.workspace_id != task.workspace_id
+                        or existing.user_id != task.user_id
+                        or existing.idempotency_key != idempotency_key
+                        or existing.workspace_context_json != asdict(original)
+                        or existing.thread_id != thread_id
+                        or existing.thread_incarnation != occurrence.thread_incarnation
+                        or (existing.metadata_json or {}).get("scheduled_task_id") != task.id
+                        or (existing.metadata_json or {}).get("scheduled_task_run_id") != occurrence.id
+                    ):
+                        raise WorkspaceAccessDenied("Scheduler existing admission is unknown")
+                    raise RunIdempotencyConflict(self._row_to_dict(existing))
+                occurrence.run_id = run_id
             if context is not None:
                 # Short admission only: workspace -> actor -> private thread,
                 # then the existing global clock -> Run row order. No checkpoint
                 # or model IO is held under this database transaction.
-                thread = await ThreadMetaRepository(self._sf)._locked_row(session, thread_id, resolved_user_id, context, include_deleting=operation_kind == "delete")
+                if scheduled_admission is not None:
+                    # The receipt helper already locked scope and every parent
+                    # in canonical order; do not begin the writer a second time.
+                    thread = await session.scalar(ThreadMetaRepository._owned_scope(select(ThreadMetaRow).where(ThreadMetaRow.thread_id == thread_id), resolved_user_id, context).with_for_update())
+                else:
+                    thread = await ThreadMetaRepository(self._sf)._locked_row(session, thread_id, resolved_user_id, context, include_deleting=operation_kind == "delete")
                 if thread is None or not thread.incarnation:
                     raise WorkspaceAccessDenied("private thread is unavailable")
                 values["workspace_context_json"] = asdict(context)

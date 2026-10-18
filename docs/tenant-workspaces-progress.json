@@ -29,13 +29,13 @@
     "M1 original deployment-data inventory and physical maintenance/restore evidence with M10",
     "M2 full scoped Gateway activation and SSO/invitation management acceptance",
     "M3 threads/runs and attachments, scoped conversion/maintenance, client switching and physical file/NAS integration",
-    "M4 is partial (execution signature primitive only); M5 through M11 remain pending"
+    "M4 native C/dependency and one Scheduler main are verified; installed Scheduler/MCP/control/browser/HTTP/tool/IM/physical integration remains partial; M5–M11 remain pending."
   ],
   "static_checks": [
     "ruff check with backend/ruff.toml passed",
     "git diff --check passed"
   ],
-  "format_note": "Local ruff 0.15.12 reformats pre-existing services.py beyond this patch even with repository ruff.toml; unrelated generated formatting discarded. Version-matched cloud format gate remains to be run.",
+  "format_note": "Latest focused cloud gate #123 passed Ruff check and 61-file format verification. Historical full regression remains #88; no broad suite repeated.",
   "context_contract": {
     "red": {
       "build": 3,
@@ -1549,17 +1549,17 @@
   },
   "latest_checkpoint": {
     "work_package": "M4",
-    "status": "partial M4: dependency continuation, receive-time revocation and dispatched control retirement verified",
+    "status": "partial M4: Scheduler conversation-origin/fresh once main verified",
     "last_verified_job": "deerflow-tenant-execution-m4-sql",
-    "last_verified_build": 121,
-    "next": "Remaining M4 Scheduler/background identities and actual physical B/two-host integration; preserve M0–M11 parent scope.",
+    "last_verified_build": 123,
+    "next": "Two necessary PG boundaries: queued member withdrawal and pre-insert occurrence lease takeover; then remaining Scheduler/public/installed-host requirements.",
     "tenant_activation": "closed",
     "deployment": "none",
     "previous_backend_job": "deerflow-tenant-m1-postgres",
     "previous_backend_build": 89,
-    "native_candidate_schema": "0040_mcp_workspace_identity",
+    "native_candidate_schema": "0041_scheduler_workspace",
     "last_verified_database_job": "deerflow-tenant-execution-m4-sql",
-    "last_verified_database_build": 121,
+    "last_verified_database_build": 123,
     "executor_candidate_schema": "e0003_execution_identity",
     "execution_status": "active",
     "resumed_at": "2026-10-18",
@@ -1569,7 +1569,8 @@
     "checkpoint_evidence": [
       "docs/tenant-workspaces-evidence/native-dependency-118.json",
       "docs/tenant-workspaces-evidence/native-dependency-119.json",
-      "docs/tenant-workspaces-evidence/native-dispatched-control-121.json"
+      "docs/tenant-workspaces-evidence/native-dispatched-control-121.json",
+      "docs/tenant-workspaces-evidence/native-scheduler-123.json"
     ]
   },
   "workspace_feedback": {
@@ -13755,6 +13756,61 @@
       "no crash/restart acceptance",
       "no C-to-B-to-C acceptance",
       "no tenant activation or deployment"
+    ]
+  },
+  "scheduler_workspace_wip": {
+    "status": "scheduler_once_origin_fresh_main_verified_boundaries_next",
+    "native_schema_candidate": "0041_scheduler_workspace",
+    "main": "conversation-origin fresh_thread_per_run, real PG queue/launcher/native Run completion/event",
+    "required_boundaries": [
+      "original SQL context and private thread incarnation",
+      "atomic occurrence lease/attempt fence with Run insertion",
+      "no scoped legacy recovery fallback",
+      "workspace-bound event/IM publication"
+    ],
+    "next": "Two necessary PG boundaries: queued member withdrawal and pre-insert occurrence lease takeover; then remaining Scheduler/public/installed-host requirements.",
+    "red": {
+      "job": "deerflow-tenant-execution-m4-sql",
+      "build": 122,
+      "result": "FAILURE",
+      "tests": "1 failed in 16.08s",
+      "failure": "Bound Scheduler create lost its original workspace: native SQL row workspace_id is NULL",
+      "source_archive_sha256": "2dc43e9770a7aee7ba10732594959fe7d846233a41dc6d327f243aaef6f60854",
+      "pipeline_sha256": "c094298e9ccc991b94a6f949b93103359af7ba5b6ed3a867fabaab849fe21b6c"
+    },
+    "implementation_review": {
+      "status": "main_draft_and_targeted_entry_review_in_progress",
+      "automatic_review": "Broad mechanical Scheduler guard rewrite rejected without execution; replaced by three root-reviewed exact targeted patches, each separately approved and applied.",
+      "applied_guard_patches": [
+        "51cdac7d1ea9b218f5b03d82dd4205e52576823ae403ed249599e666eda29dc3",
+        "285df551f5e0ed8391b6b5b5d12179e1c9305df153ee09b12892bec21d7b6e22",
+        "946fe592df8eb7dc128f9f89c67918978c64612b4c22625fc984e92b04f0e6aa"
+      ],
+      "required_followups": [
+        "Main get_active_run must implement current resource/private-parent scope, not be denied",
+        "Server scheduled background binds original SQL authority per occurrence and restores UI context",
+        "Scoped manual management remains withheld until its authenticated resource path is integrated",
+        "Recovery scans actual exact bound Runs, finalizes only canonical terminal states, retains unknown outcomes",
+        "Root review complete draft before one same PostgreSQL GREEN"
+      ]
+    },
+    "green": {
+      "job": "deerflow-tenant-execution-m4-sql",
+      "build": 123,
+      "result": "SUCCESS",
+      "tests": "1 passed in 19.61s",
+      "archive_sha256": "38365c971a1477aed246aa747b2f10fd4460cc750e2b665f1de334329374246f",
+      "evidence": "docs/tenant-workspaces-evidence/native-scheduler-123.json"
+    },
+    "entry_matrix": "docs/tenant-workspaces-evidence/native-scheduler-entry-matrix.md",
+    "remaining": [
+      "Necessary queued withdrawal and pre-insert lease takeover boundaries",
+      "Scoped HTTP/tool full replies, lists/status/history/management/manual dispatch",
+      "Page fresh/reuse runtime acceptance",
+      "Installed scheduled dependency reconciler, MCP continuation/own-stop",
+      "Expired queue and unknown launch recovery/control",
+      "Workspace-qualified IM delivery and full lifecycle",
+      "Physical B/two-host story and remaining M0–M11 gates"
     ]
   }
 }

@@ -3,18 +3,25 @@ from __future__ import annotations
 import hashlib
 import logging
 from collections.abc import Sequence
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import and_, exists, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from deerflow.authz.workspace import get_current_workspace
 from deerflow.persistence.run import RunRepository
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.finalization import FinalizationObserver, automatic_runs_used, end_condition_reached, finalize_occurrence, finish_task_at_end_condition, is_host_pause_marker, utc
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project
+from deerflow.persistence.scheduled_task_runs.scope import bound_native_run, live_task_predicate, lock_scheduled_identity
 from deerflow.persistence.scheduled_tasks.model import ACTIVE_RUN_STATUSES, LIVE_TASK_STATUSES, ONCE_TASK_STATUS_BY_RUN_STATUS, TERMINAL_RUN_STATUSES, TERMINAL_TASK_STATUSES, ScheduledTaskRow
+from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
+from deerflow.persistence.workspaces.scope import lock_resource_scope, resolve_resource_scope
+from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 from deerflow.scheduler.host_notes import RUN_ERROR_END_REACHED
 from deerflow.utils.goal_objective import normalize_goal_objective
 from deerflow.utils.time import coerce_iso
@@ -89,8 +96,10 @@ class ScheduledTaskRepository:
         session_factory: async_sessionmaker[AsyncSession],
         *,
         run_repository: RunRepository | None = None,
+        workspace_required: bool = False,
     ) -> None:
         self._sf = session_factory
+        self.workspace_scope_required = workspace_required
         self._run_repository = run_repository or RunRepository(session_factory)
         self._finalization_observer: FinalizationObserver | None = None
 
@@ -105,13 +114,14 @@ class ScheduledTaskRepository:
                 data[key] = coerce_iso(data[key])
         return data
 
-    @staticmethod
-    async def _lock_task(session: AsyncSession, task_id: str) -> ScheduledTaskRow | None:
+    async def _lock_task(self, session: AsyncSession, task_id: str) -> ScheduledTaskRow | None:
+        if self.workspace_scope_required:
+            return (await lock_scheduled_identity(session, self._sf, task_id))[0]
         # Match scheduled-run admission on SQLite, where FOR UPDATE is ignored:
         # acquire the database writer before checking the child occurrence.
         if session.get_bind().dialect.name == "sqlite":
-            await session.execute(update(ScheduledTaskRow).where(ScheduledTaskRow.id == task_id).values(updated_at=ScheduledTaskRow.updated_at))
-        return await session.get(ScheduledTaskRow, task_id, with_for_update=True)
+            await session.execute(update(ScheduledTaskRow).where(ScheduledTaskRow.id == task_id, ScheduledTaskRow.workspace_id.is_(None)).values(updated_at=ScheduledTaskRow.updated_at))
+        return await session.scalar(select(ScheduledTaskRow).where(ScheduledTaskRow.id == task_id, ScheduledTaskRow.workspace_id.is_(None)).with_for_update())
 
     @staticmethod
     async def _serialize_owner_quota(session: AsyncSession, user_id: str) -> None:
@@ -158,9 +168,12 @@ class ScheduledTaskRepository:
             raise ValueError("max_runs must be a positive integer")
         if standing_notes is not None and (len(standing_notes) > 10 or any(not isinstance(note, str) or not note.strip() or len(note) > 500 for note in standing_notes)):
             raise ValueError("standing notes allow at most 10 nonempty notes of 500 characters")
+        context = resolve_resource_scope(None, user_id, required=self.workspace_scope_required)
         now = datetime.now(UTC)
         row = ScheduledTaskRow(
             id=task_id,
+            workspace_id=context.workspace_id if context else None,
+            workspace_context_json=asdict(context) if context else None,
             user_id=user_id,
             thread_id=thread_id,
             origin_thread_id=origin_thread_id,
@@ -181,8 +194,21 @@ class ScheduledTaskRepository:
             updated_at=now,
         )
         async with self._sf() as session:
+            if context is not None:
+                await lock_resource_scope(session, context)
+                for parent_id in sorted({value for value in (thread_id, origin_thread_id) if value is not None}):
+                    parent = await session.scalar(ThreadMetaRepository._owned_scope(select(ThreadMetaRow).where(ThreadMetaRow.thread_id == parent_id), user_id, context).with_for_update())
+                    if parent is None or not parent.incarnation:
+                        raise WorkspaceAccessDenied("Scheduler private parent is unavailable")
+                    if parent_id == thread_id:
+                        row.thread_incarnation = parent.incarnation
+                    if parent_id == origin_thread_id:
+                        row.origin_thread_incarnation = parent.incarnation
+                if context_mode == "reuse_thread" and thread_id is None:
+                    raise WorkspaceAccessDenied("Scheduler reuse requires its existing private thread")
             if origin_thread_id is not None:
-                await self._serialize_owner_quota(session, user_id)
+                if context is None or session.get_bind().dialect.name != "sqlite":
+                    await self._serialize_owner_quota(session, user_id)
                 await self._check_owner_quota(session, user_id)
             session.add(row)
             await session.commit()
@@ -190,28 +216,45 @@ class ScheduledTaskRepository:
             return self._row_to_dict(row)
 
     async def get(self, task_id: str, *, user_id: str) -> dict[str, Any] | None:
+        context = resolve_resource_scope(None, user_id, required=self.workspace_scope_required)
         async with self._sf() as session:
-            row = await session.get(ScheduledTaskRow, task_id)
-            if row is None or row.user_id != user_id:
-                return None
-            return self._row_to_dict(row)
+            if context is not None:
+                try:
+                    row = (await lock_scheduled_identity(session, self._sf, task_id, context=context))[0]
+                except WorkspaceAccessDenied:
+                    return None
+            else:
+                row = await session.scalar(select(ScheduledTaskRow).where(ScheduledTaskRow.id == task_id, ScheduledTaskRow.user_id == user_id, ScheduledTaskRow.workspace_id.is_(None)))
+            result = self._row_to_dict(row) if row else None
+            await session.commit()
+            return result
 
     async def get_internal(self, task_id: str) -> dict[str, Any] | None:
-        """Load a task for the internal queue worker without an auth boundary."""
+        """Resolve background work from its persisted original SQL identity."""
         async with self._sf() as session:
-            row = await session.get(ScheduledTaskRow, task_id)
-            return self._row_to_dict(row) if row is not None else None
+            if self.workspace_scope_required:
+                row = (await lock_scheduled_identity(session, self._sf, task_id))[0]
+            else:
+                row = await session.scalar(select(ScheduledTaskRow).where(ScheduledTaskRow.id == task_id, ScheduledTaskRow.workspace_id.is_(None)))
+            result = self._row_to_dict(row) if row else None
+            await session.commit()
+            return result
 
     async def list_by_user(self, user_id: str) -> list[dict[str, Any]]:
-        stmt = select(ScheduledTaskRow).where(ScheduledTaskRow.user_id == user_id).order_by(ScheduledTaskRow.created_at.desc(), ScheduledTaskRow.id.desc())
+        if self.workspace_scope_required or get_current_workspace() is not None:
+            raise WorkspaceAccessDenied("Scoped Scheduler listing requires private-parent integration")
+        stmt = select(ScheduledTaskRow).where(ScheduledTaskRow.workspace_id.is_(None)).where(ScheduledTaskRow.user_id == user_id).order_by(ScheduledTaskRow.created_at.desc(), ScheduledTaskRow.id.desc())
         async with self._sf() as session:
             result = await session.execute(stmt)
             return [self._row_to_dict(row) for row in result.scalars()]
 
     async def get_active_run_status(self, task_id: str) -> str | None:
+        if self.workspace_scope_required or get_current_workspace() is not None:
+            raise WorkspaceAccessDenied("Scoped Scheduler status/history requires current private-resource integration")
         stmt = (
             select(ScheduledTaskRunRow.status)
             .where(
+                ScheduledTaskRunRow.workspace_id.is_(None),
                 ScheduledTaskRunRow.task_id == task_id,
                 ScheduledTaskRunRow.status.in_(("queued", "launching", "running")),
             )
@@ -226,10 +269,12 @@ class ScheduledTaskRepository:
         A recurring task's own ``status`` is ``enabled`` while its occurrence
         runs, so "is something running or waiting" must come from here.
         """
+        if self.workspace_scope_required or get_current_workspace() is not None:
+            raise WorkspaceAccessDenied("Scoped Scheduler status/history requires current private-resource integration")
         ids = list(dict.fromkeys(task_ids))
         if not ids:
             return {}
-        stmt = select(ScheduledTaskRunRow.task_id, ScheduledTaskRunRow.status).where(ScheduledTaskRunRow.task_id.in_(ids), ScheduledTaskRunRow.status.in_(("queued", "launching", "running")))
+        stmt = select(ScheduledTaskRunRow.task_id, ScheduledTaskRunRow.status).where(ScheduledTaskRunRow.workspace_id.is_(None), ScheduledTaskRunRow.task_id.in_(ids), ScheduledTaskRunRow.status.in_(("queued", "launching", "running")))
         rank = {"queued": 0, "launching": 1, "running": 2}
         result: dict[str, str] = {}
         async with self._sf() as session:
@@ -240,10 +285,16 @@ class ScheduledTaskRepository:
 
     async def automatic_runs_used_for(self, task_ids: Sequence[str]) -> dict[str, int]:
         """Launched automatic runs per task (the ``max_runs`` unit); missing ids map to 0."""
+        if self.workspace_scope_required or get_current_workspace() is not None:
+            raise WorkspaceAccessDenied("Scoped Scheduler status/history requires current private-resource integration")
         ids = list(dict.fromkeys(task_ids))
         if not ids:
             return {}
-        stmt = select(ScheduledTaskRunRow.task_id, func.count()).where(ScheduledTaskRunRow.task_id.in_(ids), ScheduledTaskRunRow.trigger == "scheduled", ScheduledTaskRunRow.launch_accounted.is_(True)).group_by(ScheduledTaskRunRow.task_id)
+        stmt = (
+            select(ScheduledTaskRunRow.task_id, func.count())
+            .where(ScheduledTaskRunRow.workspace_id.is_(None), ScheduledTaskRunRow.task_id.in_(ids), ScheduledTaskRunRow.trigger == "scheduled", ScheduledTaskRunRow.launch_accounted.is_(True))
+            .group_by(ScheduledTaskRunRow.task_id)
+        )
         async with self._sf() as session:
             counts = {task_id: int(count) for task_id, count in (await session.execute(stmt)).all()}
         return {task_id: counts.get(task_id, 0) for task_id in ids}
@@ -262,6 +313,8 @@ class ScheduledTaskRepository:
         launching or running) or ``"finished"`` (a completed, failed or
         cancelled task has no schedule left to pause; Resume reactivates it).
         """
+        if self.workspace_scope_required or get_current_workspace() is not None:
+            raise WorkspaceAccessDenied("Scoped Scheduler management requires current private-resource integration")
         async with self._sf() as session:
             task = await self._lock_task(session, task_id)
             if task is None or task.user_id != user_id:
@@ -274,6 +327,7 @@ class ScheduledTaskRepository:
                 (
                     await session.execute(
                         select(ScheduledTaskRunRow)
+                        .where(ScheduledTaskRunRow.workspace_id.is_(None))
                         .where(
                             ScheduledTaskRunRow.task_id == task_id,
                             ScheduledTaskRunRow.status.in_(("queued", "launching", "running")),
@@ -310,6 +364,8 @@ class ScheduledTaskRepository:
         now: datetime,
     ) -> str:
         """Delete a task only before queue execution begins."""
+        if self.workspace_scope_required or get_current_workspace() is not None:
+            raise WorkspaceAccessDenied("Scoped Scheduler management requires current private-resource integration")
         async with self._sf() as session:
             task = await self._lock_task(session, task_id)
             if task is None or task.user_id != user_id:
@@ -319,6 +375,7 @@ class ScheduledTaskRepository:
                 (
                     await session.execute(
                         select(ScheduledTaskRunRow)
+                        .where(ScheduledTaskRunRow.workspace_id.is_(None))
                         .where(
                             ScheduledTaskRunRow.task_id == task_id,
                             ScheduledTaskRunRow.status.in_(("queued", "launching", "running")),
@@ -351,6 +408,8 @@ class ScheduledTaskRepository:
         updates: dict[str, Any],
         require_mutable: bool = False,
     ) -> dict[str, Any] | None:
+        if self.workspace_scope_required or get_current_workspace() is not None:
+            raise WorkspaceAccessDenied("Scoped Scheduler management requires current private-resource integration")
         if updates.get("goal_objective") is not None:
             normalize_goal_objective(updates["goal_objective"])
         async with self._sf() as session:
@@ -359,7 +418,7 @@ class ScheduledTaskRepository:
                 # Read only the provenance first, without an ORM identity-map
                 # snapshot. Acquire the owner mutex before the parent lock so
                 # create and terminal reactivation share one admission order.
-                origin = await session.scalar(select(ScheduledTaskRow.origin_thread_id).where(ScheduledTaskRow.id == task_id, ScheduledTaskRow.user_id == user_id))
+                origin = await session.scalar(select(ScheduledTaskRow.origin_thread_id).where(ScheduledTaskRow.workspace_id.is_(None), ScheduledTaskRow.id == task_id, ScheduledTaskRow.user_id == user_id))
                 if origin is not None:
                     await self._serialize_owner_quota(session, user_id)
                     quota_transition = True
@@ -425,9 +484,11 @@ class ScheduledTaskRepository:
             return self._row_to_dict(row)
 
     async def delete(self, task_id: str, *, user_id: str) -> bool:
+        if self.workspace_scope_required or get_current_workspace() is not None:
+            raise WorkspaceAccessDenied("Scoped Scheduler management requires current private-resource integration")
         async with self._sf() as session:
             row = await session.get(ScheduledTaskRow, task_id)
-            if row is None or row.user_id != user_id:
+            if row is None or row.workspace_id is not None or row.user_id != user_id:
                 return False
             await session.delete(row)
             await session.commit()
@@ -454,6 +515,7 @@ class ScheduledTaskRepository:
             stmt = (
                 select(ScheduledTaskRow)
                 .where(
+                    live_task_predicate() if self.workspace_scope_required else ScheduledTaskRow.workspace_id.is_(None),
                     ScheduledTaskRow.next_run_at.is_not(None),
                     ScheduledTaskRow.next_run_at <= now,
                     ~active_run_for_task,
@@ -477,10 +539,29 @@ class ScheduledTaskRepository:
                 )
                 .order_by(ScheduledTaskRow.next_run_at.asc(), ScheduledTaskRow.id.asc())
                 .limit(limit)
-                .with_for_update(skip_locked=True)
             )
+            if not self.workspace_scope_required:
+                stmt = stmt.with_for_update(skip_locked=True)
             result = await session.execute(stmt)
             rows = list(result.scalars())
+            if self.workspace_scope_required:
+                identifiers = [row.id for row in rows]
+                await session.rollback()
+                claimed = []
+                for identifier in identifiers:
+                    try:
+                        row = (await lock_scheduled_identity(session, self._sf, identifier))[0]
+                        expiry = _coerce_datetime(row.lease_expires_at)
+                        active = await session.scalar(select(ScheduledTaskRunRow.id).where(ScheduledTaskRunRow.task_id == row.id, ScheduledTaskRunRow.status.in_(("queued", "launching", "running"))).limit(1))
+                        if row.status not in ("enabled", "running") or row.next_run_at is None or _coerce_datetime(row.next_run_at) > now or (expiry is not None and expiry >= now) or active is not None:
+                            await session.rollback()
+                            continue
+                        row.lease_owner, row.lease_expires_at, row.status, row.updated_at = lease_owner, lease_expires_at, "running", datetime.now(UTC)
+                        await session.commit()
+                        claimed.append(self._row_to_dict(row))
+                    except WorkspaceAccessDenied:
+                        await session.rollback()
+                return claimed
             for row in rows:
                 row.lease_owner = lease_owner
                 row.lease_expires_at = lease_expires_at
@@ -527,6 +608,7 @@ class ScheduledTaskRepository:
                 return False
             queued = await session.scalar(
                 select(ScheduledTaskRunRow).where(
+                    ScheduledTaskRunRow.workspace_id == task.workspace_id if self.workspace_scope_required else ScheduledTaskRunRow.workspace_id.is_(None),
                     ScheduledTaskRunRow.task_id == task_id,
                     ScheduledTaskRunRow.status == "queued",
                 )
@@ -556,8 +638,10 @@ class ScheduledTaskRepository:
         expected_lease_owner: str | None = None,
         task_run_id: str | None = None,
     ) -> bool:
+        if self.workspace_scope_required and (not task_run_id or not last_run_id):
+            raise WorkspaceAccessDenied("Scoped task launch bookkeeping requires its bound occurrence Run")
         async with self._sf() as session:
-            row = await self._lock_task(session, task_id)
+            row = (await lock_scheduled_identity(session, self._sf, task_id, occurrence_id=task_run_id))[0] if self.workspace_scope_required else await self._lock_task(session, task_id)
             if row is None:
                 return False
             if expected_lease_owner is not None and row.lease_owner != expected_lease_owner:
@@ -572,7 +656,7 @@ class ScheduledTaskRepository:
             occurrence = None
             if task_run_id is not None:
                 occurrence = await session.get(ScheduledTaskRunRow, task_run_id, with_for_update=True)
-                if occurrence is None or occurrence.task_id != task_id or occurrence.run_id not in (None, last_run_id):
+                if occurrence is None or (not self.workspace_scope_required and occurrence.workspace_id is not None) or occurrence.task_id != task_id or occurrence.run_id not in (None, last_run_id):
                     logger.warning(
                         "Fenced stale scheduled-task launch update for task %s: occurrence %s does not belong to run %s",
                         task_id,
@@ -585,6 +669,10 @@ class ScheduledTaskRepository:
                 # Preserve direct repository callers that identify the launch
                 # by its durable run id rather than its occurrence id.
                 occurrence = await session.scalar(select(ScheduledTaskRunRow).where(ScheduledTaskRunRow.task_id == task_id, ScheduledTaskRunRow.run_id == last_run_id).with_for_update())
+            if self.workspace_scope_required:
+                await bound_native_run(session, row, occurrence, last_run_id)
+                if status != ("running" if row.schedule_type == "once" else "enabled"):
+                    raise WorkspaceAccessDenied("Scoped task launch bookkeeping cannot set a terminal outcome")
             should_increment_run_count = increment_run_count and (last_run_id is None or row.last_run_id != last_run_id)
             if occurrence is not None:
                 if increment_run_count and last_run_id is not None:
@@ -633,11 +721,24 @@ class ScheduledTaskRepository:
         if status not in TERMINAL_RUN_STATUSES:
             raise ValueError(f"unsupported terminal occurrence status: {status!r}")
         async with self._sf() as session:
-            task = await self._lock_task(session, task_id)
+            task = (await lock_scheduled_identity(session, self._sf, task_id, occurrence_id=task_run_id))[0] if self.workspace_scope_required else await self._lock_task(session, task_id)
             occurrence = await session.get(ScheduledTaskRunRow, task_run_id, with_for_update=True)
-            if occurrence is None or occurrence.task_id != task_id or occurrence.run_id not in (None, run_id) or (task is not None and task.user_id != user_id):
+            if occurrence is None or (not self.workspace_scope_required and occurrence.workspace_id is not None) or occurrence.task_id != task_id or occurrence.run_id not in (None, run_id) or (task is not None and task.user_id != user_id):
                 await session.rollback()
                 return False
+            if self.workspace_scope_required:
+                native = await session.get(RunRow, run_id)
+                if (
+                    native is None
+                    or native.run_id != occurrence.run_id
+                    or native.workspace_id != task.workspace_id
+                    or native.user_id != user_id
+                    or native.thread_id != occurrence.thread_id
+                    or native.thread_incarnation != occurrence.thread_incarnation
+                    or native.workspace_context_json != task.workspace_context_json
+                    or native.status not in ("success", "error", "timeout", "interrupted")
+                ):
+                    raise WorkspaceAccessDenied("Scheduler completion differs from its native Run")
             accepted = await finalize_occurrence(session, task, occurrence, status=status, error=error, finished_at=finished_at, run_id=run_id, goal_verdict=goal_verdict, observer=self._finalization_observer)
             await session.commit()
             return accepted
@@ -651,8 +752,11 @@ class ScheduledTaskRepository:
         lease_seconds: int,
     ) -> dict[str, Any] | None:
         """Reserve the short pre-launch window for a manual dispatch."""
+        if self.workspace_scope_required or get_current_workspace() is not None:
+            raise WorkspaceAccessDenied("Scoped Scheduler management requires current private-resource integration")
         stmt = (
             select(ScheduledTaskRow)
+            .where(ScheduledTaskRow.workspace_id.is_(None))
             .where(
                 ScheduledTaskRow.id == task_id,
                 or_(
@@ -679,9 +783,12 @@ class ScheduledTaskRepository:
         Each dict gains ``thread_relation`` (``origin`` / ``reuse`` / ``run``) and,
         for ``run``, ``thread_run``: the latest occurrence of that task in the thread.
         """
-        ran_in_thread = exists(select(ScheduledTaskRunRow.id).where(ScheduledTaskRunRow.task_id == ScheduledTaskRow.id, ScheduledTaskRunRow.thread_id == thread_id))
+        if self.workspace_scope_required or get_current_workspace() is not None:
+            raise WorkspaceAccessDenied("Scoped Scheduler listing requires private-parent integration")
+        ran_in_thread = exists(select(ScheduledTaskRunRow.id).where(ScheduledTaskRunRow.workspace_id.is_(None), ScheduledTaskRunRow.task_id == ScheduledTaskRow.id, ScheduledTaskRunRow.thread_id == thread_id))
         stmt = (
             select(ScheduledTaskRow)
+            .where(ScheduledTaskRow.workspace_id.is_(None))
             .where(
                 ScheduledTaskRow.user_id == user_id,
                 or_(ScheduledTaskRow.thread_id == thread_id, ScheduledTaskRow.origin_thread_id == thread_id, ran_in_thread),
@@ -710,7 +817,7 @@ class ScheduledTaskRepository:
         number = run_number_expression(ScheduledTaskRunRow)
         stmt = (
             select(ScheduledTaskRunRow.trigger, ScheduledTaskRunRow.scheduled_for, ScheduledTaskRunRow.status, number)
-            .where(ScheduledTaskRunRow.task_id == task_id, ScheduledTaskRunRow.thread_id == thread_id)
+            .where(ScheduledTaskRunRow.workspace_id.is_(None), ScheduledTaskRunRow.task_id == task_id, ScheduledTaskRunRow.thread_id == thread_id)
             .order_by(ScheduledTaskRunRow.occurrence_seq.desc().nulls_last(), ScheduledTaskRunRow.created_at.desc(), ScheduledTaskRunRow.id.desc())
             .limit(1)
         )
@@ -721,19 +828,35 @@ class ScheduledTaskRepository:
         return {"run_number": int(run_number) if run_number is not None else None, "trigger": trigger, "scheduled_for": coerce_iso(utc(scheduled_for)), "status": status}
 
     async def list_by_origin_thread(self, user_id: str, origin_thread_id: str) -> list[dict[str, Any]]:
+        if self.workspace_scope_required or get_current_workspace() is not None:
+            raise WorkspaceAccessDenied("Scoped Scheduler listing requires private-parent integration")
         async with self._sf() as session:
-            rows = await session.execute(select(ScheduledTaskRow).where(ScheduledTaskRow.user_id == user_id, ScheduledTaskRow.origin_thread_id == origin_thread_id).order_by(ScheduledTaskRow.created_at.desc(), ScheduledTaskRow.id.desc()))
+            rows = await session.execute(
+                select(ScheduledTaskRow)
+                .where(ScheduledTaskRow.workspace_id.is_(None))
+                .where(ScheduledTaskRow.user_id == user_id, ScheduledTaskRow.origin_thread_id == origin_thread_id)
+                .order_by(ScheduledTaskRow.created_at.desc(), ScheduledTaskRow.id.desc())
+            )
             return [self._row_to_dict(row) for row in rows.scalars()]
 
     async def list_manageable_from_thread(self, user_id: str, thread_id: str) -> list[dict[str, Any]]:
         """Tasks a conversation may manage: created in it, or whose run it is."""
-        ran_in_thread = exists(select(ScheduledTaskRunRow.id).where(ScheduledTaskRunRow.task_id == ScheduledTaskRow.id, ScheduledTaskRunRow.thread_id == thread_id))
-        stmt = select(ScheduledTaskRow).where(ScheduledTaskRow.user_id == user_id, or_(ScheduledTaskRow.origin_thread_id == thread_id, ran_in_thread)).order_by(ScheduledTaskRow.created_at.desc(), ScheduledTaskRow.id.desc())
+        if self.workspace_scope_required or get_current_workspace() is not None:
+            raise WorkspaceAccessDenied("Scoped Scheduler listing requires private-parent integration")
+        ran_in_thread = exists(select(ScheduledTaskRunRow.id).where(ScheduledTaskRunRow.workspace_id.is_(None), ScheduledTaskRunRow.task_id == ScheduledTaskRow.id, ScheduledTaskRunRow.thread_id == thread_id))
+        stmt = (
+            select(ScheduledTaskRow)
+            .where(ScheduledTaskRow.workspace_id.is_(None))
+            .where(ScheduledTaskRow.user_id == user_id, or_(ScheduledTaskRow.origin_thread_id == thread_id, ran_in_thread))
+            .order_by(ScheduledTaskRow.created_at.desc(), ScheduledTaskRow.id.desc())
+        )
         async with self._sf() as session:
             return [self._row_to_dict(row) for row in (await session.execute(stmt)).scalars()]
 
     async def append_standing_note(self, task_id: str, *, user_id: str, note: str, origin_thread_id: str | None = None) -> dict[str, Any] | None:
         """Append one standing note; ``origin_thread_id`` additionally scopes the task when given."""
+        if self.workspace_scope_required or get_current_workspace() is not None:
+            raise WorkspaceAccessDenied("Scoped Scheduler management requires current private-resource integration")
         if not isinstance(note, str) or not note.strip() or len(note) > 500:
             raise ValueError("a standing note must contain 1 to 500 characters")
         async with self._sf() as session:
@@ -767,7 +890,15 @@ class ScheduledTaskRepository:
                 return False
             if not await end_condition_reached(session, task, now=now):
                 return False
-            active = await session.scalar(select(ScheduledTaskRunRow).where(ScheduledTaskRunRow.task_id == task_id, ScheduledTaskRunRow.status.in_(ACTIVE_RUN_STATUSES)).with_for_update())
+            active = await session.scalar(
+                select(ScheduledTaskRunRow)
+                .where(
+                    ScheduledTaskRunRow.workspace_id == task.workspace_id if self.workspace_scope_required else ScheduledTaskRunRow.workspace_id.is_(None),
+                    ScheduledTaskRunRow.task_id == task_id,
+                    ScheduledTaskRunRow.status.in_(ACTIVE_RUN_STATUSES),
+                )
+                .with_for_update()
+            )
             if active is not None and active.status in {"launching", "running"}:
                 # Completion owns the lifecycle while work is already executing.
                 return True
@@ -797,7 +928,7 @@ class ScheduledTaskRepository:
         whose history is entirely unsequenced keeps the previous timestamp
         ordering.
         """
-        base = select(ScheduledTaskRunRow).where(ScheduledTaskRunRow.task_id == task_id)
+        base = select(ScheduledTaskRunRow).where(ScheduledTaskRunRow.workspace_id.is_(None), ScheduledTaskRunRow.task_id == task_id)
         sequenced_stmt = base.where(ScheduledTaskRunRow.occurrence_seq.is_not(None)).order_by(ScheduledTaskRunRow.occurrence_seq.desc()).limit(1).execution_options(populate_existing=True)
         sequenced = (await session.execute(sequenced_stmt)).scalars().first()
         if sequenced is not None:
@@ -824,6 +955,7 @@ class ScheduledTaskRepository:
         stmt = (
             select(ScheduledTaskRunRow.id)
             .where(
+                ScheduledTaskRunRow.workspace_id.is_(None),
                 ScheduledTaskRunRow.task_id == task_id,
                 ScheduledTaskRunRow.status.in_(ACTIVE_RUN_STATUSES),
             )
@@ -891,7 +1023,14 @@ class ScheduledTaskRepository:
         row the task's newest admission.  Tasks whose latest run row is absent
         receive the generic cancellation.
         """
+        if self.workspace_scope_required:
+            from deerflow.persistence.scheduled_task_runs.sql import ScheduledTaskRunRepository
+
+            occurrences = ScheduledTaskRunRepository(self._sf, run_repository=self._run_repository, workspace_required=True)
+            occurrences.set_finalization_observer(self._finalization_observer)
+            return await occurrences._reconcile_scoped_terminal_runs(error=error, now=datetime.now(UTC))
         stmt = select(ScheduledTaskRow.id).where(
+            ScheduledTaskRow.workspace_id.is_(None),
             ScheduledTaskRow.schedule_type == "once",
             ScheduledTaskRow.status == "running",
             ScheduledTaskRow.lease_expires_at.is_(None),
@@ -909,7 +1048,7 @@ class ScheduledTaskRepository:
                 # queued occurrence, so no live row can appear between the
                 # probe below and this commit.
                 task_row = await session.get(ScheduledTaskRow, task_id, with_for_update=True)
-                if task_row is None or task_row.status != "running" or task_row.lease_expires_at is not None:
+                if task_row is None or task_row.workspace_id is not None or task_row.status != "running" or task_row.lease_expires_at is not None:
                     continue
                 run_row = await self._fetch_latest_run(session, task_id)
                 if await self._has_active_occurrence(session, task_id):
@@ -934,9 +1073,16 @@ class ScheduledTaskRepository:
         lease_grace_seconds: int = 10,
     ) -> int:
         """Cancel once tasks only after their underlying run is no longer live."""
+        if self.workspace_scope_required:
+            from deerflow.persistence.scheduled_task_runs.sql import ScheduledTaskRunRepository
+
+            occurrences = ScheduledTaskRunRepository(self._sf, run_repository=self._run_repository, workspace_required=True)
+            occurrences.set_finalization_observer(self._finalization_observer)
+            return await occurrences._reconcile_scoped_terminal_runs(error=error, now=now)
         async with self._sf() as session:
             result = await session.execute(
                 select(ScheduledTaskRow.id).where(
+                    ScheduledTaskRow.workspace_id.is_(None),
                     ScheduledTaskRow.schedule_type == "once",
                     ScheduledTaskRow.status == "running",
                 )
@@ -945,7 +1091,7 @@ class ScheduledTaskRepository:
             cancelled = 0
             for task_id in task_ids:
                 task = await session.get(ScheduledTaskRow, task_id, with_for_update=True)
-                if task is None or task.status != "running":
+                if task is None or task.workspace_id is not None or task.status != "running":
                     continue
                 if _lease_is_alive(task.lease_expires_at, now=now, grace_seconds=0):
                     continue
@@ -996,10 +1142,13 @@ class ScheduledTaskRepository:
 
     @staticmethod
     async def _find_underlying_run(session: AsyncSession, task_run: ScheduledTaskRunRow | None, task: ScheduledTaskRow) -> RunRow | None:
+        if task.workspace_id is not None:
+            # Scoped recovery uses the exact occurrence binding scanner.
+            return None
         run_ids = [candidate for candidate in (task_run.run_id if task_run is not None else None, task.last_run_id) if candidate]
         for run_id in dict.fromkeys(run_ids):
             candidate = await session.get(RunRow, run_id)
-            if candidate is None:
+            if candidate is None or candidate.workspace_id is not None:
                 continue
             linked_task_run_id = (candidate.metadata_json or {}).get("scheduled_task_run_id")
             if task_run is None or linked_task_run_id is None or linked_task_run_id == task_run.id:
@@ -1008,5 +1157,5 @@ class ScheduledTaskRepository:
         metadata_filter = RunRow.metadata_json["scheduled_task_id"].as_string() == task.id
         if task_run is not None:
             metadata_filter = RunRow.metadata_json["scheduled_task_run_id"].as_string() == task_run.id
-        result = await session.execute(select(RunRow).where(metadata_filter).order_by(RunRow.created_at.desc()).limit(1))
+        result = await session.execute(select(RunRow).where(RunRow.workspace_id.is_(None), metadata_filter).order_by(RunRow.created_at.desc()).limit(1))
         return result.scalars().first()

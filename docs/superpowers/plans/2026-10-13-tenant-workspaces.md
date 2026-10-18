@@ -993,3 +993,22 @@ Main passed (19.91s) and receive-time membership withdrawal passed (18.49s), eac
 ### 2026-10-18 — dispatched control retirement verified (#121)
 
 #120 RED reproduced a stranded dispatched notification after real membership withdrawal. #121 GREEN: one PostgreSQL case passed in 19.78s; Ruff/50 files passed. A finite-column control sweep compares original identity/context, notification versions, Run locator, next-at and exact lease values, then rechecks invalid authority before dead-lettering. No business payload/Run/checkpoint read or launch occurs. Notified version stays zero; second Run stays pending and capacity stays charged at 1, so notification cleanup cannot substitute for STOP. Exact #120/#121 fixture containers/networks are absent. Evidence: `docs/tenant-workspaces-evidence/native-dispatched-control-121.json`. M4 remains partial: Scheduler/background identities, physical B/two-host proof and remaining parent requirements are open.
+
+### M4 step 26 — Scheduler original-workspace main (in progress)
+
+Current evidence: tasks and occurrences carry only workspace_id; repository constructors/claims, launcher, recovery and event publication lack original context/incarnation fencing. Launcher uses the default internal principal. Existing metadata-only recovery fallbacks can associate a foreign Run.
+
+- [ ] Add nullable original task/occurrence context and execution/origin thread incarnation through native 0041 migration; unknown historical records remain legacy/quarantined, never enriched from current UI state.
+- [ ] Preserve original actor/workspace through real task creation, native durable queue/lease claim and fresh-thread allocation. Page fresh tasks need no fabricated parent; reuse mode must pin the real private thread incarnation. Management authorization and explicit future renewal must not revive old queued occurrences or silently refresh their snapshots.
+- [ ] Independently resolve launch authority from native SQL. Carry a server-only occurrence receipt (ID/lease owner/attempt) into native Run admission; atomically recheck exact task/occurrence/scope/thread/lease and bind the Run ID in the same transaction. Establish a consistent workspace/actor/private-parent/task/occurrence/Run lock order before implementation; do not append inversely ordered parent locks.
+- [ ] Complete and recover via exact original occurrence/Run identity, without scoped legacy metadata fallback. Write origin lifecycle events under matching private origin/incarnation; scoped IM delivery requires a workspace-bound connection and stays closed until that exists.
+- [ ] First verify one PostgreSQL conversation-origin/fresh-thread story: actual create -> durable queue -> UI switch -> background dispatch -> actual launch_scheduled_thread_run/start_run -> native pool/adoption/graph -> actual completion -> scoped origin event, no duplicate launch. Use existing real fixtures and audit app.state dependencies before CI.
+- [ ] Then only necessary queued-withdrawal/lease-fencing boundaries; page/reuse, HTTP/tool, IM and recovery remain explicit requirements for full Scheduler/M4 acceptance. No local runtime, deployment, activation or broad test matrix.
+
+Root owns architecture and acceptance; existing 6.1-sol medium agent implements and runs Shanghai CI. Parent M4 and M0–M11 remain open.
+
+### 2026-10-18 — Scheduler original-workspace main (#123)
+
+#122 RED proved a real bound task create persisted NULL workspace. #123 GREEN: one PostgreSQL story passed in 19.61s; Ruff/61 files passed. Native task/occurrence snapshots and parent incarnations (0041_scheduler_workspace), durable queue, UI switch, SQL-resolved typed launch receipt, atomic occurrence/Run association, actual native pool/adoption/graph/completion and original-origin event are verified. Root independently matched all 16 reviewed files to the successful source archive. Exact fixture containers/network are absent.
+
+Scope is one conversation-origin/fresh-thread/once story with deterministic graph, no sandbox and ASGI transport. Public management/status/history/manual, installed scheduled MCP/reconciler/own-stop, scoped IM, expired queue and unknown launch control remain withheld or unaccepted; page/reuse branches and physical integration are not accepted by this test. See `docs/tenant-workspaces-evidence/native-scheduler-123.json` and `native-scheduler-entry-matrix.md`. Next: only queued-withdrawal and pre-insert lease-takeover checks before continuing remaining requirements. Activation remains false; no deployment or push.

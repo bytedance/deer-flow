@@ -44,6 +44,7 @@ def main():
             "native-dependency-main",
             "native-dependency-revocation",
             "native-dependency-dispatched-revocation",
+            "native-scheduler-main",
         ),
         default="revocation",
     )
@@ -137,6 +138,8 @@ def main():
         tests = "tests/test_workspace_native_dependencies.py::test_scoped_native_dependency_notification_resumes_original_goal[notification_member-postgres]"
     if args.suite == "native-dependency-dispatched-revocation":
         tests = "tests/test_workspace_native_dependencies.py::test_scoped_native_dependency_notification_resumes_original_goal[dispatched_member-postgres]"
+    if args.suite == "native-scheduler-main":
+        tests = "tests/test_workspace_native_scheduler.py::test_scoped_scheduler_occurrence_keeps_original_workspace[postgres]"
     rendered = rendered.replace("@@TEST_PATHS@@", tests)
     if "@@" in rendered:
         parser.error("unresolved pipeline marker")

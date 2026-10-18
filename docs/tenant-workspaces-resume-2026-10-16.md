@@ -1,4 +1,4 @@
-# Resume checkpoint — 2026-10-18: dependency main #118, receive-time revocation #119 and dispatched control retirement #121 passed; M4 remains partial
+# Resume checkpoint — 2026-10-18: Scheduler main #123 verified; M4 and M0–M11 remain partial
 > **执行中，M4 部分完成。** Jenkins #112：单 Worker 真实 AIO 创建、文件写读、warm STOP、失败保留和 report 后释放已通过（1 项，53.79s）。两机 HTTP、恢复和 C→B→C 仍待完成；通知补丁已获用户批准，正在应用和验证；租户启动关闭。
 
 # 2026-10-16 暂停与恢复检查点
@@ -1180,3 +1180,9 @@ Jenkins #119 SUCCESS: one PostgreSQL negative passed in 18.49s; Ruff/50 files pa
 ### 2026-10-18 — dispatched control retirement verified (#121)
 
 #120 RED reproduced a stranded dispatched notification after real membership withdrawal. #121 GREEN: one PostgreSQL case passed in 19.78s; Ruff/50 files passed. A finite-column control sweep compares original identity/context, notification versions, Run locator, next-at and exact lease values, then rechecks invalid authority before dead-lettering. No business payload/Run/checkpoint read or launch occurs. Notified version stays zero; second Run stays pending and capacity stays charged at 1, so notification cleanup cannot substitute for STOP. Exact #120/#121 fixture containers/networks are absent. Evidence: `docs/tenant-workspaces-evidence/native-dispatched-control-121.json`. M4 remains partial: Scheduler/background identities, physical B/two-host proof and remaining parent requirements are open.
+
+### 2026-10-18 — Scheduler original-workspace main (#123)
+
+#122 RED proved a real bound task create persisted NULL workspace. #123 GREEN: one PostgreSQL story passed in 19.61s; Ruff/61 files passed. Native task/occurrence snapshots and parent incarnations (0041_scheduler_workspace), durable queue, UI switch, SQL-resolved typed launch receipt, atomic occurrence/Run association, actual native pool/adoption/graph/completion and original-origin event are verified. Root independently matched all 16 reviewed files to the successful source archive. Exact fixture containers/network are absent.
+
+Scope is one conversation-origin/fresh-thread/once story with deterministic graph, no sandbox and ASGI transport. Public management/status/history/manual, installed scheduled MCP/reconciler/own-stop, scoped IM, expired queue and unknown launch control remain withheld or unaccepted; page/reuse branches and physical integration are not accepted by this test. See `docs/tenant-workspaces-evidence/native-scheduler-123.json` and `native-scheduler-entry-matrix.md`. Next: only queued-withdrawal and pre-insert lease-takeover checks before continuing remaining requirements. Activation remains false; no deployment or push.
