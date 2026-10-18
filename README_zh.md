@@ -562,6 +562,10 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 4. 复制 App ID 和 App Secret，在 `.env` 中设置 `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET`，并在 `config.yaml` 中启用该渠道。
 5. _（可选）_ 交互式澄清卡片：在 `channels.feishu` 下设置 `card_interaction_enabled: true`，让 agent 的选项式提问渲染为可点击的按钮卡片，并在问题前保留背景说明。随后在开发者后台打开 **回调配置**（与「事件订阅」是不同的标签页），订阅 `card.action.trigger` 并选择 **长连接**，最后发布新版本。点击按钮等同于输入该选项作答；只有触发该次提问的用户才能操作对应卡片。按钮答案会保存到对话历史中，后续澄清继续在同一会话内进行。
 
+如果 SDK 反复记录 `CERTIFICATE_VERIFY_FAILED`，参见 [Feishu / Lark TLS 故障排查](backend/docs/IM_CHANNEL_CONNECTIONS.md#feishu--lark-tls-troubleshooting)，检查 Gateway 的 CA 信任配置。
+
+定时任务的执行结果和生命周期通知也可以主动推送给已绑定的飞书/Lark 用户，无需用户先发送新消息。它们与企业微信共用通知发件箱和本地化摘要机制。应用必须具备向该用户发送消息的权限，参见[飞书定时任务通知](backend/docs/IM_CHANNEL_CONNECTIONS.md#feishu-scheduled-task-notifications)。
+
 **WeChat 配置**
 
 1. 在 `config.yaml` 中启用 `wechat` 渠道。
