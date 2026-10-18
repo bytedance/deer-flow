@@ -8,6 +8,7 @@ from langchain.agents import create_agent
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool as as_tool
+from langgraph.checkpoint.memory import InMemorySaver
 
 from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
 from deerflow.agents.middlewares.mcp_routing_middleware import McpRoutingMiddleware, assert_mcp_routing_before_deferred_filter
@@ -325,11 +326,15 @@ def test_auto_promote_makes_schema_visible_in_same_model_cycle():
         state_schema=ThreadState,
     )
 
-    result = asyncio.run(graph.ainvoke({"messages": [HumanMessage(content="show orders")]}))
+    result = asyncio.run(graph.ainvoke({"messages": [HumanMessage(content="show orders", id="user-1")]}))
 
     assert "postgres_query" in bound[0]
     assert "metrics_query" not in bound[0]
-    assert result["promoted"] == {"catalog_hash": setup.catalog_hash, "names": ["postgres_query"]}
+    assert result["promoted"] == {
+        "catalog_hash": setup.catalog_hash,
+        "names": ["postgres_query"],
+        "turn_id": "user-1",
+    }
     assert not any(isinstance(message, ToolMessage) for message in result["messages"])
 
 
@@ -359,10 +364,14 @@ def test_auto_promoted_tool_can_be_called_without_tool_search():
         state_schema=ThreadState,
     )
 
-    result = asyncio.run(graph.ainvoke({"messages": [HumanMessage(content="show orders")]}))
+    result = asyncio.run(graph.ainvoke({"messages": [HumanMessage(content="show orders", id="user-1")]}))
 
     assert "postgres_query" in bound[0]
-    assert result["promoted"] == {"catalog_hash": setup.catalog_hash, "names": ["postgres_query"]}
+    assert result["promoted"] == {
+        "catalog_hash": setup.catalog_hash,
+        "names": ["postgres_query"],
+        "turn_id": "user-1",
+    }
     tool_messages = [message for message in result["messages"] if isinstance(message, ToolMessage)]
     assert tool_messages
     assert tool_messages[0].name == "postgres_query"
@@ -393,11 +402,49 @@ def test_explicit_tool_search_merges_with_auto_promoted_names():
         state_schema=ThreadState,
     )
 
-    result = asyncio.run(graph.ainvoke({"messages": [HumanMessage(content="show orders")]}))
+    result = asyncio.run(graph.ainvoke({"messages": [HumanMessage(content="show orders", id="user-1")]}))
 
     assert result["promoted"] == {
         "catalog_hash": setup.catalog_hash,
         "names": ["postgres_query", "metrics_query"],
+        "turn_id": "user-1",
+    }
+
+
+def test_auto_promotion_is_recomputed_on_each_user_turn():
+    bound: list[list[str]] = []
+
+    class RecordingModel(GenericFakeChatModel):
+        def bind_tools(self, tools, **kwargs):
+            bound.append([getattr(t, "name", None) for t in tools])
+            return self
+
+    routed = _routed(postgres_query, keywords=["orders"], priority=100)
+    final_tools, setup = assemble_deferred_tools([active_tool, routed], enabled=True)
+    routing_middleware = build_mcp_routing_middleware(final_tools, setup, top_k=3)
+    assert routing_middleware is not None
+    model = RecordingModel(messages=iter([AIMessage(content="first done"), AIMessage(content="second done")]))
+    graph = create_agent(
+        model=model,
+        tools=final_tools,
+        middleware=[
+            routing_middleware,
+            DeferredToolFilterMiddleware(setup.deferred_names, setup.catalog_hash),
+        ],
+        state_schema=ThreadState,
+        checkpointer=InMemorySaver(),
+    )
+    config = {"configurable": {"thread_id": "routing-turn-scope"}}
+
+    asyncio.run(graph.ainvoke({"messages": [HumanMessage(content="show orders", id="user-1")]}, config))
+    result = asyncio.run(graph.ainvoke({"messages": [HumanMessage(content="say hello", id="user-2")]}, config))
+
+    assert "postgres_query" in bound[0]
+    assert "postgres_query" not in bound[1]
+    assert result["promoted"] == {
+        "catalog_hash": setup.catalog_hash,
+        "names": [],
+        "turn_id": "user-2",
     }
 
 
@@ -432,3 +479,55 @@ def test_privacy_no_trace_metadata_or_info_logs(caplog):
     assert state["metadata"] == {"trace": "existing"}
     assert "sensitive-keyword" not in caplog.text
     assert "secret_tool" not in caplog.text
+
+
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize(
+    ("case", "expected_names", "expected_audit"),
+    [
+        ("in_flight", {"archive_lookup", "postgres_query", "metrics_query"}, ["metrics_query"]),
+        ("new_user", {"postgres_query", "metrics_query"}, ["metrics_query", "postgres_query"]),
+        ("new_catalog", {"postgres_query", "metrics_query"}, ["metrics_query", "postgres_query"]),
+        ("stale_turn", {"postgres_query", "metrics_query"}, ["metrics_query", "postgres_query"]),
+        ("no_ai", {"postgres_query", "metrics_query"}, ["metrics_query", "postgres_query"]),
+        ("malformed_names", {"postgres_query", "metrics_query"}, ["metrics_query", "postgres_query"]),
+    ],
+)
+def test_routing_legacy_migration_preserves_scope_and_audit(case, expected_names, expected_audit, use_async):
+    middleware = McpRoutingMiddleware(
+        {
+            "postgres_query": {"priority": 100, "keywords": ["orders"]},
+            "metrics_query": {"priority": 90, "keywords": ["orders"]},
+        },
+        "hash1",
+        3,
+    )
+    messages = [HumanMessage(content="orders", id="user-1"), AIMessage(content="searching")]
+    promoted = {"catalog_hash": "hash1", "names": ["archive_lookup", "postgres_query"]}
+    if case == "new_user":
+        messages.append(HumanMessage(content="orders again", id="user-2"))
+    elif case == "new_catalog":
+        promoted["catalog_hash"] = "old-hash"
+    elif case == "stale_turn":
+        promoted["turn_id"] = "old-user"
+    elif case == "no_ai":
+        messages.pop()
+    elif case == "malformed_names":
+        promoted["names"] = "archive_lookup"
+    state = {"messages": messages, "promoted": promoted}
+    recorder = _Recorder()
+    runtime = SimpleNamespace(context={"__run_journal": recorder})
+
+    update = asyncio.run(middleware.abefore_model(state, runtime)) if use_async else middleware.before_model(state, runtime)
+    merged = merge_promoted(promoted, update["promoted"])
+
+    assert set(merged["names"]) == expected_names
+    assert merged["turn_id"] == ("user-2" if case == "new_user" else "user-1")
+    assert recorder.calls[0]["changes"]["tool_names"] == expected_audit
+    assert state["promoted"] is promoted
+    assert "turn_id" not in promoted or promoted["turn_id"] == "old-user"
+
+    state["promoted"] = merged
+    repeated = asyncio.run(middleware.abefore_model(state, runtime)) if use_async else middleware.before_model(state, runtime)
+    assert set(merge_promoted(merged, repeated["promoted"])["names"]) == expected_names
+    assert len(recorder.calls) == 1

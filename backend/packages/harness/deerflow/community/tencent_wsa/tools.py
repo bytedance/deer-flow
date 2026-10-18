@@ -41,10 +41,26 @@ def _get_api_key(tool_name: str = "web_search", *, extras: Mapping[str, Any] | N
 
 
 def _coerce_max_results(value: object, *, default: int = _DEFAULT_MAX_RESULTS) -> int:
-    if isinstance(value, int) and not isinstance(value, bool):
+    """Coerce configured/tool max_results into a bounded positive int.
+
+    Bools and all floats (including integral ones such as 2.0) fall back to
+    the default; only ints and integer strings are accepted.
+    String parsing uses ``int(...)`` inside a try/except so digit-class Unicode
+    that ``str.isdigit()`` accepts but ``int`` rejects (e.g. ``"²"``, ``"1²"``)
+    falls back to the default instead of raising, matching Brave/Serply/etc.
+    Valid decimal Unicode such as ``"٣"`` still parses.
+    """
+    if isinstance(value, bool):
+        logger.warning("Invalid Tencent Cloud WSA max_results=%r; using default %s", value, default)
+        return default
+    if isinstance(value, int):
         result = value
-    elif isinstance(value, str) and value.strip().isdigit():
-        result = int(value.strip())
+    elif isinstance(value, str):
+        try:
+            result = int(value.strip())
+        except (ValueError, OverflowError):
+            logger.warning("Invalid Tencent Cloud WSA max_results=%r; using default %s", value, default)
+            return default
     else:
         logger.warning("Invalid Tencent Cloud WSA max_results=%r; using default %s", value, default)
         return default

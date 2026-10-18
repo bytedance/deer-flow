@@ -1053,7 +1053,18 @@ test("recovers a gap emitted by the initial run stream", async () => {
   for await (const entry of getAPIClient(true).runs.stream(
     "thread-2",
     "lead_agent",
-    { streamResumable: true },
+    {
+      input: {
+        messages: [
+          {
+            id: "human-2",
+            type: "human",
+            content: "Question awaiting checkpoint",
+          },
+        ],
+      },
+      streamResumable: true,
+    },
   )) {
     received.push(entry);
   }
@@ -1065,7 +1076,16 @@ test("recovers a gap emitted by the initial run stream", async () => {
     },
     {
       event: "values",
-      data: { messages: [{ type: "ai", content: "checkpoint" }] },
+      data: {
+        messages: [
+          { type: "ai", content: "checkpoint" },
+          {
+            id: "human-2",
+            type: "human",
+            content: "Question awaiting checkpoint",
+          },
+        ],
+      },
     },
     { event: "end", data: null },
   ]);

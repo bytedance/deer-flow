@@ -1152,15 +1152,12 @@ class TestOperationOwnership:
         await asyncio.gather(first, second, return_exceptions=True)
 
     @pytest.mark.anyio
-    async def test_force_close_progress_reporter_unbounded_is_characterised(self):
-        """Characterisation of a pre-existing limitation, tracked separately.
+    @pytest.mark.parametrize("late_failure", [False, True], ids=["late-success", "late-failure"])
+    async def test_force_close_bounds_and_supervises_progress_reporter(self, monkeypatch, caplog, late_failure):
+        """Lease-loss close is bounded while a late progress result stays observed."""
+        import deerflow.runtime.journal as journal_module
 
-        close(flush=False) bounds the store write (see the abandoned-store tests)
-        but still awaits the pending progress task without a deadline, so a
-        progress reporter that swallows cancellation can block a force close.
-        This reproduces identically on the pre-PR base, so it is documented here
-        rather than fixed inside the write-ownership PR.
-        """
+        monkeypatch.setattr(journal_module, "_WRITE_SETTLE_TIMEOUT_SECONDS", 0.02, raising=False)
         started = asyncio.Event()
         release = asyncio.Event()
 
@@ -1170,22 +1167,87 @@ class TestOperationOwnership:
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
                 await release.wait()
+            if late_failure:
+                raise RuntimeError("late progress failure")
 
         journal = RunJournal("r-prog", "t-prog", MemoryRunEventStore(), flush_threshold=100, progress_reporter=reporter)
         journal._schedule_progress_flush()
         await started.wait()
         assert journal._pending_progress_task is not None
 
-        bounded = True
+        close_task = asyncio.create_task(journal.close(flush=False))
         try:
-            await asyncio.wait_for(journal.close(flush=False), timeout=0.25)
-        except TimeoutError:
-            bounded = False
+            done, _pending = await asyncio.wait({close_task}, timeout=0.25)
+            assert close_task in done, "force close waited indefinitely for a cancellation-resistant progress reporter"
+            assert close_task.exception() is None
+            assert journal._closed is True
+            assert len(journal._abandoned_progress_tasks) == 1, "late progress task was not supervised"
+
+            with caplog.at_level(logging.WARNING, logger="deerflow.runtime.journal"):
+                release.set()
+                await _pump_loop()
+
+            assert journal._abandoned_progress_tasks == set()
+            if late_failure:
+                assert "Failed to persist progress snapshot for run r-prog" in caplog.text
+            assert "progress reporter for run r-prog settled after journal abandonment" in caplog.text
         finally:
             release.set()
+            await asyncio.gather(close_task, return_exceptions=True)
+
+    @pytest.mark.anyio
+    async def test_force_close_progress_cleanup_survives_repeated_caller_cancellation(self, monkeypatch):
+        """Caller cancellation detaches cleanup without dropping the late task."""
+        import deerflow.runtime.journal as journal_module
+
+        monkeypatch.setattr(journal_module, "_WRITE_SETTLE_TIMEOUT_SECONDS", 1.0, raising=False)
+        write_started = asyncio.Event()
+        progress_started = asyncio.Event()
+        progress_cancelled = asyncio.Event()
+        release_write = asyncio.Event()
+        release_progress = asyncio.Event()
+
+        class UncooperativeStore(MemoryRunEventStore):
+            async def put_batch(self, events):
+                write_started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    await release_write.wait()
+
+        async def reporter(snapshot):
+            progress_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                progress_cancelled.set()
+                await release_progress.wait()
+
+        journal = RunJournal("r-prog-cancel", "t-prog-cancel", UncooperativeStore(), flush_threshold=1, progress_reporter=reporter)
+        journal._put(event_type="A", category="trace", content="one")
+        journal._schedule_progress_flush()
+        await asyncio.wait_for(asyncio.gather(write_started.wait(), progress_started.wait()), timeout=1)
+
+        close_task = asyncio.create_task(journal.close(flush=False))
+        try:
+            # Progress cancellation must not wait behind an unrelated event
+            # writer's bounded teardown.
+            await asyncio.wait_for(progress_cancelled.wait(), timeout=0.25)
+
+            close_task.cancel("first close cancellation")
+            close_task.cancel("repeated close cancellation")
+            with pytest.raises(asyncio.CancelledError):
+                await close_task
+
+            assert journal._closed is True
+            assert len(journal._abandoned_progress_tasks) == 1, "caller cancellation dropped progress-task supervision"
+        finally:
+            release_write.set()
+            release_progress.set()
+            await asyncio.gather(close_task, return_exceptions=True)
             await _pump_loop()
 
-        assert bounded is False, "force close became bounded; please update this characterisation"
+        assert journal._abandoned_progress_tasks == set()
 
     @pytest.mark.anyio
     async def test_concurrent_flush_not_committed_retry_is_characterised(self):

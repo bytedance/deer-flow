@@ -138,7 +138,15 @@ async def invoke_plugin_action(request: Request, namespace: str, action_name: st
     try:
         async with asyncio.timeout(30):
             runs = resolve_agent_runs(request)
-            return await action.handler(MappingProxyType(payload), ActionContext(principal, MappingProxyType(settings), agent_runs=runs.for_plugin(namespace) if runs is not None else None))
+            return await action.handler(
+                MappingProxyType(payload),
+                ActionContext(
+                    principal,
+                    MappingProxyType(settings),
+                    agent_runs=runs.for_plugin(namespace) if runs is not None else None,
+                    interaction="session" if getattr(request.state, "auth_source", None) == "session" and not principal.is_internal else "other",
+                ),
+            )
     except AgentRunError as exc:
         raise HTTPException(exc.status_code, str(exc)) from exc
     except TimeoutError as exc:
