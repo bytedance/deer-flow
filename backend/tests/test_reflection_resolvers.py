@@ -47,3 +47,33 @@ def test_resolve_variable_invalid_path_format():
         resolve_variable("invalid.variable.path")
 
     assert "doesn't look like a variable path" in str(exc_info.value)
+
+
+def test_resolve_variable_empty_attribute_reports_format_guidance():
+    """A trailing colon (empty attribute) is a typo, not a missing attribute (#7015)."""
+    with pytest.raises(ImportError) as exc_info:
+        resolve_variable("json:")
+
+    message = str(exc_info.value)
+    assert "doesn't look like a variable path" in message
+    assert "does not define" not in message
+
+
+def test_resolve_variable_extra_colon_reports_format_guidance():
+    """An extra colon is a typo, not a dependency to install (#7015)."""
+    with pytest.raises(ImportError) as exc_info:
+        resolve_variable("json:loads:extra")
+
+    message = str(exc_info.value)
+    assert "doesn't look like a variable path" in message
+    assert "Missing dependency" not in message
+    assert "uv add" not in message
+
+
+def test_resolve_variable_empty_module_reports_format_guidance():
+    """A leading colon (empty module) is a typo, not a missing module (#7015)."""
+    with pytest.raises(ImportError) as exc_info:
+        resolve_variable(":loads")
+
+    message = str(exc_info.value)
+    assert "doesn't look like a variable path" in message
