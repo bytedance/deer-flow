@@ -727,14 +727,25 @@ Notes:
 - Manual trigger uses the same scheduled-task resource and run lifecycle.
 - Scheduled task definitions and task-run history are persisted in the application database.
 - With `channel_connections.enabled: true`, the scheduler sends IM notices ("scheduled task updates") to the task owner's connected identities. A delivery worker (same poll cadence as the scheduler) pushes them.
-  - **Which apps:** only providers whose channel implements proactive push get notices; today those are WeCom and Feishu/Lark (`proactive_notifications` in `app/channels/capabilities.py`, also returned by `GET /api/channels/providers`, where Settings shows "sent here" or "not available for this app yet"). Other providers get no outbox rows at all, and rows queued for them before the upgrade end once as `failed` without retries.
-  - **Optional Feishu group:** each task may select one additional owner-bound group through the task form or `notification_group_connection_id` in REST. No group is selected automatically; personal delivery is retained. The app needs `im:chat:read` for names, and a private binding never becomes a group destination. [Group setup and delivery](IM_CHANNEL_CONNECTIONS.md#feishu-group-notifications).
+  - **Which apps:** only providers whose channel implements proactive push get notices; today those are WeCom, Feishu/Lark, WeChat and QQ (`proactive_notifications` in `app/channels/capabilities.py`, also returned by `GET /api/channels/providers`). Other providers get no outbox rows, and unsupported queued rows end as `failed` without retries.
+  - **Optional group:** each task may select one additional owner-bound Feishu, QQ or WeCom group through the task form or `notification_group_connection_id` in REST. No group is selected automatically; personal delivery is retained. QQ/WeCom bindings take an owner-chosen group name; Feishu can read names with `im:chat:read`. A new private binding never authorizes an unbound group. [Group setup and delivery](IM_CHANNEL_CONNECTIONS.md#group-notifications).
   - **Events:** `run_completed`, `run_failed`, `run_unmet` (goal missed), `task_paused` (automatic pause after three missed goals), `task_stopped` (paused by the agent because its stop condition was met) and `task_finished` (all `max_runs` done or `end_at` reached).
   - **One message per occurrence:** when one occurrence produces several events, only the first of `task_stopped` > `task_paused` > `task_finished` > `run_failed` > `run_unmet` > `run_completed` is sent, and that message still says how the last run went ("The last run failed." / "didn't meet the goal"). A one-time task sends only its run's outcome, never a separate `task_finished`.
   - **Transactional:** notices are queued by the finalization observer in the same database transaction that records the outcome and are deduplicated per occurrence (or per end time for a task that ends between runs), so an occurrence finalized by crash or lease recovery notifies exactly once. Plain manual "run now" trials and interrupted runs stay silent; a trial that pauses or finishes the task still sends that notice. Occurrences that end without a finished run (launch error, queue timeout, interrupted by a restart) stay silent.
   - **Text:** the task title, what happened, a one-line result (the same run summary the tasks page shows, redacted, only when the agent replied) and "Open DeerFlow → Scheduled tasks for details." Notices carry no task, run or thread IDs, no timestamps and no links: most deployments run on localhost or a LAN, where a link would be dead on the phone that receives it.
   - **Language:** the owner's web UI language (the `locale` user preference, which the web app keeps in sync), else `channel_connections.notification_locale` (`en-US` or `zh-CN`, default `en-US`; startup-scoped). Auth-disabled installs always use the config value.
   - **Delivery:** channel/transport outages park rows without consuming the retry budget, for up to about a day; platform rejections exhaust ~15 minutes of counted retries then settle `failed`. The worker re-checks the binding right before sending: a target the owner has disconnected since enqueue is dropped as `failed`, never pushed.
+
+### Run event timestamps
+
+With `run_events.backend: db`, caller-supplied ISO 8601 event timestamps are
+normalized to UTC before storage, preserving their instant when SQLite drops
+timezone information. Timestamps without an offset are treated as UTC.
+
+**Upgrade note:** Previously stored timestamps are not rewritten. If callers
+supplied non-UTC offsets before this fix, existing SQLite `created_at` values
+may represent the wrong instant. Upgrading does not correct those values;
+the original offset cannot be recovered from the stored timestamp alone.
 
 ### Deployment topology (multi-instance)
 
@@ -811,14 +822,14 @@ Every IM channel except GitHub connects outbound to its platform (Telegram long 
 - Ownership is decided against the **database clock** inside each SQL statement (an expired lease changes hands only once it has been expired for `grace_seconds`, and every acquisition bumps a fencing `epoch`), so clock skew between hosts cannot hand a provider to two instances. The holder fails closed on its own monotonic clock: when a renewal is rejected, or cannot be confirmed for long enough that the next renewal would come too late, it stops the transport first — at least `grace_seconds` before a peer is allowed to connect.
 - Every instance tries to take every free lease of a provider it has enabled, so providers spread across instances by whoever starts first. A holder whose transport fails to start keeps the lease and retries with backoff (up to 5 minutes); a transport that cannot be stopped within its bounded teardown keeps its lease until it expires rather than invite a second connection.
 - `GET /api/channels/` reports, per arbitrated provider, `leader` (the holder's instance id, the RunManager worker id `hostname:uuid`) and `leader_here`, and `running` reflects the holder's transport on every instance, so `GET /api/channels/providers` and `POST /api/channels/{provider}/connect` behave the same wherever the load balancer sends them. `POST /api/channels/{name}/restart` on a non-holder answers `success: false` and names the holder. Scheduled-task IM notifications are claimed only by the holder of their provider.
-- Runtime channel configuration does not cross instances yet: `POST /api/channels/{provider}/runtime-config` saves the values (in the shared `runtime-config.json`) and applies them only where the provider's transport runs — a non-holder accepts them without restarting the holder, which keeps its current credentials until it next starts the channel (an instance taking a lease over reloads the provider's saved config first). Make credential changes on a single instance or restart the holder afterwards.
+- Runtime channel configuration crosses instances: `POST` / `DELETE /api/channels/{provider}/runtime-config` writes the provider's row in the shared `channel_runtime_configs` table (migration `0044_channel_runtime_configs`, encrypted with [`DEER_FLOW_CREDENTIALS_KEY`](#credentials-encryption-key-deer_flow_credentials_key)) and bumps its `version`. Every instance compares those versions on each renewal tick, so credentials saved or a disconnect made on any instance reach the holder within one renewal interval: it restarts the transport with the new credentials (or starts it, if a start on the old ones had failed), or stops it and releases the lease. A save served by a non-holder answers before the holder has tried the credentials; a failed restart shows as `running: false` and retries with the usual backoff. An instance taking a lease over reads the provider's current config, a disconnect included, before connecting.
 - The block is validated on every topology: an unknown key, a non-mapping value, `enabled` outside `auto | true | false`, `lease_seconds < 3` or `grace_seconds < 0` stop startup with the dotted path in the message.
 - Restart-required (`channels.leader_lease` in the reload-boundary registry): the gate evaluates it once and `ChannelService` captures it at construction. Change it on every instance and restart them together.
 - Known limits: a leader change loses the IM replies in flight on the old holder. The runs themselves continue on the Gateway executing them (channel runs are created with `on_disconnect: continue`) and their thread state is persisted, so the answer stays readable in the web UI, but the transport-local state that would deliver it (a Telegram placeholder message, a Feishu running card, a DingTalk replier) is gone with the old holder; a run executing on the instance that died is recovered as an error like any run of a dead worker.
 
 ### Credentials encryption key (`DEER_FLOW_CREDENTIALS_KEY`)
 
-DeerFlow encrypts credentials it stores at rest (today: per-connection IM channel credentials in the `channel_credentials` table) with a deployment key read **only** from the environment — there is no `config.yaml` key, and it is never derived from `AUTH_JWT_SECRET`.
+DeerFlow encrypts credentials it stores at rest (today: per-connection IM channel credentials in the `channel_credentials` table, and the IM bot credentials an admin enters in the web UI, in `channel_runtime_configs`) with a deployment key read **only** from the environment — there is no `config.yaml` key, and it is never derived from `AUTH_JWT_SECRET`.
 
 ```bash
 # Generate a key (urlsafe base64 of 32 random bytes, a Fernet key):
@@ -830,7 +841,7 @@ export DEER_FLOW_CREDENTIALS_KEY=<key>
 - **Single instance:** when the variable is unset or blank, the Gateway generates `{DEER_FLOW_HOME}/.credentials_key` (mode `0600`) on first use and reuses it. The file is created exclusively, so uvicorn workers sharing the runtime home converge on one key. It is only created when a feature that stores credentials is enabled.
 - **Multi-instance:** instances that do not share a runtime home would each generate their own file and could not decrypt what their peers stored. Startup therefore refuses a declared multi-instance deployment (`deployment.multi_instance: true` / `DEER_FLOW_MULTI_INSTANCE=1`) that enables `channel_connections` without the variable. Multiple workers of one process tree (`GATEWAY_WORKERS > 1` without the declaration) share the file and are not refused. Deployments that store no credentials keep booting without a key.
 - **Malformed keys** (wrong length, standard rather than urlsafe base64, any bad entry in the list) stop startup with an error that never repeats the key material.
-- **Backup:** losing the key makes every stored credential unreadable. Unreadable values are treated as missing (logged as a warning), never as a crash — Slack, for example, falls back to the deployment bot token.
+- **Backup:** losing the key makes every stored credential unreadable. Unreadable values are treated as missing (logged), never as a crash — Slack, for example, falls back to the deployment bot token, and a bot configured from the web UI reads as not configured until its credentials are saved again. If no key can be loaded at all (an unreadable key file), saving bot credentials from the web UI answers `503` instead of storing them in plaintext.
 - **Deployment tooling:** the Helm chart generates the key into its app Secret and preserves it across upgrades; `make up` (`scripts/deploy.sh`) honors a shell or `.env` value and otherwise generates and persists `$DEER_FLOW_HOME/.credentials_key` — the same file the Gateway would generate, so whichever side created it first wins.
 - The persisted `.jwt_secret` (used when `AUTH_JWT_SECRET` is unset) is created the same exclusive way, so replicas cold-starting on a shared volume no longer keep different session-signing secrets.
 
@@ -1316,6 +1327,8 @@ sandbox:
 ```yaml
 sandbox:
    use: deerflow.community.aio_sandbox:AioSandboxProvider # Docker-based sandbox
+   prewarm: true # optional: overlap likely sandbox work with the first model call
+   prewarm_max_concurrent: 1 # pending or ready-but-unused prewarms per process/provider
 ```
 
 For AIO images on the supported semver line (`1.9.3` through the recommended
@@ -1336,6 +1349,32 @@ affected creation plane is quarantined, bounded best-effort session cleanup
 is attempted, and the container is recycled instead of being returned to the
 warm pool. Session-level cleanup does not clear that quarantine because a
 timed-out create may commit after cleanup has already returned.
+
+`prewarm` is disabled by default and applies only to asynchronous AIO runs with
+an unconditional outer execution-lease cleanup: the Gateway/embedded run worker
+and native subagent executor. Direct `create_deerflow_agent(...).ainvoke()` and
+`.astream()` calls retain ordinary lazy acquisition even when this setting is on.
+For likely sandbox turns (for example, code fences or explicit shell commands),
+startup can overlap the first model call. Authorization is checked before
+speculation and checked again when a tool uses the sandbox. The acquisition
+belongs to the run's execution lease; cancellation, model failure, and turns
+without a sandbox tool drain startup and release that owner. Unused sandboxes
+follow the provider's normal warm-pool/idle cleanup policy, so false positives
+can still consume resources until eviction.
+
+Internal prewarm handles and the non-serializable cleanup marker belong only in
+server-owned runtime context, never checkpoint state. Register the marker only
+inside an unconditional async execution-lease cleanup; revoke it during cleanup,
+which must drain startup and release the owner even if no sandbox ID was published.
+
+`prewarm_max_concurrent` is a positive integer, default `1`. It bounds pending
+and ready-but-unused prewarms for each provider instance in a process. When
+full, DeerFlow skips speculation without queuing or delaying foreground tools.
+The limit is not a total-container cap or a deployment-wide quota; multiple
+Gateway processes have separate budgets. Other providers and synchronous
+embedded calls keep their existing acquisition behavior. Restart after changing
+these settings. Use the [sandbox benchmarks](../scripts/benchmark/sandbox/README.md)
+to measure first-tool wait, unused speculation, and resource pressure on your host.
 
 **BoxLite micro-VM Sandbox** (runs sandbox code in daemonless OCI micro-VMs):
 ```yaml

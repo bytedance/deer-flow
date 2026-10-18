@@ -24,6 +24,7 @@ from deerflow.sandbox.tools import (
     _resolve_and_validate_user_data_path,
     _resolve_skills_path,
     bash_tool,
+    ls_tool,
     mask_local_paths_in_output,
     replace_virtual_path,
     replace_virtual_paths_in_command,
@@ -473,6 +474,45 @@ def test_validate_local_tool_path_rejects_bare_virtual_root() -> None:
     """The bare /mnt/user-data root without trailing slash is not a valid sub-path."""
     with pytest.raises(PermissionError, match="Only paths under"):
         validate_local_tool_path(VIRTUAL_PATH_PREFIX, _THREAD_DATA)
+
+
+def test_validate_local_tool_path_allows_bare_virtual_root_for_reads() -> None:
+    """The local provider maps the aggregate root so it can be listed like AIO."""
+    validate_local_tool_path(VIRTUAL_PATH_PREFIX, _THREAD_DATA, read_only=True)
+
+
+@pytest.mark.parametrize("path", [VIRTUAL_PATH_PREFIX, f"{VIRTUAL_PATH_PREFIX}/", f"{VIRTUAL_PATH_PREFIX}/stray.txt"])
+def test_resolve_user_data_path_keeps_rejecting_the_root(path: str) -> None:
+    """Read and search tools resolve here; only ls lists the root, one allowed dir at a time."""
+    with pytest.raises(PermissionError, match="path traversal"):
+        _resolve_and_validate_user_data_path(path, _THREAD_DATA)
+
+
+def test_ls_tool_rejects_user_data_root_without_a_shared_parent(tmp_path) -> None:
+    """Without a common parent there is no host root to list, so stay closed."""
+    thread_data = {name: str(tmp_path / name / name.removesuffix("_path")) for name in ("workspace_path", "uploads_path", "outputs_path")}
+    for directory in thread_data.values():
+        Path(directory).mkdir(parents=True)
+    runtime = SimpleNamespace(state={"sandbox": {"sandbox_id": "local"}, "thread_data": thread_data}, context={"thread_id": "thread-1"})
+
+    with patch("deerflow.sandbox.tools.ensure_sandbox_initialized", return_value=LocalSandbox(id="local")):
+        result = ls_tool.func(runtime=runtime, description="list", path=VIRTUAL_PATH_PREFIX)
+
+    assert result == f"Error: Permission denied: {VIRTUAL_PATH_PREFIX}"
+
+
+@pytest.mark.parametrize("path", [VIRTUAL_PATH_PREFIX, f"{VIRTUAL_PATH_PREFIX}/"])
+def test_write_file_tool_rejects_user_data_root(tmp_path, path: str) -> None:
+    thread_data = {name: str(tmp_path / "user-data" / name.removesuffix("_path")) for name in ("workspace_path", "uploads_path", "outputs_path")}
+    for directory in thread_data.values():
+        Path(directory).mkdir(parents=True)
+    runtime = SimpleNamespace(state={"sandbox": {"sandbox_id": "local"}, "thread_data": thread_data}, context={"thread_id": "thread-1"})
+    sandbox = SimpleNamespace(write_file=lambda *args, **kwargs: pytest.fail("write reached the sandbox"))
+
+    with patch("deerflow.sandbox.tools.ensure_sandbox_initialized", return_value=sandbox):
+        result = write_file_tool.func(runtime=runtime, description="write", path=path, content="x")
+
+    assert result == f"Error: Permission denied writing to file: {path}"
 
 
 def test_validate_local_tool_path_allows_user_data_paths() -> None:
@@ -1011,6 +1051,151 @@ def test_validate_local_bash_command_paths_blocks_brace_expansion_host_paths(com
     the host path blocked rather than be exempted as a literal."""
     with pytest.raises(PermissionError, match="Unsafe absolute paths"):
         validate_local_bash_command_paths(command, _THREAD_DATA)
+
+
+@pytest.mark.parametrize(
+    ("command", "rejected"),
+    [
+        # The absolute-path regex skips a ``/`` right after a word character,
+        # so ``$HOME/...`` slipped through while ``~/``, ``${HOME}/`` and
+        # ``"$HOME"/`` were rejected. All four expand to the same host path.
+        ("cat $HOME/.ssh/id_rsa", "$HOME/.ssh/id_rsa"),
+        ('cat "$HOME/.ssh/id_rsa"', "$HOME/.ssh/id_rsa"),
+        ("ls $HOME/", "$HOME/"),
+        ("cp /mnt/user-data/workspace/rc $HOME/.bashrc", "$HOME/.bashrc"),
+        ("ls $DEER_FLOW_HOME/users", "$DEER_FLOW_HOME/users"),
+        ("echo ok && cat $_cfg/x", "$_cfg/x"),
+        # ``cd`` leaves OLDPWD at the Gateway's own working directory.
+        ("cat $OLDPWD/config.yaml", "$OLDPWD/config.yaml"),
+        # ``$PWD`` is the workspace only while the command does not rebind it.
+        ("PWD=/; cat $PWD/etc/passwd", "$PWD/etc/passwd"),
+        ("read PWD; cat $PWD/x", "$PWD/x"),
+        ("for PWD in ~; do cat $PWD/.ssh/id_rsa; done", "$PWD/.ssh/id_rsa"),
+        ("export PWD=/etc && cat $PWD/passwd", "$PWD/passwd"),
+        # ``bash -c`` gets no positionals, so ``$1`` expands to nothing.
+        ("cat $1/etc/passwd", "$1/etc/passwd"),
+        ('cat "$2/etc/passwd"', "$2/etc/passwd"),
+        ("ls $0/", "$0/"),
+        # Skipping ``$1/`` as arithmetic must not hide the ``$2/`` after it.
+        ("cat $1/$2/etc/passwd", "$2/etc/passwd"),
+        # Non-ASCII after a variable prefix is still a host path.
+        ("cat $HOME/文档/marker", "$HOME/文档/marker"),
+        # ``~name`` expands to that user's home.
+        ("cat ~root/.ssh/id_rsa", "~root/.ssh/id_rsa"),
+        ("ls ~deploy/", "~deploy/"),
+        ("make --directory=~deploy/app", "~deploy/app"),
+    ],
+)
+def test_validate_local_bash_command_paths_blocks_variable_prefixed_host_paths(command: str, rejected: str) -> None:
+    with pytest.raises(PermissionError, match="Unsafe absolute paths") as exc_info:
+        validate_local_bash_command_paths(command, _THREAD_DATA)
+
+    assert rejected in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Variables that are not used as a path prefix stay allowed.
+        "echo $HOME",
+        "echo $PATH",
+        "echo $((total/2))",
+        # A variable inside a URL is a URL segment, not a host path.
+        "curl https://api.github.com/repos/$OWNER/$REPO/issues",
+        "curl https://example.com/~alice/index.html",
+        # ``~`` mid-word is not tilde expansion.
+        "cat drafts~v2/notes.md",
+        # ``$PWD/x`` names the same file as the relative ``x``, which the guard
+        # already accepts (``$PWD/../x`` is rejected like ``../x``).
+        "cat $PWD/notes.txt",
+        'export PATH="$PWD/.venv/bin:$PATH"',
+        "cd /mnt/user-data/uploads && cat $PWD/report.pdf",
+        # awk field arithmetic is not a path.
+        "du -k /mnt/user-data/workspace | awk '{print $1/1024}'",
+        "awk -F, '{print $1/$2}' /mnt/user-data/uploads/data.csv",
+    ],
+)
+def test_validate_local_bash_command_paths_allows_non_path_variable_uses(command: str) -> None:
+    validate_local_bash_command_paths(command, _THREAD_DATA)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # CDPATH relocates a relative ``cd`` outside the workspace, taking both
+        # ``$PWD`` and plain relative paths with it.
+        "CDPATH=$HOME cd docs && cat $PWD/x",
+        "CDPATH=/ cd etc && cat passwd",
+        "export CDPATH=/; cd etc; cat passwd",
+    ],
+)
+def test_validate_local_bash_command_paths_rejects_cdpath_relocation(command: str) -> None:
+    with pytest.raises(PermissionError, match="Unsafe working directory change via CDPATH"):
+        validate_local_bash_command_paths(command, _THREAD_DATA)
+
+
+def test_validate_local_bash_command_paths_rejects_pwd_traversal_like_relative_traversal() -> None:
+    for command in ("cat ../../etc/passwd", "cat $PWD/../../etc/passwd"):
+        with pytest.raises(PermissionError, match="path traversal"):
+            validate_local_bash_command_paths(command, _THREAD_DATA)
+
+
+def test_bash_tool_rejects_variable_prefixed_host_path_before_execution(monkeypatch) -> None:
+    runtime = SimpleNamespace(
+        state={"sandbox": {"sandbox_id": "local"}, "thread_data": _THREAD_DATA.copy()},
+        context={"thread_id": "thread-1"},
+    )
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.ensure_sandbox_initialized",
+        lambda runtime: SimpleNamespace(execute_command=lambda command: pytest.fail("unsafe command should not execute")),
+    )
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+    monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: True)
+
+    result = bash_tool.func(runtime=runtime, description="read key", command="cat $HOME/.ssh/id_rsa")
+
+    assert "Unsafe absolute paths in command: $HOME/.ssh/id_rsa" in result
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell expands $HOME")
+@pytest.mark.parametrize(
+    ("command", "rejected"),
+    [
+        ('cat "$HOME/.ssh/id_rsa"', "Unsafe absolute paths in command: $HOME/.ssh/id_rsa"),
+        ('CDPATH="$HOME" cd .ssh && cat $PWD/id_rsa', "Unsafe working directory change via CDPATH"),
+        ('cat "$HOME/文档/id_rsa"', "Unsafe absolute paths in command: $HOME/文档/id_rsa"),
+    ],
+)
+def test_local_bash_tool_does_not_read_variable_prefixed_host_file(tmp_path: Path, monkeypatch, command: str, rejected: str) -> None:
+    """End to end through a real ``LocalSandbox``: before the fix the shell
+    expanded ``$HOME`` and printed the host file."""
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    (home / ".ssh" / "id_rsa").write_text("host-private-key")
+    (home / "文档").mkdir()
+    (home / "文档" / "id_rsa").write_text("host-private-key")
+    monkeypatch.setenv("HOME", str(home))
+    thread_root = tmp_path / "threads" / "t1" / "user-data"
+    thread_data = {f"{name}_path": str(thread_root / name) for name in ("workspace", "uploads", "outputs")}
+    for path in thread_data.values():
+        Path(path).mkdir(parents=True)
+    workspace = str(Path(thread_data["workspace_path"]).resolve())
+    sandbox = LocalSandbox(
+        id="local",
+        path_mappings=[PathMapping(container_path=f"{VIRTUAL_PATH_PREFIX}/workspace", local_path=workspace)],
+    )
+    runtime = SimpleNamespace(
+        state={"sandbox": {"sandbox_id": "local"}, "thread_data": thread_data},
+        context={"thread_id": "t1"},
+        config={},
+    )
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
+    monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: True)
+
+    result = bash_tool.func(runtime=runtime, description="read key", command=command)
+
+    assert "host-private-key" not in result
+    assert rejected in result
 
 
 def test_bash_tool_rejects_host_bash_when_local_sandbox_default(monkeypatch) -> None:

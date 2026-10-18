@@ -87,6 +87,36 @@ def test_knowledge_accumulator_scans_only_changed_tail(_setup_executor_classes, 
     assert scanned == [[first], [second], [compacted]]
 
 
+@pytest.mark.anyio
+async def test_knowledge_provider_receives_real_subagent_execution_identity(classes, base_config, monkeypatch):
+    from langchain_core.messages import AIMessage
+
+    from deerflow.knowledge import KnowledgeCapabilities, RetrievalResult, tools
+
+    provider = SimpleNamespace(capabilities=KnowledgeCapabilities(operations={"search", "dataset_filter"}), search_scoped=AsyncMock(return_value=RetrievalResult()))
+    monkeypatch.setattr(tools, "get_app_config", _default_app_config)
+    monkeypatch.setattr(tools, "resolve_knowledge_provider", lambda *args, **kwargs: provider)
+    scope = {"version": 1, "mode": "selected", "dataset_ids": ["private"]}
+
+    async def capturing_astream(state, *, context, **kwargs):
+        assert context["is_subagent"] is True
+        assert context["agent_id"] == base_config.name
+        content, _ = await tools._knowledge_search_entrypoint("q", SimpleNamespace(context=context))
+        assert not content.startswith("Error:")
+        yield {"messages": [AIMessage(content="Done", id="knowledge-result")]}
+
+    agent = MagicMock()
+    agent.astream = capturing_astream
+    executor = classes["SubagentExecutor"](config=base_config, tools=[], thread_id="knowledge-thread", user_id="alice", knowledge_scope=scope)
+    with patch.object(executor, "_create_agent", return_value=agent):
+        result = await executor._aexecute("Search private knowledge")
+    assert result.status == classes["SubagentStatus"].COMPLETED
+    context = provider.search_scoped.await_args.kwargs["context"]
+    assert context.agent_name == base_config.name
+    assert context.user_id == "alice"
+    assert context.scope == scope
+
+
 def _default_app_config():
     return SimpleNamespace(
         tool_search=SimpleNamespace(enabled=False),
@@ -2322,6 +2352,7 @@ class TestAsyncExecutionPath:
 
         mock_agent.astream = failing_stream
         sys.modules["deerflow.sandbox"].get_sandbox_provider.return_value = provider
+        monkeypatch.setattr(importlib.import_module("deerflow.sandbox.sandbox_provider"), "get_sandbox_provider", lambda: provider)
         lease_module = importlib.import_module("deerflow.sandbox.lease")
         monkeypatch.setattr(lease_module, "get_sandbox_lease_manager", lambda _provider: manager)
 
@@ -2382,6 +2413,7 @@ class TestAsyncExecutionPath:
 
         mock_agent.astream = failing_stream
         sys.modules["deerflow.sandbox"].get_sandbox_provider.return_value = provider
+        monkeypatch.setattr(importlib.import_module("deerflow.sandbox.sandbox_provider"), "get_sandbox_provider", lambda: provider)
         lease_module = importlib.import_module("deerflow.sandbox.lease")
         monkeypatch.setattr(lease_module, "get_sandbox_lease_manager", lambda _provider: manager)
 
@@ -3956,6 +3988,7 @@ class TestCooperativeCancellation:
             lambda: object(),
             raising=False,
         )
+        monkeypatch.setattr(importlib.import_module("deerflow.sandbox.sandbox_provider"), "get_sandbox_provider", lambda: object())
         lease_module = importlib.import_module("deerflow.sandbox.lease")
         monkeypatch.setattr(
             lease_module,
@@ -6479,15 +6512,28 @@ class TestBashExecutionHarvest:
         assert result.bash_executions is not None
         assert [e["command"] for e in result.bash_executions] == ["make test"]
 
-    def test_output_tail_is_bounded(self, classes, monkeypatch):
+    @pytest.mark.parametrize(
+        "output,expected,status",
+        [
+            ("x" * 5000, "", "success"),
+            ("x" * 5000 + "\n12 passed in 1s", "12 passed in 1s", "success"),
+            ("x" * 5000 + "\n" + "a" * 1000, "a" * 1000, "success"),
+            ("x" * 5000 + "\r\n" + "a" * 1000, "a" * 1000, "success"),
+            ("x" * 5000 + "\n" + "a" * 1001, "", "success"),
+            ("x" * 5000 + "\nExit Code: 3", "Exit Code: 3", "error"),
+        ],
+    )
+    def test_output_tail_is_bounded(self, classes, monkeypatch, output, expected, status):
         executor_module = importlib.import_module("deerflow.subagents.executor")
         monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_result_meta", _module("deerflow.agents.middlewares.tool_result_meta", TOOL_META_KEY="deerflow_tool_meta"))
         state = self._final_state(classes)
-        state["messages"][2].content = "x" * 5000
+        state["messages"][2].content = output
 
         executions = executor_module._harvest_bash_executions(state)
 
-        assert len(executions[0]["output_tail"]) == 1000
+        assert len(executions[0]["output_tail"]) <= 1000
+        assert executions[0]["output_tail"] == expected
+        assert executions[0]["status"] == status
 
     def test_long_command_is_capped_and_flagged_truncated(self, classes, monkeypatch):
         """PR review: the matcher must know the command lost its suffix."""
@@ -6681,3 +6727,42 @@ def test_utcnow_helper_returns_utc_aware_datetime(classes):
     assert now.tzinfo is not None
     assert now.utcoffset() is not None
     assert now.utcoffset().total_seconds() == 0.0
+
+
+@pytest.mark.anyio
+async def test_subagent_model_failure_drains_unclaimed_prewarm(classes, base_config, monkeypatch):
+    from deerflow.sandbox.lease import discard_sandbox_lease_manager, get_sandbox_lease_manager
+
+    prewarm = importlib.import_module("deerflow.sandbox.prewarm")
+    sandbox = SimpleNamespace(release_command_scope=lambda _: None)
+    provider = SimpleNamespace(
+        acquire_async=AsyncMock(return_value="prewarmed"),
+        get=lambda _: sandbox,
+        get_scoped=lambda *args, **kwargs: sandbox,
+        release=MagicMock(),
+    )
+    config = SimpleNamespace(sandbox=SimpleNamespace(prewarm=True, prewarm_max_concurrent=1, use="deerflow.community.aio_sandbox:AioSandboxProvider"))
+    monkeypatch.setattr(prewarm, "get_app_config", lambda: config)
+    monkeypatch.setattr(prewarm, "get_initialized_sandbox_provider", lambda: provider)
+    monkeypatch.setattr(prewarm, "authorize_sandbox_execution_async", AsyncMock())
+    captured = []
+
+    async def failing_stream(state, *, context, **kwargs):
+        captured.append(context)
+        prewarm.start_sandbox_prewarm({"messages": [classes["HumanMessage"](content="```sh\npytest\n```")]}, SimpleNamespace(context=context))
+        await context["__deerflow_sandbox_prewarm"].task
+        assert "sandbox_id" not in context
+        raise RuntimeError("subagent model failed after prewarm")
+        yield
+
+    agent = MagicMock()
+    agent.astream = failing_stream
+    executor = classes["SubagentExecutor"](config=base_config, tools=[], thread_id="subagent-prewarm", user_id="alice")
+    try:
+        with patch.object(executor, "_create_agent", return_value=agent):
+            result = await executor._aexecute("Task")
+        assert result.status == classes["SubagentStatus"].FAILED
+        provider.release.assert_called_once_with("prewarmed")
+        assert get_sandbox_lease_manager(provider).binding_for(captured[0]["sandbox_lease_owner_id"]) is None
+    finally:
+        discard_sandbox_lease_manager(provider)

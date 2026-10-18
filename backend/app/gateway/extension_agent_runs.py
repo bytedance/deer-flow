@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
 import math
+import secrets
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from typing import Any
@@ -45,6 +48,7 @@ class GatewayAgentRunsHost:
         self.app = app
         self.load_user = load_user
         self.active = True
+        self.revision_key = secrets.token_bytes(32)
 
     def close(self) -> None:
         self.active = False
@@ -120,6 +124,58 @@ class _BoundAgentRuns:
             raise AgentRunError(422, "Invalid Agent run request") from exc
         finally:
             reset_current_user(token)
+
+    async def configuration_evidence(self, *, thread_id, run_id):
+        import copy
+
+        from app.gateway.deps import get_run_manager
+        from deerflow.runtime.assembly_evidence import EVIDENCE_KEY
+
+        async with self._request("runs:read", thread_id) as request:
+            record = await get_run_manager(request).get(run_id, user_id=self._user_id)
+            if record is None or record.thread_id != thread_id:
+                raise AgentRunError(404, "Run unavailable")
+            evidence = (record.metadata or {}).get(EVIDENCE_KEY)
+            if not isinstance(evidence, dict) or evidence.get("run_id") != run_id or evidence.get("thread_id") != thread_id:
+                raise AgentRunError(409, "Host assembly evidence unavailable")
+            return copy.deepcopy(evidence)
+
+    async def read_artifact(self, *, thread_id, path):
+        from app.gateway.extension_artifacts import read_output_snapshot
+        from app.gateway.routers.artifacts import reserve_artifact_write
+
+        async with self._request("threads:read", thread_id) as request:
+            async with reserve_artifact_write(request, thread_id, user_id=self._user_id):
+                return await asyncio.to_thread(read_output_snapshot, self._user_id, thread_id, path)
+
+    async def configuration_revision(self, *, assistant_ids: list[str]) -> str:
+        from deerflow.config.agents_config import load_agent_config, load_agent_soul
+        from deerflow.config.app_config import get_app_config
+        from deerflow.config.extensions_config import get_extensions_config
+
+        if not isinstance(assistant_ids, list) or len(assistant_ids) > 32 or any(not isinstance(name, str) or not name or len(name) > 80 for name in assistant_ids):
+            raise AgentRunError(422, "Invalid Agent references")
+        names = sorted(set(assistant_ids))
+        async with self._request("runs:create"):
+
+            def snapshot():
+                agents = {}
+                for name in names:
+                    if name == "lead_agent":
+                        continue
+                    try:
+                        config = load_agent_config(name, user_id=self._user_id)
+                    except FileNotFoundError:
+                        config = None
+                    if config is None:
+                        agents[name] = None
+                        continue
+                    agents[name] = [config.model_dump(mode="json"), load_agent_soul(name, user_id=self._user_id)]
+                value = [get_app_config().model_dump(mode="json"), get_extensions_config().model_dump(mode="json"), names, agents]
+                raw = json.dumps(value, sort_keys=True, ensure_ascii=True, default=str).encode()
+                return hmac.new(self._host.revision_key, raw, hashlib.sha256).hexdigest()
+
+            return await asyncio.to_thread(snapshot)
 
     async def create_thread(self, *, assistant_id="lead_agent", thread_id=None, metadata=None) -> str:
         from app.gateway.routers.threads import ThreadCreateRequest, create_thread

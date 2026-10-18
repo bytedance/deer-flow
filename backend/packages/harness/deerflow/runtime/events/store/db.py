@@ -26,6 +26,13 @@ from deerflow.utils.time import coerce_iso
 logger = logging.getLogger(__name__)
 
 
+def _parse_created_at(value: str | None) -> datetime:
+    timestamp = datetime.fromisoformat(value) if value else datetime.now(UTC)
+    # SQLite drops tzinfo, so convert the clock value before it reaches storage.
+    # Preserve the existing convention that timestamps without an offset are UTC.
+    return timestamp.replace(tzinfo=UTC) if timestamp.tzinfo is None else timestamp.astimezone(UTC)
+
+
 class DbRunEventStore(RunEventStore):
     def __init__(self, session_factory: async_sessionmaker[AsyncSession], *, max_trace_content: int = 10240):
         self._sf = session_factory
@@ -227,7 +234,7 @@ class DbRunEventStore(RunEventStore):
                         content=db_content,
                         event_metadata=metadata,
                         seq=seq,
-                        created_at=datetime.fromisoformat(created_at) if created_at else datetime.now(UTC),
+                        created_at=_parse_created_at(created_at),
                     )
                     session.add(row)
                     await self._raise_seq_watermark(session, thread_id, seq)
@@ -264,7 +271,7 @@ class DbRunEventStore(RunEventStore):
                             content=db_content,
                             event_metadata=metadata,
                             seq=seq,
-                            created_at=datetime.fromisoformat(e["created_at"]) if e.get("created_at") else datetime.now(UTC),
+                            created_at=_parse_created_at(e.get("created_at")),
                         )
                         session.add(row)
                         rows.append(row)
@@ -319,7 +326,7 @@ class DbRunEventStore(RunEventStore):
                         content=db_content,
                         event_metadata=metadata,
                         seq=(max_seq or 0) + 1,
-                        created_at=datetime.fromisoformat(created_at) if created_at else datetime.now(UTC),
+                        created_at=_parse_created_at(created_at),
                     )
                     session.add(row)
                     await self._raise_seq_watermark(session, thread_id, row.seq)

@@ -74,6 +74,19 @@ describe("KnowledgeScopeSelector trigger", () => {
   it("does not load documents while an expanded dataset still uses all files", async () => {
     const fetch = rs.spyOn(globalThis, "fetch").mockImplementation((input) => {
       const url = requestUrl(input);
+      if (url.includes("/capabilities?"))
+        return Promise.resolve(
+          Response.json({
+            operations: [
+              "search",
+              "catalog",
+              "documents",
+              "dataset_filter",
+              "document_filter",
+            ],
+            scope_selection_enabled: true,
+          }),
+        );
       return Promise.resolve(
         Response.json({
           items: url.includes("/documents?")
@@ -117,5 +130,86 @@ describe("KnowledgeScopeSelector trigger", () => {
         ),
       ).toBe(true);
     });
+  });
+
+  it("allows dataset selection without exposing unsupported document filtering", async () => {
+    const fetch = rs.spyOn(globalThis, "fetch").mockImplementation((input) => {
+      const url = requestUrl(input);
+      return Promise.resolve(
+        Response.json(
+          url.includes("/capabilities?")
+            ? {
+                operations: ["search", "catalog", "dataset_filter"],
+                scope_selection_enabled: true,
+              }
+            : {
+                items: [
+                  { id: "dataset-1", name: "Policies", selectable: true },
+                ],
+                page: 1,
+                page_size: 100,
+                total: 1,
+              },
+        ),
+      );
+    });
+    renderSelector({
+      mode: "selected",
+      datasets: [
+        {
+          id: "dataset-1",
+          name: "Policies",
+          documents: { mode: "all" },
+        },
+      ],
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Knowledge · 1 base" }));
+    await screen.findByText("Policies");
+    expect(screen.queryByRole("button", { name: "Files" })).toBeNull();
+    expect(
+      fetch.mock.calls.some(([input]) =>
+        requestUrl(input).includes("/documents?"),
+      ),
+    ).toBe(false);
+  });
+
+  it("preserves a stale document selection and blocks Apply when filtering is unsupported", async () => {
+    rs.spyOn(globalThis, "fetch").mockImplementation((input) =>
+      Promise.resolve(
+        Response.json(
+          requestUrl(input).includes("/capabilities?")
+            ? {
+                operations: ["search", "catalog", "dataset_filter"],
+                scope_selection_enabled: true,
+              }
+            : {
+                items: [
+                  { id: "dataset-1", name: "Policies", selectable: true },
+                ],
+                page: 1,
+                page_size: 100,
+                total: 1,
+              },
+        ),
+      ),
+    );
+    renderSelector({
+      mode: "selected",
+      datasets: [
+        {
+          id: "dataset-1",
+          name: "Policies",
+          documents: {
+            mode: "selected",
+            items: [{ id: "doc-1", name: "Private file" }],
+          },
+        },
+      ],
+    });
+    fireEvent.click(screen.getByTestId("knowledge-scope-trigger"));
+    await screen.findByText("Policies");
+    expect(
+      screen.getByRole<HTMLButtonElement>("button", { name: "Apply" }).disabled,
+    ).toBe(true);
   });
 });

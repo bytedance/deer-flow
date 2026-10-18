@@ -67,11 +67,28 @@ class NotificationDeliveryRepository:
         data["payload"] = data.pop("payload_json") or {}
         return data
 
+    @staticmethod
+    def _resolve_source(
+        *,
+        source_kind: str | None,
+        source_key: str | None,
+        task_id: str | None,
+        task_run_id: str | None,
+        run_id: str | None,
+    ) -> tuple[str, str]:
+        resolved_kind = (source_kind or "").strip() or ("scheduled_task" if task_run_id or task_id else "run")
+        resolved_key = (source_key or "").strip() or (task_run_id or run_id or "").strip()
+        if not resolved_key:
+            raise ValueError("Notification delivery requires source_key, task_run_id, or run_id")
+        return resolved_kind, resolved_key
+
     async def enqueue(
         self,
         *,
-        task_id: str,
-        task_run_id: str,
+        task_id: str | None = None,
+        task_run_id: str | None = None,
+        source_kind: str | None = None,
+        source_key: str | None = None,
         event: str,
         provider: str,
         target: str,
@@ -81,10 +98,19 @@ class NotificationDeliveryRepository:
         available_at: datetime | None = None,
         max_attempts: int = 5,
     ) -> dict[str, Any]:
-        """Insert one delivery; a duplicate (task_run_id, event, provider,
-        target) returns the existing row instead of raising."""
+        """Insert one delivery; a duplicate (source_kind, source_key, event,
+        provider, target) returns the existing row instead of raising."""
+        resolved_kind, resolved_key = self._resolve_source(
+            source_kind=source_kind,
+            source_key=source_key,
+            task_id=task_id,
+            task_run_id=task_run_id,
+            run_id=run_id,
+        )
         row = NotificationDeliveryRow(
             id=self._new_id(),
+            source_kind=resolved_kind,
+            source_key=resolved_key,
             task_id=task_id,
             task_run_id=task_run_id,
             run_id=run_id,
@@ -105,7 +131,8 @@ class NotificationDeliveryRepository:
                 return self._to_dict(row)
         except IntegrityError:
             existing = await self._find_by_idempotency_key(
-                task_run_id=task_run_id,
+                source_kind=resolved_kind,
+                source_key=resolved_key,
                 event=event,
                 provider=provider,
                 target=target,
@@ -118,8 +145,10 @@ class NotificationDeliveryRepository:
         self,
         session: AsyncSession,
         *,
-        task_id: str,
-        task_run_id: str,
+        task_id: str | None = None,
+        task_run_id: str | None = None,
+        source_kind: str | None = None,
+        source_key: str | None = None,
         event: str,
         provider: str,
         target: str,
@@ -138,9 +167,18 @@ class NotificationDeliveryRepository:
         dialect = session.get_bind().dialect.name
         if dialect not in {"sqlite", "postgresql"}:
             raise ValueError(f"Unsupported notification database dialect: {dialect}")
+        resolved_kind, resolved_key = self._resolve_source(
+            source_kind=source_kind,
+            source_key=source_key,
+            task_id=task_id,
+            task_run_id=task_run_id,
+            run_id=run_id,
+        )
         insert = sqlite_insert if dialect == "sqlite" else pg_insert
         values = {
             "id": self._new_id(),
+            "source_kind": resolved_kind,
+            "source_key": resolved_key,
             "task_id": task_id,
             "task_run_id": task_run_id,
             "run_id": run_id,
@@ -153,11 +191,12 @@ class NotificationDeliveryRepository:
         }
         if available_at is not None:
             values["available_at"] = available_at
-        statement = insert(NotificationDeliveryRow).values(**values).on_conflict_do_nothing(index_elements=["task_run_id", "event", "provider", "target"])
+        statement = insert(NotificationDeliveryRow).values(**values).on_conflict_do_nothing(index_elements=["source_kind", "source_key", "event", "provider", "target"])
         await session.execute(statement)
         row = await session.scalar(
             select(NotificationDeliveryRow).where(
-                NotificationDeliveryRow.task_run_id == task_run_id,
+                NotificationDeliveryRow.source_kind == resolved_kind,
+                NotificationDeliveryRow.source_key == resolved_key,
                 NotificationDeliveryRow.event == event,
                 NotificationDeliveryRow.provider == provider,
                 NotificationDeliveryRow.target == target,
@@ -170,7 +209,8 @@ class NotificationDeliveryRepository:
     async def _find_by_idempotency_key(
         self,
         *,
-        task_run_id: str,
+        source_kind: str,
+        source_key: str,
         event: str,
         provider: str,
         target: str,
@@ -178,7 +218,8 @@ class NotificationDeliveryRepository:
         async with self.session_factory() as session:
             result = await session.execute(
                 select(NotificationDeliveryRow).where(
-                    NotificationDeliveryRow.task_run_id == task_run_id,
+                    NotificationDeliveryRow.source_kind == source_kind,
+                    NotificationDeliveryRow.source_key == source_key,
                     NotificationDeliveryRow.event == event,
                     NotificationDeliveryRow.provider == provider,
                     NotificationDeliveryRow.target == target,

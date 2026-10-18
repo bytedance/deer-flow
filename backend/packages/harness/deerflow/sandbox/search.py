@@ -1,6 +1,8 @@
+import errno
 import fnmatch
 import os
 import re
+import stat
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -59,6 +61,7 @@ IGNORE_PATTERNS = [
 
 DEFAULT_MAX_FILE_SIZE_BYTES = 1_000_000
 DEFAULT_LINE_SUMMARY_LENGTH = 200
+_GREP_RACE_ERRNOS = {errno.ENOENT, errno.ENOTDIR, errno.ELOOP, errno.EISDIR, getattr(errno, "ESTALE", errno.ENOENT)}
 
 
 @dataclass(frozen=True)
@@ -151,11 +154,8 @@ def truncate_line(line: str, max_chars: int = DEFAULT_LINE_SUMMARY_LENGTH) -> st
 
 
 def is_binary_file(path: Path, sample_size: int = 8192) -> bool:
-    try:
-        with path.open("rb") as handle:
-            return b"\0" in handle.read(sample_size)
-    except OSError:
-        return True
+    with path.open("rb") as handle:
+        return b"\0" in handle.read(sample_size)
 
 
 def find_glob_matches(root: Path, pattern: str, *, include_dirs: bool = False, max_results: int = 200) -> tuple[list[str], bool]:
@@ -224,12 +224,17 @@ def find_grep_matches(
     # Skip lines longer than this to prevent ReDoS on minified / no-newline files.
     _max_line_chars = line_summary_length * 10
 
+    def handle_search_error(error: OSError) -> None:
+        # Entries may disappear or change type during enumeration or reading.
+        if error.errno not in _GREP_RACE_ERRNOS:
+            raise error
+
     def candidate_files():
         if root_is_file:
             yield root, root.name
             return
 
-        for current_root, dirs, files in os.walk(root):
+        for current_root, dirs, files in os.walk(root, onerror=handle_search_error):
             dirs[:] = [name for name in dirs if not should_ignore_name(name)]
             rel_dir = Path(current_root).relative_to(root)
             for name in files:
@@ -247,7 +252,10 @@ def find_grep_matches(
             file_path = candidate_path.resolve()
             if not root_is_file and not file_path.is_relative_to(root):
                 continue
-            if file_path.stat().st_size > max_file_size or is_binary_file(file_path):
+            file_stat = file_path.stat()
+            if not stat.S_ISREG(file_stat.st_mode):
+                continue
+            if file_stat.st_size > max_file_size or is_binary_file(file_path):
                 continue
             # newline="\n" ends lines where LocalSandbox.read_file does, so a
             # hit's line_number is the start_line that reads it back; a bare
@@ -270,7 +278,7 @@ def find_grep_matches(
                         if len(matches) >= max_results:
                             truncated = True
                             return matches, truncated
-        except OSError:
-            continue
+        except OSError as exc:
+            handle_search_error(exc)
 
     return matches, truncated

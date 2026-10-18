@@ -59,6 +59,7 @@ class RedisCheckpointHistoryCache:
         self._ttl = ttl_seconds if ttl_seconds > 0 else None
         self._hits = 0
         self._misses = 0
+        self._write_serialization_failures = 0
 
     async def aget_many(self, keys: list[str]) -> dict[str, dict[str, Any]]:
         if not keys:
@@ -100,7 +101,18 @@ class RedisCheckpointHistoryCache:
         try:
             pipe = self._client.pipeline(transaction=False)
             for key, entry in entries.items():
-                tag, data = self._serde.dumps_typed(entry)
+                try:
+                    tag, data = self._serde.dumps_typed(entry)
+                except Exception as exc:
+                    self._write_serialization_failures += 1
+                    # Cache writes are optional; one unserializable entry must not
+                    # abort authoritative history reads or discard other entries.
+                    logger.warning(
+                        "checkpoint history cache serialization failed; skipping (key=%s): %s",
+                        key,
+                        type(exc).__name__,
+                    )
+                    continue
                 pipe.set(key, tag.encode() + _TAG_SEPARATOR + data, ex=self._ttl)
             await pipe.execute()
         except _redis_error() as exc:
@@ -112,10 +124,16 @@ class RedisCheckpointHistoryCache:
         TTL-bounded residual retention; the source-of-truth delete already
         happened, so this never raises."""
         stem = thread_key_stem(key_prefix, thread_id)
+        # The configured namespace is a literal key prefix, not a Redis glob.
+        pattern = "".join("\\" + char if char in "\\*?[]" else char for char in stem) + "*"
+        # redis-py encodes SCAN results with the configured connection encoder.
+        # A fixed UTF-8 fence silently skips owned keys for other encodings.
+        encoded_stem = self._client.connection_pool.get_encoder().encode(stem)
         try:
             cursor = 0
             while True:
-                cursor, keys = await self._client.scan(cursor=cursor, match=stem + "*", count=500)
+                cursor, keys = await self._client.scan(cursor=cursor, match=pattern, count=500)
+                keys = [key for key in keys if key.startswith(encoded_stem if isinstance(key, bytes) else stem)]
                 if keys:
                     await self._client.unlink(*keys)
                 if cursor == 0:
@@ -124,7 +142,11 @@ class RedisCheckpointHistoryCache:
             logger.warning("checkpoint history cache thread purge failed; residual entries expire via TTL: %s", exc)
 
     def stats(self) -> CheckpointCacheStats:
-        return CheckpointCacheStats(hits=self._hits, misses=self._misses)
+        return CheckpointCacheStats(
+            hits=self._hits,
+            misses=self._misses,
+            write_serialization_failures=self._write_serialization_failures,
+        )
 
     async def aclose(self) -> None:
         await self._client.aclose()

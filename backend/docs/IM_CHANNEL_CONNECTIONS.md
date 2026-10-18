@@ -474,22 +474,26 @@ can retry an ambiguously acknowledged send; it does not promise exactly-once
 messages at the provider. Record whether domestic Feishu or international Lark
 was actually exercised.
 
-### Feishu group notifications
+### Group notifications
 
-Tasks may explicitly select one additional connected Feishu group. Personal
+Tasks may explicitly select one additional connected Feishu, QQ or WeCom group. Personal
 notifications keep their existing recipients. The task stores the chosen
 `notification_group_connection_id`; a group notice stores that connection ID as
 its outbox target with `payload.target_type="group"`. It never infers a group
 destination from all of the owner's bindings.
 
-Add the app bot to a test or work group, grant `im:chat:read` for the group-name
-lookup, and publish the app changes. In the task form choose **Bind a Feishu
-group**, mention the bot and send the displayed `/connect` command in that
-group, then refresh and select its name. Name lookup failure does not discard
-the binding, but unnamed groups cannot be newly selected in the form: check
-the read permission and bind again. API selection and each delivery verify the
+In the task form select the supported channel's group-binding button. For QQ
+and WeCom, enter a recognizable group name before generating the code; the
+browser sends optional `group_name` to `POST /api/channels/{provider}/connect`,
+which stores the name with the single-use OAuth state. Send the unchanged
+`/connect` command in that group, then refresh and select the saved name.
+Bindings for two groups remain distinct from each other and from private chats.
+Feishu can retrieve its group name using `im:chat:read`; grant that permission
+and publish the app changes. A failed lookup does not discard the binding,
+but unnamed groups cannot be newly selected: fix the permission or name and
+bind again. API selection and each delivery verify the
 task owner, connection ID, connected status, and recorded group/chat identity.
-The provider sends to that verified `chat_id`; a lost binding cannot fall back
+The adapter resolves its verified group identity; a lost binding cannot fall back
 to another group or a private chat. A bot removed from the group produces a
 normal platform rejection handled by the existing retry budget.
 
@@ -613,25 +617,34 @@ Incoming messages that resolve to a connection carry `connection_id`, `owner_use
 
 Runtime provider credentials are deployment-level bot secrets, not user-owned
 connection credentials. They can come from `channels.*` in `config.yaml` or
-from the browser runtime setup flow, which persists them through
-`ChannelRuntimeConfigStore` so local/private deployments can configure bots
-without editing YAML. The runtime store is a local plaintext JSON fallback with
-owner-only file permissions (`0600`); use it only where the DeerFlow data
-directory is already trusted as secret storage. Every Gateway worker keeps its own copy
-of the file; a save or disconnect rereads it under an advisory sidecar lock
-(`.runtime-config.json.lock`) and changes only that provider, so workers sharing
-`DEER_FLOW_HOME` do not overwrite each other's bots. Reads still serve the copy
-the worker last loaded or wrote. WeChat QR login auth state
-follows the same local-runtime model and may persist a QR-derived bot token in
-the channel state directory.
+from the browser runtime setup flow (`POST` / `DELETE
+/api/channels/{provider}/runtime-config`, admin only), so local/private
+deployments can configure bots without editing YAML. With a `sqlite` or
+`postgres` database the flow stores one row per provider in
+`channel_runtime_configs`: the provider's config block encrypted with
+`DEER_FLOW_CREDENTIALS_KEY`, a plaintext disconnect flag (a disconnect keeps
+suppressing the provider's `config.yaml` block, key or no key), and a
+`version` bumped on every save. Every request re-reads the table, so all
+Gateway instances serve the same providers. Without a usable key, saving
+credentials answers `503` rather than storing plaintext, and rows the key
+cannot decrypt read as not configured. The first start after the upgrade
+imports an existing `{DEER_FLOW_HOME}/channels/runtime-config.json` (a
+provider already in the table keeps its row) and then deletes the plaintext
+file, so a downgrade to a build without the table must re-enter UI-configured
+bots. With `database.backend: memory` that file (mode `0600`, saves under an
+advisory sidecar lock) remains the store; use it only where the DeerFlow data
+directory is already trusted as secret storage. WeChat QR login auth state
+follows the local-runtime model and may persist a QR-derived bot token in the
+channel state directory.
 
 With several Gateway instances, `channels.leader_lease` gives each provider's
 platform connection to one instance: the holder of the provider's row in
 `channel_leases`. Bindings, connect codes and conversations are shared SQL
 state, so the connect flow works on any instance; `GET /api/channels/` names
-each provider's `leader`. Runtime credentials saved on an instance that does
-not hold the provider apply on the holder only when it next starts the
-channel. Channel runs are created with `on_disconnect: continue`, so a run
+each provider's `leader`. Runtime credentials saved, or a disconnect made, on
+any instance reach the holder within one lease renewal interval: it compares
+each provider's `version` in `channel_runtime_configs` on every tick and
+restarts, starts or stops its transport when the config changed. Channel runs are created with `on_disconnect: continue`, so a run
 keeps executing when the request that created it dies with its instance (a
 leader hand-off, a rolling restart, a crash): its thread state is persisted
 and the answer stays readable in the web UI, while the IM reply itself is
@@ -656,9 +669,10 @@ the request was sent, still releases the key for a retry. See
   credential material cannot be decrypted — a lost or changed key — DeerFlow
   treats it as unavailable instead of using corrupt secrets. A declared
   multi-instance deployment with channel connections enabled must set the key.
-- The local plaintext runtime credential fallback is documented above; prefer
-  deployment-managed environment/config secrets for non-local deployments until
-  a dedicated secret backend is configured.
+- Runtime bot credentials entered in the browser are encrypted with the same
+  key in `channel_runtime_configs`. Only `database.backend: memory` keeps the
+  plaintext JSON fallback documented above; prefer deployment-managed
+  environment/config secrets there.
 - `allowed_users` is **not** a bind-time defense. Because connect codes are processed before the allowlist (see Connect Flow), anyone who possesses a valid code can consume it — not only allowlisted users. Bind security therefore rests entirely on the code's confidentiality: it is 128-bit random, expires after 10 minutes, is single-use, and is shown only in the initiating user's browser (never echoed back to chat). Treat connect codes like one-time passwords and do not forward them.
 - An external identity — `(provider, external account, workspace/team/guild)` — has at most one active owner. The most recent successful bind wins: connecting an identity that another DeerFlow user already holds transfers ownership and revokes the previous owner's binding (and its stored credentials). This is enforced at the database layer, so two users racing to bind the same identity cannot both end up connected.
 - Provider bot tokens remain in `channels.*` and are never returned to the browser.
@@ -667,7 +681,7 @@ the request was sent, still releases the key for a retry. See
 
 ## Proactive notification settings
 
-The shared scheduler outbox sends result/lifecycle notices to bound private
+The shared outbox sends scheduled result/lifecycle notices to bound private
 identities on WeCom, Feishu/Lark, WeChat and QQ. **Settings → Notifications → IM
 notifications** lists connected, push-capable apps with the same per-provider
 control. The setting is durable and owner-scoped, and also works in local
@@ -675,12 +689,27 @@ control. The setting is durable and owner-scoped, and also works in local
 account or stop a scheduled task. Browser notifications have a separate switch.
 
 Opting out stops new enqueueing and permanently closes pending/retrying notices
-for that owner/provider, including any selected Feishu group. Re-enabling does
+for that owner/provider, including any selected group. Re-enabling does
 not replay these notices. A platform send already in progress may still arrive.
 Preference lookup failures park instead of sending; ordinary binding revocation,
 localized summaries, redaction, deduplication and retry budgets remain shared.
 Upgrade every Gateway worker before relying on an opt-out during a rolling
 upgrade. Downgrading below `0041_im_notice_preferences` removes the choices.
+
+The same settings page has three default-off ordinary task/goal event controls:
+completion, terminal failure and requests for input. These use the same outbox,
+ownership checks, localized renderer and send/retry opt-out. An unanswered
+Human Input Card takes precedence over completion and is rechecked before
+sending; an answered or superseded request is dropped. Ordinary goal stand-downs,
+recoverable tool errors and interrupted runs do not become failure or input
+notices. IM-originated runs retain their normal conversation replies. Migration
+`0043_runtime_im_notices` adds real source identities for non-scheduled notices;
+downgrading that revision deletes the runtime notices and retains scheduled ones.
+
+WeCom groups bound before group destinations were introduced keep their legacy
+chat identity. That compatibility applies only to the old group-binding shape;
+a new private binding never authorizes messages from an unbound group. Bind a
+specific group again with a name to make it available as a notification target.
 
 ### WeChat private notifications
 
@@ -711,5 +740,8 @@ Transport failures park; platform rejections use the shared retry budget.
 
 Current official rules are in the [QQ message overview](https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/overview.html).
 Older GitHub bot-docs snapshots say proactive sending was discontinued; use the
-current live documentation and verify the actual bot account. QQ group
-notification destinations remain separate from the existing group chat replies.
+current live documentation and verify the actual bot account. QQ group notices
+use the selected connection's current-App `group_openid`, not a member OpenID
+or the passive reply context. WeCom group notices use the selected current-bot
+`chatid` through the same smart-bot WebSocket sender; neither path falls back to
+a private destination when a group binding is unavailable.

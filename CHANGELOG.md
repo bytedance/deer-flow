@@ -13,6 +13,24 @@ This release closes that milestone with **621 merged pull requests**.
 
 ### Added
 
+- **channels:** IM bot credentials entered in the web UI now live in the shared
+  `channel_runtime_configs` table (migration `0044_channel_runtime_configs`)
+  instead of each host's plaintext `channels/runtime-config.json`. Each
+  provider's config is encrypted with `DEER_FLOW_CREDENTIALS_KEY`, a disconnect
+  is a plaintext tombstone that still overrides `config.yaml`, and every save
+  bumps a per-provider `version`. Every Gateway instance re-reads the table on
+  each request (the router no longer caches the merged config on `app.state`),
+  and under `channels.leader_lease` the holder compares the versions on every
+  renewal tick, so credentials saved or a disconnect made on any instance reach
+  the platform connection within one renewal interval instead of on the
+  holder's next restart; an instance taking a lease over reads a disconnect
+  instead of reviving cached credentials. The first start imports an existing
+  `runtime-config.json` (providers already in the table keep their row) and
+  deletes the plaintext file, so a downgrade must re-enter UI-configured bots.
+  Without a usable key, saving credentials answers `503` instead of storing
+  plaintext, and rows the key cannot decrypt read as not configured.
+  `database.backend: memory` keeps the JSON file. ([#6988])
+
 - **channels:** Option-based clarifications on the Feishu channel render as an
   interactive button card instead of plain text: each option becomes a button
   (up to 4 — beyond that the plain-text path reads better), a click resolves
@@ -1246,6 +1264,33 @@ This release closes that milestone with **621 merged pull requests**.
   because a run is still going keeps the draft and says so. ([#6556])
 
 ### Fixed
+
+- **browser:** `browser_screenshot` no longer replaces a file that already
+  exists in the thread's outputs directory. A screenshot saved as
+  `report.png` used to overwrite the user's own `report.png`, an earlier
+  capture, or another default-named capture taken in the same second; it now
+  takes the next free name (`report-1.png`, `report-2.png`, ...) like
+  `web_capture`, and the tool result reports the name actually used. The
+  complete capture is hard-linked onto the name, so a name taken concurrently
+  is skipped rather than replaced and the final name never shows a partial
+  file. Like Gateway uploads, the outputs directory needs hard-link support;
+  without it the tool reports an error instead of overwriting. A staged
+  capture swapped before publication, for example for a symlink to a host
+  file, is never linked into outputs; the tool reports an error. ([#6913])
+
+- **llm:** A provider error that arrives inside a streaming response that has
+  already returned `200` is now retried like the same error sent as an HTTP
+  status. An OpenAI-compatible gateway that answers `200` early, to keep slow
+  requests alive with SSE keepalives, reports a later 504 as an SSE `error`
+  event; the openai SDK raises that as an `APIError` with no status, so
+  `LLMErrorHandlingMiddleware` classified it as generic and the run failed on
+  the first attempt. Such a status-less error now takes a 4xx or 5xx status
+  from a numeric `code` or `status` field, an explicit `[504]`, `HTTP 502` or
+  `status 503` in its message (not an index such as `messages[502]`), or
+  `type: server_error` (500); only when none yields one does its busy check
+  also match spellings such as `rate-limit` and `RATE_LIMIT_…`. Retry budget,
+  backoff and circuit breaker treat it as the equivalent HTTP error; errors
+  that carry a status are classified as before. (issue #6896, [#6897])
 
 - **channels:** Runs started from an IM channel no longer die with the Gateway
   instance that received the message. The manager holds `runs.wait` /
@@ -5937,6 +5982,14 @@ This release closes that milestone with **621 merged pull requests**.
   80 such requests failed. The same race in IM conversation binding, such as
   a first message arriving together with `/new`, no longer fails the message.
   The losing write now updates the row the other one created. ([#6852])
+- **mcp:** Cancelling a background MCP task on SQLite now reaches the remote
+  server on the next poll cycle instead of up to `mcp_tasks.lease_seconds`
+  (120 s by default) later. A cancel that committed while the poller was
+  claiming the task had its cleared poll lease written back, because
+  `FOR UPDATE` is a no-op on SQLite. The cancellation worker then waited for
+  that lease to expire, and the task was polled once more for a result that
+  was thrown away. Each claim now re-checks that the task is still claimable
+  when it writes the lease. Postgres was not affected. ([#6859])
 - **persistence:** Startup schema upgrades no longer log a false
   `safe_add_column ... drifts from the model definition` warning for columns
   that already match the model. The check compared the model's generic type
@@ -5946,6 +5999,28 @@ This release closes that milestone with **621 merged pull requests**.
   whose head stamp was lost logged 29 (SQLite) or 36 (Postgres), burying the
   real type mismatch the warning exists to catch. Both sides are now compared
   as the connected database spells them. ([#6865])
+- **sandbox:** With host bash enabled, the local path guard now rejects a
+  shell variable used as a path prefix, such as `cat $HOME/.ssh/id_rsa`.
+  `~/`, `${HOME}/` and `"$HOME"/` were already rejected, but the
+  absolute-path scan skips a `/` that follows a word character, so the
+  bare `$HOME/...` form (quoted or not) reached the host. Positional
+  parameters are covered too: `bash -c` gets none, so `$1/etc/passwd`
+  opens `/etc/passwd`; awk-style `$1/1024` and `$1/$2` stay allowed. A
+  named home such as `~root/.ssh/id_rsa` is rejected the same way, and a
+  non-ASCII segment after a variable (`$HOME/文档`) is treated as a path,
+  not prose. Commands that mention `CDPATH` are rejected, because it moves
+  a relative `cd` outside the workspace. `$PWD/...` stays allowed because it
+  names the same file as the equivalent relative path, unless the command
+  rebinds `PWD` itself. Variables inside URLs are unaffected. The guard
+  remains best-effort and is not an isolation boundary. ([#6930])
+- **sandbox:** On the local sandbox, `ls` now accepts the `/mnt/user-data`
+  root itself and lists `workspace`, `uploads` and `outputs` as it does on
+  AIO. The provider maps that root on purpose, but the tool layer allowed
+  only paths below it and answered `Permission denied` (with a trailing
+  slash, from an internal "path traversal detected" check). The listing
+  covers only those three directories, so anything else stored directly
+  under the root stays hidden. `glob`, `grep`, `read_file` and writes still
+  reject the root, because a search would read every file below it. ([#6991])
 
 ### Security
 
@@ -6342,6 +6417,12 @@ This release closes that milestone with **621 merged pull requests**.
 
 ### Documentation
 
+- **docs:** Add a Korean README (`README_ko.md`), a complete translation of the
+  current English README. Headings, tables, and links mirror the English
+  one-to-one, and every code block and inline code span stays byte-identical;
+  only the prose is translated. The language switcher in `README.md` and the
+  other translations, and the translations list in `AGENTS.md`, now link to it.
+  ([#6909])
 - **docs:** Configuration checks and migration commands now run in the
   backend environment. The documented examples ran with system Python,
   which cannot import the installed backend workspace packages; selecting
@@ -11730,5 +11811,12 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6843]: https://github.com/bytedance/deer-flow/pull/6843
 [#6844]: https://github.com/bytedance/deer-flow/pull/6844
 [#6852]: https://github.com/bytedance/deer-flow/pull/6852
+[#6859]: https://github.com/bytedance/deer-flow/pull/6859
 [#6865]: https://github.com/bytedance/deer-flow/pull/6865
 [#6876]: https://github.com/bytedance/deer-flow/pull/6876
+[#6897]: https://github.com/bytedance/deer-flow/pull/6897
+[#6909]: https://github.com/bytedance/deer-flow/pull/6909
+[#6913]: https://github.com/bytedance/deer-flow/pull/6913
+[#6930]: https://github.com/bytedance/deer-flow/pull/6930
+[#6988]: https://github.com/bytedance/deer-flow/pull/6988
+[#6991]: https://github.com/bytedance/deer-flow/pull/6991
