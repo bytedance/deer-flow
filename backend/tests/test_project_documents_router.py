@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import anyio
 import pytest
@@ -21,6 +21,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from app.gateway.authz import AuthContext, Permissions
 from app.gateway.deps import get_config
 from app.gateway.routers import project_documents, projects
+from deerflow.config.paths import get_paths
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
 from deerflow.persistence.projects import ProjectDocumentRepository, ProjectRepository
 from deerflow.persistence.thread_meta import ThreadMetaRepository
@@ -298,6 +299,26 @@ class TestFailClosed:
             assert _upload(client, pid, "b.txt", b"b", headers=foreign).status_code == 404
             assert client.get(f"/api/projects/{pid}/documents/{doc['id']}/content", headers=foreign).status_code == 404
             assert client.delete(f"/api/projects/{pid}/documents/{doc['id']}", headers=foreign).status_code == 404
+
+    @pytest.mark.parametrize("case", ["missing", "foreign", "archived", "overlong"])
+    def test_rejected_upload_stages_nothing_and_creates_no_project_dir(self, tmp_path, case):
+        app = _build_app(tmp_path)
+        with TestClient(app) as client:
+            if case == "missing":
+                pid = "no-such-project"
+            elif case == "foreign":
+                pid = client.post("/api/projects", json={"name": "B"}, headers=_as_user("user-b")).json()["id"]
+            elif case == "archived":
+                pid = _create_project(client)["id"]
+                assert client.post(f"/api/projects/{pid}/archive").status_code == 200
+            else:
+                # Charset-safe but longer than one path component: 404, not 500.
+                pid = "a" * 300
+            with patch.object(project_documents, "stage_document_bytes", new_callable=AsyncMock, wraps=project_documents.stage_document_bytes) as stage:
+                assert _upload(client, pid, "a.txt", b"body").status_code == 404
+            stage.assert_not_awaited()
+            projects_root = get_paths().user_projects_dir("user-a")
+            assert not projects_root.exists() or list(projects_root.iterdir()) == []
 
     def test_503_when_document_repo_unavailable(self, tmp_path):
         app = _build_app(tmp_path, document_repo=None)

@@ -324,6 +324,28 @@ class TestFromThread:
 
             assert _promote(client, pid, thread_id="thread-1", kind="upload", name="real.txt").status_code == 404
 
+    @pytest.mark.parametrize("case", ["missing", "foreign", "archived", "overlong"])
+    def test_rejected_promotion_stages_nothing_and_creates_no_project_dir(self, tmp_path, case):
+        app = _build_app(tmp_path)
+        with TestClient(app) as client:
+            _seed_thread(app, "thread-1")
+            _thread_file("thread-1", "upload", "real.txt", b"real")
+            if case == "missing":
+                pid = "no-such-project"
+            elif case == "foreign":
+                pid = client.post("/api/projects", json={"name": "B"}, headers=_as_user("user-b")).json()["id"]
+            elif case == "archived":
+                pid = _create_project(client)["id"]
+                assert client.post(f"/api/projects/{pid}/archive").status_code == 200
+            else:
+                # Charset-safe but longer than one path component: 404, not 500.
+                pid = "a" * 300
+            with patch.object(project_documents, "stage_document_bytes", new_callable=AsyncMock, wraps=project_documents.stage_document_bytes) as stage:
+                assert _promote(client, pid, thread_id="thread-1", kind="upload", name="real.txt").status_code == 404
+            stage.assert_not_awaited()
+            projects_root = get_paths().user_projects_dir(_USER)
+            assert not projects_root.exists() or list(projects_root.iterdir()) == []
+
     def test_promote_rejects_a_symlinked_kind_dir_escaping_thread_storage(self, tmp_path):
         """A planted outputs symlink pointing outside thread storage must not
         become the trusted base: the source never resolves (404) and the

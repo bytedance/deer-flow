@@ -1247,6 +1247,15 @@ This release closes that milestone with **621 merged pull requests**.
 
 ### Fixed
 
+- **projects:** A shelf upload or save-from-thread into a project the caller
+  cannot write no longer leaves a directory behind or answers `500`. Both
+  routes staged the body under `users/{user_id}/projects/{project_id}/` before
+  checking the project, so a missing, foreign, or archived id kept an empty
+  `{project_id}/documents/` directory that the retention sweep never removes,
+  and an id longer than one path component failed with `ENAMETOOLONG`. They
+  now check for an owned, active project first and answer the same `404`
+  without writing; the shelf insert still re-checks under the project row lock.
+
 - **llm:** A provider error that arrives inside a streaming response that has
   already returned `200` is now retried like the same error sent as an HTTP
   status. An OpenAI-compatible gateway that answers `200` early, to keep slow
