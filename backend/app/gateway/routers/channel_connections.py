@@ -12,7 +12,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-from app.channels.capabilities import supports_proactive_notifications
+from app.channels.capabilities import supports_proactive_group_notifications, supports_proactive_notifications
 from app.channels.runtime_config_store import (
     ChannelRuntimeConfigStore,
     apply_runtime_connection_config,
@@ -57,6 +57,7 @@ class ChannelProviderResponse(BaseModel):
     # Whether scheduled-task updates can be pushed to this app (the provider
     # implements proactive push); Settings labels each provider card with it.
     proactive_notifications: bool = False
+    proactive_group_notifications: bool = False
 
 
 class ChannelProvidersResponse(BaseModel):
@@ -87,6 +88,10 @@ class ChannelConnectResponse(BaseModel):
     code: str
     instruction: str
     expires_in: int
+
+
+class ChannelConnectRequest(BaseModel):
+    group_name: str | None = Field(default=None, max_length=256)
 
 
 class WechatQRLoginResponse(BaseModel):
@@ -358,6 +363,7 @@ async def _create_state(
     *,
     owner_user_id: str,
     provider: str,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     now = datetime.now(UTC)
     state = _new_binding_code()
@@ -370,6 +376,7 @@ async def _create_state(
         expires_at=now + timedelta(seconds=_STATE_TTL_SECONDS),
         max_pending=_MAX_PENDING_CONNECT_CODES_PER_PROVIDER,
         now=now,
+        metadata=metadata,
     )
     if not inserted:
         raise HTTPException(
@@ -483,6 +490,7 @@ def _provider_response(
         credential_fields=_credential_fields(provider),
         credential_values=credential_values,
         proactive_notifications=supports_proactive_notifications(provider),
+        proactive_group_notifications=supports_proactive_group_notifications(provider),
     )
 
 
@@ -578,7 +586,14 @@ async def get_channel_connections(request: Request) -> ChannelConnectionsRespons
         return ChannelConnectionsResponse(connections=[])
     repo = _get_repository(request, config)
     rows = await repo.list_connections(_get_user_id(request))
-    return ChannelConnectionsResponse(connections=[ChannelConnectionResponse(**row) for row in rows])
+    connections = []
+    for row in rows:
+        if row.get("provider") == "wechat":
+            # Old bindings stored this private routing token in metadata. New
+            # workers keep it encrypted; never return legacy tokens to browsers.
+            row = {**row, "metadata": {key: value for key, value in (row.get("metadata") or {}).items() if key != "context_token"}}
+        connections.append(ChannelConnectionResponse(**row))
+    return ChannelConnectionsResponse(connections=connections)
 
 
 @router.delete("/connections/{connection_id}", status_code=204)
@@ -644,7 +659,7 @@ async def _disconnect_channel_provider_runtime(provider: str, request: Request) 
 
 
 @router.post("/{provider}/connect", response_model=ChannelConnectResponse)
-async def connect_channel_provider(provider: str, request: Request) -> ChannelConnectResponse:
+async def connect_channel_provider(provider: str, request: Request, body: ChannelConnectRequest | None = None) -> ChannelConnectResponse:
     config = await _get_channel_connections_config(request)
     channels_config = await _get_channels_config(request)
     if not config.enabled:
@@ -663,10 +678,14 @@ async def connect_channel_provider(provider: str, request: Request) -> ChannelCo
         raise HTTPException(status_code=400, detail="Channel provider is not configured")
 
     repo = _get_repository(request, config)
+    group_name = body.group_name.strip() if body and body.group_name else ""
+    if group_name and not supports_proactive_group_notifications(provider):
+        raise HTTPException(status_code=422, detail="This channel does not support notification group names.")
     code = await _create_state(
         repo,
         owner_user_id=_get_user_id(request),
         provider=provider,
+        metadata={"notification_group_name": group_name} if group_name else None,
     )
     return ChannelConnectResponse(
         provider=provider,

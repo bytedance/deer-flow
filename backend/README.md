@@ -94,6 +94,15 @@ Async task delegation with concurrent execution:
 - **Execution**: Background thread pools with status tracking and SSE events
 - **Flow**: Agent calls `task()` tool → executor runs subagent in background → polls for completion → returns result
 
+Durable `batch_task` items keep their lease during tool initialization, execution,
+and acceptance checks. Each claim uses a fresh ownership token; a recovered
+attempt cannot be overwritten by an earlier worker's renewal or result. Workers
+exclude their own active items from local recovery, while other workers can still
+recover abandoned leases. Expiry recovery rechecks the captured lease so it cannot
+overwrite a heartbeat that renewed after the expiry read. Pending promotion and
+queued claims use conditional database writes, so competing workers cannot claim
+the same item or undo a pause/cancellation observed after their initial read.
+
 ### Memory System
 
 LLM-powered persistent context retention across conversations:
@@ -149,10 +158,14 @@ to a boundary (SQLite) or causing the search to fail (PostgreSQL).
 | `GET /api/memory/config` | Memory configuration |
 | `GET /api/memory/status` | Combined config + data |
 | `GET /api/threads/{id}/runs/{run_id}/events` | Debug/audit events for one run; filter `event_types=context:memory` for effective memory identity |
-| `POST /api/threads/{id}/uploads` | Upload files (auto-converts PDF/PPT/Excel/Word to Markdown, rejects directory paths, auto-renames duplicate filenames in one request) |
+| `POST /api/threads/{id}/uploads` | Upload files (optional PDF/PPT/Excel/Word-to-Markdown conversion, rejects directory paths, auto-renames duplicate filenames in one request) |
 | `GET /api/threads/{id}/uploads/list` | List uploaded files |
 | `DELETE /api/threads/{id}` | Delete DeerFlow-managed local thread data after LangGraph thread deletion; unexpected failures are logged server-side and return a generic 500 detail |
 | `GET /api/threads/{id}/artifacts/{path}` | Serve generated artifacts |
+
+Automatic document conversion is disabled by default. Trusted deployments can
+enable it with `uploads.auto_convert_documents: true` in `config.yaml`; see
+[file upload configuration](docs/FILE_UPLOAD.md#支持的文档格式).
 
 Cancelling an upload waits for an already-running document conversion worker to
 finish before removing its temporary source. This prevents cleanup from deleting

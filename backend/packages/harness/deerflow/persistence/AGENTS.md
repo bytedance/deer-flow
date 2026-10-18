@@ -10,6 +10,10 @@ Alembic stamp/upgrade workers started inside `bootstrap_schema()` remain owned b
 
 On SQLite, `BEGIN IMMEDIATE` takes the database-wide write lock, so every unrelated writer (run status, thread metadata, the scheduler) waits for the transaction and fails with `database is locked` after `busy_timeout` (30s). Do slow work such as document conversion before opening a locked transaction; lock only to revalidate and publish, as `ProjectDocumentRepository.publish_under_live_lock` does. `tests/test_project_document_tools.py::TestConversionSerialization` pins this.
 
+## Unique-key upserts
+
+A repository method that creates or updates a row by a unique key must survive two first writers: both can miss the SELECT, and the later INSERT raises `IntegrityError`, a 500 for the caller. Use a dialect `on_conflict_do_update` when every key column is non-null, or retry the select-then-write after rolling back the session, as `ChannelConnectionRepository.upsert_connection` / `set_thread_id` and `FeedbackRepository.upsert` do. Feedback keeps the retry because `user_id` is nullable and a NULL key never conflicts, so ON CONFLICT would stop updating the NULL-user row.
+
 ## JSON integer filters
 
 Stored JSON integers are not bounded by the signed-64-bit filter input contract.
@@ -26,3 +30,7 @@ Scheduled-task lifecycle rules live in one place each. `ScheduledTaskRepository.
 The per-owner run cap `scheduler.max_concurrent_runs_per_user` is effective `min(per_user, max_concurrent_runs)` (0 = off) and is checked in `claim_queued_run` right after the global count, under the same budget lock. `list_queued_runs` ranks same-thread FIFO heads per owner (`ROW_NUMBER() OVER (PARTITION BY owner)`) and orders the batch by that rank, so the drain is owner-fair even with the cap off; owners at their cap drop out before the batch limit, and orphan rows (task deleted while queued) are never held back by the cap. Scheduled-task repository boundaries coerce serialized timestamps before SQL `DateTime` binding.
 
 Recovery locks task/run pairs in task-id/run-id order and restores `run_id`, `started_at` and live errors before releasing launch claims. Launch/failure/timeout updates use one parent-first transaction to prevent interleaved claims. Queue timeout fails the occurrence and advances scheduled work to prevent immediate requeue.
+
+## MCP task notifications
+
+`mcp_tasks/sql.py::claim_notification_work` never returns a row without a dispatch event. A pending snapshot whose condition resolved before delivery (tracking recovered, or an answered `input_required` prompt returned the task to `working`) is consumed at claim time: `notified_version` advances, the content fingerprint clears so an identical later event is recorded again, stale error/attempt/dispatch state clears, status returns to `none`, and the claim lease is released instead of launching an empty event. A legacy row left without a dispatch event is consumed only when nothing newer exists; a newer recorded event is rebuilt and claimed instead. Consumption is a conditional UPDATE fenced on the event version and phase the claim read, so a concurrent newer event (SQLite has no row locks) is never acknowledged and stays claimable. Coverage: `tests/test_mcp_task_repository.py` (resolved snapshot, legacy retry, expired-claim reclaim, identical-event recurrence, interleaved newer completion, legacy launching/dispatched with and without a newer completion).

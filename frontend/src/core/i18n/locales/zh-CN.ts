@@ -40,6 +40,11 @@ export const zhCN: Translations = {
       "此条目来自仓库扩展目录；实际安装和启用状态请由部署管理员确认。",
     installationGuide: "查看安装说明",
     catalog: {
+      workflows: {
+        title: "脚本工作流",
+        description:
+          "保存版本化 Agent 工作流，在同一 Gateway 进程内恢复，并确认确切的保留输出版本。不支持重启回放或硬金额预算。",
+      },
       agentTeams: {
         title: "Agent 团队",
         description: "让完整 Custom Agent 通过 @成员、共享记录与任务交接协作。",
@@ -65,6 +70,15 @@ export const zhCN: Translations = {
         title: "扩展开发示例",
         description:
           "演示中间件、任务生命周期、模型观察器、服务和 HTTP 路由的扩展方式。",
+      },
+      retrieval: {
+        title: "本地检索示例",
+        description:
+          "使用固定示例文档演示只读检索与结构化工具结果，不连接外部知识库。",
+      },
+      knowledge: {
+        title: "知识范围选择示例",
+        description: "用示例文档演示知识库和文件范围选择、检索及来源引用。",
       },
     },
     pageUnavailable: "扩展页面不可用",
@@ -274,6 +288,9 @@ export const zhCN: Translations = {
   },
 
   artifactPreview: {
+    loadingPreview: "正在准备预览...",
+    resourcesUnavailable:
+      "部分预览资源无法加载。可查看源代码或下载文件以获取完整内容。",
     limited: (previewSize, totalSize) =>
       totalSize
         ? `当前显示 ${totalSize} 中的前 ${previewSize}。`
@@ -956,6 +973,40 @@ export const zhCN: Translations = {
         "在对话中创建、且比每小时更频繁的任务需要设置保险上限。",
       submit: "恢复",
     },
+    notificationGroup: {
+      savedUnavailable: "已有群通知配置，当前服务未启用群通知。",
+      clearSaved: "清除群通知",
+      bind: "绑定飞书群",
+      bindWecom: "绑定企业微信群",
+      bindQq: "绑定 QQ 群",
+      name: "群名称",
+      nameHint:
+        "为这个群取一个容易识别的名称，便于选择通知目标。重新绑定可修改群名称。",
+      refresh: "刷新群列表",
+      bindInstructions:
+        "先把机器人加入群聊，再在群里 @机器人 并发送这条命令。完成绑定后刷新群列表。",
+      generating: "正在生成绑定码…",
+      bindFailed: "无法生成绑定码，请重试。",
+      command: "群绑定命令",
+      expiresAt: "有效期至 {time}。",
+      copy: "复制命令",
+      copied: "已复制",
+      copyFailed: "复制失败，请选中上方命令手动复制。",
+      newCode: "生成新绑定码",
+      close: "关闭绑定说明",
+      label: "额外通知到群聊（可选）",
+      detailLabel: "额外通知到群聊",
+      none: "仅通知本人",
+      personalHint: "你现有的个人通知保持不变，所选群也会收到任务更新。",
+      emptyHint: "先在下方绑定群聊，再刷新群列表。",
+      loading: "正在加载群列表…",
+      unavailable: "已选群暂不可用",
+      unavailableHint: "已选群当前不可用。可以保留、移除或选择其他群。",
+      unnamed: "群名称不可用",
+      unnamedHint: "请重新绑定该群并设置容易识别的名称，再选择通知目标。",
+      loadFailed:
+        "无法加载群列表，已保留当前选择。仍可保存其他修改或移除所选群。",
+    },
     form: {
       createTitle: "新建定时任务",
       editTitle: "编辑任务",
@@ -1120,6 +1171,8 @@ export const zhCN: Translations = {
       invalidGoal: "目标为空，或超过了 {max_chars} 个字符。",
       goalRequiresFreshThread: "设置目标时，每次运行都必须新建对话。",
       invalidStopCondition: "停止条件不能超过 {max_chars} 个字符。",
+      invalidNotificationGroup:
+        "此飞书群当前不可用，请选择其他群或移除额外群通知。",
       invalidMaxRuns: "运行次数上限必须是不小于 1 的整数。",
       endAtInPast: "请选择一个未来的结束时间。",
       endAtBeforeFirstRun: "结束时间至少要留出一次运行。",
@@ -1274,14 +1327,27 @@ export const zhCN: Translations = {
     settingsDisplayName: "显示名称",
     settingsDisplayNameTooLong: "显示名称不能超过 100 个 Unicode 码点。",
     settingsDisplayNameHint: "支持中文等 Unicode 字符，留空时使用智能体标识",
+    settingsToolGroups: "工具权限",
+    settingsToolGroupsHint: "限制该智能体及其委派任务可以使用的已配置工具组。",
+    settingsToolGroupsAll: "使用全部已配置工具组",
+    settingsToolGroupsLoadFailed: "无法加载工具组。",
+    settingsToolGroupUnavailable: "不可用",
     settingsDescription:
       "为该智能体设置显示名称和默认模型，模型修改在下一条消息生效。",
     settingsKnowledge: "默认知识库",
     settingsKnowledgeHint:
       "新对话默认使用此知识库范围，单条消息可以临时覆盖。选择全部知识库可解除绑定。",
     settingsKnowledgeReset: "使用全部知识库",
+    settingsKnowledgeSaveToolAccess: "请先保存工具权限，再选择默认知识库。",
     settingsModel: "默认模型",
     settingsModelDefault: "使用全局默认",
+    settingsModelSwitchNeedsCatalog:
+      "请先加载所选模型，再保存模型切换。你可以重试加载，或恢复原模型后保存其他修改。",
+    settingsReasoningUnsupported: "不支持",
+    settingsThinkingRequiredHint:
+      "此模型必须开启思考，已保存的关闭设置可能导致运行无法开始。请选择继承或开启以替换该值。",
+    settingsReasoningUnsupportedHint:
+      "所选模型不支持此已保存值。请选择继承或支持的值以替换它。",
     settingsTemperature: "温度",
     settingsTemperatureHint: "0 = 确定性输出，越高越发散（0–2）。",
     settingsMaxTokens: "最大输出 token",
@@ -1505,8 +1571,8 @@ export const zhCN: Translations = {
     },
     connectedAs: (name: string) => `已连接为 ${name}。`,
     scheduledUpdates: {
-      supported: "定时任务通知：会发送到这里",
-      supportedAfterConnect: "定时任务通知：连接后可发送到这里",
+      supported: "定时任务通知：已支持，可在通知设置中管理",
+      supportedAfterConnect: "定时任务通知：已支持，连接后可管理通知",
       unsupported: "定时任务通知：此应用暂不支持",
     },
   },
@@ -1679,8 +1745,8 @@ export const zhCN: Translations = {
       enable: "启用",
       disable: "停用",
       formDescription:
-        "接入 OpenAI 兼容接口。测试将发送简短的流式工具调用请求，可能产生模型调用费用。",
-      provider: "接口类型",
+        "选择厂商并填写 API Key 和模型 ID。测试将发送简短的流式工具调用请求，可能产生模型调用费用。",
+      provider: "模型厂商",
       name: "唯一名称",
       displayName: "显示名称",
       endpoint: "接口基础地址",
@@ -1701,12 +1767,28 @@ export const zhCN: Translations = {
         "接口已响应，但未返回工具调用，请检查模型的工具调用能力。",
       connection_failed:
         "连接测试失败，请检查接口地址、凭据、模型 ID 以及流式输出和工具调用支持。",
+      customProvider: "自定义 OpenAI-compatible",
+      apiKey: "API Key",
+      advanced: "高级设置",
+      providerDefault: "厂商默认值",
+      requiredKey: "填写此厂商的 API Key",
+      providerChanged: "已切换连接，请重新填写 API Key；不会复用原连接的密钥。",
+      missing_api_key:
+        "此厂商需要 API Key。请填写密钥，或先停用模型再清除密钥。",
+      authentication_failed:
+        "认证失败，请检查 API Key 是否属于所选厂商、地域或套餐。",
+      response_limit: "测试响应超出输出限制。",
+      revisionConflict:
+        "模型已变更或名称已被占用。请重新加载列表并打开编辑器；当前草稿已保留。",
+      keyOrCapabilities:
+        "请检查 API Key 和能力覆盖配置。清除预设模型密钥前须先停用模型。",
+      invalidModel: "模型配置无效，请检查厂商、模型 ID 和高级设置。",
     },
     users: {
       title: "用户管理",
       description:
         "停用或恢复本部署中的账号登录。被停用的账号在所有认证入口都会被拒绝，其现有会话立即失效。",
-      adminOnly: "只有管理员可以管理用户。",
+      adminOnly: "只有管理员可以管理用户，演示模式不支持此功能。",
       loading: "正在加载用户…",
       failed: "用户列表加载失败。",
       reload: "重新加载",
@@ -2189,6 +2271,34 @@ export const zhCN: Translations = {
       testBody: "这是一条测试通知。",
       notSupported: "当前浏览器不支持通知功能。",
       disableNotification: "关闭通知",
+      channels: {
+        title: "定时任务通知",
+        description:
+          "选择哪些已连接的应用接收定时任务更新。关闭通知不影响聊天。待发和重试中的通知会取消，重新开启不会补发旧通知。已经开始投递的通知仍可能送达。",
+        providers: {
+          feishu: "飞书 / Lark",
+          wecom: "企业微信",
+          wechat: "微信",
+          qq: "QQ",
+        },
+        toggleLabel: (provider: string) => `${provider}定时任务通知`,
+        eventsTitle: "普通任务与目标提醒",
+        eventsDescription:
+          "可选：通过上方已开启的应用接收普通网页或后台任务、目标的运行提醒（默认关闭）。",
+        events: {
+          run_completed: "任务或目标已完成",
+          run_failed: "任务或目标运行失败",
+          human_input_requested: "需要你参与确认",
+        },
+        eventToggleLabel: (event: string) => `${event}通知`,
+        loading: "正在加载通知偏好…",
+        saving: "正在保存…",
+        loadFailed: "无法加载通知偏好，请重试。",
+        saveFailed: "未能保存此更改，当前仍显示之前的设置，请重试。",
+        unavailable: "当前服务尚不支持通知偏好设置。",
+        empty: "请在设置 → 频道中连接支持定时任务通知的应用。",
+        retry: "重试",
+      },
     },
     account: {
       profileTitle: "个人信息",

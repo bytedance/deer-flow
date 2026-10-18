@@ -34,6 +34,7 @@ from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.constants import BROWSER_FRAMES_DIRNAME
 from deerflow.tools.types import Runtime
+from deerflow.utils.atomic_write import publish_bytes_atomically as _publish_bytes_atomically
 
 from .session import BrowserSession, BrowserSessionManager, PageSnapshot, ScreenshotType, get_browser_session_manager
 
@@ -435,7 +436,7 @@ def _thread_outputs_path(runtime: Runtime) -> Path | str:
 
 def _write_screenshot(outputs_path: Path, name: str, content: bytes) -> str:
     outputs_path.mkdir(parents=True, exist_ok=True)
-    (outputs_path / name).write_bytes(content)
+    _publish_bytes_atomically(outputs_path / name, content)
     return name
 
 

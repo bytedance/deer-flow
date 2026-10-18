@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-The backend runs a LangGraph-based super agent with sandbox execution, persistent memory, subagent delegation, and extensible tools in isolated per-thread environments.
+The LangGraph backend provides sandbox execution, persistent memory, subagent delegation, and extensible tools, isolated per thread.
 
 **Architecture**:
 - **Gateway API** (port 8001): REST API plus embedded LangGraph-compatible agent runtime
@@ -13,9 +13,9 @@ The backend runs a LangGraph-based super agent with sandbox execution, persisten
 **Runtime**:
 - `make dev`, Docker dev, and production all run the agent runtime in Gateway via `RunManager` + `run_agent()` + `StreamBridge` (`packages/harness/deerflow/runtime/`). Nginx exposes that runtime at `/api/langgraph/*` and rewrites it to Gateway's native `/api/*` routers.
 - Gateway streams `write_file` and `str_replace` argument deltas in bounded batches for multi-mode `messages-tuple` consumers; single-mode message consumers retain the original per-chunk contract. Non-message frames flush pending batches, and `values` remains an optional complete-state snapshot rather than a prerequisite for batching.
-- With `stream_subgraphs`, subgraph frames keep their namespace in the SSE event name (`values|<ns>`, LangGraph Platform style) instead of impersonating root frames — a delegated subagent inherits the parent checkpoint namespace, so publishing its `values` snapshot as bare `values` replaces the whole thread view in SDK clients (#4399). Root-only consumers (file-tool chunk batcher, subagent event persistence, LLM error-fallback detection) ignore namespaced frames. The web frontend does not request subgraph streaming; subtask progress rides root-namespace `task_*` custom events.
+- `stream_subgraphs` preserves subgraph SSE namespaces (`values|<ns>`, LangGraph Platform style); bare `values` would overwrite the SDK thread view (#4399). Delegated subagents inherit the parent's checkpoint namespace. Root-only consumers (file-tool chunk batcher, subagent event persistence, LLM error-fallback detection) ignore namespaced frames. The web frontend uses root `task_*` events without subgraph streaming.
 - Background subagent identity is deliberately split: the provider `tool_call_id` remains the correlation key for `ToolMessage`, `task_*` SSE events, persisted lifecycle events, frontend cards, and the public `ExtensionData.scope_id` contract (stored as `SubagentResult.external_task_id`), while `SubagentExecutor.execute_async()` generates a full server-side `execution_id` for `SubagentResult.task_id`, the process-wide registry, polling, cancellation, timeout handling, and cleanup. Provider IDs are not globally unique across parent runs, so they must never become registry ownership keys; scheduler closures retain their own `SubagentResult` rather than resolving ownership again through the mutable registry. Terminal subagent token usage travels in the current run's `ToolMessage.additional_kwargs` and is attributed from message state, never through a process-global provider-ID cache.
-- Scheduled tasks dispatch through the normal Gateway run path. `launch_scheduled_thread_run` reads `get_app_config()` at dispatch and passes `scheduler.recursion_limit` (default 1000, matching the web UI; clamped by `max_recursion_limit`), so YAML changes apply on the next run without restarting Gateway.
+- Scheduled runs use Gateway's normal run path. `launch_scheduled_thread_run` reads `get_app_config()` at dispatch: `scheduler.recursion_limit` defaults to 1000 (web UI), capped by `max_recursion_limit`; YAML changes apply next run without restart. IM enqueue checks recipients before locking preferences in the outcome transaction.
 - Run-history `status` filters are occurrence states, not task states. `ScheduledTaskRunStatus` in `persistence/scheduled_tasks/model.py` is the shared API/repository vocabulary and must match the active and terminal occurrence-status sets. Keep owner lookup before reading history, and apply SQL task/status predicates before pagination; omitted status preserves the existing response.
 - The background scheduler is single-instance by default. `scheduler.multi_instance=true` opts into lease-aware recovery across Gateway instances and requires shared Postgres, `run_ownership.heartbeat_enabled=true`, and `run_events.backend=db`; otherwise startup rejects the configuration. Live scheduled runs are preserved when a peer starts; expired launch claims return to the durable queue, expired run leases are atomically taken over, stale launch writes are fenced by lease ownership, and the Postgres advisory-locked budget makes `max_concurrent_runs` a shared global cap for `launching`/`running` rows.
 - The multi-process startup gate also fires on `deployment.multi_instance: true`; contract in `docs/CONFIGURATION.md`.
@@ -63,6 +63,8 @@ backend/
 Every code change must keep docs accurate and current: update `README.md` for
 user-facing behavior and the relevant `AGENTS.md` for development changes.
 `CLAUDE.md` imports `AGENTS.md`; do not edit the shim.
+
+Image result URL policy: [image search guide](packages/harness/deerflow/community/image_search/AGENTS.md).
 
 ### Backend Benchmarks
 
@@ -166,16 +168,18 @@ environment with `uv run --no-sync --project backend` from the repository root.
 `--project` preserves the caller's working directory and relative runtime/config
 selectors; `--no-sync` retains installed extras such as PostgreSQL drivers.
 
-More specific `AGENTS.md` files in backend code directories contain the subsystem sections split from this file. Follow the nearest file in the directory tree.
+Read the nearest scoped `AGENTS.md` for subsystem ownership.
 
 ## Architecture
+
+Read-only knowledge: [contract](docs/KNOWLEDGE.md).
 
 ### Harness / App Split
 
 The backend is split into two layers with a strict dependency direction:
 
 - **Harness** (`packages/harness/deerflow/`): Publishable agent framework package (`deerflow-harness`). Import prefix: `deerflow.*`. Contains agent orchestration, tools, sandbox, models, MCP, skills, config — everything needed to build and run agents.
-- **App** (`app/`): Unpublished application code. Import prefix: `app.*`. Contains the FastAPI Gateway API and IM channel integrations (Feishu, Slack, Telegram, DingTalk).
+- **App** (`app/`): Unpublished application code. Import prefix: `app.*`. Contains the FastAPI Gateway API and IM channel integrations (Feishu, Slack, Telegram, DingTalk). Feishu option clarifications can render as interactive button cards behind `channels.feishu.card_interaction_enabled` (default off); see `app/channels/AGENTS.md`.
 
 **Dependency rule**: App imports deerflow, but deerflow never imports app. This boundary is enforced by `tests/test_harness_boundary.py` which runs in CI.
 

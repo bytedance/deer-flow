@@ -13,6 +13,16 @@ from deerflow.runtime.checkpoint_cache.provider import (
 )
 
 
+class _FakeEncoder:
+    def encode(self, value: str) -> bytes:
+        return value.encode()
+
+
+class _FakeConnectionPool:
+    def get_encoder(self) -> _FakeEncoder:
+        return _FakeEncoder()
+
+
 class _FakeRedis:
     """Minimal async redis stand-in: mget / set / pipeline / scan / unlink."""
 
@@ -20,6 +30,7 @@ class _FakeRedis:
         self.store: dict[str, bytes] = {}
         self.ttls: dict[str, int | None] = {}
         self.unlinked: list[tuple[str, ...]] = []
+        self.connection_pool = _FakeConnectionPool()
 
     async def mget(self, keys: list[str]) -> list[bytes | None]:
         return [self.store.get(k) for k in keys]

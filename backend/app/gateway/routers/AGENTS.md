@@ -16,6 +16,15 @@ create-only: collisions return 409, never overwrite or upsert. Ordinary creation
 and import share `_persist_new_agent`, which uses `run_drained_write` so a
 cancelled request still drains the owned persistence worker.
 
+`GET /api/agent-tool-groups` projects only configured group names for the
+custom-Agent settings allowlist. Never expose tool provider paths, credentials,
+or raw tool configuration through this catalog.
+
+Custom Agent update guards apply legacy shared-file checks only when the
+resolved store is `FileAgentStore`, including the `update_agent` tool. DB
+imports retain source files for rollback; those files cannot veto SQL updates.
+Keep store resolution and filesystem checks off-loop in the HTTP route.
+
 Committed MCP reconciliation failures are logged once by
 `fail_mcp_reconciliation`, with only the underlying exception type.
 `_run_drained_mcp_apply` passes `_McpCommittedReconciliationError` as an expected
@@ -29,3 +38,7 @@ critical section to preserve history ordering. Keep the sidecar distinct from
 the nested projection lock, retain it across requests, and acquire/release both
 off-loop inside the drained worker. Unrelated users retain independent locks;
 external filesystem writers do not participate in this history guarantee.
+
+Plugin actions stamp `ActionContext.interaction=session` only from authenticated
+session provenance. Never accept it from payloads or propagate it to model tools;
+extensions use it to distinguish owner review from model/tool output.

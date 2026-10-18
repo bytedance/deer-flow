@@ -1,10 +1,10 @@
 # AGENTS.md
 
-This file provides guidance to AI coding agents (Claude Code, Codex, and others) when working with the DeerFlow frontend. It is the source of truth; the sibling `CLAUDE.md` imports it via `@AGENTS.md`.
+This is the source of truth for DeerFlow frontend coding agents; the sibling `CLAUDE.md` imports it via `@AGENTS.md`.
 
 ## Project Overview
 
-DeerFlow Frontend is a Next.js 16 web interface for an AI agent system. It communicates with a LangGraph-based backend to provide thread-based AI conversations with streaming responses, artifacts, and a skills/tools system.
+DeerFlow's Next.js 16 frontend provides thread-based AI conversations with streaming responses, artifacts, skills, and tools through a LangGraph backend.
 
 **Stack**: Next.js 16, React 19, TypeScript 5.8, Tailwind CSS 4, pnpm 10.26.2. Requires Node.js 22+ and pnpm 10.26.2+.
 
@@ -36,13 +36,18 @@ upstream dependency chain resolves a patched version without it; regenerate
 | `pnpm typecheck` | TypeScript type check (`tsc --noEmit`)        |
 | `pnpm start`     | Start production server                       |
 
-Unit tests live under `tests/unit/` and mirror the `src/` layout (e.g., `tests/unit/core/api/stream-mode.test.ts` tests `src/core/api/stream-mode.ts`). Powered by Rstest; import source modules via the `@/` path alias.
+Rstest unit tests under `tests/unit/` mirror `src/` (e.g., `tests/unit/core/api/stream-mode.test.ts` tests `src/core/api/stream-mode.ts`). Import source modules via `@/`.
 
 Webpack is the default development bundler. Use `DEER_FLOW_DEV_BUNDLER=turbo` with `pnpm dev` to opt in to Turbopack when diagnosing a local Next.js bundler issue.
 
 On Windows `pnpm dev` binds `127.0.0.1` by default because Hyper-V/winnat excluded port ranges can reject Next's default `0.0.0.0` bind with `EACCES` (#2870). Pass `pnpm dev -- --hostname 0.0.0.0` to listen on a LAN interface instead.
 
-Rstest runs them as two projects (`rstest.config.ts`). `*.test.ts` / `*.test.tsx` run in a plain **node** environment — that is nearly the whole suite, and it is the default for anything that is pure logic. `*.dom.test.ts` / `*.dom.test.tsx` run in **happy-dom**, for tests that need a document: hooks driven through `renderHook` from `@testing-library/react`, and components. Keep the split — a DOM environment costs roughly 3x the runtime of the node suite, so tests that do not render should not opt into it. A hook whose behavior only exists under real React (effect ordering, cleanup on unmount, re-render on store change) belongs in a `.dom.test.*` file rather than a node test that mocks `react` itself.
+`rstest.config.ts` separates **node** (`*.test.ts` / `*.test.tsx`) for pure logic
+from **happy-dom** (`*.dom.test.ts` / `*.dom.test.tsx`) for components and hooks
+rendered with `@testing-library/react`'s `renderHook`. Keep the split: DOM tests
+cost roughly 3x more runtime. Hooks that depend on React effect ordering, unmount
+cleanup, or re-renders on store changes belong in `.dom.test.*`; do not mock React
+in node tests to cover those behaviors.
 
 E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`. The real-backend auth contract in `tests/e2e-real-backend/auth-disabled-contract.spec.ts` and `backend/tests/test_auth_me_permissions.py` pin the complete route-permission list; update both when adding registered permissions (including `projects:read/write/delete`).
 
@@ -57,12 +62,41 @@ Run status `unmet` identifies a finished occurrence whose scheduled goal was not
 `core/scheduled-tasks/goal-outcome.ts` maps goal verdicts and host reason codes for run history; show known codes as localized labels; unknown codes, raw run errors and the evaluator's reason stay behind the run row's Details. Check-failure codes are "unchecked", not a miss. `contracts/scheduled_goal_notes_contract.json` pins the host strings it and `run-error.ts` match.
 Scheduled-task views read state through the pure `core/scheduled-tasks` helpers (`status.ts`, `actions.ts`, `format.ts`, `describeTaskSchedule`, `errors.ts`) so list, detail and chat card agree. "Is a run active?" is `status === "running"` or `active_run_status` (a recurring task stays `enabled` while it runs). Default views show no IDs, ISO times, cron strings or enum names; errors localize by `detail.code` (`contracts/scheduled_task_errors_contract.json`) with raw text only behind Details. `tests/e2e/utils/readable.ts` and `tests/unit/helpers/readable.ts` assert this.
 The tasks page (`app/workspace/scheduled-tasks/page.tsx`) only composes `components/workspace/scheduled-tasks/*`: list with status tabs, detail (Runs / Stops when / goal / Does / notes / History), outcome notice, create/edit/duplicate dialog (PATCH sends only changed fields, `null` clears) and the renew dialog that a `limits_exhausted` Resume opens. `?task_id=` selects a task; `?thread_id=` scopes the list to one chat.
+`notification_group_connection_id` adds one Feishu group without changing personal
+notifications. The selector requires `features.scheduled_tasks.group_notifications`
+(absent = false); otherwise a saved target is preserved but explicitly clearable.
+While the capability query is pending, show loading without a clear control.
+Reuse `useChannelConnections`: offer connected Feishu `group` bindings with matching
+nonempty metadata chat/workspace IDs. Show workspace names; disable unnamed groups
+and never display raw IDs. Loading/errors preserve selections. PATCH omits unchanged
+groups, clears with `null`, and leaves schedules untouched; Duplicate copies the group.
+`BindFeishuGroup` uses the connect API for a persistent, copyable `/connect` command
+and explicitly refreshes the shared query. The general connection poll stops early
+when a private binding already exists, so cannot wait for a new group.
 In chat, a `schedule_task` result becomes an `assistant:scheduled-task` group (`core/scheduled-tasks/tool-result.ts`, last card per task per turn; not a turn boundary) rendered by `ScheduledTaskCard`, which polls the task only while on screen. A human message with `additional_kwargs.deerflow_scheduled_origin` stays a `human` group with `scheduledOrigin`: `ScheduledRunPrompt` renders the origin's user-language parts, never the launched text, and it is not editable.
 Server-created threads: `core/threads/origin.ts` reads `metadata.deerflow_origin` (`contracts/thread_origin_contract.json`), then `channel_source`, then a legacy `scheduled_task_id`; provider names come from `threads.origin.providers`. `core/threads/activity.ts` polls `/api/thread-activity` (mount `useThreadActivity` once; unmounting resets its cursor; first poll only seeds; invalidate lists only on server-origin threads, truncation or a higher `read_version`) and `useMarkThreadRead` posts reads. `core/scheduled-tasks/events.ts` loads a chat's lifecycle events, not gated on its task list; `placeTaskEvents` puts each at the end of its `after_run_id` turn. The UI language is saved as the `locale` preference once per session and on each switch, only when the Gateway's preferences include `locale`.
 Thread rows (sidebar, `/workspace/chats`) show `ThreadOriginIcon` and, if `unread === true` and not the open thread, `ThreadUnreadDot` with `threads.unreadLabel` as row label. `WorkspaceSidebar` mounts `useThreadActivity`. Chat pages call `useMarkOpenThreadRead` once metadata loads (marks read on load, on an unread flip, on tab visible, and via its callback from `onFinish`).
 Chat pages pass `useThreadScheduledTaskEvents` data to `MessageList` (`scheduledTaskEvents`; the custom-agent page also passes its agent for the run link), which renders `ScheduledTaskEventLine` through `VirtualMessageList.renderAfterGroup` at the `placeTaskEvents` position, inside the group's measured row. Lines are history: never gated on the task list. Channel provider cards (Settings and the sidebar list) render `ChannelScheduledUpdates` from `proactive_notifications`, and nothing when the field is absent.
+Keep IM notification preferences viewer-fenced and separate from browser alerts; only confirmed server writes change switches.
 
 ## Architecture
+
+Knowledge evidence is parsed in `core/citations/sources.ts` from version-1
+ToolMessage artifacts. Message rows receive sources from preceding loaded tool
+messages. `#knowledge-source-ID` links resolve to `KnowledgeCitation` and an
+expandable source panel with actual excerpts. Missing URLs/pages remain absent.
+Web citations and old history remain compatible. Never infer evidence from
+assistant labels or numbered legacy text.
+Shared records use the `RetrievalSource` type (native RAGFlow retains
+`KnowledgeSource`). Accept raw and `#user-content-knowledge-source-ID`
+fragments without disabling sanitizer clobber protection. Validate immutable
+tool messages through `createKnowledgeSourceReader` to reuse per-object parses.
+Cross-component field bounds live in `contracts/knowledge_sources.v1.json`.
+Completed `SubtaskCard` reports read shared evidence only from the matching
+`task` ToolMessage after its invocation in the current subagent group, selected
+by `findSubtaskResultMessage`. Prompts/earlier steps do not borrow final evidence.
+Remount report Markdown when validated source IDs change: Streamdown caches
+unchanged text blocks independently of renderer components.
 
 ```
 Frontend (Next.js) ──▶ LangGraph SDK ──▶ LangGraph Backend (lead_agent)
@@ -70,32 +104,27 @@ Frontend (Next.js) ──▶ LangGraph SDK ──▶ LangGraph Backend (lead_age
                                               └── Tools & Skills
 ```
 
-The frontend is a stateful chat application. Users create **threads** (conversations), send messages, set thread-scoped `/goal` completion conditions, and receive streamed AI responses. The backend orchestrates agents that can produce **artifacts** (files/code), **todos**, and goal state updates.
+Users create **threads** (conversations), send messages, set thread-scoped `/goal` completion conditions, and receive streamed responses, agent **artifacts** (files/code), **todos** and goal state updates.
 
 ### Source Layout (`src/`)
 
-- **`app/`** — Next.js App Router. Routes include `/` (landing), `/showcase/[thread_id]` (allowlisted public read-only demos), `/workspace/chats/[thread_id]` (authenticated chat), `/workspace/agents/[agent_name]` and `/workspace/agents/new` (custom agents), `/artifacts/view` (chrome-free window that renders Markdown or CSV/TSV artifacts with the panel's own renderer), `/blog/…`, the `(auth)/{login,setup,auth/callback}` flow, `/[lang]/docs/…`, and `/api/…` route handlers (e.g. `/api/memory`).
-- **`components/`** — React components:
-  - `ui/` — Shadcn UI primitives (auto-generated, ESLint-ignored)
-  - `ai-elements/` — Vercel AI SDK elements (auto-generated, ESLint-ignored)
-  - `workspace/` — Chat page components (messages, artifacts, settings)
-  - `landing/` — Landing page sections
-  - `docs/` — Docs / MDX rendering components
-- **`core/`** — Business logic, the heart of the app. Domains include `threads/` (creation, streaming, state), `api/` (LangGraph client singleton), `agents/` (custom agents), `subagents/` (runtime worker catalog and administrator mutations), `auth/` (authentication), `artifacts/`, `channels/` (IM connections), `integrations/` (managed third-party integration status/install clients such as Lark CLI), `i18n/` (en-US, zh-CN), `settings/`, `memory/`, `skills/`, `messages/`, `mcp/`, `models/`, `input-polish/` (pre-send draft rewrite API), `voice-input/` (browser speech-recognition helpers), `suggestions/`, `tasks/`, `todos/`, `tools/`, `workspace-changes/` (run-scoped changed-file summaries and diff fetching), `config/`, `notification/`, `blog/`, plus rendering helpers (`rehype/`, `streamdown/`) and `utils/`.
-- **`hooks/`** — Shared React hooks
-- **`lib/`** — Utilities (`cn()` from clsx + tailwind-merge)
-- **`content/`** — MDX content (blog posts, docs) rendered by the app
-- **`styles/`** — Global CSS with Tailwind v4 `@import` syntax and CSS variables for theming
-- **`typings/`** — Ambient TypeScript declarations
-- Root files: `env.js` (env validation), `mdx-components.ts` (MDX component map)
+- `app/` — Next.js routes: chat/workspace, agents, auth, showcase, artifact views,
+  localized docs/blog, and API handlers.
+- `components/` — generated `ui/` and `ai-elements/`; application components under
+  `workspace/`, `landing/`, and `docs/`.
+- `core/` — domain logic, API clients, state/hooks, i18n, and Markdown renderers.
+- `hooks/`, `lib/`, `typings/` — shared hooks, utilities, and ambient types.
+- `content/`, `styles/` — MDX content and Tailwind styles.
+- `env.js`, `mdx-components.ts` — environment validation and MDX component map.
 
-More specific `AGENTS.md` files under `src/` contain the frontend sections split from this file.
+Read [src/AGENTS.md](src/AGENTS.md) for component and domain ownership.
 
 ## Code Style
 
 `core/utils/markdown.ts` reads web-fetch titles from the first nonblank line.
-Match zero to three literal spaces before `# ` without trimming indentation;
-mixed space/tab code blocks must fall back to the URL. Strip optional closing
+Match zero to three literal spaces before a single `#` followed by an ASCII
+space or tab, without trimming indentation; mixed space/tab code blocks must
+fall back to the URL. Strip optional closing
 hashes with a backwards scan so long fetched titles cannot cause quadratic regex
 backtracking. Closing hashes require a preceding space/tab (or an empty title)
 and only ASCII spaces/tabs afterward, apart from the terminal CR in CRLF input.
@@ -108,6 +137,18 @@ Custom Agent `display_name` is an optional Unicode UI label, edited in
 keep `name` for React identity, URLs, requests, and runtime `agent_name`.
 The 100-code-point budget uses `[...value.trim()].length`, matching Pydantic;
 do not use HTML `maxLength`, which counts UTF-16 code units instead.
+
+Custom Agent tool access is edited from the configured names returned by
+`GET /api/agent-tool-groups`. Preserve the `null` / `[]` / explicit-list
+contract (inherit all / disable all / allowlist), retain missing selected names
+as removable entries, and submit `tool_groups` only when the user changes it.
+Mark missing names unavailable only after a successful catalog load; loading
+and errors preserve neutral labels and removable selections.
+When a changed allowlist excludes `knowledge`, send `knowledge_scope: null` in
+the same update so a saved retrieval default cannot break run admission. Gate
+knowledge selection on both draft and persisted tool access: catalog reads
+authorize against the saved agent, so new access must be saved first. Restored
+tool selections remain unchanged and must not clear a knowledge default.
 
 Custom Agent portability uses the versioned `deerflow.custom-agent` JSON
 document through `core/agents/api.ts`. Keep file parsing client-side only for
@@ -127,6 +168,12 @@ from the filtered list so hidden tasks cannot remain actionable. Keep literal
 matching in `core/scheduled-tasks/search.ts`; clearing search retains other filters.
 
 Single-run schedule edits retain the mounted task's original `run_at` while its wall time and timezone match. The parent echoes edits through `initial`; retain a stable snapshot and reset the parent draft during render before remounting with a task key when switching tasks. Use the resolved timezone consistently for the snapshot and displayed wall time. Component and scheduled-task E2E tests cover DST folds and timestamp precision.
+
+The scheduled-task schedule input initializes Custom cron from the current
+preset and its current fields on every transition into the custom editor.
+Do not substitute a daily schedule or restore stale `parts.raw` after preset
+edits. Component tests cover emitted specs; browser tests pin unchanged
+schedules through the task form's PATCH payload on desktop and mobile.
 
 ## Environment
 
@@ -165,6 +212,11 @@ localized inline feedback; both create and edit must block submission. Keep this
 UI validation separate from the API payload. Preserve the original instant when
 wall time and timezone match the mounted snapshot; validate changed inputs, and
 restore the exact original timestamp when those edits are reverted.
+
+Wall-time conversion matches the scheduler's `ZoneInfo(fold=0)` policy: choose
+the first occurrence of a repeated time and the pre-transition offset for a
+skipped time. Stored one-time schedules use that instant for display; the form's
+round-trip validation must still reject newly entered skipped times.
 
 ## Resources
 
@@ -306,7 +358,11 @@ accounts through `core/auth/admin-users.ts` → `/api/v1/admin/users`. The page
 reuses `userSchema` for rows — both endpoints parse against it, so a
 malformed payload fails the load instead of rendering a phantom row
 (`disabled` optional — absent means not disabled) — and PATCHes only
-`{disabled}`; role stays a read-only column. The Gateway's rejection detail
+`{disabled}`; role stays a read-only column. Like model management, the page
+also gates on `isStaticWebsiteOnly()` (the demo user is nominally an admin,
+but there is no Gateway to query), and the settings dialog falls back to the
+first nav section when a deep link or stale store activates a section the
+current user's nav does not offer. The Gateway's rejection detail
 (last-active-admin 409) renders verbatim. A session
 that turns out to be disabled maps `account_disabled` (see `AUTH_ERROR_CODES`)
 to a login redirect with a stated reason (login surface only — sign-up keeps
@@ -334,37 +390,19 @@ through the contract's aliases/default (`resolveReasoningEffort`). Effort values
 are open strings (`ReasoningEffortValue`), so provider-specific tokens such as
 `max` flow through local settings and account preferences unchanged; the custom
 agent dialog offers only the intersection with the per-agent `low/medium/high`
-schema and hides "off" for required-thinking models. Do not read the booleans in
-components directly. On a legacy model, `resolveReasoningEffort` keeps only its
-advertised generic values; this drops a remembered provider-specific token after
-a model switch without changing the backend's direct legacy-request behavior.
+schema and blocks new "off" for required-thinking models. Do not read the booleans in
+components directly. Legacy `resolveReasoningEffort` keeps only advertised generic
+values, dropping provider tokens after a switch; backend requests stay unchanged.
+Agent settings omit untouched reasoning, show invalid saved values for clearing,
+and require a known model to save a model switch.
 
 ## Full-stack plugin UI
 
-`core/extensions/` loads authenticated deployment-installed ES modules from `/api/plugins`.
-Inline modules use authenticated fetch plus a released Blob URL. Manifest assets use
-native credentialed module scripts, preserving relative imports and resource URLs.
-Both honor the backend base and prefixes; transport and cache semantics are documented in
-`docs/full-stack-plugins.md`. Host copy belongs in the typed locale dictionaries.
-Conversation action factories, shapes and availability callbacks are guarded per plugin;
-only validated value snapshots reach the toolbar/sidebar render paths.
-`PluginNavigation` and the dynamic workspace extension route consume page declarations;
-Capability Center defaults to the repository examples in `core/extensions/catalog.ts`,
-merged by explicit namespace with runtime descriptors. Catalog-only entries are discovery
-metadata, never module-loader inputs or proof of installation. Backend-only examples may
-have no plugin descriptor; keep their runtime status unasserted. Details link to package
-installation instructions. Keep the catalog aligned with `examples/deerflow-extension-*`.
-Agent teams uses `community.agent-teams`; merge its installed descriptor into the
-localized catalog entry without asserting runtime status for a catalog-only row.
-Conversation action slots augment normal/custom-agent toolbars and sidebar menus without replacing native export or notification.
-Plugin views use mount/dispose and abort signals; Shadow DOM is CSS isolation, not a sandbox.
-Descriptors are user-keyed page snapshots, refreshed manually. Backend calls bind the plugin's
-namespace, action allowlist and expected viewer identity. See `docs/full-stack-plugins.md`.
-
-Plugin page `openConversation(threadId)` resolves authenticated thread metadata
-with `pathOfThread`; do not let plugins hardcode default-agent routes. The page's
-abort signal fences late navigation after unmount/account changes. Synchronous
-conversation-action callbacks reject Promise returns while consuming rejections.
+Follow [invariants](../docs/full-stack-plugins.md#frontend-implementation-invariants) for
+plugin loaders/pages/actions: viewer-bound auth, native actions, i18n and
+mount/dispose/abort fencing. Shadow DOM is not a sandbox. Bundled extensions need
+typed en/zh `core/extensions/catalog.ts` entries with their namespace.
+Catalog entries are not proof of installation or activation.
 
 ### Composer references
 
@@ -382,5 +420,11 @@ sends, with retry on failure. Polish restores whole labels longest-first in one
 pass. Confirmed thread creation seeds metadata before migration; references stay
 locked during attachment. Deleting an object removes its context; undo restores
 references already attached to the draft. Labels grant no read authority. IME,
-caret, thread changes and attachment fences apply to editor and picker. The `@`
+caret, thread changes and attachment fences apply to editor and picker. Commit
+mention text before restoring focus synchronously; a delayed callback must not
+overwrite subsequent typing or caret movement. The `@`
 and attachment buttons share the picker.
+
+### Web model provider presets
+
+Settings → Models obtains provider form metadata from the admin-only backend `/api/managed-models/providers`; do not copy endpoints, protocols or adapter maps into the UI. New models need only provider, API key and arbitrary model ID, with server-generated stable names. Custom endpoint fields and legacy edits stay supported. Provider/endpoint changes clear test results and saved-key reuse; omitted keys retain only the same connection. Capability overrides belong in Advanced settings. Successful saves/toggles invalidate both managed-model queries and MODELS_QUERY_KEY so existing chat/Agent selectors refresh. Keep locale text and administrator/static-mode restrictions aligned.
