@@ -20,6 +20,8 @@ _CLIENT_CONTEXT_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
 _MAX_CLIENT_CONTEXT_ITEMS = 32
 _MAX_CLIENT_NAME_LENGTH = 80
 _MAX_CLIENT_VALUE_LENGTH = 200
+# JavaScript's Number.MAX_SAFE_INTEGER: JSON integers are otherwise unbounded.
+_MAX_CLIENT_INTEGER = 2**53 - 1
 
 
 def _clean_key(value: Any) -> str | None:
@@ -48,9 +50,9 @@ def _clean_preference_value(value: Any) -> str | int | float | bool | None:
     if isinstance(value, bool):
         return value
     if isinstance(value, int):
-        return value
+        return int(value) if abs(value) <= _MAX_CLIENT_INTEGER else None
     if isinstance(value, float):
-        return value if math.isfinite(value) else None
+        return float(value) if math.isfinite(value) else None
     if isinstance(value, str):
         return _clean_text(value)
     return None
