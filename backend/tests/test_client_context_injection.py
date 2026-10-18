@@ -236,3 +236,49 @@ async def test_compiled_graph_delivers_client_context_request_only_and_latest_on
     assert _client_messages(fourth) == []
     state = await graph.aget_state(config)
     assert all("client_context" not in str(m.content) for m in state.values["messages"])
+
+
+def _pii_app_config(*, enabled: bool):
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.model_config import ModelConfig
+    from deerflow.config.pii_redaction_config import PiiRedactionConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    return AppConfig(
+        models=[ModelConfig(name="m", display_name="m", description=None, use="langchain_openai:ChatOpenAI", model="m", supports_thinking=False, supports_vision=False)],
+        sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+        pii_redaction=PiiRedactionConfig(enabled=True, token_secret="unit-test-deployment-secret-0123456789") if enabled else PiiRedactionConfig(),
+    )
+
+
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("pii_enabled", [True, False], ids=["pii-on", "pii-off"])
+def test_composed_chain_applies_the_pii_policy_to_the_client_block(pii_enabled, use_async):
+    from deerflow.agents.middlewares.pii_redaction_middleware import PiiRedactionMiddleware
+
+    email = "alice@example.com"
+    app_config = _pii_app_config(enabled=pii_enabled)
+    model = _RecordingModel()
+    # Production order: the PII wrapper is outer, and DynamicContext adds the block inside it.
+    outer = [PiiRedactionMiddleware(app_config.pii_redaction)] if pii_enabled else []
+    graph = create_agent(
+        model,
+        system_prompt="Server-owned instructions",
+        middleware=[*outer, InputSanitizationMiddleware(), DynamicContextMiddleware(app_config=app_config, memory_enabled=False), SystemMessageCoalescingMiddleware()],
+        checkpointer=InMemorySaver(),
+    )
+    config = {"configurable": {"thread_id": f"client-pii-{pii_enabled}-{use_async}"}}
+    payload = {"messages": [{"role": "user", "content": f"Mail {email}"}]}
+    context = {"run_id": "run-pii", "client": {"name": "custom-analytics-frontend", "preferences": {"contact": email}}}
+    if use_async:
+        asyncio.run(graph.ainvoke(payload, config, context=context))
+    else:
+        graph.invoke(payload, config, context=context)
+
+    (request,) = model.requests
+    (block,) = _client_messages(request)
+    assert "custom-analytics-frontend" in block.content
+    if pii_enabled:
+        assert all(email not in str(message.content) for message in request)
+    else:
+        assert email in block.content

@@ -59,6 +59,7 @@ from langchain_core.messages import HumanMessage, RemoveMessage, SystemMessage
 from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.message_utils import insert_after_leading_system_messages
+from deerflow.agents.middlewares.pii_redaction_middleware import redact_text
 from deerflow.projects.context import build_project_context_message, is_project_context_message, pinned_project_snapshot, project_context_insertion_index, render_documents_block, render_project_block
 from deerflow.runtime.client_context import client_context_limits, render_client_context_for_prompt
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
@@ -67,6 +68,7 @@ from deerflow.utils.messages import INJECTED_USER_MESSAGE_ID_SUFFIX, ORIGINAL_US
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
+    from deerflow.config.pii_redaction_config import PiiRedactionConfig
 
 logger = logging.getLogger(__name__)
 
@@ -417,6 +419,7 @@ class DynamicContextMiddleware(AgentMiddleware):
         policies must not share a fingerprint.
         """
         max_entries, max_bytes = self._shelf_index_limits()
+        pii_redaction_config = self._pii_redaction_config()
         return {
             "current_date_timezone": _effective_date_timezone_name(),
             "memory_enabled": self._memory_enabled,
@@ -424,7 +427,11 @@ class DynamicContextMiddleware(AgentMiddleware):
             "shelf_index_max_bytes": max_bytes,
             "client_context_delivery": "framed_request_message_after_system_prompt",
             "client_context_limits": client_context_limits(),
+            "client_context_pii_redaction": bool(pii_redaction_config and pii_redaction_config.enabled),
         }
+
+    def _pii_redaction_config(self) -> PiiRedactionConfig | None:
+        return self._app_config.pii_redaction if self._app_config is not None else None
 
     def _build_full_reminder(self, runtime: Runtime | None = None, *, query: str | None = None) -> tuple[str, str | None]:
         """Return (date_reminder, memory_block | None).
@@ -758,8 +765,7 @@ class DynamicContextMiddleware(AgentMiddleware):
         message = build_project_context_message(block, run_id)
         return request.override(messages=[*messages[:index], message, *messages[index:]]), project_block, documents_block
 
-    @staticmethod
-    def _assemble_client_request(request: ModelRequest) -> ModelRequest:
+    def _assemble_client_request(self, request: ModelRequest) -> ModelRequest:
         """Insert the run's ``context.client`` as one transient data message.
 
         The values come from the request body, so they never enter system
@@ -769,12 +775,14 @@ class DynamicContextMiddleware(AgentMiddleware):
         unchanged client keeps the cached prefix stable across runs. Like the
         project message it is request-only: never a state update and never
         flagged ``dynamic_context_reminder``, so a later run without
-        ``client`` simply has no block.
+        ``client`` simply has no block. It is added inside the outer
+        ``PiiRedactionMiddleware``, so the configured policy is applied here.
         """
         context = getattr(getattr(request, "runtime", None), "context", None)
         block = render_client_context_for_prompt(context.get("client")) if isinstance(context, dict) else None
         if block is None:
             return request
+        block = redact_text(block, self._pii_redaction_config())
         message = HumanMessage(
             content=block,
             additional_kwargs={

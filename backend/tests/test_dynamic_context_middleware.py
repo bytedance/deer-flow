@@ -1039,6 +1039,7 @@ def _declared_date_timezone_policies():
 _CLIENT_CONTEXT_POLICY = {
     "client_context_delivery": "framed_request_message_after_system_prompt",
     "client_context_limits": {"max_items": 32, "max_name_length": 80, "max_value_length": 200, "max_integer": 2**53 - 1},
+    "client_context_pii_redaction": False,
 }
 
 
