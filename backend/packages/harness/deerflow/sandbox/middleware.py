@@ -31,6 +31,7 @@ from deerflow.sandbox.lease import (
     sandbox_lease_owner,
 )
 from deerflow.sandbox.overwrite import unwrap_sandbox
+from deerflow.sandbox.prewarm import close_sandbox_prewarm, start_sandbox_prewarm
 from deerflow.sandbox.sandbox_provider import get_initialized_sandbox_provider
 from deerflow.utils.file_io import await_drained
 
@@ -429,6 +430,22 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         return await super().abefore_agent(state, runtime)
 
     @override
+    def before_model(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
+        # LangChain registers both halves of this hook as one graph node. An
+        # async-only override would make compiled invoke()/stream() fail even
+        # with prewarm disabled. Sync runs retain ordinary lazy acquisition.
+        return super().before_model(state, runtime)
+
+    @override
+    async def abefore_model(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
+        # This deliberately starts but does not await acquisition. The model's
+        # first response then overlaps Docker startup; the first sandbox tool
+        # claims the same task through ensure_sandbox_initialized_async().
+        if self._lazy_init and state.get("sandbox") is None:
+            start_sandbox_prewarm(state, runtime)
+        return await super().abefore_model(state, runtime)
+
+    @override
     def after_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
         sandbox, fork_restored = unwrap_sandbox(state.get("sandbox"))
         if sandbox is not None:
@@ -463,6 +480,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
 
     @override
     async def aafter_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
+        await close_sandbox_prewarm(runtime)
         sandbox, fork_restored = unwrap_sandbox(state.get("sandbox"))
         if sandbox is not None:
             sandbox_id = sandbox["sandbox_id"]

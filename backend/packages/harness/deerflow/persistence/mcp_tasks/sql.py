@@ -675,25 +675,78 @@ class McpTaskRepository:
         async with self._sf() as session:
             rows = list((await session.execute(stmt)).scalars())
             expires_at = now + timedelta(seconds=lease_seconds)
+            claimed: list[McpTaskRow] = []
             for row in rows:
+                rebuild_snapshot = row.notification_status in ("pending", "claimed") or (row.notification_status == "retry" and row.dispatch_version != row.event_version)
+                if not rebuild_snapshot and row.dispatch_event is None and row.dispatch_version != row.event_version:
+                    # A legacy in-flight phase whose dispatch payload is gone, with
+                    # a newer event already recorded: claim that newer event instead
+                    # of consuming it. Terminal tasks stop polling, so a consumed
+                    # completion would be lost permanently.
+                    rebuild_snapshot = True
+                event = (
+                    _notification_event(
+                        row,
+                        tracking_degraded=int(row.consecutive_poll_error_count or 0) >= tracking_degraded_after_errors,
+                    )
+                    if rebuild_snapshot
+                    else row.dispatch_event
+                )
+                if event is None:
+                    # The condition behind this snapshot resolved before delivery
+                    # (for example tracking recovered, or an input_required prompt
+                    # was answered), or the row carries an empty generation left by
+                    # a pre-fix claim. Consume only what was proven empty — the
+                    # current event version for a rebuild, the empty dispatch
+                    # generation otherwise — through a conditional UPDATE fenced on
+                    # the event version and phase this read saw. SQLite has no
+                    # ``SELECT FOR UPDATE``, so a newer event recorded after the
+                    # read must win: the fence then matches no row, this consume is
+                    # a no-op, and the newer event stays claimable. Clearing the
+                    # content fingerprint keeps an identical later event from being
+                    # suppressed by a snapshot that was never delivered.
+                    consumed_version = row.event_version if rebuild_snapshot else (row.dispatch_version if row.dispatch_version is not None else row.event_version)
+                    status_at_read = row.notification_status
+                    session.expunge(row)
+                    await session.execute(
+                        update(McpTaskRow)
+                        .where(
+                            McpTaskRow.id == row.id,
+                            McpTaskRow.event_version == consumed_version,
+                            McpTaskRow.notification_status == status_at_read,
+                        )
+                        .values(
+                            notified_version=consumed_version,
+                            event_fingerprint=None,
+                            notification_status="none",
+                            notification_error=None,
+                            notification_attempt_count=0,
+                            dispatch_version=None,
+                            dispatch_attempt=0,
+                            dispatch_event=None,
+                            notification_run_id=None,
+                            notification_lease_owner=None,
+                            notification_lease_expires_at=None,
+                            notification_lease_token=None,
+                            updated_at=now,
+                        )
+                    )
+                    continue
                 row.notification_lease_owner = lease_owner
                 row.notification_lease_expires_at = expires_at
                 row.notification_lease_token = _new_claim_token()
-                rebuild_snapshot = row.notification_status in ("pending", "claimed") or (row.notification_status == "retry" and row.dispatch_version != row.event_version)
                 if rebuild_snapshot:
                     if row.dispatch_version != row.event_version:
                         row.dispatch_attempt = 0
                         row.notification_attempt_count = 0
                     row.dispatch_version = row.event_version
-                    row.dispatch_event = _notification_event(
-                        row,
-                        tracking_degraded=int(row.consecutive_poll_error_count or 0) >= tracking_degraded_after_errors,
-                    )
+                    row.dispatch_event = event
                     row.notification_run_id = None
                     row.notification_status = "claimed"
                 row.updated_at = now
+                claimed.append(row)
             await session.commit()
-            return [self._row_to_dict(row) for row in rows]
+            return [self._row_to_dict(row) for row in claimed]
 
     async def begin_notification_launch(
         self,

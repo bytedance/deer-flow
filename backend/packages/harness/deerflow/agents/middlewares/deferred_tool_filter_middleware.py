@@ -8,20 +8,23 @@ calls to tools that have not been promoted yet.
 
 The deferred name set and the catalog hash are injected at construction time
 (no ContextVar). Promotion state is read from graph state (``state["promoted"]``),
-scoped by catalog hash so a stale persisted promotion cannot expose a renamed
-or drifted tool.
+scoped by catalog hash and genuine user-message ID so a stale promotion cannot
+expose a renamed tool or remain active in a later user turn.
 """
 
 import logging
-from collections.abc import Awaitable, Callable
-from typing import override
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from typing import Any, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
 from langchain_core.messages import ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
+from langgraph.runtime import Runtime
 from langgraph.types import Command
+
+from deerflow.agents.middlewares.message_utils import genuine_user_turn_id, has_ai_response_after_latest_user_message
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +34,7 @@ class DeferredToolFilterMiddleware(AgentMiddleware[AgentState]):
 
     ToolNode still holds all tools (including deferred) for execution routing,
     but the LLM only sees active tool schemas plus tools that have already been
-    promoted (recorded in ``state["promoted"]`` under the current catalog hash).
+    promoted under the current catalog hash and genuine user turn.
     """
 
     def __init__(self, deferred_names: frozenset[str], catalog_hash: str | None):
@@ -43,16 +46,48 @@ class DeferredToolFilterMiddleware(AgentMiddleware[AgentState]):
         return {
             "deferred_names": sorted(self._deferred),
             "catalog_hash": self._catalog_hash,
-            "promotion_scope": "graph_state_catalog_hash",
+            "promotion_scope": "graph_state_catalog_hash_user_turn",
         }
 
-    def _promoted(self, state) -> set[str]:
+    def _promotion_is_current(self, state: Mapping[str, Any] | None, promoted: Mapping[str, Any]) -> bool:
+        if promoted.get("catalog_hash") != self._catalog_hash:
+            return False
+        promoted_turn_id = promoted.get("turn_id")
+        if promoted_turn_id is None:
+            return has_ai_response_after_latest_user_message(list((state or {}).get("messages") or []))
+        current_turn_id = genuine_user_turn_id(list((state or {}).get("messages") or []))
+        return current_turn_id is not None and promoted_turn_id == current_turn_id
+
+    def _promoted(self, state: Mapping[str, Any] | None) -> set[str]:
         promoted = (state or {}).get("promoted")
-        if promoted and promoted.get("catalog_hash") == self._catalog_hash:
-            return set(promoted.get("names") or [])
+        if not isinstance(promoted, Mapping) or not self._promotion_is_current(state, promoted):
+            return set()
+        names = promoted.get("names")
+        if isinstance(names, Sequence) and not isinstance(names, (str, bytes)):
+            return {name for name in names if isinstance(name, str)}
         return set()
 
-    def _hidden(self, state) -> set[str]:
+    def _turn_state_update(self, state: Mapping[str, Any] | None) -> dict[str, Any] | None:
+        turn_id = genuine_user_turn_id(list((state or {}).get("messages") or []))
+        if not self._deferred or not self._catalog_hash or turn_id is None:
+            return None
+        promoted = (state or {}).get("promoted")
+        if isinstance(promoted, Mapping) and self._promotion_is_current(state, promoted):
+            if promoted.get("turn_id") == turn_id:
+                return None
+            names = promoted.get("names")
+            migrated_names = [name for name in names if isinstance(name, str)] if isinstance(names, Sequence) and not isinstance(names, (str, bytes)) else []
+        else:
+            migrated_names = []
+        return {
+            "promoted": {
+                "catalog_hash": self._catalog_hash,
+                "names": migrated_names,
+                "turn_id": turn_id,
+            }
+        }
+
+    def _hidden(self, state: Mapping[str, Any] | None) -> set[str]:
         return set(self._deferred) - self._promoted(state)
 
     def _filter_tools(self, request: ModelRequest) -> ModelRequest:
@@ -79,6 +114,14 @@ class DeferredToolFilterMiddleware(AgentMiddleware[AgentState]):
             name=name,
             status="error",
         )
+
+    @override
+    def before_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
+        return self._turn_state_update(state)
+
+    @override
+    async def abefore_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
+        return self._turn_state_update(state)
 
     @override
     def wrap_model_call(

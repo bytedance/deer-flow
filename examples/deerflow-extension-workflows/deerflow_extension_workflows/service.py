@@ -15,6 +15,8 @@ from pathlib import Path
 
 from deerflow_extension_api import AgentRunError
 
+from .artifacts import Artifacts
+from .lifecycle import Lifecycle
 from .store import TERMINAL, Store
 
 NAMESPACE = "community.workflows"
@@ -58,19 +60,27 @@ def project(record, detail=True):
         )
     }
     result["run_id"] = record["id"]
+    result.update(
+        fingerprint=record["fingerprint"],
+        definition=record.get("definition"),
+        configuration_revision=record.get("configuration_revision"),
+    )
     if detail:
         result.update(
+            checkpoints=copy.deepcopy(record.get("checkpoints", [])),
+            artifacts=copy.deepcopy(record.get("artifacts", [])),
+            pause_expires_at=record.get("pause_expires_at"),
             script=record["script"],
             args=record["args"],
             logs=record["logs"],
             result=record.get("result"),
-            steps=[{k: v for k, v in step.items() if k not in ("input", "output")} for step in record["steps"]],
+            steps=[{k: v for k, v in step.items() if k not in ("input", "output", "configuration_evidence", "input_artifacts")} for step in record["steps"]],
         )
     encoded(result, 60 * 1024)
     return result
 
 
-class Workflows:
+class Workflows(Lifecycle, Artifacts):
     def __init__(self, config):
         self.config = config
         self.store = None
@@ -80,6 +90,7 @@ class Workflows:
         self.entries = {}
         self.admissions = set()
         self.launch_lock = asyncio.Lock()
+        self.control_lock = asyncio.Lock()
         self.write_lock = asyncio.Lock()
         self.global_slots = asyncio.Semaphore(config["global_concurrency"])
         self.lockfile = None
@@ -137,9 +148,16 @@ class Workflows:
         owner = self.owner(context)
         if context.agent_runs is None:
             raise ValueError("Session-bound AgentRuns required; PAT/internal callers unsupported")
-        if set(payload) - {"request_id", "script", "args"}:
+        if set(payload) - {"request_id", "script", "args", "definition"}:
             raise ValueError("Unexpected launch fields")
-        script = text(payload.get("script"), 16000)
+        definition = payload.get("definition")
+        if definition is not None:
+            if "script" in payload or not isinstance(definition, dict):
+                raise ValueError("Choose a script or an exact definition version")
+            definition = await self.get_definition(definition, context)
+            script = definition.pop("script")
+        else:
+            script = text(payload.get("script"), 16000)
         encoded(script, 16000)
         request_id = text(payload.get("request_id"), 128)
         args = copy.deepcopy(payload.get("args", {}))
@@ -156,6 +174,7 @@ class Workflows:
                 "admission_timeout_seconds",
                 "max_calls",
                 "timeout_seconds",
+                "pause_timeout_seconds",
                 "cpu_seconds",
                 "memory_bytes",
             )
@@ -168,10 +187,16 @@ class Workflows:
                 "args_hash": args_hash,
                 "limits": limits,
                 "agents": sorted(self.config["agents"]),
+                "definition": definition,
             }
         )
         record = {
             "id": uuid.uuid4().hex,
+            "definition": definition,
+            "configuration_revision": await context.agent_runs.configuration_revision(assistant_ids=sorted(self.config["agents"])) if hasattr(context.agent_runs, "configuration_revision") else None,
+            "operator_revision": identity({**self.config, "agents": sorted(self.config["agents"])}),
+            "checkpoints": [],
+            "artifacts": [],
             "request_id": request_id,
             "fingerprint": fingerprint,
             "script_hash": script_hash,
@@ -231,7 +256,11 @@ class Workflows:
         self.workers.pop(run_id, None)
         self.entries.pop(run_id, None)
         if not task.cancelled() and task.exception() is not None:
-            logger.error("Workflow %s supervisor failed (%s); inspect retained child records", run_id, type(task.exception()).__name__)
+            logger.error(
+                "Workflow %s supervisor failed (%s); inspect retained child records",
+                run_id,
+                type(task.exception()).__name__,
+            )
 
     async def get(self, payload, context):
         owner = self.owner(context)
@@ -270,22 +299,29 @@ class Workflows:
         response = {"id": message["id"]}
         row = None
         try:
-            if not isinstance(payload, dict) or set(payload) != {
-                "stepId",
-                "agentRef",
-                "task",
-            }:
+            if not isinstance(payload, dict) or not {"stepId", "agentRef", "task"} <= set(payload) or set(payload) - {"stepId", "agentRef", "task", "artifacts"}:
                 raise ValueError("agent requires stepId, agentRef, task")
             step_id = text(payload["stepId"], 80)
             if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", step_id):
                 raise ValueError("stepId must contain ASCII letters, digits, underscores or hyphens")
             if payload["agentRef"] not in self.config["agents"]:
                 raise ValueError("Agent reference not permitted by operator")
-            if any(s["step_id"] == step_id for s in record["steps"]):
-                raise ValueError("Step ID already used")
-            if len(record["steps"]) >= self.config["max_calls"]:
-                entry["fault"] = "Total Agent call limit"
-                raise ValueError(entry["fault"])
+            versions = payload.get("artifacts", [])
+            if not isinstance(versions, list) or len(versions) > 16 or any(not isinstance(v, str) for v in versions):
+                raise ValueError("artifacts must contain at most 16 version IDs")
+            references = []
+            for version in versions:
+                if not self.approved_artifact(record, version):
+                    raise ValueError("File version has not been approved")
+                info, _ = await asyncio.to_thread(self.store.artifact, owner, record["id"], version)
+                references.append({"run_id": record["id"], **{k: info[k] for k in ("version", "sha256", "name", "size")}})
+            task = payload["task"]
+            if references:
+                task = {
+                    "task": task,
+                    "approved_artifacts": references,
+                    "artifact_instruction": "Read these exact versions using read_workflow_artifact (run_id, version, offset). Follow next_offset until null. Do not use source file paths.",
+                }
             # Stable identity/input are recorded BEFORE thread creation or run admission.
             thread_id = "workflow-" + identity([record["id"], step_id])[:32]
             message_id = "workflow-" + identity([record["id"], step_id, 1])[:32]
@@ -294,10 +330,16 @@ class Workflows:
                     {
                         "role": "user",
                         "id": message_id,
-                        "content": encoded(payload["task"], 8000),
+                        "content": encoded(task, 16000 if references else 8000),
                     }
                 ]
             }
+            # Revalidate after file IO; validation and reservation must not yield.
+            if any(s["step_id"] == step_id for s in record["steps"] + record.get("checkpoints", []) + record.get("artifacts", [])):
+                raise ValueError("Step ID already used")
+            if len(record["steps"]) >= self.config["max_calls"]:
+                entry["fault"] = "Total Agent call limit"
+                raise ValueError(entry["fault"])
             row = {
                 "step_id": step_id,
                 "attempt": 1,
@@ -306,6 +348,7 @@ class Workflows:
                 "run_id": None,
                 "status": "queued",
                 "input": input,
+                "input_artifacts": references,
                 "idempotency_key": f"{record['id']}:{message_id}:1",
             }
             record["steps"].append(row)
@@ -314,6 +357,13 @@ class Workflows:
                 if entry["cancel"].is_set() or entry["fault"]:
                     row["status"] = "cancelled"
                     raise ValueError("Workflow stopping")
+                if record.get("configuration_revision") is not None:
+                    try:
+                        await self.check_configuration(entry)
+                    except Exception:
+                        entry["fault"] = "Agent configuration changed or unavailable"
+                        row["status"] = "failed"
+                        raise
                 row["status"] = "creating_thread"
                 await self.save(owner, record)
                 # Never cancel these awaits just because a workflow cancel was requested.
@@ -334,7 +384,11 @@ class Workflows:
                         input=input,
                         idempotency_key=row["idempotency_key"],
                     )
-                row.update(run_id=run.run_id, status="running", effective_assistant_id=run.assistant_id)
+                row.update(
+                    run_id=run.run_id,
+                    status="running",
+                    effective_assistant_id=run.assistant_id,
+                )
                 await self.save(owner, record)
                 while True:
                     if entry["cancel"].is_set() or entry["fault"]:
@@ -352,7 +406,7 @@ class Workflows:
                 if state.get("next") or state.get("interrupts") or pending_input(messages):
                     row["status"] = "waiting_input"
                     entry["fault"] = "waiting_input"
-                    raise ValueError("Child requires input; Phase 1 cannot resume or approve")
+                    raise ValueError("Child requires input; workflow resume cannot answer child interrupts")
                 if run.status != "success":
                     row["status"] = "failed"
                     raise ValueError("Agent run did not succeed")
@@ -384,9 +438,22 @@ class Workflows:
                 else:
                     output = content
                 encoded(output, 12000)
+                # Evidence comes from the run's completed host assembly, never a
+                # fresh read of mutable configuration after the Agent finishes.
+                async with asyncio.timeout(5):
+                    proof = await runs.configuration_evidence(thread_id=thread_id, run_id=run.run_id)
+                if proof.get("run_id") != run.run_id or proof.get("thread_id") != thread_id or proof.get("source") != "host_assembly":
+                    raise ValueError("Host configuration evidence does not match child run")
+                row["configuration_evidence"] = proof
+                row["configuration_version"] = proof["version"]
                 # Capture before any later turn can alter the thread checkpoint.
-                row.update(status="completed", output=copy.deepcopy(output))
+                row.update(
+                    status="completed",
+                    output=copy.deepcopy(output),
+                    artifact_version=identity([record["id"], step_id, row["attempt"], output]),
+                )
                 response["value"] = {
+                    "artifactVersion": row["artifact_version"],
                     "output": output,
                     "threadId": thread_id,
                     "runId": run.run_id,
@@ -466,7 +533,7 @@ class Workflows:
                     "memory_bytes": self.config["memory_bytes"],
                 },
             )
-            async with asyncio.timeout(self.config["timeout_seconds"]):
+            async with asyncio.timeout(self.config["timeout_seconds"]) as deadline:
                 turns = 0
                 while True:
                     if entry["cancel"].is_set() or entry["fault"]:
@@ -483,6 +550,19 @@ class Workflows:
                     messages = frame["messages"]
                     if not isinstance(messages, list) or len(messages) > 64:
                         raise ValueError("Worker message limit")
+                    if any(m.get("type") in ("pause", "humanCheckpoint") for m in messages):
+                        if len(messages) != 1 or entry["tasks"] or frame["outcome"] is not None:
+                            raise ValueError("Checkpoint must be awaited alone, after all Agent calls")
+                        response = await self.checkpoint(entry, messages[0], deadline)
+                        await self.send(process, {"responses": [response]})
+                        continue
+                    if any(m.get("type") in ("captureArtifact", "readArtifact") for m in messages):
+                        if len(messages) != 1 or entry["tasks"] or frame["outcome"] is not None:
+                            raise ValueError("Artifact operations must be awaited alone")
+                        operation = self.capture if messages[0]["type"] == "captureArtifact" else self.consume
+                        response = await operation(entry, messages[0])
+                        await self.send(process, {"responses": [response]})
+                        continue
                     for message in messages:
                         if message.get("type") == "log":
                             if len(record["logs"]) >= 20:
@@ -523,7 +603,10 @@ class Workflows:
         except TimeoutError:
             # Keep this outside asyncio.timeout: its own cancellation must first
             # leave the context manager so it can be translated to TimeoutError.
-            record.update(status="failed", error="Execution deadline exceeded")
+            record.update(
+                status="failed",
+                error="Checkpoint wait deadline exceeded" if record["status"] in ("paused", "waiting_approval") else "Execution deadline exceeded",
+            )
         except asyncio.CancelledError:
             entry["cancel"].set()
             record.update(status="interrupted", error="Host interrupted; child cleanup required")

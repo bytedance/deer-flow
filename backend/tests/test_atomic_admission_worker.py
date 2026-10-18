@@ -21,9 +21,9 @@ def anyio_backend():
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("action", ["interrupt", "rollback"])
+@pytest.mark.parametrize("action,host_finalization_cancel", [("interrupt", False), ("rollback", False), ("rollback", True)])
 @pytest.mark.parametrize("with_event_store", [True, False])
-async def test_real_worker_atomic_replacement_retains_finalization_authority(store, action, with_event_store):
+async def test_real_worker_atomic_replacement_retains_finalization_authority(store, action, with_event_store, host_finalization_cancel):
     manager = RunManager(store=store, worker_id="owner", run_ownership_config=RunOwnershipConfig(heartbeat_enabled=True, lease_seconds=5, grace_seconds=0))
     record = await manager.create_or_reject("thread", user_id="review")
     started, rollback_entered, release_rollback = (asyncio.Event() for _ in range(3))
@@ -110,8 +110,21 @@ async def test_real_worker_atomic_replacement_retains_finalization_authority(sto
             assert not record.terminal_status_persisted
             renewal = asyncio.create_task(manager._renew_leases())
             await asyncio.sleep(0)
+            if host_finalization_cancel:
+                record.task.cancel("host cancellation during rollback terminal ACK")
+                await asyncio.sleep(0)
+                record.task.cancel("repeated host cancellation")
+                await asyncio.sleep(0)
+                assert not record.task.done()
+                assert not record.terminal_status_persisted
+                assert record.rollback_finalization_pending
+                assert not record.ownership_lost
             release_error_ack.set()
-        await asyncio.wait_for(record.task, 2)
+        if host_finalization_cancel:
+            with pytest.raises(asyncio.CancelledError, match="host cancellation during rollback terminal ACK"):
+                await asyncio.wait_for(record.task, 2)
+        else:
+            await asyncio.wait_for(record.task, 2)
         if renewal:
             await asyncio.wait_for(renewal, 1)
         row = await store.get(record.run_id, user_id="review")
