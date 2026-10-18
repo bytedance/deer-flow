@@ -21,9 +21,17 @@ def anyio_backend():
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("action,host_finalization_cancel", [("interrupt", False), ("rollback", False), ("rollback", True)])
+@pytest.mark.parametrize(
+    "action,host_finalization_cancel,stale_renewal_race",
+    [
+        ("interrupt", False, False),
+        ("rollback", False, False),
+        ("rollback", True, False),
+        ("rollback", False, True),
+    ],
+)
 @pytest.mark.parametrize("with_event_store", [True, False])
-async def test_real_worker_atomic_replacement_retains_finalization_authority(store, action, with_event_store, host_finalization_cancel):
+async def test_real_worker_atomic_replacement_retains_finalization_authority(store, action, with_event_store, host_finalization_cancel, stale_renewal_race):
     manager = RunManager(store=store, worker_id="owner", run_ownership_config=RunOwnershipConfig(heartbeat_enabled=True, lease_seconds=5, grace_seconds=0))
     record = await manager.create_or_reject("thread", user_id="review")
     started, rollback_entered, release_rollback = (asyncio.Event() for _ in range(3))
@@ -65,7 +73,20 @@ async def test_real_worker_atomic_replacement_retains_finalization_authority(sto
         )
     )
     renewal = None
+    stale_renewal = None
+    stale_renewal_entered, release_stale_renewal = asyncio.Event(), asyncio.Event()
+    stale_renewal_calls = []
     original_status = store.update_status
+    original_renew = store.renew_lease
+
+    async def hold_first_active_renewal(run_id, **kwargs):
+        stale_renewal_calls.append(kwargs.get("allow_interrupted", False))
+        if stale_renewal_race and len(stale_renewal_calls) == 1:
+            stale_renewal_entered.set()
+            await release_stale_renewal.wait()
+        return await original_renew(run_id, **kwargs)
+
+    store.renew_lease = hold_first_active_renewal
 
     async def hold_final_ack(run_id, status, **kwargs):
         result = await original_status(run_id, status, **kwargs)
@@ -76,6 +97,9 @@ async def test_real_worker_atomic_replacement_retains_finalization_authority(sto
 
     try:
         await asyncio.wait_for(started.wait(), 2)
+        if stale_renewal_race:
+            stale_renewal = asyncio.create_task(manager._renew_leases())
+            await asyncio.wait_for(stale_renewal_entered.wait(), 2)
         # Model the final failed-renewal window before replacement using an
         # actual persisted deadline; the Worker and checkpoint code stay real.
         deadline = datetime.now(UTC) + timedelta(milliseconds=150)
@@ -95,6 +119,15 @@ async def test_real_worker_atomic_replacement_retains_finalization_authority(sto
             assert record.terminal_commit_proof.error == "Cancelled by newer run"
             assert not manager.can_release_terminal_barrier(record)
             assert not record.terminal_status_persisted
+            if stale_renewal_race:
+                release_stale_renewal.set()
+                await asyncio.wait_for(stale_renewal, 2)
+                assert record.status in (RunStatus.interrupted, RunStatus.error)
+                assert record.owner_worker_id == "owner"
+                assert manager._runs.get(record.run_id) is record
+                assert stale_renewal_calls == [False, True]
+                assert not record.ownership_lost
+                assert record.rollback_finalization_pending
             await manager._renew_leases()
             elapsed = asyncio.Event()
             asyncio.get_running_loop().call_later(max(0, (deadline - datetime.now(UTC)).total_seconds()) + 0.03, elapsed.set)
@@ -143,9 +176,10 @@ async def test_real_worker_atomic_replacement_retains_finalization_authority(sto
     finally:
         release_rollback.set()
         release_error_ack.set()
+        release_stale_renewal.set()
         if not record.task.done():
             record.task.cancel()
-        await asyncio.gather(record.task, *([renewal] if renewal else []), return_exceptions=True)
+        await asyncio.gather(record.task, *([renewal] if renewal else []), *([stale_renewal] if stale_renewal else []), return_exceptions=True)
         await manager.stop_heartbeat(timeout=0.1)
 
 

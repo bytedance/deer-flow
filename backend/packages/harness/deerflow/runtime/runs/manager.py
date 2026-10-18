@@ -2644,6 +2644,33 @@ class RunManager:
             # still-owned per-run decision. Shutdown drains the registries.
             await asyncio.wait(checks)
 
+    def _rollback_retry_authorized(self, record: RunRecord, *, initial_allow_interrupted: bool) -> bool:
+        """Whether an active-only rejection may be retried for this rollback."""
+        proof = record.terminal_commit_proof
+        return (
+            not initial_allow_interrupted
+            and record.rollback_finalization_pending
+            and proof is not None
+            and proof.status == RunStatus.interrupted
+            and record.owner_worker_id == self._worker_id
+            and self._runs.get(record.run_id) is record
+            and not record.ownership_lost
+            and not self._has_final_terminal_ack(record)
+        )
+
+    async def _await_rollback_retry_authority(self, record: RunRecord, *, initial_allow_interrupted: bool, deadline: float) -> bool:
+        """Wait for an in-flight admission ACK, never infer it from the row."""
+        loop = asyncio.get_running_loop()
+        while loop.time() < deadline:
+            if self._rollback_retry_authorized(record, initial_allow_interrupted=initial_allow_interrupted):
+                return True
+            attempts = set(self._terminal_attempts.get(record.run_id, ()))
+            remaining = deadline - loop.time()
+            if not attempts or remaining <= 0:
+                break
+            await asyncio.wait(attempts, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
+        return loop.time() < deadline and self._rollback_retry_authorized(record, initial_allow_interrupted=initial_allow_interrupted)
+
     async def _renew_one_lease(self, record: RunRecord) -> None:
         assert self._store is not None and self._run_ownership_config is not None
         if self._has_final_terminal_ack(record):
@@ -2652,10 +2679,11 @@ class RunManager:
         self._arm_lease_deadline(record)
         confirmed = self._parse_lease_deadline(record.lease_expires_at)
         remaining = max(0.0, (confirmed - datetime.now(UTC)).total_seconds()) if confirmed else 0.0
-        deadline = asyncio.get_running_loop().time() + remaining
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + remaining
 
         async def fence(reason: str) -> None:
-            if not await self._release_confirmed_terminal_barrier(record, timeout=max(0.0, deadline - asyncio.get_running_loop().time())):
+            if not await self._release_confirmed_terminal_barrier(record, timeout=max(0.0, deadline - loop.time())):
                 await self._mark_ownership_lost(record, reason=reason, require_active=False)
 
         if remaining <= 0:
@@ -2669,57 +2697,75 @@ class RunManager:
             # Never start another renewal for this run while it is in flight.
             await fence("A previous lease renewal is still unconfirmed.")
             return
-        new_expiry = (datetime.now(UTC) + timedelta(seconds=self._run_ownership_config.lease_seconds)).isoformat()
-        operation = asyncio.create_task(
-            self._call_store_with_retry(
-                "renew_lease",
-                record.run_id,
-                lambda: self._store.renew_lease(
+
+        initial_allow_interrupted = record.rollback_finalization_pending and record.terminal_commit_proof is not None and record.terminal_commit_proof.status == RunStatus.interrupted
+        for retry_index in range(2):
+            allow_interrupted = record.rollback_finalization_pending and record.terminal_commit_proof is not None and record.terminal_commit_proof.status == RunStatus.interrupted
+            new_expiry = (datetime.now(UTC) + timedelta(seconds=self._run_ownership_config.lease_seconds)).isoformat()
+            operation = asyncio.create_task(
+                self._call_store_with_retry(
+                    "renew_lease",
                     record.run_id,
-                    owner_worker_id=self._worker_id,
-                    lease_expires_at=new_expiry,
-                    **({"allow_interrupted": True} if record.rollback_finalization_pending and record.terminal_commit_proof is not None and record.terminal_commit_proof.status == RunStatus.interrupted else {}),
+                    lambda: self._store.renew_lease(
+                        record.run_id,
+                        owner_worker_id=self._worker_id,
+                        lease_expires_at=new_expiry,
+                        **({"allow_interrupted": True} if allow_interrupted else {}),
+                    ),
                 ),
-            ),
-            name=f"run-lease-io:{record.run_id}",
-        )
-        self._supervise_lease_task(self._lease_operations, record.run_id, operation)
-        try:
-            done, _ = await asyncio.wait({operation}, timeout=max(0.0, deadline - asyncio.get_running_loop().time()))
-            if not done:
-                operation.cancel()
-                # Do not join cancellation-resistant I/O. Its late result is
-                # observed by the supervisor and cannot mutate local authority.
-                await fence("Lease renewal exceeded the last confirmed lease deadline.")
-                return
+                name=f"run-lease-io:{record.run_id}",
+            )
+            self._supervise_lease_task(self._lease_operations, record.run_id, operation)
             try:
-                renewal = operation.result()
-            except (Exception, asyncio.CancelledError):
-                if asyncio.get_running_loop().time() >= deadline:
-                    await fence("Lease renewal failed through the last confirmed lease deadline.")
-                else:
-                    logger.warning("Lease renewal failed for run %s; will retry before expiry", record.run_id)
-                return
-            if self._has_final_terminal_ack(record):
-                await self._release_confirmed_terminal_barrier(record, timeout=0)
-                return
-            if record.ownership_lost or self._runs.get(record.run_id) is not record:
-                return
-            if asyncio.get_running_loop().time() >= deadline:
-                await fence("Lease renewal completed after the last confirmed lease had already expired.")
-                return
-            if renewal.renewed is not True:
+                done, _ = await asyncio.wait({operation}, timeout=max(0.0, deadline - loop.time()))
+                if not done:
+                    operation.cancel()
+                    # Do not join cancellation-resistant I/O. Its late result is
+                    # observed by the supervisor and cannot mutate local authority.
+                    await fence("Lease renewal exceeded the last confirmed lease deadline.")
+                    return
+                try:
+                    renewal = operation.result()
+                except (Exception, asyncio.CancelledError):
+                    if loop.time() >= deadline:
+                        await fence("Lease renewal failed through the last confirmed lease deadline.")
+                    else:
+                        logger.warning("Lease renewal failed for run %s; will retry before expiry", record.run_id)
+                    return
+                if self._has_final_terminal_ack(record):
+                    await self._release_confirmed_terminal_barrier(record, timeout=0)
+                    return
+                if record.ownership_lost or self._runs.get(record.run_id) is not record:
+                    return
+                if loop.time() >= deadline:
+                    await fence("Lease renewal completed after the last confirmed lease had already expired.")
+                    return
+                if renewal.renewed is True:
+                    record.lease_expires_at = new_expiry
+                    self._arm_lease_deadline(record)
+                    if renewal.cancel_action is not None:
+                        action = renewal.cancel_action if renewal.cancel_action in ("interrupt", "rollback") else "interrupt"
+                        # Signal here, before joining any other run's decision.
+                        await self._signal_local_cancel(record.run_id, action=action)
+                    return
+                if (
+                    retry_index == 0
+                    and not initial_allow_interrupted
+                    and await self._await_rollback_retry_authority(
+                        record,
+                        initial_allow_interrupted=initial_allow_interrupted,
+                        deadline=deadline,
+                    )
+                ):
+                    # The first request raced atomic rollback admission. Re-check
+                    # the interrupted row once under the same per-run decision,
+                    # with owner and live-lease predicates still enforced in Store.
+                    continue
                 await fence("The durable store rejected lease renewal for this worker.")
                 return
-            record.lease_expires_at = new_expiry
-            self._arm_lease_deadline(record)
-            if renewal.cancel_action is not None:
-                action = renewal.cancel_action if renewal.cancel_action in ("interrupt", "rollback") else "interrupt"
-                # Signal here, before joining any other run's decision.
-                await self._signal_local_cancel(record.run_id, action=action)
-        except asyncio.CancelledError:
-            operation.cancel()
-            raise
+            except asyncio.CancelledError:
+                operation.cancel()
+                raise
 
     async def _reconcile_orphans_periodic(self) -> None:
         """Sweep for expired leases owned by dead peers.

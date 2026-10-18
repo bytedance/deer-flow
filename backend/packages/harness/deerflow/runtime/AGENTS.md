@@ -111,8 +111,16 @@ returned claimed rows, using their committed outcome fields. It does not repeat
 the interrupted update. An interrupted ACK is intermediate while a live Worker
 still owes rollback: keep a separate rollback barrier and explicitly renew that
 interrupted row under the same live-owner/lease predicates until the final error
-ACK. Even without an event store, defer rollback's error write until restoration
-has finished. A fenced Worker must not begin a rollback checkpoint restoration,
+ACK. An active-only renewal that was already in flight across atomic rollback
+admission is retried once with `allow_interrupted=True` only after this Worker's
+interrupted ACK is available, and only while that same per-run decision remains
+inside its original deadline. An in-flight admission ACK is awaited; row state is
+never reread as attribution. Peer takeover, an expired lease, a changed/final
+outcome, or a second rejection still fences. Even without an event store, defer
+rollback's error write until restoration has finished. `tests/test_stale_active_renewal.py`
+covers the Manager transition (including an ACK still in flight), and
+`tests/test_atomic_admission_worker.py` covers the real Worker restoration/error
+tail with and without an event Store. A fenced Worker must not begin a rollback checkpoint restoration,
 including when fencing itself delivered cancellation. Admission compensation never retries an unowned write in heartbeat
 mode. A local deadline guard remains armed after fast renewal errors and after
 heartbeat stop; it rechecks the latest lease/proof and fences without waiting for

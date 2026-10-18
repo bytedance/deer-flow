@@ -591,8 +591,10 @@ DeerFlow still uses `Forwarded` / `X-Forwarded-*` headers to recover the browser
 > actually reached the database. Expired leases cannot be renewed.
 > Interrupt-and-replace admission acknowledges only the old runs actually claimed
 > by its atomic transaction. Rollback keeps renewing its acknowledged interrupted
-> row until restoration and the separate final error commit finish. A failed
-> renewal leaves a local expiry guard armed. Shutdown bounds its wait for orphan
+> row until restoration and the separate final error commit finish. An
+> active-only renewal that raced that admission gets one bounded retry after the
+> interrupted acknowledgment, without weakening the owner or live-lease checks.
+> A failed renewal leaves a local expiry guard armed. Shutdown bounds its wait for orphan
 > recovery, but cancellation-resistant storage may still be using its resources.
 
 >
