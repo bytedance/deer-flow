@@ -41,6 +41,8 @@ def main():
             "native-pool-final",
             "native-stop-main",
             "native-stop-final",
+            "native-dependency-main",
+            "native-dependency-revocation",
         ),
         default="revocation",
     )
@@ -128,6 +130,10 @@ def main():
         tests = "tests/test_ecs_executor_agent_dispatch.py::test_scoped_native_stop_cannot_acknowledge_a_different_missing_container tests/test_ecs_executor_agent_dispatch.py::test_scoped_native_text_run_proves_no_sandbox_start_after_drain"
     if args.suite == "native-stop-final":
         tests += " tests/test_ecs_executor_agent_dispatch.py::test_native_cancel_stop_is_shared_with_task_finalizer tests/test_ecs_executor_agent_dispatch.py::test_native_lost_ownership_retains_attempt_reservation tests/test_workspace_native_dispatch.py::test_native_c_pool_dispatch_executes_original_run"
+    if args.suite == "native-dependency-main":
+        tests = "tests/test_workspace_native_dependencies.py::test_scoped_native_dependency_notification_resumes_original_goal[normal-postgres]"
+    if args.suite == "native-dependency-revocation":
+        tests = "tests/test_workspace_native_dependencies.py::test_scoped_native_dependency_notification_resumes_original_goal[notification_member-postgres]"
     rendered = rendered.replace("@@TEST_PATHS@@", tests)
     if "@@" in rendered:
         parser.error("unresolved pipeline marker")

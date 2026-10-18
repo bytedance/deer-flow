@@ -670,3 +670,11 @@ specific approval; this test archive excludes those uncommitted SQL changes.
 重新执行时先打包指定提交及已审测试，计算源码包摘要；将两个脚本、专用 `worker-known_hosts` 公钥文件、预检回执和源码包放在 Jenkins 工作目录，并生成 `c-aio-inputs.sha256`。模板的 `PHASE` 对应源码包文件名前缀，`INPUTS_SHA256` 对应清单摘要，`SOURCE_SHA256` 对应源码包摘要，`NATIVE_IMAGE_ID`/`AIO_IMAGE_ID` 必须是已存在镜像的完整不可变 ID。替换所有 `@@...@@` 后再提交，禁止复用旧摘要冒充新源码。
 
 运行仅使用 Worker 内网 `192.168.0.189` 和唯一 `/var/tmp` 测试目录；公网地址重启后可变。需至少 2560 MiB 可用内存。harness 和 AIO 各限制 1 GiB；harness 名称必须保持 `deer-c-harness-*`，不能与 `deer-c-aio-*` 沙箱发现前缀重合。脚本不安装、拉取或构建镜像，不挂载业务 NAS，不启动正式 Gateway。失败后先读取本次日志和精确容器状态，不因超时重新启动同一次任务。
+
+## 2026-10-18 — 原工作区异步依赖续跑
+
+Jenkins `deerflow-tenant-execution-m4-sql`：#118 主流程 1 passed / 19.91s；#119 接收前撤权 1 passed / 18.49s。两次均通过 Ruff 和 50 文件格式检查。证据见 `tenant-workspaces-evidence/native-dependency-118.json`、`native-dependency-119.json`。
+
+复用 `scripts/render_tenant_run_control_pipeline.py`：`--suite native-dependency-main` 只选 `[normal-postgres]`，`--suite native-dependency-revocation` 只选 `[notification_member-postgres]`。沿用现有 Jenkins 隔离 PostgreSQL 工具镜像和资源限额；不运行全矩阵。主流程使用真实 SQL、MCP 通知服务、签名接收、start_run 和 native adoption，模型图/RemoteIO 确定性替代，控制传输为 ASGI。
+
+撤权用例在已签名请求送达前真实增加成员版本，独立 SQL 观察无续跑和精确租约收尾。已 dispatched 后撤权的恢复收尾仍待实现；此处不证明真实 B 容器或两机网络。scoped 启动不执行 legacy checkpoint 补写，checkpoint-only 导入需单独授权迁移。

@@ -1802,3 +1802,9 @@ HTTP execution, crash/restart recovery, full C→B→C, remaining resource domai
 and M0–M11 remain open. Tenant activation and schema fences remain unchanged.
 The separate dependency-notification proposal remains unapplied pending its
 specific approval; this test archive excludes those uncommitted SQL changes.
+
+## 2026-10-18 — approved dependency notification main (#118)
+
+User explicitly approved the reviewed proposal; it is now applied. Jenkins #118 SUCCESS (1 PostgreSQL case, 19.91s; Ruff/50 files) verifies source wait, real MCP poll and notification, independent v2 SQL authority, actual start_run and native continuation to delivered. Both runs retain original workspace/incarnation/goal; no repeat launch. Details: `docs/tenant-workspaces-evidence/native-dependency-118.json`. Deterministic graph/remote IO and ASGI transport are not physical B/two-host acceptance. One necessary pre-receive membership revocation check is in progress; dispatched recovery settlement and parent M4 remain open. No deployment or activation.
+
+Follow-up #119 SUCCESS: one PostgreSQL receive-time membership-withdrawal test passed in 18.49s, Ruff/50 files clean. Controller independently rejects the signed stale request; no second Run exists; exact notification lease dead-letters and clears, capacity remains zero. Current production matches #118 archive. Already-dispatched revocation recovery remains open; parent M4 stays partial.

@@ -558,16 +558,28 @@ def install_native_dispatch(app, host):
 
                 notification = args["notification"]
                 owner, thread_id = notification["owner_user_id"], notification["thread_id"]
-                claims = verify_execution_scope(args["capability"], secret=credential.encode(), authenticated_user_id=owner, arguments=notification, expected_audience=node, expected_operation="native_notification")
-                thread = await host.app.state.thread_store.get(thread_id, user_id=owner)
-                if thread is None or claims["thread_id"] != thread_id or claims["incarnation"] != thread["incarnation"]:
-                    raise ValueError("Native notification identity mismatch")
-                # Global native notification claims may be owned by any peer.
-                # Authenticate the sender, then resolve placement centrally;
-                # the sender node is never evidence of the source Run's node.
-                task = await host.app.state.mcp_task_repo.get(notification["task_id"], user_id=owner, thread_id=thread_id, thread_incarnation=thread["incarnation"])
+                from deerflow.mcp.tasks import TaskReference
+                from ecs_executor.dependencies import dependency_workspace
+
+                context = None
+                if getattr(host.app.state.mcp_task_repo, "workspace_scope_required", False):
+                    task = await host.app.state.mcp_task_repo.resolve_notification_authority(notification["task_id"], user_id=owner, thread_id=thread_id, notification=notification)
+                    reference = TaskReference.from_record(task)
+                    context = reference.workspace_context
+                    incarnation = reference.thread_incarnation
+                else:
+                    thread = await host.app.state.thread_store.get(thread_id, user_id=owner)
+                    if thread is None:
+                        raise ValueError("Native notification parent is unavailable")
+                    incarnation = thread["incarnation"]
+                    task = await host.app.state.mcp_task_repo.get(notification["task_id"], user_id=owner, thread_id=thread_id, thread_incarnation=incarnation)
+                claims = verify_execution_scope(
+                    args["capability"], secret=credential.encode(), authenticated_user_id=owner, arguments=notification, expected_audience=node, expected_operation="native_notification", expected_workspace_context=context
+                )
                 if (
                     task is None
+                    or claims["thread_id"] != thread_id
+                    or claims["incarnation"] != incarnation
                     or task.get("run_id") != args["source_run_id"]
                     or claims["run_id"] != (task.get("run_id") or "mcp-task:" + notification["task_id"])
                     or task.get("dispatch_version") != notification["dispatch_version"]
@@ -577,7 +589,8 @@ def install_native_dispatch(app, host):
                 ):
                     raise ValueError("Native notification reservation mismatch")
                 try:
-                    return JSONResponse(await launch_mcp_task_notification_run(app=host.app, **notification))
+                    with dependency_workspace(context):
+                        return JSONResponse(await launch_mcp_task_notification_run(app=host.app, **notification))
                 except PermanentNotificationError:
                     return JSONResponse({"error": "Notification permanently rejected"}, status_code=410)
                 except ConflictError:
@@ -593,6 +606,10 @@ def install_native_dispatch(app, host):
                         raise RuntimeError("Native control snapshot changed")
                     updated = await asyncio.to_thread(host.pool.report, node, args["owner"], job["id"], job["generation"], args["changes"], job)
                     return JSONResponse(_native_control_projection(updated))
+                if operation == "wait":
+                    from ecs_executor.dependencies import persist_wait
+
+                    return JSONResponse({"waiting": await persist_wait(host, job, source_worker_id=args.get("native_owner_worker_id"))})
                 # Scoped dependencies and NoStart settlement need their native
                 # lifecycle fences; never route them into legacy handlers.
                 raise ValueError("Scoped native operation is not integrated")
@@ -646,16 +663,28 @@ class NativeWorkerHost:
 
     async def persist_dependency_wait(self, record):
         for job, owned in self.executions.values():
-            if owned.run_id == record.run_id:
-                return (await self.request("wait", job_id=job["id"], generation=job["generation"]))["waiting"]
+            if owned is record and owned.run_id == job["native"]["run_id"]:
+                if record.ownership_lost or record.abort_event.is_set() or not record.owner_worker_id:
+                    raise RuntimeError("Native dependency source ownership was lost")
+                return (await self.request("wait", job_id=job["id"], generation=job["generation"], native_owner_worker_id=record.owner_worker_id))["waiting"]
         raise RuntimeError("Native dependency source assignment unavailable")
 
     async def forward_notification(self, notification):
         from app.mcp_tasks.errors import PermanentNotificationError
         from deerflow.runtime.runs.manager import ConflictError
 
-        thread = await self.app.state.thread_store.get(notification["thread_id"], user_id=notification["owner_user_id"])
-        task = await self.app.state.mcp_task_repo.get(notification["task_id"], user_id=notification["owner_user_id"], thread_id=notification["thread_id"], thread_incarnation=thread.get("incarnation") if thread else None)
+        context = None
+        if getattr(self.app.state.mcp_task_repo, "workspace_scope_required", False):
+            from deerflow.mcp.tasks import TaskReference
+
+            task = await self.app.state.mcp_task_repo.resolve_notification_authority(notification["task_id"], user_id=notification["owner_user_id"], thread_id=notification["thread_id"], notification=notification)
+            reference = TaskReference.from_record(task)
+            context = reference.workspace_context
+            incarnation = reference.thread_incarnation
+        else:
+            thread = await self.app.state.thread_store.get(notification["thread_id"], user_id=notification["owner_user_id"])
+            incarnation = thread.get("incarnation") if thread else None
+            task = await self.app.state.mcp_task_repo.get(notification["task_id"], user_id=notification["owner_user_id"], thread_id=notification["thread_id"], thread_incarnation=incarnation)
         if task is None:
             raise PermanentNotificationError("Native notification source unavailable")
         capability = mint_execution_scope(
@@ -663,8 +692,9 @@ class NativeWorkerHost:
             audience=self.config["node_id"],
             user_id=notification["owner_user_id"],
             thread_id=notification["thread_id"],
-            incarnation=thread["incarnation"],
+            incarnation=incarnation,
             run_id=task.get("run_id") or "mcp-task:" + notification["task_id"],
+            workspace_context=context,
             operation="native_notification",
             arguments=notification,
         )

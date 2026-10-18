@@ -101,7 +101,7 @@ def test_native_mcp_retains_scope_after_run_and_selection_change(native_engine):
     asyncio.run(scenario())
 
 
-def _in_workspace_case(database_engine, body):
+def _in_workspace_case(database_engine, body, *, owner_user_id="owner"):
     from app.gateway.workspaces.service import WorkspaceService
     from deerflow.authz.workspace import reset_current_workspace, set_current_workspace
     from deerflow.persistence.run.sql import RunRepository
@@ -110,7 +110,10 @@ def _in_workspace_case(database_engine, body):
     from deerflow.runtime import RunManager
 
     with database_engine.begin() as conn:
-        conn.execute(sa.update(UserRow).where(UserRow.id == "owner").values(email_verified_at=datetime.now(UTC)))
+        if owner_user_id != "owner":
+            conn.execute(sa.insert(UserRow).values(id=owner_user_id, email=owner_user_id + "@example.com", email_verified_at=datetime.now(UTC)))
+        else:
+            conn.execute(sa.update(UserRow).where(UserRow.id == owner_user_id).values(email_verified_at=datetime.now(UTC)))
     driver = "sqlite+aiosqlite" if database_engine.dialect.name == "sqlite" else "postgresql+asyncpg"
 
     async def scenario():
@@ -119,10 +122,10 @@ def _in_workspace_case(database_engine, body):
             sf = async_sessionmaker(engine, expire_on_commit=False)
             workspaces = WorkspaceRepository(sf)
             service = WorkspaceService(workspaces)
-            personal = await workspaces.provision_personal("owner")
-            team = await workspaces.create_team("owner", "MCP boundaries", "mcp-boundaries")
-            original = await service.resolve_context("owner", team["id"])
-            other = await service.resolve_context("owner", personal["id"])
+            personal = await workspaces.provision_personal(owner_user_id)
+            team = await workspaces.create_team(owner_user_id, "MCP boundaries", "mcp-boundaries")
+            original = await service.resolve_context(owner_user_id, team["id"])
+            other = await service.resolve_context(owner_user_id, personal["id"])
             token = set_current_workspace(original)
             try:
                 await body(SimpleNamespace(sf=sf, service=service, team=team, original=original, other=other, runs=RunManager(store=RunRepository(sf, workspace_required=True), worker_id="mcp-boundary-source")))

@@ -903,6 +903,16 @@ class McpTaskService:
             await self._release_notification_failure(record, now=now, error=error)
 
     async def _notify_one_claimed(self, record: dict[str, Any], *, now: datetime) -> None:
+        if record.get("workspace_id") is None:
+            return await self._notify_one_in_workspace(record, now=now)
+        reference = TaskReference.from_record(record)
+        await self._with_workspace(reference.workspace_context, lambda: self._notify_one_in_workspace(record, now=now))
+
+    @staticmethod
+    def _notification_reference(record):
+        return {"task_reference": TaskReference.from_record(record)} if record.get("workspace_id") is not None else {}
+
+    async def _notify_one_in_workspace(self, record: dict[str, Any], *, now: datetime) -> None:
         task_id = record["id"]
         dispatch_version = int(record.get("dispatch_version") or 0)
         notification_attempts = max(0, int(record.get("notification_attempt_count") or 0))
@@ -915,6 +925,7 @@ class McpTaskService:
                 run_id = record.get("notification_run_id")
                 await self._repository.finish_notification_run(
                     task_id,
+                    **self._notification_reference(record),
                     lease_owner=self._lease_owner,
                     notification_lease_token=record["notification_lease_token"],
                     dispatch_version=dispatch_version,
@@ -926,6 +937,7 @@ class McpTaskService:
             elif status == RunStatus.success:
                 await self._repository.finish_notification_run(
                     task_id,
+                    **self._notification_reference(record),
                     lease_owner=self._lease_owner,
                     notification_lease_token=record["notification_lease_token"],
                     dispatch_version=dispatch_version,
@@ -937,6 +949,7 @@ class McpTaskService:
             elif status in {RunStatus.error, RunStatus.timeout, RunStatus.interrupted}:
                 await self._repository.finish_notification_run(
                     task_id,
+                    **self._notification_reference(record),
                     lease_owner=self._lease_owner,
                     notification_lease_token=record["notification_lease_token"],
                     dispatch_version=dispatch_version,
@@ -948,6 +961,7 @@ class McpTaskService:
             else:
                 await self._repository.defer_dispatched_notification(
                     task_id,
+                    **self._notification_reference(record),
                     lease_owner=self._lease_owner,
                     notification_lease_token=record["notification_lease_token"],
                     dispatch_version=dispatch_version,
@@ -961,6 +975,7 @@ class McpTaskService:
             completed_at = _notification_completion_time(not_before=now)
             await self._repository.dead_letter_notification(
                 task_id,
+                **self._notification_reference(record),
                 lease_owner=self._lease_owner,
                 notification_lease_token=record["notification_lease_token"],
                 dispatch_version=dispatch_version,
@@ -978,6 +993,7 @@ class McpTaskService:
         record["notification_status"] = "launching"
         launch_reserved = await self._repository.begin_notification_launch(
             task_id,
+            **self._notification_reference(record),
             lease_owner=self._lease_owner,
             notification_lease_token=record["notification_lease_token"],
             dispatch_version=dispatch_version,
@@ -990,6 +1006,7 @@ class McpTaskService:
                     record,
                     release=lambda: self._repository.release_notification_lease(
                         task_id,
+                        **self._notification_reference(record),
                         lease_owner=self._lease_owner,
                         notification_lease_token=record["notification_lease_token"],
                         next_notification_at=launch_started_at,
@@ -1003,6 +1020,7 @@ class McpTaskService:
                 record,
                 release=lambda: self._repository.release_notification_claim(
                     task_id,
+                    **self._notification_reference(record),
                     lease_owner=self._lease_owner,
                     notification_lease_token=record["notification_lease_token"],
                     next_notification_at=launch_started_at,
@@ -1026,6 +1044,7 @@ class McpTaskService:
             completed_at = _notification_completion_time(not_before=now)
             await self._repository.dead_letter_notification(
                 task_id,
+                **self._notification_reference(record),
                 lease_owner=self._lease_owner,
                 notification_lease_token=record["notification_lease_token"],
                 dispatch_version=dispatch_version,
@@ -1042,6 +1061,7 @@ class McpTaskService:
                     record,
                     release=lambda: self._repository.release_notification_lease(
                         task_id,
+                        **self._notification_reference(record),
                         lease_owner=self._lease_owner,
                         notification_lease_token=record["notification_lease_token"],
                         next_notification_at=completed_at + timedelta(seconds=self._poll_interval_seconds),
@@ -1055,6 +1075,7 @@ class McpTaskService:
                     record,
                     release=lambda: self._repository.release_notification_claim(
                         task_id,
+                        **self._notification_reference(record),
                         lease_owner=self._lease_owner,
                         notification_lease_token=record["notification_lease_token"],
                         next_notification_at=completed_at + timedelta(seconds=self._poll_interval_seconds),
@@ -1072,6 +1093,7 @@ class McpTaskService:
                     record,
                     release=lambda: self._repository.release_notification_lease(
                         task_id,
+                        **self._notification_reference(record),
                         lease_owner=self._lease_owner,
                         notification_lease_token=record["notification_lease_token"],
                         next_notification_at=completed_at + timedelta(seconds=self._notification_retry_seconds(record)),
@@ -1085,6 +1107,7 @@ class McpTaskService:
                     record,
                     release=lambda: self._repository.release_notification_claim(
                         task_id,
+                        **self._notification_reference(record),
                         lease_owner=self._lease_owner,
                         notification_lease_token=record["notification_lease_token"],
                         next_notification_at=completed_at + timedelta(seconds=self._notification_retry_seconds(record)),
@@ -1098,6 +1121,7 @@ class McpTaskService:
         completed_at = _notification_completion_time(not_before=now)
         await self._repository.mark_notification_dispatched(
             task_id,
+            **self._notification_reference(record),
             lease_owner=self._lease_owner,
             notification_lease_token=record["notification_lease_token"],
             dispatch_version=dispatch_version,
@@ -1299,6 +1323,7 @@ class McpTaskService:
                 record,
                 release=lambda: self._repository.release_notification_lease(
                     record["id"],
+                    **self._notification_reference(record),
                     lease_owner=self._lease_owner,
                     notification_lease_token=record["notification_lease_token"],
                     next_notification_at=completed_at + timedelta(seconds=self._notification_retry_seconds(record)),
@@ -1336,6 +1361,7 @@ class McpTaskService:
         if record.get("notification_status") in {"launching", "dispatched"}:
             compensation = self._repository.release_notification_lease(
                 task_id,
+                **self._notification_reference(record),
                 lease_owner=self._lease_owner,
                 notification_lease_token=record["notification_lease_token"],
                 next_notification_at=datetime.now(UTC),
@@ -1346,6 +1372,7 @@ class McpTaskService:
         else:
             compensation = self._repository.release_notification_claim(
                 task_id,
+                **self._notification_reference(record),
                 lease_owner=self._lease_owner,
                 notification_lease_token=record["notification_lease_token"],
                 next_notification_at=datetime.now(UTC),

@@ -1,5 +1,5 @@
-<!-- 当前状态：2026-10-18 用户恢复执行；历史暂停记录保留，参见文末最新检查点。 -->
-> **执行中，M4 部分完成。** Jenkins #112：单 Worker 真实 AIO 创建、文件写读、warm STOP、失败保留和 report 后释放已通过（1 项，53.79s）。两机 HTTP、恢复和 C→B→C 仍待完成；通知补丁待具体审批，租户启动关闭。
+# Resume checkpoint — 2026-10-18: dependency main #118 and receive-time revocation #119 passed; M4 remains partial
+> **执行中，M4 部分完成。** Jenkins #112：单 Worker 真实 AIO 创建、文件写读、warm STOP、失败保留和 report 后释放已通过（1 项，53.79s）。两机 HTTP、恢复和 C→B→C 仍待完成；通知补丁已获用户批准，正在应用和验证；租户启动关闭。
 
 # 2026-10-16 暂停与恢复检查点
 
@@ -1160,3 +1160,19 @@ HTTP execution, crash/restart recovery, full C→B→C, remaining resource domai
 and M0–M11 remain open. Tenant activation and schema fences remain unchanged.
 The separate dependency-notification proposal remains unapplied pending its
 specific approval; this test archive excludes those uncommitted SQL changes.
+
+## 2026-10-18 — dependency patch explicitly approved
+
+User answered “批准应用并验证” for the reviewed patch SHA256 `35f9ce88035b71c9cc733514d0e712dbac7cd3b52f80bbd534318d55b054cb1c`. Apply the six reviewed files with existing SQL draft preserved through exact final-content reconciliation. First run one PostgreSQL native-dependency-main, then necessary permission checks. No deployment, push or tenant activation. Earlier pending-approval entries are historical.
+
+### 2026-10-18 — approved dependency patch / #115 diagnosis
+
+The approved proposal is applied. #113–115 each ran only the PostgreSQL dependency main. Source success, durable wait and pool release now pass. #115 isolates the continuation failure: SQL receipts match, but the notification launcher constructs a default internal principal inconsistent with the original workspace actor. The reviewed minimal correction passes the independently authorized owner to `get_internal_user`; verification is pending. No activation, deployment or push.
+
+### 2026-10-18 — dependency main verified (#118)
+
+Jenkins #118 SUCCESS: 1 passed in 19.91s; Ruff check and 50-file format verification pass. Real SQL/RunManager/MCP notification/v2 controller/start_run/native adoption complete the original goal continuation with two runs and delivered notification. Remote IO and graph are deterministic, controller transport is ASGI. See `tenant-workspaces-evidence/native-dependency-118.json`. No physical B or full M4 acceptance claimed. #116 exposed missing fixture event store; #117 exposed inappropriate legacy checkpoint backfill in scoped startup. The latter is now legacy-only, preserving worker-only scoped journal writes. A single membership-withdrawal-before-receive case is next; dispatched recovery settlement remains open.
+
+### 2026-10-18 — necessary revocation verified (#119)
+
+Jenkins #119 SUCCESS: one PostgreSQL negative passed in 18.49s; Ruff/50 files passed. Real membership version withdrawal after worker signing but before controller receive yields HTTP403, no second Run, exact lease dead-letter settlement and zero unreleased capacity. Current production files exactly match successful #118 archive. Exact fixture containers/network are absent. See `tenant-workspaces-evidence/native-dependency-119.json`. Remaining: control-only recovery of notifications already dispatched before withdrawal, physical B/two-host story, other M4 domains and M0–M11 parent requirements. No new CI run needed for this checkpoint.

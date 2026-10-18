@@ -433,3 +433,18 @@ ownership/lease fences and refuses unknown outcomes. A drained task that never
 entered acquisition can prove text-only NoStart; failed/in-flight acquisition
 cannot. Captures are private in-memory receipts: restart without them retains
 reservations. Cloud AIO lifecycle acceptance and tenant activation remain separate.
+
+Scoped native dependency waits restore original SQL Run authority and fence the
+adopted owner, live lease, execution lifetime and exact executor assignment before
+recording a receipt. Notification business claims lock workspace/member/private
+parent/source before task, require an uncancelled successful source, and preserve
+original scope through v2 forwarding and continuation snapshot admission. Lease
+compensation remains exact task/scope/token control; it grants no new business
+access. Checkpoint signatures, idempotency, continuation budgets and physical
+STOP/NoStart gates remain authoritative. The deterministic PostgreSQL dependency
+story exercises native asynchronous result notification, not physical B execution.
+
+Scoped starts never synthesize checkpoint-only journal history. An empty native
+message feed is valid for graphs without a model callback. Importing scoped
+checkpoint-only history requires a separately authorized migration; launchers
+do not receive a worker journal-write grant for backfill.

@@ -777,6 +777,141 @@ class McpTaskRepository:
             await session.commit()
             return bool(result.rowcount)
 
+    @staticmethod
+    def _notification_scope_filters(reference):
+        if reference is None:
+            return (McpTaskRow.workspace_id.is_(None),)
+        return (
+            McpTaskRow.workspace_id == reference.workspace_context.workspace_id,
+            McpTaskRow.user_id == reference.user_id,
+            McpTaskRow.thread_id == reference.thread_id,
+            McpTaskRow.thread_incarnation == reference.thread_incarnation,
+            McpTaskRow.run_id == reference.run_id,
+        )
+
+    async def _lock_notification_reference(self, session, task_id, reference, *, business):
+        if reference is None:
+            return None
+        if reference.local_task_id != task_id or reference.workspace_context is None:
+            raise WorkspaceAccessDenied("notification requires its captured native task")
+        if business:
+            await self._locked_source(session, context=reference.workspace_context, user_id=reference.user_id, thread_id=reference.thread_id, thread_incarnation=reference.thread_incarnation, run_id=reference.run_id, running=False)
+            source = await session.get(RunRow, reference.run_id)
+            if source.status != "success" or source.cancel_action is not None:
+                raise WorkspaceAccessDenied("notification source cannot continue")
+        row = await session.scalar(select(McpTaskRow).where(McpTaskRow.id == task_id, *self._notification_scope_filters(reference)).with_for_update().execution_options(populate_existing=True))
+        if row is None or row.remote_task_id != reference.remote_task_id or row.server_name != reference.server_name or row.workspace_context_json != asdict(reference.workspace_context):
+            raise WorkspaceAccessDenied("notification native identity changed")
+        return row
+
+    async def resolve_dependency_source_authority(self, *, user_id, thread_id, run_id, incarnation, running=False, source_worker_id=None):
+        """Resolve original source scope in SQL; no job/token scope grants access."""
+        async with self._sf() as session:
+            locator = (await session.execute(select(RunRow.workspace_id, RunRow.workspace_context_json).where(RunRow.run_id == run_id))).first()
+            if locator is None or locator.workspace_id is None:
+                raise WorkspaceAccessDenied("scoped dependency source is unavailable")
+            try:
+                context = WorkspaceContext(**locator.workspace_context_json)
+            except (TypeError, ValueError):
+                raise WorkspaceAccessDenied("dependency source scope is invalid") from None
+            await self._locked_source(session, context=context, user_id=user_id, thread_id=thread_id, thread_incarnation=incarnation, run_id=run_id, running=running, source_worker_id=source_worker_id)
+            if running:
+                from deerflow.persistence.workspaces.run_control import NativeRunStopTarget, execution_lifetime, pending_run_stop
+
+                source = await session.get(RunRow, run_id)
+                if source.lease_expires_at is None or await session.scalar(select(pending_run_stop(run_id=run_id, workspace_id=context.workspace_id))):
+                    raise WorkspaceAccessDenied("Dependency source lease or STOP fence changed")
+                lifetime = await execution_lifetime(session, NativeRunStopTarget.from_row(source))
+                if lifetime is None:
+                    raise WorkspaceAccessDenied("Dependency source lifetime is unavailable")
+            await session.commit()
+            return context
+
+    async def resolve_notification_authority(self, task_id, *, user_id, thread_id, notification=None):
+        """Independent native SQL authority, never a context supplied by a token.
+
+        Read a locator, then use the native workspace/actor/parent/source/task
+        lock order and original snapshots. Source success is required for fresh
+        notification business; lease-only compensation uses separate methods.
+        """
+        async with self._sf() as session:
+            locator = await session.scalar(select(McpTaskRow).where(McpTaskRow.id == task_id, McpTaskRow.user_id == user_id, McpTaskRow.thread_id == thread_id))
+            if locator is None or locator.workspace_id is None:
+                raise WorkspaceAccessDenied("scoped notification task is unavailable")
+            try:
+                reference = TaskReference.from_record(self._row_to_dict(locator, include_internal=True))
+            except (TypeError, ValueError):
+                raise WorkspaceAccessDenied("notification native scope is invalid") from None
+            row = await self._lock_notification_reference(session, task_id, reference, business=True)
+            if notification is not None:
+                expiry = row.notification_lease_expires_at
+                if expiry is not None and expiry.tzinfo is None:
+                    expiry = expiry.replace(tzinfo=UTC)
+                if (
+                    row.notification_status != "launching"
+                    or not row.notification_lease_owner
+                    or not row.notification_lease_token
+                    or expiry is None
+                    or expiry < datetime.now(UTC)
+                    or row.dispatch_version != notification["dispatch_version"]
+                    or row.dispatch_attempt != notification["dispatch_attempt"]
+                    or row.dispatch_event != notification["event"]
+                ):
+                    raise WorkspaceAccessDenied("notification launch receipt changed")
+            result = self._row_to_dict(row, include_internal=True)
+            await session.commit()
+            return result
+
+    @staticmethod
+    def _live_notification_candidate():
+        from deerflow.persistence.workspaces.model import WorkspaceMembershipRow, WorkspaceRow
+        from deerflow.persistence.workspaces.sql import WorkspaceRepository
+
+        live = (
+            WorkspaceRepository._membership_query(McpTaskRow.user_id)
+            .where(
+                WorkspaceRow.id == McpTaskRow.workspace_id,
+                WorkspaceRow.policy_version == McpTaskRow.workspace_context_json["policy_version"].as_integer(),
+                WorkspaceMembershipRow.version == McpTaskRow.workspace_context_json["membership_version"].as_integer(),
+                McpTaskRow.workspace_context_json["actor_user_id"].as_string() == McpTaskRow.user_id,
+                McpTaskRow.workspace_context_json["workspace_id"].as_string() == McpTaskRow.workspace_id,
+            )
+            .correlate(McpTaskRow)
+            .exists()
+        )
+        source = (
+            select(RunRow.run_id)
+            .where(
+                RunRow.run_id == McpTaskRow.run_id,
+                RunRow.user_id == McpTaskRow.user_id,
+                RunRow.workspace_id == McpTaskRow.workspace_id,
+                RunRow.thread_id == McpTaskRow.thread_id,
+                RunRow.thread_incarnation == McpTaskRow.thread_incarnation,
+                RunRow.operation_kind == "run",
+                RunRow.status == "success",
+                RunRow.cancel_action.is_(None),
+            )
+            .correlate(McpTaskRow)
+            .exists()
+        )
+        from deerflow.persistence.projects.model import ProjectRow
+
+        project = select(ProjectRow.id).where(ProjectRow.id == ThreadMetaRow.project_id, ProjectRow.workspace_id == McpTaskRow.workspace_id).correlate(ThreadMetaRow, McpTaskRow).exists()
+        parent = (
+            select(ThreadMetaRow.thread_id)
+            .where(
+                ThreadMetaRow.thread_id == McpTaskRow.thread_id,
+                ThreadMetaRow.user_id == McpTaskRow.user_id,
+                ThreadMetaRow.workspace_id == McpTaskRow.workspace_id,
+                ThreadMetaRow.incarnation == McpTaskRow.thread_incarnation,
+                ThreadMetaRow.status != "deleting",
+                or_(ThreadMetaRow.project_id.is_(None), project),
+            )
+            .correlate(McpTaskRow)
+            .exists()
+        )
+        return live & source & parent
+
     async def claim_notification_work(
         self,
         *,
@@ -786,13 +921,11 @@ class McpTaskRepository:
         limit: int,
         tracking_degraded_after_errors: int,
     ) -> list[dict[str, Any]]:
-        if self.workspace_scope_required:
-            return []
         statuses = ("pending", "claimed", "launching", "retry", "dispatched")
         stmt = (
             select(McpTaskRow)
             .where(
-                McpTaskRow.workspace_id.is_(None),
+                self._live_notification_candidate() if self.workspace_scope_required else McpTaskRow.workspace_id.is_(None),
                 McpTaskRow.event_version > McpTaskRow.notified_version,
                 McpTaskRow.notification_status.in_(statuses),
                 or_(McpTaskRow.next_notification_at.is_(None), McpTaskRow.next_notification_at <= now),
@@ -800,10 +933,27 @@ class McpTaskRepository:
             )
             .order_by(McpTaskRow.next_notification_at.asc(), McpTaskRow.id.asc())
             .limit(limit)
-            .with_for_update(skip_locked=True)
         )
+        if not self.workspace_scope_required:
+            stmt = stmt.with_for_update(skip_locked=True)
         async with self._sf() as session:
-            rows = list((await session.execute(stmt)).scalars())
+            candidates = list((await session.execute(stmt)).scalars())
+            rows = []
+            for candidate in candidates:
+                if self.workspace_scope_required:
+                    reference = TaskReference.from_record(self._row_to_dict(candidate, include_internal=True))
+                    candidate = await self._lock_notification_reference(session, candidate.id, reference, business=True)
+                    deadline = candidate.notification_lease_expires_at
+                    if deadline is not None and deadline.tzinfo is None:
+                        deadline = deadline.replace(tzinfo=UTC)
+                    if (
+                        candidate.notification_status not in statuses
+                        or candidate.event_version <= candidate.notified_version
+                        or (deadline is not None and deadline >= now)
+                        or (candidate.next_notification_at is not None and candidate.next_notification_at.replace(tzinfo=UTC) > now)
+                    ):
+                        continue
+                rows.append(candidate)
             expires_at = now + timedelta(seconds=lease_seconds)
             for row in rows:
                 row.notification_lease_owner = lease_owner
@@ -823,7 +973,7 @@ class McpTaskRepository:
                     row.notification_status = "claimed"
                 row.updated_at = now
             await session.commit()
-            return [self._row_to_dict(row) for row in rows]
+            return [self._row_to_dict(row, include_internal=self.workspace_scope_required) for row in rows]
 
     async def begin_notification_launch(
         self,
@@ -834,6 +984,7 @@ class McpTaskRepository:
         dispatch_version: int,
         lease_seconds: int,
         now: datetime,
+        task_reference: TaskReference | None = None,
     ) -> bool:
         """Reserve one idempotent Agent launch before starting the side effect."""
         launchable = or_(
@@ -847,6 +998,7 @@ class McpTaskRepository:
             update(McpTaskRow)
             .where(
                 McpTaskRow.id == task_id,
+                *self._notification_scope_filters(task_reference),
                 McpTaskRow.notification_lease_owner == lease_owner,
                 McpTaskRow.notification_lease_token == notification_lease_token,
                 McpTaskRow.notification_lease_expires_at >= now,
@@ -860,6 +1012,7 @@ class McpTaskRepository:
             )
         )
         async with self._sf() as session:
+            await self._lock_notification_reference(session, task_id, task_reference, business=True)
             result = await session.execute(stmt)
             await session.commit()
             return bool(result.rowcount)
@@ -873,11 +1026,13 @@ class McpTaskRepository:
         dispatch_version: int,
         run_id: str,
         now: datetime,
+        task_reference: TaskReference | None = None,
     ) -> bool:
         stmt = (
             update(McpTaskRow)
             .where(
                 McpTaskRow.id == task_id,
+                *self._notification_scope_filters(task_reference),
                 McpTaskRow.notification_lease_owner == lease_owner,
                 McpTaskRow.notification_lease_token == notification_lease_token,
                 McpTaskRow.notification_lease_expires_at >= now,
@@ -896,6 +1051,15 @@ class McpTaskRepository:
             )
         )
         async with self._sf() as session:
+            scoped_row = await self._lock_notification_reference(session, task_id, task_reference, business=False)
+            if task_reference is not None:
+                launched = await session.get(RunRow, run_id)
+                if (
+                    launched is None
+                    or (launched.workspace_id, launched.user_id, launched.thread_id, launched.thread_incarnation) != (scoped_row.workspace_id, scoped_row.user_id, scoped_row.thread_id, scoped_row.thread_incarnation)
+                    or launched.workspace_context_json != scoped_row.workspace_context_json
+                ):
+                    raise WorkspaceAccessDenied("notification launch Run identity differs")
             result = await session.execute(stmt)
             await session.commit()
             return bool(result.rowcount)
@@ -910,6 +1074,7 @@ class McpTaskRepository:
         error: str | None,
         replace_with_latest: bool,
         count_failure: bool = False,
+        task_reference: TaskReference | None = None,
     ) -> bool:
         values: dict[str, Any] = {
             "notification_status": "pending" if replace_with_latest else "retry",
@@ -931,12 +1096,14 @@ class McpTaskRepository:
             update(McpTaskRow)
             .where(
                 McpTaskRow.id == task_id,
+                *self._notification_scope_filters(task_reference),
                 McpTaskRow.notification_lease_owner == lease_owner,
                 McpTaskRow.notification_lease_token == notification_lease_token,
             )
             .values(**values)
         )
         async with self._sf() as session:
+            await self._lock_notification_reference(session, task_id, task_reference, business=False)
             result = await session.execute(stmt)
             await session.commit()
             return bool(result.rowcount)
@@ -952,6 +1119,7 @@ class McpTaskRepository:
         next_notification_at: datetime | None,
         error: str | None,
         now: datetime,
+        task_reference: TaskReference | None = None,
     ) -> bool:
         if delivered:
             # A newer event may have arrived after this dispatch was queued; keep
@@ -984,10 +1152,22 @@ class McpTaskRepository:
             updated_at=now,
         )
         async with self._sf() as session:
+            scoped_row = await self._lock_notification_reference(session, task_id, task_reference, business=False)
+            if task_reference is not None and delivered:
+                launched = await session.get(RunRow, scoped_row.notification_run_id) if scoped_row.notification_run_id else None
+                if (
+                    launched is None
+                    or launched.status != "success"
+                    or launched.cancel_action is not None
+                    or (launched.workspace_id, launched.user_id, launched.thread_id, launched.thread_incarnation) != (scoped_row.workspace_id, scoped_row.user_id, scoped_row.thread_id, scoped_row.thread_incarnation)
+                    or launched.workspace_context_json != scoped_row.workspace_context_json
+                ):
+                    raise WorkspaceAccessDenied("notification completion lacks its successful native Run")
             result = await session.execute(
                 update(McpTaskRow)
                 .where(
                     McpTaskRow.id == task_id,
+                    *self._notification_scope_filters(task_reference),
                     McpTaskRow.notification_lease_owner == lease_owner,
                     McpTaskRow.notification_lease_token == notification_lease_token,
                     McpTaskRow.notification_lease_expires_at >= now,
@@ -1008,6 +1188,7 @@ class McpTaskRepository:
         next_notification_at: datetime,
         error: str | None,
         count_failure: bool = False,
+        task_reference: TaskReference | None = None,
     ) -> bool:
         """Release unexpected notification work without changing its phase."""
         values: dict[str, Any] = {
@@ -1024,12 +1205,14 @@ class McpTaskRepository:
             update(McpTaskRow)
             .where(
                 McpTaskRow.id == task_id,
+                *self._notification_scope_filters(task_reference),
                 McpTaskRow.notification_lease_owner == lease_owner,
                 McpTaskRow.notification_lease_token == notification_lease_token,
             )
             .values(**values)
         )
         async with self._sf() as session:
+            await self._lock_notification_reference(session, task_id, task_reference, business=False)
             result = await session.execute(stmt)
             await session.commit()
             return bool(result.rowcount)
@@ -1044,10 +1227,12 @@ class McpTaskRepository:
         error: str,
         count_failure: bool,
         now: datetime,
+        task_reference: TaskReference | None = None,
     ) -> bool:
         """Stop one failed snapshot, preserving any newer event for delivery."""
         base_filters = (
             McpTaskRow.id == task_id,
+            *self._notification_scope_filters(task_reference),
             McpTaskRow.notification_lease_owner == lease_owner,
             McpTaskRow.notification_lease_token == notification_lease_token,
             McpTaskRow.notification_lease_expires_at >= now,
@@ -1071,6 +1256,7 @@ class McpTaskRepository:
             dead_letter_values["notification_attempt_count"] = McpTaskRow.notification_attempt_count + 1
 
         async with self._sf() as session:
+            await self._lock_notification_reference(session, task_id, task_reference, business=False)
             dead_lettered = await session.execute(update(McpTaskRow).where(*base_filters, McpTaskRow.event_version <= dispatch_version).values(**dead_letter_values))
             if dead_lettered.rowcount:
                 await session.commit()
@@ -1106,12 +1292,14 @@ class McpTaskRepository:
         dispatch_version: int,
         next_notification_at: datetime,
         now: datetime,
+        task_reference: TaskReference | None = None,
     ) -> bool:
         """Release a notification lease while its Agent run is still active."""
         stmt = (
             update(McpTaskRow)
             .where(
                 McpTaskRow.id == task_id,
+                *self._notification_scope_filters(task_reference),
                 McpTaskRow.notification_lease_owner == lease_owner,
                 McpTaskRow.notification_lease_token == notification_lease_token,
                 McpTaskRow.notification_lease_expires_at >= now,
@@ -1127,6 +1315,7 @@ class McpTaskRepository:
             )
         )
         async with self._sf() as session:
+            await self._lock_notification_reference(session, task_id, task_reference, business=False)
             result = await session.execute(stmt)
             await session.commit()
             return bool(result.rowcount)

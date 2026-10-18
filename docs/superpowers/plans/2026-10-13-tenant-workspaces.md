@@ -951,9 +951,9 @@ Step 24 evidence: #106 eight passed in 25.67s, 44-file Ruff; physical backend si
 
 Observed entry gaps at HEAD 92341ced6: native worker scoped `wait` is explicitly denied; MCP `claim_notification_work` returns no work in workspace-required mode; the background notification launcher does not independently recover the original task workspace. Fix the complete dependency story rather than remove these gates independently.
 
-- [ ] Reuse actual SQL workspace/MCP fixtures for one deterministic source C → B result → notification → continuation C story. Keep native goal/checkpoint and idempotent notification authority.
-- [ ] Scope dependency wait persistence to the adopted source Run and exact assignment, preserving native goal/conversation receipt and ledger compare-and-swap.
-- [ ] Claim/reserve notifications from durable original task/source identity, checking current membership/policy/parent before business launch. Bind background reads and continuation to that identity, never the UI selection or transport assertions alone.
+- [x] Reuse actual SQL workspace/MCP fixtures for one deterministic source C → B result → notification → continuation C story. Keep native goal/checkpoint and idempotent notification authority.
+- [x] Scope dependency wait persistence to the adopted source Run and exact assignment, preserving native goal/conversation receipt and ledger compare-and-swap.
+- [x] Claim/reserve notifications from durable original task/source identity, checking current membership/policy/parent before business launch. Bind background reads and continuation to that identity, never the UI selection or transport assertions alone.
 - [ ] Preserve revoked-task control cleanup without publishing results or granting continuation; keep unknown physical outcomes charged. Retry must not duplicate continuation.
 - [ ] Validate the main story first on existing Shanghai CI, then only necessary withdrawal/duplicate boundaries; update evidence and locally commit. Actual two-host/AIO proof remains separately open.
 
@@ -985,3 +985,7 @@ HTTP execution, crash/restart recovery, full C→B→C, remaining resource domai
 and M0–M11 remain open. Tenant activation and schema fences remain unchanged.
 The separate dependency-notification proposal remains unapplied pending its
 specific approval; this test archive excludes those uncommitted SQL changes.
+
+### Step 25 checkpoint — #118/#119
+
+Main passed (19.91s) and receive-time membership withdrawal passed (18.49s), each one PostgreSQL story. Original goal/scope/incarnation and duplicate prevention verified through actual native continuation. Exact leased compensation on receive denial verified. Already-dispatched notification recovery after revocation remains open, so control-cleanup/parent step acceptance stays partial. See committed evidence JSONs and testing guide. Current production matches #118 archive; #119 adds only a negative fixture branch and exact renderer selection.

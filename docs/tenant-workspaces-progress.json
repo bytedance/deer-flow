@@ -1549,23 +1549,27 @@
   },
   "latest_checkpoint": {
     "work_package": "M4",
-    "status": "partial M4: real single-worker AIO capture, shell, warm STOP and capacity release verified",
+    "status": "partial M4: native dependency continuation main and receive-time member revocation verified",
     "last_verified_job": "deerflow-tenant-execution-m4-sql",
-    "last_verified_build": 112,
-    "next": "Apply dependency proposal only after its pending approval; finish C->B->C and control cleanup, two-host/recovery and remaining M0-M11 acceptance.",
+    "last_verified_build": 119,
+    "next": "Implement control-only settlement for previously dispatched notifications after revocation, then remaining M4 domains; actual physical B/two-host story remains separately open.",
     "tenant_activation": "closed",
     "deployment": "none",
     "previous_backend_job": "deerflow-tenant-m1-postgres",
     "previous_backend_build": 89,
     "native_candidate_schema": "0040_mcp_workspace_identity",
     "last_verified_database_job": "deerflow-tenant-execution-m4-sql",
-    "last_verified_database_build": 106,
+    "last_verified_database_build": 119,
     "executor_candidate_schema": "e0003_execution_identity",
     "execution_status": "active",
     "resumed_at": "2026-10-18",
     "last_full_regression_build": 88,
     "last_full_regression_tests": 134,
-    "last_verified_tests": 1
+    "last_verified_tests": 1,
+    "checkpoint_evidence": [
+      "docs/tenant-workspaces-evidence/native-dependency-118.json",
+      "docs/tenant-workspaces-evidence/native-dependency-119.json"
+    ]
   },
   "workspace_feedback": {
     "status": "partial_M3_verified_repository_and_HTTP_main",
@@ -13553,7 +13557,7 @@
     }
   },
   "native_dependency_notification_wip": {
-    "status": "sql_draft_present_remaining_patch_under_review_after_auto_approval_rejection",
+    "status": "main_and_receive_time_revocation_verified",
     "scope": "one PostgreSQL native async dependency/notification story; deterministic RemoteIO, not physical B",
     "builds": [
       {
@@ -13584,9 +13588,88 @@
         "duration_ms": 39899,
         "failure": "Real run_agent dependency wait callback receives HTTP403 scoped wait; source Run ends error: Dependency receipt commit failed",
         "proof_scope": "First real business break only; later notification and continuation assertions not yet reached"
+      },
+      {
+        "build": 113,
+        "job": "deerflow-tenant-execution-m4-sql",
+        "phase": "m4-native-dependency-approved-20261018-01",
+        "result": "FAILURE",
+        "archive_sha256": "627d0ecb62a1a9b2d17bfe2d641917857b39bdfca1bb4b46d733a03d6918ea6f",
+        "tests": "1 failed in 19.77s",
+        "failure": "Source succeeds, dependency wait persists and pool releases; continuation claim absent. Fixture missing host.config identified."
+      },
+      {
+        "build": 114,
+        "job": "deerflow-tenant-execution-m4-sql",
+        "phase": "m4-native-dependency-config-20261018-02",
+        "result": "FAILURE",
+        "archive_sha256": "fbda57e7c58e3983940efbf5c74b6b79ede07f648e436e04450086ec03aa87f3",
+        "tests": "1 failed in 22.63s",
+        "failure": "Completed task dead-lettered after controller denies notification; no continuation."
+      },
+      {
+        "build": 115,
+        "job": "deerflow-tenant-execution-m4-sql",
+        "phase": "m4-native-dependency-diagnostic-20261018-03",
+        "result": "FAILURE",
+        "archive_sha256": "00bd9f93cd943696f9689f57837a419e1c2d43ca58b465567a1b3df1be1a5d1e",
+        "tests": "1 failed in 19.71s",
+        "failure": "SQL version/attempt/event match; native launcher uses default internal user, causing workspace actor/resource caller mismatch before thread access fallback."
+      },
+      {
+        "build": 116,
+        "job": "deerflow-tenant-execution-m4-sql",
+        "result": "FAILURE",
+        "archive_sha256": "9e9d4c548cf5e6055671556301eb613996e1c3a8f5535484945651aaa2497516",
+        "tests": "1 failed in 19.42s",
+        "failure": "Original owner identity correction passed prior denial; fixture lacks app.state.run_event_store."
+      },
+      {
+        "build": 117,
+        "job": "deerflow-tenant-execution-m4-sql",
+        "result": "FAILURE",
+        "archive_sha256": "cbcc5b95192e5890c8fbf06ff562977a7d223be1b8fee53e2ea6f4d56805a2f5",
+        "tests": "1 failed in 18.96s",
+        "failure": "Real event store rejects unbound checkpoint-history synthetic write. Tool-only graph legitimately has trace/checkpoint but no model message journal; empty feed is not evidence of legacy data."
+      },
+      {
+        "job": "deerflow-tenant-execution-m4-sql",
+        "build": 118,
+        "result": "SUCCESS",
+        "tests": "1 passed in 19.91s",
+        "duration_ms": 40379,
+        "source_archive_sha256": "c4e612c02c8743c75e61f3b8f1d00331dcf88a41bfa0075dfc4a757c3805c294",
+        "pipeline_sha256": "c1da350b0e2e4f71c93075fbd78c4aac36993348171612f01f7b8fa3340f6f34",
+        "test_sha256": "b101eaa9696da1bc00ee58b9885ee56270f313af354af2f485e146d607e9e4e5",
+        "static": "Ruff check passed; 50 files formatted",
+        "cleanup": "Agent independently inspected exact build 113–118 harness/db/network: absent",
+        "verified_scope": [
+          "Original source succeeds and persists dependency wait",
+          "Actual MCP polling and notification claims",
+          "Signed v2 controller receive with independent SQL authority",
+          "Actual start_run continuation and native pool adoption",
+          "Two runs preserve workspace/incarnation/original goal; notification delivered; no repeat launch"
+        ],
+        "limits": [
+          "Deterministic remote IO and graph; not physical B or model API acceptance",
+          "ASGI controller transport, not two-host HTTP",
+          "Withdrawal and dispatched recovery settlement not covered by this main",
+          "No tenant activation, deployment or push"
+        ],
+        "archive_sha256": "c4e612c02c8743c75e61f3b8f1d00331dcf88a41bfa0075dfc4a757c3805c294"
+      },
+      {
+        "build": 119,
+        "job": "deerflow-tenant-execution-m4-sql",
+        "result": "SUCCESS",
+        "tests": "1 passed in 18.49s",
+        "duration_ms": 39880,
+        "archive_sha256": "235d01090acc2c85dd002d62ffb421eb99f1b050a0f6e2957a1eaeb72641c900",
+        "pipeline_sha256": "6c6299dcaaf7f318f1f3d33d9bbbbaa52e85fba3c9b73d14db2177873f23138c",
+        "evidence": "docs/tenant-workspaces-evidence/native-dependency-119.json"
       }
     ],
-    "next": "Integrate original-authority wait, notification SQL/service/v2 receiver and actual start_run continuation on this same PostgreSQL story",
+    "next": "Implement control-only settlement for previously dispatched notifications after revocation, then remaining M4 domains; actual physical B/two-host story remains separately open.",
     "activation": false,
     "review": {
       "rejected_action": "Unreviewed scripted mutation of production notification authorization, leases and continuation across multiple files",
@@ -13599,8 +13682,16 @@
         "Keep legacy notification path compatible",
         "Verify original native Run ownership for wait"
       ],
-      "next": "Finish and review concrete proposed patch before retry or requesting any needed approval"
-    }
+      "next": "Preserve this verified checkpoint; remaining dispatched recovery settlement is not claimed complete.",
+      "approval": {
+        "date": "2026-10-18",
+        "answer": "批准应用并验证",
+        "patch_sha256": "35f9ce88035b71c9cc733514d0e712dbac7cd3b52f80bbd534318d55b054cb1c",
+        "scope": "Apply reviewed patch; one Jenkins PostgreSQL main and necessary permission checks; no deploy/push/activation"
+      },
+      "application": "Approved patch applied; notification owner principal and legacy-only checkpoint seed integration corrections independently reviewed. Main #118 and receive-time revocation #119 passed."
+    },
+    "architecture_decision": "Scoped startup checks bound-actor live/private event access but never performs legacy synthetic checkpoint-history backfill. Only SQL-adopted workers write scoped execution journals; scoped checkpoint-only imports need separate authorized migration."
   },
   "native_c_aio_physical": {
     "status": "verified_single_worker_physical_main",
