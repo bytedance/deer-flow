@@ -8,6 +8,12 @@ from __future__ import annotations
 
 from pathlib import PurePath, PurePosixPath
 
+#: Filler bytes an executable magic may hide behind: ASCII whitespace (space,
+#: tab, LF, CR, vertical tab, form feed) and NUL padding.
+_EXEC_SNIFF_FILLER = b" \t\n\r\x0b\x0c\x00"
+#: Cap on the leading-filler run the sniff tolerates.
+_EXEC_SNIFF_LIMIT = 64
+
 CODE_SUFFIXES = frozenset({".bash", ".bat", ".cjs", ".cmd", ".hta", ".js", ".jse", ".mjs", ".php", ".pl", ".ps1", ".psm1", ".py", ".rb", ".sct", ".sh", ".ts", ".vbe", ".vbs", ".wsf", ".zsh"})
 # Full magics per variant — a shorter shared prefix would also match
 # non-executable data files.
@@ -40,6 +46,35 @@ def is_code_file(path: str | PurePath, head: bytes) -> bool:
     return is_code_path(path) or (not _posix(path).suffix and head.startswith(b"#!"))
 
 
+#: Bytes callers should hand over so a capped whitespace run plus the longest
+#: magic always fits the sniff window.
+EXEC_SNIFF_BYTES = _EXEC_SNIFF_LIMIT + max(len(magic) for magic in _EXECUTABLE_MAGIC_PREFIXES)
+
+
+def executable_binary_magic(prefix: bytes) -> bytes | None:
+    """Return the executable magic *prefix* starts with, after leading whitespace.
+
+    A binary does not need its magic at byte 0 to be loadable: glibc's
+    ``ld.so`` maps segments through the program headers (shebang/whitespace-
+    prefixed ELFs are a shipped packaging trick) and the PE loader likewise
+    locates sections through the header stored inside the image, so padding
+    the magic with spaces or newlines evades an offset-0 probe while leaving
+    the payload executable. The tolerated run is capped at
+    ``_EXEC_SNIFF_LIMIT`` bytes so indented prose cannot widen the existing
+    2-byte ``MZ`` false-positive surface without bound.
+    """
+    head = prefix[:_EXEC_SNIFF_LIMIT]
+    offset = len(head) - len(head.lstrip(_EXEC_SNIFF_FILLER))
+    if offset == _EXEC_SNIFF_LIMIT or offset >= len(prefix):
+        return None
+    return next((magic for magic in _EXECUTABLE_MAGIC_PREFIXES if prefix.startswith(magic, offset)), None)
+
+
 def is_executable_binary_prefix(prefix: bytes) -> bool:
-    """Detect ELF, PE, and Mach-O executables by magic bytes."""
-    return prefix.startswith(_EXECUTABLE_MAGIC_PREFIXES)
+    """Detect ELF, PE, and Mach-O executables by magic bytes.
+
+    Tolerates a bounded leading run of ASCII whitespace (see
+    :func:`executable_binary_magic`); callers passing only a head window
+    should provide at least ``EXEC_SNIFF_BYTES`` bytes.
+    """
+    return executable_binary_magic(prefix) is not None

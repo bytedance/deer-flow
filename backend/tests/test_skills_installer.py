@@ -283,6 +283,29 @@ class TestSafeExtract:
             with pytest.raises(ValueError, match="executable binary"):
                 safe_extract_skill_archive(zf, dest)
 
+    @pytest.mark.parametrize(
+        ("filler", "magic"),
+        [
+            pytest.param(b"\n", b"\x7fELF", id="newline-elf"),
+            pytest.param(b" ", b"MZ", id="space-pe"),
+            pytest.param(b"\x00\x00\x00\n", b"\x7fELF", id="nul-run-elf"),
+        ],
+    )
+    def test_rejects_whitespace_prefixed_executable_binary(self, tmp_path, filler, magic):
+        """Leading filler must not smuggle a binary past the extraction guard."""
+        zip_path = self._make_zip(
+            tmp_path,
+            {
+                "my-skill/SKILL.md": "---\nname: test\ndescription: x\n---\n# Test",
+                "my-skill/assets/payload": filler + magic + b"\x00" * 64,
+            },
+        )
+        dest = tmp_path / "out"
+        dest.mkdir()
+        with zipfile.ZipFile(zip_path) as zf:
+            with pytest.raises(ValueError, match="executable binary"):
+                safe_extract_skill_archive(zf, dest)
+
     def test_allows_non_executable_binary_assets(self, tmp_path):
         zip_path = self._make_zip(
             tmp_path,

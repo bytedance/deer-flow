@@ -470,6 +470,67 @@ def test_executable_magic_matches_the_installer_extraction_guard(tmp_path: Path,
     assert is_executable_binary_prefix(magic)
 
 
+@pytest.mark.parametrize(
+    ("filler", "magic", "evidence"),
+    [
+        pytest.param(b"\n", b"\x7fELF", "ELF", id="newline-elf"),
+        pytest.param(b"   ", b"\x7fELF", "ELF", id="spaces-elf"),
+        pytest.param(b" ", b"MZ", "PE", id="space-pe"),
+        pytest.param(b"\r\n", b"\xca\xfe\xba\xbe", "Mach-O", id="crlf-macho-fat"),
+    ],
+)
+def test_whitespace_prefixed_executable_magic_is_critical(tmp_path: Path, filler: bytes, magic: bytes, evidence: str) -> None:
+    """A binary does not need its magic at byte 0 to stay loadable (ld.so and
+    the PE loader route through headers), so padding it with whitespace must
+    not demote the finding or let the archive through."""
+    skill_dir = tmp_path / "demo-skill"
+    _write_skill(skill_dir)
+    tool = skill_dir / "assets" / "tool"
+    tool.parent.mkdir(parents=True, exist_ok=True)
+    tool.write_bytes(filler + magic + b"\x00" * 64)
+
+    result = scan_skill_dir(skill_dir)
+
+    finding = _finding_by_rule(result["findings"], "package-executable-binary")
+    assert (finding["file"], finding["severity"], finding["evidence"]) == ("assets/tool", "CRITICAL", evidence)
+    assert result["blocked"] is True
+
+
+def test_whitespace_prefixed_executable_blocks_enforce_static_scan(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "demo-skill"
+    _write_skill(skill_dir)
+    helper = skill_dir / "bin" / "helper"
+    helper.parent.mkdir(parents=True, exist_ok=True)
+    helper.write_bytes(b" \t\n" + b"\x7fELF" + b"\x02\x01\x01\x00" + b"\x00" * 64)
+
+    with pytest.raises(StaticScanBlockedError):
+        enforce_static_scan(skill_dir, skill_name="demo-skill", app_config=SimpleNamespace(skill_scan=SimpleNamespace(enabled=True)))
+
+
+def test_archive_preflight_flags_whitespace_prefixed_executable(tmp_path: Path) -> None:
+    archive = tmp_path / "demo-skill.skill"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("demo-skill/SKILL.md", "---\nname: demo-skill\ndescription: Demo skill\n---\n")
+        zf.writestr("demo-skill/assets/payload", b"\n" + b"\x7fELF" + b"\x00" * 64)
+
+    result = scan_archive_preflight(archive)
+
+    assert _finding_by_rule(result["findings"], "package-executable-binary")["severity"] == "CRITICAL"
+    assert result["blocked"] is True
+
+
+def test_heavy_whitespace_beyond_the_cap_is_not_an_executable(tmp_path: Path) -> None:
+    """Indented prose must not become a false positive: only a bounded run of
+    leading whitespace is treated as filler."""
+    skill_dir = tmp_path / "demo-skill"
+    _write_skill(skill_dir)
+    notes = skill_dir / "assets" / "notes"
+    notes.parent.mkdir(parents=True, exist_ok=True)
+    notes.write_bytes(b" " * 64 + b"MZ, the magic number\n")
+
+    assert not [finding for finding in scan_skill_dir(skill_dir)["findings"] if finding["rule_id"] == "package-executable-binary"]
+
+
 def test_truncated_mach_o_magic_is_not_an_executable(tmp_path: Path) -> None:
     skill_dir = tmp_path / "demo-skill"
     _write_skill(skill_dir)
