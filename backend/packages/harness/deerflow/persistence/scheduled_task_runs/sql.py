@@ -637,6 +637,9 @@ class ScheduledTaskRunRepository:
                     status="launching",
                     lease_owner=lease_owner,
                     lease_expires_at=now + timedelta(seconds=lease_seconds),
+                    # attempt_count doubles as the launch-claim generation:
+                    # late bookkeeping passes it back so a reclaim cannot be
+                    # overwritten by an older attempt with the same owner.
                     attempt_count=ScheduledTaskRunRow.attempt_count + 1,
                 )
             )
@@ -653,15 +656,19 @@ class ScheduledTaskRunRepository:
         *,
         lease_owner: str,
         error: str | None = None,
+        expected_attempt_count: int | None = None,
     ) -> bool:
         async with self._sf() as session:
+            conditions = [
+                ScheduledTaskRunRow.id == run_record_id,
+                ScheduledTaskRunRow.status == "launching",
+                ScheduledTaskRunRow.lease_owner == lease_owner,
+            ]
+            if expected_attempt_count is not None:
+                conditions.append(ScheduledTaskRunRow.attempt_count == expected_attempt_count)
             result = await session.execute(
                 update(ScheduledTaskRunRow)
-                .where(
-                    ScheduledTaskRunRow.id == run_record_id,
-                    ScheduledTaskRunRow.status == "launching",
-                    ScheduledTaskRunRow.lease_owner == lease_owner,
-                )
+                .where(*conditions)
                 .values(
                     status="queued",
                     lease_owner=None,
@@ -758,12 +765,19 @@ class ScheduledTaskRunRepository:
         lease_owner: str,
         error: str,
         now: datetime,
+        expected_attempt_count: int | None = None,
     ) -> bool:
         """Fail a claimed launch and update its parent without a release gap."""
         async with self._sf() as session:
             task = await self._lock_task(session, task_id)
             row = await session.get(ScheduledTaskRunRow, run_record_id, with_for_update=True)
             if row is None or row.task_id != task_id or row.status != "launching" or row.lease_owner != lease_owner:
+                await session.rollback()
+                return False
+            if expected_attempt_count is not None and int(row.attempt_count or 0) != expected_attempt_count:
+                # A newer claim generation owns this row. The caller's launch
+                # already lost the race; do not terminalize or release the
+                # fresh claim's lease.
                 await session.rollback()
                 return False
 
