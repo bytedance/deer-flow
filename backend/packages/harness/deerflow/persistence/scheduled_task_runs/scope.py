@@ -152,7 +152,7 @@ def live_occurrence_predicate(occurrence, task):
     )
 
 
-async def lock_scheduled_identity(session, sf, task_id, *, occurrence_id=None, context=None, receipt=None, execution_parent=None, budget_key=None):
+async def lock_scheduled_identity(session, sf, task_id, *, occurrence_id=None, context=None, receipt=None, execution_parent=None, extra_parents=(), budget_key=None):
     # Locator reads acquire no task/occurrence locks before native parents.
     locator = await session.scalar(select(ScheduledTaskRow).where(ScheduledTaskRow.id == task_id))
     if locator is None or locator.workspace_id is None:
@@ -179,6 +179,10 @@ async def lock_scheduled_identity(session, sf, task_id, *, occurrence_id=None, c
         parent_id, incarnation = execution_parent
         if not incarnation or (parent_id in parents and parents[parent_id] != incarnation):
             raise WorkspaceAccessDenied("Scheduler queued parent identity differs")
+        parents[parent_id] = incarnation
+    for parent_id, incarnation in extra_parents:
+        if not incarnation or (parent_id in parents and parents[parent_id] != incarnation):
+            raise WorkspaceAccessDenied("Scheduler management parent identity differs")
         parents[parent_id] = incarnation
     await lock_resource_scope(session, context)
     for thread_id in sorted(parents):

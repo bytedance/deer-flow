@@ -451,7 +451,10 @@ class _SchedulerCapability:
             raise scheduler_error(404, "task_not_found", "Scheduled task not found")
         if task.get("origin_thread_id") != self._origin_thread_id:
             # Re-queried on every call, never cached in the grant.
-            run_task_ids = await self._task_run_repo.task_ids_for_thread(self._origin_thread_id, user_id=self._owner_id) if self._origin_thread_id else []
+            if self._run_binding is not None:
+                run_task_ids = [value["id"] for value in await self._task_repo.list_manageable_from_thread(self._owner_id, self._origin_thread_id)] if self._origin_thread_id else []
+            else:
+                run_task_ids = await self._task_run_repo.task_ids_for_thread(self._origin_thread_id, user_id=self._owner_id) if self._origin_thread_id else []
             if task_id not in run_task_ids:
                 raise scheduler_error(404, "task_not_found", "Scheduled task not found")
         return task
@@ -480,10 +483,10 @@ class _SchedulerCapability:
         guard = await self._run_binding.check()
         token = set_current_workspace(self._run_binding.workspace_context)
         try:
-            if action not in {"list", "create"}:
+            if action not in {"list", "create", "update", "pause", "resume", "delete"}:
                 result = tool_error_payload(scheduler_error(503, "scheduler_scoped_management_unavailable", "Scoped schedule management requires its native integration"))
             else:
-                result = await self._manage(action=action, request=request, worker_target=guard.target if action == "create" else None)
+                result = await self._manage(action=action, request=request, worker_target=guard.target if action != "list" else None)
             await guard.check()
             return result
         finally:
@@ -501,9 +504,9 @@ class _SchedulerCapability:
             if action == "create":
                 return await self._create(request, worker_target=worker_target)
             if action == "update":
-                return await self._update(request)
+                return await self._update(request, worker_target=worker_target)
             if action == "resume":
-                return await self._resume(request)
+                return await self._resume(request, worker_target=worker_target)
             allowed = {"task_id", "note"} if action == "note" else {"task_id"} if action != "list" else set()
             if request.keys() - allowed:
                 raise scheduler_error(422, "unsupported_fields", "Unsupported scheduled task fields")
@@ -514,7 +517,7 @@ class _SchedulerCapability:
                 return await self._note(task, request.get("note"))
             if action == "trial":
                 return await self._trial(task)
-            return await self._pause_or_delete(action, task)
+            return await self._pause_or_delete(action, task, worker_target=worker_target)
         except HTTPException as exc:
             return tool_error_payload(exc)
         except (ActiveScheduledTaskMutationConflict, ValueError) as exc:
@@ -582,7 +585,7 @@ class _SchedulerCapability:
         view = _task_view(task, used=0, active_run_status=None, timezone_source=timezone_source, browser_timezone=browser)
         return self._result("create", task=view, now_local=_now_local(timezone))
 
-    async def _update(self, request: dict[str, Any]) -> dict[str, Any]:
+    async def _update(self, request: dict[str, Any], *, worker_target: NativeRunStopTarget | None = None) -> dict[str, Any]:
         from app.gateway.routers.scheduled_tasks import ScheduledTaskUpdateRequest, resolve_scheduled_task_assistant_id
 
         if request.keys() - _UPDATE_FIELDS:
@@ -617,7 +620,7 @@ class _SchedulerCapability:
             )
         except HTTPException as exc:
             raise _with_now_local(exc, timezone) from None
-        updated = await self._task_repo.update(task["id"], user_id=self._owner_id, updates=updates, require_mutable=True)
+        updated = await self._task_repo.update(task["id"], user_id=self._owner_id, updates=updates, require_mutable=True, **self._worker_arguments(worker_target))
         if updated is None:
             raise scheduler_error(404, "task_not_found", "Scheduled task not found")
         source = "explicit" if explicit is not None else "saved"
@@ -625,7 +628,7 @@ class _SchedulerCapability:
         view = await self._view(updated, timezone_source=source, browser_timezone=browser)
         return self._result("update", task=view, now_local=_now_local(updated.get("timezone")))
 
-    async def _resume(self, request: dict[str, Any]) -> dict[str, Any]:
+    async def _resume(self, request: dict[str, Any], *, worker_target: NativeRunStopTarget | None = None) -> dict[str, Any]:
         from app.gateway.routers.scheduled_tasks import ScheduledTaskResumeRequest
 
         if request.keys() - _RESUME_FIELDS:
@@ -641,13 +644,15 @@ class _SchedulerCapability:
         try:
             renewal = ScheduledTaskResumeRequest(**fields).model_dump(include=set(fields))
             await self._ensure_mutable(task)
-            if task.get("status") == "enabled":
+            if task.get("status") == "enabled" and self._run_binding is None:
                 return self._result("resume", task=await self._view(task))
             used = (await self._task_repo.automatic_runs_used_for([task["id"]])).get(task["id"], 0)
             updates = await asyncio.to_thread(prepare_resume_updates, task, renewal, used=used, now=datetime.now(UTC))
+            if self._run_binding is not None:
+                updates.setdefault("status", "enabled")
         except HTTPException as exc:
             raise _with_now_local(exc, task.get("timezone")) from None
-        updated = await self._task_repo.update(task["id"], user_id=self._owner_id, updates=updates, require_mutable=True)
+        updated = await self._task_repo.update(task["id"], user_id=self._owner_id, updates=updates, require_mutable=True, **self._worker_arguments(worker_target))
         if updated is None:
             raise scheduler_error(404, "task_not_found", "Scheduled task not found")
         return self._result("resume", task=await self._view(updated))
@@ -678,14 +683,17 @@ class _SchedulerCapability:
         trial = {"outcome": outcome, "existing": bool(result.get("existing")), "thread_id": thread_id if isinstance(thread_id, str) else None}
         return self._result("trial", task=await self._view(current), trial=trial)
 
-    async def _pause_or_delete(self, action: str, task: dict[str, Any]) -> dict[str, Any]:
+    def _worker_arguments(self, target):
+        return {"worker_target": target, "expected_token_version": self._token_version} if target is not None else {}
+
+    async def _pause_or_delete(self, action: str, task: dict[str, Any], *, worker_target: NativeRunStopTarget | None = None) -> dict[str, Any]:
         task_id = task["id"]
         if action == "pause" and task.get("status") == "running":
             raise scheduler_error(409, "task_running", "Scheduled task is currently running; retry after the active execution finishes")
         if action == "pause":
-            outcome = await self._task_repo.pause_with_queue_cancellation(task_id, user_id=self._owner_id, error=host_notes.RUN_ERROR_PAUSED_WHILE_QUEUED, now=datetime.now(UTC))
+            outcome = await self._task_repo.pause_with_queue_cancellation(task_id, user_id=self._owner_id, error=host_notes.RUN_ERROR_PAUSED_WHILE_QUEUED, now=datetime.now(UTC), **self._worker_arguments(worker_target))
         else:
-            outcome = await self._task_repo.delete_with_queue_cancellation(task_id, user_id=self._owner_id, error=host_notes.RUN_ERROR_DELETED_WHILE_QUEUED, now=datetime.now(UTC))
+            outcome = await self._task_repo.delete_with_queue_cancellation(task_id, user_id=self._owner_id, error=host_notes.RUN_ERROR_DELETED_WHILE_QUEUED, now=datetime.now(UTC), **self._worker_arguments(worker_target))
         if outcome == "not_found":
             raise scheduler_error(404, "task_not_found", "Scheduled task not found")
         if outcome == "executing":

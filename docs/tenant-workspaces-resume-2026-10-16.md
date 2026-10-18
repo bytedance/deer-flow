@@ -1,4 +1,4 @@
-# Resume checkpoint — 2026-10-18: native Scheduler list/create and terminal write boundary #144 verified; remaining lifecycle open
+# Resume checkpoint — 2026-10-18: Scheduler management mains #146 verified; two control boundaries next
 > **执行中，M4 部分完成。** Jenkins #112：单 Worker 真实 AIO 创建、文件写读、warm STOP、失败保留和 report 后释放已通过（1 项，53.79s）。两机 HTTP、恢复和 C→B→C 仍待完成；通知主干与必要撤权控制已验证；HTTP创建/列表/详情已通过#130；租户启动关闭。
 
 # 2026-10-16 暂停与恢复检查点
@@ -1259,3 +1259,14 @@ Root independently checked terminal and six archive/source bytes; exact fixture 
 `deerflow-tenant-execution-m4-sql #144 SUCCESS`: one PostgreSQL boundary passed (19.79s), Ruff/67-file format passed; production code unchanged from `0be0a16d3`. After actual ToolNode guard/permission/validation succeeds, a thin test wrapper changes only authoritative source Run status from running to success, retaining exact owner, effective lease and open execution lifetime. The real task writer rejects with `Scheduler create requires its running native execution`. All task and occurrence columns remain unchanged; canonical journal contains the coded refusal, and the original native no-sandbox STOP/report releases its reservation. This proves the new business-write fence separately from generic native finalizer authority.
 
 Root independently checked terminal, five source/archive bytes and exact fixture cleanup. Evidence: `docs/tenant-workspaces-evidence/native-scheduler-tool-create-terminal-144.json`. No added test matrix or physical sandbox. Origin-incarnation/token-version atomic-window refusals remain code-reviewed only. Next business slice is task management/pause/resume/manual/own-stop with original authority; remaining entry, installed dependency, IM/recovery and full M0–M11 stay required. Activation false; no deployment/push/local runtime.
+
+
+### 2026-10-18 — HTTP and remote tool Scheduler management mains (#146)
+
+`deerflow-tenant-execution-m4-sql #146 SUCCESS`: two PostgreSQL business stories passed (25.21s), Ruff/67-file formatting passed. Authenticated HTTP and remote actual ToolNode each complete create → update → real due queue → pause → resume → new due occurrence → delete. #145 reproduced HTTP PATCH 404 without resource binding and the remote tool's explicit withheld-update refusal; later actions were not reached in that RED.
+
+Shared scoped writers preserve current private-resource access and immutable original task snapshots. They lock workspace/actor, sorted original/proposed/occurrence/source parents, optional quota, task, occurrence and original tool Run in order; they recheck active identity after locks, guard protected update fields and reuse original target/token/running/lease/lifetime/STOP fences. A waiting row is cancellable only with no native Run, explicit unaccounted state, no start and no lease. Invalid original execution authority cannot be renewed through resume/rearm. Legacy branches remain unchanged; note/manual/own-stop are still withheld.
+
+The stories use a deterministic business scheduling clock while native lease/SQL/STOP time remains real. Old queued occurrences stay interrupted, resume does not replay them, and the next due claim creates a new id/sequence2. No scheduled execution is launched; run_count/automatic use stay0 and original task snapshot remains unchanged. The HTTP main also changes fresh mode to an existing private reuse parent and verifies its nonce. Native Run ID sets do not grow during management; the remote source reservation remains1 before its own no-sandbox STOP/report and0 afterward. No physical sandbox/provider API is represented.
+
+Root independently checked terminal, six source/archive bytes and exact cleanup. Evidence: `docs/tenant-workspaces-evidence/native-scheduler-management-146.json`. Next only two necessary boundaries: unknown queued accounting must be retained; after original snapshot expiry, current resource pause/delete may work but resume/rearm must explicitly require new/copy. Full M4/M0–M11, note/manual/own-stop, installed dependencies, IM/recovery and physical gates remain open. Activation false; no deployment/push/local runtime.

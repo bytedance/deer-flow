@@ -12,7 +12,7 @@ Implemented for this once/conversation-origin/fresh main:
 - Scoped event writes and reads carry workspace/origin nonce and private parent checks; legacy rows/joins/ID mutations are NULL-isolated.
 
 Withheld / not accepted:
-- HTTP create/list/detail are scoped and verified in #130. Local-session tool listing is verified in #136 and original-session remote main in #139; two original credential boundaries passed in #140, while management and manual trigger remain withheld. HTTP history/thread relations are verified in #132. Current resource reads never renew original execution context.
+- HTTP create/list/detail are scoped and verified in #130. Local-session tool listing is verified in #136 and original-session remote main in #139; two original credential boundaries passed in #140, while core management mains passed #146 and note/manual/own-stop remain withheld. HTTP history/thread relations are verified in #132. Current resource reads never renew original execution context.
 - HTTP task creation response enrichment is verified in #130; complete tool/UI and lifecycle acceptance remains open.
 - Page fresh with no origin and reuse branches have identity handling but no runtime acceptance in this single story.
 - Scheduled C->B->C transfer/own-stop and installed dependency_wait_reconciler path are explicitly withheld. The main uses no async dependency reconciler and does not represent the complete installed host.
@@ -22,4 +22,6 @@ Withheld / not accepted:
 
 One PostgreSQL story: RED #122, GREEN #123 (19.61s). Queued withdrawal and pre-insert lease takeover boundaries passed in #125 (two PostgreSQL cases); no dialect matrix. See `native-scheduler-boundaries-125.json`.
 
-Conversation ToolNode create/fresh → due queue main passed #143 with atomic original parent/token/Run checks. Only list/create are open; terminal-between-validation-and-write refusal passed #144. Original nonce/token atomic-window refusals are code-reviewed only. Other management/manual/own-stop and complete runtime/lifecycle remain unaccepted.
+Conversation ToolNode create/fresh → due queue main passed #143 with atomic original parent/token/Run checks. List/create/update/pause/resume/delete mains are open and verified in #146; terminal-between-validation-and-write refusal passed #144. Original nonce/token atomic-window refusals are code-reviewed only. Other management/manual/own-stop and complete runtime/lifecycle remain unaccepted.
+
+HTTP and remote ToolNode complete management mains passed #146 (two PG stories). Unknown queued accounting retention and stale snapshot pause/delete versus rearm boundaries are next. No physical scheduled execution, note/manual/own-stop or full lifecycle acceptance is inferred.

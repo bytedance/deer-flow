@@ -341,6 +341,10 @@ def _exercise_scoped_scheduler_occurrence(native_engine, executor_engine, monkey
 
 @pytest.mark.parametrize("executor_engine", ["postgres"], indirect=True)
 def test_scoped_scheduler_http_create_list_detail_use_current_resource_scope(native_engine, executor_engine, monkeypatch, tmp_path):  # noqa: F811
+    _exercise_scheduler_resource_http(native_engine, executor_engine, monkeypatch, tmp_path)
+
+
+def _exercise_scheduler_resource_http(native_engine, executor_engine, monkeypatch, tmp_path, *, management=False):  # noqa: F811
     from fastapi import FastAPI
     from sqlalchemy import select, update
 
@@ -354,10 +358,11 @@ def test_scoped_scheduler_http_create_list_detail_use_current_resource_scope(nat
     from app.gateway.csrf_middleware import CSRFMiddleware
     from app.gateway.routers import scheduled_tasks
     from app.scheduler.service import ScheduledTaskService
-    from deerflow.authz.workspace import get_current_workspace
+    from deerflow.authz.workspace import get_current_workspace, reset_current_workspace, set_current_workspace
     from deerflow.config import app_config
     from deerflow.config.app_config import AppConfig
     from deerflow.persistence.run.sql import RunRepository
+    from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
     from deerflow.persistence.scheduled_task_runs.sql import ScheduledTaskRunRepository
     from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
     from deerflow.persistence.scheduled_tasks.sql import ScheduledTaskRepository
@@ -379,6 +384,8 @@ def test_scoped_scheduler_http_create_list_detail_use_current_resource_scope(nat
     monkeypatch.setattr(deps, "get_app_config", lambda: configuration)
     monkeypatch.setattr(auth_config, "_auth_config", auth_config.AuthConfig(jwt_secret="synthetic-scheduler-resource-http-key-64-characters-for-test-only!!"))
     monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+
+    clock = _scheduler_management_clock(monkeypatch, scheduled_tasks) if management else None
 
     async def scenario(case):
         threads = ThreadMetaRepository(case.sf, workspace_required=True)
@@ -413,8 +420,8 @@ def test_scoped_scheduler_http_create_list_detail_use_current_resource_scope(nat
                     "/api/scheduled-tasks",
                     headers=selected,
                     json={
-                        "thread_id": parent["thread_id"],
-                        "context_mode": "reuse_thread",
+                        "thread_id": None if management else parent["thread_id"],
+                        "context_mode": "fresh_thread_per_run" if management else "reuse_thread",
                         "title": "Original private follow-up",
                         "prompt": "Prepare the private follow-up",
                         "schedule_type": "once",
@@ -429,7 +436,52 @@ def test_scoped_scheduler_http_create_list_detail_use_current_resource_scope(nat
                 async with case.sf() as session:
                     task = await session.get(ScheduledTaskRow, task_id)
                     original_snapshot = dict(task.workspace_context_json)
-                    assert original_snapshot == asdict(case.original) and task.thread_incarnation == parent["incarnation"]
+                    assert original_snapshot == asdict(case.original)
+                    assert task.thread_incarnation == (None if management else parent["incarnation"])
+                if management:
+                    from deerflow.persistence.run.model import RunRow
+
+                    async with case.sf() as session:
+                        initial_run_ids = set(await session.scalars(select(RunRow.run_id)))
+                    ui_scope = set_current_workspace(case.other)
+                    try:
+                        updated = await client.patch(
+                            "/api/scheduled-tasks/" + task_id,
+                            headers=selected,
+                            json={"title": "Updated private follow-up", "context_mode": "reuse_thread", "thread_id": parent["thread_id"], "schedule_type": "interval", "schedule_spec": {"every_seconds": 3600}, "max_runs": 1},
+                        )
+                        assert updated.status_code == 200, updated.text
+                        assert updated.json()["title"] == "Updated private follow-up"
+                        first, first_at = await _queue_management_task(case, tasks, foreground, task_id)
+                        clock[0] = first_at
+                        paused = await client.post("/api/scheduled-tasks/" + task_id + "/pause", headers=selected)
+                        assert paused.status_code == 200 and paused.json()["status"] == "paused", paused.text
+                        await _assert_management_wait_cancelled(case, task_id, first)
+                        resumed = await client.post("/api/scheduled-tasks/" + task_id + "/resume", headers=selected)
+                        assert resumed.status_code == 200 and resumed.json()["status"] == "enabled", resumed.text
+                        await _assert_management_wait_cancelled(case, task_id, first)
+                        assert await tasks.claim_due_tasks(now=clock[0], lease_owner=foreground._lease_owner, lease_seconds=120, limit=1) == []
+                        second, second_at = await _queue_management_task(case, tasks, foreground, task_id)
+                        assert second != first and second_at > first_at
+                        clock[0] = second_at
+                        async with case.sf() as session:
+                            row = await session.get(ScheduledTaskRow, task_id)
+                            waits = (await session.scalars(select(ScheduledTaskRunRow).where(ScheduledTaskRunRow.task_id == task_id).order_by(ScheduledTaskRunRow.occurrence_seq))).all()
+                            assert [item.occurrence_seq for item in waits] == [1, 2]
+                            assert row.workspace_context_json == original_snapshot and row.run_count == 0 and row.max_runs == 1
+                            assert row.thread_id == parent["thread_id"] and row.thread_incarnation == parent["incarnation"]
+                        detail = await client.get("/api/scheduled-tasks/" + task_id, headers=selected)
+                        assert detail.status_code == 200 and detail.json()["automatic_runs_used"] == 0
+                        assert (await client.get("/api/scheduled-tasks/" + task_id, headers={"X-Deerflow-Workspace": case.other.workspace_id})).status_code == 404
+                        deleted = await client.delete("/api/scheduled-tasks/" + task_id, headers=selected)
+                        assert deleted.status_code == 200 and deleted.json()["deleted"] is True, deleted.text
+                        await _assert_management_wait_cancelled(case, task_id, second, deleted=True)
+                        async with case.sf() as session:
+                            assert set(await session.scalars(select(RunRow.run_id))) == initial_run_ids
+                        assert get_current_workspace() == case.other
+                    finally:
+                        reset_current_workspace(ui_scope)
+                    return
                 # Use the actual due-claim/foreground path to persist a queued
                 # occurrence; no control poller or native Run is started.
                 queue_at = datetime.now(UTC) + timedelta(hours=2)
@@ -598,7 +650,7 @@ def test_scoped_scheduler_tool_list_uses_original_native_invocation(native_engin
     _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, tmp_path)
 
 
-def _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, tmp_path, *, remote=False, boundary="normal", tool_action="list"):  # noqa: F811
+def _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, tmp_path, *, remote=False, boundary="normal", tool_action="list", management=False):  # noqa: F811
     import json
 
     from fastapi import FastAPI
@@ -818,6 +870,8 @@ def _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, t
 
         monkeypatch.setattr(scheduled_task_access, "prepare_scheduler_capability", observe_prepare)
         entered, release = asyncio.Event(), asyncio.Event()
+        waiting_queue, queued_ready = asyncio.Event(), asyncio.Event()
+        clock = _scheduler_management_clock(monkeypatch, scheduled_task_access) if management else None
 
         async def emit_list(state, config, runtime: GraphRuntime):
             runtime_diagnostics.append({"enabled": scheduler_tools_enabled(runtime.context.get("app_config")), "capability": is_scheduler_capability(runtime.context.get(SCHEDULER_CAPABILITY_CONTEXT_KEY))})
@@ -826,8 +880,13 @@ def _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, t
             assert get_current_workspace() == case.original
             entered.set()
             await release.wait()
-            arguments = {"action": tool_action}
-            if tool_action == "create":
+            action = ("create", "update", "pause", "resume", "delete")[len(observed)] if management else tool_action
+            arguments = {"action": action}
+            if management and action != "create":
+                arguments["task_id"] = observed[0]["task"]["id"]
+            if management and action == "update":
+                arguments.update(title="Updated remote follow-up", schedule_type="interval", schedule_spec={"every_seconds": 3600})
+            if action == "create":
                 arguments.update(
                     title="Remote conversation follow-up",
                     prompt="Deliver the private follow-up",
@@ -841,7 +900,14 @@ def _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, t
 
         async def observe_result(state, config):
             observed.append(json.loads(state["messages"][-1].content))
-            return {"messages": [AIMessage(content="The conversation's schedules were listed")]}
+            if management:
+                expected = ("create", "update", "pause", "resume", "delete")[len(observed) - 1]
+                assert observed[-1].get("action") == expected, observed[-1]
+                if expected in {"update", "resume"}:
+                    waiting_queue.set()
+                    await queued_ready.wait()
+                    queued_ready.clear()
+            return {"messages": [AIMessage(content="The conversation's schedule request was handled")]}
 
         builder = StateGraph(ThreadState, context_schema=dict)
         builder.add_node("call", emit_list)
@@ -850,7 +916,10 @@ def _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, t
         builder.add_edge(START, "call")
         builder.add_edge("call", "tools")
         builder.add_edge("tools", "observed")
-        builder.add_edge("observed", END)
+        if management:
+            builder.add_conditional_edges("observed", lambda state: "call" if len(observed) < 5 else END)
+        else:
+            builder.add_edge("observed", END)
         graph = builder.compile(checkpointer=saver)
         monkeypatch.setattr(services, "resolve_agent_factory", lambda assistant_id: lambda **kwargs: graph)
         record, selected = None, None
@@ -871,9 +940,9 @@ def _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, t
                     title="Original tool follow-up",
                     prompt="Private follow-up",
                     schedule_type="once",
-                    schedule_spec={"run_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat()},
+                    schedule_spec={"run_at": (datetime.now(UTC) + timedelta(hours=24 if management else 1)).isoformat()},
                     timezone="UTC",
-                    next_run_at=datetime.now(UTC) + timedelta(hours=1),
+                    next_run_at=datetime.now(UTC) + timedelta(hours=24 if management else 1),
                 )
                 ids = [original_task["id"]]
                 response = await client.post(
@@ -885,7 +954,7 @@ def _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, t
                         "title": "Other private tool schedule",
                         "prompt": "Private follow-up",
                         "schedule_type": "once",
-                        "schedule_spec": {"run_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat()},
+                        "schedule_spec": {"run_at": (datetime.now(UTC) + timedelta(hours=24 if management else 1)).isoformat()},
                         "timezone": "UTC",
                     },
                 )
@@ -957,21 +1026,63 @@ def _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, t
                         reset_current_workspace(lookup_scope)
                 assert get_current_workspace() == case.other
                 assert record is not None and record.task is not None
+                if management:
+                    async with case.sf() as session:
+                        admitted_run_ids = set(await session.scalars(select(RunRow.run_id)))
+                        assert run_id in admitted_run_ids
                 await asyncio.wait_for(entered.wait(), timeout=20)
                 ui = await client.get("/api/scheduled-tasks", headers={"X-Deerflow-Workspace": case.other.workspace_id})
                 assert ui.status_code == 200 and [row["id"] for row in ui.json()] == [ids[1]]
                 release.set()
+                if management:
+                    queued_ids = []
+                    for index in range(2):
+                        waiting = asyncio.create_task(waiting_queue.wait())
+                        done, _ = await asyncio.wait({waiting, record.task}, timeout=20, return_when=asyncio.FIRST_COMPLETED)
+                        if record.task in done:
+                            waiting.cancel()
+                            try:
+                                await waiting
+                            except asyncio.CancelledError:
+                                pass
+                            await record.task
+                            raise AssertionError({"tool_results": observed, "run_error": record.error})
+                        assert waiting in done, {"tool_results": observed}
+                        waiting_queue.clear()
+                        created_id = observed[0]["task"]["id"]
+                        if index:
+                            await _assert_management_wait_cancelled(case, created_id, queued_ids[0])
+                            assert await tasks.claim_due_tasks(now=clock[0], lease_owner=foreground._lease_owner, lease_seconds=120, limit=1) == []
+                        queued_id, queue_at = await _queue_management_task(case, tasks, foreground, created_id)
+                        queued_ids.append(queued_id)
+                        clock[0] = queue_at
+                        queued_ready.set()
+                    assert queued_ids[0] != queued_ids[1]
                 await asyncio.wait_for(record.task, timeout=20)
                 assert record.status.value == "success", record.error
                 if remote:
                     assert preparation == [{"present": boundary != "token_version", "source": "internal", "mode": "interactive", "config_enabled": True}]
                     assert record.kwargs["scheduler_origin"] == saved_origin
+                    if management:
+                        async with case.sf() as session:
+                            assert set(await session.scalars(select(RunRow.run_id))) == admitted_run_ids
+                        assert (await asyncio.to_thread(pool.node_status, "worker"))["unreleased"] == 1
                     await host.stop_owned(job)
                     await host.report(job, {"state": "completed", "physical_stopped": True})
                     host.executions.pop(job["id"])
                     assert (await request_worker("poll"))["claim"] is None
                     assert (await asyncio.to_thread(pool.node_status, "worker"))["unreleased"] == 0
-                if boundary == "normal":
+                if management:
+                    assert [value["action"] for value in observed] == ["create", "update", "pause", "resume", "delete"]
+                    await _assert_management_wait_cancelled(case, created_id, queued_ids[1], deleted=True)
+                    async with case.sf() as session:
+                        from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
+
+                        waits = (await session.scalars(select(ScheduledTaskRunRow).where(ScheduledTaskRunRow.task_id == created_id).order_by(ScheduledTaskRunRow.occurrence_seq))).all()
+                        assert [value.occurrence_seq for value in waits] == [1, 2]
+                    assert observed[1]["task"]["title"] == "Updated remote follow-up"
+                    assert observed[3]["task"]["automatic_runs_used"] == 0
+                elif boundary == "normal":
                     assert len(observed) == 1 and observed[0].get("action") == tool_action, {
                         "preparation": preparation,
                         "runtime": runtime_diagnostics,
@@ -1038,6 +1149,7 @@ def _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, t
                     assert not any("Other private tool schedule" in row.content for row in journal)
         finally:
             release.set()
+            queued_ready.set()
             if record is not None and record.task is not None and not record.task.done():
                 record.task.cancel()
                 try:
@@ -1077,3 +1189,64 @@ def test_scoped_scheduler_remote_tool_create_queues_original_workspace(native_en
 @pytest.mark.parametrize("executor_engine", ["postgres"], indirect=True)
 def test_scoped_scheduler_remote_tool_create_rejects_terminal_writer(native_engine, executor_engine, monkeypatch, tmp_path):  # noqa: F811
     _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, tmp_path, remote=True, tool_action="create", boundary="terminal_writer")
+
+
+def _scheduler_management_clock(monkeypatch, module):
+    clock = [datetime.now(UTC)]
+
+    class ManagementClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0].astimezone(tz) if tz is not None else clock[0].replace(tzinfo=None)
+
+    monkeypatch.setattr(module, "datetime", ManagementClock)
+    return clock
+
+
+async def _queue_management_task(case, tasks, foreground, task_id):
+    from sqlalchemy import select
+
+    from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
+    from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
+
+    async with case.sf() as session:
+        task = await session.get(ScheduledTaskRow, task_id)
+        due_at = task.next_run_at + timedelta(seconds=1)
+        assert task.workspace_context_json == asdict(case.original) and task.run_count == 0 and task.max_runs == 1
+    due = await tasks.claim_due_tasks(now=due_at, lease_owner=foreground._lease_owner, lease_seconds=120, limit=1)
+    assert len(due) == 1 and due[0]["id"] == task_id
+    result = await foreground.dispatch_task(due[0], now=due_at, trigger="scheduled")
+    assert result["outcome"] == "queued" and result["run_id"] is None
+    async with case.sf() as session:
+        occurrence = await session.get(ScheduledTaskRunRow, result["task_run_id"])
+        assert occurrence.workspace_context_json == asdict(case.original) and occurrence.status == "queued"
+        assert occurrence.run_id is None and occurrence.launch_accounted is False and occurrence.started_at is None
+        assert occurrence.lease_owner is None and occurrence.lease_expires_at is None
+        assert (await session.scalar(select(ScheduledTaskRow.run_count).where(ScheduledTaskRow.id == task_id))) == 0
+    return result["task_run_id"], due_at
+
+
+async def _assert_management_wait_cancelled(case, task_id, occurrence_id, *, deleted=False):
+    from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
+    from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
+
+    async with case.sf() as session:
+        occurrence = await session.get(ScheduledTaskRunRow, occurrence_id)
+        assert occurrence.status == "interrupted" and occurrence.run_id is None and occurrence.launch_accounted is False
+        assert occurrence.lease_owner is None and occurrence.lease_expires_at is None and occurrence.started_at is None
+        assert occurrence.workspace_context_json == asdict(case.original)
+        task = await session.get(ScheduledTaskRow, task_id)
+        if deleted:
+            assert task is None
+        else:
+            assert task.workspace_context_json == asdict(case.original) and task.run_count == 0 and task.max_runs == 1
+
+
+@pytest.mark.parametrize("executor_engine", ["postgres"], indirect=True)
+def test_scoped_scheduler_http_management_keeps_original_execution(native_engine, executor_engine, monkeypatch, tmp_path):  # noqa: F811
+    _exercise_scheduler_resource_http(native_engine, executor_engine, monkeypatch, tmp_path, management=True)
+
+
+@pytest.mark.parametrize("executor_engine", ["postgres"], indirect=True)
+def test_scoped_scheduler_remote_tool_management_keeps_original_execution(native_engine, executor_engine, monkeypatch, tmp_path):  # noqa: F811
+    _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, tmp_path, remote=True, tool_action="create", management=True)

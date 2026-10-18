@@ -329,6 +329,159 @@ class ScheduledTaskRepository:
             counts = {task_id: int(count) for task_id, count in (await session.execute(stmt)).all()}
         return {task_id: counts.get(task_id, 0) for task_id in ids}
 
+    async def _lock_management_resource(self, session, task_id, user_id, *, updates=None, worker_target=None, expected_token_version=None):
+        context = resolve_resource_scope(None, user_id, required=True)
+        if worker_target is None:
+            if expected_token_version is not None:
+                raise WorkspaceAccessDenied("Scheduler worker credential requires its original execution")
+        elif type(worker_target) is not NativeRunStopTarget or type(expected_token_version) is not int or expected_token_version < 0 or worker_target.workspace_context != context or worker_target.user_id != user_id:
+            raise WorkspaceAccessDenied("Scheduler management requires its original native execution")
+        locator = await session.scalar(select(ScheduledTaskRow).where(ScheduledTaskRow.id == task_id, resource_task_predicate(context)))
+        if locator is None:
+            return None, None, context
+        original = dict(locator.workspace_context_json)
+        located_parents = (locator.origin_thread_id, locator.origin_thread_incarnation, locator.thread_id, locator.thread_incarnation, locator.context_mode)
+        # Do not filter an inconsistent active row into apparent NoStart.
+        active = await session.scalar(select(ScheduledTaskRunRow).where(ScheduledTaskRunRow.task_id == task_id, ScheduledTaskRunRow.status.in_(ACTIVE_RUN_STATUSES)))
+        occurrence_id = active.id if active else None
+        if active is not None and (active.workspace_id != locator.workspace_id or active.workspace_context_json != original):
+            raise WorkspaceAccessDenied("Scheduler active execution identity is unknown")
+        extra = []
+        if worker_target is not None:
+            extra.append((worker_target.thread_id, worker_target.thread_incarnation))
+        updates = updates or {}
+        fixed_id = updates.get("thread_id", locator.thread_id) if updates.get("context_mode", locator.context_mode) == "reuse_thread" else None
+        fixed_nonce = None
+        if fixed_id is not None:
+            fixed_nonce = await session.scalar(ThreadMetaRepository._owned_scope(select(ThreadMetaRow.incarnation).where(ThreadMetaRow.thread_id == fixed_id), user_id, context))
+            if not fixed_nonce:
+                raise WorkspaceAccessDenied("Scheduler new private parent is unavailable")
+            extra.append((fixed_id, fixed_nonce))
+        elif updates.get("context_mode", locator.context_mode) == "reuse_thread":
+            raise WorkspaceAccessDenied("Scheduler reuse requires its existing private thread")
+        quota = updates.get("status") in LIVE_TASK_STATUSES and locator.origin_thread_id is not None
+        quota_key = (int.from_bytes(hashlib.sha256(f"scheduler-conversation-quota\x00{user_id}".encode()).digest()[:8], "big") & 0x7FFFFFFFFFFFFFFF) if quota else None
+        task, active, _ = await lock_scheduled_identity(
+            session,
+            self._sf,
+            task_id,
+            context=context,
+            occurrence_id=occurrence_id,
+            extra_parents=tuple(extra),
+            budget_key=quota_key,
+        )
+        if task.workspace_context_json != original or (task.origin_thread_id, task.origin_thread_incarnation, task.thread_id, task.thread_incarnation, task.context_mode) != located_parents:
+            raise WorkspaceAccessDenied("Scheduler task parents changed during management")
+        # Re-read active state after taking the parent task lock; a new child
+        # cannot be treated as absent based on the earlier unlocked locator.
+        current_active = await session.scalar(select(ScheduledTaskRunRow.id).where(ScheduledTaskRunRow.task_id == task_id, ScheduledTaskRunRow.status.in_(ACTIVE_RUN_STATUSES)))
+        if current_active != occurrence_id:
+            raise WorkspaceAccessDenied("Scheduler active execution changed during management")
+        if worker_target is not None:
+            related = task.origin_thread_id == worker_target.thread_id and task.origin_thread_incarnation == worker_target.thread_incarnation
+            if not related:
+                related = bool(
+                    await session.scalar(
+                        select(ScheduledTaskRunRow.id)
+                        .where(
+                            ScheduledTaskRunRow.task_id == task.id,
+                            ScheduledTaskRunRow.thread_id == worker_target.thread_id,
+                            ScheduledTaskRunRow.thread_incarnation == worker_target.thread_incarnation,
+                            resource_occurrence_predicate(context),
+                        )
+                        .join(ScheduledTaskRow, ScheduledTaskRow.id == ScheduledTaskRunRow.task_id)
+                        .limit(1)
+                    )
+                )
+            if not related:
+                raise WorkspaceAccessDenied("Scheduler task is outside its original conversation")
+            version = await session.scalar(select(UserRow.token_version).where(UserRow.id == user_id))
+            if version != expected_token_version:
+                raise WorkspaceAccessDenied("Scheduler original credential changed")
+            execution, _ = await self._run_repository._lock_worker_effect_after_parent(session, worker_target)
+            if execution.status != "running":
+                raise WorkspaceAccessDenied("Scheduler management requires its running native execution")
+        # This value was sampled before locks and proven under the sorted
+        # private-parent locks. Applying it is left to the caller after checks.
+        return task, active, (context, fixed_id, fixed_nonce)
+
+    async def _manage_resource_wait(self, task_id, *, user_id, error, now, delete_task, worker_target, expected_token_version):
+        async with self._sf() as session:
+            task, active, _ = await self._lock_management_resource(session, task_id, user_id, worker_target=worker_target, expected_token_version=expected_token_version)
+            if task is None:
+                return "not_found"
+            if active is not None and (
+                active.status != "queued" or active.run_id is not None or active.launch_accounted is not False or active.started_at is not None or active.lease_owner is not None or active.lease_expires_at is not None
+            ):
+                return "executing"
+            if task.status == "running":
+                return "executing"
+            if not delete_task and task.status in TERMINAL_TASK_STATUSES:
+                return "finished"
+            if active is not None:
+                active.status, active.error, active.finished_at = "interrupted", error, now
+                active.lease_owner, active.lease_expires_at = None, None
+            if delete_task:
+                await session.delete(task)
+            else:
+                task.status, task.updated_at = "paused", now
+                task.lease_owner, task.lease_expires_at = None, None
+            await session.commit()
+            return "deleted" if delete_task else "paused"
+
+    async def _update_resource(self, task_id, *, user_id, updates, worker_target, expected_token_version):
+        allowed = {"title", "prompt", "assistant_id", "context_mode", "thread_id", "schedule_type", "schedule_spec", "timezone", "goal_objective", "stop_condition", "max_runs", "end_at", "next_run_at", "status", "last_error"}
+        if not set(updates) <= allowed or ("status" in updates and updates["status"] != "enabled") or ("last_error" in updates and updates["last_error"] is not None):
+            raise WorkspaceAccessDenied("Scheduler updates cannot change execution authority or control receipts")
+        if updates.get("goal_objective") is not None:
+            normalize_goal_objective(updates["goal_objective"])
+        async with self._sf() as session:
+            task, active, identity = await self._lock_management_resource(session, task_id, user_id, updates=updates, worker_target=worker_target, expected_token_version=expected_token_version)
+            if task is None:
+                return None
+            context, fixed_id, fixed_nonce = identity
+            if active is not None or task.status == "running":
+                raise ActiveScheduledTaskMutationConflict(active.status if active is not None else "running")
+            if updates.get("status") == "enabled" or set(updates) & {"schedule_type", "schedule_spec", "timezone", "next_run_at", "context_mode", "thread_id"}:
+                if not await session.scalar(select(live_task_predicate()).where(ScheduledTaskRow.id == task_id)):
+                    raise WorkspaceAccessDenied("Original task authority expired; create/copy a new task")
+            if updates.get("goal_objective", task.goal_objective) is not None and updates.get("context_mode", task.context_mode) != "fresh_thread_per_run":
+                raise ValueError("goal-backed schedules require fresh_thread_per_run")
+            reactivating = updates.get("status") == "enabled" and task.status != "enabled"
+            if reactivating and task.origin_thread_id is not None and task.status in TERMINAL_TASK_STATUSES:
+                await self._check_owner_quota(session, user_id)
+            moves_boundary = any(key in updates and updates[key] != getattr(task, key) for key in ("goal_objective", "prompt", "stop_condition"))
+            for key, value in updates.items():
+                setattr(task, key, _coerce_datetime(value) if key in _TIMESTAMP_KEYS else value)
+            if "context_mode" in updates or "thread_id" in updates:
+                task.thread_id, task.thread_incarnation = fixed_id, fixed_nonce
+            if moves_boundary:
+                task.unmet_streak_after_seq = task.last_occurrence_seq
+            if reactivating:
+                used = int(
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(ScheduledTaskRunRow)
+                        .join(ScheduledTaskRow, ScheduledTaskRow.id == ScheduledTaskRunRow.task_id)
+                        .where(
+                            ScheduledTaskRunRow.task_id == task_id,
+                            resource_occurrence_predicate(context),
+                            ScheduledTaskRunRow.trigger == "scheduled",
+                            ScheduledTaskRunRow.launch_accounted.is_(True),
+                        )
+                    )
+                    or 0
+                )
+                if (task.end_at is not None and utc(task.end_at) <= datetime.now(UTC)) or (task.max_runs is not None and used >= task.max_runs):
+                    limit = "end_at" if task.end_at is not None and utc(task.end_at) <= datetime.now(UTC) else "max_runs"
+                    raise ScheduledTaskLimitsExhausted(limit=limit, used=used, max_runs=task.max_runs, end_at=coerce_iso(utc(task.end_at)) if task.end_at is not None else None)
+                if is_host_pause_marker(task.last_error):
+                    task.last_error = None
+            task.updated_at = datetime.now(UTC)
+            await session.commit()
+            await session.refresh(task)
+            return self._row_to_dict(task)
+
     async def pause_with_queue_cancellation(
         self,
         task_id: str,
@@ -336,6 +489,8 @@ class ScheduledTaskRepository:
         user_id: str,
         error: str,
         now: datetime,
+        worker_target: NativeRunStopTarget | None = None,
+        expected_token_version: int | None = None,
     ) -> str:
         """Pause a task and cancel its waiting occurrence in one transaction.
 
@@ -343,8 +498,8 @@ class ScheduledTaskRepository:
         launching or running) or ``"finished"`` (a completed, failed or
         cancelled task has no schedule left to pause; Resume reactivates it).
         """
-        if self.workspace_scope_required or get_current_workspace() is not None:
-            raise WorkspaceAccessDenied("Scoped Scheduler management requires current private-resource integration")
+        if self.workspace_scope_required or get_current_workspace() is not None or worker_target is not None or expected_token_version is not None:
+            return await self._manage_resource_wait(task_id, user_id=user_id, error=error, now=now, delete_task=False, worker_target=worker_target, expected_token_version=expected_token_version)
         async with self._sf() as session:
             task = await self._lock_task(session, task_id)
             if task is None or task.user_id != user_id:
@@ -392,10 +547,12 @@ class ScheduledTaskRepository:
         user_id: str,
         error: str,
         now: datetime,
+        worker_target: NativeRunStopTarget | None = None,
+        expected_token_version: int | None = None,
     ) -> str:
         """Delete a task only before queue execution begins."""
-        if self.workspace_scope_required or get_current_workspace() is not None:
-            raise WorkspaceAccessDenied("Scoped Scheduler management requires current private-resource integration")
+        if self.workspace_scope_required or get_current_workspace() is not None or worker_target is not None or expected_token_version is not None:
+            return await self._manage_resource_wait(task_id, user_id=user_id, error=error, now=now, delete_task=True, worker_target=worker_target, expected_token_version=expected_token_version)
         async with self._sf() as session:
             task = await self._lock_task(session, task_id)
             if task is None or task.user_id != user_id:
@@ -437,9 +594,11 @@ class ScheduledTaskRepository:
         user_id: str,
         updates: dict[str, Any],
         require_mutable: bool = False,
+        worker_target: NativeRunStopTarget | None = None,
+        expected_token_version: int | None = None,
     ) -> dict[str, Any] | None:
-        if self.workspace_scope_required or get_current_workspace() is not None:
-            raise WorkspaceAccessDenied("Scoped Scheduler management requires current private-resource integration")
+        if self.workspace_scope_required or get_current_workspace() is not None or worker_target is not None or expected_token_version is not None:
+            return await self._update_resource(task_id, user_id=user_id, updates=updates, worker_target=worker_target, expected_token_version=expected_token_version)
         if updates.get("goal_objective") is not None:
             normalize_goal_objective(updates["goal_objective"])
         async with self._sf() as session:

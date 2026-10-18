@@ -1,0 +1,74 @@
+{
+  "build": 146,
+  "queue": 1098,
+  "phase": "m4-native-scheduler-management-green-20261018-34",
+  "result": "SUCCESS",
+  "duration_ms": 48009,
+  "pytest": "2 passed in 25.21s",
+  "ruff": "All checks passed; 67 files already formatted",
+  "source_sha256": "4a3b7f9c02c2473fa2852124e3b5c9d668506407a43157a570325e69fca1d8b0",
+  "pipeline_sha256": "b10256db8f06bd605370c69d7d1cf245fdfc8fcb7661f5e25bc43bb20ecde4bc",
+  "source_archive_exact_match": {
+    "backend/packages/harness/deerflow/persistence/scheduled_task_runs/scope.py": "3ecdb978db34209d3d0fee746fefccfb000daf5286fa0c96ceb448af69289fd1",
+    "backend/packages/harness/deerflow/persistence/scheduled_tasks/sql.py": "bb691ad8678f2bfbc217300c578a22ae7b4f0b94cb65d8aa944abdff77e85892",
+    "backend/app/gateway/scheduled_task_access.py": "732b15cc55855380fe4d643424488c369a8eac656aac80ad6154d11d48632dfa",
+    "backend/app/gateway/routers/scheduled_tasks.py": "d1fd73afa304b5cef61d774e1e1346abef3fa0c26d845edf640abe94eef45e5f",
+    "backend/tests/test_workspace_native_scheduler.py": "59416fd493270b8b25fc872712c70008dde22914954495b0e35791dce2da41e1",
+    "scripts/render_tenant_run_control_pipeline.py": "229538a1873f64b3bc76b96f3b5aae15141eaa5b3905f624c5ec1125ba7b51c3"
+  },
+  "approved_patch_sha256": "fefd4d5306f7e4318559a6ff217d3ca7a1d29aaffd9e713039fb3d5b93aedcb5",
+  "log_path": "/private/tmp/m4-native-scheduler-management-green-20261018-34.log",
+  "log_sha256": "4a2a6817e78a9823ff08193234b6991da4e65a491240f04c3e2d12cb8b4ed9b8",
+  "cleanup_path": "/private/tmp/native-scheduler-management-build146-cleanup.json",
+  "scope": "Two PostgreSQL actual HTTP and remote ToolNode create/update/queue/pause/resume/new-due-queue/delete stories. Deterministic business scheduling clock only (not native lease/STOP clock). Old queue remains interrupted, new occurrence distinct seq2, original task snapshot not renewed, no native Run-ID increment, source reservation1 before no-sandbox STOP/report and0 after. No note/manual/own-stop/IM or adversarial boundaries claimed.",
+  "job": "deerflow-tenant-execution-m4-sql",
+  "cleanup": {
+    "build": 146,
+    "read_only": true,
+    "cleanup": [
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-146",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-146"
+      },
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-146-db",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-146-db"
+      },
+      {
+        "kind": "network",
+        "name": "deerflow-tenant-execution-m4-sql-146",
+        "exit": 1,
+        "stderr": "Error response from daemon: network deerflow-tenant-execution-m4-sql-146 not found"
+      }
+    ]
+  },
+  "root_review": "Root reviewed full four-file product patch, corrected factory decorator invocation before apply, independently read live Jenkins terminal and byte-matched all six files against SHA-verified successful source archive.",
+  "history": [
+    {
+      "build": 145,
+      "queue": 1096,
+      "phase": "m4-native-scheduler-management-red-20261018-33",
+      "result": "FAILURE",
+      "duration_ms": 39975,
+      "pytest": "2 failed in 22.32s",
+      "first_errors": [
+        "HTTP actual create passed; PATCH with UIother/headeroriginal returns404 task_not_found because route lacks scope wrapper.",
+        "Remote actual create passed; actual update ToolNode returns503 scheduler_scoped_management_unavailable. Subsequent lifecycle assertions not reached."
+      ],
+      "source_sha256": "7a395de69c285a58fd773b12f1288214f8965387d68ca8ed2c8c9eb5762ef255",
+      "pipeline_sha256": "82be42ecb590fdb7ae78c778a2d3a2bbca18705d8aa433fe3e4d0470eca60ce9",
+      "log_path": "/private/tmp/m4-native-scheduler-management-red-20261018-33.log",
+      "log_sha256": "f50212167d22d4caf24e2366120a642bb0267fecda10a0096428dd092dc7142a",
+      "cleanup_path": "/private/tmp/native-scheduler-management-build145-cleanup.json"
+    }
+  ],
+  "limits": [
+    "Two normal business mains only; unknown queued accounting and stale original snapshot management boundaries follow separately.",
+    "Business scheduling time is controlled; native SQL/worker lease/STOP clock is unchanged. No second scheduled native Run or physical sandbox/provider API.",
+    "note/manual/own-stop, other Run entry variants, installed dependencies/IM/recovery, physical B/two-host and full M0-M11 remain required. Tenant activation false."
+  ]
+}
