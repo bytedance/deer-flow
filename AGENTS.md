@@ -215,8 +215,10 @@ Repo-wide conventions:
 - **Before pushing** — backend `make format`, frontend `pnpm check`.
   Backend CI enforces `ruff format --check`.
 - **Skill text encoding** — treat `SKILL.md` and other textual skill resources as UTF-8;
-  Python utilities that read or write them must pass `encoding="utf-8"` rather than
-  relying on the platform locale.
+  Python utilities that read or write them must pass an explicit encoding rather than
+  relying on the platform locale. Reads of `SKILL.md` itself use `encoding="utf-8-sig"`,
+  so a BOM written by a Windows editor never becomes the first character of the content;
+  writes stay `encoding="utf-8"`.
 - **Version sources must stay in lockstep** — a release version must match identically in
   `backend/pyproject.toml`, `frontend/package.json`, and `deploy/helm/deer-flow/Chart.yaml`
   (`version` + `appVersion`), and `backend/uv.lock` must record the same version for the root
