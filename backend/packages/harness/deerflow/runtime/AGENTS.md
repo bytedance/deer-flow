@@ -97,6 +97,16 @@ from `on_llm_end` before inspecting the response or touching any run state.
 **Skill history:** `record_skill_usage` saves lead-run snapshots on terminal
 answers for paginated history. See `docs/skill-usage-ui.md`.
 
+**Checkpoint retention:** The Gateway-owned completion hook invokes
+the bounded trailing-duration retention helper after a successful run's duration-only metadata
+checkpoint and before the worker drops its finalizing fence. It holds both the
+durable `checkpoint_write` reservation and the process-local
+`_checkpoint_thread_lock`, and allows one contract-proven duration leaf per
+completion. Retention is fail-open and the scheduler completion observer still
+runs if the pass fails; it never changes run status or deletes resumable
+ancestors. History reads may recreate the fast-path duration leaf after a later
+read, so this hook is a bounded hygiene pass rather than an unbounded sweep.
+
 **Run delivery receipts:** Finalize artifact evidence and terminal status before clearing an ordinary satisfied goal, under a checkpoint-write reservation. Delivery failure retains the goal without continuing. Only that clear writes `goal_outcome`; other goal writes remove it. Historical replay keeps the current goal and budget, and drops the old outcome. Scheduled exception below; details: `backend/docs/runtime-guidance-details.md`.
 
 **Deferred terminal commit:** With an event store, the worker stages its terminal

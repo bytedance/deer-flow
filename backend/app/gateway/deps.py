@@ -29,6 +29,7 @@ from fastapi import FastAPI, HTTPException, Request
 from langgraph.types import Checkpointer
 
 from app.gateway.auth.errors import AuthErrorCode
+from app.gateway.run_completion import run_gateway_completion_hooks
 from deerflow.community.browser_automation.session import browser_multi_worker_error
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.channel_leader_lease_config import CHANNEL_LEADER_LEASE_FIELD, ChannelLeaderLeaseConfig, ChannelLeaderLeaseConfigError, channel_leader_lease_from_app_config
@@ -1130,9 +1131,24 @@ def get_run_context(request: Request) -> RunContext:
     host = getattr(request.app.state, "agent_runs_host", None)
     # Internal/channel and PAT runs deliberately receive no retained delegation.
     agent_runs = host.bind(request) if host is not None else None
+    scheduled_service = getattr(request.app.state, "scheduled_task_service", None)
+    checkpointer = get_checkpointer(request)
+    # Some embedded/test callers build a partial app state without a
+    # RunManager. The retention adapter falls back to its process-local lock in
+    # that mode; the production lifespan always installs the durable manager.
+    run_manager = getattr(request.app.state, "run_manager", None)
+
+    async def on_run_completed(record: Any) -> None:
+        await run_gateway_completion_hooks(
+            record,
+            checkpointer=checkpointer,
+            run_manager=run_manager,
+            scheduled_service=scheduled_service,
+        )
+
     return RunContext(
         agent_runs=agent_runs,
-        checkpointer=get_checkpointer(request),
+        checkpointer=checkpointer,
         store=get_store(request),
         event_store=get_run_event_store(request),
         run_events_config=getattr(request.app.state, "run_events_config", None),
@@ -1142,7 +1158,7 @@ def get_run_context(request: Request) -> RunContext:
         mcp_task_repo=getattr(request.app.state, "mcp_task_repo", None),
         app_config=get_config(),
         extensions=getattr(request.app.state, "extensions", None),
-        on_run_completed=getattr(request.app.state, "scheduled_task_service", None).handle_run_completion if getattr(request.app.state, "scheduled_task_service", None) is not None else None,
+        on_run_completed=on_run_completed,
     )
 
 

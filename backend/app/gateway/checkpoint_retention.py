@@ -23,10 +23,12 @@ by a deleted checkpoint in the same step (contract "deletion mechanics").
 Postgres ``checkpoint_blobs`` rows are keyed by ``version`` = the id of the
 checkpoint that wrote the blob, so the same join keys clean them.
 
-The service ships **without a production trigger**: where retention is
-invoked from (post-run hook vs scheduler vs explicit admin action) is a
-maintainer decision that lands with the contract itself. Measurement-first:
-reports carry before/after per-thread stats in the same normalized shape as
+The Gateway invokes the service from the run completion hook after the
+duration-only checkpoint is written and before the worker releases its
+same-thread finalizing fence. The hook uses a one-checkpoint budget and the
+shared checkpoint lock, so the pass is bounded and cannot classify a leaf
+concurrently with a successor run. Measurement-first: reports carry
+before/after per-thread stats in the same normalized shape as
 ``scripts/benchmark/checkpoint/bench_channels.py``.
 
 History fast-path interaction: the trailing duration-only leaf is also the
@@ -55,7 +57,7 @@ from app.gateway.checkpoint_lineage import (
     is_duration_only_checkpoint,
 )
 
-__all__ = ["RetentionPolicy", "RetentionReport", "enforce_thread_retention"]
+__all__ = ["RetentionPolicy", "RetentionReport", "enforce_thread_retention", "enforce_trailing_duration_retention"]
 
 
 @dataclass(frozen=True)
@@ -175,6 +177,46 @@ def _ensure_supported_saver(saver: BaseCheckpointSaver) -> None:
     if async_postgres_saver is not None and isinstance(saver, async_postgres_saver):
         return
     raise NotImplementedError(f"checkpoint retention supports InMemorySaver, AsyncSqliteSaver and AsyncPostgresSaver, got {type(saver).__module__}.{type(saver).__name__}")
+
+
+def _unwrap_cached_saver(saver: BaseCheckpointSaver) -> tuple[BaseCheckpointSaver, Any | None]:
+    """Return the canonical saver and an optional delta-history cache wrapper.
+
+    Delta mode always constructs ``CachedHistorySaver`` at the Gateway
+    boundary, even when the cache has zero entries. Retention operates on the
+    canonical checkpoint rows; the wrapper is retained only so its thread
+    cache can be purged after a row is removed.
+    """
+    try:
+        from deerflow.runtime.checkpointer.cached_saver import CachedHistorySaver
+    except Exception:
+        return saver, None
+
+    wrapper: Any | None = None
+    canonical = saver
+    while isinstance(canonical, CachedHistorySaver):
+        wrapper = canonical
+        canonical = canonical._inner
+    return canonical, wrapper
+
+
+async def _checkpoint_has_writes(saver: Any, key: tuple[str, str], thread_id: str) -> bool:
+    """Check one checkpoint's pending writes without scanning its thread."""
+    ns, cp_id = key
+    if isinstance(saver, InMemorySaver):
+        return bool(saver.writes.get((thread_id, ns, cp_id)))
+    if isinstance(saver, AsyncSqliteSaver):
+        async with saver.conn.execute(
+            "SELECT 1 FROM writes WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ? LIMIT 1",
+            (thread_id, ns, cp_id),
+        ) as cursor:
+            return await cursor.fetchone() is not None
+    async with saver._cursor() as cursor:
+        await cursor.execute(
+            "SELECT 1 FROM checkpoint_writes WHERE thread_id = %s AND checkpoint_ns = %s AND checkpoint_id = %s LIMIT 1",
+            (thread_id, ns, cp_id),
+        )
+        return await cursor.fetchone() is not None
 
 
 async def _thread_storage_stats(saver: Any, thread_id: str) -> dict[str, int]:
@@ -520,4 +562,77 @@ async def enforce_thread_retention(
 
         if collect_stats:
             report.stats_after = await _thread_storage_stats(saver, thread_id)
+        return report
+
+
+async def enforce_trailing_duration_retention(
+    saver: BaseCheckpointSaver,
+    thread_id: str,
+    *,
+    thread_lock: AbstractAsyncContextManager[None] | None = None,
+) -> RetentionReport:
+    """Prune at most the current root duration leaf with bounded I/O.
+
+    Run completion is a latency-sensitive path. The full retention service is
+    intentionally exhaustive because it reports per-thread statistics and
+    protects every namespace and ancestor. This hook only needs the one leaf
+    just written by the completed run, so it reads the root head and its parent
+    directly, checks that one row for pending writes, and performs no history
+    scan or statistics pass. The parent/version equality is the contract proof
+    that deleting the leaf cannot orphan a blob referenced by the resumable
+    parent. Cached delta-history entries are purged for the thread after the
+    source row is removed.
+    """
+    canonical, cache_wrapper = _unwrap_cached_saver(saver)
+    _ensure_supported_saver(canonical)
+    report = RetentionReport(thread_id=thread_id)
+    lock: AbstractAsyncContextManager[None] = thread_lock if thread_lock is not None else nullcontext()
+    async with lock:
+        latest = await canonical.aget_tuple(_thread_config(thread_id))
+        if latest is None:
+            return report
+        latest_config = checkpoint_configurable(latest)
+        latest_id = latest_config.get("checkpoint_id")
+        latest_ns = latest_config.get("checkpoint_ns") or ""
+        parent_config = getattr(latest, "parent_config", None)
+        parent_values = (parent_config or {}).get("configurable") if isinstance(parent_config, dict) else None
+        parent_id = parent_values.get("checkpoint_id") if isinstance(parent_values, dict) else None
+        parent_ns = (parent_values or {}).get("checkpoint_ns") or "" if isinstance(parent_values, dict) else ""
+        if not latest_id or not parent_id:
+            return report
+
+        parent = await canonical.aget_tuple(parent_config)
+        if parent is None:
+            return report
+        latest_node = _Node(
+            ns=latest_ns,
+            cp_id=latest_id,
+            parent_ns=parent_ns,
+            parent_id=parent_id,
+            duration_only=is_duration_only_checkpoint(latest, stamp_fallback=False),
+            metadata_source=(getattr(latest, "metadata", None) or {}).get("source"),
+            carries_run_durations=isinstance((getattr(latest, "metadata", None) or {}).get("run_durations"), dict),
+            versions=frozenset(((getattr(latest, "checkpoint", None) or {}).get("channel_versions") or {}).values()),
+        )
+        parent_node = _Node(
+            ns=parent_ns,
+            cp_id=parent_id,
+            parent_ns=None,
+            parent_id=None,
+            duration_only=is_duration_only_checkpoint(parent, stamp_fallback=False),
+            metadata_source=(getattr(parent, "metadata", None) or {}).get("source"),
+            carries_run_durations=isinstance((getattr(parent, "metadata", None) or {}).get("run_durations"), dict),
+            versions=frozenset(((getattr(parent, "checkpoint", None) or {}).get("channel_versions") or {}).values()),
+        )
+        _mark_duration_leaves_without_the_marker({(latest_ns, latest_id): latest_node, (parent_ns, parent_id): parent_node})
+        if not latest_node.duration_only or latest_node.versions != parent_node.versions:
+            return report
+        if await _checkpoint_has_writes(canonical, (latest_ns, latest_id), thread_id):
+            return report
+
+        await _delete_checkpoint_rows(canonical, thread_id, (latest_ns, latest_id))
+        report.protected_head_ids = {parent_ns: parent_id}
+        report.deleted_checkpoint_ids.append(latest_id)
+        if cache_wrapper is not None:
+            await cache_wrapper._apurge_thread(thread_id)
         return report

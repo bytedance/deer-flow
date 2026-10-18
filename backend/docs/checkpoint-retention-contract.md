@@ -1,9 +1,9 @@
 # Checkpoint Retention Contract (DRAFT)
 
-Status: **draft** — the deletion contract for #4189 item 3. No retention or
-deletion implementation should land before this contract (or a successor
-revision of it) is accepted, and every deletion proposal must be validated
-against `backend/tests/test_checkpoint_retention_contract.py`.
+Status: **draft** — the deletion contract for #4189 item 3. The storage
+service and its contract tests predate the production trigger; every future
+deletion shape must still be validated against
+`backend/tests/test_checkpoint_retention_contract.py`.
 
 ## Why a contract is needed
 
@@ -131,6 +131,45 @@ Without either, E1 pruning and history reads churn against each other. This
 decision belongs to the wiring PR, not to the storage-level service: the
 service cannot tell a cache-carrying leaf from a payload-free one on the
 alist path without re-implementing the writer's merge semantics.
+
+## Production completion hook
+
+The Gateway wires the bounded trailing-leaf helper through the existing
+optional `RunContext.on_run_completed` callback. The worker invokes that
+callback only after a successful run has written its duration metadata and
+while the same-thread finalizing fence is still held. The Gateway adapter then:
+
+1. reserves a durable `checkpoint_write` thread operation, so another Gateway
+   worker cannot admit a competing run or checkpoint mutation while the pass
+   is in flight;
+2. acquires `_checkpoint_thread_lock(thread_id)`, the same keyed lock used by
+   the duration writer and history migration;
+3. reads only the root head, its parent, and the head's pending-write row;
+4. removes at most the one contract-proven trailing duration leaf and purges
+   any `CachedHistorySaver` entries for that thread;
+5. logs the report when a leaf is removed; and
+6. invokes the scheduler completion observer regardless of whether retention
+   succeeded.
+
+The one-row budget is intentional. A successful run writes at most one new
+duration-only leaf, while an older backlog may have accumulated during an
+outage or an embedded caller that did not install the Gateway hook. A later
+successful run can make bounded progress without turning finalization into an
+unbounded sweep. The completion path does not collect storage statistics or
+walk the historical checkpoint list; the exhaustive service remains available
+for off-path maintenance and measurement. The durable reservation prevents a successor run from
+forking from a row after classification but before deletion; the
+process-local lock additionally serializes same-worker history and duration
+writers. If another operation has already won admission, the hook leaves the
+leaf for a later completion rather than attempting an unsafe deletion.
+
+Retention is fail-open: unsupported savers, transient database errors, and
+schema mismatches are logged and leave the run outcome and scheduled-task
+completion unchanged. Embedded harness callers can omit the hook and retain
+the existing behavior. The hook does not run for interrupted, failed, or
+aborted records, because those paths do not create a successful duration
+checkpoint and must not be treated as an opportunity to rewrite lifecycle
+state.
 
 ## Item 4 note (large tool results)
 
