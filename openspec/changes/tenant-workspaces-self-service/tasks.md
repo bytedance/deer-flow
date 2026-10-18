@@ -1680,3 +1680,28 @@ queue. Next scoped queued maintenance/control-only NoStart, then claim/owned/v2
 launch with independent SQL authorization, adoption/context, recovery and physical
 C->B->C. All remaining domains and M0-M11 parents stay open; activation false,
 startup schema fence unchanged. No local runtime, model call, push or PR.
+
+
+## M4 C queue control checkpoint — 2026-10-18
+
+Shanghai Jenkins #96 reproduced missing workspace scope on dispatcher restart
+(two failures). #97 queue main passed two cases. #98 exposed scoped legacy
+terminal-update and missing NoStart settlement (four failed/four passed).
+#99 passed 20 focused tests in 49.50s and 35-file Ruff checks. Exact archive,
+source/log hashes and removed fixture-volume evidence: progress JSON
+`native_c_queue_control`; 38 source hashes match the working tree. No owned
+fixture containers/networks remain. No repeated 134-case regression.
+
+Control reads compare immutable C locators against canonical native SQL and
+return only control facts. Exact original pending ownership renews without an
+ambient member context. Revocation can settle NoStart only after ledger CAS
+confirms no assignment/attempt/generation/start; native Stop/lifetime/END use
+existing captured-target helpers. Legacy finish_dispatch_pending rejects scoped
+Runs. Assigned-work fixture retains its native lifetime and pending Stop;
+this is not physical STOP evidence. Acknowledged settlement replay is covered;
+lost-END acknowledgement on this new scoped path was not separately injected.
+
+Next: scoped claim/owned, independent v2 SQL authorization, receiver context and
+adoption, then physical C execution/recovery. Full M0–M11 remains open; activation
+false and startup schema fence unchanged. No deployment, push, model call or
+local application runtime.

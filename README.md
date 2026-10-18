@@ -3090,3 +3090,6 @@ immutable, and scope stripping cannot downgrade it to legacy execution.
 [Validation scope](docs/tenant-workspaces-testing.md) covers SQL staging and
 ownership transfer; remote claiming, recovery and complete tenant deployment
 remain pending.
+
+
+Tenant workspace development: queued remote-agent admissions now retain their original ownership after dispatcher restart. Revoked, never-assigned admissions can settle through native cancellation; assigned work still requires confirmed stopping. Remote tenant execution and self-service rollout remain under development and disabled.

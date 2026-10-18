@@ -373,3 +373,6 @@ native lifetime; no member grant is reused and an open lifetime never qualifies.
 The bridge delay occurs outside SQL; Run identity/creation/owner and durable
 receipt are rechecked after the delay. This does not acknowledge physical C STOP
 or permit deletion of a foreign lane.
+
+
+inspect_dispatch_control compares all original C bindings against canonical native SQL and returns control facts only, without payload/result reads or a member grant. renew_lease dispatch_target fences the exact pending target. finish_dispatch_pending is unscoped compatibility only; scoped NoStart uses confirm_workspace_run_stop.

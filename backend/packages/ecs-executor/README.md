@@ -736,7 +736,8 @@ legacy B identity hashing remains unchanged. Native reads/ownership CAS still
 reauthorize; snapshot JSON alone never grants execution.
 
 Shanghai SQL #95 verifies thirteen focused checks and thirty-five-file Ruff.
-This is staging/handoff only: queued lease maintenance/NoStart/refusal settlement,
+Queued restart/lease and pre-assignment NoStart control now pass Shanghai #99
+(20 focused cases). Refusal recovery,
 scoped pool claim/owned, independent v2 launch verification, receiver RunContext,
 recovery and physical C->B->C remain pending. Default pool claims still refuse
 scoped C, and tenant activation remains closed. See the current

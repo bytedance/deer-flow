@@ -504,11 +504,13 @@ class RunRepository(RunStore):
     async def finish_dispatch_pending(self, run_id: str, *, owner_worker_id: str, error: str | None = None) -> bool:
         """Terminalize a queued dispatch admission only before worker adoption.
 
-        The dispatch host must first fence its job against claim/start. The
-        pending owner CAS makes adoption and this terminal commit exclusive.
+        Unscoped compatibility only. Scoped consumers require captured native
+        NoStart control, not this payload-bearing terminal update. The dispatch
+        host must first fence its job against claim/start; pending owner CAS
+        makes adoption and this terminal commit exclusive.
         """
         async with self._sf() as session:
-            conditions = [RunRow.run_id == run_id, RunRow.owner_worker_id == owner_worker_id, RunRow.status == "pending"]
+            conditions = [RunRow.run_id == run_id, RunRow.workspace_id.is_(None), RunRow.owner_worker_id == owner_worker_id, RunRow.status == "pending"]
             if error is None:
                 conditions.append(RunRow.cancel_action.is_not(None))
             else:
@@ -871,7 +873,76 @@ class RunRepository(RunStore):
             await session.commit()
             return result.rowcount != 0
 
-    async def renew_lease(self, run_id: str, *, owner_worker_id: str, lease_expires_at: str) -> LeaseRenewal:
+    async def inspect_dispatch_control(self, *, identity, owner_worker_id):
+        """Inspect an exact durable dispatch target without a member data grant.
+
+        Locators are expectations from the immutable C ledger. Resolve the
+        captured context from native SQL, compare EVERY original binding, and
+        return control facts only; no kwargs, metadata, results or model data.
+        """
+        columns = (
+            RunRow.run_id,
+            RunRow.user_id,
+            RunRow.workspace_id,
+            RunRow.thread_id,
+            RunRow.thread_incarnation,
+            RunRow.owner_worker_id,
+            RunRow.created_at,
+            RunRow.workspace_context_json,
+            RunRow.status,
+            RunRow.cancel_action,
+            RunRow.lease_expires_at,
+            RunRow.operation_kind,
+        )
+        async with self._sf() as session:
+            row = (await session.execute(select(*columns).where(RunRow.run_id == identity.get("run_id"), RunRow.owner_worker_id == owner_worker_id))).first()
+            try:
+                if row is None or row.operation_kind != "run":
+                    return None
+                target = NativeRunStopTarget.from_row(row)
+                expected = {
+                    "run_id": target.run_id,
+                    "user_id": target.user_id,
+                    "workspace_id": target.workspace_id,
+                    "thread_id": target.thread_id,
+                    "incarnation": target.thread_incarnation,
+                    "workspace_context": target.as_payload()["workspace_context"],
+                    "created_at": target.created_at,
+                }
+                if identity != expected:
+                    return None
+                lifetime = await execution_lifetime(session, target, open_only=False)
+            except ValueError:
+                return None
+            live = await session.scalar(
+                ThreadMetaRepository._owned_scope(select(ThreadMetaRow.thread_id).where(ThreadMetaRow.thread_id == target.thread_id, ThreadMetaRow.incarnation == target.thread_incarnation), target.user_id, target.workspace_context)
+            )
+            from deerflow.persistence.workspaces.model import WorkspaceOperationOutboxRow
+
+            stop = await session.get(WorkspaceOperationOutboxRow, target.operation_id)
+            stop_recorded = (
+                stop is not None
+                and stop.kind == "run_stop"
+                and stop.workspace_id == target.workspace_id
+                and stop.user_id == target.user_id
+                and stop.state in ("pending", "completed")
+                and isinstance(stop.payload, dict)
+                and stop.payload.get("target") == target.as_payload()
+            )
+            deadline = row.lease_expires_at
+            if deadline is not None and deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=UTC)
+            return {
+                "target": target,
+                "status": row.status,
+                "cancel_action": row.cancel_action,
+                "live": bool(live),
+                "stop_recorded": stop_recorded,
+                "lifetime_completed": lifetime.state == "completed",
+                "lease_active": deadline is not None and deadline > datetime.now(UTC),
+            }
+
+    async def renew_lease(self, run_id: str, *, owner_worker_id: str, lease_expires_at: str, dispatch_target: NativeRunStopTarget | None = None) -> LeaseRenewal:
         lease_dt = datetime.fromisoformat(lease_expires_at)
         now = datetime.now(UTC)
         async with self._sf() as session:
@@ -880,6 +951,12 @@ class RunRepository(RunStore):
             row = await session.scalar(select(RunRow).where(RunRow.run_id == run_id).with_for_update())
             if row is None or row.owner_worker_id != owner_worker_id:
                 return LeaseRenewal(renewed=False)
+            if dispatch_target is not None:
+                try:
+                    if type(dispatch_target) is not NativeRunStopTarget or NativeRunStopTarget.from_row(row) != dispatch_target or row.status != "pending":
+                        return LeaseRenewal(renewed=False)
+                except ValueError:
+                    return LeaseRenewal(renewed=False)
             if row.workspace_id is not None:
                 try:
                     await execution_lifetime(session, NativeRunStopTarget.from_row(row))

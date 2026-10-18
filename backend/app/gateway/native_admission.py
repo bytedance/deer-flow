@@ -111,7 +111,9 @@ async def make_native_snapshot(request, record, *, run_ctx, body, config, graph_
             context = record.workspace_context
             if run_ctx.workspace_context != context or metadata.get("workspace_id") != context.workspace_id or metadata.get("user_id") != record.user_id or metadata["incarnation"] != record.thread_incarnation:
                 raise RunStartupError("Remote native snapshot differs from its captured admission")
-            snapshot.update(workspace_id=context.workspace_id, workspace_context=asdict(context))
+            from deerflow.persistence.workspaces.run_control import NativeRunStopTarget
+
+            snapshot.update(workspace_id=context.workspace_id, workspace_context=asdict(context), created_at=NativeRunStopTarget.from_record(record).created_at)
 
         if transport_secret is not None:
             from ecs_executor.agent_dispatch import seal_native_secrets

@@ -240,6 +240,8 @@ class NativeDispatchHost:
         raise RuntimeError("Native refusal commit unconfirmed")
 
     async def settle_queued_cancel(self, job):
+        if job.get("workspace_id") is not None:
+            return await self.maintain_scoped(job)
         if job.get("settlement_kind") == "refusal":
             return await self.settle_refusal(job)
         if job.get("start_intent") or job["state"] != "cancelled":
@@ -261,6 +263,80 @@ class NativeDispatchHost:
                 raise RuntimeError("Queued native cancellation commit unconfirmed")
         await asyncio.to_thread(self.pool.store.mutate, job["id"], lambda value: value.update(settlement_pending=False))
 
+    @staticmethod
+    def _no_native_assignment(job):
+        start = job.get("start_intent")
+        attempt = job.get("attempt")
+        return (start is None or start is False) and (attempt is None or (type(attempt) is int and attempt == 0)) and all(job.get(key) is None for key in ("node_id", "worker_owner", "generation"))
+
+    async def settle_scoped_no_start(self, job, control):
+        """Consume a durable pre-assignment CAS; never infer physical STOP."""
+        target = control["target"]
+        if (
+            not control["stop_recorded"]
+            or not self._no_native_assignment(job)
+            or job.get("settlement_kind") != "scoped_no_start"
+            or job.get("scoped_no_start_target") != target.as_payload()
+            or job["state"] != "cancelled"
+            or job.get("physical_stopped") is not True
+        ):
+            return
+        store = self.app.state.run_store
+        if not await store.confirm_workspace_run_stop(target, evidence="native_not_started"):
+            return
+        from deerflow.persistence.workspaces.run_control import signal_owned_stream_end
+
+        if not await signal_owned_stream_end(store._sf, target, signal=lambda: self.app.state.stream_bridge.publish_end(target.run_id), closed_only=True):
+            return
+
+        def acknowledge(value):
+            if (
+                not self._no_native_assignment(value)
+                or value.get("settlement_kind") != "scoped_no_start"
+                or value.get("scoped_no_start_target") != target.as_payload()
+                or value["state"] != "cancelled"
+                or value.get("physical_stopped") is not True
+            ):
+                raise RuntimeError("Native NoStart settlement identity changed")
+            value["settlement_pending"] = False
+
+        await asyncio.to_thread(self.pool.store.mutate, job["id"], acknowledge)
+
+    async def maintain_scoped(self, job):
+        """Renew only original queued native ownership; never grant execution."""
+        store = self.app.state.run_store
+        inspect = getattr(store, "inspect_dispatch_control", None)
+        if inspect is None:
+            raise RuntimeError("Scoped native dispatch requires native control storage")
+        native = job["native"]
+        identity = {key: native.get(key) for key in ("run_id", "user_id", "workspace_id", "thread_id", "incarnation", "workspace_context", "created_at")}
+        owner = "dispatch:" + job["id"]
+        control = await inspect(identity=identity, owner_worker_id=owner)
+        if control is None:
+            return
+        if job.get("settlement_kind") == "scoped_no_start":
+            return await self.settle_scoped_no_start(job, control)
+        if control["lifetime_completed"] or control["status"] != "pending" or not control["lease_active"]:
+            return
+        renewal = await store.renew_lease(native["run_id"], owner_worker_id=owner, lease_expires_at=(datetime.now(UTC) + timedelta(seconds=120)).isoformat(), dispatch_target=control["target"])
+        if not renewal.renewed:
+            return
+        if not control["live"] or control["stop_recorded"] or renewal.cancel_action or renewal.workspace_stop_requested:
+            # Serialize this NoStart proof against the same ledger CAS used by
+            # assignment. Once an assignment/generation exists, retain unknown
+            # physical work and never close native lifetime from start_intent.
+            def stop(value):
+                value["cancel_requested"] = True
+                if control["stop_recorded"] and value["state"] in ("staged", "queued") and value.get("physical_stopped") is False and self._no_native_assignment(value):
+                    value.update(state="cancelled", physical_stopped=True, settlement_pending=True, settlement_kind="scoped_no_start", scoped_no_start_target=control["target"].as_payload())
+
+            stopped = await asyncio.to_thread(self.pool.store.mutate, job["id"], stop)
+            if stopped.get("settlement_kind") == "scoped_no_start":
+                await self.settle_scoped_no_start(stopped, control)
+            return
+        if job["state"] == "staged":
+            await asyncio.to_thread(self.pool.store.mutate, job["id"], lambda value: value.update(state="queued") if value["state"] == "staged" and not value.get("start_intent") and not value.get("cancel_requested") else None)
+
     async def maintain(self):
         from ecs_executor.dependencies import maintain_waits
 
@@ -277,6 +353,12 @@ class NativeDispatchHost:
         jobs = await asyncio.to_thread(self.pool.store.list_active, kind="C")
         for job in jobs:
             if job.get("kind") != "C":
+                continue
+            if job.get("workspace_id") is not None:
+                try:
+                    await self.maintain_scoped(job)
+                except Exception:
+                    logger.warning("Scoped native queue maintenance remains unconfirmed")
                 continue
             native = job["native"]
             row = await store.get(native["run_id"], user_id=native["user_id"])

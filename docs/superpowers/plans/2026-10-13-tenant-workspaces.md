@@ -898,3 +898,14 @@ will run with its runtime dependencies, not replace them with fake success.
 Also retain the release audit item: startup.py currently expects 0037 while the
 read-clock migration head is 0038; align the candidate's schema fence and paired
 release evidence before activation, rather than opening the current guard.
+
+
+### M4 step 21 — scoped C queue control
+
+- [x] Original-owner pending renewal after dispatcher restart without ambient member context.
+- [x] Canonical native control read and pre-assignment CAS NoStart settlement.
+- [x] Scoped legacy-finisher refusal and assigned-work retention; Shanghai #99 20 passed.
+- [ ] Scoped claim/receiver/adoption and physical remote C execution remain next.
+
+Evidence: `docs/tenant-workspaces-progress.json` → `native_c_queue_control`.
+Full M4 and M0–M11 are not complete.

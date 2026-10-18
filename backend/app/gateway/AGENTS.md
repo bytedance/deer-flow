@@ -554,3 +554,6 @@ workspace/context and checks the RunContext and actual parent incarnation. C
 ledger/affinity capture is verified (#95), while scoped queued maintenance,
 independent v2 launch verification, remote adoption/context and recovery remain
 unintegrated. Do not enable the tenant startup or default pool claim fences.
+
+
+Scoped native C snapshots include canonical created_at for exact control binding. Queued recovery uses native control-only inspection and pre-assignment ledger CAS; it does not authorize worker launch. Tenant activation remains closed.
