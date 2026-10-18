@@ -743,7 +743,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         # is skipped or summary generation fails.
         messages = [message for message in messages if not (isinstance(message, HumanMessage) and message.name == TODO_REMINDER_MESSAGE_NAME)]
 
-        cutoff_index = self._determine_cutoff_index(messages)
+        cutoff_index = self._determine_cutoff_index(project_upload_contexts(messages))
         if cutoff_index <= 0:
             return None
 

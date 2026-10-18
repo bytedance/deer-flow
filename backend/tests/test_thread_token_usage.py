@@ -180,3 +180,25 @@ async def test_build_context_usage_returns_none_when_checkpoint_read_fails(monke
     )
 
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_build_context_usage_includes_structured_upload_descriptions(monkeypatch: pytest.MonkeyPatch) -> None:
+    from copy import deepcopy
+
+    from langchain_core.messages import HumanMessage
+    from langchain_core.messages.utils import count_tokens_approximately
+
+    description = "Document outline: " + "section " * 800
+    messages = [HumanMessage(id="upload", content="Read this", additional_kwargs={"deerflow_upload_context": {"version": 1, "text": description}})]
+    saved = deepcopy(messages)
+    accessor = SimpleNamespace(aget=AsyncMock(return_value=SimpleNamespace(values={"messages": messages})))
+    monkeypatch.setattr(context_usage, "build_thread_checkpoint_state_accessor", AsyncMock(return_value=(accessor, {"configurable": {"thread_id": "thread-1"}})))
+    monkeypatch.setattr(context_usage, "get_config", lambda: SimpleNamespace(models=[SimpleNamespace(name="model")], get_model_config=lambda name: SimpleNamespace(context_window=10_000)))
+    expected = int(count_tokens_approximately([HumanMessage(content=f"{description}\n\nRead this")]))
+    assert expected > 200
+
+    result = await context_usage.build_context_usage(request=SimpleNamespace(app=SimpleNamespace()), thread_id="thread-1", run_store=_make_run_store())
+
+    assert result == {"token_count": expected, "max_context_tokens": 10_000, "percentage": round(expected / 10_000 * 100, 1)}
+    assert messages == saved

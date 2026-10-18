@@ -41,9 +41,11 @@ does not guess how to recover user text from transport framing. A guardrail
 exception retains the existing fail-open behavior and still projects the
 independently captured file descriptions.
 
-Summary token counting and rolling summary source preparation project the same
-context before applying source budgets. Parent conversation snapshots include it
-as inert historical data, not child system instructions. Memory admission removes
+Summary triggers, token/fraction retention and the context-usage estimate count
+the projected context; partitioning still retains the original stored messages.
+Rolling summary source preparation projects it before applying source budgets.
+Parent conversation snapshots include it as inert historical data, not child
+system instructions. Memory admission removes
 the context metadata; file outlines are not durable user memory.
 
 ## Display and compatibility

@@ -258,6 +258,34 @@ def test_memory_payload_excludes_file_context_even_with_redaction_disabled(tmp_p
     assert UPLOAD_CONTEXT_KEY in state["messages"][0].additional_kwargs
 
 
+@pytest.mark.parametrize("keep", [("tokens", 100), ("fraction", 0.01)])
+def test_token_retention_compacts_structured_uploads_without_projecting_state(keep):
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+    from langchain_core.messages.utils import count_tokens_approximately
+
+    from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
+
+    messages = [
+        HumanMessage(id="upload", content="Read this", additional_kwargs={UPLOAD_CONTEXT_KEY: {"version": 1, "text": "Document outline: " + "section " * 800}}),
+        AIMessage(id="old-answer", content="Read"),
+        HumanMessage(id="current", content="Continue"),
+        AIMessage(id="current-answer", content="Done"),
+    ]
+    saved = deepcopy(messages)
+    model = FakeMessagesListChatModel(responses=[AIMessage(content="Remembered document")], profile={"max_input_tokens": 10_000})
+    middleware = DeerFlowSummarizationMiddleware(model=model, trigger=("tokens", 200), keep=keep, token_counter=count_tokens_approximately)
+    assert count_tokens_approximately(messages) < 100
+
+    result = middleware.before_model({"messages": messages}, SimpleNamespace(context={"thread_id": "thread"}))
+
+    assert result is not None
+    assert result["summary_text"] == "Remembered document"
+    assert "upload" not in [message.id for message in result["messages"]]
+    assert "current" in [message.id for message in result["messages"]]
+    assert messages == saved
+
+
 @pytest.mark.parametrize("as_message", [False, True])
 def test_gateway_normalization_strips_forged_context_but_keeps_files(as_message):
     from app.gateway.services import _normalize_input_messages

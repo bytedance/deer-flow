@@ -3446,7 +3446,8 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deve
 
 New upload turns keep the user's message separate from server-generated file
 context. Models, conversation summaries and delegated agents still receive the
-validated file descriptions, while chat, copy and export preserve the original
+validated file descriptions, included in context budgets and usage estimates,
+while chat, copy and export preserve the original
 user text, including literal tag examples. Existing inline-upload history remains
 readable. See the [upload context contract](docs/upload-context.md) for storage,
 compatibility and integration details.
