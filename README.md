@@ -3069,3 +3069,10 @@ actual work until native cleanup; goal evaluation preserves permission refusal
 and stop signals. [Validation scope](docs/tenant-workspaces-testing.md) covers
 deterministic provider threads, with tool effects and arbitrary external model
 transports still pending. Multi-tenant deployment remains disabled.
+
+
+Scoped native sandbox tools recheck execution authority after readiness and before
+synchronous dispatch. Read-before-write checks preserve native stop signals, so
+a revoked waiting report write is refused. [Verification scope](docs/tenant-workspaces-testing.md)
+records actual file/lease and shared Agent-chain checks. Cache identity, external
+effects and full tenant activation remain pending.

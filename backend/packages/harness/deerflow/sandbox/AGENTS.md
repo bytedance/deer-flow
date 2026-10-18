@@ -119,3 +119,14 @@ symlinks, and visible depth/size bounds.
 - `read_file` - Read file contents with optional line range; full reads keep stored line endings (Local `read_file`/`grep` read `newline="\n"`, writes `newline=""`), ranged reads join with `\n`
 - `write_file` - Write/append to files, creates directories; overwrites by default and exposes the `append` argument in the model-facing schema for end-of-file writes; subject to the read-before-write gate when `read_before_write.enabled` (see Middleware Chain)
 - `str_replace` - Substring replacement (single or all occurrences); `_match_line_endings` gives `old_str`/`new_str` a CRLF file's endings; same-path serialization is scoped to `(sandbox.id, path)` so isolated sandboxes do not contend on identical virtual paths inside one process; subject to the read-before-write gate when `read_before_write.enabled` (see Middleware Chain)
+
+
+**Private native Run guard**: independently of the legacy single-decision sandbox
+authorization scope, tools recheck current execution authority before returning
+ready/reused sandboxes and after the sync executor queue before the body. Record
+sandbox_id before the ready guard so refusal can unwind an acquired native lease.
+Reuse run_sync_lifecycle_operation drain. GraphBubbleUp propagates before ordinary
+tool error normalization; read-before-write inspection/marks preserve it too.
+Actual SQL/Run/LocalSandbox write_file and full SDK chain verified (#88); provider
+workspace/incarnation caches, process/network effects and remote C remain open.
+No guard keeps legacy behavior; ambient workspace is not execution authority.

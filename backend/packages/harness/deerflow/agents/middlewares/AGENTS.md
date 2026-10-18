@@ -156,9 +156,9 @@ control path; it is not an ordinary error ToolMessage or retry prompt.
 
 Actual full native chain/Agent/report-file tests verify tool admission and the
 next model after legitimate work. Model-local callback/queue protection also
-covers independent factory model calls. Preserve system title/summary/goal
-fallback stop propagation and actual extension provider-task lifetimes as open
-integration work; admission is not physical isolation or rollback of prior IO.
+covers independent factory model calls. System title/summary/goal fallback STOP and named direct/extension provider-task
+lifetimes are now integrated and verified separately. Admission is not physical
+isolation or rollback of prior IO.
 
 Title async provider fallback and summary construction/sync/async provider fallback
 must rethrow GraphBubbleUp before generic Exception handling. Native STOP is not
@@ -170,3 +170,11 @@ before actual lifetime close. Sync/embedded and arbitrary provider streaming or
 transport internals are not granted equivalent cleanup proof. Tool wrapper
 currently rechecks admission only; actual tool effects need their own lifetime
 and publication protocol.
+
+
+ReadBeforeWriteMiddleware rethrows GraphBubbleUp alongside SandboxAuthorizationError
+in _check_write_gate and _attach_read_mark; only ordinary inspection errors retain
+the historical fail-open/skip-mark behavior. Native sandbox tools repeat private
+Run checks after readiness and before sync body dispatch, reusing native lease
+and drain. #88 verifies actual report writes/refusal and the complete SDK chain;
+cache identity and process/network/publication protocols remain separate work.

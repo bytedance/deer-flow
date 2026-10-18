@@ -1,5 +1,5 @@
-<!-- 当前状态：用户于 2026-10-17 明确暂停；参见文末 sandbox dispatch WIP 暂停检查点。 -->
-> **已暂停，不自动继续。** 本轮 WIP 已完成真实沙箱就绪/执行前权限保护及 read-before-write STOP 修复，上海 #87 定向 12 项与 30 文件 Ruff 通过。最后一轮回归在暂停前已提交（队列 976，预期 #88），结果未核验；暂停后的状态查询被自动审批拒绝，不得绕过。完整 M0–M11 仍保留，租户启动关闭。
+<!-- 当前状态：2026-10-18 用户恢复执行；历史暂停记录保留，参见文末最新检查点。 -->
+> **执行中，M4 部分完成。** 同一 Jenkins #88 已核验成功，134 项及 30 文件 Ruff 通过；下一步审计沙箱身份/缓存复用。完整 M0–M11 保留，租户启动关闭。
 
 # 2026-10-16 暂停与恢复检查点
 
@@ -899,3 +899,43 @@ M0–M11。LocalSandbox 测试不代表主机隔离或远端 C 停止；启动�
 
 详细代码哈希、构建状态和限制见 progress.json -> sandbox_dispatch_pause_checkpoint。
 本轮无新增表/部署/推送，没有本机应用、pytest、Docker Desktop 测试。
+
+
+## 2026-10-18 原生沙箱调用与写入前检查验收
+
+恢复后核验暂停前的同一 Jenkins #88，没有重启测试。`sandbox-final` 固定回归
+**134 passed in 250.07s**，30 文件 Ruff 检查/格式通过；当前 33 个相关源码文件
+与归档逐字节一致。上海专属 job：`deerflow-tenant-execution-m4-sql`。
+
+- #84 RED：2 failed / 2 passed（21.23s），实际就绪等待后撤权仍写出报告。
+- #85 主干：4 passed（20.84s），实际原生 owner 与租约释放断言通过。
+- #86 RED：2 failed / 6 passed（28.93s），写入前检查吞掉原生 STOP 并 fail-open。
+- #87 必要边界：12 passed（36.83s），包括完整 create_agent 共享 middleware。
+- #88 固定回归：沿用此前 114 项，加本轮 12 项及八项既有沙箱兼容检查。
+
+工具就绪/复用返回及同步线程执行前重新检查私有 Run guard；先记录 sandbox_id
+以允许拒绝时正确退还已有租约。复用原生 run_sync_lifecycle_operation 的 drain，
+没有新造执行器。工具错误归一化与 read-before-write 检查/读标记保留 GraphBubbleUp；
+旧 sandbox 授权 provider 的单次判断及普通写入保护不变。
+
+用例复用实际 SQL 成员版本、原生 Run、LocalSandbox、真实报告文件与原生租约。
+正常报告内容正确，撤权后文件不存在、停止未被转成普通工具错误、owner 无遗留。
+外层切换空间不会改变原 Run 捕获的身份。确定性模型只用于触发实际 SDK 工具链。
+
+复跑入口（仅上海；归档摘要需匹配本次源码）：
+
+```bash
+python scripts/render_tenant_run_control_pipeline.py sandbox-main <归档SHA256> --suite sandbox-main
+python scripts/render_tenant_run_control_pipeline.py sandbox-final <归档SHA256> --suite sandbox-final
+```
+
+归档/日志/33 文件摘要、五轮精确移除的 PG 临时卷、空容器/网络和固定镜像回执见
+`progress.json -> native_sandbox_dispatch_fence`。#88 归档：
+`1ea76044aef8e18c7526c307b4c35b4df3514a7c37655690675a8f61c65b18cb`。
+仅核实已记录的临时卷，没有推断旧卷所有权或全局 prune。
+
+这不是主机文件系统隔离、进程/网络/外部发布原子性、任意 provider SDK、远端 C
+物理停止或全部缓存命名空间验收。下一步审计实际 provider 的空间/线程代次身份
+及旧缓存复用，先证明主干问题再修。完整 M0–M11、其他撤权域、scoped dispatcher/
+recovery/API 和产品验收仍待推进。租户开关 false、启动 schema fence 不变；
+没有本机应用/pytest/Node/浏览器/Docker 测试、真实模型调用、部署或推送。

@@ -1636,3 +1636,17 @@ M4 model service lifetime checkpoint (2026-10-17): #72 fixture-only signature er
 
 
 M4 named direct-model lifetime and goal STOP checkpoint (2026-10-17): #78 actual lead/title cancellation RED (four failed/four passed), #79 real goal preparation STOP normalization RED (two failed/six passed). #80 main eight passed, #82 focused thirty-six passed, #83 fixed 114 passed plus twenty-seven-file cloud Ruff. Private host guard retains/drains named native model calls; goal usage remains inside actual work and goal read/evaluation/persistence/re-read preserves permission refusal/STOP. Existing real thread/SQL/heartbeat/conflict/independent-workspace checks reused, with only necessary revocation/direct-retained-task-cancel boundaries. Exact evidence: native_direct_model_lifetime. Tool/external effects, real SDK/stream/cache, full scoped goal persistence, remaining revocation domains, dispatcher/recovery and all M0-M11 acceptance remain open. No tenant activation, push or deployment.
+
+
+M4 native sandbox dispatch checkpoint (2026-10-18): resumed the same pending #88,
+no rebuild. #84 actual late report RED (2 failed/2 passed); #85 main four passed;
+#86 read-before-write STOP fail-open RED (2 failed/6 passed); #87 twelve passed;
+#88 fixed 134 passed in 250.07s plus thirty-file cloud Ruff. Native readiness,
+reuse and sync thread dispatch recheck the private Run guard; preserve STOP in
+sandbox normalization/read-before-write; reuse existing drain and native lease
+cleanup. Real SQL/Run/LocalSandbox report and full shared SDK chain, deterministic
+model only. Source/archive/log/exact resource evidence: native_sandbox_dispatch_fence.
+Provider cache workspace/incarnation reuse remains next; no host/process/network
+isolation, remote C physical STOP or complete product acceptance claimed.
+All M0-M11 parent tasks remain open, activation false, schema fence unchanged.
+No deployment/push or local application runtime.

@@ -405,6 +405,14 @@ python -m pytest tests/test_workspace_execution.py tests/test_workspace_revocati
 - [x] 主干先八项通过，再复用必要边界至三十六项，最后固定一百一十四项与二十七文件云端 Ruff；CI/回执/恢复点/文档及本地提交。
 - [ ] 工具/文件/进程/网络/发布效应、真实 provider 流/SDK/cache、完整持久化 scoped goal、其他撤权域和 scoped dispatcher/recovery/APIs、远端 C 仍待实施。M4/M0–M11 父项继续未完成，启动关闭。
 
+#### M4 第十八小步：原生沙箱就绪、执行前门禁和写入前 STOP（2026-10-18 已验证）
+
+- [x] 实际 native Run/SQL/LocalSandbox 文件复现等待后撤权仍写报告；先修主干，再复现写入前检查吞掉 STOP。
+- [x] 就绪/复用及同步线程执行前重新核验私有 Run，保留已有租约可退还；复用原生生命周期 drain，不重写执行器。
+- [x] 工具与写入前检查/读标记保留 GraphBubbleUp；正常报告、撤权无文件、完整共享 SDK 链及 owner 清理通过。
+- [x] 定向 12 项后固定 134 项、30 文件云端 Ruff；恢复时读取同一 #88 结果，归档/源码/日志/精确资源回执和文档保存。
+- [ ] 沙箱 workspace/thread-incarnation 缓存及复用仍待实际审计；进程/网络/发布、其他撤权域、scoped dispatcher/recovery、远端 C 与完整 M0–M11 继续未验收。租户启动关闭。
+
 ### M5：记忆、知识检索与工具凭据隔离
 
 **修改接点：**
