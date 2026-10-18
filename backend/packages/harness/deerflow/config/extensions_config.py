@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validat
 
 from deerflow.config._boolean_guards import reject_boolean
 from deerflow.config.file_signature import ConfigSignature, get_config_signature, read_config_with_signature
-from deerflow.config.runtime_paths import existing_project_file
+from deerflow.config.runtime_paths import existing_project_file, project_root
 from deerflow.constants import (
     DEFAULT_MCP_SESSION_INIT_TIMEOUT,
     MCP_TASK_NAME_MAX_LENGTH,
@@ -514,6 +514,18 @@ class ExtensionsConfig(BaseModel):
             # branches above, finding nothing here is the expected case, so
             # return None rather than raising.
             return None
+
+    @classmethod
+    def default_config_path(cls) -> Path:
+        """Where a writer creates ``extensions_config.json`` when none resolves.
+
+        The project root is the first location the fallback search of
+        :meth:`resolve_config_path` checks, so a file created here is the one
+        the next resolution — and every other writer — reads back. Only for
+        writers that create the file after ``resolve_config_path()`` returned
+        ``None``; the explicit and env-var modes never reach it.
+        """
+        return project_root() / "extensions_config.json"
 
     @classmethod
     def from_file(cls, config_path: str | None = None) -> "ExtensionsConfig":

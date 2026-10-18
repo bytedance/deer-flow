@@ -1006,12 +1006,15 @@ def test_public_skill_toggle_clears_all_users_cache(monkeypatch, tmp_path):
     assert persisted["skills"]["public-skill"]["enabled"] is False
 
 
-def test_public_skill_toggle_creates_missing_extensions_config(monkeypatch, tmp_path):
+def test_public_skill_toggle_creates_missing_extensions_config_at_project_root(monkeypatch, tmp_path):
     from deerflow.config.extensions_config import ExtensionsConfig
 
-    backend_dir = tmp_path / "backend"
-    backend_dir.mkdir()
+    # The working directory's parent is not the project root: the new file
+    # must land where resolution looks first, not next to the cwd.
+    backend_dir = tmp_path / "runtime" / "backend"
+    backend_dir.mkdir(parents=True)
     monkeypatch.chdir(backend_dir)
+    monkeypatch.setenv("DEER_FLOW_PROJECT_ROOT", str(tmp_path))
     config_path = tmp_path / "extensions_config.json"
 
     def _load_skills(*, enabled_only: bool):
@@ -1047,6 +1050,7 @@ def test_public_skill_toggle_creates_missing_extensions_config(monkeypatch, tmp_
     assert json.loads(config_path.read_text(encoding="utf-8")) == {
         "skills": {"public-skill": {"enabled": False}},
     }
+    assert not (backend_dir.parent / "extensions_config.json").exists()
 
 
 def test_public_skill_toggle_rebuilds_projection_before_response(monkeypatch, tmp_path):

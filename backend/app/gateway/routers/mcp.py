@@ -28,7 +28,6 @@ from deerflow.config.extensions_config import (
     reload_extensions_config,
     validate_raw_extensions_config,
 )
-from deerflow.config.runtime_paths import project_root
 from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT
 from deerflow.mcp.cache import (
     McpReconciliationPending,
@@ -1300,7 +1299,7 @@ def _apply_mcp_config_update(body: McpConfigUpdateRequest) -> dict:
     # same sidecar path for the complete read-modify-write cycle.
     config_path = ExtensionsConfig.resolve_config_path()
     if config_path is None:
-        config_path = project_root() / "extensions_config.json"
+        config_path = ExtensionsConfig.default_config_path()
         logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
 
     with extensions_config_write_lock, extensions_config_file_lock(config_path):
@@ -1398,7 +1397,7 @@ def _mcp_config_path(*, create: bool) -> Path:
     config_path = ExtensionsConfig.resolve_config_path()
     if config_path is None:
         if create:
-            config_path = project_root() / "extensions_config.json"
+            config_path = ExtensionsConfig.default_config_path()
             logger.info("No existing extensions config found. Creating new config at: %s", config_path)
         else:
             raise HTTPException(

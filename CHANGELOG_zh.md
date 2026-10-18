@@ -1015,6 +1015,14 @@
 
 ### 修复
 
+- **skills：** 在尚无 `extensions_config.json` 时切换技能开关，现在会在项目根目录
+  （`DEER_FLOW_PROJECT_ROOT`，未设置时为工作目录）创建该文件，这与 MCP 编辑器已有的
+  创建位置一致，也是配置解析最先查找的位置。此前技能开关使用工作目录的父目录：当
+  Gateway 不是从 `backend/` 启动时，新文件会落在查找路径之外，重新加载后开关被静默
+  丢弃，之后的 MCP 编辑还会再创建第二个文件。现在两个路由共用
+  `ExtensionsConfig.default_config_path()`。Docker 与 `make dev` 不受影响：它们设置了
+  配置路径，或者项目根目录恰好就是那个父目录。
+
 - **浏览器：** `browser_screenshot` 不再替换线程 outputs 目录中已存在的文件。此前以
   `report.png` 保存的截图会覆盖用户自己的 `report.png`、更早的截图，或同一秒内生成的
   另一张默认命名截图；现在会像 `web_capture` 一样改用下一个空闲名称（`report-1.png`、
