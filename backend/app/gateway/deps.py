@@ -303,7 +303,8 @@ def credentials_key_consumers(config: AppConfig) -> list[str]:
     consumers: list[str] = []
     connections = getattr(config, "channel_connections", None)
     if connections is not None and getattr(connections, "enabled", False):
-        # ChannelConnectionRepository encrypts per-connection credentials.
+        # ChannelConnectionRepository encrypts per-connection credentials, and
+        # the runtime config store the bot credentials entered in the web UI.
         consumers.append("channel_connections.enabled=true")
     return consumers
 
