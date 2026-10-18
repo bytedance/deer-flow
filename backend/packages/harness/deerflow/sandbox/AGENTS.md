@@ -130,3 +130,12 @@ tool error normalization; read-before-write inspection/marks preserve it too.
 Actual SQL/Run/LocalSandbox write_file and full SDK chain verified (#88); provider
 workspace/incarnation caches, process/network effects and remote C remain open.
 No guard keeps legacy behavior; ambient workspace is not execution authority.
+
+
+Local continuation/deletion main (#90): actual native Run writes a report, same
+incarnation keeps it; actual delete_private_thread reserves and cleans files
+before replacing metadata, so a same-ID new incarnation cannot recover it even
+with the old cached sandbox ID. Local get_scoped inherits None, causing ordinary
+restoration to acquire and compare fresh mappings. Do not infer a product leak
+from the user/thread key alone or substitute raw metadata deletion for cleanup.
+This does not verify AIO/custom provider identity, interrupted cleanup or remote C.

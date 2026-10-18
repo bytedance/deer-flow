@@ -1,5 +1,5 @@
 <!-- 当前状态：2026-10-18 用户恢复执行；历史暂停记录保留，参见文末最新检查点。 -->
-> **执行中，M4 部分完成。** 同一 Jenkins #88 已核验成功，134 项及 30 文件 Ruff 通过；下一步审计沙箱身份/缓存复用。完整 M0–M11 保留，租户启动关闭。
+> **执行中，M4 部分完成。** Jenkins #90 原生 Local 续跑/删除重建四项通过，沿用 #88 固定 134 项回归；下一步接 scoped dispatcher/远端 C，其他 provider 身份仍待验证。完整 M0–M11 保留，租户启动关闭。
 
 # 2026-10-16 暂停与恢复检查点
 
@@ -953,3 +953,36 @@ Local provider 没有覆写 get_scoped，继承实现返回 None；普通 checkp
 并对照正常同代次续写。先确定存储、API 读取、执行与清理一致的身份，再改 namespace；
 仅给 provider ID 加字段不足以解决目录复用。保持旧 scope token 契约及 fork 借用/
 owner 清理兼容。不开新的 provider 大矩阵，不启动真实模型或部署。
+
+
+## 2026-10-18 原生 Local 删除重建主干：复用现有机制
+
+上海 `deerflow-tenant-execution-m4-sql #90 SUCCESS`，**4 passed in 23.64s**，
+30 文件 Ruff 检查和格式通过。SQLite/PostgreSQL 各运行正常续跑和真实删除重建：
+
+1. 实际原生 Run、LocalSandbox 和 write_file 写出报告并成功关闭、退还租约。
+2. 同一线程代次正常续跑，可读回完整报告。
+3. 走真实 `delete_private_thread`：持有原生删除预约，使用生命周期回执完成文件/
+   checkpoint/session/metadata 清理。然后同 ID 重建，确认 incarnation 改变。
+4. 新 Run 即使携带原先 sandbox ID，也无法读回旧报告；成功状态与 owner 清理明确断言。
+
+首轮 #89 四项失败是夹具漏开必需的 ownership heartbeat，业务节点未执行，不是
+产品 RED；#90 按原生配置启用心跳、120 秒 lease，并显式等待实际 worker task。
+最初仅从缓存键推断的泄漏没有被真实 Local 删除主干证实。直接删除 SQL 行会绕过
+原生文件清理，不能作为产品故障证据；本次没有据此改生产命名空间或旧 token 契约。
+
+```bash
+python scripts/render_tenant_run_control_pipeline.py sandbox-recreation <归档SHA256> --suite sandbox-reuse
+```
+
+#90 归档 SHA256：`a27912fab097f3b7e78a1beae44f62459cfc7e47dab577345034fbce22f3447c`。
+32 个源码摘要与当前版本匹配；renderer 随后只格式化原有 tuple，实际生成的
+Jenkinsfile 与 #90 逐字节相同，另存摘要。本文件此前 12 项用例未改，沿用 #88 的固定
+134 项回归证据，不因新增四项夹具重复跑全部。归档、日志、精确移除的两个 PG
+临时卷及空容器/网络回执见 `native_sandbox_recreation_main`。
+
+这是实际内部删除入口和本机 Local 沙箱证据，不是完整 HTTP/JWT/browser、崩溃/
+撤权中清理、任意自定义 provider、AIO/远端 C、NAS 或进程隔离验收。继续按计划
+接 scoped dispatcher/远端 C 准入与恢复；AIO namespace、外部效应及 account/token/
+policy 等撤权域保留未完成。M4/M0–M11 父项不勾选、租户启动 false、启动 schema
+fence 不变；无部署、推送、真实模型请求或本机应用/pytest/Node/浏览器/Docker 运行。

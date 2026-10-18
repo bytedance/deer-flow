@@ -186,3 +186,113 @@ def test_native_sandbox_reauthorizes_after_readiness(native_engine, trigger, poi
             reset_app_config()
 
     _in_workspace_case(native_engine, scenario)
+
+
+@pytest.mark.parametrize("recreate", [False, True])
+def test_native_sandbox_thread_recreation_does_not_restore_old_report(native_engine, recreate):  # noqa: F811
+    from types import SimpleNamespace
+
+    from langchain.tools import ToolRuntime
+    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.config import get_config, get_stream_writer
+    from langgraph.graph import END, START, MessagesState, StateGraph
+    from langgraph.runtime import Runtime
+    from starlette.requests import Request
+
+    from app.gateway.workspaces.deletion import delete_private_thread
+    from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
+    from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+    from deerflow.config.run_ownership_config import RunOwnershipConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+    from deerflow.persistence.run.sql import RunRepository
+    from deerflow.persistence.thread_meta import ThreadMetaRepository
+    from deerflow.persistence.user.model import UserRow
+    from deerflow.runtime import MemoryStreamBridge, RunContext, RunManager, run_agent
+    from deerflow.runtime.events.store.memory import MemoryRunEventStore
+    from deerflow.runtime.user_context import reset_current_user, set_current_user
+    from deerflow.sandbox.lease import ensure_sandbox_lease_owner, get_sandbox_lease_manager, run_sync_lifecycle_operation
+    from deerflow.sandbox.sandbox_provider import reset_sandbox_provider, set_sandbox_provider
+    from deerflow.sandbox.tools import ensure_sandbox_initialized_async, write_file_tool
+
+    async def scenario(case):
+        config = AppConfig(models=[], sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"))
+        set_app_config(config)
+        provider = LocalSandboxProvider()
+        set_sandbox_provider(provider)
+        threads = ThreadMetaRepository(case.sf, workspace_required=True)
+        first = await threads.create("sandbox-recreation", user_id="owner")
+        store = RunRepository(case.sf, workspace_required=True)
+        manager = RunManager(store=store, worker_id="sandbox-recreation-owner", run_ownership_config=RunOwnershipConfig(heartbeat_enabled=True, lease_seconds=120))
+        async with case.sf() as session:
+            principal = await session.get(UserRow, "owner")
+        user_token = set_current_user(principal)
+        observations = []
+        cached_state = {}
+
+        async def execute(turn):
+            record = await manager.create_or_reject("sandbox-recreation", user_id="owner")
+
+            async def report(state, runtime: Runtime):
+                ensure_sandbox_lease_owner(runtime.context)
+                tool_state = dict(state)
+                tool_state.update(ThreadDataMiddleware().before_agent(tool_state, runtime))
+                tool_state.update(cached_state)
+                tool_runtime = ToolRuntime(state=tool_state, context=runtime.context, config=get_config(), stream_writer=get_stream_writer(), tools=[write_file_tool], tool_call_id="recreation-report", store=None)
+                sandbox = await ensure_sandbox_initialized_async(tool_runtime)
+                if turn == 0:
+                    result = await write_file_tool.coroutine(tool_runtime, "/mnt/user-data/outputs/report.txt", "private original incarnation report")
+                    assert result == "OK"
+                else:
+                    try:
+                        content = await run_sync_lifecycle_operation(sandbox.read_file, "/mnt/user-data/outputs/report.txt")
+                    except FileNotFoundError:
+                        content = None
+                    observations.append(content)
+                cached_state["sandbox"] = dict(tool_state["sandbox"])
+                return state
+
+            graph = StateGraph(MessagesState, context_schema=dict)
+            graph.add_node("report", report)
+            graph.add_edge(START, "report")
+            graph.add_edge("report", END)
+            compiled = graph.compile()
+            task = asyncio.create_task(
+                run_agent(
+                    MemoryStreamBridge(),
+                    manager,
+                    record,
+                    ctx=RunContext(checkpointer=None, thread_store=threads, workspace_context=case.original, app_config=config),
+                    agent_factory=lambda **kwargs: compiled,
+                    graph_input={"messages": []},
+                    config={"configurable": {"thread_id": record.thread_id}},
+                    thread_incarnation=record.thread_incarnation,
+                    stream_modes=["values"],
+                )
+            )
+            record.task = task
+            await task
+            assert record.status == "success", "native business node must actually finish"
+            assert record.workspace_execution_closed
+            assert not get_sandbox_lease_manager(provider)._bindings_by_owner
+            return record
+
+        try:
+            original = await execute(0)
+            assert original.thread_incarnation == first["incarnation"]
+            if recreate:
+                state = SimpleNamespace(thread_store=threads, run_store=store, run_manager=manager, run_event_store=MemoryRunEventStore(), checkpointer=MemorySaver())
+                request = Request({"type": "http", "app": SimpleNamespace(state=state)})
+                result = await delete_private_thread(request, "sandbox-recreation")
+                assert result["success"]
+                replacement = await threads.create("sandbox-recreation", user_id="owner")
+                assert replacement["incarnation"] != first["incarnation"]
+            next_run = await execute(1)
+            assert (next_run.thread_incarnation != original.thread_incarnation) == recreate
+            expected = None if recreate else "private original incarnation report"
+            assert observations == [expected], "new thread incarnation read a report belonging to its deleted predecessor"
+        finally:
+            reset_sandbox_provider()
+            reset_current_user(user_token)
+            reset_app_config()
+
+    _in_workspace_case(native_engine, scenario)

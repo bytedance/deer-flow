@@ -3076,3 +3076,9 @@ synchronous dispatch. Read-before-write checks preserve native stop signals, so
 a revoked waiting report write is refused. [Verification scope](docs/tenant-workspaces-testing.md)
 records actual file/lease and shared Agent-chain checks. Cache identity, external
 effects and full tenant activation remain pending.
+
+
+The native Local conversation-deletion flow also clears generated report files
+before a same-ID conversation is recreated; normal continuation keeps them.
+[Validation scope](docs/tenant-workspaces-testing.md) records both database checks.
+Remote providers and complete tenant deployment still have separate pending gates.

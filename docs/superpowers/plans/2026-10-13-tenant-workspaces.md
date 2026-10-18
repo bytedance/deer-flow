@@ -413,6 +413,14 @@ python -m pytest tests/test_workspace_execution.py tests/test_workspace_revocati
 - [x] 定向 12 项后固定 134 项、30 文件云端 Ruff；恢复时读取同一 #88 结果，归档/源码/日志/精确资源回执和文档保存。
 - [ ] 沙箱 workspace/thread-incarnation 缓存及复用仍待实际审计；进程/网络/发布、其他撤权域、scoped dispatcher/recovery、远端 C 与完整 M0–M11 继续未验收。租户启动关闭。
 
+#### M4 第十九小步：原生 Local 续跑及真实删除重建主干（2026-10-18 已验证）
+
+- [x] 源码审计后沿真实删除预约/生命周期回执/文件清理入口验证，不用直接删数据库行制造假故障。
+- [x] 实际 Run/LocalSandbox 报告：同代次续跑保留；真实删除后同 ID 新代次即使恢复旧 sandbox ID 也读不到旧报告；租约/成功状态明确断言。
+- [x] #89 仅夹具缺少心跳，不算产品 RED；修正 #90 四项及 30 文件云端 Ruff 通过。仅追加四项，旧十二项未改，沿用 #88 固定回归。
+- [x] 保存源码/归档/日志/精确资源回执及文档；此主干复用现有原生机制，没有新增生产 namespace 实现。
+- [ ] AIO/其他 provider、失败/撤权/崩溃中删除、scoped dispatcher/远端 C、其他撤权域与完整 M0–M11 继续待验收。租户启动关闭。
+
 ### M5：记忆、知识检索与工具凭据隔离
 
 **修改接点：**

@@ -1650,3 +1650,17 @@ Provider cache workspace/incarnation reuse remains next; no host/process/network
 isolation, remote C physical STOP or complete product acceptance claimed.
 All M0-M11 parent tasks remain open, activation false, schema fence unchanged.
 No deployment/push or local application runtime.
+
+
+M4 native Local deletion/recreation main checkpoint (2026-10-18): #89 failed
+before business execution because the new fixture omitted mandatory ownership
+heartbeats; not a product RED. Corrected #90 four passed (23.64s), thirty-file
+cloud Ruff. Actual SQL/Run/LocalSandbox report, same-incarnation continuation,
+then actual delete_private_thread reservation/cleanup/receipt and same-ID new
+incarnation. A restored old sandbox ID cannot recover the removed report.
+Existing native cleanup suffices for this main; no production namespace rewrite.
+Exact evidence: native_sandbox_recreation_main. Original twelve dispatch cases
+unchanged; retain #88 fixed 134-item evidence rather than repeat it. Internal
+entry proof only; HTTP/JWT/browser, AIO/provider namespace, crash/revocation during
+cleanup, scoped dispatcher/remote C, other revocation domains and all M0-M11
+parents remain open. Activation/schema fences unchanged; no deployment or push.
