@@ -1468,6 +1468,8 @@ Skill Markdown and bundled text resources use UTF-8. Skill-creator CLI and revie
 Skill-creator benchmark aggregation uses recorded `timing.json` token counts even
 when `grading.json` already contains the run duration. Recorded zero counts are
 preserved; output character counts remain a legacy proxy only when token data is missing.
+Malformed or non-object `timing.json` data is treated as missing measurements, so
+aggregation preserves the grading duration and continues processing other runs.
 
 `SKILL.md` YAML frontmatter must open and close with `---` on its own line (trailing spaces or tabs are allowed). A line such as `---suffix` is not a closing delimiter.
 

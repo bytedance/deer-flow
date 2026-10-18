@@ -94,6 +94,43 @@ def test_missing_token_measurements_keep_legacy_character_fallback(
     assert benchmark["runs"][0]["result"]["time_seconds"] == expected_time
 
 
+@pytest.mark.parametrize("layout", ["workspace", "legacy"])
+@pytest.mark.parametrize("has_grading_duration", [False, True])
+@pytest.mark.parametrize(
+    "timing_data",
+    [None, [], [{"total_tokens": 84852}], "timing", 42, False],
+    ids=["null", "empty-array", "array", "string", "number", "boolean"],
+)
+def test_non_object_timing_keeps_fallback_and_other_runs(
+    tmp_path, benchmark_script, layout, has_grading_duration, timing_data
+):
+    root = tmp_path / "runs" if layout == "legacy" else tmp_path
+    grading_timing = {"total_duration_seconds": 23.3} if has_grading_duration else None
+    run_dir = write_run(root, grading_timing=grading_timing)
+    (run_dir / "timing.json").write_text(json.dumps(timing_data), encoding="utf-8")
+    write_run(
+        root,
+        timing={"total_duration_seconds": 25.0, "total_tokens": 0},
+        config="without_skill",
+    )
+
+    benchmark = benchmark_script["generate_benchmark"](tmp_path)
+
+    results = {run["configuration"]: run["result"] for run in benchmark["runs"]}
+    assert set(results) == {"with_skill", "without_skill"}
+    assert results["with_skill"]["tokens"] == 12450
+    assert results["with_skill"]["time_seconds"] == (
+        23.3 if has_grading_duration else 0.0
+    )
+    assert results["without_skill"]["tokens"] == 0
+    assert results["without_skill"]["time_seconds"] == 25.0
+    assert benchmark["run_summary"]["with_skill"]["tokens"]["mean"] == 12450
+    assert benchmark["run_summary"]["delta"]["tokens"] == "+12450"
+    assert "| Tokens | 12450 ± 0 | 0 ± 0 | +12450 |" in benchmark_script[
+        "generate_markdown"
+    ](benchmark)
+
+
 def test_recorded_tokens_propagate_to_summary_delta_and_markdown(
     tmp_path, benchmark_script
 ):

@@ -141,6 +141,8 @@ def load_run_results(benchmark_dir: Path) -> dict:
                     try:
                         with open(timing_file, encoding="utf-8") as tf:
                             timing_data = json.load(tf)
+                        if not isinstance(timing_data, dict):
+                            timing_data = {}
                         if result["time_seconds"] == 0.0:
                             result["time_seconds"] = timing_data.get("total_duration_seconds", 0.0)
                         result["tokens"] = timing_data.get("total_tokens")
