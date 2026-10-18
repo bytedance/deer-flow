@@ -130,3 +130,43 @@ def test_fallback_without_parameters(fallback_client):
     assert client.get_repo_info("owner", "repo") == {"ok": True}
 
     assert captured["url"] == "https://api.github.com/repos/owner/repo"
+
+
+def test_tree_asks_for_the_repository_head(file_content_client):
+    client, captured = file_content_client
+
+    assert client.get_tree("owner", "repo") == {"ok": True}
+
+    url = urlsplit(captured["url"])
+    assert url.path == "/repos/owner/repo/git/trees/HEAD"
+    assert parse_qs(url.query) == {"recursive": ["1"]}
+
+
+def test_tree_keeps_an_explicit_branch(file_content_client):
+    client, captured = file_content_client
+
+    assert client.get_tree("owner", "repo", branch="dev", recursive=False) == {
+        "ok": True
+    }
+
+    url = urlsplit(captured["url"])
+    assert url.path == "/repos/owner/repo/git/trees/dev"
+    assert url.query == ""
+
+
+def test_tree_does_not_guess_another_branch(monkeypatch, fallback_client):
+    client, _ = fallback_client
+    asked: list[str] = []
+
+    def fail_after_recording(endpoint, params=None, accept=None):
+        asked.append(endpoint)
+        raise RuntimeError("HTTP 404")
+
+    monkeypatch.setattr(client, "_get", fail_after_recording)
+
+    with pytest.raises(RuntimeError):
+        client.get_tree("owner", "repo")
+
+    # A stale `master` still resolves as a branch, so retrying names here silently
+    # returns the wrong repository's tree instead of failing.
+    assert asked == ["/repos/owner/repo/git/trees/HEAD"]
