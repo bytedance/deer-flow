@@ -595,6 +595,10 @@ def test_scoped_scheduler_http_history_and_thread_relations_keep_private_run(nat
 
 @pytest.mark.parametrize("executor_engine", ["postgres"], indirect=True)
 def test_scoped_scheduler_tool_list_uses_original_native_invocation(native_engine, executor_engine, monkeypatch, tmp_path):  # noqa: F811
+    _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, tmp_path)
+
+
+def _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, tmp_path, *, remote=False):  # noqa: F811
     import json
 
     from fastapi import FastAPI
@@ -654,6 +658,18 @@ def test_scoped_scheduler_tool_list_uses_original_native_invocation(native_engin
     monkeypatch.setattr(auth_config, "_auth_config", auth_config.AuthConfig(jwt_secret="synthetic-native-scheduler-tool-list-key-64-characters-for-test!!"))
     monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
 
+    ledger = None
+    if remote:
+        from ecs_executor.agent_dispatch import NativeDispatchHost, NativeWorkerHost, install_native_dispatch
+        from ecs_executor.dispatch import PROTOCOL, WORKER_VERSION
+        from ecs_executor.job_store import JobStore
+        from ecs_executor.nodes import Node
+        from ecs_executor.scheduling import Scheduling
+        from ecs_executor.schema import SCHEMA_REVISION, upgrade_schema
+
+        upgrade_schema(executor_engine)
+        ledger = JobStore(executor_engine.url.render_as_string(hide_password=False))
+
     async def scenario(case):
         threads = ThreadMetaRepository(case.sf, workspace_required=True)
         origin = await threads.create("scheduler-tool-origin", user_id=owner)
@@ -692,6 +708,53 @@ def test_scoped_scheduler_tool_list_uses_original_native_invocation(native_engin
         app.add_middleware(CSRFMiddleware)
 
         app.include_router(thread_runs.router)
+        receiver = host = pool = None
+        if remote:
+            receiver = RunManager(store, worker_id="scheduler-tool-remote", run_ownership_config=RunOwnershipConfig(heartbeat_enabled=True, lease_seconds=120))
+            worker_app, control_app = FastAPI(), FastAPI()
+            for key in (
+                "workspace_service",
+                "thread_store",
+                "run_store",
+                "stream_bridge",
+                "checkpointer",
+                "store",
+                "run_event_store",
+                "mcp_task_repo",
+                "project_repo",
+                "project_document_repo",
+                "scheduled_task_repo",
+                "scheduled_task_run_repo",
+                "scheduled_task_service",
+            ):
+                setattr(worker_app.state, key, getattr(app.state, key))
+            worker_app.state.run_manager = receiver
+            node = Node(cpu_millis=4000, memory_mib=8192, resident_cpu_millis=1500, resident_memory_mib=2048, max_concurrency=1, profiles={"report"}, kinds={"C"})
+            pool = Scheduling(ledger, nodes={"worker": node})
+            secret = "scheduler-remote-origin-secret-at-least-32-bytes"
+            dispatcher = NativeDispatchHost(
+                app, pool, {"artifact_root": str(tmp_path / "remote-tool-pool"), "native_node": "worker", "remote_all": True, "profile": "report", "profiles": {"report": {"cpu_millis": 100, "memory_mib": 64}}}, {"worker": secret}
+            )
+            app.state.native_run_admission_host = dispatcher
+            # Same trusted native host, separate authenticated worker transport;
+            # browser JWT/CSRF never substitutes for the node credential.
+            install_native_dispatch(control_app, dispatcher)
+            host = NativeWorkerHost.__new__(NativeWorkerHost)
+            host.app, host.secret, host.adoption_lock, host.config = worker_app, secret, asyncio.Lock(), {"node_id": "worker"}
+            host.executions, host.stop_tasks, host.sandbox_captures = {}, {}, {}
+
+            async def request_worker(operation, **values):
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=control_app), base_url="http://native-remote-tool-fixture") as client:
+                    response = await client.post(
+                        f"/api/native-workers/worker/{operation}",
+                        headers={"Authorization": "Bearer " + secret},
+                        json={"schema_revision": SCHEMA_REVISION, "protocol": PROTOCOL, "worker_version": WORKER_VERSION, "mount_id": dispatcher.mount_id, "owner": "scheduler-remote-owner", **values},
+                    )
+                    response.raise_for_status()
+                    return response.json()
+
+            host.request = request_worker
+            worker_app.state.native_run_admission_host = host
 
         captured, observed, preparation, runtime_diagnostics = [], [], [], []
         original_prepare = scheduled_task_access.prepare_scheduler_capability
@@ -767,16 +830,45 @@ def test_scoped_scheduler_tool_list_uses_original_native_invocation(native_engin
                 assert response.status_code == 200, response.text
                 ids.append(response.json()["id"])
                 selected = set_current_workspace(case.other)
-                response = await client.post(
-                    "/api/threads/" + origin["thread_id"] + "/runs", headers={"X-Deerflow-Workspace": case.original.workspace_id}, json={"input": {"messages": [{"type": "human", "content": "List the schedules for this conversation"}]}}
-                )
+                request_body = {"input": {"messages": [{"type": "human", "content": "List the schedules for this conversation"}]}}
+                if remote:
+                    request_body["context"] = {"scheduler_origin": {"source": "pat", "actor_user_id": "client-cannot-select-origin"}}
+                    request_body["config"] = {"configurable": {"scheduler_origin": {"version": 1, "source": "internal", "actor_user_id": "client-config-cannot-select-origin"}}}
+                request_headers = {"X-Deerflow-Workspace": case.original.workspace_id, **({"Idempotency-Key": "remote-scheduler-tool-origin"} if remote else {})}
+                response = await client.post("/api/threads/" + origin["thread_id"] + "/runs", headers=request_headers, json=request_body)
                 assert response.status_code == 200, response.text
                 run_id = response.json()["run_id"]
-                lookup_scope = set_current_workspace(case.original)
-                try:
-                    record = await manager.get(run_id, user_id=owner)
-                finally:
-                    reset_current_workspace(lookup_scope)
+                job = None
+                if remote:
+                    async with case.sf() as session:
+                        pending = await session.get(RunRow, run_id)
+                        assert pending.status == "pending"
+                        saved_origin = pending.kwargs_json.get("scheduler_origin")
+                        assert isinstance(saved_origin, dict), "Remote admission did not durably capture original session eligibility"
+                        assert set(saved_origin) == {"version", "source", "actor_user_id", "token_version", "permission_ceiling"}
+                        assert saved_origin["version"] == 1 and saved_origin["source"] == "session" and saved_origin["actor_user_id"] == owner
+                        assert type(saved_origin["token_version"]) is int and saved_origin["token_version"] == 0
+                        assert saved_origin["permission_ceiling"] == sorted(set(saved_origin["permission_ceiling"]))
+                        assert "threads:read" in saved_origin["permission_ceiling"]
+                    repeated = await client.post("/api/threads/" + origin["thread_id"] + "/runs", headers=request_headers, json=request_body)
+                    assert repeated.status_code == 200 and repeated.json()["run_id"] == run_id, repeated.text
+                    async with case.sf() as session:
+                        assert (await session.get(RunRow, run_id)).kwargs_json["scheduler_origin"] == saved_origin
+                    envelope = (await request_worker("poll"))["claim"]
+                    assert envelope is not None and envelope["job"]["native"]["kwargs"]["scheduler_origin"] == saved_origin
+                    different = await client.post("/api/threads/" + origin["thread_id"] + "/runs", headers={**request_headers, "Idempotency-Key": "different-native-scheduler-work"}, json=request_body)
+                    assert different.status_code == 409, different.text
+                    assert (await asyncio.to_thread(pool.node_status, "worker"))["unreleased"] == 1
+                    job = await host.report(envelope["job"], {"start_intent": True})
+                    record = await host.adopt_owned(job, envelope["capability"])
+                    host.executions[job["id"]] = (job, record)
+                    await host.report(job, {"state": "running"})
+                else:
+                    lookup_scope = set_current_workspace(case.original)
+                    try:
+                        record = await manager.get(run_id, user_id=owner)
+                    finally:
+                        reset_current_workspace(lookup_scope)
                 assert get_current_workspace() == case.other
                 assert record is not None and record.task is not None
                 await asyncio.wait_for(entered.wait(), timeout=20)
@@ -785,6 +877,14 @@ def test_scoped_scheduler_tool_list_uses_original_native_invocation(native_engin
                 release.set()
                 await asyncio.wait_for(record.task, timeout=20)
                 assert record.status.value == "success", record.error
+                if remote:
+                    assert preparation == [{"present": True, "source": "internal", "mode": "interactive", "config_enabled": True}]
+                    assert record.kwargs["scheduler_origin"] == saved_origin
+                    await host.stop_owned(job)
+                    await host.report(job, {"state": "completed", "physical_stopped": True})
+                    host.executions.pop(job["id"])
+                    assert (await request_worker("poll"))["claim"] is None
+                    assert (await asyncio.to_thread(pool.node_status, "worker"))["unreleased"] == 0
                 assert len(observed) == 1 and observed[0].get("action") == "list", {"preparation": preparation, "runtime": runtime_diagnostics, "tool_error": [{key: value.get(key) for key in ("code", "error")} for value in observed]}
                 assert [row["id"] for row in observed[0]["tasks"]] == [ids[0]]
                 assert "Other private tool schedule" not in json.dumps(observed)
@@ -815,5 +915,16 @@ def test_scoped_scheduler_tool_list_uses_original_native_invocation(native_engin
                 reset_current_workspace(selected)
             await foreground.stop()
             await manager.stop_heartbeat()
+            if receiver is not None:
+                await receiver.stop_heartbeat()
 
-    _in_workspace_case(native_engine, scenario, owner_user_id=owner)
+    try:
+        _in_workspace_case(native_engine, scenario, owner_user_id=owner)
+    finally:
+        if ledger is not None:
+            ledger.engine.dispose()
+
+
+@pytest.mark.parametrize("executor_engine", ["postgres"], indirect=True)
+def test_scoped_scheduler_remote_tool_list_preserves_admitted_session(native_engine, executor_engine, monkeypatch, tmp_path):  # noqa: F811
+    _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, tmp_path, remote=True)

@@ -2270,6 +2270,9 @@ async def start_run(
                 # cannot both succeed across Gateway workers.
                 if require_existing_thread and not await thread_access_allowed():
                     raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+                from app.gateway.scheduled_task_access import SCHEDULER_ORIGIN_KEY, capture_scheduler_origin
+
+                scheduler_origin = capture_scheduler_origin(request, user_id=owner_user_id or (str(user.id) if user is not None else None), app_config=run_ctx.app_config or get_app_config())
                 record = await run_mgr.create_or_reject(
                     thread_id,
                     body.assistant_id,
@@ -2281,6 +2284,10 @@ async def start_run(
                     # config built above keeps the secrets for the actual run.
                     kwargs={
                         "input": run_record_input,
+                        # Immutable server admission data: a client config key
+                        # cannot select this top-level origin. Idempotent reuse
+                        # keeps the already-persisted record and its old receipt.
+                        **({SCHEDULER_ORIGIN_KEY: scheduler_origin} if scheduler_origin is not None else {}),
                         **({"knowledge_default_request_hash": knowledge_default_request_hash} if accepts_knowledge_default else {}),
                         "config": redact_config_secrets(body.config),
                         **({"conversation_references": conversation_references} if conversation_references else {}),

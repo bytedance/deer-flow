@@ -21,7 +21,7 @@ from zoneinfo import ZoneInfo
 from fastapi import HTTPException, Request
 
 from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, AUTH_SOURCE_AUTH_DISABLED, AUTH_SOURCE_INTERNAL, AUTH_SOURCE_SESSION, get_auth_disabled_user, is_auth_disabled
-from app.gateway.authz import resolve_route_permissions
+from app.gateway.authz import AuthContext, resolve_route_permissions
 from app.gateway.deps import get_config, get_local_provider, get_scheduled_task_repo, get_scheduled_task_run_repo, get_scheduled_task_service, get_thread_store
 from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE
 from app.gateway.scheduled_task_errors import active_occurrence_error, repository_error, scheduler_error, tool_error_payload
@@ -313,6 +313,53 @@ async def _owner(owner_id: str, token_version: int, *, auth_disabled_owner: bool
     if user is None or str(user.id) != owner_id or getattr(user, "token_version", 0) != token_version or getattr(user, "needs_setup", False) or getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE:
         return None
     return user
+
+
+SCHEDULER_ORIGIN_KEY = "scheduler_origin"
+_SCHEDULER_ORIGIN_FIELDS = frozenset({"version", "source", "actor_user_id", "token_version", "permission_ceiling"})
+
+
+def capture_scheduler_origin(request, *, user_id, app_config):
+    """Freeze only the original authenticated session, never caller JSON or fresh role IO."""
+    context = get_current_workspace()
+    state = getattr(request, "state", None)
+    auth, user = getattr(state, "auth", None), getattr(state, "user", None)
+    if not scheduler_tools_enabled(app_config) or type(context) is not WorkspaceContext or getattr(state, "auth_source", None) != AUTH_SOURCE_SESSION:
+        return None
+    if not isinstance(auth, AuthContext) or not auth.is_authenticated or user is None:
+        return None
+    actor = str(auth.user.id)
+    if actor != str(user.id) or actor != user_id or actor != context.actor_user_id:
+        return None
+    version = getattr(auth.user, "token_version", None)
+    if type(version) is not int or version < 0 or getattr(user, "token_version", None) != version:
+        return None
+    permissions = auth.permissions
+    if type(permissions) is not list or any(type(value) is not str or not value for value in permissions):
+        return None
+    return {"version": 1, "source": AUTH_SOURCE_SESSION, "actor_user_id": actor, "token_version": version, "permission_ceiling": sorted(set(permissions))}
+
+
+@dataclass(frozen=True, repr=False)
+class _SchedulerOrigin:
+    token_version: int
+    permission_ceiling: frozenset[str]
+
+    @classmethod
+    def from_record(cls, record):
+        if type(record) is not RunRecord or type(record.kwargs) is not dict:
+            return None
+        value = record.kwargs.get(SCHEDULER_ORIGIN_KEY)
+        if type(value) is not dict or value.keys() != _SCHEDULER_ORIGIN_FIELDS:
+            return None
+        if type(value["version"]) is not int or value["version"] != 1 or value["source"] != AUTH_SOURCE_SESSION or type(value["actor_user_id"]) is not str or value["actor_user_id"] != record.user_id:
+            return None
+        version, permissions = value["token_version"], value["permission_ceiling"]
+        if type(version) is not int or version < 0 or type(permissions) is not list or any(type(permission) is not str or not permission for permission in permissions):
+            return None
+        if permissions != sorted(set(permissions)):
+            return None
+        return cls(version, frozenset(permissions))
 
 
 @dataclass(frozen=True, repr=False)
@@ -691,10 +738,12 @@ async def prepare_scheduler_capability(
             return None
     elif scoped_repository or get_current_workspace() is not None:
         return None
-    # Remote adoption currently has no trusted original session/PAT source or
-    # permission ceiling. Internal transport must not manufacture eligibility.
-    if binding is not None and interaction_policy.mode is RunInteractionMode.INTERACTIVE and getattr(request.state, "auth_source", None) != AUTH_SOURCE_SESSION:
-        return None
+    origin = _SchedulerOrigin.from_record(run_record) if binding is not None else None
+    if binding is not None:
+        # Internal transport is not a session. Only the canonical admitted
+        # Run's persisted origin can preserve original session eligibility.
+        if origin is None or getattr(request.state, "auth_source", None) not in {AUTH_SOURCE_SESSION, AUTH_SOURCE_INTERNAL}:
+            return None
     token = set_current_workspace(binding.workspace_context) if binding is not None else None
     try:
         return await _prepare_scheduler_capability(
@@ -708,6 +757,7 @@ async def prepare_scheduler_capability(
             scheduled_task_runtime=scheduled_task_runtime,
             client_timezone=client_timezone,
             run_binding=binding,
+            admitted_origin=origin,
         )
     finally:
         if token is not None:
@@ -726,6 +776,7 @@ async def _prepare_scheduler_capability(
     scheduled_task_runtime: Mapping[str, Any] | None = None,
     client_timezone: str | None = None,
     run_binding: _SchedulerRunBinding | None = None,
+    admitted_origin: _SchedulerOrigin | None = None,
 ) -> SchedulerRunCapability | None:
     """Bind private host authority; do not retain the Request or internal user.
 
@@ -741,11 +792,13 @@ async def _prepare_scheduler_capability(
     auth_disabled_owner = owner_id == AUTH_DISABLED_USER_ID and is_auth_disabled()
     if source == AUTH_SOURCE_AUTH_DISABLED and not auth_disabled_owner:
         return None
-    token_version = getattr(user, "token_version", 0)
+    token_version = admitted_origin.token_version if admitted_origin is not None else getattr(user, "token_version", 0)
     current = await _owner(owner_id, token_version, auth_disabled_owner=auth_disabled_owner)
     if current is None:
         return None
     ceiling = frozenset(await resolve_route_permissions(current, is_internal=False))
+    if admitted_origin is not None:
+        ceiling &= admitted_origin.permission_ceiling
     if source != AUTH_SOURCE_INTERNAL:
         auth = getattr(request.state, "auth", None)
         request_user = getattr(request.state, "user", None)
@@ -799,7 +852,7 @@ async def _prepare_scheduler_capability(
         _service=service,
         _task_id=task_id,
         _occurrence_id=occurrence_id,
-        _display="card" if source in {AUTH_SOURCE_SESSION, AUTH_SOURCE_AUTH_DISABLED} else "text",
+        _display="card" if admitted_origin is not None or source in {AUTH_SOURCE_SESSION, AUTH_SOURCE_AUTH_DISABLED} else "text",
         _client_timezone=client_timezone if isinstance(client_timezone, str) and client_timezone else None,
         _run_binding=run_binding,
     )

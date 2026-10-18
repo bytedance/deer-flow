@@ -1309,6 +1309,21 @@ class RunRepository(RunStore):
                     raise WorkspaceAccessDenied("private thread is unavailable")
                 values["workspace_context_json"] = asdict(context)
                 values["thread_incarnation"] = thread.incarnation
+                if scheduled_admission is None and operation_kind == "run" and idempotency_key is not None:
+                    existing = await session.scalar(
+                        select(RunRow).where(
+                            RunRow.idempotency_key == idempotency_key,
+                            RunRow.user_id == resolved_user_id,
+                            RunRow.thread_id == thread_id,
+                            RunRow.operation_kind == "run",
+                            RunRow.workspace_id == context.workspace_id,
+                            RunRow.thread_incarnation == thread.incarnation,
+                        )
+                    )
+                    if existing is not None and existing.workspace_context_json == asdict(context):
+                        # Durable retry observes its original admission; it
+                        # grants no new work and changes no execution receipt.
+                        raise RunIdempotencyConflict(self._row_to_dict(existing))
                 if await session.scalar(select(pending_execution_barrier(workspace_id=context.workspace_id, user_id=resolved_user_id, thread_id=thread_id))):
                     raise ConflictError("Thread has native execution cleanup awaiting confirmation")
             # Keep the global clock -> run-row lock order used by every other

@@ -51,6 +51,8 @@ def main():
             "native-scheduler-history-http",
             "native-scheduler-history-http-final",
             "native-scheduler-tool-list",
+            "native-scheduler-tool-remote",
+            "native-scheduler-tool-remote-final",
         ),
         default="revocation",
     )
@@ -164,6 +166,10 @@ def main():
         )
     if args.suite == "native-scheduler-tool-list":
         tests = "tests/test_workspace_native_scheduler.py::test_scoped_scheduler_tool_list_uses_original_native_invocation[postgres]"
+    if args.suite in ("native-scheduler-tool-remote", "native-scheduler-tool-remote-final"):
+        tests = "tests/test_workspace_native_scheduler.py::test_scoped_scheduler_remote_tool_list_preserves_admitted_session[postgres]"
+    if args.suite == "native-scheduler-tool-remote-final":
+        tests += " tests/test_workspace_native_scheduler.py::test_scoped_scheduler_tool_list_uses_original_native_invocation[postgres]"
     rendered = rendered.replace("@@TEST_PATHS@@", tests)
     if "@@" in rendered:
         parser.error("unresolved pipeline marker")

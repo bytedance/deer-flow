@@ -12,7 +12,7 @@ Implemented for this once/conversation-origin/fresh main:
 - Scoped event writes and reads carry workspace/origin nonce and private parent checks; legacy rows/joins/ID mutations are NULL-isolated.
 
 Withheld / not accepted:
-- HTTP create/list/detail are scoped and verified in #130. Local-session tool listing is verified in #136; remote eligibility, management and manual trigger remain withheld. HTTP history/thread relations are verified in #132. Current resource reads never renew original execution context.
+- HTTP create/list/detail are scoped and verified in #130. Local-session tool listing is verified in #136 and original-session remote main in #139; two credential boundaries are next, while management and manual trigger remain withheld. HTTP history/thread relations are verified in #132. Current resource reads never renew original execution context.
 - HTTP task creation response enrichment is verified in #130; complete tool/UI and lifecycle acceptance remains open.
 - Page fresh with no origin and reuse branches have identity handling but no runtime acceptance in this single story.
 - Scheduled C->B->C transfer/own-stop and installed dependency_wait_reconciler path are explicitly withheld. The main uses no async dependency reconciler and does not represent the complete installed host.
