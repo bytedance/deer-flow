@@ -404,28 +404,37 @@ entries of each map. Keys must match `^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$`;
 whitespace is collapsed, and other fields, nested values and non-finite numbers
 are dropped. Dropped fields are logged at debug level without their values. The
 result reaches `runtime.context["client"]` only, never `configurable` or the
-checkpoint.
+checkpoint. The legacy `config.context.client` input is sanitized the same way;
+`config.configurable.client` is ignored. Both nested config locations omit
+`client` when saving a run record or returning its configuration through the
+runs API. Cleanup leaves the caller's request object unchanged. Reading an
+older record also omits these fields without rewriting the stored record.
 
 On every model call the lead agent receives the current value as one hidden,
 user-role `<client_context>` block placed after the system prompt, with the
 values framed by the same `--- BEGIN/END USER INPUT ---` markers as the user's
-own message. It is never system text and never written to the thread history:
-a run without `context.client` has no block, and only the current request's
-value applies.
+own message. It is never system text and never written to the thread history.
+A run without a usable client value in either supported input location has
+no block; only the current request's value applies.
 
 - Capabilities and preferences are advisory hints, not enforcement. A client
   that must never receive some output still has to enforce that outside the
   model, in server-side policy or in the client itself.
 - `name` is informational only. Never use it for authorization or identity;
   trust comes from the authenticated principal.
-- Send the same `client` object on every run. An unchanged object keeps the
-  cached prompt prefix stable; a changed object makes the next request re-read
-  the conversation once.
+- Send the same `client` object on each run from the same client. Placement
+  after the system messages keeps an unchanged client ahead of the growing
+  conversation, allowing the message prefix to remain stable across runs.
+  Changing or omitting it can invalidate reuse of the following conversation
+  prefix. Actual cache hits, cost and latency depend on the model provider;
+  offline message-order tests do not establish those outcomes.
 - Subagents and embedded `DeerFlowClient` runs do not receive it; the lead
   agent decides the user-facing output shape. Runs the server starts
   (schedules, IM channels, GitHub agents, MCP notifications, and extensions
   unless the plugin passes a `client`) carry none, even on a thread a custom
-  client opened, so their replies are not shaped by these hints.
+  client opened. A thread does not retain a "last-seen client" for future
+  tasks: a launcher must explicitly supply its own current hints if needed.
+  Existing channel-specific response formatting is unchanged.
 
 **Response:** Server-Sent Events (SSE) stream
 

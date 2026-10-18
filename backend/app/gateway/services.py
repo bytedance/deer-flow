@@ -2376,10 +2376,10 @@ async def start_run(
                         body.assistant_id,
                         on_disconnect=disconnect,
                         metadata=run_metadata,
-                        # Persist a secret-redacted copy of the config: the run record is
+                        # Persist a redacted copy of the config: the run record is
                         # written to runs.kwargs_json and echoed by the run API, so a
-                        # request-scoped secret (#3861) must not ride along. The live
-                        # config built above keeps the secrets for the actual run.
+                        # request-scoped secret (#3861) or client hint must not ride along.
+                        # The live config built above keeps them for the actual run.
                         kwargs={
                             "input": run_record_input,
                             **({"knowledge_default_request_hash": knowledge_default_request_hash} if accepts_knowledge_default else {}),

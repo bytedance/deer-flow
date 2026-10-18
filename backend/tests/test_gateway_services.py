@@ -5618,7 +5618,9 @@ async def test_client_timezone_reaches_only_the_schedule_capability(_stub_app_co
 
 
 @pytest.mark.asyncio
-async def test_start_run_forwards_sanitized_client_context_to_runtime_context_only(_stub_app_config):
+@pytest.mark.parametrize("carrier", ["context", "config.context", "config.configurable", "both-config-sections"])
+async def test_start_run_forwards_sanitized_client_context_to_runtime_context_only(_stub_app_config, carrier):
+    from copy import deepcopy
     from unittest.mock import patch
 
     from app.gateway.routers.thread_runs import RunCreateRequest
@@ -5627,8 +5629,16 @@ async def test_start_run_forwards_sanitized_client_context_to_runtime_context_on
     from deerflow.runtime.runs.store.memory import MemoryRunStore
 
     client = {"name": "custom-analytics-frontend", "access_token": "secret", "capabilities": {"csv_download": True, "charts": "yes"}}
-    body = RunCreateRequest(input={"messages": [{"role": "user", "content": "Analyze this dataset"}]}, context={"client": client})
-    request = _make_start_run_request(RunManager(store=MemoryRunStore()))
+    request_config = {"metadata": {"caller_key": "kept"}}
+    body_context = {"client": client} if carrier == "context" else None
+    if carrier in {"config.context", "both-config-sections"}:
+        request_config["context"] = {"client": client, "thinking_enabled": False}
+    if carrier in {"config.configurable", "both-config-sections"}:
+        request_config["configurable"] = {"client": client, "thinking_enabled": False}
+    original_config = deepcopy(request_config)
+    body = RunCreateRequest(input={"messages": [{"role": "user", "content": "Analyze this dataset"}]}, context=body_context, config=request_config)
+    run_store = MemoryRunStore()
+    request = _make_start_run_request(RunManager(store=run_store))
     captured: dict[str, object] = {}
 
     async def fake_run_agent(*_args, **kwargs):
@@ -5642,5 +5652,16 @@ async def test_start_run_forwards_sanitized_client_context_to_runtime_context_on
         await record.task
 
     config = captured["config"]
-    assert config["context"]["client"] == {"name": "custom-analytics-frontend", "capabilities": {"csv_download": True}}
+    if carrier == "config.configurable":
+        assert "client" not in config.get("context", {})
+    else:
+        assert config["context"]["client"] == {"name": "custom-analytics-frontend", "capabilities": {"csv_download": True}}
     assert "client" not in config.get("configurable", {})
+    expected_stored_config = deepcopy(original_config)
+    for section in ("context", "configurable"):
+        if section in expected_stored_config:
+            expected_stored_config[section].pop("client")
+    stored = await run_store.get(record.run_id)
+    assert stored["kwargs"]["config"] == expected_stored_config
+    assert record.kwargs["config"] == expected_stored_config
+    assert body.config == original_config

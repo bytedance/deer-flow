@@ -518,6 +518,8 @@ preferences. DeerFlow sanitizes it and passes the values to the agent as
 untrusted, request-scoped hints, so skills can pick an output shape the client
 can show. It is never an authorization or identity signal. See
 [Create Run](backend/docs/API.md#create-run).
+Client hints are omitted from stored run configuration and must be sent again
+for each run; later runs, including server-started tasks, do not inherit them.
 The checkpoint storage settings `database.checkpoint_channel_mode` and
 `database.checkpoint_delta.snapshot_frequency` (default `10`) are exceptions:
 both are frozen when the process first builds an agent (including through

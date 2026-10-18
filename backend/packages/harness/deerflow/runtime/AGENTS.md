@@ -236,6 +236,13 @@ Check all owners and categories; surviving rows retain the allocation floor.
 
 **Checkpoint benchmarks:** Paired full/delta cases and production-shaped runs are documented in `backend/docs/runtime-guidance-details.md`.
 
+# Client capability context
+
+Client capability hints are request-only. `redact_config_secrets` excludes
+`client` from both `context` and `configurable` in saved configs and historical
+run API responses, without mutating the input. The live run keeps its sanitized
+client; later or server-started runs do not inherit it from thread history.
+
 # Referenced conversation capability
 
 `RunContext.conversation_reader` is a host-provided per-run callback. The worker
