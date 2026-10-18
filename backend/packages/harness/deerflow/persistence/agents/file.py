@@ -83,7 +83,9 @@ class FileAgentStore(AgentStore):
                     break
         if not soul_path.exists():
             return None
-        content = soul_path.read_text(encoding="utf-8").strip()
+        # utf-8-sig strips a leading BOM (Windows Notepad / PowerShell 5.1 write
+        # one) before .strip(); str.strip() does not remove U+FEFF (#6985).
+        content = soul_path.read_text(encoding="utf-8-sig").strip()
         return content or None
 
     def list(self, *, user_id: str | None = None) -> list[AgentConfig]:

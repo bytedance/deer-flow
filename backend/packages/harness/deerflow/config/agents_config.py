@@ -377,7 +377,9 @@ def load_agent_soul(agent_name: str | None, *, user_id: str | None = None) -> st
         soul_path = get_paths().base_dir / SOUL_FILENAME
         if not soul_path.exists():
             return None
-        content = soul_path.read_text(encoding="utf-8").strip()
+        # utf-8-sig strips a leading BOM (Windows Notepad / PowerShell 5.1 write
+        # one) before .strip(); str.strip() does not remove U+FEFF (#6985).
+        content = soul_path.read_text(encoding="utf-8-sig").strip()
         return content or None
     from deerflow.persistence.agents import get_agent_store
 
