@@ -188,7 +188,13 @@ def test_exhausted_timestamp_claims_refuse_to_overwrite(outputs, monkeypatch):
 
     monkeypatch.setattr(output_names, "MAX_COLLISION_PROBES", 1)
     monkeypatch.setattr(output_names, "datetime", _FrozenClock)
-    held = ["report.png", "report-1.png", "report-20261014-120000-123456.png"]
+    # The timestamped fallbacks offset one frozen clock sample, so they are all
+    # distinct names; exhausting them means holding every one of them.
+    held = [
+        "report.png",
+        "report-1.png",
+        *(f"report-20261014-120000-{123456 + offset:06d}.png" for offset in range(output_names.MAX_TIMESTAMP_ATTEMPTS)),
+    ]
     for name in held:
         (outputs / name).write_bytes(b"earlier")
 
