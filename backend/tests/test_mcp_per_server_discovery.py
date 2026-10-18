@@ -7,6 +7,7 @@ import builtins
 import logging
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 from langchain_core.tools import StructuredTool
 
@@ -711,3 +712,37 @@ async def test_discovery_and_wrapper_use_the_same_session_init_timeout(monkeypat
     assert len(groups["A"].tools) == 1
     assert observed["discovery"] == 5.0
     assert observed["wrapper"] == observed["discovery"]
+
+
+@pytest.mark.asyncio
+async def test_per_server_discovery_failure_log_redacts_resolved_credentials(monkeypatch, caplog):
+    """A failed per-server discovery must not log a credential-bearing URL."""
+    from langchain_mcp_adapters import client as adapter_client
+
+    secret = "s3cr3t-pass-123"
+    config = _config({"A": {"enabled": True, "type": "http", "url": "https://alice@remote.test/mcp"}})
+    _patch_common(monkeypatch)
+
+    class FakeClient:
+        def __init__(self, connections, **kwargs) -> None:
+            self.callbacks = kwargs.get("callbacks") or []
+            self.tool_interceptors = kwargs.get("tool_interceptors") or []
+            self.tool_name_prefix = kwargs.get("tool_name_prefix", True)
+
+        async def get_tools(self, *, server_name=None):
+            request = httpx.Request("GET", f"https://alice:{secret}@remote.test/mcp")
+            raise httpx.HTTPStatusError(
+                f"Client error for url '{request.url}'",
+                request=request,
+                response=httpx.Response(401, request=request),
+            )
+
+    monkeypatch.setattr(adapter_client, "MultiServerMCPClient", FakeClient)
+
+    with caplog.at_level("WARNING", logger="deerflow.mcp.tools"):
+        result = await get_mcp_tools_by_server(config, server_names={"A"})
+
+    assert result == {}
+    assert secret not in caplog.text  # the resolved credential never reaches the log
+    assert "server 'A'" in caplog.text  # the offending server name is retained
+    assert "HTTPStatusError" in caplog.text  # exception type retained

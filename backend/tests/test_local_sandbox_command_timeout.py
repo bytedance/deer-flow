@@ -87,8 +87,13 @@ def test_timeout_output_carries_authoritative_failure_marker(monkeypatch):
     """A timed-out command is a failed execution: the output must carry an
     exit marker so exit-status evidence (acceptance checklist) cannot read a
     partial passing summary as success."""
+    canned = ("12 passed\n", "", 0, True)
     monkeypatch.setattr(LocalSandbox, "_get_shell", lambda self: "/bin/sh")
-    monkeypatch.setattr(LocalSandbox, "_run_posix_command", staticmethod(lambda args, timeout, env=None: ("12 passed\n", "", 0, True)))
+    monkeypatch.setattr(LocalSandbox, "_run_posix_command", staticmethod(lambda args, timeout, env=None: canned))
+    # Windows hosts dispatch timed-out commands through the MSYS/PowerShell
+    # runner instead of the POSIX one; stub it too so the marker contract is
+    # hermetic and does not require make(1) or a resolvable shell path.
+    monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(lambda *args, **kwargs: canned))
 
     output = LocalSandbox("t").execute_command("make test", timeout=1)
 

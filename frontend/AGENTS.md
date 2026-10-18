@@ -1,6 +1,6 @@
 # AGENTS.md
 
-This is the source of truth for DeerFlow frontend coding agents; the sibling `CLAUDE.md` imports it via `@AGENTS.md`.
+DeerFlow frontend guidance source of truth; `CLAUDE.md` imports `@AGENTS.md`.
 
 ## Project Overview
 
@@ -42,7 +42,12 @@ Webpack is the default development bundler. Use `DEER_FLOW_DEV_BUNDLER=turbo` wi
 
 On Windows `pnpm dev` binds `127.0.0.1` by default because Hyper-V/winnat excluded port ranges can reject Next's default `0.0.0.0` bind with `EACCES` (#2870). Pass `pnpm dev -- --hostname 0.0.0.0` to listen on a LAN interface instead.
 
-Rstest runs them as two projects (`rstest.config.ts`). `*.test.ts` / `*.test.tsx` run in a plain **node** environment — that is nearly the whole suite, and it is the default for anything that is pure logic. `*.dom.test.ts` / `*.dom.test.tsx` run in **happy-dom**, for tests that need a document: hooks driven through `renderHook` from `@testing-library/react`, and components. Keep the split — a DOM environment costs roughly 3x the runtime of the node suite, so tests that do not render should not opt into it. A hook whose behavior only exists under real React (effect ordering, cleanup on unmount, re-render on store change) belongs in a `.dom.test.*` file rather than a node test that mocks `react` itself.
+`rstest.config.ts` separates **node** (`*.test.ts` / `*.test.tsx`) for pure logic
+from **happy-dom** (`*.dom.test.ts` / `*.dom.test.tsx`) for components and hooks
+rendered with `@testing-library/react`'s `renderHook`. Keep the split: DOM tests
+cost roughly 3x more runtime. Hooks that depend on React effect ordering, unmount
+cleanup, or re-renders on store changes belong in `.dom.test.*`; do not mock React
+in node tests to cover those behaviors.
 
 E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`. The real-backend auth contract in `tests/e2e-real-backend/auth-disabled-contract.spec.ts` and `backend/tests/test_auth_me_permissions.py` pin the complete route-permission list; update both when adding registered permissions (including `projects:read/write/delete`).
 
@@ -72,8 +77,26 @@ In chat, a `schedule_task` result becomes an `assistant:scheduled-task` group (`
 Server-created threads: `core/threads/origin.ts` reads `metadata.deerflow_origin` (`contracts/thread_origin_contract.json`), then `channel_source`, then a legacy `scheduled_task_id`; provider names come from `threads.origin.providers`. `core/threads/activity.ts` polls `/api/thread-activity` (mount `useThreadActivity` once; unmounting resets its cursor; first poll only seeds; invalidate lists only on server-origin threads, truncation or a higher `read_version`) and `useMarkThreadRead` posts reads. `core/scheduled-tasks/events.ts` loads a chat's lifecycle events, not gated on its task list; `placeTaskEvents` puts each at the end of its `after_run_id` turn. The UI language is saved as the `locale` preference once per session and on each switch, only when the Gateway's preferences include `locale`.
 Thread rows (sidebar, `/workspace/chats`) show `ThreadOriginIcon` and, if `unread === true` and not the open thread, `ThreadUnreadDot` with `threads.unreadLabel` as row label. `WorkspaceSidebar` mounts `useThreadActivity`. Chat pages call `useMarkOpenThreadRead` once metadata loads (marks read on load, on an unread flip, on tab visible, and via its callback from `onFinish`).
 Chat pages pass `useThreadScheduledTaskEvents` data to `MessageList` (`scheduledTaskEvents`; the custom-agent page also passes its agent for the run link), which renders `ScheduledTaskEventLine` through `VirtualMessageList.renderAfterGroup` at the `placeTaskEvents` position, inside the group's measured row. Lines are history: never gated on the task list. Channel provider cards (Settings and the sidebar list) render `ChannelScheduledUpdates` from `proactive_notifications`, and nothing when the field is absent.
+Keep IM notification preferences viewer-fenced and separate from browser alerts; only confirmed server writes change switches.
 
 ## Architecture
+
+Knowledge evidence is parsed in `core/citations/sources.ts` from version-1
+ToolMessage artifacts. Message rows receive sources from preceding loaded tool
+messages. `#knowledge-source-ID` links resolve to `KnowledgeCitation` and an
+expandable source panel with actual excerpts. Missing URLs/pages remain absent.
+Web citations and old history remain compatible. Never infer evidence from
+assistant labels or numbered legacy text.
+Shared records use the `RetrievalSource` type (native RAGFlow retains
+`KnowledgeSource`). Accept raw and `#user-content-knowledge-source-ID`
+fragments without disabling sanitizer clobber protection. Validate immutable
+tool messages through `createKnowledgeSourceReader` to reuse per-object parses.
+Cross-component field bounds live in `contracts/knowledge_sources.v1.json`.
+Completed `SubtaskCard` reports read shared evidence only from the matching
+`task` ToolMessage after its invocation in the current subagent group, selected
+by `findSubtaskResultMessage`. Prompts/earlier steps do not borrow final evidence.
+Remount report Markdown when validated source IDs change: Streamdown caches
+unchanged text blocks independently of renderer components.
 
 ```
 Frontend (Next.js) ──▶ LangGraph SDK ──▶ LangGraph Backend (lead_agent)
@@ -85,28 +108,23 @@ Users create **threads** (conversations), send messages, set thread-scoped `/goa
 
 ### Source Layout (`src/`)
 
-- **`app/`** — Next.js App Router. Routes include `/` (landing), `/showcase/[thread_id]` (allowlisted public read-only demos), `/workspace/chats/[thread_id]` (authenticated chat), `/workspace/agents/[agent_name]` and `/workspace/agents/new` (custom agents), `/artifacts/view` (chrome-free window that renders Markdown or CSV/TSV artifacts with the panel's own renderer), `/blog/…`, the `(auth)/{login,setup,auth/callback}` flow, `/[lang]/docs/…`, and `/api/…` route handlers (e.g. `/api/memory`).
-- **`components/`** — React components:
-  - `ui/` — Shadcn UI primitives (auto-generated, ESLint-ignored)
-  - `ai-elements/` — Vercel AI SDK elements (auto-generated, ESLint-ignored)
-  - `workspace/` — Chat page components (messages, artifacts, settings)
-  - `landing/` — Landing page sections
-  - `docs/` — Docs / MDX rendering components
-- **`core/`** — Business logic, the heart of the app. Domains include `threads/` (creation, streaming, state), `api/` (LangGraph client singleton), `agents/` (custom agents), `subagents/` (runtime worker catalog and administrator mutations), `auth/` (authentication), `artifacts/`, `channels/` (IM connections), `integrations/` (managed third-party integration status/install clients such as Lark CLI), `i18n/` (en-US, zh-CN), `settings/`, `memory/`, `skills/`, `messages/`, `mcp/`, `models/`, `input-polish/` (pre-send draft rewrite API), `voice-input/` (browser speech-recognition helpers), `suggestions/`, `tasks/`, `todos/`, `tools/`, `workspace-changes/` (run-scoped changed-file summaries and diff fetching), `config/`, `notification/`, `blog/`, plus rendering helpers (`rehype/`, `streamdown/`) and `utils/`.
-- **`hooks/`** — Shared React hooks
-- **`lib/`** — Utilities (`cn()` from clsx + tailwind-merge)
-- **`content/`** — MDX content (blog posts, docs) rendered by the app
-- **`styles/`** — Global CSS with Tailwind v4 `@import` syntax and CSS variables for theming
-- **`typings/`** — Ambient TypeScript declarations
-- Root files: `env.js` (env validation), `mdx-components.ts` (MDX component map)
+- `app/` — Next.js routes: chat/workspace, agents, auth, showcase, artifact views,
+  localized docs/blog, and API handlers.
+- `components/` — generated `ui/` and `ai-elements/`; application components under
+  `workspace/`, `landing/`, and `docs/`.
+- `core/` — domain logic, API clients, state/hooks, i18n, and Markdown renderers.
+- `hooks/`, `lib/`, `typings/` — shared hooks, utilities, and ambient types.
+- `content/`, `styles/` — MDX content and Tailwind styles.
+- `env.js`, `mdx-components.ts` — environment validation and MDX component map.
 
-More specific `AGENTS.md` files under `src/` contain the frontend sections split from this file.
+Read [src/AGENTS.md](src/AGENTS.md) for component and domain ownership.
 
 ## Code Style
 
 `core/utils/markdown.ts` reads web-fetch titles from the first nonblank line.
-Match zero to three literal spaces before `# ` without trimming indentation;
-mixed space/tab code blocks must fall back to the URL. Strip optional closing
+Match zero to three literal spaces before a single `#` followed by an ASCII
+space or tab, without trimming indentation; mixed space/tab code blocks must
+fall back to the URL. Strip optional closing
 hashes with a backwards scan so long fetched titles cannot cause quadratic regex
 backtracking. Closing hashes require a preceding space/tab (or an empty title)
 and only ASCII spaces/tabs afterward, apart from the terminal CR in CRLF input.
@@ -194,6 +212,11 @@ localized inline feedback; both create and edit must block submission. Keep this
 UI validation separate from the API payload. Preserve the original instant when
 wall time and timezone match the mounted snapshot; validate changed inputs, and
 restore the exact original timestamp when those edits are reverted.
+
+Wall-time conversion matches the scheduler's `ZoneInfo(fold=0)` policy: choose
+the first occurrence of a repeated time and the pre-transition offset for a
+skipped time. Stored one-time schedules use that instant for display; the form's
+round-trip validation must still reject newly entered skipped times.
 
 ## Resources
 
@@ -367,17 +390,19 @@ through the contract's aliases/default (`resolveReasoningEffort`). Effort values
 are open strings (`ReasoningEffortValue`), so provider-specific tokens such as
 `max` flow through local settings and account preferences unchanged; the custom
 agent dialog offers only the intersection with the per-agent `low/medium/high`
-schema and hides "off" for required-thinking models. Do not read the booleans in
-components directly. On a legacy model, `resolveReasoningEffort` keeps only its
-advertised generic values; this drops a remembered provider-specific token after
-a model switch without changing the backend's direct legacy-request behavior.
+schema and blocks new "off" for required-thinking models. Do not read the booleans in
+components directly. Legacy `resolveReasoningEffort` keeps only advertised generic
+values, dropping provider tokens after a switch; backend requests stay unchanged.
+Agent settings omit untouched reasoning, show invalid saved values for clearing,
+and require a known model to save a model switch.
 
 ## Full-stack plugin UI
 
-Before changing plugin loaders, pages or conversation actions, read the mandatory
-[Frontend implementation invariants](../docs/full-stack-plugins.md#frontend-implementation-invariants).
-Preserve authenticated, viewer-bound loading, native actions, localization and
-mount/dispose plus abort fencing; Shadow DOM is not a security sandbox.
+Follow [invariants](../docs/full-stack-plugins.md#frontend-implementation-invariants) for
+plugin loaders/pages/actions: viewer-bound auth, native actions, i18n and
+mount/dispose/abort fencing. Shadow DOM is not a sandbox. Bundled extensions need
+typed en/zh `core/extensions/catalog.ts` entries with their namespace.
+Catalog entries are not proof of installation or activation.
 
 ### Composer references
 

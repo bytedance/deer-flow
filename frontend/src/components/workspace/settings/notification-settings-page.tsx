@@ -8,9 +8,19 @@ import { useI18n } from "@/core/i18n/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useLocalSettings } from "@/core/settings";
 
+import { ChannelNotificationSettings } from "./channel-notification-settings";
 import { SettingsSection } from "./settings-section";
 
 export function NotificationSettingsPage() {
+  return (
+    <div className="space-y-8">
+      <BrowserNotificationSettings />
+      <ChannelNotificationSettings />
+    </div>
+  );
+}
+
+function BrowserNotificationSettings() {
   const { t } = useI18n();
   const { permission, isSupported, requestPermission, showNotification } =
     useNotification();

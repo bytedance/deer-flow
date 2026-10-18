@@ -483,12 +483,17 @@ def _atomic_write(path: Path, raw: bytes) -> None:
 def _process_file_lock(lock_path: Path, timeout_seconds: float) -> Iterator[None]:
     """Cross-process advisory lock for one scope, using only the stdlib."""
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    handle = open(lock_path, "a+b")
     deadline = time.monotonic() + timeout_seconds
     acquired = False
+    handle: Any = None
     try:
         while not acquired:
             try:
+                # (Re)open inside the retry loop: on Windows two threads/processes
+                # racing to create a not-yet-existing lock file with an append
+                # open transiently raise PermissionError (EACCES) on ``open()``
+                # itself, before the byte-range lock below is ever attempted.
+                handle = open(lock_path, "a+b")
                 if os.name == "nt":
                     import msvcrt
 
@@ -504,6 +509,9 @@ def _process_file_lock(lock_path: Path, timeout_seconds: float) -> Iterator[None
                     fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 acquired = True
             except OSError:
+                if handle is not None:
+                    handle.close()
+                    handle = None
                 if time.monotonic() >= deadline:
                     raise TimeoutError(f"Timed out acquiring memory scope lock {lock_path}")
                 time.sleep(0.05)
@@ -522,7 +530,8 @@ def _process_file_lock(lock_path: Path, timeout_seconds: float) -> Iterator[None
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             except OSError:
                 logger.warning("Failed to release memory scope lock %s", lock_path)
-        handle.close()
+        if handle is not None:
+            handle.close()
 
 
 class MemoryStorage(abc.ABC):

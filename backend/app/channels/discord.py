@@ -10,12 +10,24 @@ import threading
 from concurrent.futures import Future
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
+
+import httpx
 
 from app.channels.allowed_users import parse_channel_ids
 from app.channels.base import Channel
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
-from app.channels.message_bus import InboundMessage, InboundMessageType, InboundReservation, MessageBus, OutboundMessage, ResolvedAttachment
+from app.channels.inbound_files import coerce_file_size, safe_inbound_filename
+from app.channels.message_bus import (
+    INBOUND_FILE_CONTENT_KEY,
+    InboundMessage,
+    InboundMessageType,
+    InboundReservation,
+    MessageBus,
+    OutboundMessage,
+    ResolvedAttachment,
+)
 from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
@@ -34,6 +46,11 @@ DISCORD_OUTBOUND_TIMEOUT_SECONDS = 30.0
 # a healthy upload mid-transfer would report it as failed, so the bound here
 # only exists to convert a wedged client into a logged failure.
 DISCORD_UPLOAD_TIMEOUT_SECONDS = 120.0
+
+# Match Discord's default non-Nitro upload ceiling for inbound attachments.
+DISCORD_MAX_INBOUND_FILE_BYTES = 25 * 1024 * 1024
+# Bot Authorization is only attached for these CDN host suffixes.
+DISCORD_CDN_HOST_SUFFIXES = frozenset({"discordapp.net", "discordapp.com", "discord.com"})
 
 
 def _parse_discord_guild_id(entry: Any) -> int | None:
@@ -558,7 +575,9 @@ class DiscordChannel(Channel):
             return
 
         text = (message.content or "").strip()
-        if not text:
+        files = self._extract_inbound_files(message)
+        # File-only messages have empty content; still admit them when attachments exist.
+        if not text and not files:
             return
 
         if self._discord_module is None:
@@ -580,6 +599,7 @@ class DiscordChannel(Channel):
         if has_mention:
             text = text.replace(bot_mention or "", "").replace(alt_mention or "", "").replace(standard_mention or "", "").strip()
             # Don't return early if text is empty — still process the mention (e.g., create thread)
+            # or a captionless attachment that arrived with an @mention.
 
         connect_code = self._pending_connect_code(text)
         if connect_code and await self._bind_connection_from_connect_code(message, connect_code):
@@ -596,6 +616,7 @@ class DiscordChannel(Channel):
             user_id=str(message.author.id),
             text=text,
             msg_type=msg_type,
+            files=files,
             metadata={
                 "guild_id": str(guild.id) if guild else None,
                 "channel_id": str(message.channel.id),
@@ -613,6 +634,7 @@ class DiscordChannel(Channel):
             guild=guild,
             has_mention=bool(has_mention),
             reservation=reservation,
+            files=files,
         )
 
     async def _handle_admitted_message(
@@ -624,9 +646,11 @@ class DiscordChannel(Channel):
         guild,
         has_mention: bool,
         reservation: InboundReservation,
+        files: list[dict[str, Any]] | None = None,
     ) -> None:
         """Finish Discord routing while owning one bounded intake slot."""
         reservation_transferred = False
+        files = files or []
         try:
             # --- Determine thread/channel routing and typing target ---
             thread_id = None
@@ -648,6 +672,7 @@ class DiscordChannel(Channel):
                         text=text,
                         msg_type=msg_type,
                         thread_ts=thread_id,
+                        files=files,
                         metadata={
                             "guild_id": str(guild.id) if guild else None,
                             "channel_id": str(message.channel.id),
@@ -754,6 +779,7 @@ class DiscordChannel(Channel):
                 text=text,
                 msg_type=msg_type,
                 thread_ts=thread_id,
+                files=files,
                 metadata={
                     "guild_id": str(guild.id) if guild else None,
                     "channel_id": str(message.channel.id),
@@ -923,6 +949,178 @@ class DiscordChannel(Channel):
             await send(text)
         except Exception:
             logger.exception("[Discord] failed to send connection reply")
+
+    async def receive_file(self, msg: InboundMessage, thread_id: str, *, user_id: str | None = None) -> InboundMessage:
+        """Download inbound Discord attachments for the shared upload pipeline.
+
+        Attachment CDN URLs are captured on the message event (they expire).
+        Bytes cross to ``ChannelManager`` through ``INBOUND_FILE_CONTENT_KEY``
+        (same shape as Slack/Telegram). Prefer a Bot Authorization header when
+        the channel has a token — Discord has been rolling authenticated CDN
+        access — but signed URLs still download without one.
+        """
+        del thread_id, user_id
+        if not msg.files:
+            return msg
+
+        token = self._bot_token or None
+        materialized: list[dict[str, Any]] = []
+        unavailable: list[str] = []
+        size_limit_notice = f"exceeds the {DISCORD_MAX_INBOUND_FILE_BYTES / (1024 * 1024):g} MiB download limit"
+
+        for file_info in msg.files:
+            if not isinstance(file_info, dict):
+                continue
+
+            filename = self._safe_inbound_filename(file_info.get("filename"), "attachment")
+            declared_size = self._file_size(file_info.get("size"))
+            if declared_size is not None and declared_size > DISCORD_MAX_INBOUND_FILE_BYTES:
+                logger.warning("[Discord] inbound file exceeds download limit, skipping: %s", filename)
+                unavailable.append(f"{filename} ({size_limit_notice})")
+                continue
+
+            url = file_info.get("url")
+            if not isinstance(url, str) or not url.strip():
+                logger.error("[Discord] cannot download inbound file without url: %s", filename)
+                unavailable.append(f"{filename} (download unavailable)")
+                continue
+
+            try:
+                content = await self._download_attachment(url.strip(), token)
+            except Exception as exc:
+                logger.error(
+                    "[Discord] failed to download inbound file %s: %s",
+                    filename,
+                    type(exc).__name__,
+                )
+                unavailable.append(f"{filename} (download failed)")
+                continue
+
+            if content is None:
+                # Stream aborted for size; encoding refusals raise above.
+                unavailable.append(f"{filename} ({size_limit_notice})")
+                continue
+
+            if len(content) > DISCORD_MAX_INBOUND_FILE_BYTES:
+                logger.warning("[Discord] downloaded inbound file exceeds limit, skipping: %s", filename)
+                unavailable.append(f"{filename} ({size_limit_notice})")
+                continue
+
+            materialized.append(
+                {
+                    "type": "image" if file_info.get("type") == "image" else "file",
+                    "filename": filename,
+                    "mime_type": file_info.get("mime_type") if isinstance(file_info.get("mime_type"), str) else "application/octet-stream",
+                    "size": len(content),
+                    INBOUND_FILE_CONTENT_KEY: content,
+                }
+            )
+
+        msg.files = materialized
+        if unavailable:
+            notice = f"[Discord attachment unavailable: {', '.join(unavailable)}]"
+            msg.text = f"{msg.text}\n\n{notice}" if msg.text else notice
+        return msg
+
+    @classmethod
+    def _is_discord_cdn_url(cls, url: str) -> bool:
+        """True when *url* targets a Discord CDN host (dot-boundary aware)."""
+        try:
+            host = (urlsplit(url).hostname or "").lower()
+        except ValueError:
+            return False
+        if not host:
+            return False
+        return any(host == suffix or host.endswith(f".{suffix}") for suffix in DISCORD_CDN_HOST_SUFFIXES)
+
+    async def _download_attachment(self, url: str, token: str | None) -> bytes | None:
+        """Stream a Discord attachment CDN URL; never log the URL.
+
+        Bot Authorization is attached only for Discord CDN hosts so a foreign
+        URL on the bus can never carry the bot token off-platform. Returns
+        ``None`` only when the streamed body exceeds the per-file cap; a
+        non-identity ``Content-Encoding`` raises so callers report
+        ``(download failed)`` instead of a misleading size-limit notice.
+        """
+        headers = {"Accept-Encoding": "identity"}
+        if token and self._is_discord_cdn_url(url):
+            headers["Authorization"] = f"Bot {token}"
+        chunks: list[bytes] = []
+        total = 0
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
+            async with client.stream("GET", url, headers=headers) as response:
+                response.raise_for_status()
+                encoding = (response.headers.get("content-encoding") or "").strip().lower()
+                if encoding and encoding != "identity":
+                    logger.warning(
+                        "[Discord] inbound file response uses Content-Encoding %r, dropping before decode",
+                        encoding,
+                    )
+                    raise RuntimeError(f"unsupported content-encoding: {encoding}")
+                async for chunk in response.aiter_raw():
+                    total += len(chunk)
+                    if total > DISCORD_MAX_INBOUND_FILE_BYTES:
+                        logger.warning(
+                            "[Discord] inbound file exceeds %d bytes download limit, dropping",
+                            DISCORD_MAX_INBOUND_FILE_BYTES,
+                        )
+                        return None
+                    chunks.append(chunk)
+        return b"".join(chunks)
+
+    @classmethod
+    def _extract_inbound_files(cls, message) -> list[dict[str, Any]]:
+        """Build file descriptors from a discord.py Message's attachments."""
+        raw_attachments = getattr(message, "attachments", None) or []
+        files: list[dict[str, Any]] = []
+        for index, raw in enumerate(raw_attachments):
+            if isinstance(raw, dict):
+                url = raw.get("url")
+                filename_raw = raw.get("filename")
+                content_type = raw.get("content_type") or raw.get("mime_type")
+                size_raw = raw.get("size")
+                file_id = raw.get("id") or raw.get("file_id")
+            else:
+                url = getattr(raw, "url", None)
+                filename_raw = getattr(raw, "filename", None)
+                content_type = getattr(raw, "content_type", None)
+                size_raw = getattr(raw, "size", None)
+                file_id = getattr(raw, "id", None)
+
+            if not isinstance(url, str) or not url.strip():
+                continue
+
+            if isinstance(file_id, int):
+                file_id_str = str(file_id)
+            elif isinstance(file_id, str) and file_id:
+                file_id_str = file_id
+            else:
+                file_id_str = str(index)
+
+            mime_type = content_type if isinstance(content_type, str) and content_type else "application/octet-stream"
+            fallback = f"discord-file-{file_id_str}.bin"
+            filename = cls._safe_inbound_filename(filename_raw, fallback)
+            is_image = mime_type.startswith("image/")
+            files.append(
+                {
+                    "type": "image" if is_image else "file",
+                    "file_id": file_id_str,
+                    "filename": filename,
+                    "mime_type": mime_type,
+                    "size": cls._file_size(size_raw),
+                    # CDN URL only — Authorization is attached in receive_file when available.
+                    "url": url.strip(),
+                }
+            )
+        return files
+
+    @staticmethod
+    def _safe_inbound_filename(value: Any, fallback: str) -> str:
+        return safe_inbound_filename(value, fallback)
+
+    @staticmethod
+    def _file_size(value: Any) -> int | None:
+        return coerce_file_size(value)
 
     def _run_client(self) -> None:
         self._discord_loop = asyncio.new_event_loop()

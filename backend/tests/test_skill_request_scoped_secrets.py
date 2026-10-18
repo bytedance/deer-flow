@@ -1553,7 +1553,7 @@ class TestBashToolInjectsActiveSecrets:
         assert captured["command"] == "echo hi"
         assert captured["env"] == {"ERP_TOKEN": "tok-789", USER_ID_ENV: "u-win"}
 
-    def test_remote_bash_does_not_forward_shared_timeout(self):
+    def test_remote_bash_forwards_shared_timeout(self):
         from deerflow.sandbox import tools as tools_mod
 
         captured = {}
@@ -1600,7 +1600,7 @@ class TestBashToolInjectsActiveSecrets:
             )
 
         assert out == "done"
-        assert captured["timeout"] is None
+        assert captured["timeout"] == 42
 
 
 _SECRET = "sk-erp-9f3c-DO-NOT-LEAK"

@@ -811,6 +811,28 @@ class TestStream:
 
         assert [event.data["content"] for event in _ai_events(events)] == ["Checking again.", "\n\n[FORCED STOP] Repeated tool calls exceeded the safety limit."]
 
+    @pytest.mark.parametrize("snapshot_text, expected_delta", [("Hello\n\n附加说明", "\n\n附加说明"), ("Hello", ""), ("Rewritten answer", "")])
+    def test_first_streamed_snapshot_preserves_text_and_metadata_once(self, client, snapshot_text, expected_delta):
+        call = {"name": "bash", "args": {"command": "ls"}, "id": "call-1"}
+        message = AIMessage(content=snapshot_text, id="ai-1", tool_calls=[call], additional_kwargs={"note": "added"})
+        agent = _make_agent_mock(
+            [
+                ("messages", (AIMessageChunk(content="Hello", id="ai-1"), {})),
+                ("messages", (AIMessageChunk(content="", id="ai-1", tool_call_chunks=[{"name": "bash", "args": '{"command":"ls"}', "id": "call-1", "index": 0}]), {})),
+                ("values", {"messages": [message]}),
+                ("values", {"messages": [message.model_copy()]}),
+            ]
+        )
+        with patch.object(client, "_ensure_agent"), patch.object(client, "_agent", agent):
+            events = list(client.stream("hi", thread_id="t-first-streamed-snapshot"))
+
+        ai_events = [event.data for event in events if event.type == "messages-tuple" and event.data.get("type") == "ai"]
+        assert "".join(event["content"] for event in ai_events) == "Hello" + expected_delta
+        first_snapshot_index = next(index for index, event in enumerate(events) if event.type == "values")
+        assert "".join(event.data.get("content", "") for event in events[:first_snapshot_index]) == "Hello" + expected_delta
+        assert [event["additional_kwargs"] for event in ai_events if event.get("additional_kwargs")] == [{"note": "added"}]
+        assert [event["tool_calls"] for event in ai_events if event.get("tool_calls")] == [[call]]
+
     def test_stream_does_not_resend_a_replacement_that_does_not_extend_the_sent_text(self, client):
         """Only appended text is sent; a rewrite of what was already sent would duplicate output."""
         sent = AIMessage(content="Let me look.", id="ai-1")
@@ -1260,6 +1282,26 @@ class TestStream:
 
 
 class TestChat:
+    @pytest.mark.parametrize("suffix", ["", "\n\n附加说明"])
+    def test_returns_text_appended_before_the_first_values_snapshot(self, client, suffix):
+        """A model wrapper can extend streamed text before the model node commits."""
+        from langchain.agents import create_agent
+        from langchain.agents.middleware import AgentMiddleware, ModelResponse
+        from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+
+        class AppendTextMiddleware(AgentMiddleware):
+            def wrap_model_call(self, request, handler):
+                response = handler(request)
+                message = response.result[0]
+                return ModelResponse(result=[message.model_copy(update={"content": message.content + suffix})])
+
+        # A stable ID connects streamed text to the first committed snapshot;
+        # id-less responses would bypass reconciliation and mask a regression.
+        model = FakeMessagesListChatModel(responses=[AIMessage(content="Hello", id="ai-1")])
+        graph = create_agent(model=model, middleware=[AppendTextMiddleware()], state_schema=ThreadState)
+        with patch.object(client, "_ensure_agent"), patch.object(client, "_agent", graph):
+            assert client.chat("hi", thread_id="t-first-snapshot") == "Hello" + suffix
+
     @pytest.mark.parametrize(
         ("events", "expected"),
         [

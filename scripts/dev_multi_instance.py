@@ -170,7 +170,7 @@ def build_multi_instance_config(
             for name in disabled:
                 channels[name]["enabled"] = False
             if disabled:
-                notes.append(f"disabled IM channels under {section_name}: {', '.join(disabled)}: both Gateways would connect the same bot (set DEERFLOW_MI_KEEP_CHANNELS=1 to keep them)")
+                notes.append(f"disabled IM channels under {section_name}: {', '.join(disabled)}: the harness keeps your bots offline unless asked (set DEERFLOW_MI_KEEP_CHANNELS=1 to keep them; the leader lease then gives each bot to one Gateway)")
 
     memory = _section(config, "memory")
     manager_class = memory.get("manager_class")

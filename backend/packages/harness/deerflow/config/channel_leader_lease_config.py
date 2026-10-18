@@ -7,12 +7,11 @@ Telegram rejects the second poller with ``409 Conflict``, Discord delivers
 every message to every session so the user is answered twice, and the
 per-process ``ChannelManager`` state diverges between instances.
 
-The leader lease will be the arbitration for that: a row per provider in the
+The leader lease arbitrates that: a ``channel_leases`` row per provider in the
 shared database, held by one instance and renewed on a heartbeat, so only the
-holder starts the provider's transport. This module owns the configuration
-section and the startup gate consumes it; the transport arbitration itself
-ships separately with ``ChannelService``, so ``auto`` / ``true`` are reserved
-settings until then and must not be presented as an ownership guarantee.
+holder starts the provider's transport (``app.channels.leadership`` and
+``ChannelService``). This module owns the configuration section; the startup
+gate and ``ChannelService.from_app_config`` consume it.
 
 ``channels`` is not part of the ``AppConfig`` Pydantic schema (its provider
 blocks carry raw credentials), so this model is validated from the
@@ -44,9 +43,9 @@ class ChannelLeaderLeaseConfig(BaseModel):
         default="auto",
         description=(
             "auto (default) turns the lease on whenever the Gateway sees a multi-process signal (GATEWAY_WORKERS / WEB_CONCURRENCY > 1, "
-            "deployment.multi_instance: true or DEER_FLOW_MULTI_INSTANCE=1) and leaves a single instance untouched; true always turns it on; "
-            "false never does. A multi-process deployment with IM channels enabled refuses to start when this is false. Until the lease-backed "
-            "transport ownership ships, auto and true are reserved settings: they do not yet stop every instance from connecting."
+            "deployment.multi_instance: true or DEER_FLOW_MULTI_INSTANCE=1) and leaves a single instance untouched; true always turns it on "
+            "(it needs a sqlite or postgres database); false never does. While it is on, only the instance holding a provider's lease opens that "
+            "platform connection (GitHub webhooks stay on every instance). A multi-process deployment with IM channels enabled refuses to start when this is false."
         ),
     )
     lease_seconds: int = Field(

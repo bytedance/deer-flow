@@ -19,7 +19,10 @@ import {
   useSubtaskContext,
   useUpdateSubtask,
 } from "@/core/tasks/context";
-import { collectRenderedSubtasks } from "@/core/tasks/subtask-render";
+import {
+  collectRenderedSubtasks,
+  findSubtaskResultMessage,
+} from "@/core/tasks/subtask-render";
 import type { Subtask } from "@/core/tasks/types";
 
 rs.mock("@/core/tasks/api", () => ({ fetchSubtaskSteps: rs.fn() }));
@@ -117,6 +120,110 @@ function setup(history = false) {
 }
 
 describe("SubtaskCard message synchronization", () => {
+  it.each([false, true])(
+    "renders forwarded evidence on completion/replay (replay=%s)",
+    async (replay) => {
+      const id = "a".repeat(32);
+      const report = `Answer [citation:Label](#knowledge-source-${id})`;
+      const invocation = {
+        type: "ai",
+        content: "",
+        tool_calls: [
+          {
+            id: "task-1",
+            name: "task",
+            args: { description: "Research", prompt: "Find sources" },
+          },
+        ],
+      } as unknown as Message;
+      const result = {
+        type: "tool",
+        name: "task",
+        tool_call_id: "task-1",
+        content: `Task Succeeded\n${report}\nReal retrieved evidence`,
+        artifact: {
+          knowledge_sources_version: 1,
+          knowledge_sources: [
+            {
+              id,
+              provider: "lightrag",
+              title: "Retrieved guide",
+              excerpt: "Real retrieved evidence",
+            },
+          ],
+        },
+      } as unknown as Message;
+      const client = new QueryClient();
+      client.setQueryData(["models"], {
+        models: [],
+        token_usage: { enabled: false },
+      });
+      const draw = (messages: Message[]) => {
+        const group = {
+          id: "group-1",
+          type: "assistant:subagent" as const,
+          messages,
+        };
+        const completed = messages.length > 1;
+        return (
+          <QueryClientProvider client={client}>
+            <I18nContext.Provider
+              value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
+            >
+              <SubtasksProvider>
+                <SubtaskCard
+                  taskId="task-1"
+                  isLoading={!completed}
+                  fallbackTask={{
+                    id: "task-1",
+                    subagent_type: "researcher",
+                    description: "Research",
+                    prompt: "Find sources",
+                    status: completed ? "completed" : "in_progress",
+                    result: completed ? report : undefined,
+                  }}
+                  resultMessage={findSubtaskResultMessage(group, "task-1")}
+                />
+              </SubtasksProvider>
+            </I18nContext.Provider>
+          </QueryClientProvider>
+        );
+      };
+      const messages = replay
+        ? (JSON.parse(JSON.stringify([invocation, result])) as Message[])
+        : [invocation];
+      const view = render(draw(messages));
+      fireEvent.click(screen.getByRole("button", { name: /Research/ }));
+      if (!replay) view.rerender(draw([invocation, result]));
+      const citation = await screen.findByRole("button", {
+        name: "Retrieved guide",
+      });
+      fireEvent.focus(citation);
+      expect(await screen.findByText("Real retrieved evidence")).toBeTruthy();
+      expect(view.container.textContent).not.toContain("unavailable");
+      // A different task or non-evidence content must not authorize the report.
+      view.rerender(
+        draw([
+          invocation,
+          { ...result, tool_call_id: "other-task" } as Message,
+        ]),
+      );
+      expect(
+        screen.queryByRole("button", { name: "Retrieved guide" }),
+      ).toBeNull();
+      view.rerender(
+        draw([invocation, { ...result, content: "No evidence" } as Message]),
+      );
+      expect(
+        screen.queryByRole("button", { name: "Retrieved guide" }),
+      ).toBeNull();
+      // The final report text is unchanged when its evidence becomes available.
+      view.rerender(draw([invocation, result]));
+      expect(
+        await screen.findByRole("button", { name: "Retrieved guide" }),
+      ).toBeTruthy();
+    },
+  );
   it("merges a delayed history backfill with live steps after argument synchronization", async () => {
     let finishBackfill!: (steps: NonNullable<Subtask["steps"]>) => void;
     rs.mocked(fetchSubtaskSteps).mockImplementation(

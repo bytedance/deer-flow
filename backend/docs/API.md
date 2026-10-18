@@ -1216,6 +1216,11 @@ mounted directory must be writable only by trusted operators.
 
 Upload one or more files to a thread.
 
+Automatic Office/PDF-to-Markdown conversion is disabled by default. To enable
+host-side parsing in a trusted deployment, set
+`uploads.auto_convert_documents: true` in `config.yaml`. See
+[document conversion configuration](FILE_UPLOAD.md#支持的文档格式).
+
 ```http
 POST /api/threads/{thread_id}/uploads
 Content-Type: multipart/form-data
@@ -1224,7 +1229,7 @@ Content-Type: multipart/form-data
 **Request Body:**
 - `files`: One or more files to upload
 
-**Response:**
+**Response** (example with automatic conversion enabled and successful):
 ```json
 {
   "success": true,
@@ -1248,7 +1253,7 @@ Content-Type: multipart/form-data
 
 **Name collisions:** filenames are claimed unique against the thread's existing uploads and reserved atomically — a same-name upload never replaces the existing file; it lands as `document_1.pdf` (the response's `filename`/`original_filename` reflect the claimed name). Use the artifacts `PUT` endpoint for sanctioned in-place updates.
 
-**Supported Document Formats** (auto-converted to Markdown):
+**Supported Document Formats** (converted to Markdown only when automatic conversion is enabled):
 - PDF (`.pdf`)
 - PowerPoint (`.ppt`, `.pptx`)
 - Excel (`.xls`, `.xlsx`)
@@ -1719,7 +1724,7 @@ stripped from client-supplied messages and state updates.
 **IM notices ("scheduled task updates").** With `channel_connections.enabled`,
 each item of `GET /api/channels/providers` carries
 `proactive_notifications` (bool): whether scheduled-task updates are pushed to
-that app. Only providers with proactive push (WeCom and Feishu/Lark today) get notices; the
+that app. Only providers with proactive push (WeCom, Feishu/Lark, WeChat and QQ private chat today) get notices; the
 others get none, and Settings says so. An occurrence sends at most one message,
 in the owner's `locale` preference (see Account Preferences), else
 `channel_connections.notification_locale`. Notices carry no IDs and no links;
@@ -1728,6 +1733,19 @@ see `backend/docs/CONFIGURATION.md` for the events and the merge rule.
 ```json
 { "provider": "wecom", "display_name": "WeCom", "connection_status": "connected", "proactive_notifications": true }
 ```
+
+**Runtime bot credentials.** `POST /api/channels/{provider}/runtime-config`
+(body `{"values": {...}}`, keyed by the provider's `credential_fields`) and
+`DELETE /api/channels/{provider}/runtime-config` are admin-only; they save or
+disconnect the deployment's bot for that provider and answer with its provider
+item. Password values come back masked (`********`); sending the mask back
+keeps the stored value. A save whose channel fails to start on the serving
+instance, or a disconnect whose channel fails to stop there, answers `400` and
+stores nothing (under `channels.leader_lease` a non-holder stores the save and
+the holder applies it on its next renewal tick). With a SQLite or
+PostgreSQL database the values are stored encrypted with
+`DEER_FLOW_CREDENTIALS_KEY` and shared by every Gateway instance; without a
+usable key a save answers `503`. See `backend/docs/IM_CHANNEL_CONNECTIONS.md`.
 
 ---
 
@@ -2091,3 +2109,25 @@ a JSON boolean. Writes containing only boolean pin/archive flags preserve
 `updated_at` and all other metadata. The owner-checked endpoint returns the normal
 thread metadata response; original thread and artifact URLs remain available.
 Archiving does not cancel runs, pause schedules, or change retention.
+
+### Proactive IM notification preferences
+
+`GET/PATCH /api/channels/notification-preferences` is authenticated and owner-scoped.
+Both require `X-Expected-User-Id` matching the authenticated viewer; a stale
+account returns 409. Session mutations retain normal CSRF protection. The local
+auth-disabled default identity is supported without creating an auth account.
+
+GET and PATCH return `{ "feishu": true, "wecom": true, "wechat": true, "qq": true }`
+with the owner's effective booleans. PATCH accepts only supplied provider fields,
+strict booleans or `null` (reset to enabled); other fields are rejected. Missing
+preferences preserve the existing connected-channel default. Browser notification
+preferences and chat connection state remain independent.
+
+Opt-out and cancellation of that owner's pending/sending outbox rows for the
+provider commit together; the internal terminal reason is `disabled_by_owner`.
+Retries consume no additional attempts, and opting back in cannot reopen the
+old rows. The worker rechecks preferences and claim ownership before starting a
+provider send. A provider call already started may still complete; it cannot be
+retracted. All Gateway workers must be upgraded to honor the shared preference.
+Migration `0041_im_notice_preferences` adds only a small owner/provider preference
+table; downgrade removes these choices, so subsequent upgrades use defaults.

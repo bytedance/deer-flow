@@ -1,6 +1,6 @@
 # 🦌 DeerFlow - 2.0
 
-[English](./README.md) | 中文 | [日本語](./README_ja.md) | [Français](./README_fr.md) | [Русский](./README_ru.md) | [Português](./README_pt.md)
+[English](./README.md) | 中文 | [日本語](./README_ja.md) | [Français](./README_fr.md) | [Русский](./README_ru.md) | [Português](./README_pt.md) | [한국어](./README_ko.md)
 
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](./backend/pyproject.toml)
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](./Makefile)
@@ -179,6 +179,13 @@ YAML 同名模型优先，已有任务保留原配置快照。托管模型使用
        api_key: $OPPER_API_KEY
        base_url: https://api.opper.ai/v3/compat
 
+     - name: api-route-gpt-6.1-sol
+       display_name: GPT 6.1 Sol (API Route)
+       use: langchain_openai:ChatOpenAI
+       model: gpt-6.1-sol
+       api_key: $API_ROUTE_API_KEY
+       base_url: https://global.api-route.com/v1
+
      - name: gpt-5-responses
        display_name: GPT-5 (Responses API)
        use: langchain_openai:ChatOpenAI
@@ -201,6 +208,8 @@ YAML 同名模型优先，已有任务保留原配置快照。托管模型使用
    ```
 
    OpenRouter 以及类似的 OpenAI 兼容网关，建议通过 `langchain_openai:ChatOpenAI` 配合 `base_url` 来配置。如果你更想用 provider 自己的环境变量名，也可以直接把 `api_key` 指向对应变量，例如 `api_key: $OPENROUTER_API_KEY`。
+
+   Setup Wizard 也支持 [API Route](https://www.api-route.com)，会将密钥保存为 `API_ROUTE_API_KEY`，并使用上面的 Chat Completions 端点。可用模型取决于密钥所属组别和权限；修改 `config.yaml` 中的模型前，请先查询需要认证的 `GET https://global.api-route.com/v1/models` 模型目录，并原样使用返回的模型 ID，不要添加上游 provider 前缀。
 
    如果要让 OpenAI 模型走 `/v1/responses`，继续使用 `langchain_openai:ChatOpenAI`，并设置 `use_responses_api: true` 和 `output_version: responses/v1`。
 
@@ -228,6 +237,7 @@ YAML 同名模型优先，已有任务保留原配置快照。托管模型使用
    ```
 
    - Codex CLI 会读取 `~/.codex/auth.json`
+   - Codex 的 `bind_tools` 和直接调用支持 `tool_choice`：`auto`、`none`、`required` 或指定函数名称/对象。`any` 和 `True` 表示 `required`；`None` 和 `False` 保留服务端默认策略。单次调用可覆盖绑定策略。绑定时校验绑定策略；直接调用及覆盖参数在 HTTP 请求前校验。`required` 至少需要一个函数工具，指定函数必须存在于工具列表中。无工具时仍支持 `auto` 和 `none`。
    - Claude Code 支持 `CLAUDE_CODE_OAUTH_TOKEN`、`ANTHROPIC_AUTH_TOKEN`、`CLAUDE_CODE_CREDENTIALS_PATH`，或 `~/.claude/.credentials.json`
    - ACP agent 条目与 model provider 是分开配置的——如果你配置了 `acp_agents.codex`，请把它指向一个 Codex ACP 适配器，例如 `npx -y @zed-industries/codex-acp`
    - MiniMax Code 原生支持 ACP，不需要额外适配器。先安装并登录，再把它配置成 ACP agent：
@@ -716,6 +726,11 @@ DeerFlow 可连接租户级 RAGFlow，并通过 `knowledge_search` 按 embedding
 `context.agent_name`，确保 Gateway 的范围校验与运行时加载的是同一个智能体；主智能体聊天使用 `lead_agent`，两者都只有在共享配置启用 RAGFlow provider 时才会提交知识范围。
 
 本版不在工作区侧边栏增加独立的“知识库”入口，也不提供 DeerFlow 知识库管理页面；知识库和文件的创建、上传、解析与删除仍直接在 RAGFlow 中完成。
+
+运维还可独立安装 [WeKnora 只读扩展](examples/deerflow-extension-weknora/README.md)，
+对接 WeKnora v0.8.3，使用知识库/文档范围选择器和共享检索引用。
+需显式配置 DeerFlow 用户到 WeKnora 工作空间的凭据绑定；资源授权仍由 WeKnora 执行。
+安装与配置步骤见扩展目录中的英文指南。
 
 Gateway 生成后续建议时，现在会先把普通字符串输出和 block/list 风格的富文本内容统一归一化，再去解析 JSON 数组响应，因此不同 provider 的内容包装方式不会再悄悄把建议吞掉。
 

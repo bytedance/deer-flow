@@ -2390,6 +2390,24 @@ export function mockLangGraphAPI(
     return route.fallback();
   });
 
+  void page.route("**/api/knowledge/capabilities?*", (route) =>
+    route.fulfill({
+      json: {
+        operations: featureFlags.knowledgeScopeSelectionEnabled
+          ? [
+              "search",
+              "sources",
+              "catalog",
+              "documents",
+              "dataset_filter",
+              "document_filter",
+            ]
+          : ["search"],
+        scope_selection_enabled: featureFlags.knowledgeScopeSelectionEnabled,
+      },
+    }),
+  );
+
   void page.route("**/api/mcp/config", (route) =>
     route.fulfill({ json: { mcp_servers: {} } }),
   );

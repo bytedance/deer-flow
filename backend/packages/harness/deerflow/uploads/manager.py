@@ -167,6 +167,26 @@ def validate_path_traversal(path: Path, base: Path) -> None:
         raise PathTraversalError("Path traversal detected") from None
 
 
+def _replacement_destination_is_hardlinked(st: os.stat_result) -> bool:
+    """Whether a *replacement* destination shows an untrusted extra hard link.
+
+    Only used on the non-exclusive replacement path, where the module is about to
+    overwrite a file it published itself. On POSIX ``st_nlink`` is authoritative,
+    so ``st_nlink > 1`` means a second name — possibly outside the uploads tree —
+    aliases the destination and overwriting it would mutate that other file.
+
+    Windows cannot answer that question with ``st_nlink``: NTFS leaves the count at
+    2 once one of the two names of a published upload is unlinked, and unlinking a
+    hard link does not decrement it either. The count there is therefore *always*
+    at least 2 for a file this module just published, which made the guard reject
+    every legitimate replacement upload (``copy_upload_file_no_symlink``) and made
+    the alias-reclaiming sweep unable to clear it. Treat the count as unreliable on
+    Windows; the symlink and regular-file guards on the same destination, and the
+    ``exclusive`` (first-claim) path used by every untrusted caller, are unchanged.
+    """
+    return os.name != "nt" and st.st_nlink > 1
+
+
 def validate_upload_destination(base_dir: Path, filename: str, *, exclusive: bool = False) -> Path:
     """Validate a destination; exclusive creation treats regular hardlinks as collisions."""
     safe_name = normalize_filename(filename)
@@ -179,7 +199,7 @@ def validate_upload_destination(base_dir: Path, filename: str, *, exclusive: boo
 
     if st is not None and not stat.S_ISREG(st.st_mode):
         raise UnsafeUploadPathError(f"Upload destination is not a regular file: {safe_name}")
-    if not exclusive and st is not None and st.st_nlink > 1:
+    if not exclusive and st is not None and _replacement_destination_is_hardlinked(st):
         raise UnsafeUploadPathError(f"Upload destination has multiple links: {safe_name}")
 
     validate_path_traversal(dest, base_dir)
@@ -197,21 +217,80 @@ def _staging_entry_stat(entry: os.DirEntry[str]) -> os.stat_result:
     return os.lstat(entry.path)
 
 
+def _uploads_dir_entry_stats(uploads_dir: Path) -> dict[str, os.stat_result]:
+    """One ``lstat`` per entry, keyed by name.
+
+    Built once per *uploads_dir* so the stale-staging sweep stays linear in the
+    number of entries instead of rescanning the directory for every staging file.
+    Entries that cannot be stat'ed are omitted: a file that cannot be stat'ed is
+    kept, never removed on a guess.
+    """
+    try:
+        with os.scandir(uploads_dir) as entries:
+            stats: dict[str, os.stat_result] = {}
+            for entry in entries:
+                # ``_staging_entry_stat`` uses ``os.lstat`` rather than
+                # ``entry.stat``: on Windows a ``DirEntry`` stat reports zero
+                # for ``st_dev``/``st_ino`` and leaves ``st_nlink`` at zero
+                # (the same limitation the ``st_nlink`` note above records),
+                # so it can never match a real inode there.
+                try:
+                    stats[entry.name] = _staging_entry_stat(entry)
+                except FileNotFoundError:
+                    continue  # vanished mid-scan; nothing left to clean
+                except OSError:
+                    logger.warning("Could not stat upload staging file %s; keeping it", entry.path, exc_info=True)
+                    continue
+            return stats
+    except FileNotFoundError:
+        return {}  # directory vanished during cleanup
+    except OSError:
+        logger.warning("Could not scan uploads directory for stale staging files: %s", uploads_dir, exc_info=True)
+        return {}
+
+
+def _staging_name_shares_inode_with_sibling(sibling_stats: dict[str, os.stat_result], name: str, st: os.stat_result) -> bool:
+    """Whether another entry in the uploads dir names the same inode as *name*.
+
+    A commit publishes a staged part with ``os.link``, so its bytes carry two names
+    for an instant and the staged name is an alias once the final name exists. Any
+    sibling sharing ``(st_dev, st_ino)`` marks it as such an alias. Inode
+    identity is the portable signal: unlike ``st_nlink`` it stays meaningful on
+    Windows, where the count is not decremented when a hard link is removed, so the
+    sweep can still reclaim a published alias there instead of mistaking it for an
+    in-flight upload and leaving the destination stuck behind the multi-link check.
+
+    A zero ``st_ino`` on either side never matches: on filesystems that cannot
+    answer inode identity (FAT/exFAT, some SMB/network shares) every name would
+    look like every other name's alias and the sweep would delete in-flight
+    uploads at any age. Such a volume falls back to the ``min_age`` guard only.
+    """
+    if st.st_ino == 0:
+        return False
+    for sibling_name, sibling_st in sibling_stats.items():
+        if sibling_name == name or sibling_st.st_ino == 0:
+            continue
+        if sibling_st.st_dev == st.st_dev and sibling_st.st_ino == st.st_ino:
+            return True
+    return False
+
+
 def cleanup_stale_upload_staging_files(base_dir: Path | str | None = None, *, min_age: timedelta = UPLOAD_STAGING_MIN_AGE) -> int:
     """Remove orphaned Gateway upload staging files left by a hard crash.
 
-    A lone ``.upload-*.part`` (``st_nlink == 1``) is removed only once its mtime
-    is older than *min_age*. The uploads directories may live on a volume
-    shared by several Gateway replicas, so at startup such a file can belong to
-    an upload another replica is still writing; each chunk write refreshes its
-    mtime, which keeps it younger than the guard until it is committed or
-    abandoned.
+    A lone ``.upload-*.part`` is removed only once its mtime is older than
+    *min_age*. The uploads directories may live on a volume shared by several
+    Gateway replicas, so at startup such a file can belong to an upload another
+    replica is still writing; each chunk write refreshes its mtime, which keeps it
+    younger than the guard until it is committed or abandoned. "Lone" is decided by
+    whether a sibling entry names the same inode rather than by ``st_nlink``, which
+    Windows does not decrement when a hard link is removed.
 
-    A staging name with ``st_nlink > 1`` is removed at any age: the commit's
-    ``os.link`` already published those bytes under their final name, so the
-    staged name is only an alias left behind by a crash (or a deferred removal
-    that never ran). Keeping it would make that destination fail the
-    multi-link safety check on the next replacement upload (embedded
+    A staging name that shares an inode with a sibling is removed at any age: the
+    commit's ``os.link`` already published those bytes under their final name, so
+    the staged name is only an alias left behind by a crash (or a deferred removal
+    that never ran). Keeping it would make that destination fail the multi-link
+    safety check on the next replacement upload (embedded
     ``DeerFlowClient.upload_files`` goes through ``copy_upload_file_no_symlink``).
     Removing the alias cannot affect an upload in flight: a staged part gains
     its second link only through its own commit.
@@ -224,31 +303,19 @@ def cleanup_stale_upload_staging_files(base_dir: Path | str | None = None, *, mi
     for uploads_dir in _iter_upload_dirs(root):
         if not uploads_dir.is_dir():
             continue
-        try:
-            with os.scandir(uploads_dir) as entries:
-                for entry in entries:
-                    if not is_upload_staging_file(entry.name) or not entry.is_file(follow_symlinks=False):
-                        continue
-                    try:
-                        st = _staging_entry_stat(entry)
-                    except FileNotFoundError:
-                        continue
-                    except OSError:
-                        logger.warning("Could not stat upload staging file %s; keeping it", entry.path, exc_info=True)
-                        continue
-                    if st.st_nlink <= 1 and st.st_mtime >= cutoff:
-                        continue  # a lone, young part may still be in flight on another replica
-                    try:
-                        os.unlink(entry.path)
-                        removed += 1
-                    except FileNotFoundError:
-                        pass
-                    except OSError:
-                        logger.warning("Failed to remove stale upload staging file: %s", entry.path, exc_info=True)
-        except FileNotFoundError:
-            continue
-        except OSError:
-            logger.warning("Failed to scan uploads directory for stale staging files: %s", uploads_dir, exc_info=True)
+        entry_stats = _uploads_dir_entry_stats(uploads_dir)
+        for name, st in entry_stats.items():
+            if not is_upload_staging_file(name) or not stat.S_ISREG(st.st_mode):
+                continue
+            if not _staging_name_shares_inode_with_sibling(entry_stats, name, st) and st.st_mtime >= cutoff:
+                continue  # a lone, young part may still be in flight on another replica
+            try:
+                os.unlink(uploads_dir / name)
+                removed += 1
+            except FileNotFoundError:
+                pass
+            except OSError:
+                logger.warning("Failed to remove stale upload staging file: %s", uploads_dir / name, exc_info=True)
     return removed
 
 
@@ -309,7 +376,7 @@ def open_upload_file_no_symlink(base_dir: Path, filename: str, *, exclusive: boo
     # Note: a narrow race window remains between the pre-open lstat and open(); the
     # path-traversal check mitigates escapes from base_dir but cannot prevent an
     # attacker who can atomically replace dest with a symlink after the check.
-    if not exclusive and st is not None and st.st_nlink > 1:
+    if not exclusive and st is not None and _replacement_destination_is_hardlinked(st):
         raise UnsafeUploadPathError(f"Upload destination has multiple links: {safe_name}")
 
     flags = os.O_WRONLY | os.O_CREAT
@@ -325,7 +392,7 @@ def open_upload_file_no_symlink(base_dir: Path, filename: str, *, exclusive: boo
 
     if pre_open_st is not None and not stat.S_ISREG(pre_open_st.st_mode):
         raise UnsafeUploadPathError(f"Upload destination is not a regular file: {safe_name}")
-    if not exclusive and pre_open_st is not None and pre_open_st.st_nlink > 1:
+    if not exclusive and pre_open_st is not None and _replacement_destination_is_hardlinked(pre_open_st):
         raise UnsafeUploadPathError(f"Upload destination has multiple links: {safe_name}")
 
     try:
@@ -337,7 +404,10 @@ def open_upload_file_no_symlink(base_dir: Path, filename: str, *, exclusive: boo
 
     try:
         opened_stat = os.fstat(fd)
-        if not stat.S_ISREG(opened_stat.st_mode) or opened_stat.st_nlink > 1:
+        # The exclusive path keeps the strict post-open single-link check on every
+        # platform (a just-exclusively-created file must have exactly one link);
+        # only the non-exclusive replacement path defers to the Windows-aware guard.
+        if not stat.S_ISREG(opened_stat.st_mode) or (exclusive and opened_stat.st_nlink != 1) or (not exclusive and _replacement_destination_is_hardlinked(opened_stat)):
             raise UnsafeUploadPathError(f"Upload destination is not an exclusive regular file: {safe_name}")
         os.ftruncate(fd, 0)
         fh = os.fdopen(fd, "wb")

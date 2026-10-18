@@ -303,8 +303,9 @@ def extract_artifacts_from_result(
        results — become ``file`` entries, subject to the same
        referenceability gate as every other ref source (``data:``/``blob:``
        and other unresolvable URIs are skipped).
-    3. ``content`` blocks of type ``file`` / ``image`` with a URL source become
-       ``file`` / ``image`` entries.
+    3. ``content`` blocks of type ``file`` / ``image`` with a top-level ``url``
+       or legacy ``source.url`` become ``file`` / ``image`` entries. A present
+       top-level URL takes precedence, with MIME metadata from the same shape.
     4. ``content`` text blocks and plain-string results are scanned
        conservatively for sandbox paths and remote file URLs (gated by
        ``detect_refs_in_text``).
@@ -383,7 +384,10 @@ def extract_artifacts_from_result(
         block_type = block.get("type", "")
 
         if block_type in {"file", "image"}:
-            source = block.get("source") or {}
+            # Standard LangChain blocks keep URL/MIME at the top level. Select
+            # one shape before validation so conflicting legacy fields cannot
+            # replace an invalid standard URL or supply unrelated MIME metadata.
+            source = block if "url" in block else block.get("source") or {}
             if not isinstance(source, dict):
                 continue
             url = source.get("url")

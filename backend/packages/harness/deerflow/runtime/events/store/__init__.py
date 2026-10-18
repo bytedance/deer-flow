@@ -1,4 +1,4 @@
-from deerflow.runtime.events.store.base import RunEventStore
+from deerflow.runtime.events.store.base import RunEventStore, RunEventStoreNotCommittedError
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 
 
@@ -23,4 +23,4 @@ def make_run_event_store(config=None) -> RunEventStore:
     raise ValueError(f"Unknown run_events backend: {config.backend!r}")
 
 
-__all__ = ["MemoryRunEventStore", "RunEventStore", "make_run_event_store"]
+__all__ = ["MemoryRunEventStore", "RunEventStore", "RunEventStoreNotCommittedError", "make_run_event_store"]

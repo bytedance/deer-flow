@@ -133,8 +133,16 @@ _TEXT: dict[str, dict[str, str]] = {
         "last_unmet": "The last run didn't meet the goal: {reason}.",
         "last_unmet_bare": "The last run didn't meet the goal.",
         "last_interrupted": "The last run was interrupted.",
+        "runtime_title": "Task “{title}”",
+        "runtime_untitled": "Untitled conversation",
+        "runtime_completed": "Completed.",
+        "runtime_failed": "Failed to complete.",
+        "human_input_requested": "Waiting for your input in the conversation.",
+        "question": "Question: {question}",
         "result": "Result: {summary}",
         "closing": "Open DeerFlow → Scheduled tasks for details.",
+        "runtime_closing": "Open DeerFlow → Conversations for details.",
+        "human_input_closing": "Open DeerFlow → Conversations to continue.",
         "sentence_gap": " ",
     },
     "zh-CN": {
@@ -160,8 +168,16 @@ _TEXT: dict[str, dict[str, str]] = {
         "last_unmet": "最后一次运行未达成目标：{reason}。",
         "last_unmet_bare": "最后一次运行未达成目标。",
         "last_interrupted": "最后一次运行被中断了。",
+        "runtime_title": "任务“{title}”",
+        "runtime_untitled": "未命名对话",
+        "runtime_completed": "已完成。",
+        "runtime_failed": "运行失败，未能完成。",
+        "human_input_requested": "正在等待你在对话中确认或补充信息。",
+        "question": "待确认：{question}",
         "result": "结果：{summary}",
         "closing": "在 DeerFlow 的定时任务页查看详情。",
+        "runtime_closing": "在 DeerFlow 的对话页查看详情。",
+        "human_input_closing": "在 DeerFlow 的对话页继续处理。",
         "sentence_gap": "",
     },
 }
@@ -173,11 +189,22 @@ _SUMMARY_EVENTS = frozenset({"run_completed", "run_unmet", "task_paused", "task_
 _SUMMARY_RUN_STATUSES = frozenset({"success", "unmet"})
 # Rows written before payload version 2 carry no ``run_status`` for these.
 _LEGACY_RUN_STATUS = {"run_completed": "success", "run_failed": "failed", "run_unmet": "unmet", "task_paused": "unmet"}
+_RUNTIME_SOURCE_KINDS = frozenset({"run", "human_input_request"})
 
 
 def _payload(delivery: dict[str, Any]) -> dict[str, Any]:
     payload = delivery.get("payload")
     return payload if isinstance(payload, dict) else {}
+
+
+def _is_runtime_delivery(delivery: dict[str, Any]) -> bool:
+    payload = _payload(delivery)
+    source_kind = delivery.get("source_kind") or payload.get("source_kind")
+    if isinstance(source_kind, str) and source_kind in _RUNTIME_SOURCE_KINDS:
+        return True
+    if delivery.get("event") == "human_input_requested":
+        return True
+    return not delivery.get("task_id") and not delivery.get("task_run_id") and bool(delivery.get("run_id"))
 
 
 def _run_status(delivery: dict[str, Any]) -> str | None:
@@ -230,10 +257,11 @@ def _with_reason(key: str, code: object, locale: str) -> str:
     return text[f"{key}_bare"] if reason is None else text[key].format(reason=reason)
 
 
-def _title(payload: dict[str, Any], locale: str) -> str:
-    title = payload.get("task_title")
-    title = _one_line(title) if isinstance(title, str) else ""
-    return _truncate(title, limit=_TITLE_LIMIT) if title else _TEXT[locale]["untitled"]
+def _title(payload: dict[str, Any], locale: str, *, runtime: bool = False) -> str:
+    raw_title = payload.get("task_title") or payload.get("thread_title")
+    title = _one_line(redact_egress_text(raw_title)) if isinstance(raw_title, str) else ""
+    fallback_key = "runtime_untitled" if runtime else "untitled"
+    return _truncate(title, limit=_TITLE_LIMIT) if title else _TEXT[locale][fallback_key]
 
 
 def _positive_int(value: object) -> int | None:
@@ -254,19 +282,21 @@ def _last_run_suffix(event: str, run_status: str | None, payload: dict[str, Any]
     return None
 
 
-def _what_happened(delivery: dict[str, Any], locale: str) -> str:
+def _what_happened(delivery: dict[str, Any], locale: str, *, runtime: bool = False) -> str:
     text = _TEXT[locale]
     payload = _payload(delivery)
     event = delivery.get("event") or ""
     run_status = _run_status(delivery)
     parts: list[str]
-    if event == "run_completed":
-        parts = [text["run_completed"]]
+    if event == "human_input_requested":
+        parts = [text["human_input_requested"]]
+    elif event == "run_completed":
+        parts = [text["runtime_completed" if runtime else "run_completed"]]
         if "relied_on_assumption" in payload:
             parts.append(text["goal_met_with_assumption"] if payload.get("relied_on_assumption") is True else text["goal_met"])
     elif event == "run_failed":
         # Raw error text never leaves: tracebacks can carry hosts, paths and tokens.
-        parts = [text["run_failed"]]
+        parts = [text["runtime_failed" if runtime else "run_failed"]]
     elif event == "run_unmet":
         parts = [_with_reason("run_unmet", payload.get("reason_code"), locale)]
     elif event == "task_paused":
@@ -308,11 +338,22 @@ def render_notification_text(delivery: dict[str, Any], *, default_locale: str = 
     locale = resolve_locale(delivery, default_locale)
     text = _TEXT[locale]
     payload = _payload(delivery)
-    lines = [text["title"].format(title=_title(payload, locale)), _what_happened(delivery, locale)]
-    reply = payload.get("result_summary")
-    if wants_result_summary(delivery) and isinstance(reply, str):
-        summary = run_summary(redact_egress_text(reply))
-        if summary:
-            lines.append(text["result"].format(summary=summary))
-    lines.append(text["closing"])
+    runtime = _is_runtime_delivery(delivery)
+    event = delivery.get("event") or ""
+    title_template = text["runtime_title" if runtime else "title"]
+    lines = [title_template.format(title=_title(payload, locale, runtime=runtime)), _what_happened(delivery, locale, runtime=runtime)]
+    if event == "human_input_requested":
+        raw_question = payload.get("question") or payload.get("result_summary")
+        if isinstance(raw_question, str):
+            question = _truncate(_one_line(redact_egress_text(raw_question)), limit=_CONDITION_LIMIT)
+            if question:
+                lines.append(text["question"].format(question=question))
+    else:
+        reply = payload.get("result_summary")
+        if wants_result_summary(delivery) and isinstance(reply, str):
+            summary = run_summary(redact_egress_text(reply))
+            if summary:
+                lines.append(text["result"].format(summary=summary))
+    closing_key = "human_input_closing" if event == "human_input_requested" else ("runtime_closing" if runtime else "closing")
+    lines.append(text[closing_key])
     return "\n".join(lines)

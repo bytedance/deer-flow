@@ -7,6 +7,7 @@ import importlib
 import os
 import stat
 import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
@@ -3286,6 +3287,377 @@ def test_destroy_swallows_close_errors_and_still_destroys_backend(tmp_path, capl
     provider._backend.destroy.assert_called_once()
 
 
+def _observe_destroy_target(provider, info):
+    running = {info.sandbox_id: info}
+    provider._backend.is_absent = MagicMock(side_effect=lambda sid: sid not in running)
+    provider._backend.inspect_runtime = MagicMock(side_effect=running.get)
+    provider._backend.complete_absent_teardown = MagicMock()
+    return running
+
+
+def test_destroy_failure_keeps_durable_runtime_target_for_cleanup_retry(tmp_path):
+    provider, sandbox, _ = _make_provider_with_active_sandbox(tmp_path, "retry-stop")
+    info = provider._sandbox_infos["retry-stop"]
+    info.container_id = "generation-one"
+    running = _observe_destroy_target(provider, info)
+
+    def stop(target):
+        if provider._backend.destroy.call_count == 1:
+            raise RuntimeError("stop failed")
+        running.pop(target.sandbox_id)
+
+    provider._backend.destroy.side_effect = stop
+    try:
+        with pytest.raises(RuntimeError, match="stop failed"):
+            provider.destroy(info.sandbox_id)
+        assert provider._quarantine_store().contains(info)
+        assert info.sandbox_id not in provider._sandboxes
+        sandbox.close.assert_called_once()
+        assert provider.destroy(info.sandbox_id) is True
+        assert provider._backend.destroy.call_count == 2
+        assert all(call.args[0] is info for call in provider._backend.destroy.call_args_list)
+        assert info.sandbox_id not in provider._sandboxes
+        assert info.sandbox_id not in provider._sandbox_infos
+        assert not provider._quarantine_store().contains(info)
+        sandbox.close.assert_called_once()
+    finally:
+        provider.reset()
+
+
+def test_destroy_repeated_failure_never_turns_into_false_success(tmp_path):
+    provider, _, _ = _make_provider_with_active_sandbox(tmp_path, "still-running")
+    _observe_destroy_target(provider, provider._sandbox_infos["still-running"])
+    provider._backend.destroy.side_effect = RuntimeError("stop still failing")
+    try:
+        for _ in range(2):
+            with pytest.raises(RuntimeError, match="stop still failing"):
+                provider.destroy("still-running")
+        assert provider._backend.destroy.call_count == 2
+    finally:
+        provider.reset()
+
+
+def test_destroy_retry_preserves_a_different_runtime_generation(tmp_path):
+    provider, _, module = _make_provider_with_active_sandbox(tmp_path, "replacement")
+    old = provider._sandbox_infos["replacement"]
+    old.container_id = "old-generation"
+    running = _observe_destroy_target(provider, old)
+    provider._backend.destroy.side_effect = RuntimeError("stop failed")
+    try:
+        with pytest.raises(RuntimeError, match="stop failed"):
+            provider.destroy("replacement")
+        new = module.SandboxInfo("replacement", "http://new", container_id="new-generation")
+        running["replacement"] = new
+        for _ in range(2):
+            assert provider.destroy("replacement") is False
+        assert provider._backend.destroy.call_count == 1
+        assert running["replacement"] is new
+        assert provider._quarantine_store().contains(old)
+        assert not provider._quarantine_store().contains(new)
+    finally:
+        provider.reset()
+
+
+@pytest.mark.parametrize("admission", ["discovery", "orphan-adoption"])
+@pytest.mark.parametrize("via_lease", [False, True], ids=["provider", "lease-manager"])
+def test_failed_destroy_allows_replacement_acquisition(failure_recovery_lifecycle, admission, via_lease):
+    from deerflow.sandbox.lease import SandboxLeaseManager
+
+    provider, _, _, old = failure_recovery_lifecycle
+    running = _observe_destroy_target(provider, old)
+    provider._backend.destroy.side_effect = RuntimeError("stop failed")
+    with pytest.raises(RuntimeError, match="stop failed"):
+        provider.destroy(old.sandbox_id)
+
+    replacement = type(old)(old.sandbox_id, old.sandbox_url, container_id="replacement-generation")
+    running[old.sandbox_id] = replacement
+    provider._backend.discover = MagicMock(return_value=replacement)
+    provider._backend.list_running = MagicMock(return_value=[replacement])
+    if admission == "orphan-adoption":
+        provider._reconcile_orphans()
+        assert provider._warm_pool[old.sandbox_id][0] is replacement
+
+    manager = SandboxLeaseManager(provider)
+    try:
+        if via_lease:
+            acquired = manager.acquire("new-execution", "thread-failure-recovery", user_id="alice")
+        else:
+            acquired = provider.acquire("thread-failure-recovery", user_id="alice")
+        assert acquired == old.sandbox_id
+        assert provider._sandbox_infos[acquired] is replacement
+        assert provider.get(acquired) is not None
+        assert provider.get_scoped(acquired, thread_id="thread-failure-recovery", user_id="alice") is not None
+        assert acquired not in provider._cleanup_retry_ids
+        assert provider._quarantine_store().contains(old)
+        assert not provider._quarantine_store().contains(replacement)
+        provider._backend.destroy.assert_called_once_with(old)
+
+        if via_lease:
+            manager.release("new-execution")
+            reacquired = manager.acquire("next-execution", "thread-failure-recovery", user_id="alice")
+        else:
+            provider.release(acquired)
+            reacquired = provider.acquire("thread-failure-recovery", user_id="alice")
+        assert reacquired == acquired
+        assert provider.get(reacquired) is not None
+        assert provider._sandbox_infos[reacquired] is replacement
+        provider._backend.destroy.assert_called_once_with(old)
+    finally:
+        manager.close()
+
+
+@pytest.mark.parametrize("generation", ["container-generation-1", None], ids=["quarantined", "unknown"])
+def test_warm_reclaim_keeps_failed_stop_fence_for_unsafe_generation(failure_recovery_lifecycle, generation):
+    provider, _, _, old = failure_recovery_lifecycle
+    _observe_destroy_target(provider, old)
+    provider._backend.destroy.side_effect = RuntimeError("stop failed")
+    with pytest.raises(RuntimeError, match="stop failed"):
+        provider.destroy(old.sandbox_id)
+    candidate = type(old)(old.sandbox_id, old.sandbox_url, container_id=generation)
+    provider._warm_pool[old.sandbox_id] = (candidate, time.time())
+    provider._warm_pool_identity[old.sandbox_id] = None
+    provider_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+
+    with pytest.raises(provider_mod.SandboxPolicyReplacementDeferredError):
+        provider._reclaim_warm_pool_sandbox("thread-failure-recovery", old.sandbox_id, user_id="alice")
+
+    assert old.sandbox_id in provider._cleanup_retry_ids
+    assert provider._quarantine_store().contains(candidate)
+    assert provider.get(old.sandbox_id) is None
+    assert old.sandbox_id not in provider._sandboxes
+
+
+@pytest.mark.parametrize("generation", ["container-generation-1", None], ids=["quarantined", "unknown"])
+def test_warm_reclaim_does_not_clear_fence_if_entry_changes(failure_recovery_lifecycle, monkeypatch, generation):
+    provider, _, _, old = failure_recovery_lifecycle
+    _observe_destroy_target(provider, old)
+    provider._backend.destroy.side_effect = RuntimeError("stop failed")
+    with pytest.raises(RuntimeError, match="stop failed"):
+        provider.destroy(old.sandbox_id)
+    replacement = type(old)(old.sandbox_id, old.sandbox_url, container_id="replacement-generation")
+    provider._backend.list_running = MagicMock(return_value=[replacement])
+    provider._reconcile_orphans()
+    assert provider._warm_pool[old.sandbox_id][0] is replacement
+    unvalidated = type(old)(old.sandbox_id, old.sandbox_url, container_id=generation)
+    publish = provider._publish_ownership
+
+    def swap_during_publish(sandbox_id):
+        publish(sandbox_id)
+        with provider._lock:
+            provider._warm_pool[sandbox_id] = (unvalidated, time.time())
+
+    monkeypatch.setattr(provider, "_publish_ownership", swap_during_publish)
+    assert provider._reclaim_warm_pool_sandbox("thread-failure-recovery", old.sandbox_id, user_id="alice") is None
+    assert provider._warm_pool[old.sandbox_id][0] is unvalidated
+    assert old.sandbox_id in provider._cleanup_retry_ids
+    assert provider._quarantine_store().contains(unvalidated)
+    assert provider.get(old.sandbox_id) is None
+    assert old.sandbox_id not in provider._sandboxes
+
+
+def test_failed_destroy_record_write_blocks_cached_reuse_until_retry(tmp_path, monkeypatch):
+    provider, client, _ = _make_provider_with_active_sandbox(tmp_path, "record-write")
+    info = provider._sandbox_infos["record-write"]
+    info.container_id = "generation-one"
+    provider._thread_sandboxes[("alice", "thread")] = info.sandbox_id
+    provider._active_sandbox_identity[info.sandbox_id] = ("alice", "thread")
+    running = _observe_destroy_target(provider, info)
+
+    def stop(target):
+        if provider._backend.destroy.call_count == 1:
+            raise RuntimeError("stop failed")
+        running.pop(target.sandbox_id)
+
+    provider._backend.destroy.side_effect = stop
+    store = provider._quarantine_store()
+    try:
+        with monkeypatch.context() as patcher:
+            patcher.setattr(store, "mark", MagicMock(side_effect=PermissionError("record unavailable")))
+            with pytest.raises(PermissionError, match="record unavailable"):
+                provider.destroy(info.sandbox_id)
+        assert provider._sandbox_infos[info.sandbox_id] is info
+        client.close.assert_not_called()
+        assert provider.get(info.sandbox_id) is None
+        assert provider.get_scoped(info.sandbox_id, thread_id="thread", user_id="alice") is None
+        assert provider.destroy(info.sandbox_id) is True
+        assert provider._backend.destroy.call_count == 2
+        assert not provider._cleanup_retry_ids
+        client.close.assert_called_once()
+    finally:
+        provider.reset()
+
+
+def test_destroy_retry_needs_confirmed_absence_after_accepted_stop(tmp_path):
+    provider, _, _ = _make_provider_with_active_sandbox(tmp_path, "terminating")
+    info = provider._sandbox_infos["terminating"]
+    info.container_id = "pod-uid"
+    running = _observe_destroy_target(provider, info)
+    provider._backend.destroy.side_effect = [RuntimeError("delete failed"), None]
+    try:
+        with pytest.raises(RuntimeError, match="delete failed"):
+            provider.destroy(info.sandbox_id)
+        with pytest.raises(RuntimeError, match="still present"):
+            provider.destroy(info.sandbox_id)
+        assert provider._quarantine_store().contains(info)
+        running.clear()
+        assert provider.destroy(info.sandbox_id) is True
+        assert provider._backend.destroy.call_count == 2
+        assert not provider._quarantine_store().contains(info)
+    finally:
+        provider.reset()
+
+
+def test_destroy_keeps_reservation_while_stop_is_pending(tmp_path):
+    from deerflow.sandbox.lease import get_sandbox_lease_manager
+
+    provider, _, _ = _make_provider_with_active_sandbox(tmp_path, "slow-stop")
+    info = provider._sandbox_infos["slow-stop"]
+    entered, finish = threading.Event(), threading.Event()
+    errors = []
+
+    def stop(_info):
+        entered.set()
+        assert finish.wait(5)
+
+    def destroy():
+        try:
+            provider.destroy("slow-stop")
+        except BaseException as exc:
+            errors.append(exc)
+
+    provider._backend.destroy.side_effect = stop
+    worker = threading.Thread(target=destroy)
+    worker.start()
+    try:
+        assert entered.wait(5)
+        assert provider._sandbox_infos.get("slow-stop") is info
+        assert "slow-stop" in provider._local_teardown
+        assert provider._lock.acquire(blocking=False), "container I/O held the metadata lock"
+        provider._lock.release()
+        with pytest.raises(RuntimeError, match="teardown"):
+            get_sandbox_lease_manager(provider).retain("late-holder", "slow-stop", thread_id="thread", user_id="alice")
+    finally:
+        finish.set()
+        worker.join(5)
+        provider.reset()
+    assert not worker.is_alive()
+    assert not errors
+
+
+def test_destroy_completion_does_not_remove_a_replacement_runtime(tmp_path):
+    provider, old_client, module = _make_provider_with_active_sandbox(tmp_path, "same-id")
+    old_info = provider._sandbox_infos["same-id"]
+    old_info.container_id = "old-generation"
+    replacement = module.SandboxInfo(sandbox_id="same-id", sandbox_url="http://new", container_id="new-generation")
+    new_client = MagicMock()
+
+    def stop(info):
+        assert info is old_info
+        # A replacement published by a stale/external callback must survive the
+        # completion of destruction of the old immutable generation.
+        with provider._lock:
+            provider._sandbox_infos["same-id"] = replacement
+            provider._sandboxes["same-id"] = new_client
+
+    provider._backend.destroy.side_effect = stop
+    try:
+        assert provider.destroy("same-id") is True
+        assert provider._sandbox_infos["same-id"] is replacement
+        assert provider._sandboxes["same-id"] is new_client
+        old_client.close.assert_called_once()
+        new_client.close.assert_not_called()
+    finally:
+        provider.reset()
+
+
+@pytest.mark.parametrize("failed_state", ["active", "warm"])
+@pytest.mark.parametrize("journal_failure", [False, True], ids=["recorded", "record-write-failed"])
+def test_shutdown_retains_only_failed_resources_and_retries_them(tmp_path, monkeypatch, failed_state, journal_failure):
+    provider, client, module = _make_provider_with_active_sandbox(tmp_path, "active")
+    warm = module.SandboxInfo(sandbox_id="warm", sandbox_url="http://warm", container_id="warm-generation")
+    provider._warm_pool["warm"] = (warm, 1.0)
+    provider._warm_pool_identity["warm"] = ("alice", "thread")
+    provider._stop_idle_checker = MagicMock()
+    provider._stop_lease_renewal = MagicMock()
+    provider._ownership.close = MagicMock()
+    active = provider._sandbox_infos["active"]
+    active.container_id = "active-generation"
+    running = _observe_destroy_target(provider, active)
+    running["warm"] = warm
+    failed_id = failed_state
+    failed = False
+    store = provider._quarantine_store()
+    mark = store.mark
+    mark_calls = 0
+
+    def record(info):
+        nonlocal mark_calls
+        mark_calls += 1
+        if mark_calls == 1:
+            assert info.sandbox_id in provider._local_teardown
+            assert provider._ownership.take(info.sandbox_id) is False, "cleanup record escaped the teardown lease"
+            if journal_failure:
+                raise PermissionError("record storage unavailable")
+        mark(info)
+
+    monkeypatch.setattr(store, "mark", record)
+
+    def stop(info):
+        nonlocal failed
+        if info.sandbox_id == failed_id and not failed:
+            failed = True
+            raise RuntimeError("temporary stop failure")
+        running.pop(info.sandbox_id)
+
+    provider._backend.destroy.side_effect = stop
+    try:
+        with pytest.raises(RuntimeError, match="shutdown"):
+            provider.shutdown()
+        assert provider._shutdown_called is False
+        provider._ownership.close.assert_not_called()
+        assert provider._cleanup_retry_ids == {failed_id}
+        assert store.contains(running[failed_id]) is (not journal_failure)
+        assert provider._backend.destroy.call_count == 2, "one failed resource skipped the others"
+        provider.shutdown()
+        assert provider._backend.destroy.call_count == 3
+        assert provider._backend.destroy.call_args.args[0].sandbox_id == failed_id
+        assert not provider._sandboxes and not provider._warm_pool
+        provider._ownership.close.assert_called_once()
+        client.close.assert_called_once()
+        provider.shutdown()
+        assert provider._backend.destroy.call_count == 3
+    finally:
+        provider.reset()
+
+
+def test_shutdown_retry_still_closes_unfinished_executions(tmp_path):
+    from deerflow.sandbox.lease import get_sandbox_lease_manager
+
+    provider, _, _ = _make_provider_with_active_sandbox(tmp_path, "unfinished")
+    info = provider._sandbox_infos["unfinished"]
+    info.container_id = "generation-one"
+    running = _observe_destroy_target(provider, info)
+    manager = get_sandbox_lease_manager(provider)
+    manager.retain("unfinished-run", info.sandbox_id, thread_id="thread", user_id="alice")
+
+    def stop(target):
+        if provider._backend.destroy.call_count == 1:
+            raise RuntimeError("stop failed")
+        running.pop(target.sandbox_id)
+
+    provider._backend.destroy.side_effect = stop
+    try:
+        with pytest.raises(RuntimeError, match="shutdown"):
+            provider.shutdown()
+        assert manager.binding_for("unfinished-run") == info.sandbox_id
+        provider.shutdown()
+        assert provider._backend.destroy.call_count == 2
+        assert not running and not provider._cleanup_retry_ids
+    finally:
+        manager.close()
+        provider.reset()
+
+
 def test_shutdown_keeps_aio_warm_entries_owned_when_idle_checker_stop_times_out(tmp_path):
     """A failed reaper join must leave AIO warm entries available to a retry."""
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
@@ -3301,7 +3673,8 @@ def test_shutdown_keeps_aio_warm_entries_owned_when_idle_checker_stop_times_out(
     provider._warm_pool_identity = {"warm-retry": ("default", "thread-retry")}
     provider._stop_idle_checker = MagicMock(side_effect=[RuntimeError("reaper still alive"), None])
     provider._stop_lease_renewal = MagicMock()
-    provider._destroy_warm_entry = MagicMock()
+    provider._destroy_warm_entry = MagicMock(wraps=provider._destroy_warm_entry)
+    provider._backend.destroy = MagicMock()
     provider._ownership.close = MagicMock()
 
     with pytest.raises(RuntimeError, match="reaper still alive"):
@@ -3338,7 +3711,8 @@ def test_shutdown_keeps_aio_warm_entries_owned_when_lease_renewal_stop_times_out
     provider._warm_pool = {"warm-renewal-retry": (warm_info, 1.0)}
     provider._warm_pool_identity = {"warm-renewal-retry": ("default", "thread-retry")}
     provider._stop_idle_checker = MagicMock()
-    provider._destroy_warm_entry = MagicMock()
+    provider._destroy_warm_entry = MagicMock(wraps=provider._destroy_warm_entry)
+    provider._backend.destroy = MagicMock()
     provider._ownership.close = MagicMock()
 
     renewal_thread = MagicMock()

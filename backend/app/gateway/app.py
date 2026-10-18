@@ -2,6 +2,7 @@ import asyncio
 import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager, suppress
+from typing import Any
 
 from deerflow_extension_api import (
     EXTENSION_PLUGIN_AUTHZ_RESOLVER_ASYNC_KEY,
@@ -18,7 +19,7 @@ from app.gateway.auth_middleware import AuthMiddleware
 from app.gateway.browser_capability import ensure_browser_runtime_available
 from app.gateway.config import get_gateway_config
 from app.gateway.csrf_middleware import CORS_EXPOSED_HEADERS, CSRFMiddleware, get_configured_cors_origins
-from app.gateway.deps import langgraph_runtime
+from app.gateway.deps import langgraph_runtime, multi_process_deployment
 from app.gateway.health import READINESS_CHECKPOINTER_CONFIG_ATTR, READINESS_PROVISIONER_URL_ATTR, readiness_payload
 from app.gateway.routers import (
     agents,
@@ -33,6 +34,7 @@ from app.gateway.routers import (
     features,
     feedback,
     github_webhooks,
+    im_notification_preferences,
     input_polish,
     integrations,
     knowledge,
@@ -503,6 +505,7 @@ async def _start_scheduled_task_notification_delivery(app: FastAPI, startup_conf
         from app.scheduler.notification_delivery import NotificationDeliveryWorker
         from deerflow.persistence.engine import get_session_factory
         from deerflow.persistence.run import RunRepository
+        from deerflow.persistence.user.im_notifications import ImNotificationPreferencesRepository
 
         run_repo = RunRepository(get_session_factory())
 
@@ -512,6 +515,46 @@ async def _start_scheduled_task_notification_delivery(app: FastAPI, startup_conf
             row = await run_repo.get(run_id, user_id=user_id)
             return row.get("last_ai_message") if row else None
 
+        async def resolve_human_input_pending(delivery: dict[str, Any]) -> bool | None:
+            payload = delivery.get("payload") or {}
+            thread_id = payload.get("thread_id")
+            request_id = payload.get("request_id")
+            owner_user_id = delivery.get("owner_user_id")
+            if not isinstance(thread_id, str) or not thread_id:
+                return False
+            thread_store = getattr(app.state, "thread_store", None)
+            if thread_store is not None and owner_user_id:
+                thread_meta = await thread_store.get(thread_id, user_id=owner_user_id)
+                if thread_meta is None:
+                    return False
+            checkpointer = getattr(app.state, "checkpointer", None)
+            if checkpointer is None:
+                return True
+            from types import SimpleNamespace
+
+            from app.gateway.context_usage import _load_checkpoint_messages
+            from app.gateway.services import build_thread_checkpoint_state_accessor
+            from deerflow.agents.human_input import extract_unanswered_human_input_request
+            from deerflow.runtime.user_context import reset_current_user, set_current_user
+
+            owner_token = set_current_user(SimpleNamespace(id=owner_user_id)) if isinstance(owner_user_id, str) and owner_user_id else None
+            try:
+                accessor, checkpoint_config = await build_thread_checkpoint_state_accessor(
+                    SimpleNamespace(app=app, headers={}, state=SimpleNamespace(), cookies={}),
+                    thread_id=thread_id,
+                )
+                messages = await _load_checkpoint_messages(accessor, checkpoint_config)
+            finally:
+                if owner_token is not None:
+                    reset_current_user(owner_token)
+            current_request = extract_unanswered_human_input_request(messages)
+            if current_request is None:
+                return False
+            if isinstance(request_id, str) and request_id and current_request.get("request_id") != request_id:
+                return False
+            return True
+
+        prefs_repo = ImNotificationPreferencesRepository(get_session_factory())
         worker = NotificationDeliveryWorker(
             delivery_repo=notification_repo,
             resolve_channel=channel_service.get_channel,
@@ -521,6 +564,12 @@ async def _start_scheduled_task_notification_delivery(app: FastAPI, startup_conf
             # Both repositories come from the same session factory, so the
             # connection repository is present whenever the outbox one is.
             resolve_connections=connection_repo.list_connections,
+            # Under channels.leader_lease, rows for a provider whose transport
+            # another instance holds are left to that instance.
+            excluded_providers=getattr(channel_service, "notification_excluded_providers", None),
+            resolve_notification_preferences=prefs_repo.get,
+            resolve_notification_event_preferences=prefs_repo.get_event_preferences,
+            resolve_human_input_pending=resolve_human_input_pending,
             poll_interval_seconds=startup_config.scheduler.poll_interval_seconds,
             # Language of notices whose owner has no UI language preference.
             default_locale=startup_config.channel_connections.notification_locale,
@@ -765,6 +814,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 startup_config,
                 get_stream_bridge=lambda: getattr(app.state, "stream_bridge", None),
                 credentials_cipher=credentials_cipher,
+                # channels.leader_lease: auto follows the same multi-process
+                # signal the startup gate used; the lease owner is this
+                # instance's run worker id, so lease and run logs line up.
+                multi_process=multi_process_deployment(startup_config),
+                lease_owner_id=getattr(getattr(app.state, "run_manager", None), "worker_id", None),
             )
             logger.info("Channel service started: %s", channel_service.get_status())
         except Exception:
@@ -1335,6 +1389,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # Auth API is mounted at /api/v1/auth
     app.include_router(auth.router)
     app.include_router(user_preferences.router)
+    app.include_router(im_notification_preferences.router)
 
     # Feedback API is mounted at /api/threads/{thread_id}/runs/{run_id}/feedback
     app.include_router(feedback.router)
