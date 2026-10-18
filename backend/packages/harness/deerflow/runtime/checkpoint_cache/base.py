@@ -51,6 +51,7 @@ class CheckpointCacheStats:
     misses: int = 0
     evictions: int = 0
     entries: int = 0
+    write_serialization_failures: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -58,6 +59,7 @@ class CheckpointCacheStats:
             "misses": self.misses,
             "evictions": self.evictions,
             "entries": self.entries,
+            "write_serialization_failures": self.write_serialization_failures,
         }
 
 

@@ -449,6 +449,13 @@ and revoked before host shutdown; PAT/internal grants remain unsupported.
 Unstamped internal launches receive no handle and must still start normally.
 Action/tool dispatch scopes handles to each registered plugin namespace for
 idempotency isolation; request-resolved handles use `for_plugin` explicitly.
+`configuration_revision` (API 0.2.7) rechecks grants and returns a process-local
+HMAC of declarative app/extensions and Agent config/SOUL, not effective assembly,
+memory, referenced files or provider state. Never expose raw secret configuration.
+`configuration_evidence` reads persisted, run-bound actual assembly versions; the
+worker captures descriptors even without observers and persists before execution.
+`read_artifact` authorizes bounded output bytes off-loop; extensions retain immutable
+versions themselves. Workflow preview/approval/consumption must share those bytes.
 
 **Recorded extension-first exception.** The project-shelf summary pipeline
 (`projects/summaries.py`) ships in core: its consumer-visible surface (the

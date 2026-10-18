@@ -12,6 +12,8 @@ operations: a close failure must not prevent the unlink attempt.
 Log each cleanup `OSError` at warning level with the temporary path and exception
 details so leaked siblings are observable; logging must not replace the primary
 publication exception or interruption.
+Both tools take collision names from `output_names.output_name_candidates`
+(name, `-1`..`-1000`, five timestamps); claim each atomically, never pre-check.
 
 ### Model Retry Hints
 
@@ -112,8 +114,9 @@ and preserve the generic `+xml` rule.
 
 ### Conversion Worker Ownership
 
-`convert_file_to_markdown` drains large-file conversion workers across caller
-cancellation before returning control to source-file cleanup. Keep conversion
+`convert_file_to_markdown` offloads parsing for every source size: compressed
+Office files can require seconds of work below 1 MiB. It drains conversion workers
+across caller cancellation before returning control to source-file cleanup. Keep conversion
 inside `await_drained`, including when the worker fails or cancellation repeats;
 upload ingestion owns a temporary source that it removes in `finally`. Coverage
 lives in `tests/test_file_conversion_cancellation.py`.

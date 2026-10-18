@@ -331,12 +331,55 @@ class TestTencentWsaSearch:
 class TestTencentWsaConfiguration:
     @pytest.mark.parametrize(
         ("value", "expected"),
-        [(3, 3), ("7", 7), (True, 5), (2.9, 5), (0, 5), (-1, 5), (500, 50), ("bad", 5)],
+        [
+            (3, 3),
+            ("7", 7),
+            (True, 5),
+            (2.9, 5),
+            (0, 5),
+            (-1, 5),
+            (500, 50),
+            ("bad", 5),
+            # str.isdigit() is true for these, but int() raises ValueError (#6921).
+            ("²", 5),
+            ("1²", 5),
+            # Valid non-ASCII decimal digits must still parse.
+            ("٣", 3),
+        ],
     )
     def test_coerce_max_results(self, value, expected):
         from deerflow.community.tencent_wsa.tools import _coerce_max_results
 
         assert _coerce_max_results(value) == expected
+
+    def test_configured_unparseable_digit_max_results_falls_back(self):
+        """Config max_results that passes isdigit but fails int must not crash invoke."""
+        page = json.dumps(
+            {
+                "title": "ok",
+                "url": "https://example.com",
+                "content": "snippet",
+            },
+            ensure_ascii=False,
+        )
+        http_response = MagicMock()
+        http_response.json.return_value = _response([page])
+        _client, context_manager = _mock_http_client(http_response)
+
+        with (
+            patch("deerflow.community.tencent_wsa.tools.get_app_config") as get_config,
+            patch("deerflow.community.tencent_wsa.tools.httpx.Client", return_value=context_manager),
+        ):
+            get_config.return_value.get_tool_config.return_value = _tool_config({"api_key": "test-key", "max_results": "²"})
+
+            from deerflow.community.tencent_wsa.tools import web_search_tool
+
+            result = json.loads(web_search_tool.run({"query": "腾讯云"}))
+
+        assert "error" not in result
+        assert result["query"] == "腾讯云"
+        assert result["total_results"] == 1
+        assert result["results"][0]["title"] == "ok"
 
     @pytest.mark.parametrize("value", (None, "2", True, 2.0, "bad", -1, 3))
     def test_invalid_mode_is_omitted(self, value):

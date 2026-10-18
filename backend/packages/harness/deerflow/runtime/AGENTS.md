@@ -1,3 +1,10 @@
+### Checkpoint Cache Concurrency
+
+The memory history cache is shared by sync saver wrappers. Its threading lock
+serializes lookup/LRU promotion, population/eviction, thread purge, close, and
+statistics snapshots. Keep cache critical sections free of awaits and saver I/O;
+immutable histories do not make the mutable LRU registry thread-safe.
+
 ### Redis Checkpoint Cache Purge
 
 Thread purge escapes Redis glob metacharacters in the complete literal key stem
@@ -7,7 +14,20 @@ to sibling namespaces. Keep the cursor loop and outage/TTL fallback unchanged.
 
 ### Stream Bridge Heartbeats
 
+Observed Redis streams removed during replay yield `StreamGap` with empty bounds; initially empty streams still wait. After this gap, `/wait` refreshes store-only status and completes only for a terminal run with no retained stream.
+
+Memory stream cleanup retires the captured stream generation, clears its retained
+payloads and wakes its Condition. Established readers emit one empty-bound
+`StreamGap` and stop if replay is unfinished, including on bridge close. Fully
+consumed terminal streams keep END, using the retired generation's tail offset;
+readers never attach to a recreated stream. An unpublished stream without explicit
+cleanup still heartbeats.
+New readers that capture a generation but acquire its Condition only after
+retirement always receive a gap, including cursor-less terminal reattachments.
+
 Memory/Redis bridges keep startup-only `stream_bridge.heartbeat_interval_seconds`; explicit `subscribe(..., heartbeat_interval=...)` overrides it. Provider contexts drain owned cache/bridge/checkpointer/Store teardown across cancellation. `close_agent_stream()` shields close to completion: preserve counts, defer host cancellation, balance repeats, keep active errors, log attached close failures at callers, map close cancellation to failure, never time out.
+
+Reconnect cursor parsing requires ASCII digits and must treat integer-conversion failures as malformed input. Redis cursors additionally require unsigned 64-bit components; use the same parser before sending a cursor to `XREAD` and when detecting replay gaps. Preserve malformed-cursor policy: memory replays retained events, Redis tails active streams and replays ended streams through `end`. `tests/test_stream_bridge.py` directly tests both parsers offline, including oversized sequences, Redis component overflow, non-ASCII digits, and valid uint64 boundaries; integration tests also exercise malformed cursors against real Redis.
 
 ### Checkpoint Channel Modes (`full` / `delta`)
 
@@ -85,10 +105,13 @@ writes. `RunRecord.terminal_commit_pending` keeps `_renew_leases()` renewing tha
 still-active row until the commit is attempted; a renewal rejected by the worker's
 own commit is confirmed by re-reading the row, while a peer claim fences the run.
 Never select runs for renewal by local status alone. Shutdown's drain treats the
-same state as active: such runs are awaited (never cancelled — cancellation would
-skip their terminal tail) so the duration checkpoint and terminal commit land
-before checkpointer teardown. A drain timeout leaves staged statuses and commit
-barriers intact without persisting `interrupted`. A finalizer that raises is
+same state as active, and also awaits committed terminal workers still executing
+hooks, END or resource cleanup. The registered worker shields and drains one owned
+finalizer across repeated host cancellation, preserving the first interruption even
+if a step fails. There is no deadline that cancels or detaches writes; backend I/O
+must be bounded by its backend. Only the optional completion hook receives host
+cancellation, and its child task is drained before the terminal tail continues.
+A drain timeout leaves staged statuses and commit barriers intact without persisting `interrupted`. A finalizer that raises is
 logged with its run ID, staged status and exception while the other runs continue
 draining. Coverage: `tests/test_gateway_run_drain_shutdown.py`.
 
@@ -124,7 +147,7 @@ prompts, and derived hashes do not enter the event. Ordinary task-tool subagents
 recorder proxy, never the journal itself; durable batch runs have no parent
 journal and emit no such event. Recorder failures are fail-open.
 
-**RunJournal write ownership** (`runtime/journal.py`): a batch handed to `store.put_batch()` is owned by a journal task until its outcome settles, so a cancelled `flush()`/`close()` caller detaches the waiter and re-raises `CancelledError` only after the owned write is drained — never abandon or replay the in-flight batch. A generic `put_batch` exception is an ambiguous outcome: it is quarantined, blocks every successor write, and makes `flush()`/`close()` report non-success instead of replaying the batch. Only `RunEventStoreNotCommittedError` means the store proved none of the batch committed and may be deliberately retried; stores must raise it instead of a bare exception for that case. Explicit `flush()` and `close(flush=True)` share one per-journal operation lock, so a successor batch can never overtake an unsettled predecessor, every waiter observes the same settlement, and a normal close detaches only after the whole buffer has settled. `close(flush=False)` is a separate abort path that never queues on that lock: it revokes write ownership before its first await and makes any in-flight flush report non-success rather than a late success. A cancelled write waits a bounded time for the store call to end; `Task.cancelled()`/a clean return does not prove an uncooperative backend's I/O actually stopped, so this is a bound on waiting, not a termination guarantee. An inner store task that outlives that bound stays supervised until it settles, so its late result is retrieved and logged rather than dropped. Two adjacent limits are known and tracked separately, not fixed here: the bounded wait covers the store write, not a `progress_reporter` that ignores cancellation (a pre-existing hazard on the force-close path); and background-write warnings log the exception type and message, whose text is backend-controlled and may echo driver-level parameters, so log consumers must not treat it as payload-free.
+**RunJournal write ownership** (`runtime/journal.py`): a batch handed to `store.put_batch()` is owned by a journal task until its outcome settles, so a cancelled `flush()`/`close()` caller detaches the waiter and re-raises `CancelledError` only after the owned write is drained — never abandon or replay the in-flight batch. A generic `put_batch` exception is an ambiguous outcome: it is quarantined, blocks every successor write, and makes `flush()`/`close()` report non-success instead of replaying the batch. Only `RunEventStoreNotCommittedError` means the store proved none of the batch committed and may be deliberately retried; stores must raise it instead of a bare exception for that case. Explicit `flush()` and `close(flush=True)` share one per-journal operation lock, so a successor batch can never overtake an unsettled predecessor, every waiter observes the same settlement, and a normal close detaches only after the whole buffer has settled. `close(flush=False)` is a separate abort path that never queues on that lock: it revokes write ownership before its first await and makes any in-flight flush report non-success rather than a late success. A cancelled event write or pending progress snapshot waits a bounded time to settle; `Task.cancelled()`/a clean return does not prove an uncooperative backend's I/O actually stopped, so this is a bound on waiting, not a termination guarantee. A task that outlives that bound stays supervised until it settles, so its late result is retrieved and logged rather than dropped while lease-loss finalization continues. Background-write and progress-reporter warnings log the exception type and message, whose text is backend-controlled and may echo driver-level parameters, so log consumers must not treat it as payload-free.
 
 **JSONL record boundaries** (`runtime/events/store/jsonl.py`): thread reads,
 run reads, and sequence recovery split on physical newlines. Do not use

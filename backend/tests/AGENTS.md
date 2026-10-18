@@ -10,6 +10,17 @@ ownership and capture cleanup. Retain the real XLSX conversion coverage.
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+`.github/workflows/backend-windows-live-policy.yml` runs the child-env contract and all
+four live-test collection policy cases on Windows/Python 3.12, weekly, manually,
+and for relevant PR changes. These children only collect live tests. Keep the
+make-dependent checks in the default suite. The workflow-selection regression
+in `test_client_live_policy.py` collects the configured pytest nodes and pins
+all five policy checks, so a partial name filter cannot silently omit cases.
+
+Runtime-callback cleanup tests keep DEBUG capture enabled and implement graph
+checkpoint reads. Fixture-only exception tracebacks can retain the journal;
+preserve the strict weak-reference assertion rather than clearing captured logs.
+
 Config-upgrade checkout fixtures clear inherited `DEER_FLOW_CONFIG_PATH`,
 `DEER_FLOW_PROJECT_ROOT` and `DEER_FLOW_ENV_FILE` before applying explicit test
 overrides. Exercise selector leaks through the real script with temporary
