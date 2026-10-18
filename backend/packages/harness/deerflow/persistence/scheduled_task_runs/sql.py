@@ -17,7 +17,17 @@ from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.finalization import FinalizationObserver, end_condition_reached, finalize_occurrence, finish_task_at_end_condition, is_host_pause_marker
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project
-from deerflow.persistence.scheduled_task_runs.scope import ScheduledAdmissionReceipt, bound_native_run, captured_context, live_occurrence_predicate, live_task_predicate, lock_scheduled_identity
+from deerflow.persistence.scheduled_task_runs.scope import (
+    ScheduledAdmissionReceipt,
+    bound_native_run,
+    captured_context,
+    live_occurrence_predicate,
+    live_task_predicate,
+    lock_scheduled_identity,
+    resource_native_run_predicate,
+    resource_occurrence_predicate,
+    resource_task_predicate,
+)
 from deerflow.persistence.scheduled_tasks.model import (
     ACTIVE_RUN_STATUSES,
     TERMINAL_RUN_STATUSES,
@@ -25,6 +35,7 @@ from deerflow.persistence.scheduled_tasks.model import (
     ScheduledTaskRunStatus,
 )
 from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
+from deerflow.persistence.workspaces.scope import resolve_resource_scope
 from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 from deerflow.scheduler.host_notes import RUN_ERROR_END_REACHED
 from deerflow.scheduler.schedules import next_run_at as compute_next_run_at
@@ -119,6 +130,39 @@ def run_number_expression(outer: Any):
     def accounted(compare):
         condition = and_(inner.task_id == outer.task_id, inner.workspace_id.is_not_distinct_from(outer.workspace_id), inner.trigger == "scheduled", inner.launch_accounted.is_(True), compare(inner.occurrence_seq, outer.occurrence_seq))
         return select(func.count()).select_from(inner).where(condition).correlate(outer).scalar_subquery()
+
+    sequenced = and_(outer.trigger == "scheduled", outer.occurrence_seq.is_not(None))
+    return case(
+        (and_(sequenced, outer.launch_accounted.is_(True)), accounted(operator.le)),
+        (and_(sequenced, outer.status.in_(("launching", "running"))), accounted(operator.lt) + 1),
+        else_=None,
+    )
+
+
+def resource_run_number_expression(outer, context):
+    """Public numbering counts only currently visible original occurrences.
+
+    The background run_number_expression remains the original execution clock.
+    """
+    inner = aliased(ScheduledTaskRunRow)
+    task = aliased(ScheduledTaskRow)
+
+    def accounted(compare):
+        return (
+            select(func.count())
+            .select_from(inner)
+            .join(task, task.id == inner.task_id)
+            .where(
+                inner.task_id == outer.task_id,
+                inner.trigger == "scheduled",
+                inner.launch_accounted.is_(True),
+                compare(inner.occurrence_seq, outer.occurrence_seq),
+                resource_task_predicate(context, task),
+                resource_occurrence_predicate(context, inner, task),
+            )
+            .correlate(outer)
+            .scalar_subquery()
+        )
 
     sequenced = and_(outer.trigger == "scheduled", outer.occurrence_seq.is_not(None))
     return case(
@@ -477,14 +521,23 @@ class ScheduledTaskRunRepository:
         evaluator's reason is deliberately not the summary; it stays in
         ``goal_verdict``.
         """
-        if self.workspace_scope_required or get_current_workspace() is not None:
-            raise WorkspaceAccessDenied("Scoped Scheduler status/history requires current private-resource integration")
-        number = run_number_expression(ScheduledTaskRunRow).label("run_number")
-        stmt = (
-            select(ScheduledTaskRunRow, number, RunRow.total_tokens, RunRow.last_ai_message)
-            .outerjoin(RunRow, and_(RunRow.run_id == ScheduledTaskRunRow.run_id, RunRow.workspace_id.is_(None)))
-            .where(ScheduledTaskRunRow.workspace_id.is_(None), ScheduledTaskRunRow.task_id == task_id)
-        )
+        current = get_current_workspace()
+        context = resolve_resource_scope(None, current.actor_user_id if current is not None else None, required=self.workspace_scope_required)
+        if context is not None:
+            number = resource_run_number_expression(ScheduledTaskRunRow, context).label("run_number")
+            stmt = (
+                select(ScheduledTaskRunRow, number, RunRow.total_tokens, RunRow.last_ai_message)
+                .join(ScheduledTaskRow, ScheduledTaskRow.id == ScheduledTaskRunRow.task_id)
+                .outerjoin(RunRow, resource_native_run_predicate())
+                .where(ScheduledTaskRunRow.task_id == task_id, resource_task_predicate(context), resource_occurrence_predicate(context))
+            )
+        else:
+            number = run_number_expression(ScheduledTaskRunRow).label("run_number")
+            stmt = (
+                select(ScheduledTaskRunRow, number, RunRow.total_tokens, RunRow.last_ai_message)
+                .outerjoin(RunRow, and_(RunRow.run_id == ScheduledTaskRunRow.run_id, RunRow.workspace_id.is_(None)))
+                .where(ScheduledTaskRunRow.workspace_id.is_(None), ScheduledTaskRunRow.task_id == task_id)
+            )
         if status is not None:
             stmt = stmt.where(ScheduledTaskRunRow.status == status)
         stmt = stmt.order_by(ScheduledTaskRunRow.created_at.desc(), ScheduledTaskRunRow.id.desc()).limit(limit).offset(offset)

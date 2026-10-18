@@ -382,3 +382,5 @@ transfer_pending from dispatch ownership rechecks nonexpired lease and absence o
 
 
 inspect_native_execution_control is a separate exact-identity, control-only view of the canonical current owner after adoption. It returns no business payload and is never launch authority. inspect_dispatch_control still requires a nonempty explicit owner, and receiver authorization uses that stricter path.
+
+Scheduler public history/thread relations use alias-aware resource predicates from `scheduled_task_runs/scope.py`; current live resource authority does not renew stored task execution snapshots. Public run-number subqueries filter visible original occurrences before counting, independently of background launch numbering. Summary/token LEFT JOINs require the exact normal native Run scope/user/thread/incarnation/snapshot and Scheduler task+occurrence metadata; mismatched pointers expose no Run payload.

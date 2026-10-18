@@ -8,7 +8,7 @@ task, occurrence, then the native Run clock/Run. No network/checkpoint IO here.
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import or_, select, text
+from sqlalchemy import and_, or_, select, text
 
 from deerflow.authz.workspace import WorkspaceContext
 from deerflow.persistence.projects.model import ProjectRow
@@ -18,8 +18,57 @@ from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
 from deerflow.persistence.workspaces.model import WorkspaceMembershipRow, WorkspaceRow
-from deerflow.persistence.workspaces.scope import lock_resource_scope
+from deerflow.persistence.workspaces.scope import live_workspace_predicate, lock_resource_scope
 from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied, WorkspaceRepository
+
+
+def resource_task_predicate(context, task=ScheduledTaskRow):
+    """Current resource access does not renew the task's execution snapshot."""
+
+    def parent(identity, incarnation):
+        owned = ThreadMetaRepository._owned_scope(select(ThreadMetaRow.thread_id).where(ThreadMetaRow.thread_id == identity, ThreadMetaRow.incarnation == incarnation), context.actor_user_id, context).correlate(task).exists()
+        return or_(identity.is_(None), owned)
+
+    return and_(
+        task.workspace_id == context.workspace_id,
+        task.user_id == context.actor_user_id,
+        live_workspace_predicate(context),
+        task.workspace_context_json["workspace_id"].as_string() == task.workspace_id,
+        task.workspace_context_json["actor_user_id"].as_string() == task.user_id,
+        parent(task.origin_thread_id, task.origin_thread_incarnation),
+        parent(task.thread_id, task.thread_incarnation),
+    )
+
+
+def resource_occurrence_predicate(context, occurrence=ScheduledTaskRunRow, task=ScheduledTaskRow):
+    """Filter original child identity and its private execution parent before aggregation."""
+    parent = (
+        ThreadMetaRepository._owned_scope(select(ThreadMetaRow.thread_id).where(ThreadMetaRow.thread_id == occurrence.thread_id, ThreadMetaRow.incarnation == occurrence.thread_incarnation), context.actor_user_id, context)
+        .correlate(occurrence)
+        .exists()
+    )
+    return and_(
+        occurrence.workspace_id == task.workspace_id,
+        *(occurrence.workspace_context_json[key].as_string() == task.workspace_context_json[key].as_string() for key in ("workspace_id", "actor_user_id")),
+        *(occurrence.workspace_context_json[key].as_integer() == task.workspace_context_json[key].as_integer() for key in ("membership_version", "policy_version")),
+        parent,
+    )
+
+
+def resource_native_run_predicate(native=RunRow, task=ScheduledTaskRow, occurrence=ScheduledTaskRunRow):
+    """Read a summary only from the occurrence's exact normal native Run."""
+    return and_(
+        native.run_id == occurrence.run_id,
+        native.operation_kind == "run",
+        native.workspace_id == task.workspace_id,
+        native.user_id == task.user_id,
+        native.thread_id == occurrence.thread_id,
+        native.thread_incarnation == occurrence.thread_incarnation,
+        *(native.workspace_context_json[key].as_string() == task.workspace_context_json[key].as_string() for key in ("workspace_id", "actor_user_id")),
+        *(native.workspace_context_json[key].as_integer() == task.workspace_context_json[key].as_integer() for key in ("membership_version", "policy_version")),
+        native.metadata_json["scheduled_task_id"].as_string() == task.id,
+        native.metadata_json["scheduled_task_run_id"].as_string() == occurrence.id,
+    )
 
 
 @dataclass(frozen=True, slots=True)

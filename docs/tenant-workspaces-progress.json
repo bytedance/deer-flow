@@ -1549,23 +1549,23 @@
   },
   "latest_checkpoint": {
     "work_package": "M4",
-    "status": "partial M4: Scheduler HTTP create/list/detail verified; remaining Scheduler lifecycle open",
+    "status": "partial M4: Scheduler HTTP history/thread relations verified; tool and lifecycle integration open",
     "last_verified_job": "deerflow-tenant-execution-m4-sql",
-    "last_verified_build": 130,
-    "next": "Integrate scoped Scheduler history/thread relations/tool listing, then management and installed background dependencies in order; keep original execution authority immutable. Full M0–M11 remains open.",
+    "last_verified_build": 132,
+    "next": "Bind interactive Scheduler tool capability to captured original native Run identity and actual WorkerInvocationGuard; then complete management/manual/own-stop and remaining installed/lifecycle gates.",
     "tenant_activation": "closed",
     "deployment": "none",
     "previous_backend_job": "deerflow-tenant-m1-postgres",
     "previous_backend_build": 89,
     "native_candidate_schema": "0041_scheduler_workspace",
     "last_verified_database_job": "deerflow-tenant-execution-m4-sql",
-    "last_verified_database_build": 130,
+    "last_verified_database_build": 132,
     "executor_candidate_schema": "e0003_execution_identity",
     "execution_status": "active",
     "resumed_at": "2026-10-18",
     "last_full_regression_build": 88,
     "last_full_regression_tests": 134,
-    "last_verified_tests": 1,
+    "last_verified_tests": 2,
     "checkpoint_evidence": [
       "docs/tenant-workspaces-evidence/native-dependency-118.json",
       "docs/tenant-workspaces-evidence/native-dependency-119.json",
@@ -1573,7 +1573,8 @@
       "docs/tenant-workspaces-evidence/native-scheduler-123.json",
       "docs/tenant-workspaces-evidence/native-scheduler-boundaries-125.json",
       "docs/tenant-workspaces-evidence/native-schema-compatibility-127.json",
-      "docs/tenant-workspaces-evidence/native-scheduler-resource-130.json"
+      "docs/tenant-workspaces-evidence/native-scheduler-resource-130.json",
+      "docs/tenant-workspaces-evidence/native-scheduler-history-132.json"
     ]
   },
   "workspace_feedback": {
@@ -13762,7 +13763,7 @@
     ]
   },
   "scheduler_workspace_wip": {
-    "status": "main_boundaries_and_http_create_list_detail_verified_remaining_scope_open",
+    "status": "native_main_boundaries_http_reads_verified_tool_lifecycle_open",
     "native_schema_candidate": "0041_scheduler_workspace",
     "main": "conversation-origin fresh_thread_per_run, real PG queue/launcher/native Run completion/event",
     "required_boundaries": [
@@ -13771,7 +13772,7 @@
       "no scoped legacy recovery fallback",
       "workspace-bound event/IM publication"
     ],
-    "next": "Integrate scoped Scheduler history/thread relations/tool listing, then management and installed background dependencies in order; keep original execution authority immutable. Full M0–M11 remains open.",
+    "next": "Bind interactive Scheduler tool capability to captured original native Run identity and actual WorkerInvocationGuard; then complete management/manual/own-stop and remaining installed/lifecycle gates.",
     "red": {
       "job": "deerflow-tenant-execution-m4-sql",
       "build": 122,
@@ -13807,7 +13808,7 @@
     },
     "entry_matrix": "docs/tenant-workspaces-evidence/native-scheduler-entry-matrix.md",
     "remaining": [
-      "Scoped history/thread relations/tool listing, management/manual dispatch and remaining tool flows",
+      "Scoped tool capability/listing, management/manual dispatch and remaining tool flows",
       "Page fresh/reuse runtime acceptance",
       "Installed scheduled dependency reconciler, MCP continuation/own-stop",
       "Expired queue and unknown launch recovery/control",
@@ -13829,6 +13830,16 @@
       "result": "SUCCESS",
       "tests": "1 passed in 17.57s",
       "evidence": "docs/tenant-workspaces-evidence/native-scheduler-resource-130.json"
+    },
+    "history_thread_wip": {
+      "status": "verified",
+      "scope": "HTTP history and thread relations; tool capability/listing remains subsequent required work",
+      "verification": "One native completion/real-auth HTTP PG main plus existing #130 shared-predicate regression; no broad matrix",
+      "plan": "M4 step 27 in Superpowers/OpenSpec",
+      "build": 132,
+      "result": "SUCCESS",
+      "tests": "2 passed in 24.55s",
+      "evidence": "docs/tenant-workspaces-evidence/native-scheduler-history-132.json"
     }
   },
   "native_0041_execution_compatibility_wip": {

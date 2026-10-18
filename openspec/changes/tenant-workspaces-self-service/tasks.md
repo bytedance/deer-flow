@@ -1843,3 +1843,23 @@ Evidence: `docs/tenant-workspaces-evidence/native-schema-compatibility-127.json`
 The story verifies real JWT/session + CSRF + workspace resolution, private reuse-thread POST/enriched response, actual due claim/foreground durable queue, queued list/detail after fresh membership versions, other-workspace empty list/404 detail, and preserved original snapshot/no launched Run. Root independently matched five changed files to the archive; exact containers/network are absent. Evidence: `docs/tenant-workspaces-evidence/native-scheduler-resource-130.json`; selector `--suite native-scheduler-resource-http`.
 
 History/thread relations/tool listing, management/manual dispatch, installed Scheduler dependency/own-stop, IM and timeout/unknown recovery remain open. This is not full Scheduler/M4 or M0–M11 acceptance. Tenant activation stays false; no deployment, remote push or local application/test runtime.
+
+
+### M4 step 27 — scoped Scheduler history and thread relations (HTTP slice verified; full M4 open)
+
+- [x] Review real history/thread HTTP handlers and all tool capability callers. HTTP read resource authority uses the current authenticated workspace; stored execution snapshots remain immutable.
+- [x] Share alias-aware task/occurrence resource predicates without weakening background original-authority filters. History summary/token LEFT JOIN requires the exact normal native Run, owner/workspace/thread/incarnation/snapshot and task/occurrence metadata.
+- [x] Scope history and the public run-number subquery before status/order/pagination. Preserve the separate background launch-number authority. Scope origin/reuse/run thread relations and their latest occurrence before LIMIT.
+- [x] Run one actual native completion → authenticated HTTP history/thread-list PostgreSQL story, plus the existing #130 create/list/detail story only for shared-predicate regression. Include one hidden newest occurrence, current membership version reads, immutable execution snapshot, other-space refusal and mismatched-Run payload refusal in the same story.
+- [x] Root review exact diff, verify Shanghai evidence/archive/cleanup and save a local commit.
+
+Interactive tool listing remains an explicit subsequent requirement: `_SchedulerCapability` must bind original native Run/workspace/private-parent identity and recheck it on each call. Do not infer this from current HTTP resource access or enable management/manual/installed dependency paths from these read proofs. Complete M4/M0–M11 acceptance remains open.
+
+
+### 2026-10-18 — Scheduler HTTP history/thread relations (#132)
+
+`deerflow-tenant-execution-m4-sql #131` completed the real native Run and persisted the deterministic model reply plus 12 tokens, then the original history handler returned 404 because it had not bound the request workspace. `#132 SUCCESS`: the new native-completion/authenticated HTTP history/thread-relations story and existing #130 create/list/detail regression passed (2 tests, 24.55s); Ruff and 65-file format checks passed. No provider API was called.
+
+Shared alias-aware predicates filter current resource workspace/private parents and original occurrence identity before history pagination, public number counts and thread latest-run LIMIT. Summary/token LEFT JOIN requires exact normal native Run identity/snapshot/task+occurrence metadata. The story keeps a hidden newest history row out of page/count, reads canonical reply/usage, rejects a temporary foreign Run payload sentinel, restores original seed values, and verifies fresh membership reads/unchanged execution snapshot/other-space 404. Background original-authority numbering remains unchanged. Root independently matched all six changed source files to the archive; exact fixture containers/network are absent. Evidence: `docs/tenant-workspaces-evidence/native-scheduler-history-132.json`.
+
+Only HTTP history and thread relations are newly accepted. Tool capability/listing, management/manual/own-stop, installed dependency, IM, timeout/unknown recovery and full M0–M11 remain open. Next: capture original native Run identity in the trusted scheduler capability, reuse actual WorkerInvocationGuard per call, and restore the caller scope afterward. Activation false; no deployment/push or local application/test runtime.

@@ -18,6 +18,12 @@ from test_workspace_mcp import _in_workspace_case
 @pytest.mark.parametrize("executor_engine", ["postgres"], indirect=True)
 @pytest.mark.parametrize("boundary", ["normal", "queued_member", "launch_lease"])
 def test_scoped_scheduler_occurrence_keeps_original_workspace(native_engine, executor_engine, monkeypatch, tmp_path, boundary):  # noqa: F811
+    _exercise_scoped_scheduler_occurrence(native_engine, executor_engine, monkeypatch, tmp_path, boundary=boundary)
+
+
+def _exercise_scoped_scheduler_occurrence(native_engine, executor_engine, monkeypatch, tmp_path, *, boundary="normal", after_completion=None):  # noqa: F811
+    from types import SimpleNamespace
+
     from ecs_executor.agent_dispatch import NativeDispatchHost, NativeWorkerHost, install_native_dispatch
     from ecs_executor.dispatch import PROTOCOL, WORKER_VERSION
     from ecs_executor.job_store import JobStore
@@ -167,10 +173,29 @@ def test_scoped_scheduler_occurrence_keeps_original_workspace(native_engine, exe
         monkeypatch.setattr(services, "get_run_context", lambda request: ctx)
         executed = []
 
+        model = None
+        if after_completion is not None:
+            from langchain_core.language_models.chat_models import BaseChatModel
+            from langchain_core.outputs import ChatGeneration, ChatResult
+
+            class DeterministicHistoryModel(BaseChatModel):
+                @property
+                def _llm_type(self):
+                    return "deterministic-scheduler-history"
+
+                def _generate(self, *args, **kwargs):
+                    raise AssertionError("The native Scheduler main is asynchronous")
+
+                async def _agenerate(self, *args, **kwargs):
+                    return ChatResult(generations=[ChatGeneration(message=AIMessage(content="The private research update is complete", usage_metadata={"input_tokens": 7, "output_tokens": 5, "total_tokens": 12}))])
+
+            model = DeterministicHistoryModel()
+
         async def respond(state, config):
             assert get_current_workspace() == case.original
             executed.append(config["configurable"]["thread_id"])
-            return {"messages": [AIMessage(content="The private research update is complete")]}
+            message = await model.ainvoke(state["messages"], config=config) if model is not None else AIMessage(content="The private research update is complete")
+            return {"messages": [message]}
 
         builder = StateGraph(ThreadState, context_schema=dict)
         builder.add_node("answer", respond)
@@ -287,6 +312,12 @@ def test_scoped_scheduler_occurrence_keeps_original_workspace(native_engine, exe
             assert get_current_workspace() == case.other
             assert (await request_worker("poll"))["claim"] is None
             assert (await asyncio.to_thread(pool.node_status, "worker"))["unreleased"] == 0
+            if after_completion is not None:
+                await after_completion(
+                    SimpleNamespace(
+                        case=case, tasks=tasks, occurrences=occurrences, threads=threads, service=foreground, task_id=created["id"], occurrence_id=queued["task_run_id"], record=adopted, origin=origin, configuration=configuration
+                    )
+                )
         finally:
             if adopted is not None and adopted.task is not None and not adopted.task.done():
                 adopted.task.cancel()
@@ -434,3 +465,129 @@ def test_scoped_scheduler_http_create_list_detail_use_current_resource_scope(nat
             await foreground.stop()
 
     _in_workspace_case(native_engine, scenario, owner_user_id=owner)
+
+
+@pytest.mark.parametrize("executor_engine", ["postgres"], indirect=True)
+def test_scoped_scheduler_http_history_and_thread_relations_keep_private_run(native_engine, executor_engine, monkeypatch, tmp_path):  # noqa: F811
+    from fastapi import FastAPI
+    from sqlalchemy import update
+
+    import deerflow.config as config_facade
+    from app.gateway import deps
+    from app.gateway.auth import config as auth_config
+    from app.gateway.auth import create_access_token
+    from app.gateway.auth_middleware import AuthMiddleware
+    from app.gateway.csrf_middleware import CSRFMiddleware
+    from app.gateway.routers import scheduled_tasks
+    from deerflow.authz.workspace import get_current_workspace
+    from deerflow.config import app_config
+    from deerflow.config.app_config import AppConfig
+    from deerflow.persistence.run.model import RunRow
+    from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
+    from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
+    from deerflow.persistence.workspaces.model import WorkspaceMembershipRow
+
+    async def read_completed(main):
+        case = main.case
+        owner = case.original.actor_user_id
+        configuration = AppConfig.model_validate(
+            {**main.configuration.model_dump(), "authorization": {"enabled": True, "provider": {"use": "deerflow.authz.rbac:RbacAuthorizationProvider", "config": {"roles": {"user": {"routes": {"allow": "*"}}}}}}}
+        )
+        monkeypatch.setattr(config_facade, "get_app_config", lambda: configuration)
+        monkeypatch.setattr(app_config, "get_app_config", lambda: configuration)
+        monkeypatch.setattr(deps, "get_app_config", lambda: configuration)
+        monkeypatch.setattr(auth_config, "_auth_config", auth_config.AuthConfig(jwt_secret="synthetic-scheduler-history-key-64-characters-for-test-only!!"))
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+        app = FastAPI()
+        app.state.workspace_service = case.service
+        app.state.thread_store, app.state.scheduled_task_service = main.threads, main.service
+        app.state.scheduled_task_repo, app.state.scheduled_task_run_repo = main.tasks, main.occurrences
+        app.include_router(scheduled_tasks.router)
+        app.add_middleware(AuthMiddleware)
+        app.add_middleware(CSRFMiddleware)
+        async with case.sf() as session, session.begin():
+            run = await session.get(RunRow, main.record.run_id)
+            assert run.status == "success" and run.total_tokens == 12
+            assert run.last_ai_message == "The private research update is complete"
+            # A hidden history row sorts first and precedes the real sequence.
+            # Its legacy/foreign private parent must affect neither page nor number.
+            session.add(
+                ScheduledTaskRunRow(
+                    id="hidden-history-row",
+                    task_id=main.task_id,
+                    occurrence_seq=0,
+                    launch_accounted=True,
+                    thread_id="thread",
+                    thread_incarnation="epoch",
+                    run_id="foreign-run",
+                    scheduled_for=datetime.now(UTC),
+                    trigger="scheduled",
+                    status="success",
+                    workspace_id=case.original.workspace_id,
+                    workspace_context_json=asdict(case.original),
+                    created_at=datetime.now(UTC) + timedelta(days=1),
+                )
+            )
+        selected = {"X-Deerflow-Workspace": case.original.workspace_id}
+        history_path = "/api/scheduled-tasks/" + main.task_id + "/runs?limit=1"
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost", headers={"Origin": "http://localhost", "X-CSRF-Token": "synthetic-history-csrf"}) as client:
+            client.cookies.set("access_token", create_access_token(owner))
+            client.cookies.set("csrf_token", "synthetic-history-csrf")
+
+            async def read_views():
+                response = await client.get(history_path, headers=selected)
+                assert response.status_code == 200, response.text
+                history = response.json()
+                assert len(history) == 1 and history[0]["id"] == main.occurrence_id
+                assert history[0]["run_number"] == 1 and history[0]["total_tokens"] == 12
+                assert history[0]["summary"] == "The private research update is complete"
+                assert (await client.get(history_path + "&offset=1", headers=selected)).json() == []
+                for thread_id, relation in ((main.origin["thread_id"], "origin"), (main.record.thread_id, "run")):
+                    response = await client.get("/api/threads/" + thread_id + "/scheduled-tasks", headers=selected)
+                    assert response.status_code == 200, response.text
+                    tasks = response.json()
+                    assert len(tasks) == 1 and tasks[0]["id"] == main.task_id and tasks[0]["thread_relation"] == relation
+                    assert tasks[0]["automatic_runs_used"] == 1
+                    if relation == "run":
+                        assert tasks[0]["thread_run"]["run_number"] == 1
+
+            await read_views()
+            async with case.sf() as session, session.begin():
+                await session.execute(update(WorkspaceMembershipRow).where(WorkspaceMembershipRow.workspace_id == case.original.workspace_id, WorkspaceMembershipRow.user_id == owner).values(version=WorkspaceMembershipRow.version + 1))
+            await read_views()
+            foreign_saved = None
+            try:
+                async with case.sf() as session, session.begin():
+                    foreign = await session.get(RunRow, "foreign-run")
+                    foreign_saved = (foreign.last_ai_message, foreign.total_tokens)
+                    # Explicit denied-data sentinel, never a model execution
+                    # result. Restore the pre-existing fixture values exactly.
+                    foreign.last_ai_message, foreign.total_tokens = "FOREIGN-HISTORY-DENIED-SENTINEL", 987654
+                    await session.execute(update(ScheduledTaskRunRow).where(ScheduledTaskRunRow.id == main.occurrence_id).values(run_id="foreign-run"))
+                response = await client.get(history_path, headers=selected)
+                assert response.status_code == 200
+                history = response.json()
+                assert len(history) == 1 and history[0]["id"] == main.occurrence_id
+                assert history[0]["summary"] is None and history[0]["total_tokens"] is None
+                assert "FOREIGN-HISTORY-DENIED-SENTINEL" not in response.text and "987654" not in response.text
+            finally:
+                async with case.sf() as session, session.begin():
+                    await session.execute(update(ScheduledTaskRunRow).where(ScheduledTaskRunRow.id == main.occurrence_id).values(run_id=main.record.run_id))
+                    if foreign_saved is not None:
+                        foreign = await session.get(RunRow, "foreign-run")
+                        foreign.last_ai_message, foreign.total_tokens = foreign_saved
+            other = {"X-Deerflow-Workspace": case.other.workspace_id}
+            assert (await client.get(history_path, headers=other)).status_code == 404
+            assert (await client.get("/api/threads/" + main.origin["thread_id"] + "/scheduled-tasks", headers=other)).status_code == 404
+            assert (await client.get("/api/threads/" + main.record.thread_id + "/scheduled-tasks", headers=other)).status_code == 404
+            await read_views()
+        async with case.sf() as session:
+            task = await session.get(ScheduledTaskRow, main.task_id)
+            occurrence = await session.get(ScheduledTaskRunRow, main.occurrence_id)
+            assert task.workspace_context_json == occurrence.workspace_context_json == asdict(case.original)
+            assert occurrence.run_id == main.record.run_id and occurrence.status == "success"
+            foreign = await session.get(RunRow, "foreign-run")
+            assert (foreign.last_ai_message, foreign.total_tokens) == foreign_saved
+        assert get_current_workspace() == case.other
+
+    _exercise_scoped_scheduler_occurrence(native_engine, executor_engine, monkeypatch, tmp_path, after_completion=read_completed)

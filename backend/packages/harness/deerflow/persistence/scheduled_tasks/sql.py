@@ -16,50 +16,17 @@ from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.finalization import FinalizationObserver, automatic_runs_used, end_condition_reached, finalize_occurrence, finish_task_at_end_condition, is_host_pause_marker, utc
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project
-from deerflow.persistence.scheduled_task_runs.scope import bound_native_run, live_task_predicate, lock_scheduled_identity
+from deerflow.persistence.scheduled_task_runs.scope import bound_native_run, live_task_predicate, lock_scheduled_identity, resource_occurrence_predicate, resource_task_predicate
 from deerflow.persistence.scheduled_tasks.model import ACTIVE_RUN_STATUSES, LIVE_TASK_STATUSES, ONCE_TASK_STATUS_BY_RUN_STATUS, TERMINAL_RUN_STATUSES, TERMINAL_TASK_STATUSES, ScheduledTaskRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
-from deerflow.persistence.workspaces.scope import live_workspace_predicate, lock_resource_scope, resolve_resource_scope
+from deerflow.persistence.workspaces.scope import lock_resource_scope, resolve_resource_scope
 from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 from deerflow.scheduler.host_notes import RUN_ERROR_END_REACHED
 from deerflow.utils.goal_objective import normalize_goal_objective
 from deerflow.utils.time import coerce_iso
 
 logger = logging.getLogger(__name__)
-
-
-def _resource_task_predicate(context):
-    """Current resource access does not renew the task's execution snapshot."""
-
-    def parent(identity, incarnation):
-        owned = ThreadMetaRepository._owned_scope(select(ThreadMetaRow.thread_id).where(ThreadMetaRow.thread_id == identity, ThreadMetaRow.incarnation == incarnation), context.actor_user_id, context).correlate(ScheduledTaskRow).exists()
-        return or_(identity.is_(None), owned)
-
-    return and_(
-        ScheduledTaskRow.workspace_id == context.workspace_id,
-        ScheduledTaskRow.user_id == context.actor_user_id,
-        live_workspace_predicate(context),
-        ScheduledTaskRow.workspace_context_json["workspace_id"].as_string() == ScheduledTaskRow.workspace_id,
-        ScheduledTaskRow.workspace_context_json["actor_user_id"].as_string() == ScheduledTaskRow.user_id,
-        parent(ScheduledTaskRow.origin_thread_id, ScheduledTaskRow.origin_thread_incarnation),
-        parent(ScheduledTaskRow.thread_id, ScheduledTaskRow.thread_incarnation),
-    )
-
-
-def _resource_occurrence_predicate(context):
-    """Filter original child identity and its private execution parent before aggregation."""
-    parent = (
-        ThreadMetaRepository._owned_scope(select(ThreadMetaRow.thread_id).where(ThreadMetaRow.thread_id == ScheduledTaskRunRow.thread_id, ThreadMetaRow.incarnation == ScheduledTaskRunRow.thread_incarnation), context.actor_user_id, context)
-        .correlate(ScheduledTaskRunRow)
-        .exists()
-    )
-    return and_(
-        ScheduledTaskRunRow.workspace_id == ScheduledTaskRow.workspace_id,
-        *(ScheduledTaskRunRow.workspace_context_json[key].as_string() == ScheduledTaskRow.workspace_context_json[key].as_string() for key in ("workspace_id", "actor_user_id")),
-        *(ScheduledTaskRunRow.workspace_context_json[key].as_integer() == ScheduledTaskRow.workspace_context_json[key].as_integer() for key in ("membership_version", "policy_version")),
-        parent,
-    )
 
 
 class ScheduledTaskQuotaExceeded(ValueError):
@@ -275,7 +242,7 @@ class ScheduledTaskRepository:
 
     async def list_by_user(self, user_id: str) -> list[dict[str, Any]]:
         context = resolve_resource_scope(None, user_id, required=self.workspace_scope_required)
-        scope = _resource_task_predicate(context) if context is not None else ScheduledTaskRow.workspace_id.is_(None)
+        scope = resource_task_predicate(context) if context is not None else ScheduledTaskRow.workspace_id.is_(None)
         stmt = select(ScheduledTaskRow).where(scope, ScheduledTaskRow.user_id == user_id).order_by(ScheduledTaskRow.created_at.desc(), ScheduledTaskRow.id.desc())
         async with self._sf() as session:
             result = await session.execute(stmt)
@@ -305,7 +272,7 @@ class ScheduledTaskRepository:
             return {}
         stmt = select(ScheduledTaskRunRow.task_id, ScheduledTaskRunRow.status).where(ScheduledTaskRunRow.task_id.in_(ids), ScheduledTaskRunRow.status.in_(("queued", "launching", "running")))
         if context is not None:
-            stmt = stmt.join(ScheduledTaskRow, ScheduledTaskRow.id == ScheduledTaskRunRow.task_id).where(_resource_task_predicate(context), _resource_occurrence_predicate(context))
+            stmt = stmt.join(ScheduledTaskRow, ScheduledTaskRow.id == ScheduledTaskRunRow.task_id).where(resource_task_predicate(context), resource_occurrence_predicate(context))
         else:
             stmt = stmt.where(ScheduledTaskRunRow.workspace_id.is_(None))
         rank = {"queued": 0, "launching": 1, "running": 2}
@@ -325,7 +292,7 @@ class ScheduledTaskRepository:
             return {}
         stmt = select(ScheduledTaskRunRow.task_id, func.count()).where(ScheduledTaskRunRow.task_id.in_(ids), ScheduledTaskRunRow.trigger == "scheduled", ScheduledTaskRunRow.launch_accounted.is_(True))
         if context is not None:
-            stmt = stmt.join(ScheduledTaskRow, ScheduledTaskRow.id == ScheduledTaskRunRow.task_id).where(_resource_task_predicate(context), _resource_occurrence_predicate(context))
+            stmt = stmt.join(ScheduledTaskRow, ScheduledTaskRow.id == ScheduledTaskRunRow.task_id).where(resource_task_predicate(context), resource_occurrence_predicate(context))
         else:
             stmt = stmt.where(ScheduledTaskRunRow.workspace_id.is_(None))
         stmt = stmt.group_by(ScheduledTaskRunRow.task_id)
@@ -817,18 +784,15 @@ class ScheduledTaskRepository:
         Each dict gains ``thread_relation`` (``origin`` / ``reuse`` / ``run``) and,
         for ``run``, ``thread_run``: the latest occurrence of that task in the thread.
         """
-        if self.workspace_scope_required or get_current_workspace() is not None:
-            raise WorkspaceAccessDenied("Scoped Scheduler listing requires private-parent integration")
-        ran_in_thread = exists(select(ScheduledTaskRunRow.id).where(ScheduledTaskRunRow.workspace_id.is_(None), ScheduledTaskRunRow.task_id == ScheduledTaskRow.id, ScheduledTaskRunRow.thread_id == thread_id))
-        stmt = (
-            select(ScheduledTaskRow)
-            .where(ScheduledTaskRow.workspace_id.is_(None))
-            .where(
-                ScheduledTaskRow.user_id == user_id,
-                or_(ScheduledTaskRow.thread_id == thread_id, ScheduledTaskRow.origin_thread_id == thread_id, ran_in_thread),
-            )
-            .order_by(ScheduledTaskRow.created_at.desc(), ScheduledTaskRow.id.desc())
-        )
+        context = resolve_resource_scope(None, user_id, required=self.workspace_scope_required)
+        if context is not None:
+            related = exists(select(ScheduledTaskRunRow.id).where(ScheduledTaskRunRow.task_id == ScheduledTaskRow.id, ScheduledTaskRunRow.thread_id == thread_id, resource_occurrence_predicate(context)).correlate(ScheduledTaskRow))
+            requested_parent = ThreadMetaRepository._owned_scope(select(ThreadMetaRow.thread_id).where(ThreadMetaRow.thread_id == thread_id), user_id, context).exists()
+            stmt = select(ScheduledTaskRow).where(resource_task_predicate(context), requested_parent, or_(ScheduledTaskRow.thread_id == thread_id, ScheduledTaskRow.origin_thread_id == thread_id, related))
+        else:
+            related = exists(select(ScheduledTaskRunRow.id).where(ScheduledTaskRunRow.workspace_id.is_(None), ScheduledTaskRunRow.task_id == ScheduledTaskRow.id, ScheduledTaskRunRow.thread_id == thread_id))
+            stmt = select(ScheduledTaskRow).where(ScheduledTaskRow.workspace_id.is_(None), ScheduledTaskRow.user_id == user_id, or_(ScheduledTaskRow.thread_id == thread_id, ScheduledTaskRow.origin_thread_id == thread_id, related))
+        stmt = stmt.order_by(ScheduledTaskRow.created_at.desc(), ScheduledTaskRow.id.desc())
         async with self._sf() as session:
             rows = list((await session.execute(stmt)).scalars())
             items: list[dict[str, Any]] = []
@@ -840,21 +804,21 @@ class ScheduledTaskRepository:
                     data["thread_relation"], data["thread_run"] = "reuse", None
                 else:
                     data["thread_relation"] = "run"
-                    data["thread_run"] = await self._latest_thread_run(session, row.id, thread_id)
+                    data["thread_run"] = await self._latest_thread_run(session, row.id, thread_id, context=context)
                 items.append(data)
             return items
 
     @staticmethod
-    async def _latest_thread_run(session: AsyncSession, task_id: str, thread_id: str) -> dict[str, Any] | None:
-        from deerflow.persistence.scheduled_task_runs.sql import run_number_expression
+    async def _latest_thread_run(session: AsyncSession, task_id: str, thread_id: str, *, context=None) -> dict[str, Any] | None:
+        from deerflow.persistence.scheduled_task_runs.sql import resource_run_number_expression, run_number_expression
 
-        number = run_number_expression(ScheduledTaskRunRow)
-        stmt = (
-            select(ScheduledTaskRunRow.trigger, ScheduledTaskRunRow.scheduled_for, ScheduledTaskRunRow.status, number)
-            .where(ScheduledTaskRunRow.workspace_id.is_(None), ScheduledTaskRunRow.task_id == task_id, ScheduledTaskRunRow.thread_id == thread_id)
-            .order_by(ScheduledTaskRunRow.occurrence_seq.desc().nulls_last(), ScheduledTaskRunRow.created_at.desc(), ScheduledTaskRunRow.id.desc())
-            .limit(1)
-        )
+        number = resource_run_number_expression(ScheduledTaskRunRow, context) if context is not None else run_number_expression(ScheduledTaskRunRow)
+        stmt = select(ScheduledTaskRunRow.trigger, ScheduledTaskRunRow.scheduled_for, ScheduledTaskRunRow.status, number).where(ScheduledTaskRunRow.task_id == task_id, ScheduledTaskRunRow.thread_id == thread_id)
+        if context is not None:
+            stmt = stmt.join(ScheduledTaskRow, ScheduledTaskRow.id == ScheduledTaskRunRow.task_id).where(resource_task_predicate(context), resource_occurrence_predicate(context))
+        else:
+            stmt = stmt.where(ScheduledTaskRunRow.workspace_id.is_(None))
+        stmt = stmt.order_by(ScheduledTaskRunRow.occurrence_seq.desc().nulls_last(), ScheduledTaskRunRow.created_at.desc(), ScheduledTaskRunRow.id.desc()).limit(1)
         found = (await session.execute(stmt)).first()
         if found is None:
             return None

@@ -426,6 +426,7 @@ async def delete_scheduled_task(task_id: str, request: Request):
 
 
 @router.get("/scheduled-tasks/{task_id}/runs")
+@workspace_resource_scope()
 @require_permission("threads", "read")
 async def list_scheduled_task_runs(
     task_id: str,
@@ -447,6 +448,7 @@ async def list_scheduled_task_runs(
 
 
 @router.get("/threads/{thread_id}/scheduled-tasks")
+@workspace_resource_scope()
 @require_permission("threads", "read", owner_check=True)
 async def list_thread_scheduled_tasks(thread_id: ThreadId, request: Request):
     """Tasks created in, running in, or run by this conversation (``thread_relation``)."""
