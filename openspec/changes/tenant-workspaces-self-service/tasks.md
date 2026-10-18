@@ -1915,12 +1915,12 @@ Root independently read live terminal and byte-matched six source/template files
 Root independently checked terminal, all five source bytes and exact fixture cleanup. No sandbox/provider call or physical STOP claim. Evidence: `docs/tenant-workspaces-evidence/native-scheduler-origin-boundaries-140.json`. Next: conversation tool-create → durable task/due queue main, using original Run identity and native live execution checks in the same SQL write transaction. Other management/manual/own-stop, remaining entries, installed dependencies/IM/recovery and full M0–M11 stay open; activation false, no deployment/push/local runtime.
 
 
-### M4 step 30 — conversation tool-create through native authority (main verified; terminal writer boundary next)
+### M4 step 30 — conversation tool-create through native authority (main and terminal writer boundary verified)
 
 - [x] Verify one real remote interactive Run/ToolNode create → durable original-space task → actual due queue main before adding write boundaries. Preserve the original session receipt, actual worker guard and unrelated UI context. Reuse native validation, quota and scheduling rather than a parallel runner.
 - [x] Allow only scoped create in addition to list. Pass the actual matched native worker target and original token version as server-only repository arguments; client tool/HTTP fields cannot select them. Keep other management/manual/own-stop explicitly withheld.
 - [x] In the same short task writer transaction retain workspace/actor → sorted private parents → owner quota → native Run lock ordering; compare captured origin incarnation, context/user and token version under locks, then check original Run lifetime/STOP/lease before insert. Reuse the native Run authority implementation without repeated SQLite BEGIN or long IO under locks.
-- [ ] Root review precise patch, run the same main GREEN, then only the necessary stale-authority/write boundary. Freeze source/CI/cleanup evidence and local commit. Full M4/M0–M11 and tenant activation remain open/closed respectively.
+- [x] Root review precise patch, run the same main GREEN, then only the necessary terminal write boundary (#143/#144). Freeze source/CI/cleanup evidence and local commit. Full M4/M0–M11 and tenant activation remain open/closed respectively.
 
 
 ### 2026-10-18 — Conversation Scheduler create/due-queue main (#143)
@@ -1930,3 +1930,10 @@ Root independently checked terminal, all five source bytes and exact fixture cle
 Only list/create are open. The tool passes the actual original native target and token version through server-only arguments. The task writer retains workspace/actor → sorted parents → quota → Run order, compares the original nonce and locked actor token, and checks native lifetime/STOP/lease/running status before insert. The old public native guard keeps its original checks through a shared internal after-parent helper; ordinary HTTP resource creation is unchanged. UI-other cannot redirect ownership. The main verifies fresh-thread task identity/limit and queued original occurrence with no second native Run. Native no-sandbox STOP/report releases the original reservation; no physical execution or provider API is claimed.
 
 Root independently checked terminal and six archive/source bytes; exact fixture resources are absent. Evidence: `docs/tenant-workspaces-evidence/native-scheduler-tool-create-143.json`. Next only one terminal-between-validation-and-writer refusal probe; nonce/token transaction refusal paths are not separately proved by this main. Other task management/manual/own-stop and full M0–M11 remain open. Activation false; no deployment/push/local runtime.
+
+
+### 2026-10-18 — Conversation create terminal write window (#144)
+
+`deerflow-tenant-execution-m4-sql #144 SUCCESS`: one PostgreSQL boundary passed (19.79s), Ruff/67-file format passed; production code unchanged from `0be0a16d3`. After actual ToolNode guard/permission/validation succeeds, a thin test wrapper changes only authoritative source Run status from running to success, retaining exact owner, effective lease and open execution lifetime. The real task writer rejects with `Scheduler create requires its running native execution`. All task and occurrence columns remain unchanged; canonical journal contains the coded refusal, and the original native no-sandbox STOP/report releases its reservation. This proves the new business-write fence separately from generic native finalizer authority.
+
+Root independently checked terminal, five source/archive bytes and exact fixture cleanup. Evidence: `docs/tenant-workspaces-evidence/native-scheduler-tool-create-terminal-144.json`. No added test matrix or physical sandbox. Origin-incarnation/token-version atomic-window refusals remain code-reviewed only. Next business slice is task management/pause/resume/manual/own-stop with original authority; remaining entry, installed dependency, IM/recovery and full M0–M11 stay required. Activation false; no deployment/push/local runtime.

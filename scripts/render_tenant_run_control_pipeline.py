@@ -55,6 +55,7 @@ def main():
             "native-scheduler-tool-remote-final",
             "native-scheduler-tool-remote-boundaries",
             "native-scheduler-tool-create",
+            "native-scheduler-tool-create-terminal",
         ),
         default="revocation",
     )
@@ -179,6 +180,8 @@ def main():
         )
     if args.suite == "native-scheduler-tool-create":
         tests = "tests/test_workspace_native_scheduler.py::test_scoped_scheduler_remote_tool_create_queues_original_workspace[postgres]"
+    if args.suite == "native-scheduler-tool-create-terminal":
+        tests = "tests/test_workspace_native_scheduler.py::test_scoped_scheduler_remote_tool_create_rejects_terminal_writer[postgres]"
     rendered = rendered.replace("@@TEST_PATHS@@", tests)
     if "@@" in rendered:
         parser.error("unresolved pipeline marker")

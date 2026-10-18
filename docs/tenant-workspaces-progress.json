@@ -1549,17 +1549,17 @@
   },
   "latest_checkpoint": {
     "work_package": "M4",
-    "status": "partial M4: native local/remote Scheduler list and conversation create/due-queue main verified; write boundary and remaining lifecycle open",
+    "status": "partial M4: native Scheduler local/remote list and create/due queue plus terminal write refusal verified; remaining lifecycle open",
     "last_verified_job": "deerflow-tenant-execution-m4-sql",
-    "last_verified_build": 143,
-    "next": "Verify one terminal-between-validation-and-create writer boundary; then scoped task management/manual/own-stop and remaining full-goal gates.",
+    "last_verified_build": 144,
+    "next": "Continue scoped Scheduler task update/pause/resume/delete/manual/own-stop through original native authority, prioritizing business main and only necessary boundaries. Original nonce/token atomic-window refusals remain unproven; retain full M0-M11 scope.",
     "tenant_activation": "closed",
     "deployment": "none",
     "previous_backend_job": "deerflow-tenant-m1-postgres",
     "previous_backend_build": 89,
     "native_candidate_schema": "0041_scheduler_workspace",
     "last_verified_database_job": "deerflow-tenant-execution-m4-sql",
-    "last_verified_database_build": 143,
+    "last_verified_database_build": 144,
     "executor_candidate_schema": "e0003_execution_identity",
     "execution_status": "active",
     "resumed_at": "2026-10-18",
@@ -1578,7 +1578,8 @@
       "docs/tenant-workspaces-evidence/native-scheduler-tool-136.json",
       "docs/tenant-workspaces-evidence/native-scheduler-origin-139.json",
       "docs/tenant-workspaces-evidence/native-scheduler-origin-boundaries-140.json",
-      "docs/tenant-workspaces-evidence/native-scheduler-tool-create-143.json"
+      "docs/tenant-workspaces-evidence/native-scheduler-tool-create-143.json",
+      "docs/tenant-workspaces-evidence/native-scheduler-tool-create-terminal-144.json"
     ]
   },
   "workspace_feedback": {
@@ -13776,7 +13777,7 @@
       "no scoped legacy recovery fallback",
       "workspace-bound event/IM publication"
     ],
-    "next": "Verify one terminal-between-validation-and-create writer boundary; then scoped task management/manual/own-stop and remaining full-goal gates.",
+    "next": "Continue scoped Scheduler task update/pause/resume/delete/manual/own-stop through original native authority, prioritizing business main and only necessary boundaries. Original nonce/token atomic-window refusals remain unproven; retain full M0-M11 scope.",
     "red": {
       "job": "deerflow-tenant-execution-m4-sql",
       "build": 122,
@@ -13869,14 +13870,17 @@
       "boundary_evidence": "docs/tenant-workspaces-evidence/native-scheduler-origin-boundaries-140.json"
     },
     "conversation_tool_create_wip": {
-      "status": "main_verified_terminal_write_boundary_next",
+      "status": "main_and_terminal_write_boundary_verified",
       "plan": "M4 step 30 in Superpowers/OpenSpec",
       "scope": "Only native-bound conversation create, exact original parent/Run/token authority inside SQL writer; remaining actions withheld",
       "verification": "One remote create/due-queue PostgreSQL main first, then necessary write boundary only",
       "build": 143,
       "result": "SUCCESS",
       "tests": "1 passed in 20.65s",
-      "evidence": "docs/tenant-workspaces-evidence/native-scheduler-tool-create-143.json"
+      "evidence": "docs/tenant-workspaces-evidence/native-scheduler-tool-create-143.json",
+      "boundary_build": 144,
+      "boundary_evidence": "docs/tenant-workspaces-evidence/native-scheduler-tool-create-terminal-144.json",
+      "limits": "Origin nonce and token-version atomic-window refusals code-reviewed, not separately exercised. Other actions remain withheld."
     }
   },
   "native_0041_execution_compatibility_wip": {

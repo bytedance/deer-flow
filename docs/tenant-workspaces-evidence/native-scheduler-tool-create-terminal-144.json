@@ -1,0 +1,54 @@
+{
+  "build": 144,
+  "queue": 1094,
+  "phase": "m4-native-scheduler-tool-create-terminal-20261018-32",
+  "result": "SUCCESS",
+  "duration_ms": 39836,
+  "pytest": "1 passed in 19.79s",
+  "source_sha256": "26cf2730061d3eb070d4451dab9e51320aa40f471bc1669babbce030ac0d2ebb",
+  "pipeline_sha256": "97959df25d8610fc92dffcade60bab539228fc3e138f6a0f03c54931e92424a4",
+  "source_archive_exact_match": {
+    "backend/app/gateway/scheduled_task_access.py": "8d3f5fe707d5a50fb2b796d41ff36c64e73518d423d5efa41b67b33ea7631fba",
+    "backend/packages/harness/deerflow/persistence/scheduled_tasks/sql.py": "12cdc8516e420c788e7e1953891968a503591b560bbd07bc71491ef7494808a0",
+    "backend/packages/harness/deerflow/persistence/run/sql.py": "282aefa830b9fd8300365a06eac6ca5134c8fa04e9fb211eefa09a083b46ac7f",
+    "backend/tests/test_workspace_native_scheduler.py": "2b32b8b03cdedf93bff5a7a0dc82e4228d58700b1c5ada59f55bd7d2bcf4f7b8",
+    "scripts/render_tenant_run_control_pipeline.py": "ba8153bff2fd732fb4198bd9d5f75f646c9ff877517b651dc5ad8b15fc27d0f4"
+  },
+  "production_unchanged_from_HEAD": "0be0a16d3",
+  "log_path": "/private/tmp/m4-native-scheduler-tool-create-terminal-20261018-32.log",
+  "log_sha256": "e61aedc432e57209948a7277adb62de9474db4d82c29f9ef558448db9c3e9c8c",
+  "cleanup_path": "/private/tmp/native-scheduler-tool-create-build144-cleanup.json",
+  "scope": "One PostgreSQL terminal-between-validation-and-writer boundary. Real precheck passed, SQL terminal still had exact owner/live lease/open lifetime, real task writer denied running-only fence; all task/occurrence columns unchanged. No nonce/token boundary or physical sandbox proof.",
+  "ruff": "All checks passed; 67 files already formatted",
+  "job": "deerflow-tenant-execution-m4-sql",
+  "cleanup": {
+    "build": 144,
+    "read_only": true,
+    "cleanup": [
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-144",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-144"
+      },
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-144-db",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-144-db"
+      },
+      {
+        "kind": "network",
+        "name": "deerflow-tenant-execution-m4-sql-144",
+        "exit": 1,
+        "stderr": "Error response from daemon: network deerflow-tenant-execution-m4-sql-144 not found"
+      }
+    ]
+  },
+  "root_review": "Root reviewed exact terminal-only diff, independently read live Jenkins terminal, verified source SHA and byte-compared all five files.",
+  "reviewed_test_patch_sha256": "8b308b07cbe543f8e166469a92ef1b955494f3fe2a09d67b07435dc5cbe765b9",
+  "limits": [
+    "Only terminal write window; original parent-incarnation and token-version atomic-window refusals have not been separately exercised.",
+    "No physical sandbox or entire credential/Run revocation proof. Remaining management/manual/own-stop and full M4/M0-M11 remain open. Activation false."
+  ]
+}

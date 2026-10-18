@@ -756,6 +756,57 @@ def _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, t
             host.request = request_worker
             worker_app.state.native_run_admission_host = host
 
+        terminal_injections, writer_errors = [], []
+        if boundary == "terminal_writer":
+            from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
+            from deerflow.persistence.workspaces.model import WorkspaceOperationOutboxRow
+            from deerflow.persistence.workspaces.run_control import NativeRunStopTarget
+            from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
+
+            async def task_snapshot(session):
+                rows = []
+                for row_type in (ScheduledTaskRow, ScheduledTaskRunRow):
+                    table = row_type.__table__
+                    values = (await session.execute(select(*table.c).order_by(*table.primary_key.columns))).mappings().all()
+                    rows.append(deepcopy([dict(value) for value in values]))
+                return rows
+
+            original_task_create = tasks.create
+
+            async def terminal_before_task_writer(**kwargs):
+                target = kwargs.get("worker_target")
+                if target is None:
+                    return await original_task_create(**kwargs)
+                assert not terminal_injections, "The actual ToolNode create must reach the writer once"
+                assert type(target) is NativeRunStopTarget and kwargs["expected_token_version"] == 0
+                # This real check happens after tool guard/_require/validation;
+                # only the original SQL writer is allowed to reject the race.
+                await store.check_worker_invocation(target)
+                async with case.sf() as session:
+                    before = await task_snapshot(session)
+                    source = await session.get(RunRow, target.run_id)
+                    lifetime = await session.get(WorkspaceOperationOutboxRow, target.execution_id)
+                    assert source.status == "running" and NativeRunStopTarget.from_row(source) == target
+                    assert lifetime.state == "open" and source.lease_expires_at > datetime.now(UTC)
+                    owner_lease = (source.owner_worker_id, source.lease_expires_at)
+                    source.status = "success"
+                    await session.commit()
+                terminal_injections.append(target.run_id)
+                try:
+                    return await original_task_create(**kwargs)
+                except WorkspaceAccessDenied as exc:
+                    writer_errors.append((type(exc).__name__, str(exc)))
+                    raise
+                finally:
+                    async with case.sf() as session:
+                        assert await task_snapshot(session) == before
+                        source = await session.get(RunRow, target.run_id)
+                        lifetime = await session.get(WorkspaceOperationOutboxRow, target.execution_id)
+                        assert source.status == "success" and (source.owner_worker_id, source.lease_expires_at) == owner_lease
+                        assert lifetime.state == "open"
+
+            monkeypatch.setattr(tasks, "create", terminal_before_task_writer)
+
         captured, observed, preparation, runtime_diagnostics = [], [], [], []
         original_prepare = scheduled_task_access.prepare_scheduler_capability
 
@@ -956,8 +1007,12 @@ def _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, t
                             assert occurrence.thread_id is not None and occurrence.thread_incarnation is not None
                         assert (await asyncio.to_thread(pool.node_status, "worker"))["unreleased"] == 0
                 else:
-                    expected_code = "scheduler_tools_disabled" if boundary == "token_version" else "permission_denied"
+                    expected_code = "scheduler_tools_disabled" if boundary == "token_version" else "invalid_request" if boundary == "terminal_writer" else "permission_denied"
                     assert len(observed) == 1 and observed[0].get("code") == expected_code, observed
+                    if boundary == "terminal_writer":
+                        assert terminal_injections == [run_id]
+                        assert writer_errors == [("WorkspaceAccessDenied", "Scheduler create requires its running native execution")]
+                        assert observed[0].get("error") == writer_errors[0][1]
                     assert all(value not in json.dumps(observed) for value in (*ids, "Original tool follow-up", "Other private tool schedule"))
                 assert "Other private tool schedule" not in json.dumps(observed)
                 assert captured and (captured[0] is not None) == (boundary != "token_version")
@@ -1017,3 +1072,8 @@ def test_scoped_scheduler_remote_tool_retains_original_authority(native_engine, 
 @pytest.mark.parametrize("executor_engine", ["postgres"], indirect=True)
 def test_scoped_scheduler_remote_tool_create_queues_original_workspace(native_engine, executor_engine, monkeypatch, tmp_path):  # noqa: F811
     _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, tmp_path, remote=True, tool_action="create")
+
+
+@pytest.mark.parametrize("executor_engine", ["postgres"], indirect=True)
+def test_scoped_scheduler_remote_tool_create_rejects_terminal_writer(native_engine, executor_engine, monkeypatch, tmp_path):  # noqa: F811
+    _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, tmp_path, remote=True, tool_action="create", boundary="terminal_writer")
