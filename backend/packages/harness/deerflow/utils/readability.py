@@ -78,18 +78,23 @@ def _python_fallback_article(html: str) -> dict[str, str | None]:
     body = soup.body or soup
     # Shell regions are dropped wherever they appear, so neither the <main>
     # branch nor the <article> branch can leak navigation noise into the
-    # serialized content.
+    # serialized content. Regions *inside* an <article> are kept: docs sites
+    # (MDN, Docusaurus, many blogs) mark in-article callouts as <aside>, so
+    # sweeping them would silently drop real article text.
     for tag in body.find_all(["nav", "footer", "aside"]):
-        tag.decompose()
+        if tag.find_parent("article") is None:
+            tag.decompose()
     main = body.find("main")
     container = main if main is not None and main.get_text(strip=True) else body
     # Prefer a detected <article>: surrounding shell text can otherwise
     # exhaust the fetch tools' 4096-character result budget before the
-    # article itself is reached. Look beyond the selected container for it,
-    # and skip textless placeholders the same way an empty <main> is skipped.
-    article_container = container.find("article") or body.find("article")
-    if article_container is not None and not article_container.get_text(strip=True):
-        article_container = None
+    # article itself is reached. The first <article> in document order can
+    # be a textless placeholder (SPA shells, teaser cards), so pick the
+    # first text-bearing candidate instead of stopping at the first match:
+    # inside the container first, then anywhere else in the body.
+    article_container = next((a for a in container.find_all("article") if a.get_text(strip=True)), None)
+    if article_container is None and container is not body:
+        article_container = next((a for a in body.find_all("article") if a.get_text(strip=True)), None)
     content = article_container if article_container is not None else container
     # Common layouts keep the visible heading outside the article; continue
     # the lookup in the wider container after an article-level miss.

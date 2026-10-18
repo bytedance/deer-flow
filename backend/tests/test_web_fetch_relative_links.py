@@ -209,6 +209,58 @@ def test_python_fallback_skips_textless_article(monkeypatch):
     assert "No content could be extracted" not in markdown
 
 
+def test_python_fallback_keeps_in_article_aside_callout(monkeypatch):
+    from deerflow.utils import readability
+
+    monkeypatch.setattr(readability, "_readability_js_available", lambda: False)
+    html = """<html><head><title>Guide</title></head><body>
+    <article><h1>Guide</h1><p>Main prose.</p>
+    <aside class="note"><p>Important caveat readers need.</p></aside></article>
+    </body></html>"""
+
+    markdown = ReadabilityExtractor().extract_article(html, url=PAGE_URL).to_markdown()
+
+    # Docs sites (MDN, Docusaurus, many blogs) use <aside> for in-article
+    # callouts; the shell sweep must not drop real article text with them.
+    assert "Main prose." in markdown
+    assert "Important caveat readers need." in markdown
+
+
+def test_python_fallback_still_strips_aside_outside_article(monkeypatch):
+    from deerflow.utils import readability
+
+    monkeypatch.setattr(readability, "_readability_js_available", lambda: False)
+    html = """<html><head><title>Site</title></head><body>
+    <main><article><p>Main prose.</p></article>
+    <aside><p>Shell sidebar</p></aside></main>
+    <footer>Site footer</footer></body></html>"""
+
+    markdown = ReadabilityExtractor().extract_article(html, url=PAGE_URL).to_markdown()
+
+    # The in-article protection is scoped to the article itself: shell
+    # regions beside it still leak nothing into the serialized content.
+    assert "Main prose." in markdown
+    assert "Shell sidebar" not in markdown
+    assert "Site footer" not in markdown
+
+
+def test_python_fallback_skips_empty_article_before_real_one(monkeypatch):
+    from deerflow.utils import readability
+
+    monkeypatch.setattr(readability, "_readability_js_available", lambda: False)
+    html = """<html><head><title>T</title></head><body>
+    <main><article></article><p>shell</p></main>
+    <article><h1>Real story</h1><p>Substantive prose.</p></article></body></html>"""
+
+    markdown = ReadabilityExtractor().extract_article(html, url=PAGE_URL).to_markdown()
+
+    # The first <article> in document order can be a textless placeholder;
+    # discarding it must not shadow a real <article> later in the document.
+    assert markdown.startswith("# Real story")
+    assert "Substantive prose." in markdown
+    assert "shell" not in markdown
+
+
 @pytest.mark.parametrize("base", ["http://[broken", "data:text/plain,invalid", "javascript:void(0)", "about:blank", "mailto:help@example.com", "blob:https://example.com/id"])
 def test_invalid_document_base_does_not_lose_valid_relative_links(base):
     article = ReadabilityExtractor().extract_article(
