@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING
 from deerflow.config.paths import Paths
 from deerflow.projects.documents import _content_intact, check_document_content, converted_markdown_path, original_file_path
 from deerflow.utils.file_io import await_drained, run_file_io
+from deerflow.utils.host_paths import extended_length_path
 from deerflow.utils.time import coerce_iso
 
 if TYPE_CHECKING:
@@ -233,7 +234,7 @@ def _reconcile_storage(paths: Paths, *, user_id: str | None, rows: list[dict], g
     if user_id is not None:
         user_ids = [user_id]
     else:
-        users_root = paths.base_dir / "users"
+        users_root = extended_length_path(paths.base_dir / "users")
         user_ids = sorted(entry.name for entry in users_root.iterdir() if entry.is_dir()) if users_root.is_dir() else []
     for uid in user_ids:
         projects_root = paths.user_projects_dir(uid)

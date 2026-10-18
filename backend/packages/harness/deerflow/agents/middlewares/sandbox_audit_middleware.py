@@ -73,8 +73,9 @@ _HIGH_RISK_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\b(LD_PRELOAD|LD_LIBRARY_PATH)\s*="),
     # --- bash built-in networking (bypasses tool allowlists) ---
     re.compile(r"/dev/tcp/"),
-    # --- fork bomb ---
-    re.compile(r"\S+\(\)\s*\{[^}]*\|\s*\S+\s*&"),  # :(){ :|:& };:
+    # --- fork bomb: fn(){ ... | fn & } (the function name must recur after the
+    # pipe; kept byte-identical to _FORK_BOMB_PATTERN in skills/skillscan/orchestrator.py) ---
+    re.compile(r"(?P<fn>[^\s(){};|&]{1,64})\(\)\s*\{[^{}]{0,2048}\|\s*[^{}\s&]{0,64}(?P=fn)\s*&"),  # :(){ :|:& };:
     re.compile(r"while\s+true.*&\s*done"),  # while true; do bash & done
 ]
 

@@ -9,6 +9,7 @@ import {
   describeGoalOutcome,
   describeTaskLastError,
   describeTaskOutcome,
+  goalReasonKeyOf,
   parseStopRunId,
   requestedScheduleStop,
 } from "@/core/scheduled-tasks/goal-outcome";
@@ -97,6 +98,16 @@ test("an unknown unmet code stays visible without a label", () => {
     code: null,
     reasonKey: null,
   });
+});
+
+test("goalReasonKeyOf reads a code with or without the blocked: prefix", () => {
+  expect(goalReasonKeyOf("blocked:needs_user_input")).toBe("needsUserInput");
+  expect(goalReasonKeyOf("needs_user_input")).toBe("needsUserInput");
+  expect(goalReasonKeyOf("thread_changed_before_continuation")).toBe(
+    "threadChanged",
+  );
+  expect(goalReasonKeyOf("blocked:none")).toBeNull();
+  expect(goalReasonKeyOf("future_reason")).toBeNull();
 });
 
 test.each([

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -13,6 +14,10 @@ from deerflow.config.extensions_config import ExtensionsConfig, McpOAuthConfig
 from deerflow.mcp.headers import apply_header_overrides, header_spellings, illegal_header_value_reason
 
 logger = logging.getLogger(__name__)
+
+# Used when the token endpoint omits ``expires_in`` or returns a value the
+# manager cannot turn into a lifetime.
+_DEFAULT_TOKEN_LIFETIME_SECONDS = 3600
 
 
 @dataclass
@@ -224,13 +229,22 @@ class OAuthTokenManager:
 
         token_type = str(payload.get(oauth.token_type_field, oauth.default_token_type) or oauth.default_token_type)
 
-        expires_in_raw = payload.get(oauth.expires_in_field, 3600)
+        expires_in_raw = payload.get(oauth.expires_in_field, _DEFAULT_TOKEN_LIFETIME_SECONDS)
         try:
             expires_in = int(expires_in_raw)
-        except (TypeError, ValueError):
-            expires_in = 3600
-
-        expires_at = datetime.now(UTC) + timedelta(seconds=max(expires_in, 1))
+        except (TypeError, ValueError, OverflowError):
+            # ``OverflowError``: ``json.loads`` accepts ``Infinity``/``NaN``, and
+            # ``int()`` rejects a non-finite float. Treat it like any other
+            # unusable value instead of failing the whole token fetch.
+            expires_in = _DEFAULT_TOKEN_LIFETIME_SECONDS
+        now = datetime.now(UTC)
+        try:
+            expires_at = now + timedelta(seconds=max(expires_in, 1))
+        except OverflowError:
+            # Either timedelta construction or datetime addition can overflow.
+            # Let the arithmetic enforce its exact range, avoiding a rounded
+            # total_seconds() ceiling, and use the same instant for fallback.
+            expires_at = now + timedelta(seconds=_DEFAULT_TOKEN_LIFETIME_SECONDS)
         return _OAuthToken(access_token=access_token, token_type=token_type, expires_at=expires_at)
 
 
@@ -268,6 +282,7 @@ async def get_initial_oauth_headers(
     extensions_config: ExtensionsConfig,
     *,
     token_manager: OAuthTokenManager | None = None,
+    server_names: Collection[str] | None = None,
 ) -> dict[str, str]:
     """Get initial OAuth Authorization headers for MCP server connections."""
     token_manager = token_manager or OAuthTokenManager.from_extensions_config(extensions_config)
@@ -275,7 +290,10 @@ async def get_initial_oauth_headers(
         return {}
 
     headers: dict[str, str] = {}
+    requested = set(server_names) if server_names is not None else None
     for server_name in token_manager.oauth_server_names():
+        if requested is not None and server_name not in requested:
+            continue
         try:
             value = await token_manager.get_authorization_header(server_name)
         except Exception:

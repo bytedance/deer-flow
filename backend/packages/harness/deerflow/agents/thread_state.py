@@ -16,7 +16,7 @@ from langgraph.channels import DeltaChannel
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 import deerflow.checkpoint_patches as _checkpoint_patches  # noqa: F401 - import-time saver fixes
-from deerflow.agents.goal_state import GoalState
+from deerflow.agents.goal_state import GoalOutcomeState, GoalState
 from deerflow.agents.task_continuity.state import TaskNotesChannel, merge_task_notes
 from deerflow.config.database_config import DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY, CheckpointChannelMode
 from deerflow.subagents.status_contract import SUBAGENT_STATUS_VALUES
@@ -115,6 +115,12 @@ def merge_viewed_images(existing: dict[str, ViewedImageData] | None, new: dict[s
 
     Special case: If new is an empty dict {}, it clears the existing images.
     This allows middlewares to clear the viewed_images state after processing.
+
+    Dict order tracks recency: a key updated by ``new`` is re-inserted at the
+    end, so a re-viewed image becomes the newest entry. The image injection
+    middleware admits entries newest-first and tells the model to re-view an
+    omitted image, so the recovery only works if the re-viewed entry actually
+    moves to the newest position (#6825, review on #6829).
     """
     if existing is None:
         return new or {}
@@ -123,8 +129,11 @@ def merge_viewed_images(existing: dict[str, ViewedImageData] | None, new: dict[s
     # Special case: empty dict means clear all viewed images
     if len(new) == 0:
         return {}
-    # Merge dictionaries, new values override existing ones for same keys
-    return {**existing, **new}
+    # Merge dictionaries; new values override existing ones for same keys, and
+    # updated keys move to the end so insertion order reflects recency.
+    merged = {key: value for key, value in existing.items() if key not in new}
+    merged.update(new)
+    return merged
 
 
 def merge_todos(existing: list | None, new: list | None) -> list | None:
@@ -150,27 +159,35 @@ def merge_goal(existing: GoalState | None, new: GoalState | None) -> GoalState |
 class PromotedTools(TypedDict):
     catalog_hash: str
     names: list[str]
+    turn_id: NotRequired[str]
 
 
 def merge_promoted(existing: PromotedTools | None, new: PromotedTools | None) -> PromotedTools | None:
-    """Reducer for deferred-tool promotions, scoped by catalog hash.
+    """Reducer for deferred-tool promotions, scoped by catalog and user turn.
 
     - new None/empty -> preserve existing (node didn't touch promotions).
-    - catalog_hash changed -> replace wholesale, dropping stale names (prevents a
-      persisted bare name from exposing a different tool after catalog drift).
-    - same catalog_hash -> union names, dedupe, preserve order.
+    - catalog_hash or explicit turn_id changed -> replace wholesale, dropping
+      stale names.
+    - same scope -> union names, dedupe, preserve order.
+    - a missing new turn_id inherits the existing scope. ``tool_search`` writes
+      this shape after the filter establishes the current turn before the model.
     """
     if not new:
         return existing
-    if existing is None or existing.get("catalog_hash") != new["catalog_hash"]:
-        return {
-            "catalog_hash": new["catalog_hash"],
-            "names": list(dict.fromkeys(new["names"])),
-        }
-    return {
-        "catalog_hash": existing["catalog_hash"],
-        "names": list(dict.fromkeys(existing["names"] + new["names"])),
+    new_turn_id = new.get("turn_id")
+    replace = existing is None or existing.get("catalog_hash") != new["catalog_hash"] or (new_turn_id is not None and existing.get("turn_id") != new_turn_id)
+    existing_names = existing.get("names") if existing is not None else None
+    if not isinstance(existing_names, list) or not all(isinstance(name, str) for name in existing_names):
+        existing_names = []
+    names = new["names"] if replace else existing_names + new["names"]
+    merged: PromotedTools = {
+        "catalog_hash": new["catalog_hash"],
+        "names": list(dict.fromkeys(names)),
     }
+    turn_id = new_turn_id if new_turn_id is not None else (existing or {}).get("turn_id")
+    if turn_id is not None:
+        merged["turn_id"] = turn_id
+    return merged
 
 
 TERMINAL_STATUSES: frozenset[str] = frozenset(SUBAGENT_STATUS_VALUES)
@@ -366,6 +383,7 @@ class ThreadState(AgentState):
     artifacts: Annotated[list[str], merge_artifacts]
     todos: Annotated[list | None, merge_todos]
     goal: Annotated[GoalState | None, merge_goal]
+    goal_outcome: NotRequired[GoalOutcomeState | None]
     uploaded_files: NotRequired[list[dict] | None]
     viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  # image_path -> metadata (no base64)
     promoted: Annotated[PromotedTools | None, merge_promoted]

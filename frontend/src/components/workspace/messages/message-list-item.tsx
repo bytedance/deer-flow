@@ -11,6 +11,7 @@ import {
 import {
   memo,
   useCallback,
+  useId,
   useMemo,
   useState,
   type ImgHTMLAttributes,
@@ -35,7 +36,10 @@ import {
   resolveArtifactURL,
   resolveMessageImageURL,
 } from "@/core/artifacts/utils";
-import { extractCitationSources } from "@/core/citations/sources";
+import {
+  type RetrievalSource,
+  extractCitationSources,
+} from "@/core/citations/sources";
 import { readConversationReferences } from "@/core/conversation-references";
 import { useI18n } from "@/core/i18n/hooks";
 import {
@@ -53,6 +57,7 @@ import {
 } from "@/core/skills";
 import { useSkills } from "@/core/skills/hooks";
 import { pathOfThread } from "@/core/threads/utils";
+import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 
 import { WorkspaceChangeBadge } from "../changes";
@@ -144,10 +149,12 @@ export function MessageListItem({
   runId,
   threadId,
   artifactPaths = [],
+  knowledgeSources = [],
   showCopyButton = true,
   showWorkspaceChanges = false,
   durationSeconds,
   canEdit = false,
+  editLockedByGoal = false,
   isEditPending = false,
   onEditAndRegenerate,
 }: {
@@ -156,16 +163,20 @@ export function MessageListItem({
   isLoading?: boolean;
   threadId: string;
   artifactPaths?: readonly string[];
+  knowledgeSources?: readonly RetrievalSource[];
   feedback?: FeedbackData | null;
   runId?: string;
   showCopyButton?: boolean;
   showWorkspaceChanges?: boolean;
   durationSeconds?: number;
   canEdit?: boolean;
+  /** Edit would be allowed but for an active goal: show the pencil locked. */
+  editLockedByGoal?: boolean;
   isEditPending?: boolean;
   onEditAndRegenerate?: (replacementText: string) => void | Promise<boolean>;
 }) {
   const { t } = useI18n();
+  const editLockedId = useId();
   const isHuman = message.type === "human";
   // One derivation serves both editing and the toolbar, and only runs when
   // either consumer can use it: assistant rows never render this toolbar
@@ -225,6 +236,7 @@ export function MessageListItem({
         isLoading={isLoading}
         threadId={threadId}
         artifactPaths={artifactPaths}
+        knowledgeSources={knowledgeSources}
         runId={runId}
         showWorkspaceChanges={showWorkspaceChanges}
         durationSeconds={durationSeconds}
@@ -247,8 +259,10 @@ export function MessageListItem({
             isHuman
               ? "absolute right-0 -bottom-9 left-0 justify-end"
               : "absolute right-0 bottom-0 left-0",
-            "z-20 opacity-0 transition-opacity delay-200 duration-300 group-hover/conversation-message:opacity-100",
+            // focus-within: a keyboard user tabbing to a button sees it.
+            "z-20 opacity-0 transition-opacity delay-200 duration-300 group-hover/conversation-message:opacity-100 focus-within:opacity-100",
           )}
+          data-testid="message-toolbar"
         >
           <div className="pointer-events-auto flex gap-1">
             <CopyButton clipboardData={copyData} />
@@ -266,6 +280,32 @@ export function MessageListItem({
                 </Button>
               </Tooltip>
             )}
+            {!canEdit &&
+              editLockedByGoal &&
+              isHuman &&
+              onEditAndRegenerate &&
+              !isEditing && (
+                <>
+                  <Tooltip content={t.inputBox.goalBar.editLocked}>
+                    <Button
+                      aria-label={t.common.editAndRerun}
+                      aria-disabled="true"
+                      aria-describedby={editLockedId}
+                      className="aria-disabled:cursor-not-allowed"
+                      size="icon-sm"
+                      type="button"
+                      variant="ghost"
+                      data-testid="message-edit-locked"
+                    >
+                      {/* Dim only the icon so the focus ring stays at full strength. */}
+                      <PencilIcon className="size-4 opacity-50" />
+                    </Button>
+                  </Tooltip>
+                  <span id={editLockedId} className="sr-only">
+                    {t.inputBox.goalBar.editLocked}
+                  </span>
+                </>
+              )}
             {feedback !== undefined && runId && threadId && (
               <FeedbackButtons
                 threadId={threadId}
@@ -376,6 +416,7 @@ function MessageContent_({
   isLoading = false,
   threadId,
   artifactPaths,
+  knowledgeSources = [],
   runId,
   showWorkspaceChanges = false,
   durationSeconds,
@@ -386,6 +427,7 @@ function MessageContent_({
   isLoading?: boolean;
   threadId: string;
   artifactPaths: readonly string[];
+  knowledgeSources?: readonly RetrievalSource[];
   runId?: string;
   showWorkspaceChanges?: boolean;
   durationSeconds?: number;
@@ -410,9 +452,9 @@ function MessageContent_({
           maxWidth="90%"
         />
       ),
-      a: createMarkdownLinkComponent(threadId),
+      a: createMarkdownLinkComponent(threadId, knowledgeSources),
     }),
-    [artifactPaths, threadId],
+    [artifactPaths, threadId, knowledgeSources],
   );
 
   const rawContent = extractContentFromMessage(message);
@@ -459,8 +501,9 @@ function MessageContent_({
     return rawContent ?? "";
   }, [rawContent, isHuman]);
   const citationSources = useMemo(
-    () => (isHuman ? [] : extractCitationSources(contentToDisplay)),
-    [contentToDisplay, isHuman],
+    () =>
+      isHuman ? [] : extractCitationSources(contentToDisplay, knowledgeSources),
+    [contentToDisplay, isHuman, knowledgeSources],
   );
 
   const filesList =
@@ -547,6 +590,7 @@ function MessageContent_({
                 editState.onDraftChange(event.currentTarget.value)
               }
               onKeyDown={(event) => {
+                if (isIMEComposing(event)) return;
                 if (event.key === "Escape") {
                   event.preventDefault();
                   editState.onCancel();

@@ -8,6 +8,70 @@ from collections.abc import Callable
 from urllib.parse import urlparse
 
 _BLOCKED_HOSTNAMES = {"localhost", "metadata.google.internal"}
+_IDNA_DOT_TRANSLATION = str.maketrans("\u3002\uff0e\uff61", "...")
+
+
+def safe_public_result_url(value: object) -> str:
+    """Screen an untrusted result URL without doing DNS or network I/O.
+
+    This only filters URLs returned to callers. Downloaders must still check
+    the resolved address at connection time.
+    """
+    if not isinstance(value, str):
+        return ""
+    url = value.strip()
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname
+    except ValueError:
+        return ""
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or not host:
+        return ""
+    # IDNA clients treat these Unicode label separators as ASCII dots. Screen
+    # the normalized host so an IP literal cannot masquerade as a DNS name.
+    host = host.translate(_IDNA_DOT_TRANSLATION).lower().rstrip(".")
+    if not host or host in _BLOCKED_HOSTNAMES or host.endswith(".localhost"):
+        return ""
+
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        address = _decode_result_ipv4(host)
+        if address is None:
+            return url
+    if isinstance(address, ipaddress.IPv6Address):
+        embedded = address.ipv4_mapped or address.sixtofour
+        if embedded is None and address in ipaddress.ip_network("64:ff9b::/96"):
+            embedded = ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
+        if embedded is None and 1 < int(address) < 1 << 32:
+            embedded = ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
+        if embedded is not None and is_blocked_address(embedded):
+            return ""
+    return "" if is_blocked_address(address) else url
+
+
+def _decode_result_ipv4(host: str) -> ipaddress.IPv4Address | None:
+    """Recognize decimal, octal and hex IPv4 spellings accepted by clients."""
+    parts = host.split(".")
+    if not 1 <= len(parts) <= 4:
+        return None
+    values: list[int] = []
+    for part in parts:
+        try:
+            base = 16 if part.startswith(("0x", "0X")) else 8 if part.startswith("0") and len(part) > 1 else 10
+            values.append(int(part, base))
+        except ValueError:
+            return None
+    *leading, last = values
+    if any(not 0 <= value <= 255 for value in leading):
+        return None
+    remaining_bits = 8 * (4 - len(leading))
+    if not 0 <= last < 1 << remaining_bits:
+        return None
+    result = 0
+    for value in leading:
+        result = result << 8 | value
+    return ipaddress.IPv4Address(result << remaining_bits | last)
 
 
 def resolve_host_addresses(hostname: str) -> list[ipaddress._BaseAddress]:
@@ -99,9 +163,9 @@ def validate_public_http_url(
     resolves the name again, so a rebinding DNS server can still hand that
     connect a private address unless the connection is pinned to the vetted
     IPs (:func:`resolve_public_addresses`), as ``deerflow.mcp.personal_network``
-    and the browser egress proxy do. Delegated fetch services (crawl4ai,
-    Browserless, fastcrw) resolve on their own side and cannot be pinned from
-    here.
+    and the browser egress proxy do. Delegated fetch services (Browserless,
+    crawl4ai, fastcrw, firecrawl) resolve on their own side and cannot be pinned
+    from here.
     """
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -118,4 +182,53 @@ def validate_public_http_url(
         resolve_public_addresses(hostname, action=action, resolver=resolver)
     except ValueError as exc:
         return str(exc)
+    return None
+
+
+def validate_delegated_backend_url(
+    base_url: str,
+    *,
+    network_isolation_confirmed: bool = False,
+    resolver: Callable[[str], list[ipaddress._BaseAddress]] | None = None,
+) -> str | None:
+    """Validate a delegated fetch backend's base URL before delegating navigation.
+
+    Browserless, Crawl4AI, fastCRW, and Firecrawl resolve the target URL, follow
+    redirects, and load subresources in the backend's own network namespace, so
+    the target-URL screen in :func:`validate_public_http_url` cannot be enforced
+    end-to-end. The only safe way to delegate is to ensure the backend's outbound
+    network is isolated from the deployment's private and metadata networks.
+
+    A backend reachable at a public address (for example Browserless Cloud) runs
+    outside the deployment network, so delegation needs no extra confirmation. A
+    backend at a loopback, private, or unverifiable address is self-hosted inside
+    the deployment network, so this fails closed unless the operator confirms the
+    backend's egress is isolated via ``network_isolation_confirmed=True``.
+
+    The check resolves the backend hostname once, at validation time only. A
+    backend client built afterwards connects by hostname and resolves the name
+    again, so a DNS name that answers with a public address during screening and
+    a private one at connect time still passes. Pin the connection to the vetted
+    addresses (:func:`resolve_public_addresses`) to close that rebinding window.
+
+    Returns an ``"Error: ..."`` string when delegation must be refused, or
+    ``None`` when the caller may proceed. Blocking like
+    :func:`resolve_public_addresses`; from a coroutine, call it via
+    ``asyncio.to_thread``.
+    """
+    parsed = urlparse(base_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return "Error: Only http:// and https:// backend URLs are supported"
+
+    if network_isolation_confirmed:
+        return None
+
+    hostname = parsed.hostname
+    if not hostname:
+        return "Error: Backend URL host could not be parsed"
+
+    try:
+        resolve_public_addresses(hostname, action="delegate to", resolver=resolver)
+    except ValueError as exc:
+        return f"{exc}. To delegate to a self-hosted backend, set network_isolation_confirmed: true."
     return None

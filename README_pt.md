@@ -1,6 +1,6 @@
 # 🦌 DeerFlow - 2.0
 
-[English](./README.md) | [中文](./README_zh.md) | [日本語](./README_ja.md) | [Français](./README_fr.md) | [Русский](./README_ru.md) | Português
+[English](./README.md) | [中文](./README_zh.md) | [日本語](./README_ja.md) | [Français](./README_fr.md) | [Русский](./README_ru.md) | Português | [한국어](./README_ko.md)
 
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](./backend/pyproject.toml)
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](./Makefile)
@@ -200,6 +200,13 @@ Para o endpoint oficial do Gemini compatível com OpenAI, do Google, use o [perf
        api_key: $OPENROUTER_API_KEY
        base_url: https://openrouter.ai/api/v1
 
+     - name: opper-claude-sonnet-4-6
+       display_name: Claude Sonnet 4.6 (Opper)
+       use: langchain_openai:ChatOpenAI
+       model: claude-sonnet-4-6
+       api_key: $OPPER_API_KEY
+       base_url: https://api.opper.ai/v3/compat
+
      - name: gpt-5-responses
        display_name: GPT-5 (Responses API)
        use: langchain_openai:ChatOpenAI
@@ -322,7 +329,7 @@ make docker-logs    # View logs
 
 O `make docker-start` só inicia o `provisioner` quando o `config.yaml` usa o modo provisioner (`sandbox.use: deerflow.community.aio_sandbox:AioSandboxProvider` com `provisioner_url`).
 
-Os builds do Docker usam o registry upstream do `uv` por padrão. Se você precisa de mirrors mais rápidos em redes restritas, exporte `UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple` e `NPM_REGISTRY=https://registry.npmmirror.com` antes de rodar `make docker-init` ou `make docker-start`.
+Os builds do Docker usam o registry upstream do `uv` por padrão. A imagem do gateway instala com `uv sync --locked` e o `uv.lock` fixa `https://pypi.org/simple`, portanto `UV_INDEX_URL` precisa manter esse valor: exportar um mirror como `https://pypi.tuna.tsinghua.edu.cn/simple` faz o build falhar com ``The lockfile at `uv.lock` needs to be updated, but `--locked` was provided`` (reproduza em um ambiente já sincronizado com `cd backend && UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple uv sync --locked --check`; se o ambiente em si estiver desatualizado, `--check` informa apenas isso para qualquer índice, então use `uv lock --check` para ver o erro sem sincronizar). Instalar a partir de um mirror exige regerar o lock ou remover `--locked`, e as duas opções mudam o que a imagem instala, então mantenha o índice padrão em um checkout que você pretende contribuir de volta. `NPM_REGISTRY=https://registry.npmmirror.com` é independente disso e se aplica à instalação `pnpm` da imagem do frontend e à instalação do Lark CLI na imagem do gateway (`@larksuite/cli`, que o `backend/Dockerfile` instala com npm).
 
 O tráfego de controle do sandbox AIO local é sempre direto: endereços de loopback/privados, hosts de cluster de rótulo único e hostnames internos do Docker/Podman não herdam `HTTP_PROXY` nem `HTTPS_PROXY`. FQDNs externos de sandbox e IPs públicos continuam respeitando as configurações de proxy do ambiente.
 
@@ -1646,7 +1653,7 @@ O PoC não faz limpeza automática. Concluída a verificação, exclua o chat de
 
 ### Padrões de implantação
 
-A stack Docker publica a porta de entrada apenas em `127.0.0.1`, de acordo com o modelo de ambiente local confiável descrito acima. Para acessá-la de outra máquina, defina `BIND_HOST` no `.env` (por exemplo `BIND_HOST=0.0.0.0`), e só depois de adotar as medidas de segurança abaixo.
+A stack Docker publica a porta de entrada apenas em `127.0.0.1`, e o `make dev` / `make start` local vinculam o nginx, o Gateway e o frontend ao loopback, de acordo com o modelo de ambiente local confiável descrito acima. Para acessá-la de outra máquina, defina `BIND_HOST` no `.env` (por exemplo `BIND_HOST=0.0.0.0`), e só depois de adotar as medidas de segurança abaixo. Na execução local, `BIND_HOST` vale apenas para o nginx na porta `2026`; o Gateway e o frontend continuam no loopback, atrás dele.
 
 **Conclua a configuração de primeiro uso antes que o host fique acessível.** Uma instância nova ainda não tem contas, então crie a conta de admin por `/setup` logo depois de iniciar qualquer implantação que não seja só de loopback.
 

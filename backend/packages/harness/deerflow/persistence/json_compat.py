@@ -20,8 +20,8 @@ _KEY_CHARSET_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 # Allowed value types for metadata filter values (same set accepted by JsonMatch).
 ALLOWED_FILTER_VALUE_TYPES: tuple[type, ...] = (type(None), bool, int, float, str)
 
-# SQLite raises an overflow when binding values outside signed 64-bit range;
-# PostgreSQL overflows during BIGINT cast. Reject at validation time instead.
+# Keep filter inputs portable: SQLite cannot bind integers outside signed
+# 64-bit range. Stored JSON numbers may still be larger on either backend.
 _INT64_MIN = -(2**63)
 _INT64_MAX = 2**63 - 1
 
@@ -47,8 +47,8 @@ def validate_metadata_filter_value(value: object) -> bool:
     SQLAlchemy's ``inherit_cache`` invariant when ``value`` is unhashable.
 
     Integer values are additionally restricted to the signed 64-bit range
-    ``[-2**63, 2**63 - 1]``: SQLite overflows when binding larger values
-    and PostgreSQL overflows during the ``BIGINT`` cast.
+    ``[-2**63, 2**63 - 1]`` so filters remain portable to SQLite, which
+    cannot bind larger integer values.
     """
     if not isinstance(value, ALLOWED_FILTER_VALUE_TYPES):
         return False
@@ -135,11 +135,9 @@ class _Dialect:
     num_types: tuple[str, ...]
     num_cast: str
     int_types: tuple[str, ...]
-    int_cast: str
-    # None for SQLite where json_type already returns 'integer'/'real';
-    # regex literal for PostgreSQL where json_typeof returns 'number' for
-    # both ints and floats, so an extra guard prevents CAST errors on floats.
-    int_guard: str | None
+    # PostgreSQL ->> returns the JSON number spelling; SQLite json_extract
+    # returns a native integer or a (possibly lossy) real for large integers.
+    int_as_text: bool
     string_type: str
     bool_type: str | None
 
@@ -149,8 +147,7 @@ _SQLITE = _Dialect(
     num_types=("integer", "real"),
     num_cast="REAL",
     int_types=("integer",),
-    int_cast="INTEGER",
-    int_guard=None,
+    int_as_text=False,
     string_type="text",
     bool_type=None,
 )
@@ -160,8 +157,7 @@ _PG = _Dialect(
     num_types=("number",),
     num_cast="DOUBLE PRECISION",
     int_types=("number",),
-    int_cast="BIGINT",
-    int_guard="'^-?[0-9]+$'",
+    int_as_text=True,
     string_type="string",
     bool_type="boolean",
 )
@@ -189,11 +185,19 @@ def _build_clause(compiler: SQLCompiler, typeof: str, extract: str, value: objec
             return f"{typeof} = '{bool_str}'"
         return f"({typeof} = '{dialect.bool_type}' AND {extract} = '{bool_str}')"
     if isinstance(value, int):
-        bp = _bind(compiler, value, BigInteger(), **kw)
-        if dialect.int_guard:
-            # CASE prevents CAST error when json_typeof = 'number' also matches floats
-            return f"(CASE WHEN {_type_check(typeof, dialect.int_types)} AND {extract} ~ {dialect.int_guard} THEN CAST({extract} AS {dialect.int_cast}) END = {bp})"
-        return f"({_type_check(typeof, dialect.int_types)} AND CAST({extract} AS {dialect.int_cast}) = {bp})"
+        if dialect.int_as_text:
+            # JSON integer spellings are canonical except for -0. Comparing
+            # text avoids overflowing BIGINT (or even NUMERIC) on stored values
+            # and still excludes decimal/exponent spellings from int filters.
+            bp = _bind(compiler, str(value), String(), **kw)
+            comparison = f"{extract} IN ({bp}, '-0')" if value == 0 else f"{extract} = {bp}"
+        else:
+            bp = _bind(compiler, value, BigInteger(), **kw)
+            # json_type reports 'integer' for oversized JSON integers too, but
+            # json_extract returns REAL. Casting that REAL to INTEGER clamps it
+            # to an int64 boundary and would create a false positive.
+            comparison = f"typeof({extract}) = 'integer' AND {extract} = {bp}"
+        return f"({_type_check(typeof, dialect.int_types)} AND {comparison})"
     if isinstance(value, float):
         bp = _bind(compiler, value, Float(), **kw)
         return f"({_type_check(typeof, dialect.num_types)} AND CAST({extract} AS {dialect.num_cast}) = {bp})"

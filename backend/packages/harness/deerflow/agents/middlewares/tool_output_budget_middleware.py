@@ -719,7 +719,7 @@ def _patch_tool_message(
     trigger = _effective_trigger(tool_name, config)
     citation_result = None
     if tool_name in {"knowledge_search", "task"} and trigger > 0 and len(text) > trigger:
-        citation_result = budget_source_artifact(text, msg.artifact, trigger, summary=(budgeted[0] if budgeted else text) if tool_name == "task" else "")
+        citation_result = budget_source_artifact(text, msg.artifact, trigger, summary=(budgeted.replacement if budgeted else text) if tool_name == "task" else "")
     if citation_result is not None:
         replacement, update["artifact"] = citation_result
         transform_kind = "truncated"
@@ -728,6 +728,11 @@ def _patch_tool_message(
         transform_kind = budgeted.transform_kind
     else:
         return msg
+    from deerflow.knowledge.sources import prune_sources
+
+    replacement, artifact = prune_sources(replacement, update.get("artifact", msg.artifact))
+    if artifact is not msg.artifact or "artifact" in update:
+        update["artifact"] = artifact
     update["content"] = [{"type": "text", "text": replacement}, *retained_blocks] if retained_blocks else replacement
     if getattr(msg, "response_metadata", None):
         update["response_metadata"] = dict(msg.response_metadata)

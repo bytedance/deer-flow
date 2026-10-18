@@ -2,6 +2,32 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
+
+def extended_length_path(path: Path) -> Path:
+    """Use Windows' extended namespace for local filesystem access.
+
+    Prefix before appending children: even a short root can contain a long
+    document filename. Normalize ordinary paths before adding the prefix;
+    extended paths bypass Win32's ordinary path normalization. This is lexical
+    only: callers must still resolve symlinks and enforce their own confinement.
+    Existing extended/device namespaces (including named pipes) are returned
+    unchanged, without normalizing their segments.
+    POSIX paths are unchanged. Do not use this spelling for Docker mount sources
+    or persisted relative paths.
+    """
+    if os.name != "nt":
+        return path
+    if str(path).startswith(("\\\\?\\", "\\\\.\\")):
+        return path
+    absolute = os.path.abspath(path)
+    if absolute.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + absolute[2:])
+    return Path("\\\\?\\" + absolute)
+
+
 # Windows also treats the ISO-8859-1 superscript digits ¹, ² and ³ as device numbers.
 # https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file
 # CONIN$ and CONOUT$ open the console input and output buffers, not ordinary files.
@@ -26,7 +52,9 @@ def windows_incompatible_segment(segment: str) -> str | None:
         return None
     if segment.endswith((" ", ".")):
         return "trailing dot or space"
-    stem = segment.split(".", 1)[0]
+    # Windows ignores ASCII spaces before a device name's extension (NUL .txt).
+    # Trim only for comparison; ordinary filenames must retain their spaces.
+    stem = segment.split(".", 1)[0].rstrip(" ")
     if stem.upper() in _WINDOWS_RESERVED_NAMES:
         return "reserved Windows device name"
     return None

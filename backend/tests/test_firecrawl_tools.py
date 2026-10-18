@@ -1,11 +1,22 @@
 """Unit tests for the Firecrawl community tools."""
 
+import ipaddress
 import json
 import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
+
+
+@pytest.fixture
+def public_dns():
+    """Keep mocked tool calls offline while exercising the real URL safety check."""
+    with patch(
+        "deerflow.community.url_safety.resolve_host_addresses",
+        return_value=[ipaddress.ip_address("93.184.216.34")],
+    ):
+        yield
 
 
 class TestWebSearchTool:
@@ -42,6 +53,7 @@ class TestWebSearchTool:
 class TestWebFetchTool:
     @patch("deerflow.community.firecrawl.tools.AsyncFirecrawlApp")
     @patch("deerflow.community.firecrawl.tools.get_app_config")
+    @pytest.mark.usefixtures("public_dns")
     @pytest.mark.anyio
     async def test_fetch_uses_web_fetch_config(self, mock_get_app_config, mock_firecrawl_cls):
         fetch_config = MagicMock()
@@ -71,14 +83,48 @@ class TestWebFetchTool:
             formats=["markdown"],
         )
 
+    @patch("deerflow.community.firecrawl.tools.AsyncFirecrawlApp")
+    @patch("deerflow.community.firecrawl.tools.get_app_config")
+    @pytest.mark.usefixtures("public_dns")
+    @pytest.mark.anyio
+    async def test_fetch_builds_client_from_the_validated_config_snapshot(self, mock_get_app_config, mock_firecrawl_cls):
+        # The endpoint screen reads the config once; a later read returning a
+        # different revision must not leak its key into the screened client.
+        config_a = MagicMock()
+        config_a.model_extra = {
+            "base_url": "http://192.168.0.47:3002",
+            "network_isolation_confirmed": True,
+            "api_key": "key-a",
+        }
+        config_b = MagicMock()
+        config_b.model_extra = {
+            "base_url": "http://192.168.0.99:3002",
+            "network_isolation_confirmed": True,
+            "api_key": "key-b",
+        }
+        mock_get_app_config.return_value.get_tool_config.side_effect = [config_a, config_b]
+
+        mock_scrape_result = MagicMock()
+        mock_scrape_result.markdown = "Fetched markdown"
+        mock_scrape_result.metadata = MagicMock(title="Fetched Page")
+        mock_firecrawl_cls.return_value.scrape = AsyncMock(return_value=mock_scrape_result)
+
+        from deerflow.community.firecrawl.tools import web_fetch_tool
+
+        result = await web_fetch_tool.ainvoke({"url": "https://example.com"})
+
+        assert result == "# Fetched Page\n\nFetched markdown"
+        mock_firecrawl_cls.assert_called_once_with(api_key="key-a", api_url="http://192.168.0.47:3002")
+
 
 class TestFirecrawlBaseUrl:
     @patch("deerflow.community.firecrawl.tools.AsyncFirecrawlApp")
     @patch("deerflow.community.firecrawl.tools.get_app_config")
+    @pytest.mark.usefixtures("public_dns")
     @pytest.mark.anyio
     async def test_fetch_passes_base_url_as_api_url(self, mock_get_app_config, mock_firecrawl_cls):
         fetch_config = MagicMock()
-        fetch_config.model_extra = {"base_url": "http://192.168.0.47:3002"}
+        fetch_config.model_extra = {"base_url": "http://192.168.0.47:3002", "network_isolation_confirmed": True}
 
         def get_tool_config(name):
             if name == "web_fetch":
@@ -146,6 +192,7 @@ class TestPerCallClientTeardown:
 
     @patch("deerflow.community.firecrawl.tools.AsyncFirecrawlApp")
     @patch("deerflow.community.firecrawl.tools.get_app_config")
+    @pytest.mark.usefixtures("public_dns")
     @pytest.mark.anyio
     async def test_fetch_closes_the_per_call_client(self, mock_get_app_config, mock_firecrawl_cls):
         fetch_config = MagicMock()
@@ -182,6 +229,7 @@ class TestPerCallClientTeardown:
 
     @patch("deerflow.community.firecrawl.tools.AsyncFirecrawlApp")
     @patch("deerflow.community.firecrawl.tools.get_app_config")
+    @pytest.mark.usefixtures("public_dns")
     @pytest.mark.anyio
     async def test_fetch_closes_the_per_call_client_when_scrape_raises(self, mock_get_app_config, mock_firecrawl_cls):
         mock_get_app_config.return_value.get_tool_config.return_value = None
@@ -198,6 +246,7 @@ class TestPerCallClientTeardown:
 
     @patch("deerflow.community.firecrawl.tools.AsyncFirecrawlApp")
     @patch("deerflow.community.firecrawl.tools.get_app_config")
+    @pytest.mark.usefixtures("public_dns")
     @pytest.mark.anyio
     async def test_close_failure_does_not_hide_scrape_error(self, mock_get_app_config, mock_firecrawl_cls, caplog):
         mock_get_app_config.return_value.get_tool_config.return_value = None
@@ -279,6 +328,65 @@ class TestPerCallClientTeardown:
         result = await web_search_tool.ainvoke({"query": "test query"})
 
         assert result == "[]"
+
+
+class TestFirecrawlBackendIsolation:
+    """Fail-closed delegated-backend SSRF guard (issue #5970)."""
+
+    @patch("deerflow.community.firecrawl.tools.AsyncFirecrawlApp")
+    @patch("deerflow.community.firecrawl.tools.get_app_config")
+    @pytest.mark.usefixtures("public_dns")
+    @pytest.mark.anyio
+    async def test_fetch_fails_closed_on_self_hosted_backend(self, mock_get_app_config, mock_firecrawl_cls):
+        fetch_config = MagicMock()
+        fetch_config.model_extra = {"base_url": "http://localhost:3000"}
+        mock_get_app_config.return_value.get_tool_config.return_value = fetch_config
+
+        from deerflow.community.firecrawl.tools import web_fetch_tool
+
+        result = await web_fetch_tool.ainvoke({"url": "https://example.com"})
+
+        assert "network_isolation_confirmed" in result
+        mock_firecrawl_cls.assert_not_called()
+
+    @patch("deerflow.community.firecrawl.tools.AsyncFirecrawlApp")
+    @patch("deerflow.community.firecrawl.tools.get_app_config")
+    @pytest.mark.usefixtures("public_dns")
+    @pytest.mark.anyio
+    async def test_fetch_allows_self_hosted_backend_when_confirmed(self, mock_get_app_config, mock_firecrawl_cls):
+        fetch_config = MagicMock()
+        fetch_config.model_extra = {"base_url": "http://localhost:3000", "network_isolation_confirmed": True}
+        mock_get_app_config.return_value.get_tool_config.return_value = fetch_config
+
+        mock_scrape_result = MagicMock()
+        mock_scrape_result.markdown = "ok"
+        mock_scrape_result.metadata = MagicMock(title="T")
+        mock_firecrawl_cls.return_value.scrape = AsyncMock(return_value=mock_scrape_result)
+
+        from deerflow.community.firecrawl.tools import web_fetch_tool
+
+        result = await web_fetch_tool.ainvoke({"url": "https://example.com"})
+
+        assert result == "# T\n\nok"
+        mock_firecrawl_cls.return_value.scrape.assert_called_once_with("https://example.com", formats=["markdown"])
+
+    @patch("deerflow.community.firecrawl.tools.AsyncFirecrawlApp")
+    @patch("deerflow.community.firecrawl.tools.get_app_config")
+    @pytest.mark.usefixtures("public_dns")
+    @pytest.mark.anyio
+    async def test_fetch_allows_public_backend(self, mock_get_app_config, mock_firecrawl_cls):
+        mock_get_app_config.return_value.get_tool_config.return_value = None
+
+        mock_scrape_result = MagicMock()
+        mock_scrape_result.markdown = "ok"
+        mock_scrape_result.metadata = MagicMock(title="T")
+        mock_firecrawl_cls.return_value.scrape = AsyncMock(return_value=mock_scrape_result)
+
+        from deerflow.community.firecrawl.tools import web_fetch_tool
+
+        result = await web_fetch_tool.ainvoke({"url": "https://example.com"})
+
+        assert result == "# T\n\nok"
 
 
 # `None` is itself a configured value (`max_results:` with nothing after it in YAML), so an absent key

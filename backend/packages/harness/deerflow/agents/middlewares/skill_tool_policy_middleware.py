@@ -17,6 +17,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
+from deerflow.authz.activation_decisions import ActivationDecisions
 from deerflow.runtime.secret_context import SKILL_TOOL_POLICY_DECISION_CONTEXT_KEY, read_slash_skill_source_paths
 from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
 from deerflow.skills.tool_policy import ALWAYS_AVAILABLE_BUILTIN_TOOL_NAMES, allowed_tool_names_for_skills
@@ -36,9 +37,9 @@ _POLICY_SOURCES = frozenset({_POLICY_SOURCE_PASSIVE, _POLICY_SOURCE_SLASH, _POLI
 _MISSING_POLICY_DECISION = object()
 # Async-prepass registry load already attempted and failed: the async hook must
 # not let the worker-side filter silently retry storage — a successful retry
-# would resolve skills whose names are absent from the (empty) decision map and
-# fall back to the synchronous provider API from the thread, which for a
-# loop-affine provider turns a denial into a fail-open allow. Tri-state marker
+# would resolve skills whose names are absent from the (empty) decision batch —
+# a policy-resolved miss (per the carried fail-closed/fail-open policy, with a
+# WARNING), never a silent fallback. Tri-state marker
 # in the style of _MISSING_POLICY_DECISION.
 # Registry argument handed down the policy-resolution call chain: a loaded
 # snapshot (dict), the load-failure marker, or None ("load it here" — the
@@ -80,25 +81,33 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         self._skill_authorization = skill_authorization
         self._decision_owner_token = secrets.token_urlsafe(24)
 
-    def _activation_allowed(self, skill_name: str, *, activation_decisions: dict[str, bool] | None = None) -> bool:
+    def _activation_allowed(self, skill_name: str, *, activation_decisions: ActivationDecisions | None = None) -> bool:
         """Action-scoped ``skill:activate`` decision for one skill name.
 
         Persisted ``skill_context`` entries were authorized when they were
         stamped, but the policy may have changed since — every entry is
         re-authorized before its allowed-tools declaration is applied.
-        *activation_decisions* carries decisions precomputed on the event loop
-        via ``aauthorize()`` (async hooks); names absent from the map fall back
-        to the synchronous check, which is the correct API for the sync hooks.
+        *activation_decisions* carries the per-step
+        :class:`~deerflow.authz.activation_decisions.ActivationDecisions`
+        batch precomputed on the event loop via ``aauthorize()`` (async
+        hooks): a covered name returns the batched decision; a miss inside
+        the batch resolves per the carried provider-error policy with a loud
+        WARNING and never touches a provider. ``None`` (the sync hooks, or
+        authorization disabled) is the only case that takes the synchronous
+        check below — the correct API there.
         """
         if self._skill_authorization is None:
             return True
-        if activation_decisions is not None and skill_name in activation_decisions:
-            return activation_decisions[skill_name]
+        if activation_decisions is not None:
+            # Construction-enforced: a miss inside an async batch resolves per
+            # the provider-error policy with a loud log — it never falls back
+            # to the synchronous authorize() from a worker thread.
+            return activation_decisions.decision_for(skill_name)
         from deerflow.authz.skill_filter import skill_activation_allowed
 
         return skill_activation_allowed(self._skill_authorization, skill_name)
 
-    async def _collect_activation_decisions(self, names) -> dict[str, bool] | None:
+    async def _collect_activation_decisions(self, names) -> ActivationDecisions | None:
         """Precompute ``skill:activate`` decisions on the event loop (async hooks).
 
         The policy resolution itself runs in a worker thread (storage reads),
@@ -107,20 +116,22 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         resolves the policy paths through the live registry off-loop first,
         because the decision consumers (``_active_skills_for_paths``) check
         the registry skill's declared name. Authorizing a path-derived name
-        here would miss the map and fall back to the synchronous provider
-        call from the worker thread (wrong API for loop-affine providers).
+        here would surface as a batch miss at the consumer, which resolves
+        per the carried fail-closed/fail-open policy with a WARNING (denied
+        under the production default; allowed without any provider consult
+        under fail-open) — visible, but still a wiring bug to fix.
         """
         if self._skill_authorization is None:
             return None
         candidates = {name for name in names if isinstance(name, str) and name}
-        if not candidates:
-            return None
         from deerflow.authz.skill_filter import skill_activation_allowed_async
 
         decisions: dict[str, bool] = {}
         for name in sorted(candidates):
             decisions[name] = await skill_activation_allowed_async(self._skill_authorization, name)
-        return decisions
+        # An empty batch is still a batch — consumers resolving an uncovered
+        # name must fail per policy, not silently take the sync path.
+        return ActivationDecisions(decisions, fail_closed=self._skill_authorization.fail_closed)
 
     def _resolve_policy_registry(self, paths: tuple[str, ...]) -> tuple[dict[str, Skill] | object, list[str]]:
         """Load the path-keyed registry and canonicalize the policy paths.
@@ -131,8 +142,10 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         marker preserves the failure: the async caller hands it down so
         ``_active_skills_for_paths`` applies its fail-closed treatment instead
         of retrying storage (a transient-failure retry that succeeds would
-        resolve skills missing from the decision map and fall back to the
-        synchronous provider API). Unresolvable paths yield no name:
+        resolve skills whose names are absent from the decision batch — a
+        policy-resolved miss: denied under the production fail-closed
+        default, allowed without any provider consult under fail-open, and
+        logged loudly either way). Unresolvable paths yield no name:
         ``_active_skills_for_paths`` skips them before the activation check,
         so no decision is needed for them.
         """
@@ -193,7 +206,7 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         self,
         paths: tuple[str, ...],
         *,
-        activation_decisions: dict[str, bool] | None = None,
+        activation_decisions: ActivationDecisions | None = None,
         registry: _RegistryArg = None,
     ) -> tuple[list[Skill], bool]:
         if not paths:
@@ -250,7 +263,7 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         self,
         paths: tuple[str, ...],
         *,
-        activation_decisions: dict[str, bool] | None = None,
+        activation_decisions: ActivationDecisions | None = None,
         registry: _RegistryArg = None,
     ) -> set[str] | None:
         active_skills, policy_failed = self._active_skills_for_paths(paths, activation_decisions=activation_decisions, registry=registry)
@@ -307,7 +320,7 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         request: ModelRequest | ToolCallRequest,
         *,
         policy: _PolicySignature | None = None,
-        activation_decisions: dict[str, bool] | None = None,
+        activation_decisions: ActivationDecisions | None = None,
         registry: _RegistryArg = None,
     ) -> set[str] | None:
         resolved_policy = self._active_policy(request) if policy is None else policy
@@ -324,7 +337,7 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         *,
         policy: _PolicySignature | None = None,
         refresh_decision: bool = False,
-        activation_decisions: dict[str, bool] | None = None,
+        activation_decisions: ActivationDecisions | None = None,
         registry: _RegistryArg = None,
     ) -> ModelRequest:
         resolved_policy = self._active_policy(request) if policy is None else policy

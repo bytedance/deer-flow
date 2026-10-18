@@ -102,13 +102,13 @@ async def test_manager_injects_shared_store_and_dedupes_cross_pod():
     loop would (``if await self._is_duplicate_inbound(msg): continue``)."""
     from app.channels.manager import ChannelManager
     from app.channels.message_bus import InboundMessage, MessageBus
-    from app.channels.store import ChannelStore
+    from app.channels.store import JsonChannelStore
     from deerflow.persistence.engine import get_session_factory
 
     sf = get_session_factory()
     shared_store = PostgresInboundDedupeStore(session_factory=sf)
-    manager_a = ChannelManager(bus=MessageBus(), store=ChannelStore(), inbound_dedupe_store=shared_store)
-    manager_b = ChannelManager(bus=MessageBus(), store=ChannelStore(), inbound_dedupe_store=shared_store)
+    manager_a = ChannelManager(bus=MessageBus(), store=JsonChannelStore(), inbound_dedupe_store=shared_store)
+    manager_b = ChannelManager(bus=MessageBus(), store=JsonChannelStore(), inbound_dedupe_store=shared_store)
 
     msg = InboundMessage(
         channel_name="github",

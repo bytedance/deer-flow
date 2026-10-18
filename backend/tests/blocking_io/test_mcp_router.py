@@ -14,6 +14,7 @@ IO runs at collection, outside the gate.
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
 from pathlib import Path
@@ -26,6 +27,7 @@ from app.gateway.routers.mcp import (
     McpConfigUpdateRequest,
     McpServerConfigResponse,
     McpServerStateUpdateRequest,
+    create_mcp_servers,
     get_mcp_configuration,
     update_mcp_configuration,
     update_mcp_server_state,
@@ -165,7 +167,7 @@ async def test_concurrent_mcp_put_and_patch_updates_are_serialized(tmp_path: Pat
 
 
 async def test_update_mcp_configuration_drains_write_across_cancellation(tmp_path: Path, monkeypatch) -> None:
-    """A cancelled PUT still settles the config write and the tools-cache reset."""
+    """A cancelled PUT drains the committed handoff and finishes teardown outside locks."""
     config_path = tmp_path / "extensions_config.json"
     await asyncio.to_thread(config_path.write_text, '{"mcpServers": {}, "skills": {}}', encoding="utf-8")
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_path))
@@ -175,44 +177,61 @@ async def test_update_mcp_configuration_drains_write_across_cancellation(tmp_pat
 
     monkeypatch.setattr(mcp_router, "require_admin_user", _noop_admin)
 
-    started = threading.Event()
-    release = threading.Event()
-    original_apply = mcp_router._apply_mcp_config_update
+    prepared: list[object] = []
+    finished: list[object] = []
+    finish_started = threading.Event()
+    finish_release = threading.Event()
 
-    def _blocked_apply(body):
-        started.set()
-        assert release.wait(timeout=5)
-        return original_apply(body)
+    def fake_prepare(config, *, config_path):
+        prepared.append(config)
+        return len(prepared)
 
-    monkeypatch.setattr(mcp_router, "_apply_mcp_config_update", _blocked_apply)
+    def fake_finish(pending):
+        finished.append(pending)
+        if pending == 1:
+            finish_started.set()
+            assert finish_release.wait(timeout=5)
 
-    cache_resets: list[int] = []
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: cache_resets.append(1))
+    monkeypatch.setattr(mcp_router, "prepare_mcp_reconciliation", fake_prepare)
+    monkeypatch.setattr(mcp_router, "finish_mcp_reconciliation", fake_finish)
 
-    body = McpConfigUpdateRequest(
-        mcp_servers={"test-server": McpServerConfigResponse(type="http", url="https://example.test/mcp", description="anchor")},
+    first = asyncio.create_task(
+        update_mcp_configuration(
+            request=None,
+            body=McpConfigUpdateRequest(
+                mcp_servers={"A": McpServerConfigResponse(type="http", url="https://a.example/mcp")},
+            ),
+        )
     )
 
-    task = asyncio.create_task(update_mcp_configuration(request=None, body=body))
     try:
-        assert await asyncio.to_thread(started.wait, 5)
-        task.cancel()
+        assert await asyncio.to_thread(finish_started.wait, 5)
+        first.cancel()
         await asyncio.sleep(0.05)
-        task.cancel()
-        await asyncio.sleep(0.05)
-        assert not task.done()
+        assert not first.done(), "cancellation released ownership before teardown drained"
 
-        release.set()
+        # The first request has released the extensions-config locks even though
+        # its teardown is still blocked. A second legal writer must proceed.
+        second = asyncio.create_task(
+            create_mcp_servers(
+                request=None,
+                body=McpConfigUpdateRequest(
+                    mcp_servers={"B": McpServerConfigResponse(type="http", url="https://b.example/mcp")},
+                ),
+            )
+        )
+        await asyncio.wait_for(second, timeout=5)
+        assert len(prepared) == 2
+        assert finished == [1, 2]
+
+        written = json.loads(await asyncio.to_thread(config_path.read_text, encoding="utf-8"))
+        assert set(written["mcpServers"]) == {"A", "B"}
+
+        finish_release.set()
         with pytest.raises(asyncio.CancelledError):
-            await task
+            await first
     finally:
-        release.set()
-        if not task.done():
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-
-    # The cancelled caller drained the write: the merged config landed and the
-    # tools-cache reset published behind it.
-    written = await asyncio.to_thread(config_path.read_text, encoding="utf-8")
-    assert "test-server" in written
-    assert cache_resets == [1]
+        finish_release.set()
+        if not first.done():
+            first.cancel()
+            await asyncio.gather(first, return_exceptions=True)

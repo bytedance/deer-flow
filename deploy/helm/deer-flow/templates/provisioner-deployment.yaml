@@ -8,7 +8,11 @@ metadata:
     {{- include "deer-flow.labels" . | nindent 4 }}
     app.kubernetes.io/component: provisioner
 spec:
-  replicas: 1
+  replicas: {{ .Values.provisioner.replicas }}
+  {{- with .Values.provisioner.strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "deer-flow.selectorLabels" . | nindent 6 }}

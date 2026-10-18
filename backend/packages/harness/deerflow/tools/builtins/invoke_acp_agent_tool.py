@@ -125,6 +125,66 @@ def _build_permission_response(options: list[Any], *, auto_approve: bool) -> Any
     return RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
 
 
+def _agent_path(env: dict[str, str] | None) -> str | None:
+    """Return the ``PATH`` the ACP SDK will give the agent subprocess.
+
+    The SDK builds the child environment by inheriting a trimmed copy of the
+    Gateway's environment and then applying ``acp_agents.<name>.env`` on top, so
+    a configured ``PATH`` -- not the Gateway's -- decides which launcher the
+    agent actually finds. ``None`` means the agent does not override ``PATH``,
+    which lets ``shutil.which`` fall back to the Gateway's own.
+
+    The lookup is case-insensitive because environment variable names are on
+    Windows, where ``Path`` and ``PATH`` name the same variable.
+    """
+    if not env:
+        return None
+    return next((value for key, value in env.items() if key.upper() == "PATH"), None)
+
+
+def _resolve_agent_command(command: str, path: str | None = None) -> str:
+    r"""Return the host path to spawn for a configured ACP agent command.
+
+    ``asyncio.create_subprocess_exec``, which the ACP SDK's stdio transport
+    uses, does not apply ``PATHEXT`` on Windows: a bare ``npx`` or ``mcode``
+    raises ``FileNotFoundError`` even though the npm shim (``npx.cmd``) is on
+    ``PATH``, and an absolute ``C:\npm\mcode`` spawns npm's extensionless shell
+    script instead of ``mcode.CMD`` and dies with ``WinError 193``. Resolve
+    the command the way the MCP Python SDK normalizes stdio commands, and keep
+    the configured value when nothing matches so the not-found remediation
+    still fires.
+
+    Bare names and absolute paths are resolved. A relative configured path is
+    handed to the spawn unchanged: it refers to the ACP workspace the spawn
+    runs in, not to the Gateway's cwd. An absolute path keeps its own
+    directory -- ``shutil.which`` searches that directory and probes
+    ``PATHEXT`` there.
+
+    ``path`` is the ``PATH`` the agent subprocess will actually see (see
+    ``_agent_path``); the Gateway's own is only the fallback. A successful
+    lookup is returned absolute: for a relative ``PATH`` entry ``shutil.which``
+    yields a result relative to the Gateway's cwd, while the spawn runs with
+    ``cwd`` set to the ACP workspace, where that path resolves elsewhere -- or
+    not at all.
+
+    An already-absolute result is returned unchanged: a lexical ``abspath``
+    would collapse a ``..`` that follows a symlink, changing which file the
+    spawn actually runs.
+
+    The lookup stats the filesystem (``shutil.which`` -> ``os.access``), so
+    callers must run it off the event loop.
+    """
+    if os.path.dirname(command) and not os.path.isabs(command):
+        return command
+    try:
+        resolved = shutil.which(command, path=path)
+    except OSError:
+        return command
+    if not resolved:
+        return command
+    return resolved if os.path.isabs(resolved) else os.path.abspath(resolved)
+
+
 def _format_invocation_error(agent: str, cmd: str, exc: Exception) -> str:
     """Return a user-facing ACP invocation error with actionable remediation."""
     if not isinstance(exc, FileNotFoundError):
@@ -213,7 +273,14 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
                 return response
 
         client = _CollectingClient()
-        cmd = agent_config.command
+        agent_env: dict[str, str] | None = None
+        if agent_config.env:
+            # $VARS in config.yaml are already resolved by AppConfig.resolve_env_variables;
+            # resolving again would rewrite a secret that itself starts with $.
+            agent_env = dict(agent_config.env)
+        # Resolve against the PATH the agent subprocess will see, not the Gateway's:
+        # the SDK merges agent_env over its inherited environment at spawn time.
+        cmd = await asyncio.to_thread(_resolve_agent_command, agent_config.command, _agent_path(agent_env))
         args = agent_config.args or []
         physical_cwd = await asyncio.to_thread(_get_work_dir, thread_id)
         try:
@@ -225,9 +292,6 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
                 exc,
             )
             mcp_servers = []
-        agent_env: dict[str, str] | None = None
-        if agent_config.env:
-            agent_env = {k: (os.environ.get(v[1:], "") if v.startswith("$") else v) for k, v in agent_config.env.items()}
 
         try:
             from acp import spawn_agent_process
@@ -268,7 +332,9 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
             return result or "(no response)"
         except Exception as e:
             logger.error("ACP agent '%s' invocation failed: %s", agent, e)
-            return await asyncio.to_thread(_format_invocation_error, agent, cmd, e)
+            # Report the configured command, not the resolved path: remediation
+            # text has to match what the operator wrote in config.yaml.
+            return await asyncio.to_thread(_format_invocation_error, agent, agent_config.command, e)
 
     return StructuredTool.from_function(
         name="invoke_acp_agent",

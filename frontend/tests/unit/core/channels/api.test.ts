@@ -36,6 +36,21 @@ beforeEach(() => {
 });
 
 describe("channels api", () => {
+  test("sends an owner-chosen group name with the binding-code request", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, { provider: "qq", code: "code", expires_in: 600 }),
+    );
+    await connectChannelProvider("qq", { groupName: "Release team" });
+    expect(mockedFetch).toHaveBeenCalledWith(
+      "/backend/api/channels/qq/connect",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ group_name: "Release team" }),
+      },
+    );
+  });
+
   test("loads provider catalog", async () => {
     mockedFetch.mockResolvedValueOnce(
       jsonResponse(200, {

@@ -47,6 +47,9 @@ _TRUNCATION_MARKER = "… (truncated)"
 # the line is an info string when opening, or whitespace only when closing.
 _CODE_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 
+# HTML comment blocks end on the first line containing -->.
+_HTML_COMMENT_START_RE = re.compile(r"^ {0,3}<!--")
+
 # ATX headings require 1-6 hashes and a space/tab separator (or end of line).
 # Match the original indentation so indented code cannot become a heading.
 _ATX_HEADING_RE = re.compile(r"^ {0,3}#{1,6}(?:[ \t]+(.*))?$")
@@ -126,15 +129,23 @@ def extract_outline(md_path: Path) -> list[dict]:
     outline: list[dict] = []
     fence_char = ""
     fence_length = 0
+    in_html_comment = False
     try:
         with md_path.open(encoding="utf-8-sig") as f:
             for lineno, line in enumerate(f, 1):
+                if in_html_comment:
+                    in_html_comment = "-->" not in line
+                    continue
+
                 fence = _CODE_FENCE_RE.match(line.rstrip("\r\n"))
                 if fence_char:
                     if fence:
                         marker, suffix = fence.groups()
                         if marker[0] == fence_char and len(marker) >= fence_length and not suffix.strip(" \t"):
                             fence_char = ""
+                    continue
+                if _HTML_COMMENT_START_RE.match(line):
+                    in_html_comment = "-->" not in line
                     continue
                 if fence:
                     marker, info = fence.groups()

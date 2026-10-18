@@ -17,7 +17,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from deerflow.config._boolean_guards import reject_boolean
-from deerflow.config.file_signature import ConfigSignature, get_config_signature
+from deerflow.config.file_signature import ConfigSignature, get_config_signature, read_config_with_signature
 from deerflow.config.runtime_paths import existing_project_file
 from deerflow.constants import (
     DEFAULT_MCP_SESSION_INIT_TIMEOUT,
@@ -535,11 +535,16 @@ class ExtensionsConfig(BaseModel):
             # Return empty config if extensions config file is not found
             return cls(mcp_servers={}, skills={})
 
+        return cls._from_path_with_signature(resolved_path)[0]
+
+    @classmethod
+    def _from_path_with_signature(cls, resolved_path: Path) -> tuple["ExtensionsConfig", ConfigSignature]:
+        """Parse the exact bytes whose signature the singleton will record."""
         try:
-            with open(resolved_path, encoding="utf-8-sig") as f:
-                config_data = json.load(f)
+            data, signature = read_config_with_signature(resolved_path)
+            config_data = json.loads(data.decode("utf-8-sig"))
             config_data = cls.resolve_env_variables(config_data)
-            return cls.model_validate(config_data)
+            return cls.model_validate(config_data), signature
         except json.JSONDecodeError as e:
             raise ValueError(f"Extensions config file at {resolved_path} is not valid JSON: {e}") from e
         except Exception as e:
@@ -818,22 +823,18 @@ def _probe_extensions_config_state() -> tuple[Path | None, ConfigSignature | Non
 def _load_and_cache_extensions_config(config_path: str | None = None) -> ExtensionsConfig:
     """Load the config from disk and record the revision it came from.
 
-    The caller holds ``_extensions_config_lock``. The signature is probed
-    *before* parsing, so it describes the parsed revision or an older one,
-    never a newer one: a write that lands between the probe and the parse
-    then shows up as one extra reload on the next call. Probing afterwards
-    could record the newer revision's signature against the older content, a
-    stale state the comparison could never detect.
+    The caller holds ``_extensions_config_lock``. Parsing and the recorded
+    digest use one read, so a competing edit or backup restore cannot leave
+    one revision cached under another revision's signature.
     """
     global _extensions_config, _extensions_config_path, _extensions_config_signature
     global _extensions_config_is_custom, _extensions_config_source, _extensions_config_rejected
 
     resolved_path = ExtensionsConfig.resolve_config_path(config_path)
-    signature = get_config_signature(resolved_path) if resolved_path is not None else None
-    # ``from_file`` keeps resolving the path itself (and is called without an
-    # argument when none was given) so callers that substitute it see the
-    # same call shape as before.
-    loaded = ExtensionsConfig.from_file(config_path) if config_path else ExtensionsConfig.from_file()
+    if resolved_path is None:
+        loaded, signature = ExtensionsConfig(), None
+    else:
+        loaded, signature = ExtensionsConfig._from_path_with_signature(resolved_path)
     _extensions_config = loaded
     _extensions_config_path = resolved_path
     _extensions_config_signature = signature
@@ -906,7 +907,7 @@ def get_extensions_config() -> ExtensionsConfig:
         try:
             # Parse the probed file: a second search could publish an empty
             # config if that file disappeared before parsing.
-            loaded = ExtensionsConfig.from_file(str(current_path))
+            loaded, loaded_signature = ExtensionsConfig._from_path_with_signature(current_path)
         except Exception as exc:
             _keep_last_known_good(current_path, current_signature, "Extensions config at %s changed but could not be loaded (%s)", current_path, _describe_load_failure(exc))
             return _extensions_config
@@ -914,7 +915,7 @@ def get_extensions_config() -> ExtensionsConfig:
         logger.info("Extensions config at %s changed on disk; reloaded", current_path)
         _extensions_config = loaded
         _extensions_config_path = current_path
-        _extensions_config_signature = current_signature
+        _extensions_config_signature = loaded_signature
         _extensions_config_rejected = None
         return loaded
 

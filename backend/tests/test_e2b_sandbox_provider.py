@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import importlib
+import importlib.util
 import json
 import os
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 from collections import OrderedDict
@@ -22,7 +24,8 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from e2b import FileNotFoundException, TimeoutException
+from e2b import CommandExitException, FileNotFoundException, TimeoutException
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from pydantic import ValidationError
 
 from deerflow.community.e2b_sandbox.capacity import (
@@ -1751,13 +1754,77 @@ def test_execute_command_returns_stdout_on_success():
     assert sb.is_dead is False
 
 
+def _raise_exit(stdout: str, stderr: str, exit_code: int):
+    """The real SDK raises ``CommandExitException`` on a nonzero exit; it
+    never returns a result with ``exit_code != 0``."""
+
+    def run(_cmd: str) -> Any:
+        raise CommandExitException(stderr=stderr, stdout=stdout, exit_code=exit_code, error=f"exit status {exit_code}")
+
+    return run
+
+
 def test_execute_command_appends_exit_marker_when_failure_has_output():
     """LocalSandbox parity: a nonzero exit must survive in the output text
     even when the command produced output, so evidence consumers (acceptance
     checklist) recover the actual shell status."""
-    client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout="5 passed, 1 error\n", stderr="", exit_code=1)]))
+    client = FakeClient(commands=FakeCommandsAPI([_raise_exit("5 passed, 1 error\n", "", 1)]))
     sb = _make_sandbox(client)
     assert sb.execute_command("make test") == "5 passed, 1 error\n\nExit Code: 1"
+
+
+def test_execute_command_keeps_stdout_and_stderr_on_nonzero_exit():
+    client = FakeClient(commands=FakeCommandsAPI([_raise_exit("12 passed\n", "coverage below 80%\n", 2)]))
+    sb = _make_sandbox(client)
+    assert sb.execute_command("pytest -q") == "12 passed\n\ncoverage below 80%\n\nExit Code: 2"
+    assert sb.is_dead is False
+
+
+def test_execute_command_reports_exit_code_when_failure_has_no_output():
+    client = FakeClient(commands=FakeCommandsAPI([_raise_exit("", "", 1)]))
+    sb = _make_sandbox(client)
+    assert sb.execute_command("false") == "Command exited with code 1"
+
+
+def test_execute_command_nonzero_exit_mentioning_not_found_does_not_mark_dead():
+    """A command's own stderr can contain "sandbox not found"; that is a failed
+    command, not a reaped VM."""
+    client = FakeClient(commands=FakeCommandsAPI([_raise_exit("", "error: sandbox not found\n", 1)]))
+    sb = _make_sandbox(client)
+    assert sb.execute_command("mytool status") == "error: sandbox not found\n\nExit Code: 1"
+    assert sb.is_dead is False
+
+
+def test_execute_command_nonzero_exit_is_harvested_as_error():
+    """End-to-end with the real executor harvest. ``tests/conftest.py`` mocks
+    ``deerflow.subagents.executor``, so it is loaded under a unique name."""
+    path = Path(__file__).parents[1] / "packages/harness/deerflow/subagents/executor.py"
+    spec = importlib.util.spec_from_file_location("_e2b_exit_marker_executor", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    try:
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        from deerflow.subagents import acceptance_checks
+
+        client = FakeClient(commands=FakeCommandsAPI([_raise_exit("12 passed\n", "coverage below 80%\n", 1)]))
+        out = _make_sandbox(client).execute_command("pytest -q")
+
+        cmd = "pytest -q"
+        ai = AIMessage(content="", tool_calls=[{"name": "bash", "args": {"command": cmd}, "id": "tc-1", "type": "tool_call"}])
+        tm = ToolMessage(content=out, tool_call_id="tc-1", name="bash")
+        executions = module._harvest_bash_executions({"messages": [HumanMessage(content="task"), ai, tm]})
+        assert executions, "harvest returned no bash executions"
+        for entry in executions:
+            entry["shell_persistent"] = False
+        assert executions[-1]["status"] == "error"
+        assert executions[-1]["status_marker"] == "Exit Code: 1"
+        assert acceptance_checks._check_tests_passed_leaf(cmd, executions)["holds"] is False
+    finally:
+        sys.modules.pop(spec.name, None)
+        shutdown = getattr(module, "_shutdown_isolated_subagent_loop", None)
+        if shutdown is not None:
+            shutdown()
 
 
 def test_execute_command_does_not_mark_dead_on_unrelated_error():
@@ -1769,6 +1836,22 @@ def test_execute_command_does_not_mark_dead_on_unrelated_error():
     sb = _make_sandbox(client)
     out = sb.execute_command("echo hi")
     assert "Error" in out
+    assert sb.is_dead is False
+
+
+def test_execute_command_timeout_appends_exit_marker():
+    """A command deadline is a shell outcome, not a provider hiccup: the result
+    must end with the same ``Exit Code: 124`` marker Local/AIO/Tenki emit on
+    timeout, so the acceptance-checklist harvest recovers the real status
+    (#6847)."""
+
+    def slow(_cmd: str, **kwargs) -> Any:
+        raise TimeoutException("deadline exceeded")
+
+    client = FakeClient(commands=FakeCommandsAPI([slow]))
+    sb = _make_sandbox(client)
+    out = sb.execute_command("sleep 9999", timeout=5)
+    assert out == "Error: command timed out\nExit Code: 124"
     assert sb.is_dead is False
 
 
@@ -2078,6 +2161,30 @@ def test_reclaim_warm_pool_sandbox_handles_reconnect_exception(monkeypatch):
     sid = p._reclaim_warm_pool_sandbox("t1", user_id="u1")
     assert sid is None
     assert "sb-broken" not in p._warm_pool
+
+
+def test_reclaim_warm_pool_sandbox_with_missing_sandbox_frees_slot(monkeypatch):
+    """Reclaiming a confirmed-missing warm sandbox frees the transition slot (#6540).
+
+    ``Sandbox.connect`` raising a trusted not-found error is a confirmed-gone
+    result: it must not leave an eviction tombstone behind that pins the
+    transitioning slot forever.
+    """
+    p = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+
+    def missing_sandbox(_sid, **_kw):
+        raise RuntimeError(FakeCommandsAPI.NOT_FOUND_MSG)
+
+    fake_cls.connect_factory = missing_sandbox
+    seed = p._stable_seed("t1", "u1")
+    p._warm_pool["sb-gone"] = (seed, 12345.0)
+
+    assert p._reclaim_warm_pool_sandbox("t1", user_id="u1") is None
+    assert "sb-gone" not in p._warm_pool
+    assert p._eviction_tombstones == set()
+    assert p._remote_ops_in_progress == set()
+    assert p._transitioning_slots == 0
 
 
 def test_acquire_discards_warm_sandbox_when_bootstrap_fails(monkeypatch):
@@ -3300,6 +3407,298 @@ def _setup_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(paths_mod, "get_paths", lambda: Paths(base_dir=tmp_path), raising=False)
 
 
+@pytest.mark.parametrize("home_dir", ["/home/user", "/home/custom"])
+@pytest.mark.parametrize("async_acquire", [False, True])
+def test_recreated_sandbox_restores_saved_thread_files(monkeypatch, tmp_path, home_dir, async_acquire):
+    """A second turn must read saved bytes after the first VM expires."""
+    _setup_paths(monkeypatch, tmp_path)
+    provider = _make_provider()
+    provider._config["home_dir"] = home_dir
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda *args: [])
+    sdk = _install_fake_sdk(monkeypatch, provider)
+    clients = []
+
+    def create(**kwargs):
+        client = FakeClient(sandbox_id=f"vm-{len(clients)}")
+        clients.append(client)
+        return client
+
+    sdk.create_factory = create
+
+    def acquire():
+        if async_acquire:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                provider._acquire_executor = executor
+                return asyncio.run(provider.acquire_async("t1", user_id="u1"))
+        return provider.acquire("t1", user_id="u1")
+
+    paths = Paths(base_dir=tmp_path)
+    paths.ensure_thread_dirs("t1", user_id="u1")
+    (paths.sandbox_uploads_dir("t1", user_id="u1") / "input.bin").write_bytes(b"\x00\xff")
+    (paths.acp_workspace_dir("t1", user_id="u1") / "result.md").write_text("ACP result", encoding="utf-8")
+    # Neither another owner nor another thread may supply the restored bytes.
+    for user_id, thread_id in [("u2", "t1"), ("u1", "t2")]:
+        paths.ensure_thread_dirs(thread_id, user_id=user_id)
+        (paths.sandbox_outputs_dir(thread_id, user_id=user_id) / "private.txt").write_text("private", encoding="utf-8")
+
+    first_id = acquire()
+    first = provider.get(first_id)
+    contents = {"outputs/test.md": "# Saved output\n", "workspace/nested/test.md": "# Saved work\n"}
+    for relative, content in contents.items():
+        first.write_file(f"/mnt/user-data/{relative}", content)
+    listing = "".join(f"{len(content.encode())}\t2.000000000\t{home_dir}/{relative}\x00" for relative, content in contents.items())
+    clients[0].commands._responses.append(SimpleNamespace(stdout=listing, stderr="", exit_code=0))
+    provider.release(first_id)
+    for relative, content in contents.items():
+        assert (paths.thread_dir("t1", user_id="u1") / "user-data" / relative).read_text(encoding="utf-8") == content
+
+    def expired(*args, **kwargs):
+        raise RuntimeError(FakeCommandsAPI.NOT_FOUND_MSG)
+
+    sdk.connect_factory = expired
+    second_id = acquire()
+    assert second_id != first_id
+    second = provider.get(second_id)
+    for relative, content in contents.items():
+        assert second.read_file(f"/mnt/user-data/{relative}") == content
+    assert clients[1].files.store[f"{home_dir}/uploads/input.bin"] == b"\x00\xff"
+    assert clients[1].files.store[f"{home_dir}/acp-workspace/result.md"] == b"ACP result"
+    assert not any("private.txt" in path for path in clients[1].files.store)
+    assert second.mount_upload_result.completed_files == 4
+    provider.shutdown()
+
+
+@pytest.mark.parametrize("reuse", ["active", "warm", "discovered"])
+def test_thread_restore_does_not_overwrite_live_sandbox(monkeypatch, tmp_path, reuse):
+    _setup_paths(monkeypatch, tmp_path)
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda *args: [])
+    sdk = _install_fake_sdk(monkeypatch, provider)
+    paths = Paths(base_dir=tmp_path)
+    paths.ensure_thread_dirs("t1", user_id="u1")
+    (paths.sandbox_outputs_dir("t1", user_id="u1") / "test.md").write_text("stale", encoding="utf-8")
+    client = FakeClient(files=FakeFilesAPI({"/home/user/outputs/test.md": b"newer"}))
+    sdk.connect_factory = lambda *args, **kwargs: client
+    if reuse == "active":
+        provider._sandboxes[client.sandbox_id] = _make_sandbox(client, sandbox_id=client.sandbox_id)
+        provider._thread_sandboxes[provider._thread_key("t1", "u1")] = client.sandbox_id
+    elif reuse == "warm":
+        provider._warm_pool[client.sandbox_id] = (provider._stable_seed("t1", "u1"), time.time())
+    else:
+        sdk.list_return = [_info(client.sandbox_id, "u1", "t1")]
+    sandbox_id = provider.acquire("t1", user_id="u1")
+    assert provider.get(sandbox_id).read_file("/mnt/user-data/outputs/test.md") == "newer"
+    assert client.files.write_calls == []
+    provider.shutdown()
+
+
+@pytest.mark.parametrize("failure", ["write", "file_limit", "byte_limit", "single_file_limit", "tree_file_limit", "tree_byte_limit", "deadline"])
+def test_thread_restore_failure_discards_unusable_sandbox(monkeypatch, tmp_path, caplog, failure):
+    _setup_paths(monkeypatch, tmp_path)
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda *args: [])
+    sdk = _install_fake_sdk(monkeypatch, provider)
+    client = FakeClient()
+    sdk.create_factory = lambda **kwargs: client
+    paths = Paths(base_dir=tmp_path)
+    paths.ensure_thread_dirs("t1", user_id="u1")
+    saved = paths.sandbox_outputs_dir("t1", user_id="u1") / "test.md"
+    saved.write_bytes(b"saved")
+    if failure == "write":
+        monkeypatch.setattr(client.files, "write", MagicMock(side_effect=OSError("upload failed")))
+    elif failure == "file_limit":
+        monkeypatch.setattr(mod, "_MAX_MOUNT_PASS_FILES", 0)
+    elif failure == "byte_limit":
+        monkeypatch.setattr(mod, "_MAX_MOUNT_PASS_TOTAL_BYTES", 1)
+    elif failure == "single_file_limit":
+        monkeypatch.setattr(mod, "_MAX_MOUNT_FILE_SIZE", 1)
+    elif failure == "tree_file_limit":
+        monkeypatch.setattr(mod, "_MAX_MOUNT_FILES", 0)
+    elif failure == "tree_byte_limit":
+        monkeypatch.setattr(mod, "_MAX_MOUNT_TOTAL_SIZE", 1)
+    else:
+        provider._config["mount_upload_deadline_seconds"] = 0
+    with pytest.raises(RuntimeError, match="restore.*thread") as error:
+        provider.acquire("t1", user_id="u1")
+    message = str(error.value)
+    assert str(tmp_path) not in message
+    assert "tree=" in message
+    if failure.endswith("limit"):
+        assert isinstance(error.value, mod._ThreadResourceRestoreLimitError)
+        assert "tree=outputs" in message
+        assert "Operator action required" in message
+        assert "Retrying unchanged data" in message
+        expected_limit = {
+            "file_limit": "file count cap 0",
+            "byte_limit": "total byte budget 1",
+            "single_file_limit": "1-byte file limit",
+            "tree_file_limit": "0-file limit",
+            "tree_byte_limit": "1-byte total limit",
+        }[failure]
+        assert expected_limit in message
+    else:
+        assert not isinstance(error.value, mod._ThreadResourceRestoreLimitError)
+        assert "Operator action required" not in message
+        assert ("OSError" if failure == "write" else "time budget 0s") in message
+    records = [r for r in caplog.records if "Failed to restore" in r.message]
+    assert len(records) == 1
+    assert records[0].exc_info is not None
+    assert "u1" in records[0].message and "t1" in records[0].message
+    if failure == "write":
+        assert "upload failed" in caplog.text
+    assert client.killed and client.closed
+    assert not provider._sandboxes
+    assert not provider._thread_sandboxes
+    assert not provider._remote_ops_in_progress
+    assert provider._reserved_slots == 0
+    assert saved.read_bytes() == b"saved"
+    provider.shutdown()
+
+
+@pytest.mark.parametrize("cap", ["_MAX_MOUNT_PASS_FILES", "_MAX_MOUNT_PASS_TOTAL_BYTES"])
+def test_thread_restore_shared_limit_requires_saved_data_remediation(monkeypatch, tmp_path, cap):
+    _setup_paths(monkeypatch, tmp_path)
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, cap, 1)
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda *args: [])
+    sdk = _install_fake_sdk(monkeypatch, provider)
+    clients = []
+
+    def create(**kwargs):
+        client = FakeClient(sandbox_id=f"restore-{len(clients)}")
+        clients.append(client)
+        return client
+
+    sdk.create_factory = create
+    paths = Paths(base_dir=tmp_path)
+    paths.ensure_thread_dirs("t1", user_id="u1")
+    first = paths.sandbox_work_dir("t1", user_id="u1") / "first.txt"
+    first.write_bytes(b"1")
+    (paths.sandbox_outputs_dir("t1", user_id="u1") / "second.txt").write_bytes(b"2")
+    try:
+        for _ in range(2):
+            with pytest.raises(mod._ThreadResourceRestoreLimitError, match="tree=outputs"):
+                provider.acquire("t1", user_id="u1")
+            assert clients[-1].killed and clients[-1].closed
+            assert not provider._sandboxes
+            assert provider._reserved_slots == 0
+        # Only changing the persisted data resolves a deterministic budget breach.
+        first.unlink()
+        sandbox_id = provider.acquire("t1", user_id="u1")
+        assert provider.get(sandbox_id) is not None
+        assert clients[-1].files.write_calls == [("/home/user/outputs/second.txt", b"2")]
+    finally:
+        provider.shutdown()
+
+
+def test_thread_restore_skips_links_and_unpublished_files(monkeypatch, tmp_path):
+    from support.symlinks import symlink_or_skip
+
+    _setup_paths(monkeypatch, tmp_path)
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda *args: [])
+    paths = Paths(base_dir=tmp_path)
+    paths.ensure_thread_dirs("t1", user_id="u1")
+    uploads = paths.sandbox_uploads_dir("t1", user_id="u1")
+    (uploads / "ready.txt").write_bytes(b"ready")
+    (uploads / ".upload-inflight.part").write_bytes(b"partial")
+    (uploads / "result.e2bsync.tmp").write_bytes(b"partial")
+    outside = tmp_path / "private"
+    outside.mkdir()
+    (outside / "secret.txt").write_bytes(b"secret")
+    symlink_or_skip(uploads / "linked.txt", outside / "secret.txt")
+    symlink_or_skip(uploads / "linked-dir", outside, target_is_directory=True)
+    client = FakeClient()
+
+    result = provider._apply_mounts(client, user_id="u1", thread_id="t1")
+
+    assert client.files.write_calls == [("/home/user/uploads/ready.txt", b"ready")]
+    assert result.completed_files == 1
+
+
+@pytest.mark.parametrize("root", ["user", "thread", "workspace"])
+def test_thread_restore_rejects_linked_resource_roots(monkeypatch, tmp_path, root):
+    from support.symlinks import symlink_or_skip
+
+    _setup_paths(monkeypatch, tmp_path)
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda *args: [])
+    sdk = _install_fake_sdk(monkeypatch, provider)
+    client = FakeClient()
+    sdk.create_factory = lambda **kwargs: client
+    paths = Paths(base_dir=tmp_path)
+    roots = {
+        "user": paths.user_dir("u1"),
+        "thread": paths.thread_dir("t1", user_id="u1"),
+        "workspace": paths.sandbox_work_dir("t1", user_id="u1"),
+    }
+    source = roots[root]
+    source.parent.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "private"
+    outside.mkdir()
+    symlink_or_skip(source, outside, target_is_directory=True)
+    with pytest.raises(RuntimeError, match="restore.*thread"):
+        provider.acquire("t1", user_id="u1")
+    assert client.files.write_calls == []
+    assert client.killed and client.closed
+    provider.shutdown()
+
+
+def test_thread_restore_shares_budget_with_optional_mounts(monkeypatch, tmp_path):
+    _setup_paths(monkeypatch, tmp_path)
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MAX_MOUNT_PASS_FILES", 1)
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda *args: [])
+    paths = Paths(base_dir=tmp_path)
+    paths.ensure_thread_dirs("t1", user_id="u1")
+    (paths.sandbox_outputs_dir("t1", user_id="u1") / "saved.txt").write_bytes(b"saved")
+    optional = tmp_path / "optional.txt"
+    optional.write_bytes(b"optional")
+    provider._config["mounts"] = [SimpleNamespace(host_path=str(optional), container_path="/mnt/extra", read_only=False)]
+    client = FakeClient()
+
+    result = provider._apply_mounts(client, user_id="u1", thread_id="t1")
+
+    assert client.files.write_calls == [("/home/user/outputs/saved.txt", b"saved")]
+    assert result.truncated
+    assert result.completed_files == 1
+
+
+@pytest.mark.parametrize(
+    "tree,path_method",
+    [
+        ("workspace", "sandbox_work_dir"),
+        ("uploads", "sandbox_uploads_dir"),
+        ("outputs", "sandbox_outputs_dir"),
+        ("acp-workspace", "acp_workspace_dir"),
+    ],
+)
+def test_thread_restore_scan_error_is_not_an_empty_directory(monkeypatch, tmp_path, caplog, tree, path_method):
+    _setup_paths(monkeypatch, tmp_path)
+    provider = _make_provider()
+    paths = Paths(base_dir=tmp_path)
+    paths.ensure_thread_dirs("t1", user_id="u1")
+
+    unreadable_root = getattr(paths, path_method)("t1", user_id="u1")
+    unreadable_root.mkdir(parents=True, exist_ok=True)
+    original_walk = os.walk
+
+    def unreadable(source, *, followlinks, onerror):
+        if source == unreadable_root:
+            onerror(PermissionError(13, "unreadable directory", str(source)))
+        return original_walk(source, followlinks=followlinks, onerror=onerror)
+
+    monkeypatch.setattr(os, "walk", unreadable)
+    with pytest.raises(RuntimeError, match=f"tree={tree}.*PermissionError") as error:
+        provider._apply_mounts(FakeClient(), user_id="u1", thread_id="t1")
+    assert isinstance(error.value.__cause__, PermissionError)
+    assert str(tmp_path) not in str(error.value)
+    assert "unreadable directory" in caplog.text
+
+
 def test_sync_outputs_to_host_writes_new_files(monkeypatch, tmp_path):
     p = _make_provider()
     _setup_paths(monkeypatch, tmp_path)
@@ -3952,7 +4351,7 @@ def _search_stdout(raw: str, *, status: int = 0) -> str:
 def test_grep_scoped_glob_excludes_unrelated_directory_matches():
     """Regression: grep(glob="src/*.js") must not leak matches from sibling
     directories that merely share the file extension."""
-    raw_stdout = "/home/user/workspace/other_dir/unrelated.js:1:console.log('needle in other_dir');\n/home/user/workspace/src/app.js:1:console.log('needle in src');\n"
+    raw_stdout = "/home/user/workspace/other_dir/unrelated.js\x001:console.log('needle in other_dir');\n/home/user/workspace/src/app.js\x001:console.log('needle in src');\n"
     client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout=_search_stdout(raw_stdout), stderr="", exit_code=0)]))
     sb = _make_sandbox(client)
 
@@ -3968,7 +4367,7 @@ def test_grep_plain_glob_matches_files_in_any_directory():
     """No regression: a plain non-scoped glob (no ``/`` in the pattern) must
     keep matching files at any depth, same as before the directory-scoping
     fix."""
-    raw_stdout = "/home/user/workspace/other_dir/deep/mod.py:1:needle in a deeply nested file\n/home/user/workspace/src/app.py:1:needle in a python file too\n"
+    raw_stdout = "/home/user/workspace/other_dir/deep/mod.py\x001:needle in a deeply nested file\n/home/user/workspace/src/app.py\x001:needle in a python file too\n"
     client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout=_search_stdout(raw_stdout), stderr="", exit_code=0)]))
     sb = _make_sandbox(client)
 
@@ -3998,7 +4397,7 @@ def test_grep_scoped_glob_still_passes_coarse_include_flag():
 def test_grep_without_glob_is_unaffected():
     """No regression: omitting ``glob`` entirely must return every match
     with no path-based post-filtering."""
-    raw_stdout = "/home/user/workspace/anywhere/file.txt:3:needle here\n"
+    raw_stdout = "/home/user/workspace/anywhere/file.txt\x003:needle here\n"
     client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout=_search_stdout(raw_stdout), stderr="", exit_code=0)]))
     sb = _make_sandbox(client)
 
@@ -4010,7 +4409,7 @@ def test_grep_without_glob_is_unaffected():
 
 def test_grep_single_file_path_with_matching_glob():
     """A basename glob must also apply when the search root is one file."""
-    raw_stdout = "/home/user/uploads/report.md:2:needle here\n"
+    raw_stdout = "/home/user/uploads/report.md\x002:needle here\n"
     client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout=_search_stdout(raw_stdout), stderr="", exit_code=0)]))
     sb = _make_sandbox(client)
 
@@ -4591,6 +4990,59 @@ def test_capacity_retries_tombstone_until_warm_vm_is_destroyed(monkeypatch):
     assert p._transitioning_slots == 0
 
 
+def test_eviction_of_missing_sandbox_releases_local_capacity(monkeypatch):
+    """A control-plane confirmed missing warm sandbox frees its local slot (#6540).
+
+    The eviction sees a trusted not-found error from ``Sandbox.connect``, so
+    the transitioning slot is released instead of being retained behind a
+    tombstone that can never clear; the next acquire must succeed.
+    """
+    p = _make_provider(replicas=1, overflow_policy="reject")
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+
+    sid = p.acquire("t1", user_id="u1")
+    p.release(sid)
+
+    def missing_sandbox(_sid, **_kw):
+        raise RuntimeError(FakeCommandsAPI.NOT_FOUND_MSG)
+
+    fake_cls.connect_factory = missing_sandbox
+
+    sid2 = p.acquire("t2", user_id="u2")
+
+    assert sid2 != sid
+    assert p._eviction_tombstones == set()
+    assert p._evictions_in_progress == set()
+    assert p._transitioning_slots == 0
+
+
+def test_tombstone_retry_of_missing_sandbox_frees_retained_slot(monkeypatch):
+    """Retrying a retained tombstone against a confirmed-missing VM frees the slot exactly once."""
+    p = _make_provider(replicas=1, overflow_policy="reject")
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+
+    sid = p.acquire("t1", user_id="u1")
+    p.release(sid)
+    fake_cls.connect_factory = lambda _sid, **_kw: (_ for _ in ()).throw(RuntimeError("network down"))
+
+    with pytest.raises(SandboxCapacityExceededError) as excinfo:
+        p.acquire("t2", user_id="u2")
+    # A state-unknown failure keeps the slot retained, and the error reports it.
+    assert excinfo.value.transitioning == 1
+    assert p._eviction_tombstones == {sid}
+    assert p._transitioning_slots == 1
+
+    fake_cls.connect_factory = lambda _sid, **_kw: (_ for _ in ()).throw(RuntimeError(FakeCommandsAPI.NOT_FOUND_MSG))
+    assert p._evict_oldest_warm() == sid
+
+    assert p._eviction_tombstones == set()
+    assert p._evictions_in_progress == set()
+    assert p._transitioning_slots == 0
+
+    sid2 = p.acquire("t2", user_id="u2")
+    assert sid2 != sid
+
+
 def test_tombstone_eviction_has_one_retry_owner(monkeypatch):
     """Only one thread can retry a tombstone at a time."""
     p = _make_provider()
@@ -4654,6 +5106,44 @@ def test_shutdown_during_initial_eviction_reconnect_failure_tracks_vm(monkeypatc
     assert p._warm_pool == {}
     assert p._eviction_tombstones == set()
     assert p._evictions_in_progress == set()
+
+
+def test_shutdown_during_gone_sandbox_eviction_releases_slot_once(monkeypatch):
+    """Shutdown racing a confirmed-missing eviction leaves no retained slot.
+
+    The eviction's own cleanup must stay idempotent when shutdown has already
+    cleared the bookkeeping sets: no double slot release, no resurrected
+    tombstone.
+    """
+    p = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    p._warm_pool["warm-1"] = ("seed", time.time())
+
+    reconnect_started = threading.Event()
+    allow_failure = threading.Event()
+    calls = 0
+
+    def reconnect(_sid, **_kw):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            reconnect_started.set()
+            assert allow_failure.wait(timeout=2)
+        raise RuntimeError(FakeCommandsAPI.NOT_FOUND_MSG)
+
+    fake_cls.connect_factory = reconnect
+    eviction = threading.Thread(target=p._evict_oldest_warm)
+    eviction.start()
+    assert reconnect_started.wait(timeout=1)
+
+    p.shutdown()
+    allow_failure.set()
+    eviction.join(timeout=5)
+
+    assert p._warm_pool == {}
+    assert p._eviction_tombstones == set()
+    assert p._evictions_in_progress == set()
+    assert p._transitioning_slots == 0
 
 
 def test_capacity_reset_uses_destructive_shutdown_semantics(monkeypatch):
@@ -5586,8 +6076,9 @@ def test_list_dir_raises_when_client_closed():
 
 @pytest.mark.parametrize("marker, error", [("missing", FileNotFoundError), ("1", OSError)])
 def test_list_dir_classifies_empty_failure(marker, error):
-    listing = SimpleNamespace(stdout=f"\n__DF_FIND_STATUS__:{marker}\n", stderr="", exit_code=1)
-    client = FakeClient(commands=FakeCommandsAPI([listing]))
+    # The listing script exits 1 for both; the SDK raises CommandExitException,
+    # whose stdout still carries the status marker the parser classifies by.
+    client = FakeClient(commands=FakeCommandsAPI([_raise_exit(f"\n__DF_FIND_STATUS__:{marker}\n", "", 1)]))
     sb = _make_sandbox(client)
 
     with pytest.raises(error) as exc:
@@ -5595,9 +6086,19 @@ def test_list_dir_classifies_empty_failure(marker, error):
     assert type(exc.value) is error
 
 
+def test_list_dir_returns_entries_when_head_truncation_exits_141():
+    """``head`` closing the pipe on a large listing kills ``find`` with SIGPIPE
+    (141), a successful truncation. The SDK raises for the nonzero exit; the
+    listing must still be returned, not surface as ``OSError``."""
+    stdout = "/home/user\n/home/user/a\n/home/user/b\n\n__DF_FIND_STATUS__:141\n"
+    client = FakeClient(commands=FakeCommandsAPI([_raise_exit(stdout, "", 141)]))
+    sb = _make_sandbox(client)
+
+    assert sb.list_dir("/home/user") == ["/home/user", "/home/user/a", "/home/user/b"]
+
+
 def test_list_dir_raises_oserror_when_find_exit_is_not_missing_path():
-    listing = SimpleNamespace(stdout="", stderr="", exit_code=127)
-    client = FakeClient(commands=FakeCommandsAPI([listing]))
+    client = FakeClient(commands=FakeCommandsAPI([_raise_exit("", "", 127)]))
     sb = _make_sandbox(client)
 
     with pytest.raises(OSError, match="exited with code 127"):
@@ -5701,6 +6202,17 @@ _RS_POSIX = pytest.mark.skipif(
     os.name == "nt" or any(shutil.which(tool) is None for tool in ("sh", "head", "grep", "find")),
     reason="POSIX sh, head, grep and find required",
 )
+_RS_NON_LF_SEPARATORS = [
+    pytest.param("\r", id="carriage-return"),
+    pytest.param("\v", id="vertical-tab"),
+    pytest.param("\f", id="form-feed"),
+    pytest.param("\x1c", id="file-separator"),
+    pytest.param("\x1d", id="group-separator"),
+    pytest.param("\x1e", id="record-separator"),
+    pytest.param("\x85", id="next-line"),
+    pytest.param("\u2028", id="line-separator"),
+    pytest.param("\u2029", id="paragraph-separator"),
+]
 
 
 def _rs_env(tmp_path, failing: str | None = None) -> dict[str, str]:
@@ -5725,8 +6237,9 @@ class _RsShellCommands:
     def run(self, cmd: str, envs: dict[str, str] | None = None, **kwargs) -> SimpleNamespace:
         self.calls.append(cmd)
         # ``sh -c`` (not ``-lc``) keeps a login profile from overriding the fake PATH.
-        proc = subprocess.run(["sh", "-c", cmd], capture_output=True, text=True, env=self._env, check=False)
-        return SimpleNamespace(stdout=proc.stdout, stderr=proc.stderr, exit_code=proc.returncode)
+        # Decode bytes ourselves so text-mode universal newlines cannot alter CR in paths/content.
+        proc = subprocess.run(["sh", "-c", cmd], capture_output=True, env=self._env, check=False)
+        return SimpleNamespace(stdout=proc.stdout.decode("utf-8"), stderr=proc.stderr.decode("utf-8"), exit_code=proc.returncode)
 
 
 def _rs_sandbox(tmp_path, failing: str | None = None):
@@ -5735,6 +6248,66 @@ def _rs_sandbox(tmp_path, failing: str | None = None):
 
 def _rs_search(sb, op: str, root: str):
     return sb.grep(root, "needle") if op == "grep" else sb.glob(root, "**/*.py")
+
+
+@_RS_POSIX
+@pytest.mark.parametrize("relative_path", ["plain.txt", "report:2026.txt", "report:2:2026.txt", "2026-10-09T13:45:00.txt", "reports:2026/result.txt"])
+@pytest.mark.parametrize("search_scope", ["directory", "single_file", "filtered_directory"])
+def test_remote_grep_preserves_colons_in_paths(tmp_path, relative_path, search_scope):
+    target = tmp_path / relative_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("header\nneedle: hello:world\n", encoding="utf-8")
+    root = target if search_scope == "single_file" else tmp_path
+    glob = "*.txt" if search_scope == "filtered_directory" else None
+
+    matches, truncated = _rs_sandbox(tmp_path).grep(str(root), "needle", glob=glob)
+
+    assert [(match.path, match.line_number, match.line) for match in matches] == [(str(target), 2, "needle: hello:world")]
+    assert truncated is False
+
+
+@_RS_POSIX
+@pytest.mark.parametrize("separator", _RS_NON_LF_SEPARATORS)
+@pytest.mark.parametrize("path_template", ["report{}2026.txt", "reports{}2026/result.txt"], ids=["filename", "parent-directory"])
+@pytest.mark.parametrize("search_scope", ["directory", "single_file", "filtered_directory"])
+def test_remote_grep_preserves_non_lf_separators_in_paths(tmp_path, separator, path_template, search_scope):
+    target = tmp_path / path_template.format(separator)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("header\nneedle: hello:world\n", encoding="utf-8")
+    root = target if search_scope == "single_file" else tmp_path
+    glob = "*.txt" if search_scope == "filtered_directory" else None
+
+    matches, truncated = _rs_sandbox(tmp_path).grep(str(root), "needle", glob=glob)
+
+    assert [(match.path, match.line_number, match.line) for match in matches] == [(str(target), 2, "needle: hello:world")]
+    assert truncated is False
+
+
+@_RS_POSIX
+@pytest.mark.parametrize("separator", _RS_NON_LF_SEPARATORS)
+def test_remote_grep_preserves_non_lf_separators_in_content(tmp_path, separator):
+    target = tmp_path / "plain.txt"
+    line = f"needle: before{separator}after"
+    target.write_bytes(f"header\n{line}\n".encode())
+
+    matches, truncated = _rs_sandbox(tmp_path).grep(str(tmp_path), "needle")
+
+    assert [(match.path, match.line_number, match.line) for match in matches] == [(str(target), 2, line)]
+    assert truncated is False
+
+
+@_RS_POSIX
+@pytest.mark.parametrize("separator", _RS_NON_LF_SEPARATORS)
+@pytest.mark.parametrize("path_template", ["report{}2026.txt", "reports{}2026/result.txt"], ids=["filename", "parent-directory"])
+def test_remote_glob_preserves_non_lf_separators_in_paths(tmp_path, separator, path_template):
+    target = tmp_path / path_template.format(separator)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("content\n", encoding="utf-8")
+
+    matches, truncated = _rs_sandbox(tmp_path).glob(str(tmp_path), "*.txt")
+
+    assert matches == [str(target)]
+    assert truncated is False
 
 
 @_RS_POSIX

@@ -9,6 +9,7 @@ transport, search parsing, path guards, and terminal-session eviction.
 from __future__ import annotations
 
 import asyncio
+import base64
 import errno
 import logging
 import os
@@ -22,12 +23,14 @@ import time
 import types
 from dataclasses import dataclass, field
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from deerflow.community.opensandbox.provider import OpenSandboxProvider, _import_sdk
 from deerflow.community.opensandbox.sandbox import OpenSandboxSandbox
+from deerflow.config.paths import Paths
 
 
 @dataclass
@@ -139,6 +142,9 @@ class _FakeCommands:
             return _execution(exit_code=9)
         if command == "missing-complete":
             return _execution(stderr=("stream ended",), exit_code=None)
+        if "__DF_OUTPUT_SYNC__" in command:
+            listing = "\0".join(self._owner.file_data) + "\0" if self._owner.file_data else ""
+            return _execution(stdout=(base64.b64encode(listing.encode()).decode(), "__DF_OUTPUT_SYNC__:0:0:0"))
         if "__DF_SEARCH_STATUS__:" in command:
             return self._search(command)
         if command.startswith("find ") or "find -H " in command:
@@ -311,8 +317,6 @@ def test_provider_defers_sdk_import_until_acquire(monkeypatch: pytest.MonkeyPatc
 
 
 def test_create_passes_connection_lifetime_scope_and_environment(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
-    monkeypatch.setenv("OPEN_SANDBOX_TEST_VALUE", "resolved")
-    monkeypatch.delenv("OPEN_SANDBOX_ABSENT_VALUE", raising=False)
     provider, sdk = _install(
         monkeypatch,
         config={
@@ -324,11 +328,9 @@ def test_create_passes_connection_lifetime_scope_and_environment(monkeypatch: py
             "ready_timeout": 18,
             "sandbox_timeout": 7200,
             "use_server_proxy": True,
-            "environment": {
-                "BASE": "1",
-                "FROM_ENV": "$OPEN_SANDBOX_TEST_VALUE",
-                "MISSING_ENV": "$OPEN_SANDBOX_ABSENT_VALUE",
-            },
+            # Already resolved by AppConfig at load time; a value that starts
+            # with $ is the secret itself, not another reference.
+            "environment": {"BASE": "1", "TOKEN": "$2b$12$resolved-secret"},
         },
     )
     provider.acquire("thread-1", user_id="user-1")
@@ -336,7 +338,7 @@ def test_create_passes_connection_lifetime_scope_and_environment(monkeypatch: py
     assert call["image"] == "python:3.12"
     assert call["timeout"] == timedelta(seconds=7200)
     assert call["ready_timeout"] == timedelta(seconds=18)
-    assert call["env"] == {"BASE": "1", "FROM_ENV": "resolved", "MISSING_ENV": ""}
+    assert call["env"] == {"BASE": "1", "TOKEN": "$2b$12$resolved-secret"}
     assert call["metadata"] == {
         "deer_flow_provider": "opensandbox",
         "deer_flow_thread": "thread-1",
@@ -471,6 +473,578 @@ def test_release_and_same_scope_warm_reclaim(monkeypatch: pytest.MonkeyPatch) ->
     provider.shutdown()
 
 
+def test_release_mirrors_outputs_for_gateway_download(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from app.gateway.routers.artifacts import _read_artifact_payload
+
+    paths = Paths(base_dir=tmp_path)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+    provider, sdk = _install(monkeypatch)
+    try:
+        sandbox_id = provider.acquire("thread", user_id="owner")
+        box = provider.get(sandbox_id)
+        box.write_file("/mnt/user-data/outputs/report.txt", "generated report")
+        box.update_file("/mnt/user-data/outputs/charts/result.png", bytes(range(256)))
+        provider.release(sandbox_id)
+
+        outputs = paths.sandbox_outputs_dir("thread", user_id="owner")
+        assert _read_artifact_payload(outputs / "report.txt", "report.txt", download=True)[0] == "file"
+        assert (outputs / "report.txt").read_text(encoding="utf-8") == "generated report"
+        assert (outputs / "charts/result.png").read_bytes() == bytes(range(256))
+        assert not paths.sandbox_outputs_dir("thread", user_id="other-owner").exists()
+        assert provider.acquire("thread", user_id="owner") == sandbox_id
+        assert len(sdk.remotes) == 1
+    finally:
+        provider.shutdown()
+
+
+@pytest.fixture
+def output_sync_provider(monkeypatch, tmp_path):
+    paths = Paths(base_dir=tmp_path)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+    provider, sdk = _install(monkeypatch)
+    sandbox_id = provider.acquire("thread", user_id="owner")
+    yield provider, sdk.remotes[0], sandbox_id, paths.sandbox_outputs_dir("thread", user_id="owner")
+    provider.shutdown()
+
+
+def test_output_sync_refreshes_existing_content_and_keeps_literal_filename(output_sync_provider):
+    provider, remote, sandbox_id, outputs = output_sync_provider
+    virtual = "/mnt/user-data/outputs/report # 中文.txt"
+    remote.file_data[virtual] = b"first version"
+    provider.release(sandbox_id)
+    assert (outputs / "report # 中文.txt").read_bytes() == b"first version"
+    provider.acquire("thread", user_id="owner")
+    remote.file_data[virtual] = b"newer version"
+    provider.release(sandbox_id)
+    assert (outputs / "report # 中文.txt").read_bytes() == b"newer version"
+    assert not list(outputs.glob(".opensandbox-sync-*"))
+
+
+@pytest.mark.parametrize("file_limit", [1, 2])
+def test_output_sync_skips_invalid_utf8_record_within_file_budget(output_sync_provider, monkeypatch, caplog, file_limit):
+    provider, remote, sandbox_id, outputs = output_sync_provider
+    remote.file_data["/mnt/user-data/outputs/report.txt"] = b"valid report"
+    listing = b"/mnt/user-data/outputs/\xff\0/mnt/user-data/outputs/report.txt\0"
+    monkeypatch.setattr(provider, "_MAX_SYNC_FILES", file_limit)
+    monkeypatch.setattr(remote.commands, "run", lambda *args, **kwargs: _execution(stdout=(base64.b64encode(listing).decode(), "__DF_OUTPUT_SYNC__:0:0:0")))
+    provider.release(sandbox_id)
+    if file_limit == 2:
+        assert (outputs / "report.txt").read_bytes() == b"valid report"
+    else:
+        assert not outputs.exists()
+        assert remote.files.calls == []
+    assert "non-UTF-8" in caplog.text
+    assert sandbox_id in provider._warm_pool
+
+
+def test_output_sync_refreshes_same_size_edits(output_sync_provider):
+    provider, remote, sandbox_id, outputs = output_sync_provider
+    remote.file_data["/mnt/user-data/outputs/report.txt"] = b"first"
+    provider.release(sandbox_id)
+    assert (outputs / "report.txt").read_bytes() == b"first"
+    provider.acquire("thread", user_id="owner")
+    remote.file_data["/mnt/user-data/outputs/report.txt"] = b"later"
+    provider.release(sandbox_id)
+    assert (outputs / "report.txt").read_bytes() == b"later"
+
+
+@pytest.mark.parametrize(
+    "names",
+    [
+        ("Report.txt", "report.txt"),
+        ("Charts/report.txt", "charts/report.txt"),
+        ("Charts/first.txt", "charts/second.txt"),
+        ("nested/Report.txt", "nested/report.txt"),
+        ("Charts", "charts/report.txt"),
+        ("Résumé.txt", "résumé.txt"),
+        ("résumé.txt", "re\u0301sume\u0301.txt"),
+    ],
+)
+@pytest.mark.parametrize("reverse", [False, True])
+def test_output_sync_rejects_ambiguous_remote_names_before_copying(output_sync_provider, caplog, names, reverse):
+    provider, remote, sandbox_id, outputs = output_sync_provider
+    names = names[::-1] if reverse else names
+    remote.file_data.update({f"/mnt/user-data/outputs/{name}": f"content {index}".encode() for index, name in enumerate(names)})
+    remote.file_data["/mnt/user-data/outputs/safe.txt"] = b"unambiguous report"
+
+    provider.release(sandbox_id)
+
+    assert sorted(path.relative_to(outputs).as_posix() for path in outputs.rglob("*") if path.is_file()) == ["safe.txt"]
+    assert (outputs / "safe.txt").read_bytes() == b"unambiguous report"
+    assert remote.files.calls == [("read_bytes_stream", "/mnt/user-data/outputs/safe.txt")]
+    assert "ambiguous" in caplog.text
+    assert sandbox_id in provider._warm_pool
+
+
+def test_output_sync_collision_preflight_includes_records_beyond_file_limit(output_sync_provider, monkeypatch):
+    provider, remote, sandbox_id, outputs = output_sync_provider
+    remote.file_data.update(
+        {
+            "/mnt/user-data/outputs/Report.txt": b"first report",
+            "/mnt/user-data/outputs/safe.txt": b"safe report",
+            "/mnt/user-data/outputs/report.txt": b"different report",
+        }
+    )
+    monkeypatch.setattr(provider, "_MAX_SYNC_FILES", 2)
+
+    provider.release(sandbox_id)
+
+    assert sorted(path.name for path in outputs.iterdir()) == ["safe.txt"]
+    assert remote.files.calls == [("read_bytes_stream", "/mnt/user-data/outputs/safe.txt")]
+
+
+def test_output_sync_remote_collision_preserves_previous_copy(output_sync_provider):
+    provider, remote, sandbox_id, outputs = output_sync_provider
+    outputs.mkdir(parents=True)
+    (outputs / "Report.txt").write_bytes(b"previous complete report")
+    remote.file_data.update({"/mnt/user-data/outputs/Report.txt": b"new upper report", "/mnt/user-data/outputs/report.txt": b"new lower report"})
+
+    provider.release(sandbox_id)
+
+    assert (outputs / "Report.txt").read_bytes() == b"previous complete report"
+    assert sorted(path.name for path in outputs.iterdir()) == ["Report.txt"]
+    assert remote.files.calls == []
+
+
+@pytest.mark.parametrize("names", [("Report.txt", "report.txt"), ("Charts/old.txt", "charts/new.txt"), ("Résumé.txt", "résumé.txt"), ("résumé.txt", "re\u0301sume\u0301.txt")])
+def test_output_sync_preserves_existing_host_alias(output_sync_provider, names):
+    provider, remote, sandbox_id, outputs = output_sync_provider
+    existing, incoming = names
+    previous = outputs / existing
+    previous.parent.mkdir(parents=True)
+    previous.write_bytes(b"previous complete report")
+    remote.file_data[f"/mnt/user-data/outputs/{incoming}"] = b"different remote report"
+    remote.file_data["/mnt/user-data/outputs/safe.txt"] = b"safe report"
+
+    provider.release(sandbox_id)
+
+    assert previous.read_bytes() == b"previous complete report"
+    assert sorted(path.relative_to(outputs).as_posix() for path in outputs.rglob("*") if path.is_file()) == sorted([existing, "safe.txt"])
+    assert remote.files.calls == [("read_bytes_stream", "/mnt/user-data/outputs/safe.txt")]
+
+
+def test_output_sync_rejects_alias_planted_during_download(output_sync_provider, monkeypatch):
+    provider, remote, sandbox_id, outputs = output_sync_provider
+    remote.file_data["/mnt/user-data/outputs/Report.txt"] = b"remote report"
+    read_stream = remote.files.read_bytes_stream
+
+    def plant_alias(path):
+        (outputs / "report.txt").write_bytes(b"other complete report")
+        yield from read_stream(path)
+
+    monkeypatch.setattr(remote.files, "read_bytes_stream", plant_alias)
+    provider.release(sandbox_id)
+
+    assert (outputs / "report.txt").read_bytes() == b"other complete report"
+    assert sorted(path.name for path in outputs.iterdir()) == ["report.txt"]
+
+
+def test_output_sync_keeps_distinct_files_in_the_same_directory(output_sync_provider):
+    provider, remote, sandbox_id, outputs = output_sync_provider
+    remote.file_data.update({"/mnt/user-data/outputs/Charts/first.txt": b"first", "/mnt/user-data/outputs/Charts/second.txt": b"second"})
+
+    provider.release(sandbox_id)
+
+    assert (outputs / "Charts/first.txt").read_bytes() == b"first"
+    assert (outputs / "Charts/second.txt").read_bytes() == b"second"
+
+
+@pytest.mark.parametrize("name", ["con.txt", "PRN", "aux .log", "NUL.bin", "COM9", "lpt1.doc", "COM¹.txt", "LPT²", "CONIN$.txt", "CONOUT$"])
+def test_output_destination_rejects_reserved_components_without_deprecated_api(tmp_path, monkeypatch, name):
+    from pathlib import PureWindowsPath
+
+    def unavailable(*args):
+        raise AssertionError("PureWindowsPath.is_reserved is unavailable")
+
+    monkeypatch.setattr(PureWindowsPath, "is_reserved", unavailable)
+    with pytest.raises(ValueError, match="Unsafe"):
+        OpenSandboxProvider._output_destination(tmp_path / "outputs", f"/mnt/user-data/outputs/{name}")
+    assert not (tmp_path / "outputs").exists()
+
+
+@pytest.mark.parametrize("name", ["CONSOLE.txt", "COM10.txt", "LPT0", "report # 中文.txt"])
+def test_output_destination_accepts_nonreserved_names_without_deprecated_api(tmp_path, monkeypatch, name):
+    from pathlib import PureWindowsPath
+
+    def unavailable(*args):
+        raise AssertionError("PureWindowsPath.is_reserved is unavailable")
+
+    monkeypatch.setattr(PureWindowsPath, "is_reserved", unavailable)
+    outputs = tmp_path / "outputs"
+    assert OpenSandboxProvider._output_destination(outputs, f"/mnt/user-data/outputs/{name}") == outputs / name
+
+
+@pytest.mark.parametrize("remote_path", ["/tmp/outside", "/mnt/user-data/uploads/input.txt", "/mnt/user-data/outputs/../outside", "/mnt/user-data/outputs//bad", "/mnt/user-data/outputs/C:bad", "/mnt/user-data/outputs/NUL.txt"])
+def test_output_sync_rejects_unconfined_paths(output_sync_provider, remote_path):
+    provider, remote, sandbox_id, outputs = output_sync_provider
+    remote.file_data[remote_path] = b"untrusted listing"
+    provider.release(sandbox_id)
+    assert remote.files.calls == []
+    assert not outputs.exists()
+    assert sandbox_id in provider._warm_pool
+
+
+@pytest.mark.parametrize("link_root", [True, False])
+def test_output_sync_rejects_host_symlink_components(output_sync_provider, tmp_path, link_root):
+    from support.symlinks import symlink_or_skip
+
+    provider, remote, sandbox_id, outputs = output_sync_provider
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outputs.parent.mkdir(parents=True, exist_ok=True)
+    if link_root:
+        symlink_or_skip(outputs, outside, target_is_directory=True)
+        name = "report.txt"
+    else:
+        outputs.mkdir()
+        symlink_or_skip(outputs / "nested", outside, target_is_directory=True)
+        name = "nested/report.txt"
+    remote.file_data[f"/mnt/user-data/outputs/{name}"] = b"must not escape"
+    provider.release(sandbox_id)
+    assert list(outside.iterdir()) == []
+    assert remote.files.calls == []
+
+
+def test_output_sync_transfer_failure_preserves_previous_copy(output_sync_provider, caplog):
+    provider, remote, sandbox_id, outputs = output_sync_provider
+    outputs.mkdir(parents=True)
+    (outputs / "report.txt").write_bytes(b"old complete version")
+    remote.file_data["/mnt/user-data/outputs/report.txt"] = b"new version"
+    remote.file_error = RuntimeError("temporary file transport failure")
+    provider.release(sandbox_id)
+    assert (outputs / "report.txt").read_bytes() == b"old complete version"
+    assert sandbox_id in provider._warm_pool
+    assert "Could not synchronize" in caplog.text
+
+
+def test_output_sync_failed_replace_cleans_staging(output_sync_provider, monkeypatch):
+    provider, remote, sandbox_id, outputs = output_sync_provider
+    outputs.mkdir(parents=True)
+    (outputs / "report.txt").write_bytes(b"old complete version")
+    remote.file_data["/mnt/user-data/outputs/report.txt"] = b"new version"
+
+    def fail_replace(self, target):
+        raise PermissionError("destination temporarily open")
+
+    monkeypatch.setattr(Path, "replace", fail_replace)
+    provider.release(sandbox_id)
+    assert (outputs / "report.txt").read_bytes() == b"old complete version"
+    assert sorted(p.name for p in outputs.iterdir()) == ["report.txt"]
+
+
+def test_output_sync_partial_download_failure_stops_remaining_transfers(output_sync_provider, monkeypatch):
+    provider, remote, sandbox_id, outputs = output_sync_provider
+    remote.file_data.update({"/mnt/user-data/outputs/first.txt": b"123", "/mnt/user-data/outputs/second.txt": b"456"})
+    started = []
+
+    def partial_stream(path):
+        started.append(path)
+        yield b"123"
+        raise OSError("connection failed after receiving bytes")
+
+    monkeypatch.setattr(remote.files, "read_bytes_stream", partial_stream)
+    provider.release(sandbox_id)
+    assert started == ["/mnt/user-data/outputs/first.txt"]
+    assert not (outputs / "first.txt").exists()
+    assert not list(outputs.glob(".opensandbox-sync-*"))
+    assert sandbox_id in provider._warm_pool
+
+
+@pytest.mark.parametrize("limit", ["files", "bytes", "listing", "deadline"])
+def test_output_sync_is_bounded(output_sync_provider, monkeypatch, caplog, limit):
+    provider, remote, sandbox_id, outputs = output_sync_provider
+    remote.file_data.update({"/mnt/user-data/outputs/first.txt": b"123", "/mnt/user-data/outputs/second.txt": b"456"})
+    if limit == "files":
+        monkeypatch.setattr(provider, "_MAX_SYNC_FILES", 1)
+    elif limit == "bytes":
+        monkeypatch.setattr(provider, "_MAX_SYNC_TOTAL_BYTES", 4)
+    elif limit == "listing":
+        monkeypatch.setattr(provider, "_MAX_SYNC_LISTING_BYTES", 4)
+    else:
+        monkeypatch.setattr(provider, "_SYNC_DEADLINE_SECONDS", 1)
+        monkeypatch.setattr("deerflow.community.opensandbox.provider.time", types.SimpleNamespace(monotonic=iter([0, 2]).__next__, time=time.time))
+    provider.release(sandbox_id)
+    if limit in {"files", "bytes"}:
+        assert (outputs / "first.txt").read_bytes() == b"123"
+        assert not (outputs / "second.txt").exists()
+    else:
+        assert not outputs.exists()
+    assert sandbox_id in provider._warm_pool
+    assert caplog.records
+
+
+def test_output_sync_closes_stream_when_single_file_exceeds_cap(output_sync_provider, monkeypatch):
+    provider, remote, sandbox_id, outputs = output_sync_provider
+    remote.file_data["/mnt/user-data/outputs/large.txt"] = b"123456789"
+    monkeypatch.setattr("deerflow.community.opensandbox.provider._MAX_DOWNLOAD_SIZE", 4)
+    provider.release(sandbox_id)
+    assert not (outputs / "large.txt").exists()
+    assert remote.stream_closed
+
+
+@pytest.mark.parametrize("ticks", [[2], [0, 2]])
+def test_bounded_download_deadline_closes_native_stream(monkeypatch, ticks):
+    remote = _FakeRemote("remote")
+    path = "/mnt/user-data/outputs/report.txt"
+    remote.file_data[path] = b"123456789"
+    box = _box(remote)
+    monkeypatch.setattr("deerflow.community.opensandbox.sandbox.time", types.SimpleNamespace(monotonic=iter(ticks).__next__))
+    with pytest.raises(TimeoutError, match="synchronization timed out"):
+        box._download_file_bounded(path, max_bytes=100, deadline=1)
+    assert remote.stream_closed
+
+
+@pytest.fixture
+def output_sync_shell(output_sync_provider, monkeypatch, tmp_path):
+    """Run the production listing pipeline; only rebase the transport paths."""
+    provider, remote, sandbox_id, outputs = output_sync_provider
+    if os.name == "nt":
+        shell = Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "Git/bin/bash.exe"
+        if not shell.is_file():
+            pytest.skip("Git Bash required for real output-listing execution on Windows")
+        shell = str(shell)
+
+        def posix_path(path):
+            return subprocess.check_output([shell, "-c", 'cygpath -u "$1"', "sh", str(path)], text=True, encoding="utf-8").strip()
+    else:
+        shell = shutil.which("sh")
+        if shell is None:
+            pytest.skip("POSIX sh required")
+        posix_path = str
+    native = tmp_path / "remote-outputs"
+    native.mkdir()
+    native_root = posix_path(native)
+    fake_bin = tmp_path / "sync-bin"
+    fake_bin.mkdir()
+
+    def run(command, *, opts=None):
+        command = command.replace("/mnt/user-data/outputs", native_root)
+        command = f"PATH={shlex.quote(posix_path(fake_bin))}:$PATH; " + command
+        proc = subprocess.run([shell, "-c", command], capture_output=True, text=True, encoding="utf-8", check=False, timeout=10)
+        stdout = proc.stdout
+        if proc.returncode == 0 and "\n__DF_OUTPUT_SYNC__:" in stdout:
+            payload, marker = stdout.rstrip("\n").rsplit("\n", 1)
+            # The host's native temporary path replaces the remote mount only
+            # at this SDK transport boundary; status and filename bytes survive.
+            try:
+                listing = base64.b64decode("".join(payload.split()), validate=True)
+                listing = listing.replace(native_root.encode(), b"/mnt/user-data/outputs")
+                stdout = base64.b64encode(listing).decode() + "\n" + marker
+            except ValueError:
+                pass
+        return _execution(stdout=tuple(stdout.split("\n")), stderr=(proc.stderr,), exit_code=proc.returncode)
+
+    monkeypatch.setattr(remote.commands, "run", run)
+    return provider, remote, sandbox_id, outputs, native, fake_bin
+
+
+def test_output_sync_real_shell_handles_empty_and_literal_filenames(output_sync_shell):
+    provider, remote, sandbox_id, outputs, native, _ = output_sync_shell
+    provider.release(sandbox_id)
+    assert not outputs.exists()
+    provider.acquire("thread", user_id="owner")
+    names = ["中文 # $(echo injected).txt", "nested/result.bin"]
+    if os.name != "nt":
+        names.append("newline\nand\ttab.txt")
+    for name in names:
+        payload = bytes(range(256))
+        target = native / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(payload)
+        remote.file_data[f"/mnt/user-data/outputs/{name}"] = payload
+    provider.release(sandbox_id)
+    for name in names:
+        assert (outputs / name).read_bytes() == bytes(range(256))
+
+
+@pytest.mark.parametrize("binary", ["find", "head", "base64", "mktemp"])
+def test_output_sync_real_shell_propagates_each_pipeline_failure(output_sync_shell, binary, caplog):
+    provider, remote, sandbox_id, outputs, native, fake_bin = output_sync_shell
+    (native / "report.txt").write_bytes(b"report")
+    remote.file_data["/mnt/user-data/outputs/report.txt"] = b"report"
+    failing = fake_bin / binary
+    failing.write_text("#!/bin/sh\nexit 127\n", encoding="utf-8")
+    failing.chmod(0o755)
+    provider.release(sandbox_id)
+    assert not outputs.exists()
+    assert not remote.files.calls
+    assert "listing failed" in caplog.text
+    assert sandbox_id in provider._warm_pool
+
+
+def test_output_sync_real_shell_listing_overflow_never_downloads(output_sync_shell, monkeypatch, caplog):
+    provider, remote, sandbox_id, outputs, native, _ = output_sync_shell
+    for index in range(30):
+        (native / f"file-{index}.txt").write_bytes(b"data")
+    monkeypatch.setattr(provider, "_MAX_SYNC_LISTING_BYTES", 16)
+    provider.release(sandbox_id)
+    assert not outputs.exists()
+    assert not remote.files.calls
+    assert "listing exceeded" in caplog.text
+
+
+def test_output_sync_real_shell_rejects_unexpected_sigpipe(output_sync_shell, caplog):
+    provider, remote, sandbox_id, outputs, native, fake_bin = output_sync_shell
+    remote.file_data["/mnt/user-data/outputs/report.txt"] = b"report"
+    failing = fake_bin / "find"
+    failing.write_text("#!/bin/sh\nprintf '/mnt/user-data/outputs/report.txt\\0'\nexit 141\n", encoding="utf-8")
+    failing.chmod(0o755)
+    provider.release(sandbox_id)
+    assert not outputs.exists() and not remote.files.calls
+    assert "listing failed" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("case", "warning"),
+    [
+        ("complete", "traversal errors"),
+        ("incomplete", "listing was incomplete"),
+        ("oversized", "listing exceeded"),
+        ("head_failure", "listing failed"),
+        ("encoder_failure", "listing failed"),
+        ("find_failure", "listing failed"),
+    ],
+)
+def test_output_sync_real_shell_find_walk_error_preserves_only_complete_listing(output_sync_shell, monkeypatch, caplog, case, warning):
+    provider, remote, sandbox_id, outputs, native, fake_bin = output_sync_shell
+    remote.file_data["/mnt/user-data/outputs/report.txt"] = b"report"
+    find = fake_bin / "find"
+    tail = "printf 'unfinished'\n" if case == "incomplete" else ""
+    status = 2 if case == "find_failure" else 1
+    find.write_text(f"#!/bin/sh\nprintf '/mnt/user-data/outputs/report.txt\\0'\n{tail}echo 'find: entry vanished' >&2\nexit {status}\n", encoding="utf-8")
+    find.chmod(0o755)
+    if case == "oversized":
+        monkeypatch.setattr(provider, "_MAX_SYNC_LISTING_BYTES", 16)
+    elif case in {"head_failure", "encoder_failure"}:
+        binary = "head" if case == "head_failure" else "base64"
+        command = "cat" if binary == "head" else "command -p base64"
+        failing = fake_bin / binary
+        failing.write_text(f"#!/bin/sh\n{command}\nexit 1\n", encoding="utf-8")
+        failing.chmod(0o755)
+    provider.release(sandbox_id)
+    if case == "complete":
+        assert (outputs / "report.txt").read_bytes() == b"report"
+    else:
+        assert not outputs.exists() and not remote.files.calls
+    assert warning in caplog.text
+    assert sandbox_id in provider._warm_pool
+
+
+def test_output_sync_real_shell_does_not_follow_remote_links(output_sync_shell, tmp_path, caplog):
+    from support.symlinks import symlink_or_skip
+
+    provider, remote, sandbox_id, outputs, native, _ = output_sync_shell
+    outside = tmp_path / "remote-outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_bytes(b"outside")
+    symlink_or_skip(native / "linked", outside, target_is_directory=True)
+    provider.release(sandbox_id)
+    assert not outputs.exists() and not remote.files.calls
+    provider.acquire("thread", user_id="owner")
+    (native / "linked").unlink()
+    native.rmdir()
+    symlink_or_skip(native, outside, target_is_directory=True)
+    provider.release(sandbox_id)
+    assert not outputs.exists() and not remote.files.calls
+    assert "listing failed" in caplog.text
+
+
+def test_reacquire_waits_until_release_output_sync_finishes(output_sync_provider, monkeypatch):
+    provider, remote, sandbox_id, outputs = output_sync_provider
+    remote.file_data["/mnt/user-data/outputs/report.txt"] = b"report"
+    box = provider.get(sandbox_id)
+    original = box._download_file_bounded
+    started, unblock, acquire_started, acquired = (threading.Event() for _ in range(4))
+    errors = []
+
+    def blocked_download(*args, **kwargs):
+        started.set()
+        assert unblock.wait(10)
+        return original(*args, **kwargs)
+
+    original_checkout = provider._acquire_serializer._checkout
+
+    def checked_checkout(key):
+        result = original_checkout(key)
+        if threading.current_thread().name == "next-turn":
+            acquire_started.set()
+        return result
+
+    def reacquire():
+        try:
+            assert provider.acquire("thread", user_id="owner") == sandbox_id
+            acquired.set()
+        except BaseException as exc:
+            errors.append(exc)
+
+    monkeypatch.setattr(box, "_download_file_bounded", blocked_download)
+    monkeypatch.setattr(provider._acquire_serializer, "_checkout", checked_checkout)
+    release = threading.Thread(target=provider.release, args=(sandbox_id,))
+    acquire = threading.Thread(target=reacquire, name="next-turn")
+    try:
+        release.start()
+        assert started.wait(10)
+        assert sandbox_id not in provider._warm_pool
+        acquire.start()
+        assert acquire_started.wait(10)
+        assert not acquired.is_set()
+    finally:
+        unblock.set()
+        release.join(10)
+        if acquire.ident is not None:
+            acquire.join(10)
+    assert not release.is_alive() and not acquire.is_alive()
+    assert not errors and acquired.is_set()
+    assert (outputs / "report.txt").read_bytes() == b"report"
+
+
+@pytest.mark.parametrize("transition", ["shutdown", "reset"])
+def test_release_is_noop_when_lifecycle_closes_before_serializer_hold(output_sync_provider, monkeypatch, transition):
+    provider, remote, sandbox_id, outputs = output_sync_provider
+    original_hold = provider._acquire_serializer.hold
+
+    def close_before_hold(key):
+        getattr(provider, transition)()
+        return original_hold(key)
+
+    monkeypatch.setattr(provider._acquire_serializer, "hold", close_before_hold)
+    provider.release(sandbox_id)
+    assert provider.get(sandbox_id) is None
+    assert not outputs.exists()
+
+
+@pytest.mark.parametrize("untrack", [True, False])
+def test_release_tolerates_typed_closure_independent_of_message(output_sync_provider, monkeypatch, untrack):
+    from deerflow.sandbox import acquire_serialization
+
+    provider, remote, sandbox_id, outputs = output_sync_provider
+
+    def close_before_hold(key):
+        if untrack:
+            provider.reset()
+        raise acquire_serialization.AcquireSerializerClosed("No further scope holders accepted")
+
+    monkeypatch.setattr(provider._acquire_serializer, "hold", close_before_hold)
+    if untrack:
+        provider.release(sandbox_id)
+        assert provider.get(sandbox_id) is None
+    else:
+        with pytest.raises(acquire_serialization.AcquireSerializerClosed):
+            provider.release(sandbox_id)
+
+
+def test_release_does_not_swallow_unrelated_runtime_error_with_old_closure_message(output_sync_provider, monkeypatch):
+    provider, remote, sandbox_id, outputs = output_sync_provider
+
+    def fail_hold(key):
+        provider.reset()
+        raise RuntimeError("AcquireSerializer is closed")
+
+    monkeypatch.setattr(provider._acquire_serializer, "hold", fail_hold)
+    with pytest.raises(RuntimeError, match="AcquireSerializer is closed"):
+        provider.release(sandbox_id)
+
+
 @pytest.mark.parametrize("exit_code", [1, None])
 def test_unhealthy_warm_entry_is_destroyed_and_replaced(monkeypatch: pytest.MonkeyPatch, exit_code: int | None) -> None:
     provider, sdk = _install(monkeypatch)
@@ -519,6 +1093,72 @@ def test_execute_forwards_env_timeout_and_combines_streams() -> None:
     assert box.execute_command("result-output") == "stdout\nresult\nstderr"
     assert box.execute_command("silent-failure") == "Command exited with code 9"
     assert box.execute_command("missing-complete") == "Error: OpenSandbox command completed without an exit code: stream ended"
+
+
+def _command_error_execution(*, error_value: str, exit_code: int | None = None, error_name: str = "CommandExecError", stdout: tuple[str, ...] = (), stderr: tuple[str, ...] = (), result: tuple[str, ...] = ()) -> Any:
+    execution = _execution(stdout=stdout, stderr=stderr, result=result, exit_code=exit_code)
+    return types.SimpleNamespace(**vars(execution), error=types.SimpleNamespace(name=error_name, value=error_value))
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "result", "expected_body"),
+    [
+        ((), (), (), ""),
+        (("partial output",), (), (), "partial output\n"),
+        (("out-1", "out-2"), ("stderr",), ("result",), "out-1\nout-2\nresult\nstderr\n"),
+    ],
+)
+def test_execute_command_server_side_deadline_appends_exit_marker(stdout: tuple[str, ...], stderr: tuple[str, ...], result: tuple[str, ...], expected_body: str) -> None:
+    # The SDK cannot parse this deadline error value as an integer, so it
+    # returns an Execution with exit_code=None rather than raising TimeoutError.
+    remote = _FakeRemote("remote")
+    remote.commands.run = lambda command, opts=None: _command_error_execution(error_value="context deadline exceeded", stdout=stdout, stderr=stderr, result=result)  # type: ignore[method-assign]
+    box = _box(remote, sandbox_timeout=timedelta(seconds=60), default_command_timeout=120)
+
+    assert box.execute_command("sleep 9999", timeout=5) == f"{expected_body}Error: command timed out\nExit Code: 124"
+
+
+@pytest.mark.parametrize("error_value", ["credential lookup failed", "context canceled", "signal: killed", "timeout while starting process", ""])
+def test_execute_command_other_missing_exit_codes_are_not_timeouts(error_value: str) -> None:
+    remote = _FakeRemote("remote")
+    remote.commands.run = lambda command, opts=None: _command_error_execution(error_value=error_value)  # type: ignore[method-assign]
+    box = _box(remote, sandbox_timeout=timedelta(seconds=60), default_command_timeout=120)
+
+    assert box.execute_command("true", timeout=5) == f"Error: OpenSandbox command completed without an exit code: CommandExecError: {error_value}"
+
+
+@pytest.mark.parametrize("exit_code", [-1, 7, 124])
+def test_execute_command_numeric_error_events_keep_their_exit_code(exit_code: int) -> None:
+    # execd sends ordinary nonzero exits through CommandExecError too. In
+    # particular, -1 only proves signal termination, not a command deadline.
+    remote = _FakeRemote("remote")
+    remote.commands.run = lambda command, opts=None: _command_error_execution(error_value=str(exit_code), exit_code=exit_code, stdout=("partial output",))  # type: ignore[method-assign]
+    box = _box(remote, sandbox_timeout=timedelta(seconds=60), default_command_timeout=120)
+
+    assert box.execute_command("exit-or-signal", timeout=5) == f"partial output\nCommandExecError: {exit_code}\nExit Code: {exit_code}"
+
+
+@pytest.mark.parametrize("exit_code", [None, 7])
+def test_execute_command_deadline_text_on_other_errors_is_not_a_command_timeout(exit_code: int | None) -> None:
+    remote = _FakeRemote("remote")
+    remote.commands.run = lambda command, opts=None: _command_error_execution(error_value="context deadline exceeded", exit_code=exit_code, error_name="OtherError")  # type: ignore[method-assign]
+    box = _box(remote, sandbox_timeout=timedelta(seconds=60), default_command_timeout=120)
+
+    result = box.execute_command("true", timeout=5)
+    assert "OtherError: context deadline exceeded" in result
+    assert "command timed out" not in result
+    assert not result.endswith("Exit Code: 124")
+
+
+@pytest.mark.parametrize("message", ["", "context deadline exceeded"])
+def test_execute_command_transport_exception_is_not_a_shell_timeout(message: str) -> None:
+    remote = _FakeRemote("remote")
+    remote.command_error = TimeoutError(message)
+    box = _box(remote, sandbox_timeout=timedelta(seconds=60), default_command_timeout=120)
+
+    # Even an injected builtin TimeoutError must not turn a provider/renewal
+    # failure into an authoritative shell exit. The real SDK wraps this error.
+    assert box.execute_command("true", timeout=5) == f"Error: {message}"
 
 
 def test_operations_renew_remote_lifetime_and_bound_default_commands() -> None:

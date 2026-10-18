@@ -702,6 +702,7 @@ class McpTaskService:
         thread_incarnation: str | None,
         limit: int = 50,
         active_only: bool = False,
+        status: TaskStatus | None = None,
     ) -> list[dict[str, Any]]:
         return await self._repository.list_by_thread(
             thread_id,
@@ -709,6 +710,7 @@ class McpTaskService:
             thread_incarnation=thread_incarnation,
             limit=limit,
             active_only=active_only,
+            **({"status": TaskStatus(status)} if status is not None else {}),
         )
 
     async def cancel_task(

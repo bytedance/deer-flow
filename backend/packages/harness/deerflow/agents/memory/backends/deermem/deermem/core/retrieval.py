@@ -24,6 +24,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .paths import retrieval_index_directory
+
 logger = logging.getLogger(__name__)
 
 # ── Scoring weights ──────────────────────────────────────────────────
@@ -675,13 +677,14 @@ def create_fts5_retrieval(config: Any) -> FTS5RetrievalAdapter | None:
 
     Standalone ``DeerMem`` instances with no configured storage root use an
     in-memory index. The host factory always injects an absolute storage root,
-    so normal Gateway instances persist the rebuildable index below it.
+    so normal Gateway instances persist the rebuildable index below it, or at
+    ``retrieval_index_path`` when the operator keeps it off a shared volume.
+    Corruption recovery below deletes only that index's own files.
     """
-    storage_path = str(getattr(config, "storage_path", "") or "")
-    if not storage_path:
+    index_dir = retrieval_index_directory(getattr(config, "storage_path", ""), getattr(config, "retrieval_index_path", ""))
+    if index_dir is None:
         db_path: str | Path = ":memory:"
     else:
-        index_dir = Path(storage_path) / ".retrieval"
         index_dir.mkdir(parents=True, exist_ok=True)
         db_path = index_dir / "memory-fts5.sqlite3"
     try:

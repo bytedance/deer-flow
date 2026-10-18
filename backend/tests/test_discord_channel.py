@@ -36,6 +36,20 @@ def test_discord_channel_init() -> None:
     assert channel.name == "discord"
 
 
+@pytest.mark.parametrize("collection", [list, tuple, set, frozenset])
+def test_allowed_channels_accepts_all_id_collections(collection):
+    channel = DiscordChannel(bus=MessageBus(), config={"allowed_channels": collection([" 456 ", "789", ""])})
+
+    assert channel._allowed_channels == frozenset({"456", "789"})
+
+
+@pytest.mark.parametrize("value", [None, "", " \t ", [], (), set(), frozenset()])
+def test_empty_allowed_channels_gives_no_mention_exemption(value):
+    channel = DiscordChannel(bus=MessageBus(), config={"allowed_channels": value})
+
+    assert channel._allowed_channels == frozenset()
+
+
 @pytest.mark.asyncio
 async def test_start_without_discord_module_points_at_the_extra(caplog) -> None:
     """discord.py ships in the optional ``discord`` extra, so the missing-dependency

@@ -133,8 +133,15 @@ async def _authenticate_ws(websocket: WebSocket):
         if not isinstance(payload, TokenError):
             provider = get_local_provider()
             user = await provider.get_user(payload.sub)
-            if user is not None and user.token_version == payload.ver:
-                return user
+            if user is not None:
+                # Same post-lookup verdicts as every other JWT surface —
+                # including account suspension: WebSockets bypass
+                # AuthMiddleware, so a disabled user's still-valid cookie
+                # must not open a streaming/browser session.
+                from app.gateway.deps import validate_resolved_session_user
+
+                if validate_resolved_session_user(user, payload) is None:
+                    return user
     if is_auth_disabled():
         return get_auth_disabled_user()
     return None

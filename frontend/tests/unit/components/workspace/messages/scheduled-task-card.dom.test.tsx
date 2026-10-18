@@ -247,6 +247,27 @@ describe("ScheduledTaskCard", () => {
     expectNoRawIdentifiers(card());
   });
 
+  test.each([
+    ["en-US", "every item is checked.", "every item is checked, pauses itself"],
+    ["zh-CN", "清单全部勾完。", "清单全部勾完，满足后自动暂停"],
+  ] as const)(
+    "%s drops the stop condition's closing period before the pause clause",
+    async (locale, stopCondition, expected) => {
+      api.fetchScheduledTask.mockResolvedValue(
+        liveTask({ stop_condition: stopCondition }),
+      );
+      renderCard(
+        toolResult({
+          task: { ...toolResult().task, stop_condition: stopCondition },
+        }),
+        locale,
+      );
+      const stops = await screen.findByTestId("scheduled-task-card-stops");
+      await waitFor(() => expect(stops.textContent).toContain(expected));
+      expect(stops.textContent).not.toMatch(/[.。][,，]/);
+    },
+  );
+
   test("a recurring task mid-run disables Pause and Run once now", async () => {
     api.fetchScheduledTask.mockResolvedValue(
       liveTask({ status: "enabled", active_run_status: "running" }),

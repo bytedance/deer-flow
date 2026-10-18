@@ -1389,3 +1389,37 @@ async def test_run_agent_strips_branch_checkpoint_for_goal_continuation(monkeypa
     assert "checkpoint_id" not in second_config
     assert "checkpoint_map" not in second_config
     assert second_config["thread_id"] == "thread-branch-continuation"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["full", "delta"])
+async def test_rollback_restores_the_met_goal_record_a_cancelled_run_dropped(mode):
+    """A rolled-back run whose input replaced the goal must not lose the earlier record."""
+    from langgraph.graph import END, START, StateGraph
+
+    from deerflow.agents.thread_state import get_thread_state_schema
+    from deerflow.runtime.goal import build_goal_outcome
+
+    checkpointer = InMemorySaver()
+    builder = StateGraph(get_thread_state_schema(mode))
+    builder.add_node("agent", lambda state: {"messages": [AIMessage(content="Working on it.")]})
+    builder.add_edge(START, "agent")
+    builder.add_edge("agent", END)
+    graph = builder.compile(checkpointer=checkpointer)
+    accessor = CheckpointStateAccessor.bind(graph, checkpointer, mode=mode)
+    thread_id = "rollback-outcome-thread"
+    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    record = build_goal_outcome(build_goal_state("Ship it"), GoalEvaluation(satisfied=True, blocker="none", reason="Shipped."), reply_message_id=None)
+
+    await graph.ainvoke({"messages": [HumanMessage(content="Ship it")]}, config)
+    await write_thread_goal(checkpointer, thread_id, None, outcome=record)
+    rollback_point = await worker._capture_rollback_point(accessor, checkpointer, config)
+    await graph.ainvoke({"messages": [HumanMessage(content="Next")], "goal": build_goal_state("Next goal"), "goal_outcome": None}, config)
+    assert (await accessor.aget(config)).values["goal_outcome"] is None
+
+    restored = await worker._rollback_to_pre_run_checkpoint(accessor=accessor, checkpointer=checkpointer, thread_id=thread_id, run_id="run-1", rollback_point=rollback_point, snapshot_capture_failed=False)
+
+    values = (await accessor.aget(config)).values
+    assert restored is True
+    assert values["goal_outcome"] == record
+    assert values.get("goal") is None

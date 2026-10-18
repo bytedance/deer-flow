@@ -147,6 +147,13 @@ ensure_env_files() {
     ensure_from_example "$PROJECT_ROOT/frontend/.env" "$PROJECT_ROOT/frontend/.env.example" "frontend/.env"
 }
 
+# start runs Compose from docker/ without --env-file, so ${VAR} interpolation in
+# docker-compose-dev.yaml sees the shell only, never the checkout .env. Export
+# the .env values that interpolation consumes; a value already set in the shell
+# (even empty) wins, as it does for Compose. AUTH_TRUSTED_PROXIES and
+# DEER_FLOW_CREDENTIALS_KEY belong here because the Gateway's `environment:`
+# entries (defaulting to nginx and to empty) outrank the same keys loaded through
+# env_file and would replace the operator's values.
 load_proxy_env_from_dotenv() {
     local env_file="$PROJECT_ROOT/.env"
     local var
@@ -157,16 +164,16 @@ load_proxy_env_from_dotenv() {
         return
     fi
 
-    for var in HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy; do
+    for var in HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy AUTH_TRUSTED_PROXIES DEER_FLOW_CREDENTIALS_KEY; do
         if [ -z "${!var+x}" ]; then
             line="$(grep -E "^[[:space:]]*${var}=" "$env_file" | tail -n 1 || true)"
             if [ -n "$line" ]; then
                 value="${line#*=}"
+                value="${value%$'\r'}"
                 value="${value%\"}"
                 value="${value#\"}"
                 value="${value%\'}"
                 value="${value#\'}"
-                value="${value%$'\r'}"
                 export "${var}=${value}"
             fi
         fi
@@ -174,48 +181,7 @@ load_proxy_env_from_dotenv() {
 }
 
 detect_sandbox_mode() {
-    local config_file="$PROJECT_ROOT/config.yaml"
-    local sandbox_use=""
-    local provisioner_url=""
-
-    if [ ! -f "$config_file" ]; then
-        echo "local"
-        return
-    fi
-
-    sandbox_use=$(awk '
-        /^[[:space:]]*sandbox:[[:space:]]*$/ { in_sandbox=1; next }
-        in_sandbox && /^[^[:space:]#]/ { in_sandbox=0 }
-        in_sandbox && /^[[:space:]]*use:[[:space:]]*/ {
-            line=$0
-            sub(/^[[:space:]]*use:[[:space:]]*/, "", line)
-            print line
-            exit
-        }
-    ' "$config_file")
-
-    provisioner_url=$(awk '
-        /^[[:space:]]*sandbox:[[:space:]]*$/ { in_sandbox=1; next }
-        in_sandbox && /^[^[:space:]#]/ { in_sandbox=0 }
-        in_sandbox && /^[[:space:]]*provisioner_url:[[:space:]]*/ {
-            line=$0
-            sub(/^[[:space:]]*provisioner_url:[[:space:]]*/, "", line)
-            print line
-            exit
-        }
-    ' "$config_file")
-
-    if [[ "$sandbox_use" == *"deerflow.sandbox.local:LocalSandboxProvider"* ]]; then
-        echo "local"
-    elif [[ "$sandbox_use" == *"deerflow.community.aio_sandbox:AioSandboxProvider"* ]]; then
-        if [ -n "$provisioner_url" ]; then
-            echo "provisioner"
-        else
-            echo "aio"
-        fi
-    else
-        echo "local"
-    fi
+    bash "$SCRIPT_DIR/sandbox-mode.sh" "$PROJECT_ROOT/config.yaml"
 }
 
 # Cleanup function for Ctrl+C

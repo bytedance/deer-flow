@@ -919,3 +919,36 @@ def test_concurrent_custom_skill_toggles_do_not_lose_state(projection_env) -> No
         "skill-b": {"enabled": False},
     }
     assert list(env.paths.user_custom_skills_view_dir("alice").iterdir()) == []
+
+
+@pytest.mark.parametrize("permanent_error", [False, True])
+def test_projection_read_windows_lock_retries_only_contention(tmp_path, monkeypatch, permanent_error):
+    import errno
+
+    from deerflow.skills import projection
+
+    calls = []
+
+    class FakeMsvcrt:
+        LK_NBLCK = 2
+        LK_UNLCK = 0
+
+        @staticmethod
+        def locking(fd, operation, length):
+            calls.append(operation)
+            if operation == FakeMsvcrt.LK_NBLCK and len(calls) == 1:
+                raise OSError(errno.EBADF if permanent_error else errno.EACCES, "Lock unavailable")
+
+    monkeypatch.setattr(projection, "fcntl", None)
+    monkeypatch.setattr(projection, "msvcrt", FakeMsvcrt, raising=False)
+    storage = SimpleNamespace(user_id=None, get_skills_root_path=lambda: tmp_path)
+    if not permanent_error:
+        with projection.skill_projection_read_lock(storage, timeout=1):
+            assert calls == [FakeMsvcrt.LK_NBLCK] * 2
+        assert calls == [FakeMsvcrt.LK_NBLCK] * 2 + [FakeMsvcrt.LK_UNLCK]
+    else:
+        with pytest.raises(OSError) as caught:
+            with projection.skill_projection_read_lock(storage, timeout=1):
+                pytest.fail("Must not enter after a permanent lock error")
+        assert caught.value.errno == errno.EBADF
+        assert calls == [FakeMsvcrt.LK_NBLCK]

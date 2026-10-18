@@ -150,6 +150,16 @@ class CheckpointStateAccessor:
         raise_if_snapshot_incompatible(snapshot, self.mode)
         return snapshot
 
+    def get_tuple(self, config: dict[str, Any]) -> Any | None:
+        """Raw checkpoint tuple for a config, without materializing state."""
+
+        return self.checkpointer.get_tuple(self._prepare_config(config))
+
+    async def aget_tuple(self, config: dict[str, Any]) -> Any | None:
+        """Raw checkpoint tuple for a config, without materializing state."""
+
+        return await self.checkpointer.aget_tuple(self._prepare_config(config))
+
     def get_metadata(self, config: dict[str, Any]) -> dict[str, Any]:
         """Read checkpoint metadata without materializing channel state."""
         checkpoint_tuple = self.checkpointer.get_tuple(self._prepare_config(config))

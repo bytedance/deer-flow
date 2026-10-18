@@ -16,7 +16,7 @@ metadata:
     {{- include "deer-flow.labels" . | nindent 4 }}
     app.kubernetes.io/component: gateway
 spec:
-  minAvailable: {{ $pdb.minAvailable | default 1 | int }}
+  minAvailable: {{ include "deer-flow.pdbMinAvailable" (dict "value" $pdb.minAvailable "key" "gateway.podDisruptionBudget.minAvailable") }}
   selector:
     matchLabels:
       {{- include "deer-flow.selectorLabels" . | nindent 6 }}

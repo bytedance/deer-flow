@@ -14,7 +14,7 @@ from deerflow.persistence.run import RunRepository
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.finalization import FinalizationObserver, end_condition_reached, finalize_occurrence, finish_task_at_end_condition, is_host_pause_marker
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
-from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project
+from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project, once_run_still_scheduled
 from deerflow.persistence.scheduled_tasks.model import (
     ACTIVE_RUN_STATUSES,
     TERMINAL_RUN_STATUSES,
@@ -220,7 +220,9 @@ class ScheduledTaskRunRepository:
         task.lease_owner = None
         task.lease_expires_at = None
         task.updated_at = datetime.now(UTC)
-        if task.schedule_type == "once":
+        # A trial ahead of a once task's run time is projected like a
+        # recurring task's run, so the once run stays scheduled.
+        if task.schedule_type == "once" and not once_run_still_scheduled(task, row):
             if candidate.status == "success":
                 task.status = "completed"
                 task.last_error = None
@@ -873,6 +875,13 @@ class ScheduledTaskRunRepository:
                 task = await self._lock_task(session, task_id)
                 row = await session.get(ScheduledTaskRunRow, row_id, with_for_update=True)
                 if row is None or row.status != "launching":
+                    continue
+                # The scan only identifies candidates. While waiting for the
+                # parent lock, the old launch can requeue and a manual trigger
+                # can claim this same occurrence again, even under the same
+                # lease owner. Revalidate expiry under the write lock before
+                # clearing any claim or reconciling its underlying run.
+                if _lease_is_alive(row.lease_expires_at, now=now, grace_seconds=0):
                     continue
                 candidate = await self._find_underlying_run(session, row, task)
                 row.lease_owner = None

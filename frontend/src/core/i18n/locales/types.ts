@@ -27,11 +27,15 @@ export interface Translations {
     catalogHint: string;
     installationGuide: string;
     catalog: Record<
+      | "workflows"
       | "agentTeams"
       | "bookmarks"
       | "context"
       | "classify"
       | "screening"
+      | "retrieval"
+      | "knowledge"
+      | "weknora"
       | "example",
       { title: string; description: string }
     >;
@@ -232,6 +236,8 @@ export interface Translations {
   };
 
   artifactPreview: {
+    loadingPreview: string;
+    resourcesUnavailable: string;
     limited: (previewSize: string, totalSize?: string) => string;
     loadFullFile: string;
     loadingFullFile: string;
@@ -404,6 +410,44 @@ export interface Translations {
     goalFailed: string;
     goalTooLong: string;
     goalLengthCounter: string;
+    goalBar: {
+      regionLabel: string;
+      inProgress: string;
+      stopped: string;
+      waitingForYou: string;
+      waiting: string;
+      paused: string;
+      autoContinuedOnce: string;
+      autoContinuedMany: string;
+      details: string;
+      hideDetails: string;
+      noteLabel: string;
+      codeLabel: string;
+      assumptionTooltip: string;
+      announce: string;
+      editLocked: string;
+      busy: string;
+      next: {
+        limit: string;
+        autoOff: string;
+        noProgress: string;
+        tokenCapped: string;
+        missingEvidence: string;
+        runFailed: string;
+        needsInputCard: string;
+        needsInputReply: string;
+        external: string;
+        unchecked: string;
+        unknown: string;
+        paused: string;
+      };
+      /** Why a check failed, without the "Couldn't check the goal" of its chip. */
+      uncheckedReasons: {
+        evaluatorFailed: string;
+        noDurableEndOfTurn: string;
+        threadChanged: string;
+      };
+    };
     compactSuccess: string;
     compactSkipped: string;
     compactFailed: string;
@@ -797,6 +841,37 @@ export interface Translations {
       removeCapBlocked: string;
       submit: string;
     };
+    notificationGroup: {
+      savedUnavailable: string;
+      clearSaved: string;
+      bind: string;
+      bindWecom: string;
+      bindQq: string;
+      name: string;
+      nameHint: string;
+      refresh: string;
+      bindInstructions: string;
+      generating: string;
+      bindFailed: string;
+      command: string;
+      expiresAt: string;
+      copy: string;
+      copied: string;
+      copyFailed: string;
+      newCode: string;
+      close: string;
+      label: string;
+      detailLabel: string;
+      none: string;
+      personalHint: string;
+      emptyHint: string;
+      loading: string;
+      unavailable: string;
+      unavailableHint: string;
+      unnamed: string;
+      unnamedHint: string;
+      loadFailed: string;
+    };
     form: {
       createTitle: string;
       editTitle: string;
@@ -957,6 +1032,7 @@ export interface Translations {
       invalidGoal: string;
       goalRequiresFreshThread: string;
       invalidStopCondition: string;
+      invalidNotificationGroup: string;
       invalidMaxRuns: string;
       endAtInPast: string;
       endAtBeforeFirstRun: string;
@@ -1082,12 +1158,22 @@ export interface Translations {
     settingsDisplayName: string;
     settingsDisplayNameTooLong: string;
     settingsDisplayNameHint: string;
+    settingsToolGroups: string;
+    settingsToolGroupsHint: string;
+    settingsToolGroupsAll: string;
+    settingsToolGroupsLoadFailed: string;
+    settingsToolGroupUnavailable: string;
     settingsDescription: string;
     settingsKnowledge: string;
     settingsKnowledgeHint: string;
     settingsKnowledgeReset: string;
+    settingsKnowledgeSaveToolAccess: string;
     settingsModel: string;
     settingsModelDefault: string;
+    settingsModelSwitchNeedsCatalog: string;
+    settingsReasoningUnsupported: string;
+    settingsThinkingRequiredHint: string;
+    settingsReasoningUnsupportedHint: string;
     settingsTemperature: string;
     settingsTemperatureHint: string;
     settingsMaxTokens: string;
@@ -1493,9 +1579,39 @@ export interface Translations {
       success: string;
       tool_call_missing: string;
       connection_failed: string;
+      customProvider: string;
+      apiKey: string;
+      advanced: string;
+      providerDefault: string;
+      requiredKey: string;
+      providerChanged: string;
+      missing_api_key: string;
+      authentication_failed: string;
+      response_limit: string;
+      revisionConflict: string;
+      keyOrCapabilities: string;
+      invalidModel: string;
+    };
+    users: {
+      title: string;
+      description: string;
+      adminOnly: string;
+      loading: string;
+      failed: string;
+      reload: string;
+      empty: string;
+      email: string;
+      role: string;
+      status: string;
+      active: string;
+      disabled: string;
+      disable: string;
+      enable: string;
+      updateFailed: string;
     };
     sections: {
       models: string;
+      users: string;
       account: string;
       appearance: string;
       channels: string;
@@ -1769,6 +1885,14 @@ export interface Translations {
       };
     };
     skills: {
+      diagnosticsTitle: string;
+      diagnosticsScope: string;
+      diagnosticsInvalid: string;
+      diagnosticsQuote: string;
+      diagnosticsRefresh: string;
+      diagnosticsRefreshing: string;
+      diagnosticsFailed: string;
+      diagnosticsReloadFailed: string;
       exportPrevious: string;
       exportNotices: Record<string, string>;
       exportSkill: string;
@@ -1824,6 +1948,32 @@ export interface Translations {
       testBody: string;
       notSupported: string;
       disableNotification: string;
+      channels: {
+        title: string;
+        description: string;
+        providers: {
+          feishu: string;
+          wecom: string;
+          wechat: string;
+          qq: string;
+        };
+        toggleLabel: (provider: string) => string;
+        eventsTitle: string;
+        eventsDescription: string;
+        events: {
+          run_completed: string;
+          run_failed: string;
+          human_input_requested: string;
+        };
+        eventToggleLabel: (event: string) => string;
+        loading: string;
+        saving: string;
+        loadFailed: string;
+        saveFailed: string;
+        unavailable: string;
+        empty: string;
+        retry: string;
+      };
     };
     account: {
       profileTitle: string;
@@ -1883,6 +2033,7 @@ export interface Translations {
       sso_cancelled: string;
       sso_account_exists: string;
       sso_not_allowed: string;
+      account_disabled: string;
     };
   };
 }

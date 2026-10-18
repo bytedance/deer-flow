@@ -40,6 +40,7 @@ from deerflow.agents.middlewares.clarification_middleware import ClarificationMi
 from deerflow.agents.middlewares.configured_extensions import load_configured_extension_middlewares
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
+from deerflow.agents.middlewares.model_content_compatibility_middleware import ModelContentCompatibilityMiddleware
 from deerflow.agents.middlewares.model_length_finish_reason_middleware import ModelLengthFinishReasonMiddleware
 from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
 from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
@@ -479,6 +480,7 @@ Being proactive with task management demonstrates thoroughness and ensures all r
 # MemoryMiddleware queues conversation for memory update (after TitleMiddleware)
 # ViewImageMiddleware should be before ClarificationMiddleware to inject image details before LLM
 # ToolErrorHandlingMiddleware should be before ClarificationMiddleware to convert tool exceptions to ToolMessages
+# ModelContentCompatibilityMiddleware sanitizes model-incompatible URL content blocks in the request view; register near the end so it sees the near-final message list
 # ClarificationMiddleware should be last to intercept clarification requests after model calls
 def build_middlewares(
     config: RunnableConfig,
@@ -752,6 +754,15 @@ def build_middlewares(
     if token_budget_config.enabled and resolved_app_config.token_usage.enabled:
         middlewares.append(CompletedSubagentUsageMiddleware())
 
+    # Downgrade persisted URL-sourced file/image blocks (pre-fix MCP
+    # ResourceLink results) that the Chat Completions serializer rejects, so
+    # threads bricked before the conversion-layer fix heal at read time.
+    # Request view only: state and checkpoints are never written. Appended
+    # after every built-in content transform so it sanitizes the near-final
+    # message list, and outer of the MODEL_PHYSICAL extension anchor so
+    # extensions placed there keep their final-request guarantee.
+    middlewares.append(ModelContentCompatibilityMiddleware())
+
     # Inject custom middlewares before ClarificationMiddleware
     if custom_middlewares:
         middlewares.extend(custom_middlewares)
@@ -926,7 +937,9 @@ def _complete_assembly(
     from deerflow.extensions import get_agent_build_extensions
 
     resolved_extensions = get_agent_build_extensions()
-    if not resolved_extensions.has_agent_assembly_observers:
+    from deerflow.runtime.assembly_evidence import capture_requested
+
+    if not resolved_extensions.has_agent_assembly_observers and not capture_requested():
         return LeadAgentAssembly(graph=graph, descriptor=None, effective_model=effective_model)
 
     from deerflow.agents.assembly_descriptor import build_assembly_descriptor

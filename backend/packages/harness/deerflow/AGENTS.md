@@ -33,6 +33,17 @@ Installed `lark-shared` guidance points to Capability Center > Plugins > Lark
 (`/workspace/capabilities?tab=plugins&plugin=lark`). Guidance changes bump the
 version marker; reinstalling the managed skill pack refreshes the stored text.
 
+Managed skill-pack installation holds `_lark_install_lock` while preparing a
+private tree. The final `staging_target.rename(target)` publishes the validated
+skill bodies and manifest together; extraction, guidance and manifest writes
+remain private until that boundary. A write failure leaves the previous pack
+unchanged and discards staging. Replacement moves the old target to a backup
+first and restores it on an ordinary publication error. Atomic file writes
+fsync their temporary files, but extraction writes and parent directories are
+not fsynced; this does not guarantee whole-tree durability after power loss.
+Callers own final file modes: runtime artifacts are executable, while installed
+skill bodies and manifests are made read-only for sandbox access.
+
 App registration and direct app switching replace the per-user Lark credential
 tree transactionally. Clear the old OAuth data before running `lark-cli config
 init`: on Linux that command writes the new app secret into the file-backed
@@ -48,7 +59,8 @@ storage and transfer cost bounded relative to lossless PNG. The explicit
 `browser_screenshot` tool remains PNG because it creates a user-requested
 artifact. New automatic capture entry points must reuse the shared progress
 encoding definition in `tools.py` so the byte encoding and `.jpg` suffix cannot
-drift.
+drift. `browser_screenshot` never replaces an `outputs/` file: it hard-links
+onto the first free `-N` name.
 
 ### Embedded Client (`packages/harness/deerflow/client.py`)
 
@@ -56,11 +68,12 @@ drift.
 
 **Agent Conversation**:
 - `chat(message, thread_id)` — synchronous; returns final AI text.
+- The first `values` snapshot reconciles any suffix appended to already-streamed AI text by a model wrapper; unchanged text and non-prefix replacements are not re-emitted. Later snapshots retain the same append-only rule.
 - `stream(message, thread_id)` — subscribes to LangGraph `stream_mode=["values", "messages", "custom"]` and yields `StreamEvent`:
   - `"values"` — state snapshot (title, messages, artifacts, summary_text). Always forward `summary_text` (current summary or `None`), including unchanged values/resets. Never re-emit AI text delivered via `messages`; serialized `ToolMessage` entries retain non-`None` native `artifact`
   - `"messages-tuple"` — current-turn AI text **deltas** by `id` and each tool call/result once; excludes resumed history and preserves result `artifact`
   - `"custom"` — forwarded from `StreamWriter`; DeerFlow-built-in custom events are dual-emitted through `deerflow.utils.custom_events`, so `astream_events(version="v2")` consumers also receive one `on_custom_event` with `name=payload["type"]` and the unchanged payload as `data`
-  - `"end"` — current-turn cumulative `usage`, counted once per message id
+  - `"end"` — turn `usage`: signed chunks + positive full-message remainders, deduped by id
 - **Custom-event invariant** — use `emit_custom_event` / `aemit_custom_event`, never `StreamWriter` alone. Built-in payloads require a non-empty string `type`; typeless payloads stay writer-only, absent from `astream_events`. The writer runs first and is authoritative for Gateway/Web UI/embedded clients; best-effort callbacks must not break it. Async graph hooks must await the async helper, never dispatch synchronously on a running event loop.
 - Lazy graph creation uses `create_agent()` + `build_middlewares()`.
 - Cache graphs by storage `user_id` and the unordered set of named-agent `mcp_plugins`. `stream()` materializes `user_id` before worker/loop boundaries in every auth mode.
@@ -81,6 +94,8 @@ drift.
 | Artifacts | `get_artifact(thread_id, path)` → `(bytes, mime_type)` | tuple |
 
 **Gateway differences**: Upload takes local `Path`, not `UploadFile`, rejects directories before copying, and reuses one conversion worker inside an active event loop. Artifacts return `(bytes, mime_type)`, not HTTP Response. Gateway alone deletes `.deer-flow/threads/{thread_id}` after LangGraph thread deletion; the client has no equivalent. `update_mcp_config()` and `update_skill()` invalidate the cached agent.
+
+Upload capture, filename claims and publication: [guide](uploads/AGENTS.md).
 
 **Tests**: `tests/test_client.py` is offline, including `TestGatewayConformance`.
 `tests/test_client_live.py` requires root `config.yaml`, valid API credentials,

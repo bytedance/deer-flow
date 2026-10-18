@@ -8,12 +8,14 @@ import os
 import json
 import sys
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 try:
     import requests
 except ImportError:
     # Fallback to urllib if requests not available
     import urllib.error
+    import urllib.parse
     import urllib.request
 
     class RequestsFallback:
@@ -35,7 +37,7 @@ except ImportError:
         @staticmethod
         def get(url: str, headers: dict = None, params: dict = None, timeout: int = 30):
             if params:
-                query = "&".join(f"{k}={v}" for k, v in params.items())
+                query = urllib.parse.urlencode(params)
                 url = f"{url}?{query}"
 
             req = urllib.request.Request(url, headers=headers or {})
@@ -112,10 +114,10 @@ class GitHubAPI:
             raise
 
     def get_file_content(self, owner: str, repo: str, path: str) -> str:
-        """Get content of a specific file."""
+        """Get content of a file using its raw repository-relative path."""
         try:
             return self._get(
-                f"/repos/{owner}/{repo}/contents/{path}",
+                f"/repos/{owner}/{repo}/contents/{quote(path, safe='/')}",
                 accept="application/vnd.github.raw",
             )
         except Exception as e:
