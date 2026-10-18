@@ -9,7 +9,7 @@ from typing import Any
 from deerflow.knowledge import KnowledgeCapabilities, KnowledgeSource, RetrievalHit, RetrievalResult
 from deerflow.knowledge.sources import truncate as _truncate
 
-CAPABILITIES = KnowledgeCapabilities(operations=frozenset({"search", "sources"}))
+CAPABILITIES = KnowledgeCapabilities(operations=frozenset({"search", "sources", "catalog", "documents", "dataset_filter", "document_filter"}))
 
 
 def normalize_retrieval_result(result: Mapping[str, Any], *, dataset_names_by_id: Mapping[str, str]) -> RetrievalResult:

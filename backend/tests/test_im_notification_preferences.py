@@ -368,3 +368,55 @@ async def test_public_wechat_connection_metadata_omits_legacy_context_token(repo
     response = await channel_connections.get_channel_connections(request)
     assert response.connections[0].metadata == {"chat_type": "p2p"}
     assert row["metadata"]["context_token"] == "private-routing-token"
+
+
+@pytest.mark.anyio
+async def test_runtime_event_preferences_default_off_and_cancel_only_matching_runtime_backlog(repositories):
+    preferences, deliveries = repositories
+    assert await preferences.get_event_preferences("alice") == {
+        "run_completed": False,
+        "run_failed": False,
+        "human_input_requested": False,
+    }
+    updated = await preferences.patch("alice", {"run_completed": True, "human_input_requested": True})
+    assert updated["run_completed"] is True
+    assert updated["human_input_requested"] is True
+    assert "run_failed" not in updated
+    assert await preferences.get_event_preferences("alice") == {
+        "run_completed": True,
+        "run_failed": False,
+        "human_input_requested": True,
+    }
+
+    scheduled_row = await enqueue(deliveries, suffix="sched")
+    runtime_completed = await deliveries.enqueue(
+        source_kind="run",
+        source_key="run-1",
+        provider="feishu",
+        target="recipient-rt-1",
+        owner_user_id="alice",
+        event="run_completed",
+        run_id="run-1",
+        payload={"source_kind": "run"},
+    )
+    runtime_input = await deliveries.enqueue(
+        source_kind="human_input_request",
+        source_key="run-2:call-1",
+        provider="feishu",
+        target="recipient-rt-2",
+        owner_user_id="alice",
+        event="human_input_requested",
+        run_id="run-2",
+        payload={"source_kind": "human_input_request"},
+    )
+
+    # Disabling `run_completed` cancels the pending runtime `run_completed` notice,
+    # but leaves scheduled-task `run_completed` and runtime `human_input_requested` untouched.
+    await preferences.patch("alice", {"run_completed": False})
+    async with deliveries.session_factory() as session:
+        sched = await session.get(NotificationDeliveryRow, scheduled_row["id"])
+        rt_done = await session.get(NotificationDeliveryRow, runtime_completed["id"])
+        rt_input = await session.get(NotificationDeliveryRow, runtime_input["id"])
+        assert sched.status == "pending"
+        assert (rt_done.status, rt_done.last_error) == ("failed", "disabled_by_owner")
+        assert rt_input.status == "pending"

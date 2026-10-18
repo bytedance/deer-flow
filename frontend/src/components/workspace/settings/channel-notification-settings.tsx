@@ -10,9 +10,10 @@ import { useAuth } from "@/core/auth/AuthProvider";
 import { listChannelProviders } from "@/core/channels/api";
 import {
   loadChannelNotificationPreferences,
+  notificationEventIds,
   notificationProviderIds,
   updateChannelNotificationPreference,
-  type NotificationProviderId,
+  type NotificationPreferenceKey,
 } from "@/core/channels/notification-preferences";
 import { useI18n } from "@/core/i18n/hooks";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
@@ -51,26 +52,26 @@ function UserChannelNotifications({ userId }: { userId: string }) {
     retry: false,
     gcTime: 0,
   });
-  const [saving, setSaving] = useState<NotificationProviderId | null>(null);
+  const [saving, setSaving] = useState<NotificationPreferenceKey | null>(null);
   const [saveFailed, setSaveFailed] = useState(false);
   const saveRequest = useRef<AbortController | null>(null);
   useEffect(() => () => saveRequest.current?.abort(), []);
 
-  async function save(provider: NotificationProviderId, enabled: boolean) {
+  async function save(key: NotificationPreferenceKey, enabled: boolean) {
     if (
       saveRequest.current ||
       !query.data ||
-      query.data.preferences[provider] === enabled
+      Boolean(query.data.preferences[key]) === enabled
     )
       return;
     const request = new AbortController();
     saveRequest.current = request;
-    setSaving(provider);
+    setSaving(key);
     setSaveFailed(false);
     try {
       const preferences = await updateChannelNotificationPreference(
         userId,
-        provider,
+        key,
         enabled,
         request.signal,
       );
@@ -149,6 +150,33 @@ function UserChannelNotifications({ userId }: { userId: string }) {
           />
         </div>
       ))}
+      {providers.length > 0 && (
+        <div className="border-border/60 space-y-3 border-t pt-3">
+          <div className="space-y-1">
+            <p className="text-sm font-medium">{text.eventsTitle}</p>
+            <p className="text-muted-foreground text-xs">
+              {text.eventsDescription}
+            </p>
+          </div>
+          {notificationEventIds.map((event) => (
+            <div
+              key={event}
+              className="flex items-center justify-between gap-4"
+            >
+              <label htmlFor={`notify-event-${event}`} className="text-sm">
+                {text.events[event]}
+              </label>
+              <Switch
+                id={`notify-event-${event}`}
+                aria-label={text.eventToggleLabel(text.events[event])}
+                checked={Boolean(preferences[event])}
+                disabled={saving !== null || query.isFetching}
+                onCheckedChange={(enabled) => void save(event, enabled)}
+              />
+            </div>
+          ))}
+        </div>
+      )}
       {saving && (
         <p role="status" className="text-muted-foreground text-sm">
           {text.saving}

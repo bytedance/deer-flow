@@ -81,16 +81,36 @@ def execution_stdout(execution: Any) -> str:
 
 def format_execution(execution: Any) -> str:
     """Combine stdout, result text, and stderr using DeerFlow's string contract."""
-    output = execution_stdout(execution)
-    result = _join_event_text(item.text for item in getattr(execution, "result", []) if getattr(item, "text", None) is not None)
-    output = _append_output(output, result)
-    stderr = _join_event_text(message.text for message in getattr(getattr(execution, "logs", None), "stderr", []))
-    output = _append_output(output, stderr)
+    output = execution_body(execution)
     error = getattr(execution, "error", None)
     if error is not None:
         detail = f"{getattr(error, 'name', type(error).__name__)}: {getattr(error, 'value', error)}"
         output = _append_output(output, detail)
     return output
+
+
+def execution_body(execution: Any) -> str:
+    """Combine the command's own stdout, result text and stderr.
+
+    Excludes the error detail so a caller that reports the failure itself (the
+    timeout branch) can present the partial output without a second, rawer copy
+    of the same failure underneath it.
+    """
+    output = execution_stdout(execution)
+    result = _join_event_text(item.text for item in getattr(execution, "result", []) if getattr(item, "text", None) is not None)
+    output = _append_output(output, result)
+    stderr = _join_event_text(message.text for message in getattr(getattr(execution, "logs", None), "stderr", []))
+    return _append_output(output, stderr)
+
+
+def _is_timeout_execution(execution: Any, exit_code: int | None) -> bool:
+    """Recognize an explicit command deadline, not an ambiguous signal kill.
+
+    The SDK leaves exit_code unset when the error value is nonnumeric. A
+    bare -1 only indicates signal termination and cannot prove a timeout.
+    """
+    error = getattr(execution, "error", None)
+    return exit_code is None and getattr(error, "name", None) == "CommandExecError" and getattr(error, "value", None) == "context deadline exceeded"
 
 
 class OpenSandboxSandbox(Sandbox):
@@ -254,8 +274,15 @@ class OpenSandboxSandbox(Sandbox):
         except Exception as exc:
             logger.error("Failed to execute command in OpenSandbox %s: %s", self.id, exc)
             return f"Error: {exc}"
-        output = format_execution(execution)
         exit_code = getattr(execution, "exit_code", None)
+        # Command deadlines arrive as execution error events, not builtin
+        # TimeoutError. Normalize only the explicit deadline result; transport
+        # errors, launch failures and signal-only exits keep their own details.
+        if _is_timeout_execution(execution, exit_code):
+            body = execution_body(execution)
+            message = "Error: command timed out\nExit Code: 124"
+            return f"{body}\n{message}" if body else message
+        output = format_execution(execution)
         if exit_code is None:
             detail = output or "no completion or error event"
             return f"Error: OpenSandbox command completed without an exit code: {detail}"

@@ -11,7 +11,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import HumanMessage
 from langgraph.runtime import Runtime
 
-from deerflow.agents.middlewares.message_utils import is_genuine_user_message
+from deerflow.agents.middlewares.message_utils import genuine_user_turn_id, has_ai_response_after_latest_user_message, latest_genuine_user_message
 from deerflow.agents.middlewares.tool_promotion_audit_middleware import record_tool_promotion
 from deerflow.config.tool_search_config import clamp_auto_promote_top_k
 from deerflow.utils.messages import get_original_user_content_text
@@ -80,10 +80,7 @@ class McpRoutingMiddleware(AgentMiddleware[AgentState]):
         request, so ``is_genuine_user_message`` — not ``is_real_user_message``,
         which drops every ``hide_from_ui`` message — decides this.
         """
-        for message in reversed(messages):
-            if is_genuine_user_message(message):
-                return message
-        return None
+        return latest_genuine_user_message(messages)
 
     def _matched_names(self, state: Mapping[str, Any] | None) -> list[str]:
         if not self._catalog_hash or not self._routing_index:
@@ -113,8 +110,13 @@ class McpRoutingMiddleware(AgentMiddleware[AgentState]):
         names = self._matched_names(state)
         if not names:
             return None
+        messages = list((state or {}).get("messages") or [])
+        turn_id = genuine_user_turn_id(messages)
         promoted = (state or {}).get("promoted")
-        raw_promoted_names = promoted.get("names") if isinstance(promoted, Mapping) and promoted.get("catalog_hash") == self._catalog_hash else None
+        same_catalog = isinstance(promoted, Mapping) and promoted.get("catalog_hash") == self._catalog_hash
+        migrate_legacy = same_catalog and turn_id is not None and promoted.get("turn_id") is None and has_ai_response_after_latest_user_message(messages)
+        same_scope = same_catalog and (turn_id is None or promoted.get("turn_id") == turn_id or migrate_legacy)
+        raw_promoted_names = promoted.get("names") if same_scope else None
         already_promoted = {name for name in raw_promoted_names if isinstance(name, str)} if isinstance(raw_promoted_names, Sequence) and not isinstance(raw_promoted_names, (str, bytes)) else set()
         record_tool_promotion(
             runtime,
@@ -129,12 +131,15 @@ class McpRoutingMiddleware(AgentMiddleware[AgentState]):
             (self._catalog_hash or "")[:8],
             names,
         )
-        return {
-            "promoted": {
-                "catalog_hash": self._catalog_hash,
-                "names": names,
-            }
+        # Adding turn_id replaces the legacy envelope in merge_promoted, so
+        # carry its same-turn search names through before the filter runs.
+        promoted_update = {
+            "catalog_hash": self._catalog_hash,
+            "names": sorted(already_promoted | set(names)) if migrate_legacy else names,
         }
+        if turn_id is not None:
+            promoted_update["turn_id"] = turn_id
+        return {"promoted": promoted_update}
 
     @override
     def before_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:

@@ -335,3 +335,41 @@ test("a late preference load cannot replace the next viewer's settings", async (
       .getAttribute("aria-checked"),
   ).toBe("true");
 });
+
+test("renders default-off task & goal event switches and saves an event toggle", async () => {
+  const original = rs.mocked(fetcher).getMockImplementation()!;
+  rs.mocked(fetcher).mockImplementation((url, init) =>
+    init?.method === "PATCH"
+      ? Promise.resolve(
+          json({
+            ...defaults,
+            run_completed: false,
+            run_failed: false,
+            human_input_requested: true,
+          }),
+        )
+      : original(url, init),
+  );
+  mount();
+  for (const label of [
+    "Task or goal completed notifications",
+    "Task or goal failed notifications",
+    "Needs your input notifications",
+  ]) {
+    const toggle = await screen.findByRole("switch", { name: label });
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+  }
+  const inputToggle = screen.getByRole("switch", {
+    name: "Needs your input notifications",
+  });
+  fireEvent.click(inputToggle);
+  await waitFor(() =>
+    expect(inputToggle.getAttribute("aria-checked")).toBe("true"),
+  );
+  const [, request] = rs
+    .mocked(fetcher)
+    .mock.calls.find(([, init]) => init?.method === "PATCH")!;
+  expect(JSON.parse(request!.body as string)).toEqual({
+    human_input_requested: true,
+  });
+});

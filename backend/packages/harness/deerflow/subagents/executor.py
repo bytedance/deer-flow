@@ -590,13 +590,18 @@ def _harvest_bash_executions(
             meta_status = str(meta.get("status") or getattr(message, "status", "success") or "success")
             content = message.content if isinstance(message.content, str) else json.dumps(message.content, sort_keys=True, default=str)
             status, status_marker = _bash_evidence_status(content, meta_status)
+            output_tail = content[-_BASH_EVIDENCE_OUTPUT_TAIL_CHARS:]
+            if len(content) > _BASH_EVIDENCE_OUTPUT_TAIL_CHARS and content[-_BASH_EVIDENCE_OUTPUT_TAIL_CHARS - 1] != "\n":
+                # A clipped test name/log line can look like a summary after
+                # losing its reporter prefix. Retain only complete lines.
+                output_tail = output_tail.partition("\n")[2]
             executions.append(
                 {
                     "tool_call_id": tool_call_id,
                     "tool_name": name,
                     "command": command,
                     "command_truncated": command_truncated,
-                    "output_tail": content[-_BASH_EVIDENCE_OUTPUT_TAIL_CHARS:],
+                    "output_tail": output_tail,
                     "status": status,
                     "status_marker": status_marker,
                 }
@@ -1818,6 +1823,9 @@ class SubagentExecutor:
             context[_SANDBOX_LEASE_OWNER_CONTEXT_KEY] = sandbox_lease_owner_id
             context[_SANDBOX_COMMAND_SCOPE_CONTEXT_KEY] = sandbox_lease_owner_id
             execution_context = context
+            from deerflow.sandbox.lease import register_sandbox_prewarm_cleanup
+
+            register_sandbox_prewarm_cleanup(context)
             context["agent_id"] = self.config.name
             if self.loop_detection_recorder is not None:
                 context[LOOP_DETECTION_RECORDER_CONTEXT_KEY] = self.loop_detection_recorder
@@ -2050,13 +2058,11 @@ class SubagentExecutor:
             # usage before the outer wrapper chooses CANCELLED or TIMED_OUT.
             if collector is not None:
                 result.update_token_usage_records(collector.snapshot_records())
-            if execution_context is not None and execution_context.get("sandbox_id") is not None:
+            if execution_context is not None:
                 try:
-                    from deerflow.sandbox import get_sandbox_provider
-                    from deerflow.sandbox.lease import get_sandbox_lease_manager
+                    from deerflow.sandbox.lease import release_sandbox_execution_lease_async
 
-                    provider = get_sandbox_provider()
-                    await get_sandbox_lease_manager(provider).release_async(sandbox_lease_owner_id)
+                    await release_sandbox_execution_lease_async(execution_context)
                 except Exception:
                     logger.warning(
                         "[trace=%s] Failed to release sandbox execution lease for subagent %s",

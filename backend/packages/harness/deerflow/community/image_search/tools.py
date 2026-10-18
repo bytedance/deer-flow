@@ -147,6 +147,7 @@ async def image_search_tool(
                 "title": title if isinstance(title, str) else "",
                 "image_url": image_url,
                 "thumbnail_url": thumbnail_url,
+                "source_url": safe_public_result_url(row.get("url")),
             }
         )
 

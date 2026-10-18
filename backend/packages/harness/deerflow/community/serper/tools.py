@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 import httpx
 from langchain.tools import tool
 
+from deerflow.community.search_max_results import coerce_max_results
 from deerflow.community.search_time_range import SearchTimeRange
 from deerflow.community.url_safety import safe_public_result_url as _safe_public_url
 from deerflow.config import get_app_config
@@ -53,15 +54,18 @@ def _get_api_key(tool_name: str, *, extras: Mapping[str, object] | None = None) 
     return None
 
 
-def _coerce_max_results(value: object, default: int = 5, max_allowed: int = _SERPER_MAX_RESULTS) -> int:
-    """Coerce config/parameter input into a bounded positive result count."""
-    try:
-        count = int(value)
-    except (TypeError, ValueError, OverflowError):
-        return default
-    if count <= 0:
-        return default
-    return min(count, max_allowed)
+def _count_for_request(value: object) -> int:
+    """Coerce ``max_results`` via the shared owner, then mirror Serper's clamp.
+
+    ``deerflow.community.search_max_results.coerce_max_results`` owns what
+    "invalid" means (booleans, non-integral floats and ``OverflowError`` all
+    fall back to the default); the 10-result cap stays here because clamping
+    policy is deliberately per-provider.
+    """
+    return min(
+        coerce_max_results(value, provider="Serper", logger=logger),
+        _SERPER_MAX_RESULTS,
+    )
 
 
 def _missing_key_error(query: str, tool_name: str) -> str:
@@ -90,7 +94,14 @@ def _response_items(data: dict, field: str, query: str) -> tuple[list[dict] | No
     if not isinstance(items, list):
         logger.error("Serper returned unexpected '%s' payload type: %s", field, type(items).__name__)
         return None, _unexpected_format_error(query)
-    return [item for item in items if isinstance(item, dict)], None
+    usable = [item for item in items if isinstance(item, dict)]
+    if items and not usable:
+        # Same containment rule as groundroute/tavily: a populated container
+        # holding nothing usable is malformed, not an empty search. Reporting
+        # "No results found" tells the agent the query matched nothing.
+        logger.error("Serper returned '%s' with no usable result objects", field)
+        return None, _unexpected_format_error(query)
+    return usable, None
 
 
 def _clean_query(query: str) -> str:
@@ -385,7 +396,7 @@ def web_search_tool(query: str, max_results: int = 5, time_range: SearchTimeRang
     config = get_app_config().get_tool_config("web_search")
     if config is not None and "max_results" in config.model_extra:
         max_results = config.model_extra.get("max_results", max_results)
-    max_results = _coerce_max_results(max_results)
+    max_results = _count_for_request(max_results)
     query = _clean_query(query)
 
     try:
@@ -450,7 +461,7 @@ def image_search_tool(query: str, max_results: int = 5) -> str:
     config = get_app_config().get_tool_config("image_search")
     if config is not None and "max_results" in config.model_extra:
         max_results = config.model_extra.get("max_results", max_results)
-    max_results = _coerce_max_results(max_results)
+    max_results = _count_for_request(max_results)
     query = _clean_query(query)
 
     extra = config.model_extra if config is not None else {}
@@ -490,6 +501,7 @@ def image_search_tool(query: str, max_results: int = 5) -> str:
                 "title": r.get("title", ""),
                 "image_url": image_url,
                 "thumbnail_url": thumbnail_url,
+                "source_url": _safe_public_url(r.get("link")),
             }
         )
         if len(normalized_results) >= max_results:

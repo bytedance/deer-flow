@@ -9,6 +9,7 @@ import stat
 import tempfile
 import threading
 import zipfile
+from contextlib import contextmanager
 from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
@@ -31,6 +32,7 @@ from deerflow.agents.thread_state import DeltaThreadState, ThreadState
 from deerflow.client import DeerFlowClient, StreamEvent
 from deerflow.config.agents_config import AgentConfig
 from deerflow.config.authorization_config import AuthorizationConfig, AuthorizationProviderConfig
+from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
 from deerflow.config.paths import Paths
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
@@ -61,8 +63,7 @@ def mock_app_config():
     config.skills.deferred_discovery = False
     config.skills.container_path = "/mnt/skills"
     config.tool_search.enabled = False
-    config.database.checkpoint_channel_mode = "full"
-    config.database.checkpoint_delta.snapshot_frequency = 10
+    config.database = DatabaseConfig(backend="memory")
     config.authorization = AuthorizationConfig(enabled=False)
     return config
 
@@ -811,6 +812,28 @@ class TestStream:
 
         assert [event.data["content"] for event in _ai_events(events)] == ["Checking again.", "\n\n[FORCED STOP] Repeated tool calls exceeded the safety limit."]
 
+    @pytest.mark.parametrize("snapshot_text, expected_delta", [("Hello\n\n附加说明", "\n\n附加说明"), ("Hello", ""), ("Rewritten answer", "")])
+    def test_first_streamed_snapshot_preserves_text_and_metadata_once(self, client, snapshot_text, expected_delta):
+        call = {"name": "bash", "args": {"command": "ls"}, "id": "call-1"}
+        message = AIMessage(content=snapshot_text, id="ai-1", tool_calls=[call], additional_kwargs={"note": "added"})
+        agent = _make_agent_mock(
+            [
+                ("messages", (AIMessageChunk(content="Hello", id="ai-1"), {})),
+                ("messages", (AIMessageChunk(content="", id="ai-1", tool_call_chunks=[{"name": "bash", "args": '{"command":"ls"}', "id": "call-1", "index": 0}]), {})),
+                ("values", {"messages": [message]}),
+                ("values", {"messages": [message.model_copy()]}),
+            ]
+        )
+        with patch.object(client, "_ensure_agent"), patch.object(client, "_agent", agent):
+            events = list(client.stream("hi", thread_id="t-first-streamed-snapshot"))
+
+        ai_events = [event.data for event in events if event.type == "messages-tuple" and event.data.get("type") == "ai"]
+        assert "".join(event["content"] for event in ai_events) == "Hello" + expected_delta
+        first_snapshot_index = next(index for index, event in enumerate(events) if event.type == "values")
+        assert "".join(event.data.get("content", "") for event in events[:first_snapshot_index]) == "Hello" + expected_delta
+        assert [event["additional_kwargs"] for event in ai_events if event.get("additional_kwargs")] == [{"note": "added"}]
+        assert [event["tool_calls"] for event in ai_events if event.get("tool_calls")] == [[call]]
+
     def test_stream_does_not_resend_a_replacement_that_does_not_extend_the_sent_text(self, client):
         """Only appended text is sent; a rewrite of what was already sent would duplicate output."""
         sent = AIMessage(content="Let me look.", id="ai-1")
@@ -1260,6 +1283,26 @@ class TestStream:
 
 
 class TestChat:
+    @pytest.mark.parametrize("suffix", ["", "\n\n附加说明"])
+    def test_returns_text_appended_before_the_first_values_snapshot(self, client, suffix):
+        """A model wrapper can extend streamed text before the model node commits."""
+        from langchain.agents import create_agent
+        from langchain.agents.middleware import AgentMiddleware, ModelResponse
+        from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+
+        class AppendTextMiddleware(AgentMiddleware):
+            def wrap_model_call(self, request, handler):
+                response = handler(request)
+                message = response.result[0]
+                return ModelResponse(result=[message.model_copy(update={"content": message.content + suffix})])
+
+        # A stable ID connects streamed text to the first committed snapshot;
+        # id-less responses would bypass reconciliation and mask a regression.
+        model = FakeMessagesListChatModel(responses=[AIMessage(content="Hello", id="ai-1")])
+        graph = create_agent(model=model, middleware=[AppendTextMiddleware()], state_schema=ThreadState)
+        with patch.object(client, "_ensure_agent"), patch.object(client, "_agent", graph):
+            assert client.chat("hi", thread_id="t-first-snapshot") == "Hello" + suffix
+
     @pytest.mark.parametrize(
         ("events", "expected"),
         [
@@ -2744,6 +2787,46 @@ class TestSkillsManagement:
         finally:
             tmp_path.unlink()
 
+    def test_update_public_skill_enters_managed_write_before_projection(self, client, tmp_path):
+        from deerflow.skills import projection
+        from deerflow.skills.mutations import guard
+
+        skill = self._make_skill(enabled=True)
+        updated_skill = self._make_skill(enabled=False)
+        config_file = tmp_path / "extensions_config.json"
+        config_file.write_text('{"skills": {}}', encoding="utf-8")
+        events = []
+
+        @contextmanager
+        def record_managed_write(*_args, **_kwargs):
+            events.append("managed-enter")
+            try:
+                yield
+            finally:
+                events.append("managed-exit")
+
+        @contextmanager
+        def record_projection(*_args, **_kwargs):
+            events.append("projection-enter")
+            try:
+                yield
+            finally:
+                events.append("projection-exit")
+
+        with (
+            patch(
+                "deerflow.skills.storage.local_skill_storage.LocalSkillStorage.load_skills",
+                side_effect=[[skill], [skill], [updated_skill], [updated_skill]],
+            ),
+            patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
+            patch("deerflow.client.reload_extensions_config"),
+            patch.object(guard, "managed_global_state_write", record_managed_write),
+            patch.object(projection, "skill_projection_mutation", record_projection),
+        ):
+            client.update_skill("test-skill", enabled=False)
+
+        assert events == ["managed-enter", "projection-enter", "projection-exit", "managed-exit"]
+
     def test_update_skill_persists_state_when_source_omits_skills(self, client):
         skill = self._make_skill(enabled=True)
         updated_skill = self._make_skill(enabled=False)
@@ -2791,6 +2874,7 @@ class TestSkillsManagement:
         skill = self._make_skill(enabled=True)
         skill.category = category
         storage = MagicMock()
+        storage._app_config = client._app_config
         storage.load_skills.side_effect = [[skill], [self._make_skill(enabled=False)]]
 
         with (

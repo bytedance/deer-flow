@@ -47,10 +47,17 @@ export async function listChannelConnections(): Promise<ChannelConnection[]> {
 
 export async function connectChannelProvider(
   provider: ChannelProviderId,
+  options?: { groupName?: string },
 ): Promise<ChannelConnectResponse> {
   const response = await fetch(
     channelsUrl(`/${encodeURIComponent(provider)}/connect`),
-    { method: "POST" },
+    options?.groupName
+      ? {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ group_name: options.groupName }),
+        }
+      : { method: "POST" },
   );
   if (!response.ok) {
     await throwGatewayApiError(

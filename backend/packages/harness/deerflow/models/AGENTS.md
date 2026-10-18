@@ -41,6 +41,7 @@ while handing off to the wait queue.
 - Config values starting with `$` resolved as environment variables
 - Missing provider modules surface actionable install hints from reflection resolvers (for example `uv add langchain-google-genai`)
 - Optional `models[].request_admission` attaches a process-shared `BaseRateLimiter` at the model factory. Identical explicit groups share one FIFO across model instances, threads and event loops; implicit groups use the configured model name. Policies are immutable once registered and conflicting settings fail construction. A monotonic minimum interval spaces requests without idle-time burst credit; bounded waiters poll without occupying executor threads and unregister in `finally`. The factory strips the policy from provider kwargs and sets exposed SDK `max_retries=0` so middleware retries re-enter admission. This limits model invocations, not tokens or a distributed provider account; custom providers bypassing BaseChatModel hooks are outside the contract. Tests: `test_model_request_admission.py` and `test_model_request_admission_fifo_atomic.py`.
+- `_apply_openai_responses_api_default` routes the gpt-6 family through the OpenAI Responses API by default (`use_responses_api: true` + `output_version: responses/v1`), because the locked `langchain-openai==1.2.1` lacks a gpt-6 routing branch and OpenAI rejects function tools for gpt-6 on `/v1/chat/completions`. Gated on `issubclass(model_class, BaseChatOpenAI)` and a `gpt-6`-prefixed `model`. An explicit `use_responses_api` always wins; custom endpoints (`base_url`/`openai_api_base` or a set `OPENAI_BASE_URL`/`OPENAI_API_BASE` environment variable) and `AzureChatOpenAI` are skipped (they may lack `/responses`); an explicit `output_version` alone is preserved while `use_responses_api: true` is still injected; injection is logged. Regression cases live in `tests/test_model_factory.py` (issue #6841).
 
 ### Reasoning Capability Contract (`packages/harness/deerflow/models/reasoning.py`)
 
@@ -107,6 +108,16 @@ the provider default. Wrapped dictionaries and converted `BaseTool` schemas
 share `_convert_tools` so binding cannot discard the setting. Keep caller
 schemas and definitions unchanged. Offline sync/async request and tool-followup
 coverage: `tests/test_codex_tool_strict.py`.
+
+Codex forwards `tool_choice` from `bind_tools` and direct sync/async calls.
+Normalize `any`/`True` to `required`, named or wrapped function selections to
+Responses' flat `{type: function, name: ...}` shape, and omit `None`/`False`.
+Validate bound selections at `bind_tools`; validate invocation overrides again
+before HTTP. `required` needs at least one converted function tool, and a named
+selection must match a converted function. `auto` and `none` remain valid without
+tools. Per-call choices override bound choices without mutating caller definitions
+or history. Offline HTTP serialization and tool-followup coverage:
+`tests/test_codex_tool_choice.py`.
 
 ### Codex SSE termination (`packages/harness/deerflow/models/openai_codex_provider.py`)
 

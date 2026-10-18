@@ -10,8 +10,8 @@ from deerflow.community.url_safety import safe_public_result_url
 @pytest.mark.asyncio
 async def test_image_search_drops_unsafe_result_urls() -> None:
     rows = [
-        {"title": "safe", "image": "https://images.example/full.jpg", "thumbnail": "https://images.example/thumb.jpg"},
-        {"title": "unsafe original", "image": "http://127.0.0.1/private", "thumbnail": "https://images.example/thumb2.jpg"},
+        {"title": "safe", "image": "https://images.example/full.jpg", "thumbnail": "https://images.example/thumb.jpg", "url": "https://images.example/page"},
+        {"title": "unsafe original", "image": "http://127.0.0.1/private", "thumbnail": "https://images.example/thumb2.jpg", "url": "http://10.0.0.1/page"},
         {"title": "unsafe thumbnail", "image": "https://images.example/full3.jpg", "thumbnail": "javascript:alert(1)"},
         {"title": "both unsafe", "image": "http://2130706433/private", "thumbnail": "http://localhost/thumb"},
     ]
@@ -21,9 +21,9 @@ async def test_image_search_drops_unsafe_result_urls() -> None:
 
     assert result["total_results"] == 3
     assert result["results"] == [
-        {"title": "safe", "image_url": "https://images.example/full.jpg", "thumbnail_url": "https://images.example/thumb.jpg"},
-        {"title": "unsafe original", "image_url": "", "thumbnail_url": "https://images.example/thumb2.jpg"},
-        {"title": "unsafe thumbnail", "image_url": "https://images.example/full3.jpg", "thumbnail_url": ""},
+        {"title": "safe", "image_url": "https://images.example/full.jpg", "thumbnail_url": "https://images.example/thumb.jpg", "source_url": "https://images.example/page"},
+        {"title": "unsafe original", "image_url": "", "thumbnail_url": "https://images.example/thumb2.jpg", "source_url": ""},
+        {"title": "unsafe thumbnail", "image_url": "https://images.example/full3.jpg", "thumbnail_url": "", "source_url": ""},
     ]
 
 

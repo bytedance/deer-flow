@@ -259,8 +259,8 @@ async def test_execute_item_polls_completion_without_waiting_for_lease_renewal(m
             raise AssertionError("a task that completes between polls need not expose running")
 
         async def renew_item_lease(self, *_args, **_kwargs):
-            # Exactly one pre-launch revalidation is expected; the poll loop
-            # must not renew for a task that completes between polls.
+            # Renew before assembly and revalidate before dispatch; neither
+            # heartbeat nor polling should delay a task completing between polls.
             self.renews = getattr(self, "renews", 0) + 1
             return {"valid": True, "cancel_requested": False}
 
@@ -306,7 +306,7 @@ async def test_execute_item_polls_completion_without_waiting_for_lease_renewal(m
 
     assert repository.finalized is not None
     assert repository.finalized["result"] == "fast result"
-    assert repository.renews == 1
+    assert repository.renews == 2
 
 
 class _Registry:
@@ -602,7 +602,7 @@ async def test_cancel_during_tool_assembly_skips_launch(monkeypatch, tmp_path) -
         )
         claimed = await repository.claim_items(
             now=datetime.now(UTC),
-            lease_owner=service._lease_owner,
+            lease_owner="assembly-claim",
             lease_seconds=60,
             limit=10,
         )
@@ -648,7 +648,7 @@ async def test_cancel_during_tool_assembly_skips_launch(monkeypatch, tmp_path) -
             ),
         )
 
-        item_task = asyncio.create_task(service._execute_item(item))
+        item_task = asyncio.create_task(service._execute_item(item, lease_owner="assembly-claim"))
         assert await asyncio.to_thread(assembly_started.wait, 15)
 
         cancelled = await service.cancel_batch(batch_id="batch-1", user_id="user-1")

@@ -233,10 +233,54 @@ async def test_auth_refresh_keeps_proactive_payload_and_no_passive_budget():
         assert not channel._replies
 
 
-async def test_group_notification_remains_unsupported():
-    async with connected() as (channel, requests):
-        with pytest.raises(NotImplementedError):
-            await channel.send_group_notification_for_owner(owner_user_id="owner", target="group-binding", text_markdown="Done")
+def group_binding(**overrides):
+    return {
+        "id": "group-binding",
+        "owner_user_id": "owner",
+        "provider": "qq",
+        "status": "connected",
+        "external_account_id": "member-openid",
+        "workspace_id": "app1:group:group-openid",
+        "metadata": {"chat_type": "group", "group_openid": "group-openid"},
+        **overrides,
+    }
+
+
+async def test_group_notification_serializes_to_group_endpoint_without_passive_context():
+    async with connected(bindings=[group_binding()]) as (channel, requests):
+        await channel.send_group_notification_for_owner(
+            owner_user_id="owner",
+            target="group-binding",
+            text_markdown="任务已完成。\nOpen DeerFlow for details.",
+        )
+        channel._connection_repo.list_connections.assert_awaited_once_with("owner")
+        assert len(requests) == 2
+        _token, message = requests
+        assert str(message.url) == "https://api.sgroup.qq.com/v2/groups/group-openid/messages"
+        assert json.loads(message.content) == {"msg_type": 0, "content": "任务已完成。\nOpen DeerFlow for details."}
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"id": "other-binding"},
+        {"owner_user_id": "other-owner"},
+        {"provider": "feishu"},
+        {"status": "revoked"},
+        {"workspace_id": "another-app:group:group-openid"},
+        {"workspace_id": "app1:c2c", "metadata": {"chat_type": "c2c"}},
+        {"metadata": {"chat_type": "c2c"}},
+        {"metadata": {"chat_type": "group", "group_openid": "other-group"}},
+    ],
+)
+async def test_group_notification_refuses_invalid_or_unowned_binding_without_private_fallback(override):
+    async with connected(bindings=[binding(), group_binding(**override)]) as (channel, requests):
+        with pytest.raises(QQAPIError, match="group.*connected"):
+            await channel.send_group_notification_for_owner(
+                owner_user_id="owner",
+                target="group-binding",
+                text_markdown="Done",
+            )
         assert requests == []
 
 
@@ -258,3 +302,39 @@ async def test_notification_cancellation_propagates_without_retry():
             with pytest.raises(asyncio.CancelledError):
                 await task
         assert len(requests) == 1
+
+
+async def test_qq_group_bind_does_not_use_raw_ids_as_display_names():
+    from unittest.mock import AsyncMock
+
+    async with connected() as (channel, _requests):
+        channel._connection_repo.consume_oauth_state = AsyncMock(return_value={"owner_user_id": "owner"})
+        channel._connection_repo.upsert_connection = AsyncMock(return_value={"id": "bound"})
+        await channel._handle_inbound(
+            {
+                "t": "GROUP_AT_MESSAGE_CREATE",
+                "d": {
+                    "group_openid": "group-open-1",
+                    "author": {"member_openid": "member-1"},
+                    "id": "m-1",
+                    "content": "/connect code-1",
+                },
+            }
+        )
+        await channel._handle_inbound(
+            {
+                "t": "GROUP_AT_MESSAGE_CREATE",
+                "d": {
+                    "group_openid": "group-open-2",
+                    "author": {"member_openid": "member-1"},
+                    "id": "m-2",
+                    "content": "/connect code-2",
+                },
+            }
+        )
+        calls = channel._connection_repo.upsert_connection.await_args_list
+        assert len(calls) == 2
+        assert calls[0].kwargs["workspace_id"] == "app1:group:group-open-1"
+        assert calls[0].kwargs["workspace_name"] is None
+        assert calls[1].kwargs["workspace_id"] == "app1:group:group-open-2"
+        assert calls[1].kwargs["workspace_name"] is None

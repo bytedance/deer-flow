@@ -10,6 +10,28 @@ from pydantic import ValidationError
 from deerflow.knowledge import KnowledgeSource, RetrievalHit, RetrievalResult, format_result, sources_from_messages
 
 
+@pytest.mark.parametrize("length", [256, 257])
+def test_catalog_and_scope_share_opaque_id_length_limit(length):
+    from deerflow.knowledge import RetrievalCatalogItem
+    from deerflow.knowledge_scope import canonicalize_knowledge_scope
+
+    dataset_id = "界" * length
+    document_id = "😀" * length
+    scope = {"version": 1, "mode": "selected", "dataset_ids": [dataset_id], "document_filters": [{"dataset_id": dataset_id, "document_ids": [document_id]}]}
+    if length == 256:
+        assert RetrievalCatalogItem(id=dataset_id, name="Dataset").id == dataset_id
+        assert RetrievalCatalogItem(id=document_id, name="Document").id == document_id
+        assert canonicalize_knowledge_scope(scope) == scope
+    else:
+        for resource_id in (dataset_id, document_id):
+            with pytest.raises(ValidationError):
+                RetrievalCatalogItem(id=resource_id, name="Resource")
+        with pytest.raises(ValidationError):
+            canonicalize_knowledge_scope(scope)
+        with pytest.raises(ValidationError):
+            canonicalize_knowledge_scope({**scope, "dataset_ids": ["valid"], "document_filters": [{"dataset_id": "valid", "document_ids": [document_id]}]})
+
+
 def test_source_schema_matches_cross_component_contract():
     from jsonschema import Draft202012Validator
 

@@ -150,7 +150,8 @@ def test_capture_writes_go_through_the_atomic_publish():
     source = inspect.getsource(browserless_tools)
 
     assert "(outputs_path / final_name).write_bytes(" not in source
-    assert "_publish_bytes_atomically(outputs_path / final_name, content)" in source
+    assert "destination.unlink(missing_ok=True)" in source
+    assert "_publish_bytes_atomically(destination, content)" in source
 
 
 def test_both_tools_share_the_atomic_publisher():
