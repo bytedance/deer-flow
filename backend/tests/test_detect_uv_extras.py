@@ -7,6 +7,8 @@ future opt-in extras) are not wiped on every restart — see Issue #2754.
 from __future__ import annotations
 
 import importlib.util
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -27,7 +29,9 @@ def isolated_cwd(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("UV_EXTRAS", raising=False)
     monkeypatch.delenv("DEER_FLOW_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("DEER_FLOW_PROJECT_ROOT", raising=False)
     monkeypatch.delenv("DEER_FLOW_STREAM_BRIDGE_REDIS_URL", raising=False)
+    monkeypatch.delenv("DEER_FLOW_SANDBOX_OWNERSHIP_REDIS_URL", raising=False)
     return tmp_path
 
 
@@ -498,3 +502,44 @@ def test_resolve_extras_root_config_takes_precedence(isolated_cwd):
     (sub / "config.yaml").write_text("database:\n  backend: postgres\n")
     # Root config.yaml is checked first, matching the precedence in serve.sh.
     assert detect.resolve_extras() == []
+
+
+@pytest.mark.parametrize("checkout_config", ["config.yaml", "backend/config.yaml", None])
+def test_resolve_extras_prefers_project_root_config(isolated_cwd, monkeypatch, checkout_config):
+    if checkout_config is not None:
+        local = isolated_cwd / checkout_config
+        local.parent.mkdir(parents=True, exist_ok=True)
+        local.write_text("database:\n  backend: sqlite\n", encoding="utf-8")
+    project = isolated_cwd / "external project"
+    project.mkdir()
+    config = project / "config.yaml"
+    config.write_text("database:\n  backend: postgres\nmodels:\n  - use: langchain_ollama:ChatOllama\n", encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_PROJECT_ROOT", str(project))
+
+    assert detect.find_config_file() == config
+    assert detect.resolve_extras() == ["ollama", "postgres"]
+    # The detector runs before dependency sync, so its CLI must work without site packages.
+    result = subprocess.run([sys.executable, "-S", str(DETECT_SCRIPT_PATH)], capture_output=True, text=True, check=True)
+    assert result.stdout == "--extra ollama --extra postgres"
+
+
+def test_resolve_extras_explicit_config_overrides_project_root(isolated_cwd, monkeypatch):
+    project = isolated_cwd / "external project"
+    project.mkdir()
+    (project / "config.yaml").write_text("database:\n  backend: postgres\n", encoding="utf-8")
+    explicit = isolated_cwd / "explicit.yaml"
+    explicit.write_text("stream_bridge:\n  type: redis\n", encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_PROJECT_ROOT", str(project))
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(explicit))
+
+    assert detect.find_config_file() == explicit
+    assert detect.resolve_extras() == ["redis"]
+
+
+def test_resolve_extras_project_without_config_keeps_legacy_fallback(isolated_cwd, monkeypatch):
+    project = isolated_cwd / "external project"
+    project.mkdir()
+    (isolated_cwd / "config.yaml").write_text("database:\n  backend: postgres\n", encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_PROJECT_ROOT", str(project))
+
+    assert detect.resolve_extras() == ["postgres"]

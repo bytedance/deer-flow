@@ -39,7 +39,7 @@ def plugin_client():
     @app.middleware("http")
     async def identity(request, call_next):
         request.state.user = SimpleNamespace(id="user-1", system_role=role["value"])
-        request.state.auth_source = "session"
+        request.state.auth_source = role.get("source", "session")
         return await call_next(request)
 
     setattr(app.state, EXTENSION_PRINCIPAL_RESOLVER_KEY, lambda request: ExtensionPrincipal("user-1", is_admin=role["value"] == "admin"))
@@ -70,6 +70,7 @@ def test_one_card_and_deployment_owned_switch(plugin_client):
     role["value"] = "member"
     assert http.post(url + "/actions/check", json={"text": "hello"}).json() == {"length": 5, "limit": 20}
     assert calls[0][1].principal.user_id == "user-1"
+    assert calls[0][1].interaction == "session"
     assert http.post(url + "/actions/check", json={"text": "old-account"}, headers={"x-deerflow-plugin-viewer": "other-account"}).status_code == 409
     with pytest.raises(TypeError):
         calls[0][1].settings["enabled"] = False
@@ -150,3 +151,16 @@ def test_conflicting_manifest_cannot_half_register(plugin_client):
             with pytest.raises(ValueError):
                 registry.plugin(invalid)
             assert registry.mark() == mark
+
+
+@pytest.mark.parametrize("source", ["internal", "auth_disabled", "pat", None])
+def test_action_interaction_cannot_be_forged_in_payload(plugin_client, source):
+    http, role, calls, plugin = plugin_client
+    registry = ExtensionRegistry()
+    with registry.attributed_to("test:install"):
+        registry.plugin(replace(plugin, enabled=True))
+    http.app.state.extensions = registry.build()
+    role["source"] = source
+    response = http.post("/api/plugins/community.check/actions/check", json={"text": "x", "interaction": "session"})
+    assert response.status_code == 200
+    assert calls[-1][1].interaction == "other"

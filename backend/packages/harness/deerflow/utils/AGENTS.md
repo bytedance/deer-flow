@@ -106,8 +106,9 @@ and preserve the generic `+xml` rule.
 
 ### Conversion Worker Ownership
 
-`convert_file_to_markdown` drains large-file conversion workers across caller
-cancellation before returning control to source-file cleanup. Keep conversion
+`convert_file_to_markdown` offloads parsing for every source size: compressed
+Office files can require seconds of work below 1 MiB. It drains conversion workers
+across caller cancellation before returning control to source-file cleanup. Keep conversion
 inside `await_drained`, including when the worker fails or cancellation repeats;
 upload ingestion owns a temporary source that it removes in `finally`. Coverage
 lives in `tests/test_file_conversion_cancellation.py`.

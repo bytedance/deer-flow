@@ -1,0 +1,60 @@
+name: Windows Live Test Policy
+
+# These offline policy tests spawn pytest children that collect live tests.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 6 * * 1'
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - '.github/workflows/backend-windows-live-policy.yml'
+      - 'backend/tests/test_client_live_policy.py'
+      - 'backend/tests/test_client_live.py'
+      - 'backend/pyproject.toml'
+      - 'backend/uv.lock'
+
+concurrency:
+  group: windows-live-policy-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  windows-live-policy:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          # Must match backend/Dockerfile's UV_IMAGE tag.
+          version: '0.11.1'
+
+      - name: Install backend dependencies
+        run: uv sync --locked --group dev
+
+      - name: Check isolated child environment and live-test collection policy
+        # Explicit nodes include all four collection cases and avoid make.
+        run: >-
+          uv run python -m pytest
+          tests/test_client_live_policy.py::test_child_env_stays_isolated_but_bootable_on_windows
+          tests/test_client_live_policy.py::test_config_alone_does_not_enable_live_collection
+          tests/test_client_live_policy.py::test_explicit_opt_in_collects_live_tests
+          tests/test_client_live_policy.py::test_ci_blocks_live_collection_even_with_opt_in
+          tests/test_client_live_policy.py::test_opt_in_without_config_reports_missing_config
+          -q
