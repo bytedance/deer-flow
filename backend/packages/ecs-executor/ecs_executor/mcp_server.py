@@ -102,7 +102,7 @@ def create_app(jobs: ExecutionJobs, *, pool=None, worker_credentials=None, **kwa
 
         if set((worker_credentials or {}).values()) & (set(kwargs["user_credentials"].values()) | {kwargs["discovery_credential"], kwargs.get("control_credential")}):
             raise ValueError("Worker credentials must be separate from MCP credentials")
-        install_dispatch(app, pool, worker_credentials or {}, jobs.artifact_root)
+        install_dispatch(app, pool, worker_credentials or {}, jobs.artifact_root, jobs=jobs)
 
         @asynccontextmanager
         async def central_lifespan(application):

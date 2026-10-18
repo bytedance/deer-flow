@@ -183,7 +183,16 @@ def test_scoped_worker_withdrawal_requires_observed_stop(native_engine, executor
 
 @pytest.mark.parametrize("executor_engine", ["postgres"], indirect=True)
 def test_scoped_scheduled_c_real_b_docker_resumes_original_occurrence(native_engine, executor_engine, tmp_path, monkeypatch):  # noqa: F811
-    """Single-host B Docker + ASGI MCP, not shared-pool or two-host TCP."""
+    _exercise_scheduled_b_physical(native_engine, executor_engine, tmp_path, monkeypatch)
+
+
+@pytest.mark.parametrize("executor_engine", ["postgres"], indirect=True)
+def test_scoped_shared_pool_c_real_b_docker_resumes_original_occurrence(native_engine, executor_engine, tmp_path, monkeypatch):  # noqa: F811
+    _exercise_scheduled_b_physical(native_engine, executor_engine, tmp_path, monkeypatch, pool_mode=True)
+
+
+def _exercise_scheduled_b_physical(native_engine, executor_engine, tmp_path, monkeypatch, *, pool_mode=False):  # noqa: F811
+    """Real Docker and MCP/RPC serialization; network bridging is ASGI only."""
     import hashlib
     from types import SimpleNamespace
     from uuid import uuid4
@@ -192,7 +201,7 @@ def test_scoped_scheduled_c_real_b_docker_resumes_original_occurrence(native_eng
     import sqlalchemy as sa
     from ecs_executor.job_store import JobStore
     from ecs_executor.jobs import ExecutionJobs, ExecutionProfile
-    from ecs_executor.mcp_server import create_server
+    from ecs_executor.mcp_server import create_app, create_server
     from ecs_executor.schema import upgrade_schema
     from ecs_executor.worker import Docker, LocalWorker
     from langchain_core.tools import tool
@@ -210,17 +219,17 @@ def test_scoped_scheduled_c_real_b_docker_resumes_original_occurrence(native_eng
     manifest, evidence_path = Path(os.environ["TEST_SCOPE_OWNED_MANIFEST"]), Path(os.environ["TEST_SCOPE_EVIDENCE"])
     owned_root = Path(os.environ["TEST_SCOPE_PHYSICAL_ROOT"]).resolve()
     assert tmp_path.resolve().is_relative_to(owned_root) and manifest.is_file() and json.loads(manifest.read_text()) == []
-    # A dedicated B ledger is the supported LocalWorker single-host mode. It
-    # cannot accidentally reconcile active native C jobs from the pool ledger.
-    database = "tenant_b_physical_" + uuid4().hex
-    admin = sa.create_engine(executor_engine.url, isolation_level="AUTOCOMMIT")
+    # Pool mode uses the same native C ledger through the real outbound RPC.
+    # The original single-host mode retains its dedicated LocalWorker ledger.
+    database = executor_engine.url.database if pool_mode else "tenant_b_physical_" + uuid4().hex
+    admin = None if pool_mode else sa.create_engine(executor_engine.url, isolation_level="AUTOCOMMIT")
     b_store = jobs = None
-    evidence = {"scope": "single-host-B-Docker-ASGI-MCP", "image": image, "b_database": database, "finally_removed": False}
+    evidence = {"scope": "shared-B-C-pool-OutboundStore-ASGI" if pool_mode else "single-host-B-Docker-ASGI-MCP", "image": image, "b_database": database, "finally_removed": False}
 
     def save_evidence():
         evidence_path.write_text(json.dumps(evidence, indent=2))
 
-    def setup(case, owner, workspace_root, io_scopes):
+    def setup(case, owner, workspace_root, io_scopes, *, pool=None):
         nonlocal jobs
         secret = b"synthetic-real-scheduled-B-key-at-least-32-bytes"
         jobs = ExecutionJobs(
@@ -229,7 +238,7 @@ def test_scoped_scheduled_c_real_b_docker_resumes_original_occurrence(native_eng
             audience="B",
             profiles={"small": ExecutionProfile(image=image)},
             user_profiles={owner: {"small"}},
-            artifact_root=tmp_path / "B-artifacts",
+            artifact_root=tmp_path / ("dependency-pool" if pool_mode else "B-artifacts"),
             workspace_root=workspace_root,
             metadata_database_url=native_engine.url.render_as_string(hide_password=False),
             workspace_required=True,
@@ -253,8 +262,15 @@ def test_scoped_scheduled_c_real_b_docker_resumes_original_occurrence(native_eng
             }
         )
         monkeypatch.setattr("ecs_executor.interceptor.get_extensions_config", lambda: config)
-        server = create_server(jobs, user_credentials={owner: "original-owner-credential"}, discovery_credential="discovery-only")
-        app = server.streamable_http_app()
+        credential = "scoped-b-fixed-pool-node-credential-only"
+        if pool_mode:
+            assert pool is not None and pool.store.engine.url == b_store.engine.url
+            app = create_app(jobs, pool=pool, worker_credentials={"worker": credential}, user_credentials={owner: "original-owner-credential"}, discovery_credential="discovery-only")
+            session = app.router.lifespan_context(app)
+        else:
+            server = create_server(jobs, user_credentials={owner: "original-owner-credential"}, discovery_credential="discovery-only")
+            app = server.streamable_http_app()
+            session = server.session_manager.run()
         original_params = mcp_client.build_server_params
 
         def params(name, server_config):
@@ -280,8 +296,10 @@ def test_scoped_scheduled_c_real_b_docker_resumes_original_occurrence(native_eng
             raise AssertionError("The actual ToolNode must use its native background wrapper")
 
         wrapped = _make_background_submit_tool(submit, server_name="ecs", task_name="execution", submit_tool="submit", status_tool="status", cancel_tool="cancel", connection_scope="deployment")
-        session = server.session_manager.run()
         opened = False
+        closing = False
+        outbound = None
+        physical_state = None
 
         def source_directory(source, *, outputs=False, context=None):
             selected = set_current_workspace(context or source.workspace_context)
@@ -307,6 +325,8 @@ def test_scoped_scheduled_c_real_b_docker_resumes_original_occurrence(native_eng
 
         class ObservedDocker(Docker):
             async def checked(self, *args):
+                if args[0] == "rm" and pool_mode and not closing and not evidence.get("pending_c2_blocked_until_b_stop"):
+                    await physical_state.before_stop()
                 result = await super().checked(*args)
                 if args[0] == "create":
                     identity = result.decode().strip()
@@ -353,14 +373,50 @@ def test_scoped_scheduled_c_real_b_docker_resumes_original_occurrence(native_eng
             evidence.update(b_job_id=current_job["id"], b_spec_digest=current_job["spec_digest"], committed_and_queued=True)
             save_evidence()
             source_directory(source).joinpath("program.txt").write_bytes(b"later upload must not replace the admitted snapshot")
-            worker, deadline = LocalWorker(jobs, docker=docker), time.monotonic() + 120
+            deadline = time.monotonic() + 120
             assert get_current_workspace() == case.other
+            if pool_mode:
+                from ecs_executor.dispatch import OutboundStore
+
+                nonlocal outbound
+                loop = asyncio.get_running_loop()
+                outbound = OutboundStore(url="http://real-pool-fixture", node_id="worker", credential=credential, artifact_root=jobs.artifact_root)
+                outbound.client.close()
+
+                async def send_to_real_route(request):
+                    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as client:
+                        response = await client.request(request.method, str(request.url), headers=request.headers, content=request.content)
+                        await response.aread()
+                        return httpx.Response(response.status_code, headers=response.headers, content=response.content, request=request)
+
+                def synchronous_bridge(request):
+                    # Only socket plumbing is replaced. OutboundStore.request
+                    # still serializes real auth/protocol/body and handles the
+                    # actual install_dispatch response from the fixture loop.
+                    request.read()
+                    return asyncio.run_coroutine_threadsafe(send_to_real_route(request), loop).result(timeout=35)
+
+                outbound.client = httpx.Client(transport=httpx.MockTransport(synchronous_bridge), headers={"Authorization": "Bearer " + credential}, timeout=30)
+                await asyncio.to_thread(outbound.expire_staged)
+                claimed = await asyncio.to_thread(outbound.claim_queued)
+                assert claimed is not None, "Original scoped B was not admitted through the real shared pool RPC"
+                assert claimed["id"] == current_job["id"] and claimed["node_id"] == "worker" and claimed["worker_owner"] == outbound.owner
+                assert (await asyncio.to_thread(pool.node_status, "worker"))["unreleased"] == 1
+                evidence["b_shared_pool_reserved"] = True
+                save_evidence()
+                # The production outbound adapter is optional only until the
+                # real claim RED. Missing scoped support must still deny it.
+                worker_jobs = SimpleNamespace(store=outbound, artifact_root=jobs.artifact_root, publication=jobs.publication, workspace_required=True, execution_authority=getattr(outbound, "execution_authority", None))
+                worker = LocalWorker(worker_jobs, docker=docker, node_id="worker")
+                await worker.launch(claimed)
+            else:
+                worker = LocalWorker(jobs, docker=docker)
             while time.monotonic() < deadline:
-                await worker.tick()  # Keep ambient UI-other: publication must select the original scope itself.
-                assert get_current_workspace() == case.other
                 latest = b_store.get(current_job["id"])
                 if latest["state"] in {"completed", "failed", "cancelled"}:
                     break
+                await worker.tick()  # Keep ambient UI-other throughout actual effects.
+                assert get_current_workspace() == case.other
                 await asyncio.sleep(0.1)
             assert latest["state"] == "completed", {"state": latest["state"], "error": latest.get("error")}
             other_output = source_directory(source, outputs=True, context=case.other) / current_job["id"]
@@ -372,6 +428,10 @@ def test_scoped_scheduled_c_real_b_docker_resumes_original_occurrence(native_eng
             assert result["stdout"] == "owned dependency report" and result["exit_code"] == 0
             await worker.tick()
             assert get_current_workspace() == case.other
+            if pool_mode:
+                assert evidence["pending_c2_blocked_until_b_stop"] is True
+                assert (await asyncio.to_thread(pool.node_status, "worker"))["unreleased"] == 0
+                evidence["b_shared_pool_stop_released"] = True
             identity = evidence["container_id"]
             assert await docker.inspect(identity) is None
             final = b_store.get(current_job["id"])
@@ -380,6 +440,8 @@ def test_scoped_scheduled_c_real_b_docker_resumes_original_occurrence(native_eng
             save_evidence()
 
         async def close_server():
+            nonlocal closing
+            closing = True
             try:
                 if current_job is not None:
                     identity = evidence.get("container_id", "deerflow-exec-" + current_job["id"])
@@ -394,24 +456,28 @@ def test_scoped_scheduled_c_real_b_docker_resumes_original_occurrence(native_eng
                         evidence["finally_removed"] = True
             finally:
                 save_evidence()
+                if outbound is not None:
+                    outbound.client.close()
                 if opened:
                     await session.__aexit__(None, None, None)
 
-        return SimpleNamespace(
+        physical_state = SimpleNamespace(
             driver=ObservedOrdinaryDriver(McpTaskToolCaller(config)), tool=wrapped, arguments=arguments, output_path=output_path, execute=execute, open=open_server, close=close_server, evidence=evidence, save_evidence=save_evidence
         )
+        return physical_state
 
     from dataclasses import asdict
 
     try:
-        with admin.connect() as connection:
-            connection.execute(sa.text(f'CREATE DATABASE "{database}"'))
+        if admin is not None:
+            with admin.connect() as connection:
+                connection.execute(sa.text(f'CREATE DATABASE "{database}"'))
         b_store = JobStore(executor_engine.url.set(database=database).render_as_string(hide_password=False))
         upgrade_schema(b_store.engine)
         upgrade_schema(executor_engine)  # Freeze legacy seed after the real schema upgrade, including new nullable columns.
         with executor_engine.connect() as connection:
             seed = dict(connection.execute(sa.text("SELECT * FROM ecs_execution_jobs WHERE id='unknown'")).mappings().one())
-        _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp_path, scheduled=True, physical_b=setup)
+        _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp_path, scheduled=True, physical_b=setup, pool_b=pool_mode)
         assert evidence["c2_read_actual_published_report"] and evidence["normal_stop_exact_id_absent"] and not evidence["finally_removed"]
         assert evidence["c1_run_id"] != evidence["c2_run_id"] and evidence["task_run_count"] == 1 and evidence["final_occurrence_status"] == "success"
         with executor_engine.connect() as connection:
@@ -421,8 +487,9 @@ def test_scoped_scheduled_c_real_b_docker_resumes_original_occurrence(native_eng
             jobs.publication.engine.dispose()
         if b_store is not None:
             b_store.engine.dispose()
-        try:
-            with admin.connect() as connection:
-                connection.execute(sa.text(f'DROP DATABASE IF EXISTS "{database}"'))
-        finally:
-            admin.dispose()
+        if admin is not None:
+            try:
+                with admin.connect() as connection:
+                    connection.execute(sa.text(f'DROP DATABASE IF EXISTS "{database}"'))
+            finally:
+                admin.dispose()

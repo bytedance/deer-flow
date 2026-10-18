@@ -1549,10 +1549,10 @@
   },
   "latest_checkpoint": {
     "work_package": "M4",
-    "status": "partial M4: real single-host B Docker drives scheduled C2; shared-pool/two-host/C physical and full domains remain open",
+    "status": "partial M4: normal shared B/C pool actual B Docker→C2 verified; scoped withdrawal/control, CLI/restart and two-host/C physical gates remain open",
     "last_verified_job": "deerflow-tenant-execution-m4-physical",
-    "last_verified_build": 16,
-    "next": "Prioritize supported shared-pool/two-host native C→B→C main; keep complete revoked/private-parent/control replay, IM/recovery and full M0-M11 gates required. No test matrix expansion.",
+    "last_verified_build": 18,
+    "next": "One necessary shared-pool withdrawal/control story, then actual two-host TCP/C AIO main. Keep complete unknown/recovery/IM and all M0-M11 gates; no field/dialect matrix.",
     "tenant_activation": "closed",
     "deployment": "none",
     "previous_backend_job": "deerflow-tenant-m1-postgres",
@@ -1591,7 +1591,9 @@
       "docs/tenant-workspaces-evidence/native-scheduler-revoked-control-154.json",
       "docs/tenant-workspaces-evidence/native-scheduler-revoked-queued-control-155.json",
       "docs/tenant-workspaces-evidence/native-scheduler-real-b-physical-red-15.json",
-      "docs/tenant-workspaces-evidence/native-scheduler-real-b-physical-16.json"
+      "docs/tenant-workspaces-evidence/native-scheduler-real-b-physical-16.json",
+      "docs/tenant-workspaces-evidence/native-shared-bc-pool-red-17.json",
+      "docs/tenant-workspaces-evidence/native-shared-bc-pool-18.json"
     ]
   },
   "workspace_feedback": {
@@ -13971,6 +13973,17 @@
       "tests": "2 passed, 3 warnings in 26.33s",
       "evidence": "docs/tenant-workspaces-evidence/native-scheduler-real-b-physical-16.json",
       "red_build": 15
+    },
+    "shared_pool_B_wip": {
+      "status": "normal_main_and_existing_ordinary_filter_verified",
+      "plan": "M4 step 38 in Superpowers/OpenSpec",
+      "scope": "Explicit scoped B authorization/CAS joins existing shared B/C ledger and actual OutboundStore; keep ordinary gates closed",
+      "verification": "Same real Docker/Scheduler main, then necessary control boundaries only; no local runtime",
+      "remaining": "Scoped B withdrawal/control CAS, unknown/restart and CLI boot are code-reviewed only. Two-host TCP/C AIO physical, full revocation/recovery/IM and all M0-M11 gates remain open.",
+      "build": 18,
+      "tests": "2 passed in 28.00s",
+      "evidence": "docs/tenant-workspaces-evidence/native-shared-bc-pool-18.json",
+      "red_build": 17
     }
   },
   "native_0041_execution_compatibility_wip": {

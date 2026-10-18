@@ -761,3 +761,6 @@ Scoped closed-initial Scheduler revocation control passed #154: after native own
 
 
 Scoped B native snapshots/publication now derive paths from the captured job workspace, restoring caller context before existing SQL authorization and no-follow IO. Shanghai physical #16 verifies real single-host B output returns to the original scheduled C2 after the UI changes spaces; #15 records the prior failure. Separate B ledger and ASGI MCP transport are explicit; shared pool/two-host/C physical/full recovery remain open and tenant activation stays disabled. See `../../../docs/tenant-workspaces-testing.md`.
+
+
+Scoped B pool development now shares the existing B/C execution ledger and node budget through an explicit native-authorized path. Shanghai #18 verifies normal C1 → real B Docker → C2 with C2 waiting until B STOP; ordinary NULL-only pool admission stays isolated. Worker scope mode requires fixed `workspace_required: true`, `native_server_name`, workspace root and metadata configuration. Withdrawal/control/restart/CLI boot and actual two-host/C physical acceptance remain pending; tenant activation stays disabled. See `../../../docs/tenant-workspaces-testing.md`.

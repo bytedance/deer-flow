@@ -23,7 +23,7 @@ def test_scoped_native_dependency_notification_resumes_original_goal(native_engi
     _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp_path, revocation_phase=revocation_phase)
 
 
-def _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp_path, *, revocation_phase="normal", scheduled=False, goal_replacement=False, member_control=False, queued_control=False, physical_b=None):  # noqa: F811
+def _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp_path, *, revocation_phase="normal", scheduled=False, goal_replacement=False, member_control=False, queued_control=False, physical_b=None, pool_b=False):  # noqa: F811
     from ecs_executor.agent_dispatch import NativeDispatchHost, NativeWorkerHost, install_native_dispatch
     from ecs_executor.dispatch import PROTOCOL, WORKER_VERSION
     from ecs_executor.job_store import JobStore
@@ -113,7 +113,7 @@ def _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp
             app.state.run_event_store = events
             app.state.project_repo = ProjectRepository(case.sf, workspace_required=True)
             app.state.project_document_repo = ProjectDocumentRepository(case.sf, workspace_required=True)
-        node = Node(cpu_millis=4000, memory_mib=8192, resident_cpu_millis=1500, resident_memory_mib=2048, max_concurrency=1, profiles={"report"}, kinds={"C"})
+        node = Node(cpu_millis=4000, memory_mib=8192, resident_cpu_millis=1500, resident_memory_mib=2048, max_concurrency=1, profiles={"report", "small"} if pool_b else {"report"}, kinds={"B", "C"} if pool_b else {"C"})
         pool = Scheduling(ledger, nodes={"worker": node})
         secret = "native-dependency-offline-fixture-32-bytes"
         config = {"artifact_root": str(tmp_path / "dependency-pool"), "native_node": "worker", "remote_all": True, "profile": "report", "profiles": {"report": {"cpu_millis": 100, "memory_mib": 64}}}
@@ -248,7 +248,7 @@ def _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp
                 raise AssertionError("normal dependency story must not cancel its remote task")
 
         drivers = McpTaskDriverRegistry()
-        physical_state = physical_b(case, owner_user_id, tmp_path / "owned-files", io_scopes) if physical_b is not None else None
+        physical_state = physical_b(case, owner_user_id, tmp_path / "owned-files", io_scopes, pool=pool if pool_b else None) if physical_b is not None else None
         if physical_state is None:
             drivers.register("deterministic", DeterministicRemoteIO())
         else:
@@ -815,6 +815,24 @@ def _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp
                 now = datetime.now(UTC) + timedelta(seconds=30)
                 await tasks.run_once(now=now)
                 if physical_state is not None:
+                    if pool_b:
+
+                        async def before_b_stop():
+                            assert (await asyncio.to_thread(pool.node_status, "worker"))["unreleased"] == 1
+                            # Completed publication is available before physical
+                            # removal. Transfer C2 once, but capacity must hold it.
+                            await tasks.run_once(now=now + timedelta(seconds=30))
+                            assert (await request_worker("poll"))["claim"] is None
+                            async with case.sf() as session:
+                                occurrence = await session.get(ScheduledTaskRunRow, occurrence_id)
+                                successor = await session.get(RunRow, occurrence.run_id)
+                                assert occurrence.status == "running" and occurrence.run_id != first.run_id
+                                assert successor.status == "pending" and successor.workspace_context_json == asdict(case.original)
+                                assert occurrence.launch_accounted is True
+                            physical_state.evidence["pending_c2_blocked_until_b_stop"] = True
+                            physical_state.save_evidence()
+
+                        physical_state.before_stop = before_b_stop
                     # This first real status call activates the committed B job;
                     # the physical worker must finish before result polling.
                     await physical_state.execute(created_tasks[0], first)
@@ -856,6 +874,10 @@ def _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp
                     assert get_current_workspace() == case.other
                     return
                 assert resumed["claim"] is not None, "Native MCP notification did not admit a continuation through start_run: " + json.dumps(diagnostic, sort_keys=True)
+                if pool_b:
+                    assert (await asyncio.to_thread(pool.node_status, "worker"))["unreleased"] == 1
+                    physical_state.evidence["c2_shared_pool_reserved"] = True
+                    physical_state.save_evidence()
                 if revocation_phase == "dispatched_member":
                     pending_job = resumed["claim"]["job"]
                     async with case.sf() as session:

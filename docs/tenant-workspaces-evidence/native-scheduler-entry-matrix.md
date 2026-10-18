@@ -78,3 +78,6 @@ Root reviewed the precise patch (including a required future-version upper fence
 
 
 Step 37: Shanghai physical #16 verifies real single-host B → scheduled native C2 and fixes captured-space publication; #15 preserves the real RED. See `docs/tenant-workspaces-testing.md` and `docs/tenant-workspaces-evidence/native-scheduler-real-b-physical-16.json`. Shared pool/two-host/C physical and complete M0–M11 remain open.
+
+
+Step 38 shared-pool main verified by physical #18 (2 passed, 28.00s), after real claim RED #17. Actual B/C share one ledger/budget; pending C2 waits for real B STOP. See `docs/tenant-workspaces-evidence/native-shared-bc-pool-18.json` and canonical testing notes. Required withdrawal/control, CLI/restart and two-host/C physical acceptance remain open.
