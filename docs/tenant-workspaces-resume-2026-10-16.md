@@ -1,4 +1,4 @@
-# Resume checkpoint — 2026-10-18: native live goal-replacement settlement #152 verified; revoked/unknown control next
+# Resume checkpoint — 2026-10-18: revoked closed Scheduler control main #154 verified; remaining controls next
 > **执行中，M4 部分完成。** Jenkins #112：单 Worker 真实 AIO 创建、文件写读、warm STOP、失败保留和 report 后释放已通过（1 项，53.79s）。两机 HTTP、恢复和 C→B→C 仍待完成；通知主干与必要撤权控制已验证；HTTP创建/列表/详情已通过#130；租户启动关闭。
 
 # 2026-10-16 暂停与恢复检查点
@@ -1306,3 +1306,14 @@ Root reviewed the exact patch, independently checked terminal and SHA/three arch
 The same story then completes the actual MCP poll/result/notification path with deterministic remote IO. The result remains stored, the superseded notification becomes dead_letter/notified_version0 without a continuation Run, and the replacement goal/source rows stay unchanged. Native checkpoint-write reservations are legitimate control rows and are excluded from normal-model Run counting.
 
 Root reviewed the exact test, independently checked live terminal, SHA/two source bytes and exact cleanup; backend/app and backend/packages have no product diff. Evidence: `docs/tenant-workspaces-evidence/native-scheduler-goal-replacement-152.json`. This verifies the existing live-original-scope path; member-revoked/private-parent-retired/unknown control settlement and full recovery remain open. No actual B wire/physical/provider/two-host acceptance, no other selectors rerun. Full M0–M11 remains open; activation false, no deployment/push/local runtime.
+
+
+### 2026-10-18 — Revoked closed Scheduler control main (#154)
+
+`deerflow-tenant-execution-m4-sql #154 SUCCESS`: one PostgreSQL business story passed (21.23s), Ruff/67-file formatting passed. #153 first reproduced an already closed initial C1 remaining running after actual native owner transfer and member removal. The same installed control story now settles its original occurrence as interrupted/once task cancelled, retires only the old ledger wait and writes one control audit. Checkpoint/goal/result/business Run entry points are guarded to fail if called; none were called. Canonical C1, normal Run IDs, execution lifetime, original context/count/accounting, event baseline and parent revoke rows stay unchanged. Repeated control adds no audit or job/physical change.
+
+The SQL sweep selects finite control columns and validates canonical workspace_revoke identity, original task/occurrence/native binding and strict captured-version bounds against locked current member/workspace versions. It changes only derived occurrence/task control state and audit, with no business finalizer/observer/publication. Fresh candidates and historical audit replay use separate keyset pages; exact retired source locators go independently through existing host control reauthorization, outside SQL transactions and outside live checked/valid source sets. Parent revoke and scheduler domain remain pending.
+
+Native terminal status plus completed run_execution lifetime proves logical execution closure, not physical STOP. Existing normal completion has the same logical-before-host-STOP ordering. Physical pool reservations remain exclusively stop_owned/report; this sweep never releases capacity or changes native/physical receipts. Initial active/transferred/unknown native rows stay held.
+
+Root reviewed the precise patch (including a required future-version upper fence), independently checked terminal, SHA/four archive files and exact cleanup. Evidence: `docs/tenant-workspaces-evidence/native-scheduler-revoked-control-154.json`. This runtime proof is closed+report C1 only. Queued explicit NoStart, active/transfer/unknown, pending physical STOP, transport-failure replay and large pagination were not separately tested. Complete revoked/private-parent/account/workspace domains, actual B wire/physical, IM/recovery and M0–M11 remain open. Activation false; no deployment/push/local runtime.

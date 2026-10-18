@@ -1121,6 +1121,13 @@ class ScheduledTaskService:
     async def _reconcile_active_state(self, *, now: datetime) -> None:
         error = _LEASE_RECOVERY_ERROR
         try:
+            # Original revoke receipts have control authority only. Keep their
+            # locators out of the live checked/valid business source sets.
+            retire = getattr(self._task_run_repo, "retire_revoked_control_occurrences", None)
+            if getattr(self._task_run_repo, "workspace_scope_required", False) and retire is not None:
+                retired_sources = await retire(now=now)
+                if retired_sources and self._dependency_wait_reconciler is not None:
+                    await self._dependency_wait_reconciler(retired_sources)
             dependency_kwargs = {}
             if self._dependency_wait_reconciler is not None:
                 checked = await self._task_run_repo.dependency_wait_sources()

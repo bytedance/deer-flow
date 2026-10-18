@@ -1,0 +1,44 @@
+{
+  "build": 153,
+  "queue": 1114,
+  "phase": "m4-native-scheduler-revoked-control-red-20261018-41",
+  "result": "FAILURE",
+  "duration_ms": 39847,
+  "pytest": "1 failed in 20.72s",
+  "first_error": "Revoked closed C1 still holds the Scheduler budget: occurrence.status running != interrupted",
+  "source_sha256": "8ef2839271f0ad79b7bb7c5ec37c9a8d993546b6339d87ce7c8ad1752787fde7",
+  "pipeline_sha256": "12376a10b1997008cf1fac8d3955931916ffa2a1f96b8b6fb584d4b908e30f4d",
+  "log_path": "/private/tmp/m4-native-scheduler-revoked-control-red-20261018-41.log",
+  "log_sha256": "8272088d7edce626386c1937b745ccb4868d9938530df779f698bd32e5ce9c34",
+  "cleanup_path": "/private/tmp/native-scheduler-revoked-control-build153-cleanup.json",
+  "classification": "Business RED: real add-member, transfer-owner and removal completed, installed control run_once leaves original closed C1 occurrence running. No production change, no permission mock/setup failure.",
+  "job": "deerflow-tenant-execution-m4-sql",
+  "cleanup": {
+    "build": 153,
+    "read_only": true,
+    "cleanup": [
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-153",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-153"
+      },
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-153-db",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-153-db"
+      },
+      {
+        "kind": "network",
+        "name": "deerflow-tenant-execution-m4-sql-153",
+        "exit": 1,
+        "stderr": "Error response from daemon: network deerflow-tenant-execution-m4-sql-153 not found"
+      }
+    ]
+  },
+  "root_review": "Root reviewed the precise test and two-file product patch, requested and verified future-version upper fences before application, independently read live terminal, SHA-verified source archive and byte-matched changed files, and verified exact owned fixture cleanup.",
+  "limits": [
+    "Valid RED after actual ownership transfer/member removal: original occurrence stayed running. Later settlement/audit/ledger assertions not reached in this RED."
+  ]
+}

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import operator
 import re
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import NAMESPACE_URL, uuid5
 
-from sqlalchemy import and_, case, exists, func, or_, select, text, update
+from sqlalchemy import Text, and_, case, cast, exists, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
@@ -37,10 +40,11 @@ from deerflow.persistence.scheduled_tasks.model import (
 )
 from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
 from deerflow.persistence.user.model import UserRow
+from deerflow.persistence.workspaces.model import WorkspaceAuditEventRow, WorkspaceMembershipRow, WorkspaceOperationOutboxRow, WorkspaceRow
 from deerflow.persistence.workspaces.run_control import NativeRunStopTarget, execution_lifetime, pending_run_stop
 from deerflow.persistence.workspaces.scope import resolve_resource_scope
 from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
-from deerflow.scheduler.host_notes import RUN_ERROR_END_REACHED
+from deerflow.scheduler.host_notes import RUN_ERROR_END_REACHED, RUN_ERROR_INTERRUPTED
 from deerflow.scheduler.schedules import next_run_at as compute_next_run_at
 from deerflow.utils.time import coerce_iso
 
@@ -213,6 +217,412 @@ class ScheduledTaskRunRepository:
 
     def set_finalization_observer(self, callback: FinalizationObserver | None) -> None:
         self._finalization_observer = callback
+
+    @staticmethod
+    def _revocation_covers(operation, context, *, member_version, policy_version):
+        """Validate an existing native revoke identity, not a business grant."""
+        payload = operation.payload
+        if (
+            type(member_version) is not int
+            or type(policy_version) is not int
+            or member_version <= context.membership_version
+            or policy_version < context.policy_version
+            or operation.kind != "workspace_revoke"
+            or operation.state != "pending"
+            or operation.workspace_id != context.workspace_id
+            or operation.user_id != context.actor_user_id
+            or type(payload) is not dict
+            or type(payload.get("version")) is not int
+            or payload["version"] != 1
+            or type(payload.get("membership_version")) is not int
+            or not context.membership_version <= payload["membership_version"] < member_version
+            or type(payload.get("policy_version")) is not int
+            or not context.policy_version <= payload["policy_version"] <= policy_version
+            or type(payload.get("pending_domains")) is not list
+            or "scheduler" not in payload["pending_domains"]
+        ):
+            return False
+        identity = ["workspace_revoke", context.workspace_id, context.actor_user_id, payload["membership_version"], payload["policy_version"]]
+        encoded = json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode("ascii")
+        return operation.operation_id == hashlib.sha256(encoded).hexdigest()
+
+    async def retire_revoked_control_occurrences(self, *, now: datetime, limit: int = 64) -> frozenset[str]:
+        """Retire proven closed/NoStart occurrence control, never business work.
+
+        Workspace -> actor existence -> membership -> task -> occurrence -> Run
+        -> completed lifetime -> revoke intent. No private-parent/checkpoint,
+        model/result, quota/clock, finalization observer, STOP or capacity write.
+        A completed native lifetime proves logical closure, not physical STOP.
+        Independent pool reservations remain solely under stop_owned/report.
+        Parent revoke and its scheduler domain deliberately remain pending.
+        """
+        if not self.workspace_scope_required or type(limit) is not int or limit <= 0:
+            return frozenset()
+        task_columns = tuple(
+            getattr(ScheduledTaskRow, name)
+            for name in (
+                "id",
+                "workspace_id",
+                "user_id",
+                "workspace_context_json",
+                "status",
+                "schedule_type",
+                "updated_at",
+                "next_run_at",
+                "lease_owner",
+                "lease_expires_at",
+                "run_count",
+                "last_run_id",
+            )
+        )
+        occurrence_columns = tuple(
+            getattr(ScheduledTaskRunRow, name)
+            for name in (
+                "id",
+                "task_id",
+                "workspace_id",
+                "workspace_context_json",
+                "thread_id",
+                "thread_incarnation",
+                "run_id",
+                "trigger",
+                "status",
+                "launch_accounted",
+                "started_at",
+                "finished_at",
+                "lease_owner",
+                "lease_expires_at",
+                "attempt_count",
+                "stop_requested_run_id",
+            )
+        )
+        run_columns = tuple(
+            getattr(RunRow, name)
+            for name in (
+                "run_id",
+                "user_id",
+                "workspace_id",
+                "thread_id",
+                "thread_incarnation",
+                "workspace_context_json",
+                "owner_worker_id",
+                "created_at",
+                "operation_kind",
+                "idempotency_key",
+                "status",
+                "cancel_action",
+                "lease_expires_at",
+            )
+        ) + (
+            RunRow.metadata_json["scheduled_task_id"].as_string().label("task_id"),
+            RunRow.metadata_json["scheduled_task_run_id"].as_string().label("occurrence_id"),
+            RunRow.metadata_json["scheduled_trigger"].as_string().label("trigger"),
+        )
+        operation_columns = tuple(
+            getattr(WorkspaceOperationOutboxRow, name)
+            for name in (
+                "operation_id",
+                "workspace_id",
+                "user_id",
+                "kind",
+                "state",
+                "payload",
+                "lease_owner",
+                "lease_token",
+                "lease_expires_at",
+                "attempt",
+            )
+        )
+        no_start = and_(
+            ScheduledTaskRunRow.status == "queued",
+            ScheduledTaskRunRow.run_id.is_(None),
+            ScheduledTaskRunRow.launch_accounted.is_(False),
+            ScheduledTaskRunRow.started_at.is_(None),
+            ScheduledTaskRunRow.finished_at.is_(None),
+            ScheduledTaskRunRow.lease_owner.is_(None),
+            ScheduledTaskRunRow.lease_expires_at.is_(None),
+            ScheduledTaskRunRow.attempt_count == 0,
+            ScheduledTaskRunRow.stop_requested_run_id.is_(None),
+        )
+        lifetime = aliased(WorkspaceOperationOutboxRow)
+        closed_initial = exists(
+            select(RunRow.run_id).where(
+                ScheduledTaskRunRow.status == "running",
+                ScheduledTaskRunRow.launch_accounted.is_(True),
+                RunRow.run_id == ScheduledTaskRunRow.run_id,
+                RunRow.workspace_id == ScheduledTaskRunRow.workspace_id,
+                RunRow.user_id == ScheduledTaskRow.user_id,
+                RunRow.thread_id == ScheduledTaskRunRow.thread_id,
+                RunRow.thread_incarnation == ScheduledTaskRunRow.thread_incarnation,
+                RunRow.operation_kind == "run",
+                RunRow.idempotency_key == "scheduled-task:" + ScheduledTaskRunRow.id,
+                RunRow.status.in_(("success", "error", "timeout", "interrupted")),
+                exists(
+                    select(lifetime.operation_id).where(
+                        lifetime.kind == "run_execution",
+                        lifetime.state == "completed",
+                        lifetime.workspace_id == RunRow.workspace_id,
+                        lifetime.user_id == RunRow.user_id,
+                        lifetime.payload["run_id"].as_string() == RunRow.run_id,
+                    )
+                ),
+            )
+        ).correlate(ScheduledTaskRunRow, ScheduledTaskRow)
+        revoke_exists = exists(
+            select(WorkspaceOperationOutboxRow.operation_id).where(
+                WorkspaceOperationOutboxRow.workspace_id == ScheduledTaskRow.workspace_id,
+                WorkspaceOperationOutboxRow.user_id == ScheduledTaskRow.user_id,
+                WorkspaceOperationOutboxRow.kind == "workspace_revoke",
+                WorkspaceOperationOutboxRow.state == "pending",
+            )
+        ).correlate(ScheduledTaskRow)
+        # Each finite page advances past malformed/unknown identities. Known
+        # unsafe launching/transfer/open executions are excluded before LIMIT.
+        cursor = ""
+        while True:
+            async with self._sf() as session:
+                candidates = (
+                    await session.execute(
+                        select(
+                            ScheduledTaskRunRow.id,
+                            ScheduledTaskRunRow.task_id,
+                            ScheduledTaskRow.workspace_id,
+                            ScheduledTaskRow.user_id,
+                        )
+                        .join(ScheduledTaskRow, ScheduledTaskRow.id == ScheduledTaskRunRow.task_id)
+                        .where(
+                            ScheduledTaskRunRow.id > cursor,
+                            ScheduledTaskRunRow.workspace_id.is_not(None),
+                            ScheduledTaskRunRow.workspace_id == ScheduledTaskRow.workspace_id,
+                            revoke_exists,
+                            or_(no_start, closed_initial),
+                        )
+                        .order_by(ScheduledTaskRunRow.id)
+                        .limit(limit)
+                    )
+                ).all()
+            if not candidates:
+                break
+            for locator in candidates:
+                cursor = locator.id
+                async with self._sf() as session:
+                    if session.get_bind().dialect.name == "sqlite":
+                        await session.execute(text("BEGIN IMMEDIATE"))
+                    workspace = (await session.execute(select(WorkspaceRow.id, WorkspaceRow.policy_version).where(WorkspaceRow.id == locator.workspace_id).with_for_update())).first()
+                    actor = await session.scalar(select(UserRow.id).where(UserRow.id == locator.user_id).with_for_update())
+                    member = (
+                        await session.execute(
+                            select(WorkspaceMembershipRow.status, WorkspaceMembershipRow.version)
+                            .where(
+                                WorkspaceMembershipRow.workspace_id == locator.workspace_id,
+                                WorkspaceMembershipRow.user_id == locator.user_id,
+                            )
+                            .with_for_update()
+                        )
+                    ).first()
+                    if workspace is None or actor is None or member is None:
+                        continue
+                    task = (await session.execute(select(*task_columns, cast(ScheduledTaskRow.workspace_context_json, Text).label("snapshot_text")).where(ScheduledTaskRow.id == locator.task_id).with_for_update())).first()
+                    occurrence = (await session.execute(select(*occurrence_columns, cast(ScheduledTaskRunRow.workspace_context_json, Text).label("snapshot_text")).where(ScheduledTaskRunRow.id == locator.id).with_for_update())).first()
+                    try:
+                        if task is None or occurrence is None:
+                            continue
+                        context = WorkspaceContext(**task.workspace_context_json)
+                        if (
+                            context.workspace_id != locator.workspace_id
+                            or context.actor_user_id != locator.user_id
+                            or task.workspace_id != context.workspace_id
+                            or task.user_id != context.actor_user_id
+                            or occurrence.workspace_id != context.workspace_id
+                            or occurrence.task_id != task.id
+                            or occurrence.workspace_context_json != asdict(context)
+                            or (member.status == "active" and member.version == context.membership_version)
+                            or member.version <= context.membership_version
+                            or occurrence.trigger not in ("scheduled", "manual")
+                            or task.status not in ("enabled", "running", "paused")
+                            or task.schedule_type not in ("once", "cron", "interval")
+                            or type(occurrence.thread_id) is not str
+                            or not occurrence.thread_id
+                            or type(occurrence.thread_incarnation) is not str
+                            or not occurrence.thread_incarnation
+                        ):
+                            continue
+                        if occurrence.status == "queued":
+                            if not (
+                                occurrence.run_id is None
+                                and occurrence.launch_accounted is False
+                                and occurrence.started_at is None
+                                and occurrence.finished_at is None
+                                and occurrence.lease_owner is None
+                                and occurrence.lease_expires_at is None
+                                and type(occurrence.attempt_count) is int
+                                and occurrence.attempt_count == 0
+                                and occurrence.stop_requested_run_id is None
+                            ):
+                                continue
+                        elif occurrence.status == "running" and occurrence.launch_accounted is True:
+                            native = (await session.execute(select(*run_columns).where(RunRow.run_id == occurrence.run_id).with_for_update())).first()
+                            if native is None:
+                                continue
+                            target = NativeRunStopTarget.from_row(native)
+                            if (
+                                target.workspace_context != context
+                                or target.user_id != task.user_id
+                                or target.thread_id != occurrence.thread_id
+                                or target.thread_incarnation != occurrence.thread_incarnation
+                                or native.operation_kind != "run"
+                                or native.idempotency_key != "scheduled-task:" + occurrence.id
+                                or native.status not in ("success", "error", "timeout", "interrupted")
+                                or native.task_id != task.id
+                                or native.occurrence_id != occurrence.id
+                                or native.trigger != occurrence.trigger
+                            ):
+                                continue
+                            execution = (
+                                await session.execute(
+                                    select(*operation_columns)
+                                    .where(
+                                        WorkspaceOperationOutboxRow.operation_id == target.execution_id,
+                                    )
+                                    .with_for_update()
+                                )
+                            ).first()
+                            if (
+                                execution is None
+                                or execution.kind != "run_execution"
+                                or execution.state != "completed"
+                                or execution.workspace_id != context.workspace_id
+                                or execution.user_id != task.user_id
+                                or type(execution.payload) is not dict
+                                or type(execution.payload.get("version")) is not int
+                                or execution.payload["version"] != 1
+                                or execution.payload.get("binding") != target.execution_binding()
+                                or execution.payload.get("owner_worker_id") != target.owner_worker_id
+                            ):
+                                continue
+                        else:
+                            continue
+                        operations = (
+                            await session.execute(
+                                select(*operation_columns)
+                                .where(
+                                    WorkspaceOperationOutboxRow.workspace_id == context.workspace_id,
+                                    WorkspaceOperationOutboxRow.user_id == context.actor_user_id,
+                                    WorkspaceOperationOutboxRow.kind == "workspace_revoke",
+                                    WorkspaceOperationOutboxRow.state == "pending",
+                                )
+                                .order_by(WorkspaceOperationOutboxRow.operation_id)
+                                .with_for_update()
+                            )
+                        ).all()
+                        operation = next((row for row in operations if self._revocation_covers(row, context, member_version=member.version, policy_version=workspace.policy_version)), None)
+                        if operation is None:
+                            continue
+                    except (TypeError, ValueError):
+                        continue
+                    # Exact finite control snapshots, no old lease or native
+                    # association can be inferred away by status alone.
+                    exact_occurrence = [column.is_not_distinct_from(getattr(occurrence, column.key)) for column in occurrence_columns if column.key != "workspace_context_json"]
+                    changed = await session.execute(
+                        update(ScheduledTaskRunRow)
+                        .where(
+                            *exact_occurrence,
+                            cast(ScheduledTaskRunRow.workspace_context_json, Text) == occurrence.snapshot_text,
+                        )
+                        .values(status="interrupted", error=RUN_ERROR_INTERRUPTED, finished_at=now)
+                    )
+                    if changed.rowcount != 1:
+                        continue
+                    exact_task = [column.is_not_distinct_from(getattr(task, column.key)) for column in task_columns if column.key != "workspace_context_json"]
+                    updated = await session.execute(
+                        update(ScheduledTaskRow)
+                        .where(
+                            *exact_task,
+                            cast(ScheduledTaskRow.workspace_context_json, Text) == task.snapshot_text,
+                        )
+                        .values(status="cancelled" if task.schedule_type == "once" else "paused", next_run_at=None, updated_at=now)
+                    )
+                    if updated.rowcount != 1:
+                        await session.rollback()
+                        continue
+                    session.add(
+                        WorkspaceAuditEventRow(
+                            id=str(uuid5(NAMESPACE_URL, "scheduler.revoke_settled:" + occurrence.id)),
+                            workspace_id=context.workspace_id,
+                            actor_user_id=None,
+                            action="scheduler.revoke_settled",
+                            resource_id=occurrence.id,
+                            outcome="success",
+                            request_id=operation.operation_id,
+                        )
+                    )
+                    await session.commit()
+        # SQL success can precede a failed host call. Re-read ALL audit pages,
+        # independently of fresh candidates: first-page historical receipts
+        # cannot permanently mask a later ledger wait. These are locators only.
+        replay, cursor = set(), ""
+        while True:
+            async with self._sf() as session:
+                rows = (
+                    await session.execute(
+                        select(
+                            WorkspaceAuditEventRow.id,
+                            ScheduledTaskRunRow.run_id,
+                            ScheduledTaskRunRow.id.label("occurrence_id"),
+                            ScheduledTaskRunRow.workspace_context_json,
+                            WorkspaceMembershipRow.version.label("member_version"),
+                            WorkspaceRow.policy_version.label("current_policy_version"),
+                            *operation_columns,
+                        )
+                        .join(ScheduledTaskRunRow, ScheduledTaskRunRow.id == WorkspaceAuditEventRow.resource_id)
+                        .join(ScheduledTaskRow, ScheduledTaskRow.id == ScheduledTaskRunRow.task_id)
+                        .join(RunRow, RunRow.run_id == ScheduledTaskRunRow.run_id)
+                        .join(WorkspaceOperationOutboxRow, WorkspaceOperationOutboxRow.operation_id == WorkspaceAuditEventRow.request_id)
+                        .join(WorkspaceMembershipRow, and_(WorkspaceMembershipRow.workspace_id == ScheduledTaskRow.workspace_id, WorkspaceMembershipRow.user_id == ScheduledTaskRow.user_id))
+                        .join(WorkspaceRow, WorkspaceRow.id == ScheduledTaskRow.workspace_id)
+                        .where(
+                            WorkspaceAuditEventRow.id > cursor,
+                            WorkspaceAuditEventRow.action == "scheduler.revoke_settled",
+                            WorkspaceAuditEventRow.outcome == "success",
+                            WorkspaceAuditEventRow.actor_user_id.is_(None),
+                            WorkspaceAuditEventRow.workspace_id == ScheduledTaskRunRow.workspace_id,
+                            ScheduledTaskRunRow.status == "interrupted",
+                            ScheduledTaskRunRow.workspace_id == ScheduledTaskRow.workspace_id,
+                            cast(ScheduledTaskRunRow.workspace_context_json, Text) == cast(ScheduledTaskRow.workspace_context_json, Text),
+                            cast(ScheduledTaskRunRow.workspace_context_json, Text) == cast(RunRow.workspace_context_json, Text),
+                            RunRow.metadata_json["scheduled_task_id"].as_string() == ScheduledTaskRow.id,
+                            RunRow.metadata_json["scheduled_task_run_id"].as_string() == ScheduledTaskRunRow.id,
+                            RunRow.metadata_json["scheduled_trigger"].as_string() == ScheduledTaskRunRow.trigger,
+                            RunRow.workspace_id == ScheduledTaskRunRow.workspace_id,
+                            RunRow.user_id == ScheduledTaskRow.user_id,
+                            RunRow.thread_id == ScheduledTaskRunRow.thread_id,
+                            RunRow.thread_incarnation == ScheduledTaskRunRow.thread_incarnation,
+                            RunRow.operation_kind == "run",
+                            RunRow.idempotency_key == "scheduled-task:" + ScheduledTaskRunRow.id,
+                            WorkspaceOperationOutboxRow.kind == "workspace_revoke",
+                            WorkspaceOperationOutboxRow.state == "pending",
+                            WorkspaceOperationOutboxRow.workspace_id == RunRow.workspace_id,
+                            WorkspaceOperationOutboxRow.user_id == RunRow.user_id,
+                        )
+                        .order_by(WorkspaceAuditEventRow.id)
+                        .limit(limit)
+                    )
+                ).all()
+            if not rows:
+                break
+            for row in rows:
+                try:
+                    context = WorkspaceContext(**row.workspace_context_json)
+                except (TypeError, ValueError):
+                    continue
+                if (
+                    row.member_version > context.membership_version
+                    and self._revocation_covers(row, context, member_version=row.member_version, policy_version=row.current_policy_version)
+                    and row.id == str(uuid5(NAMESPACE_URL, "scheduler.revoke_settled:" + row.occurrence_id))
+                ):
+                    replay.add(row.run_id)
+            cursor = rows[-1].id
+        return frozenset(replay)
 
     async def resolve_launch_authority(self, receipt):
         if not self.workspace_scope_required or type(receipt) is not ScheduledAdmissionReceipt:

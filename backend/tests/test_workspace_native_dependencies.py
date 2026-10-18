@@ -23,7 +23,7 @@ def test_scoped_native_dependency_notification_resumes_original_goal(native_engi
     _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp_path, revocation_phase=revocation_phase)
 
 
-def _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp_path, *, revocation_phase="normal", scheduled=False, goal_replacement=False):  # noqa: F811
+def _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp_path, *, revocation_phase="normal", scheduled=False, goal_replacement=False, member_control=False):  # noqa: F811
     from ecs_executor.agent_dispatch import NativeDispatchHost, NativeWorkerHost, install_native_dispatch
     from ecs_executor.dispatch import PROTOCOL, WORKER_VERSION
     from ecs_executor.job_store import JobStore
@@ -409,6 +409,129 @@ def _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp
                         parent_task = await session.get(ScheduledTaskRow, scheduler_id)
                         assert occurrence.status == "running" and occurrence.run_id == first.run_id and occurrence.launch_accounted is True
                         assert parent_task.status == "running" and parent_task.run_count == 1
+                if member_control:
+                    from ecs_executor import dependencies as dependency_module
+                    from ecs_executor.job_store import _JOBS
+
+                    from deerflow.persistence.user.model import UserRow
+                    from deerflow.persistence.workspaces.model import WorkspaceAuditEventRow, WorkspaceOperationOutboxRow
+                    from deerflow.persistence.workspaces.sql import WorkspaceRepository
+
+                    successor = "22222222-2222-4222-8222-222222222222"
+                    async with case.sf() as session:
+                        session.add(UserRow(id=successor, email="scheduler-control-successor@example.com", email_verified_at=datetime.now(UTC)))
+                        await session.commit()
+                    workspaces = WorkspaceRepository(case.sf)
+                    await workspaces.add_member(case.original.workspace_id, owner_user_id, successor, role="admin")
+                    await workspaces.transfer_owner(case.original.workspace_id, owner_user_id, successor)
+                    await workspaces.remove_member(case.original.workspace_id, successor, owner_user_id)
+                    async with case.sf() as session:
+                        member = await session.get(WorkspaceMembershipRow, (case.original.workspace_id, owner_user_id))
+                        assert member.status == "removed" and member.version == case.original.membership_version + 2
+                        revokes = (
+                            await session.scalars(
+                                select(WorkspaceOperationOutboxRow).where(
+                                    WorkspaceOperationOutboxRow.workspace_id == case.original.workspace_id,
+                                    WorkspaceOperationOutboxRow.user_id == owner_user_id,
+                                    WorkspaceOperationOutboxRow.kind == "workspace_revoke",
+                                )
+                            )
+                        ).all()
+                        assert len(revokes) == 2 and all(row.state == "pending" and "scheduler" in row.payload["pending_domains"] for row in revokes)
+                        revoke_baseline = deepcopy({row.operation_id: row.payload for row in revokes})
+
+                    async def control_snapshot():
+                        async with case.sf() as session:
+                            source = dict((await session.execute(select(RunRow.__table__).where(RunRow.run_id == first.run_id))).mappings().one())
+                            normal_ids = frozenset(await session.scalars(select(RunRow.run_id).where(RunRow.operation_kind == "run")))
+                            child = dict((await session.execute(select(ScheduledTaskRunRow.__table__).where(ScheduledTaskRunRow.id == occurrence_id))).mappings().one())
+                            parent = dict((await session.execute(select(ScheduledTaskRow.__table__).where(ScheduledTaskRow.id == scheduler_id))).mappings().one())
+                            lifetimes = [
+                                dict(row)
+                                for row in (
+                                    await session.execute(
+                                        select(WorkspaceOperationOutboxRow.__table__).where(
+                                            WorkspaceOperationOutboxRow.kind == "run_execution",
+                                            WorkspaceOperationOutboxRow.payload["run_id"].as_string() == first.run_id,
+                                        )
+                                    )
+                                ).mappings()
+                            ]
+                            events = [dict(row) for row in (await session.execute(select(ScheduledTaskEventRow.__table__).where(ScheduledTaskEventRow.task_id == scheduler_id))).mappings()]
+                            audits = [
+                                dict(row)
+                                for row in (
+                                    await session.execute(
+                                        select(WorkspaceAuditEventRow.__table__)
+                                        .where(
+                                            WorkspaceAuditEventRow.action == "scheduler.revoke_settled",
+                                            WorkspaceAuditEventRow.resource_id == occurrence_id,
+                                        )
+                                        .order_by(WorkspaceAuditEventRow.id)
+                                    )
+                                ).mappings()
+                            ]
+                            ops = [
+                                dict(row)
+                                for row in (
+                                    await session.execute(select(WorkspaceOperationOutboxRow.__table__).where(WorkspaceOperationOutboxRow.operation_id.in_(revoke_baseline)).order_by(WorkspaceOperationOutboxRow.operation_id))
+                                ).mappings()
+                            ]
+                        return deepcopy((source, normal_ids, child, parent, lifetimes, events, audits, ops))
+
+                    def pool_snapshot():
+                        with ledger.engine.connect() as connection:
+                            return deepcopy([dict(row) for row in connection.execute(select(_JOBS).order_by(_JOBS.c.id)).mappings() if row["record"].get("kind") == "C"])
+
+                    before = await control_snapshot()
+                    assert len(before[4]) == 1 and before[4][0]["state"] == "completed"
+                    pool_before = await asyncio.to_thread(pool_snapshot)
+                    forbidden_reads = []
+
+                    async def forbid_business(*args, **kwargs):
+                        forbidden_reads.append("checkpoint/result/goal/business_run")
+                        raise AssertionError("Withdrawn Scheduler control attempted a business read")
+
+                    # These are real business entry points, not authorization
+                    # replacements. Control inspection and raw test SQL remain.
+                    with monkeypatch.context() as control_only:
+                        control_only.setattr(dependency_module, "checkpoint_receipt", forbid_business)
+                        control_only.setattr(goal_runtime, "read_thread_goal", forbid_business)
+                        control_only.setattr(native_worker, "clear_recovered_scheduled_goal", forbid_business)
+                        control_only.setattr(central, "get", forbid_business)
+                        control_only.setattr(receiver, "get", forbid_business)
+                        control_only.setattr(task_repo, "get", forbid_business)
+                        control_only.setattr(task_repo, "list_by_run", forbid_business)
+                        await control.run_once(now=datetime.now(UTC))
+                        after = await control_snapshot()
+                        assert after[2]["status"] == "interrupted", "Revoked closed C1 still holds the Scheduler budget"
+                        assert after[3]["status"] == "cancelled"
+                        assert after[0] == before[0] and after[1] == before[1] and after[4] == before[4]
+                        assert after[2]["run_id"] == first.run_id and after[2]["launch_accounted"] is True
+                        assert after[2]["workspace_context_json"] == after[3]["workspace_context_json"] == asdict(case.original)
+                        assert after[3]["run_count"] == before[3]["run_count"] == 1
+                        assert after[5] == before[5] and len(after[6]) == 1
+                        assert after[6][0]["request_id"] in revoke_baseline and after[6][0]["actor_user_id"] is None
+                        assert after[7] == before[7]  # Parent and scheduler domain remain pending.
+                        old_wait = await asyncio.to_thread(ledger.get, job["id"])
+                        assert old_wait["dependency_wait"]["active"] is False
+                        pool_after = await asyncio.to_thread(pool_snapshot)
+                        # Ledger control retires only the wait/version, never a
+                        # pool reservation or native/physical receipt.
+                        assert len(pool_after) == len(pool_before)
+                        for previous, current in zip(pool_before, pool_after, strict=True):
+                            assert current["id"] == previous["id"]
+                            old, new = deepcopy(previous["record"]), deepcopy(current["record"])
+                            if current["id"] == job["id"]:
+                                old["dependency_wait"]["active"] = False
+                            assert new == old
+                        await control.run_once(now=datetime.now(UTC))
+                        assert await control_snapshot() == after
+                        assert await asyncio.to_thread(pool_snapshot) == pool_after
+                    assert forbidden_reads == []
+                    assert (await asyncio.to_thread(pool.node_status, "worker"))["unreleased"] == 0
+                    assert len(admitted) == 1 and len(executed) == 1 and get_current_workspace() == case.other
+                    return
                 if goal_replacement:
                     from ecs_executor.job_store import _JOBS
 
@@ -652,3 +775,8 @@ def test_scoped_installed_scheduler_dependency_transfers_original_occurrence(nat
 @pytest.mark.parametrize("executor_engine", ["postgres"], indirect=True)
 def test_scoped_scheduled_dependency_goal_replacement_preserves_new_goal(native_engine, executor_engine, monkeypatch, tmp_path):  # noqa: F811
     _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp_path, scheduled=True, goal_replacement=True)
+
+
+@pytest.mark.parametrize("executor_engine", ["postgres"], indirect=True)
+def test_scoped_scheduler_revocation_settles_closed_dependency_control_only(native_engine, executor_engine, monkeypatch, tmp_path):  # noqa: F811
+    _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp_path, scheduled=True, member_control=True)

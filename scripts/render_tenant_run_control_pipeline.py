@@ -61,6 +61,7 @@ def main():
             "native-scheduler-manual-own-stop",
             "native-scheduler-installed-dependency",
             "native-scheduler-goal-replacement",
+            "native-scheduler-revoked-control",
         ),
         default="revocation",
     )
@@ -203,6 +204,8 @@ def main():
         tests = "tests/test_workspace_native_dependencies.py::test_scoped_installed_scheduler_dependency_transfers_original_occurrence[postgres]"
     if args.suite == "native-scheduler-goal-replacement":
         tests = "tests/test_workspace_native_dependencies.py::test_scoped_scheduled_dependency_goal_replacement_preserves_new_goal[postgres]"
+    if args.suite == "native-scheduler-revoked-control":
+        tests = "tests/test_workspace_native_dependencies.py::test_scoped_scheduler_revocation_settles_closed_dependency_control_only[postgres]"
     rendered = rendered.replace("@@TEST_PATHS@@", tests)
     if "@@" in rendered:
         parser.error("unresolved pipeline marker")
