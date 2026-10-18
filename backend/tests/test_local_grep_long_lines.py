@@ -1,5 +1,9 @@
 """Fixed-string local searches must not inherit the regex long-line guard."""
 
+import os
+import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -90,3 +94,64 @@ def test_local_sandbox_literal_grep_keeps_virtual_paths(tmp_path: Path, single_f
 
     assert matches == [GrepMatch(path=f"{virtual_root}/data.json", line_number=1, line=truncate_line(line))]
     assert truncated is False
+
+
+@pytest.mark.parametrize("case_sensitive", [False, True])
+@pytest.mark.parametrize(
+    ("pattern", "body"),
+    [
+        ("aaaaab", "a" * 30 + "b"),
+        ("aAaB", "a" * 30 + "AAab"),
+        ("i", "İ"),
+        ("i", "ı"),
+        ("s", "ſ"),
+        ("k", "K"),
+        ("iıiX", "İİİİX"),
+        ("ΣσςX", "ςΣσςX"),
+        ("β", "ϐ"),
+        ("μ", "µ"),
+        ("φ", "ϕ"),
+        ("ss", "ß"),
+        ("ß", "ẞ"),
+        ("i\u0307", "İ"),
+        ("Needle[0].value", "needle[0].VALUE"),
+        ("", "no needle"),
+        ("a" * 60, "a" * 30),
+    ],
+)
+def test_literal_long_line_preserves_regex_case_semantics(tmp_path: Path, pattern: str, body: str, case_sensitive: bool) -> None:
+    target = tmp_path / "unicode.txt"
+    line = "x" * 2500 + body
+    target.write_text(line, encoding="utf-8")
+    expected = re.search(re.escape(pattern), line, 0 if case_sensitive else re.IGNORECASE) is not None
+
+    matches, truncated = find_grep_matches(target, pattern, literal=True, case_sensitive=case_sensitive)
+
+    assert bool(matches) is expected
+    assert truncated is False
+
+
+def test_case_insensitive_literal_repeated_prefix_finishes_within_deadline(tmp_path: Path) -> None:
+    missing = tmp_path / "missing.txt"
+    present = tmp_path / "present.txt"
+    missing.write_text("a" * 900_000, encoding="utf-8")
+    present.write_text("a" * 900_000 + "b", encoding="utf-8")
+    env = os.environ.copy()
+    harness = Path(__file__).resolve().parents[1] / "packages" / "harness"
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, (str(harness), env.get("PYTHONPATH", ""))))
+    script = """
+import sys
+from pathlib import Path
+from deerflow.sandbox.search import find_grep_matches
+pattern = "a" * 10_000 + "b"
+assert find_grep_matches(Path(sys.argv[1]), pattern, literal=True) == ([], False)
+matches, truncated = find_grep_matches(Path(sys.argv[2]), pattern, literal=True)
+assert len(matches) == 1 and matches[0].line_number == 1
+assert truncated is False
+"""
+
+    # A subprocess deadline kills and reaps a regressing regex search rather
+    # than leaving an uninterruptible worker running after this test fails.
+    result = subprocess.run([sys.executable, "-c", script, str(missing), str(present)], env=env, capture_output=True, text=True, timeout=10, check=False)
+
+    assert result.returncode == 0, result.stderr

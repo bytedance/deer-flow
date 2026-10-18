@@ -110,12 +110,13 @@ Fork lookups reject invalidated clients; cancelled acquires leave borrowers a pe
 
 **Sandbox Tools** (in `packages/harness/deerflow/sandbox/tools.py`):
 
-Local `find_grep_matches` applies its long-line guard only to regex searches.
-Escaped fixed-string patterns can scan long lines without regex backtracking;
-retain file-size, binary-file, glob, symlink and result-summary limits.
-`tests/test_local_grep_long_lines.py` covers virtual paths and regex safety;
-`tests/test_sandbox_search_contract.py` covers six providers. Previews may omit
-late matches; `truncated` concerns result limits, not shortened line prefixes.
+Local grep guards long lines only in regex mode. Case-insensitive literals use
+KMP with single-character `re.IGNORECASE` matches for linear work and Unicode
+parity; case-sensitive literals use substring search. Keep file-size, binary,
+glob, symlink and preview limits. Tests: `tests/test_local_grep_long_lines.py`
+(deadline, Unicode, virtual paths), `tests/test_sandbox_search_contract.py`
+(six providers). Previews may omit late hits; `truncated` counts results,
+not shortened previews.
 
 Remote `list_dir` prints the root, then prunes ignored descendants before the
 500-entry cap. Preserve root literals, host case policy, status markers and the
