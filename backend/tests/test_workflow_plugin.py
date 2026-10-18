@@ -3,6 +3,8 @@
 import asyncio
 import json
 import os
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -508,6 +510,109 @@ async def test_workflow_deadline_is_failed_and_cleans_up(plugin, with_child):
         assert len(runs.starts) == 1
         assert final["steps"][0]["child_status"] == "interrupted"
         assert all(run.status == "interrupted" for run in runs.runs.values())
+
+
+def count_sends(service, monkeypatch):
+    sent = []
+    original = service.send
+
+    async def send(process, message):
+        sent.append(message)
+        await original(process, message)
+
+    monkeypatch.setattr(service, "send", send)
+    return sent
+
+
+@pytest.mark.asyncio
+async def test_pending_agent_wait_does_not_consume_worker_turns(plugin, monkeypatch):
+    service, runs = plugin[2], plugin[3]
+    monkeypatch.setattr(sys.modules[type(service).__module__], "TURN_LIMIT", 20)
+    sent = count_sends(service, monkeypatch)
+    result = await launch(plugin, "return await agent({stepId:'a',agentRef:'lead_agent',task:'blocked'});")
+    await asyncio.wait_for(runs.entered.wait(), 5)
+    await asyncio.sleep(3)
+    runs.release.set()
+    final = await done(plugin, result["run_id"])
+    assert final["status"] == "completed", final
+    # Idle waiting must not round-trip to the worker every poll interval.
+    assert len(sent) <= 5, len(sent)
+
+
+@pytest.mark.asyncio
+async def test_worker_exit_while_agent_pending_fails_promptly(plugin):
+    _, actions, service, runs = plugin
+    service.config["timeout_seconds"] = 60
+    result = await launch(plugin, "return await agent({stepId:'a',agentRef:'lead_agent',task:'blocked'});")
+    await asyncio.wait_for(runs.entered.wait(), 5)
+    assert runs.active == 1
+    process = service.processes[result["run_id"]]
+    process.kill()
+    await asyncio.wait_for(process.wait(), 3)
+
+    # A dead idle worker must fail before the workflow's 60-second deadline,
+    # without waiting for the blocked Agent to complete by itself.
+    await asyncio.wait_for(service.wait_idle(result["run_id"]), 3)
+    final = await actions["get"]({"run_id": result["run_id"]}, context(runs))
+    assert final["status"] == "failed", final
+    assert final["error"] == "Worker exited while waiting for Agent calls"
+    assert final["steps"][0]["child_status"] == "interrupted"
+    assert all(run.status == "interrupted" for run in runs.runs.values())
+    assert not service.processes
+
+
+@pytest.mark.asyncio
+async def test_work_frames_still_count_against_worker_turn_budget(plugin, monkeypatch):
+    """Work-carrying frames retain the turn cap (regression from PR #7025)."""
+    service = plugin[2]
+    monkeypatch.setattr(sys.modules[type(service).__module__], "TURN_LIMIT", 2)
+    result = await launch(
+        plugin,
+        """
+      await agent({stepId:'a',agentRef:'lead_agent',task:'one'});
+      await agent({stepId:'b',agentRef:'lead_agent',task:'two'});
+      return 1;
+    """,
+    )
+    final = await done(plugin, result["run_id"])
+    assert final["status"] == "failed", final
+    assert final["error"] == "Worker turn limit"
+    assert not service.processes
+
+
+@pytest.mark.asyncio
+async def test_cancel_while_agent_pending_stops_promptly(plugin):
+    _, actions, service, runs = plugin
+    result = await launch(plugin, "return await agent({stepId:'a',agentRef:'lead_agent',task:'blocked'});")
+    await asyncio.wait_for(runs.entered.wait(), 5)
+    await asyncio.sleep(0.3)
+    started = time.monotonic()
+    await actions["cancel"]({"run_id": result["run_id"]}, context(runs))
+    # Cancel latency is ~4 ms locally; the budget also covers the store writes
+    # and process reaping, which can spike on a loaded CI runner.
+    await asyncio.wait_for(service.wait_idle(result["run_id"]), 3)
+    assert time.monotonic() - started < 3
+    final = await actions["get"]({"run_id": result["run_id"]}, context(runs))
+    assert final["status"] == "cancelled", final
+    assert not service.processes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "script",
+    [
+        "for(;;) await null;",
+        "const p=agent({stepId:'a',agentRef:'lead_agent',task:'blocked'}); for(;;) await null;",
+    ],
+)
+async def test_spinning_script_still_hits_turn_limit(plugin, monkeypatch, script):
+    service = plugin[2]
+    monkeypatch.setattr(sys.modules[type(service).__module__], "TURN_LIMIT", 50)
+    result = await launch(plugin, script)
+    final = await done(plugin, result["run_id"])
+    assert final["status"] == "failed", final
+    assert final["error"] == "Worker turn limit"
+    assert not service.processes
 
 
 @pytest.mark.asyncio

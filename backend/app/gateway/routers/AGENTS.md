@@ -16,6 +16,8 @@ create-only: collisions return 409, never overwrite or upsert. Ordinary creation
 and import share `_persist_new_agent`, which uses `run_drained_write` so a
 cancelled request still drains the owned persistence worker.
 
+Skill mutation operation lists return `next_cursor: null` when `has_more` is false, including empty pages after a supplied `after_id`. The next cursor is the final returned operation only when a further page exists.
+
 `GET /api/agent-tool-groups` projects only configured group names for the
 custom-Agent settings allowlist. Never expose tool provider paths, credentials,
 or raw tool configuration through this catalog.
@@ -24,6 +26,9 @@ Custom Agent update guards apply legacy shared-file checks only when the
 resolved store is `FileAgentStore`, including the `update_agent` tool. DB
 imports retain source files for rollback; those files cannot veto SQL updates.
 Keep store resolution and filesystem checks off-loop in the HTTP route.
+Agent PUT uses `preserve_non_managed_fields(..., new_tool_groups=...)` to clear
+an inherited knowledge default when changed groups remove knowledge access.
+Explicit scope/null updates still win; unchanged groups are not a migration.
 
 Committed MCP reconciliation failures are logged once by
 `fail_mcp_reconciliation`, with only the underlying exception type.
