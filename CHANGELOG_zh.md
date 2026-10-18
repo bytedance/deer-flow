@@ -1021,7 +1021,7 @@
   Gateway 不是从 `backend/` 启动时，新文件会落在查找路径之外，重新加载后开关被静默
   丢弃，之后的 MCP 编辑还会再创建第二个文件。现在两个路由共用
   `ExtensionsConfig.default_config_path()`。Docker 与 `make dev` 不受影响：它们设置了
-  配置路径，或者项目根目录恰好就是那个父目录。
+  配置路径，或者项目根目录恰好就是那个父目录。 ([#7048])
 
 - **浏览器：** `browser_screenshot` 不再替换线程 outputs 目录中已存在的文件。此前以
   `report.png` 保存的截图会覆盖用户自己的 `report.png`、更早的截图，或同一秒内生成的
@@ -9430,3 +9430,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6930]: https://github.com/bytedance/deer-flow/pull/6930
 [#6988]: https://github.com/bytedance/deer-flow/pull/6988
 [#6991]: https://github.com/bytedance/deer-flow/pull/6991
+[#7048]: https://github.com/bytedance/deer-flow/pull/7048

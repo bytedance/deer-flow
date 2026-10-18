@@ -1274,6 +1274,7 @@ This release closes that milestone with **621 merged pull requests**.
   and the next MCP edit created a second file. Both routers now share
   `ExtensionsConfig.default_config_path()`. Docker and `make dev` were not
   affected: they set the config path, or a project root equal to that parent.
+  ([#7048])
 
 - **browser:** `browser_screenshot` no longer replaces a file that already
   exists in the thread's outputs directory. A screenshot saved as
@@ -11830,3 +11831,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6930]: https://github.com/bytedance/deer-flow/pull/6930
 [#6988]: https://github.com/bytedance/deer-flow/pull/6988
 [#6991]: https://github.com/bytedance/deer-flow/pull/6991
+[#7048]: https://github.com/bytedance/deer-flow/pull/7048
