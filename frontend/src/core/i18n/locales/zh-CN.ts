@@ -796,6 +796,7 @@ export const zhCN: Translations = {
     loadResultFailed: "无法加载批处理结果",
     truncated: "报告已截断",
     omittedEvidence: (count) => `${count} 条证据未展示`,
+    pagesLabel: "页码",
     viewItems: "查看条目",
     hideItems: "收起条目",
     itemsFailed: "无法加载批处理条目",

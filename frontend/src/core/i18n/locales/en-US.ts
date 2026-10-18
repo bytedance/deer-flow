@@ -856,6 +856,7 @@ export const enUS: Translations = {
     loadResultFailed: "Couldn't load batch result",
     truncated: "Report truncated",
     omittedEvidence: (count) => `${count} evidence entries omitted`,
+    pagesLabel: "Pages",
     viewItems: "View items",
     hideItems: "Hide items",
     itemsFailed: "Couldn't load batch items",

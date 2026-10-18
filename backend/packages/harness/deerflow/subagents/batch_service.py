@@ -67,7 +67,11 @@ def _browser_evidence_snapshot(artifact: object) -> dict[str, Any] | None:
             continue
         if any(len(source[field]) > 512 for field in ("dataset_name", "document_name")):
             continue
-        if any(len(source[field]) > 256 for field in ("dataset_id", "document_id", "chunk_id")):
+        if any(len(source[field]) > 256 for field in ("id", "dataset_id", "document_id", "chunk_id")):
+            continue
+        # Keep legacy or manually repaired rows bounded at read time too;
+        # write-time limits do not protect this endpoint from old oversized text.
+        if len(source["text"]) > 16_000:
             continue
         record = {field: source[field] for field in _BROWSER_EVIDENCE_FIELDS}
         pages = source.get("pages")

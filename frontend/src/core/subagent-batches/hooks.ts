@@ -75,7 +75,7 @@ export function useSubagentBatchItemDetail(
   threadId: string,
   batchId: string,
   position: number | null,
-  options: { enabled?: boolean } = {},
+  options: { enabled?: boolean; polling?: boolean } = {},
 ) {
   return useQuery({
     queryKey:
@@ -88,6 +88,14 @@ export function useSubagentBatchItemDetail(
       Boolean(threadId) &&
       Boolean(batchId) &&
       position !== null,
+    refetchInterval: (query) => {
+      if (options.polling === false) return false;
+      const status = query.state.data?.status;
+      return status && ["succeeded", "failed", "cancelled"].includes(status)
+        ? false
+        : 2000;
+    },
+    refetchIntervalInBackground: false,
   });
 }
 

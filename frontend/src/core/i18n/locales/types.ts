@@ -682,6 +682,7 @@ export interface Translations {
     loadResultFailed: string;
     truncated: string;
     omittedEvidence: (count: number) => string;
+    pagesLabel: string;
     viewItems: string;
     hideItems: string;
     itemsFailed: string;

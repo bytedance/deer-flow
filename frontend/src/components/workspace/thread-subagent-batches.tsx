@@ -11,7 +11,8 @@ import {
   LoaderCircleIcon,
   RotateCcwIcon,
 } from "lucide-react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
+import type { Message } from "@langchain/langgraph-sdk";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -23,6 +24,14 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Progress } from "@/components/ui/progress";
+import {
+  KnowledgeSourcesProvider,
+} from "@/components/workspace/citations/knowledge-source";
+import { CitationLink } from "@/components/workspace/citations/citation-link";
+import {
+  SafeStreamdown,
+  toStreamdownComponents,
+} from "@/core/streamdown/components";
 import {
   Sheet,
   SheetContent,
@@ -339,6 +348,7 @@ function BatchItemRow({
   const [detailOpen, setDetailOpen] = useState(false);
   const detail = useSubagentBatchItemDetail(threadId, batchId, item.position, {
     enabled: detailOpen,
+    polling: detailOpen,
   });
   return (
     <div className="bg-muted/40 rounded-lg p-2 text-xs">
@@ -411,20 +421,43 @@ function BatchItemRow({
 function BatchItemDetail({ detail }: { detail: SubagentBatchItemDetail }) {
   const { t } = useI18n();
   const evidence = detail.evidence;
+  const citationMessages = useMemo(
+    () =>
+      [
+        {
+          type: "tool",
+          name: "task",
+          artifact: evidence
+            ? { knowledge_sources: evidence }
+            : undefined,
+        },
+      ] as unknown as Message[],
+    [evidence],
+  );
   return (
-    <div className="space-y-4 text-sm">
-      <section>
+    <KnowledgeSourcesProvider messages={citationMessages}>
+      <div className="space-y-4 text-sm">
+        <section>
         <h3 className="mb-2 font-medium">{t.subagentBatches.report}</h3>
-        <div className="bg-muted/40 max-h-72 overflow-y-auto rounded-md p-3 whitespace-pre-wrap">
-          {detail.report ?? t.subagentBatches.noReport}
+        <div className="bg-muted/40 max-h-72 overflow-y-auto rounded-md p-3">
+          {detail.report ? (
+            <SafeStreamdown
+              components={toStreamdownComponents({ a: CitationLink })}
+              className="prose prose-sm dark:prose-invert max-w-none"
+            >
+              {detail.report}
+            </SafeStreamdown>
+          ) : (
+            t.subagentBatches.noReport
+          )}
         </div>
         {detail.report_truncated && (
           <p className="text-muted-foreground mt-1 text-xs">
             {t.subagentBatches.truncated}
           </p>
         )}
-      </section>
-      <section>
+        </section>
+        <section>
         <h3 className="mb-2 font-medium">{t.subagentBatches.evidence}</h3>
         {!evidence || evidence.sources.length === 0 ? (
           <p className="text-muted-foreground text-xs">
@@ -445,27 +478,28 @@ function BatchItemDetail({ detail }: { detail: SubagentBatchItemDetail }) {
                 </p>
                 {source.pages.length > 0 && (
                   <p className="text-muted-foreground mt-1 text-xs">
-                    Pages: {source.pages.join(", ")}
+                    {t.subagentBatches.pagesLabel}: {source.pages.join(", ")}
                   </p>
                 )}
               </article>
             ))}
-            {evidence.omitted_count > 0 && (
-              <p className="text-muted-foreground text-xs">
-                {t.subagentBatches.omittedEvidence(evidence.omitted_count)}
-              </p>
-            )}
           </div>
         )}
-      </section>
-      {detail.acceptance_verdict && (
-        <section>
+        {evidence && evidence.omitted_count > 0 && (
+          <p className="text-muted-foreground mt-2 text-xs">
+            {t.subagentBatches.omittedEvidence(evidence.omitted_count)}
+          </p>
+        )}
+        </section>
+        {detail.acceptance_verdict && (
+          <section>
           <h3 className="mb-2 font-medium">{t.subagentBatches.acceptance}</h3>
           <pre className="bg-muted/40 overflow-x-auto rounded-md p-3 text-xs">
             {JSON.stringify(detail.acceptance_verdict, null, 2)}
           </pre>
-        </section>
-      )}
-    </div>
+          </section>
+        )}
+      </div>
+    </KnowledgeSourcesProvider>
   );
 }
