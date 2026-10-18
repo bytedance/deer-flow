@@ -13,7 +13,7 @@ from typing import Any
 from .base import DEFAULT_HEARTBEAT_INTERVAL_SECONDS, END_SENTINEL, HEARTBEAT_SENTINEL, StreamBridge, StreamEvent, StreamGap, StreamItem
 
 logger = logging.getLogger(__name__)
-_MEMORY_STREAM_ID_RE = re.compile(r"\d+-(\d+)")
+_MEMORY_STREAM_ID_RE = re.compile(r"[0-9]+-([0-9]+)")
 
 
 @dataclass
@@ -62,7 +62,11 @@ class MemoryStreamBridge(StreamBridge):
         match = _MEMORY_STREAM_ID_RE.fullmatch(event_id)
         if match is None:
             return None
-        return int(match.group(1))
+        try:
+            return int(match.group(1))
+        except ValueError:
+            # Numeric-looking reconnect ids can exceed Python's digit limit.
+            return None
 
     @staticmethod
     def _make_gap(stream: _RunStream, requested_event_id: str | None) -> StreamGap:

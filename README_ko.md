@@ -372,7 +372,7 @@ make docker-logs    # View logs
 
 `make docker-start`는 `config.yaml`이 provisioner 모드(`sandbox.use: deerflow.community.aio_sandbox:AioSandboxProvider`와 `provisioner_url` 사용)를 쓰는 경우에만 `provisioner`를 시작합니다.
 
-Docker 빌드는 기본적으로 업스트림 `uv` 레지스트리를 사용합니다. 제한된 네트워크에서 더 빠른 미러가 필요하다면 `UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple`과 `NPM_REGISTRY=https://registry.npmmirror.com`을 export한 뒤 `make docker-init` 또는 `make docker-start`를 실행하세요.
+Docker 빌드는 기본적으로 업스트림 `uv` 레지스트리를 사용합니다. 게이트웨이 이미지는 `uv sync --locked`로 설치하고 `uv.lock`은 `https://pypi.org/simple`를 고정하므로, `UV_INDEX_URL`은 이 값을 유지해야 합니다. `https://pypi.tuna.tsinghua.edu.cn/simple` 같은 미러를 export하면 ``The lockfile at `uv.lock` needs to be updated, but `--locked` was provided`` 오류로 빌드가 실패합니다(이미 동기화된 환경에서 `cd backend && UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple uv sync --locked --check`로 재현 가능; 환경 자체가 오래된 경우에는 어떤 인덱스에서도 환경 갱신만 안내하므로, 동기화 없이 확인하려면 `uv lock --check`를 사용하세요). 미러에서 설치하려면 lock을 다시 생성하거나 `--locked`를 제거해야 하며, 둘 다 이미지에 설치되는 내용이 달라지므로 기여할 체크아웃에서는 기본 인덱스를 유지하세요. `NPM_REGISTRY=https://registry.npmmirror.com`은 이와 무관하며, 프론트엔드 이미지의 `pnpm` 설치와 게이트웨이 이미지의 Lark CLI 설치(`backend/Dockerfile`이 npm으로 설치하는 `@larksuite/cli`)에 적용됩니다.
 
 로컬 AIO 샌드박스의 제어 트래픽은 항상 직접 연결됩니다. 루프백/사설 주소, 단일 레이블 클러스터 호스트, Docker/Podman 내부 호스트 이름은 `HTTP_PROXY`나 `HTTPS_PROXY`를 상속하지 않습니다. 외부 샌드박스 FQDN과 공인 IP는 여전히 환경 변수의 프록시 설정을 따릅니다.
 
