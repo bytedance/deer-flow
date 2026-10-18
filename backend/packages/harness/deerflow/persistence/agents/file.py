@@ -258,6 +258,6 @@ class FileAgentStore(AgentStore):
 
 
 def _stage_temp(target: Path, text: str) -> Path:
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=target.parent, suffix=".tmp", delete=False) as f:
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", dir=target.parent, suffix=".tmp", delete=False) as f:
         f.write(text)
         return Path(f.name)

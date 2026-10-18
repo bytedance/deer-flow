@@ -164,7 +164,7 @@ async def _scan_static_candidate_or_raise(name: str, updates: dict[str, str], sk
             for relative_path, content in updates.items():
                 target = skill_dir / relative_path
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(content, encoding="utf-8")
+                target.write_text(content, encoding="utf-8", newline="")
             return enforce_static_scan(skill_dir, skill_name=name)
 
     try:
