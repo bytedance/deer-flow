@@ -35,6 +35,7 @@ export interface Translations {
       | "screening"
       | "retrieval"
       | "knowledge"
+      | "weknora"
       | "example",
       { title: string; description: string }
     >;

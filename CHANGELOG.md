@@ -13,6 +13,24 @@ This release closes that milestone with **621 merged pull requests**.
 
 ### Added
 
+- **channels:** IM bot credentials entered in the web UI now live in the shared
+  `channel_runtime_configs` table (migration `0044_channel_runtime_configs`)
+  instead of each host's plaintext `channels/runtime-config.json`. Each
+  provider's config is encrypted with `DEER_FLOW_CREDENTIALS_KEY`, a disconnect
+  is a plaintext tombstone that still overrides `config.yaml`, and every save
+  bumps a per-provider `version`. Every Gateway instance re-reads the table on
+  each request (the router no longer caches the merged config on `app.state`),
+  and under `channels.leader_lease` the holder compares the versions on every
+  renewal tick, so credentials saved or a disconnect made on any instance reach
+  the platform connection within one renewal interval instead of on the
+  holder's next restart; an instance taking a lease over reads a disconnect
+  instead of reviving cached credentials. The first start imports an existing
+  `runtime-config.json` (providers already in the table keep their row) and
+  deletes the plaintext file, so a downgrade must re-enter UI-configured bots.
+  Without a usable key, saving credentials answers `503` instead of storing
+  plaintext, and rows the key cannot decrypt read as not configured.
+  `database.backend: memory` keeps the JSON file. ([#6988])
+
 - **channels:** Option-based clarifications on the Feishu channel render as an
   interactive button card instead of plain text: each option becomes a button
   (up to 4 — beyond that the plain-text path reads better), a click resolves
@@ -1256,6 +1274,18 @@ This release closes that milestone with **621 merged pull requests**.
   cancellation, faults and worker exits every 20 ms) without exchanging frames,
   so idle waits no longer consume turns and `timeout_seconds` is the only wall-clock bound;
   scripts that spin the job queue still hit the turn cap. (issue #7022)
+- **browser:** `browser_screenshot` no longer replaces a file that already
+  exists in the thread's outputs directory. A screenshot saved as
+  `report.png` used to overwrite the user's own `report.png`, an earlier
+  capture, or another default-named capture taken in the same second; it now
+  takes the next free name (`report-1.png`, `report-2.png`, ...) like
+  `web_capture`, and the tool result reports the name actually used. The
+  complete capture is hard-linked onto the name, so a name taken concurrently
+  is skipped rather than replaced and the final name never shows a partial
+  file. Like Gateway uploads, the outputs directory needs hard-link support;
+  without it the tool reports an error instead of overwriting. A staged
+  capture swapped before publication, for example for a symlink to a host
+  file, is never linked into outputs; the tool reports an error. ([#6913])
 
 - **llm:** A provider error that arrives inside a streaming response that has
   already returned `200` is now retried like the same error sent as an HTTP
@@ -5992,6 +6022,14 @@ This release closes that milestone with **621 merged pull requests**.
   names the same file as the equivalent relative path, unless the command
   rebinds `PWD` itself. Variables inside URLs are unaffected. The guard
   remains best-effort and is not an isolation boundary. ([#6930])
+- **sandbox:** On the local sandbox, `ls` now accepts the `/mnt/user-data`
+  root itself and lists `workspace`, `uploads` and `outputs` as it does on
+  AIO. The provider maps that root on purpose, but the tool layer allowed
+  only paths below it and answered `Permission denied` (with a trailing
+  slash, from an internal "path traversal detected" check). The listing
+  covers only those three directories, so anything else stored directly
+  under the root stays hidden. `glob`, `grep`, `read_file` and writes still
+  reject the root, because a search would read every file below it. ([#6991])
 
 ### Security
 
@@ -11787,4 +11825,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6876]: https://github.com/bytedance/deer-flow/pull/6876
 [#6897]: https://github.com/bytedance/deer-flow/pull/6897
 [#6909]: https://github.com/bytedance/deer-flow/pull/6909
+[#6913]: https://github.com/bytedance/deer-flow/pull/6913
 [#6930]: https://github.com/bytedance/deer-flow/pull/6930
+[#6988]: https://github.com/bytedance/deer-flow/pull/6988
+[#6991]: https://github.com/bytedance/deer-flow/pull/6991
