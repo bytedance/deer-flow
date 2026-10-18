@@ -56,6 +56,10 @@ class MarkdownMemoryStorage(FileMemoryStorage):
             raw = path.read_text(encoding="utf-8")
         except (OSError, UnicodeError) as exc:
             logger.warning("Cannot read memory summary %s: %s", path, exc)
+            # Same contract as the decode/fence path below: quarantine the
+            # unreadable file (best-effort) so the next save cannot silently
+            # overwrite the user's memory with a fresh manifest.
+            self._quarantine_unreadable(path)
             return None
 
         parsed: dict[str, Any] | None = None
