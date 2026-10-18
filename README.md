@@ -868,6 +868,11 @@ Outputs with case- or Unicode-equivalent file or directory names are skipped
 before copying, and aliases of existing local paths are rejected, preserving
 previous complete copies.
 
+The [sandbox benchmark](backend/scripts/benchmark/sandbox/README.md#opensandbox)
+also supports OpenSandbox cold acquisition, warm reuse and concurrent scopes,
+using the configured service connection and reporting unconfirmed cleanup as a
+failed run. Live runs require a disposable OpenSandbox service and runtime home.
+
 BoxLite shutdown rejects late VM registration and keeps its SDK loop open while
 in-flight acquisitions finish. If they cannot drain within five seconds,
 shutdown fails with resources still owned and can be retried.
