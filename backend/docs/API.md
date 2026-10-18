@@ -366,12 +366,9 @@ their own defaults and override paths.
 
 **Client Context:**
 
-Clients may describe their output capabilities under top-level `context.client`.
-The gateway keeps only the prompt-relevant, non-sensitive fields (`name`,
-`capabilities`, and `preferences`) and places the sanitized value in the run
-runtime context. The agent may also receive a compact hidden
-`<client_context>` reminder so skills can choose an output shape that fits the
-calling client.
+A custom client can describe what it can display under top-level
+`context.client`, so the agent and its skills can choose an output shape that
+fits (for example a CSV download or a chart).
 
 ```json
 {
@@ -399,6 +396,36 @@ calling client.
   }
 }
 ```
+
+The Gateway keeps only `name` (at most 80 characters), `capabilities` (boolean
+flags) and `preferences` (string, number or boolean values; strings at most 200
+characters, integers at most 2^53 − 1 in magnitude), reading only the first 32
+entries of each map. Keys must match `^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$`;
+whitespace is collapsed, and other fields, nested values and non-finite numbers
+are dropped. Dropped fields are logged at debug level without their values. The
+result reaches `runtime.context["client"]` only, never `configurable` or the
+checkpoint.
+
+On every model call the lead agent receives the current value as one hidden,
+user-role `<client_context>` block placed after the system prompt, with the
+values framed by the same `--- BEGIN/END USER INPUT ---` markers as the user's
+own message. It is never system text and never written to the thread history:
+a run without `context.client` has no block, and only the current request's
+value applies.
+
+- Capabilities and preferences are advisory hints, not enforcement. A client
+  that must never receive some output still has to enforce that outside the
+  model, in server-side policy or in the client itself.
+- `name` is informational only. Never use it for authorization or identity;
+  trust comes from the authenticated principal.
+- Send the same `client` object on every run. An unchanged object keeps the
+  cached prompt prefix stable; a changed object makes the next request re-read
+  the conversation once.
+- Subagents and embedded `DeerFlowClient` runs do not receive it; the lead
+  agent decides the user-facing output shape. Runs the server starts
+  (schedules, IM channels, GitHub agents, MCP notifications, and extensions
+  unless the plugin passes a `client`) carry none, even on a thread a custom
+  client opened, so their replies are not shaped by these hints.
 
 **Response:** Server-Sent Events (SSE) stream
 
