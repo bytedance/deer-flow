@@ -1078,7 +1078,7 @@ The host captures a server RunRecord descriptor (original typed context, Run/use
 Remote internal interactive preparation remains explicitly closed: its snapshot lacks original session/PAT eligibility and credential permission ceiling. Next, bind that provenance to immutable server-owned Run kwargs and verify it on adoption, rather than trusting internal transport or client config. Management/manual/own-stop, other Run creation variants, installed dependency, IM, timeout/recovery and complete M0–M11 remain required. Activation false; no deployment/push or local application/test runtime.
 
 
-### M4 step 29 — remote Scheduler original credential provenance (main verified; two credential boundaries next)
+### M4 step 29 — remote Scheduler original credential provenance (main and two credential boundaries verified)
 
 - [x] Audit native snapshot and adoption: server-built Run kwargs are carried in the signed native snapshot, compared independently with original native SQL, and restored on adopt. Internal transport alone carries neither original session eligibility nor its permission ceiling.
 - [x] On first scoped admission with tool switches enabled and authenticated matching Session identities, persist only a strict v1 `scheduler_origin` descriptor in server-owned top-level kwargs (session source, actor, original token version, sorted permission ceiling). Client config/context cannot create it; non-session admissions have no eligible descriptor. No secrets or new schema.
@@ -1086,7 +1086,7 @@ Remote internal interactive preparation remains explicitly closed: its snapshot 
 - [x] Run one real authenticated production Run POST → native pool → signed snapshot/SQL verification → remote adoption → actual ToolNode list → canonical journal/report PostgreSQL main. UI changes do not select the background authority. Main passed in #139; boundary checks are tracked separately below.
 - [x] Root review exact patch, independently compare successful archive/CI/cleanup, save evidence and local commit.
 
-- [ ] After main green, verify original-token revocation and original permission-ceiling widening only (two PG cases).
+- [x] After main green, verify original-token revocation and original permission-ceiling widening only (two PG cases; #140).
 
 This is credential provenance attenuation within the existing native authority. It does not authorize from worker credentials, client config or a new Agent runner. Scoped task management/manual/own-stop, remaining Run entry variants, installed dependencies, IM/recovery and full M0–M11 remain required.
 
@@ -1098,3 +1098,10 @@ This is credential provenance attenuation within the existing native authority. 
 First admission now records only the server-owned strict session actor/token-version/permission ceiling in top-level Run kwargs. Signed native snapshots and independent SQL comparison carry that receipt to remote adoption. Internal transport remains internal; capability permissions intersect original and current native-owner permissions, with original token-version checks and the actual invocation guard preserved. Client context/config cannot replace the receipt. Canonical journal lists only the original conversation task; scope restores and post-worker capability reuse fails. No physical sandbox or model provider call is represented.
 
 Root independently read live terminal and byte-matched six source/template files to the successful archive. Exact fixture containers/network are absent. Evidence: `docs/tenant-workspaces-evidence/native-scheduler-origin-139.json`. Next run only two necessary PG boundaries: original-token revocation and later permission widening. Scoped management/manual/own-stop, other Run entry variants, installed dependency, IM/recovery and full M0–M11 remain required. Activation false; no deployment/push/local application runtime.
+
+
+### 2026-10-18 — Original Scheduler credential boundaries (#140)
+
+`deerflow-tenant-execution-m4-sql #140 SUCCESS`: only two PostgreSQL nodes passed (24.63s), with Ruff/67-file formatting. Production code is unchanged from `248a0de70`. After real SQL token version 0→1, a fresh valid cookie can retry the same admitted Run, but never replaces its original receipt0; remote Scheduler preparation refuses that expired original authority. After real RBAC expands to include threads:read, the originally narrow ceiling still yields permission_denied. Actual remote pool/adoption/ToolNode journals contain refusal codes and no private task IDs/titles. Canonical Run completes intentionally; this is Scheduler attenuation, not complete password-reset or whole-Run revocation proof.
+
+Root independently checked terminal, all five source bytes and exact fixture cleanup. No sandbox/provider call or physical STOP claim. Evidence: `docs/tenant-workspaces-evidence/native-scheduler-origin-boundaries-140.json`. Next: conversation tool-create → durable task/due queue main, using original Run identity and native live execution checks in the same SQL write transaction. Other management/manual/own-stop, remaining entries, installed dependencies/IM/recovery and full M0–M11 stay open; activation false, no deployment/push/local runtime.

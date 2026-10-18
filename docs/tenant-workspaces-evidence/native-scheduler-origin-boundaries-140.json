@@ -1,0 +1,55 @@
+{
+  "build": 140,
+  "queue": 1086,
+  "phase": "m4-native-scheduler-remote-boundaries-20261018-28",
+  "result": "SUCCESS",
+  "duration_ms": 47858,
+  "pytest": "2 passed in 24.63s",
+  "ruff": "All checks passed; 67 files already formatted",
+  "source_sha256": "f91a134822910e53da452632ebc4b50924f494bad3664e37f7e6c113b31fab83",
+  "pipeline_sha256": "81f4c66f0a64560c2d4490f9ed2311000ed69f4c50367d764aa775d0bc08091f",
+  "source_archive_exact_match": {
+    "backend/tests/test_workspace_native_scheduler.py": "a159b5855ee166dc49469add0b75c963f9ee96e5e99a022f0a10a611201fb941",
+    "scripts/render_tenant_run_control_pipeline.py": "17d70a804924c67e3026f151c952a4db7a1c374105246d4796a36d2d991a454b",
+    "backend/app/gateway/scheduled_task_access.py": "58b9413fdc34dbde39802c7d6d72d1c3ed8b801dad65e16fd08c8bdf5858a22c",
+    "backend/app/gateway/services.py": "e713957f8486a282520d1fa92cfc2ca01629f0c6cce15a8c7867dde7fff1f9c5",
+    "backend/packages/harness/deerflow/persistence/run/sql.py": "204255586a281f22b932a59bd21b759cc9ae5398621a2369dc91de549775f6fb"
+  },
+  "production_unchanged_from_HEAD": "248a0de70",
+  "log_path": "/private/tmp/m4-native-scheduler-remote-boundaries-20261018-28.log",
+  "log_sha256": "ffa4b3fffc1b33d9ba9e443a9bd6786cd9599dd6a81c1cfa939fa3aae31bd2f5",
+  "cleanup_path": "/private/tmp/native-scheduler-origin-build140-cleanup.json",
+  "scope": "Two PostgreSQL original Scheduler authority boundaries: token version changed after admission with fresh-cookie durable retry; original ceiling retained after real RBAC expansion. Native Run intentionally completes coded tool denial; native no-sandbox STOP/report releases reservation. No physical sandbox or whole-session revocation claim.",
+  "job": "deerflow-tenant-execution-m4-sql",
+  "cleanup": {
+    "build": 140,
+    "read_only": true,
+    "cleanup": [
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-140",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-140"
+      },
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-140-db",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-140-db"
+      },
+      {
+        "kind": "network",
+        "name": "deerflow-tenant-execution-m4-sql-140",
+        "exit": 1,
+        "stderr": "Error response from daemon: network deerflow-tenant-execution-m4-sql-140 not found"
+      }
+    ]
+  },
+  "root_review": "Root independently read Jenkins terminal and byte-compared all five source files to the SHA-verified successful archive; reviewed the exact two-test patch.",
+  "reviewed_test_patch_sha256": "81721a02e313fb5347f6055745c4953c633421f368f43063c350569760efd536",
+  "limits": [
+    "Only Scheduler credential attenuation; canonical Run intentionally succeeds with a coded tool denial. This does not prove full password-reset/session/PAT revocation or entire Run credential policy.",
+    "No physical sandbox/two-host or provider call; original task seeded through real conversation-origin repository API.",
+    "Full M4/M0-M11, management/manual/own-stop, remaining Run variants, installed dependency and recovery remain open. Tenant activation false."
+  ]
+}

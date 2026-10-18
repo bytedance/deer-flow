@@ -598,7 +598,7 @@ def test_scoped_scheduler_tool_list_uses_original_native_invocation(native_engin
     _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, tmp_path)
 
 
-def _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, tmp_path, *, remote=False):  # noqa: F811
+def _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, tmp_path, *, remote=False, boundary="normal"):  # noqa: F811
     import json
 
     from fastapi import FastAPI
@@ -834,6 +834,12 @@ def _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, t
                 if remote:
                     request_body["context"] = {"scheduler_origin": {"source": "pat", "actor_user_id": "client-cannot-select-origin"}}
                     request_body["config"] = {"configurable": {"scheduler_origin": {"version": 1, "source": "internal", "actor_user_id": "client-config-cannot-select-origin"}}}
+                if boundary == "permission_ceiling":
+                    # Real RBAC at the original Session admission, not a mocked
+                    # auth context or a client-provided permission declaration.
+                    configuration.authorization = type(configuration.authorization).model_validate(
+                        {"enabled": True, "provider": {"use": "deerflow.authz.rbac:RbacAuthorizationProvider", "config": {"roles": {"user": {"routes": {"allow": ["workspaces:read", "runs:create"]}}}}}}
+                    )
                 request_headers = {"X-Deerflow-Workspace": case.original.workspace_id, **({"Idempotency-Key": "remote-scheduler-tool-origin"} if remote else {})}
                 response = await client.post("/api/threads/" + origin["thread_id"] + "/runs", headers=request_headers, json=request_body)
                 assert response.status_code == 200, response.text
@@ -849,7 +855,25 @@ def _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, t
                         assert saved_origin["version"] == 1 and saved_origin["source"] == "session" and saved_origin["actor_user_id"] == owner
                         assert type(saved_origin["token_version"]) is int and saved_origin["token_version"] == 0
                         assert saved_origin["permission_ceiling"] == sorted(set(saved_origin["permission_ceiling"]))
-                        assert "threads:read" in saved_origin["permission_ceiling"]
+                        assert ("threads:read" in saved_origin["permission_ceiling"]) == (boundary != "permission_ceiling")
+                    if boundary == "token_version":
+                        from deerflow.persistence.user.model import UserRow
+
+                        async with case.sf() as session:
+                            authoritative_user = await session.get(UserRow, owner)
+                            assert authoritative_user.token_version == 0
+                            authoritative_user.token_version = 1
+                            await session.commit()
+                        client.cookies.set("access_token", create_access_token(owner, token_version=1))
+                    if boundary == "permission_ceiling":
+                        # Replace the real config object exactly as a hot reload
+                        # does, so the production RBAC cache sees the new policy.
+                        configuration.authorization = type(configuration.authorization).model_validate(
+                            {"enabled": True, "provider": {"use": "deerflow.authz.rbac:RbacAuthorizationProvider", "config": {"roles": {"user": {"routes": {"allow": "*"}}}}}}
+                        )
+                        from app.gateway.authz import resolve_route_permissions
+
+                        assert "threads:read" in await resolve_route_permissions(await users.get_user_by_id(owner), is_internal=False)
                     repeated = await client.post("/api/threads/" + origin["thread_id"] + "/runs", headers=request_headers, json=request_body)
                     assert repeated.status_code == 200 and repeated.json()["run_id"] == run_id, repeated.text
                     async with case.sf() as session:
@@ -878,20 +902,26 @@ def _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, t
                 await asyncio.wait_for(record.task, timeout=20)
                 assert record.status.value == "success", record.error
                 if remote:
-                    assert preparation == [{"present": True, "source": "internal", "mode": "interactive", "config_enabled": True}]
+                    assert preparation == [{"present": boundary != "token_version", "source": "internal", "mode": "interactive", "config_enabled": True}]
                     assert record.kwargs["scheduler_origin"] == saved_origin
                     await host.stop_owned(job)
                     await host.report(job, {"state": "completed", "physical_stopped": True})
                     host.executions.pop(job["id"])
                     assert (await request_worker("poll"))["claim"] is None
                     assert (await asyncio.to_thread(pool.node_status, "worker"))["unreleased"] == 0
-                assert len(observed) == 1 and observed[0].get("action") == "list", {"preparation": preparation, "runtime": runtime_diagnostics, "tool_error": [{key: value.get(key) for key in ("code", "error")} for value in observed]}
-                assert [row["id"] for row in observed[0]["tasks"]] == [ids[0]]
+                if boundary == "normal":
+                    assert len(observed) == 1 and observed[0].get("action") == "list", {"preparation": preparation, "runtime": runtime_diagnostics, "tool_error": [{key: value.get(key) for key in ("code", "error")} for value in observed]}
+                    assert [row["id"] for row in observed[0]["tasks"]] == [ids[0]]
+                else:
+                    expected_code = "scheduler_tools_disabled" if boundary == "token_version" else "permission_denied"
+                    assert len(observed) == 1 and observed[0].get("code") == expected_code, observed
+                    assert all(value not in json.dumps(observed) for value in (*ids, "Original tool follow-up", "Other private tool schedule"))
                 assert "Other private tool schedule" not in json.dumps(observed)
-                assert captured and captured[0] is not None
+                assert captured and (captured[0] is not None) == (boundary != "token_version")
                 assert get_invocation_guard() is None
-                with pytest.raises(WorkerInvocationDenied):
-                    await captured[0].manage(action="list", request={})
+                if captured[0] is not None:
+                    with pytest.raises(WorkerInvocationDenied):
+                        await captured[0].manage(action="list", request={})
                 assert get_current_workspace() == case.other
                 async with case.sf() as session:
                     durable = await session.get(RunRow, run_id)
@@ -901,7 +931,12 @@ def _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, t
                     assert durable.thread_id == origin["thread_id"] and durable.thread_incarnation == origin["incarnation"]
                     assert original_task.workspace_context_json == asdict(case.original) and original_task.run_count == 0
                     assert journal and all(row.workspace_id == case.original.workspace_id and row.user_id == owner for row in journal)
-                    assert any(ids[0] in row.content for row in journal), "The actual tool result was not journaled"
+                    if boundary == "normal":
+                        assert any(ids[0] in row.content for row in journal), "The actual tool result was not journaled"
+                    else:
+                        assert any(expected_code in row.content for row in journal), "The actual tool denial was not journaled"
+                        assert not any(value in row.content for row in journal for value in (*ids, "Original tool follow-up", "Other private tool schedule"))
+                        assert durable.kwargs_json["scheduler_origin"] == saved_origin
                     assert not any("Other private tool schedule" in row.content for row in journal)
         finally:
             release.set()
@@ -928,3 +963,9 @@ def _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, t
 @pytest.mark.parametrize("executor_engine", ["postgres"], indirect=True)
 def test_scoped_scheduler_remote_tool_list_preserves_admitted_session(native_engine, executor_engine, monkeypatch, tmp_path):  # noqa: F811
     _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, tmp_path, remote=True)
+
+
+@pytest.mark.parametrize("executor_engine", ["postgres"], indirect=True)
+@pytest.mark.parametrize("boundary", ["token_version", "permission_ceiling"])
+def test_scoped_scheduler_remote_tool_retains_original_authority(native_engine, executor_engine, monkeypatch, tmp_path, boundary):  # noqa: F811
+    _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, tmp_path, remote=True, boundary=boundary)

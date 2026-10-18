@@ -1,4 +1,4 @@
-# Resume checkpoint — 2026-10-18: local/remote Scheduler tool-list main #139 verified; two credential boundaries next
+# Resume checkpoint — 2026-10-18: Scheduler local/remote list and credential boundaries #140 verified; conversation tool-create next
 > **执行中，M4 部分完成。** Jenkins #112：单 Worker 真实 AIO 创建、文件写读、warm STOP、失败保留和 report 后释放已通过（1 项，53.79s）。两机 HTTP、恢复和 C→B→C 仍待完成；通知主干与必要撤权控制已验证；HTTP创建/列表/详情已通过#130；租户启动关闭。
 
 # 2026-10-16 暂停与恢复检查点
@@ -1236,3 +1236,10 @@ Remote internal interactive preparation remains explicitly closed: its snapshot 
 First admission now records only the server-owned strict session actor/token-version/permission ceiling in top-level Run kwargs. Signed native snapshots and independent SQL comparison carry that receipt to remote adoption. Internal transport remains internal; capability permissions intersect original and current native-owner permissions, with original token-version checks and the actual invocation guard preserved. Client context/config cannot replace the receipt. Canonical journal lists only the original conversation task; scope restores and post-worker capability reuse fails. No physical sandbox or model provider call is represented.
 
 Root independently read live terminal and byte-matched six source/template files to the successful archive. Exact fixture containers/network are absent. Evidence: `docs/tenant-workspaces-evidence/native-scheduler-origin-139.json`. Next run only two necessary PG boundaries: original-token revocation and later permission widening. Scoped management/manual/own-stop, other Run entry variants, installed dependency, IM/recovery and full M0–M11 remain required. Activation false; no deployment/push/local application runtime.
+
+
+### 2026-10-18 — Original Scheduler credential boundaries (#140)
+
+`deerflow-tenant-execution-m4-sql #140 SUCCESS`: only two PostgreSQL nodes passed (24.63s), with Ruff/67-file formatting. Production code is unchanged from `248a0de70`. After real SQL token version 0→1, a fresh valid cookie can retry the same admitted Run, but never replaces its original receipt0; remote Scheduler preparation refuses that expired original authority. After real RBAC expands to include threads:read, the originally narrow ceiling still yields permission_denied. Actual remote pool/adoption/ToolNode journals contain refusal codes and no private task IDs/titles. Canonical Run completes intentionally; this is Scheduler attenuation, not complete password-reset or whole-Run revocation proof.
+
+Root independently checked terminal, all five source bytes and exact fixture cleanup. No sandbox/provider call or physical STOP claim. Evidence: `docs/tenant-workspaces-evidence/native-scheduler-origin-boundaries-140.json`. Next: conversation tool-create → durable task/due queue main, using original Run identity and native live execution checks in the same SQL write transaction. Other management/manual/own-stop, remaining entries, installed dependencies/IM/recovery and full M0–M11 stay open; activation false, no deployment/push/local runtime.
