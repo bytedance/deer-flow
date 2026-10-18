@@ -17,7 +17,7 @@ from deerflow.agents.middlewares.audit_context import (
     TOOL_PROMOTION_RECORDER_CONTEXT_KEY,
     resolve_audit_recorder,
 )
-from deerflow.agents.middlewares.message_utils import latest_genuine_user_message
+from deerflow.agents.middlewares.message_utils import genuine_user_turn_id
 from deerflow.runtime.events.catalog import MIDDLEWARE_TOOL_PROMOTION_TAG
 
 logger = logging.getLogger(__name__)
@@ -94,8 +94,7 @@ class DeferredToolPromotionAuditMiddleware(AgentMiddleware[AgentState]):
         promoted = (state or {}).get("promoted")
         if not isinstance(promoted, Mapping) or promoted.get("catalog_hash") != self._catalog_hash:
             return set()
-        target = latest_genuine_user_message(list((state or {}).get("messages") or []))
-        turn_id = target.id if target is not None and isinstance(target.id, str) and target.id else None
+        turn_id = genuine_user_turn_id(list((state or {}).get("messages") or []))
         if turn_id is not None and promoted.get("turn_id") != turn_id:
             return set()
         names = promoted.get("names")

@@ -11,7 +11,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import HumanMessage
 from langgraph.runtime import Runtime
 
-from deerflow.agents.middlewares.message_utils import latest_genuine_user_message
+from deerflow.agents.middlewares.message_utils import genuine_user_turn_id, has_ai_response_after_latest_user_message, latest_genuine_user_message
 from deerflow.agents.middlewares.tool_promotion_audit_middleware import record_tool_promotion
 from deerflow.config.tool_search_config import clamp_auto_promote_top_k
 from deerflow.utils.messages import get_original_user_content_text
@@ -110,10 +110,12 @@ class McpRoutingMiddleware(AgentMiddleware[AgentState]):
         names = self._matched_names(state)
         if not names:
             return None
-        target = self._latest_user_message(list((state or {}).get("messages") or []))
-        turn_id = target.id if target is not None and isinstance(target.id, str) and target.id else None
+        messages = list((state or {}).get("messages") or [])
+        turn_id = genuine_user_turn_id(messages)
         promoted = (state or {}).get("promoted")
-        same_scope = isinstance(promoted, Mapping) and promoted.get("catalog_hash") == self._catalog_hash and (turn_id is None or promoted.get("turn_id") == turn_id)
+        same_catalog = isinstance(promoted, Mapping) and promoted.get("catalog_hash") == self._catalog_hash
+        migrate_legacy = same_catalog and turn_id is not None and promoted.get("turn_id") is None and has_ai_response_after_latest_user_message(messages)
+        same_scope = same_catalog and (turn_id is None or promoted.get("turn_id") == turn_id or migrate_legacy)
         raw_promoted_names = promoted.get("names") if same_scope else None
         already_promoted = {name for name in raw_promoted_names if isinstance(name, str)} if isinstance(raw_promoted_names, Sequence) and not isinstance(raw_promoted_names, (str, bytes)) else set()
         record_tool_promotion(
@@ -129,9 +131,11 @@ class McpRoutingMiddleware(AgentMiddleware[AgentState]):
             (self._catalog_hash or "")[:8],
             names,
         )
+        # Adding turn_id replaces the legacy envelope in merge_promoted, so
+        # carry its same-turn search names through before the filter runs.
         promoted_update = {
             "catalog_hash": self._catalog_hash,
-            "names": names,
+            "names": sorted(already_promoted | set(names)) if migrate_legacy else names,
         }
         if turn_id is not None:
             promoted_update["turn_id"] = turn_id

@@ -19,12 +19,12 @@ from typing import Any, override
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
 from langgraph.types import Command
 
-from deerflow.agents.middlewares.message_utils import latest_genuine_user_message
+from deerflow.agents.middlewares.message_utils import genuine_user_turn_id, has_ai_response_after_latest_user_message
 
 logger = logging.getLogger(__name__)
 
@@ -49,34 +49,13 @@ class DeferredToolFilterMiddleware(AgentMiddleware[AgentState]):
             "promotion_scope": "graph_state_catalog_hash_user_turn",
         }
 
-    @staticmethod
-    def _turn_id(state: Mapping[str, Any] | None) -> str | None:
-        target = latest_genuine_user_message(list((state or {}).get("messages") or []))
-        return target.id if target is not None and isinstance(target.id, str) and target.id else None
-
-    @staticmethod
-    def _legacy_promotion_is_current(state: Mapping[str, Any] | None) -> bool:
-        """Recognize an in-flight pre-turn-scope checkpoint.
-
-        Old checkpoints have no turn_id. If the latest user message already has
-        an AI response after it, the promotion may be needed to resume that
-        turn. A newly appended user message has no later AI response, so legacy
-        names are re-deferred instead of leaking into the new turn.
-        """
-        messages = list((state or {}).get("messages") or [])
-        target = latest_genuine_user_message(messages)
-        if target is None:
-            return False
-        target_index = next(index for index in range(len(messages) - 1, -1, -1) if messages[index] is target)
-        return any(isinstance(message, AIMessage) for message in messages[target_index + 1 :])
-
     def _promotion_is_current(self, state: Mapping[str, Any] | None, promoted: Mapping[str, Any]) -> bool:
         if promoted.get("catalog_hash") != self._catalog_hash:
             return False
         promoted_turn_id = promoted.get("turn_id")
         if promoted_turn_id is None:
-            return self._legacy_promotion_is_current(state)
-        current_turn_id = self._turn_id(state)
+            return has_ai_response_after_latest_user_message(list((state or {}).get("messages") or []))
+        current_turn_id = genuine_user_turn_id(list((state or {}).get("messages") or []))
         return current_turn_id is not None and promoted_turn_id == current_turn_id
 
     def _promoted(self, state: Mapping[str, Any] | None) -> set[str]:
@@ -89,7 +68,7 @@ class DeferredToolFilterMiddleware(AgentMiddleware[AgentState]):
         return set()
 
     def _turn_state_update(self, state: Mapping[str, Any] | None) -> dict[str, Any] | None:
-        turn_id = self._turn_id(state)
+        turn_id = genuine_user_turn_id(list((state or {}).get("messages") or []))
         if not self._deferred or not self._catalog_hash or turn_id is None:
             return None
         promoted = (state or {}).get("promoted")

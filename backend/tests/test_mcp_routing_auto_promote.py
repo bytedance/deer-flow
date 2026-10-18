@@ -479,3 +479,55 @@ def test_privacy_no_trace_metadata_or_info_logs(caplog):
     assert state["metadata"] == {"trace": "existing"}
     assert "sensitive-keyword" not in caplog.text
     assert "secret_tool" not in caplog.text
+
+
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize(
+    ("case", "expected_names", "expected_audit"),
+    [
+        ("in_flight", {"archive_lookup", "postgres_query", "metrics_query"}, ["metrics_query"]),
+        ("new_user", {"postgres_query", "metrics_query"}, ["metrics_query", "postgres_query"]),
+        ("new_catalog", {"postgres_query", "metrics_query"}, ["metrics_query", "postgres_query"]),
+        ("stale_turn", {"postgres_query", "metrics_query"}, ["metrics_query", "postgres_query"]),
+        ("no_ai", {"postgres_query", "metrics_query"}, ["metrics_query", "postgres_query"]),
+        ("malformed_names", {"postgres_query", "metrics_query"}, ["metrics_query", "postgres_query"]),
+    ],
+)
+def test_routing_legacy_migration_preserves_scope_and_audit(case, expected_names, expected_audit, use_async):
+    middleware = McpRoutingMiddleware(
+        {
+            "postgres_query": {"priority": 100, "keywords": ["orders"]},
+            "metrics_query": {"priority": 90, "keywords": ["orders"]},
+        },
+        "hash1",
+        3,
+    )
+    messages = [HumanMessage(content="orders", id="user-1"), AIMessage(content="searching")]
+    promoted = {"catalog_hash": "hash1", "names": ["archive_lookup", "postgres_query"]}
+    if case == "new_user":
+        messages.append(HumanMessage(content="orders again", id="user-2"))
+    elif case == "new_catalog":
+        promoted["catalog_hash"] = "old-hash"
+    elif case == "stale_turn":
+        promoted["turn_id"] = "old-user"
+    elif case == "no_ai":
+        messages.pop()
+    elif case == "malformed_names":
+        promoted["names"] = "archive_lookup"
+    state = {"messages": messages, "promoted": promoted}
+    recorder = _Recorder()
+    runtime = SimpleNamespace(context={"__run_journal": recorder})
+
+    update = asyncio.run(middleware.abefore_model(state, runtime)) if use_async else middleware.before_model(state, runtime)
+    merged = merge_promoted(promoted, update["promoted"])
+
+    assert set(merged["names"]) == expected_names
+    assert merged["turn_id"] == ("user-2" if case == "new_user" else "user-1")
+    assert recorder.calls[0]["changes"]["tool_names"] == expected_audit
+    assert state["promoted"] is promoted
+    assert "turn_id" not in promoted or promoted["turn_id"] == "old-user"
+
+    state["promoted"] = merged
+    repeated = asyncio.run(middleware.abefore_model(state, runtime)) if use_async else middleware.before_model(state, runtime)
+    assert set(merge_promoted(merged, repeated["promoted"])["names"]) == expected_names
+    assert len(recorder.calls) == 1
