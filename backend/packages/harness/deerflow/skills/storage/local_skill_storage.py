@@ -92,6 +92,7 @@ class LocalSkillStorage(SkillStorage):
 
     def read_custom_skill(self, name: str) -> str:
         from deerflow.skills.mutations.guard import managed_read
+
         with managed_read(self):
             if not self.custom_skill_exists(name):
                 raise FileNotFoundError(f"Custom skill '{name}' not found.")
