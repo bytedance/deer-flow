@@ -554,8 +554,12 @@ class Workflows(Lifecycle, Artifacts):
                         raise ValueError("Worker message limit")
                     # Only frames carrying work count against the turn budget;
                     # a poll round trip while an Agent call is pending is not a
-                    # turn, so long-running Agent steps cannot hit the cap.
-                    if messages or frame["outcome"] is not None:
+                    # turn, so long-running Agent steps cannot hit the cap. An
+                    # idle spin with no Agent in flight still counts, so a
+                    # script spinning the JS job queue keeps failing with
+                    # "Worker turn limit" instead of running to the wall
+                    # deadline.
+                    if messages or frame["outcome"] is not None or not entry["tasks"]:
                         turns += 1
                         if turns > MAX_WORKER_TURNS:
                             raise ValueError("Worker turn limit")

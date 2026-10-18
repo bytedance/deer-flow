@@ -1058,3 +1058,24 @@ async def test_work_frames_still_count_against_worker_turn_budget(plugin, monkey
     final = await done(plugin, result["run_id"])
     assert final["status"] == "failed", final
     assert "Worker turn limit" in final["error"]
+
+
+@pytest.mark.asyncio
+async def test_idle_spin_without_agent_still_hits_worker_turn_budget(plugin, monkeypatch):
+    """Only Agent-pending round trips are exempt from the cap: a script that
+    spins the JS job queue with no Agent call in flight keeps counting poll
+    frames and still fails with "Worker turn limit"."""
+    import deerflow_extension_workflows.service as workflow_service
+
+    monkeypatch.setattr(workflow_service, "MAX_WORKER_TURNS", 3)
+    result = await launch(
+        plugin,
+        """
+      function spin(){ Promise.resolve().then(spin); }
+      spin();
+      await new Promise(() => {});
+    """,
+    )
+    final = await done(plugin, result["run_id"])
+    assert final["status"] == "failed", final
+    assert "Worker turn limit" in final["error"]
