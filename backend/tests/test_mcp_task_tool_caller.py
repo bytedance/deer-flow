@@ -185,6 +185,10 @@ async def test_personal_stdio_task_call_uses_personal_pool_domain() -> None:
     session.call_tool.assert_awaited_once_with("status_report", {"task_id": "remote-1"})
 
 
+def test_connection_unavailable_error_preserves_lookup_error_compatibility() -> None:
+    assert issubclass(McpTaskConnectionUnavailableError, LookupError)
+
+
 @pytest.mark.asyncio
 async def test_missing_deployment_task_server_is_a_permanent_connection_error() -> None:
     caller = McpTaskToolCaller(_config())
