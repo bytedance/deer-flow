@@ -101,3 +101,43 @@ def test_resolve_variable_rejects_an_empty_module_half():
 
     message = str(exc_info.value)
     assert "doesn't look like a variable path" in message
+
+
+def test_resolve_variable_rejects_a_trailing_dot_in_the_module_path():
+    """``"json.:attr"`` used to advertise a distribution named ``json.``.
+
+    It stays inside the ImportError contract, so the failure mode is the
+    advice: the missing-dependency branch proposes ``uv add json.``, which
+    cannot work because a dotted module path never ends in a dot.
+    """
+    with pytest.raises(ImportError) as exc_info:
+        resolve_variable("json.:attr")
+
+    message = str(exc_info.value)
+    assert "doesn't look like a variable path" in message
+    assert "uv add" not in message
+
+
+def test_resolve_variable_rejects_stray_whitespace_in_the_module_path():
+    """A space inside the module half is invisible in the rendered hint.
+
+    ``"json :loads"`` (a pasted sentence fragment) reached the
+    missing-dependency branch and suggested ``uv add json `` -- the trailing
+    space is the typo and is not visible in the message.
+    """
+    with pytest.raises(ImportError) as exc_info:
+        resolve_variable("json :loads")
+
+    message = str(exc_info.value)
+    assert "doesn't look like a variable path" in message
+    assert "uv add" not in message
+
+
+def test_resolve_variable_rejects_surrounding_whitespace_in_the_path():
+    """Leading/trailing space around the whole path is the same mistake."""
+    for path in (" json:attr", "json:attr ", "json:attr\n"):
+        with pytest.raises(ImportError) as exc_info:
+            resolve_variable(path)
+        message = str(exc_info.value)
+        assert "doesn't look like a variable path" in message, path
+        assert "uv add" not in message, path

@@ -56,7 +56,23 @@ def resolve_variable[T](
     # rather than ImportError, so callers that catch ImportError -- every
     # provider/extension/middleware loader -- would see an unhandled crash.
     # These paths are absolute by construction, so reject it here too.
-    if not module_path or not variable_name or ":" in module_path or module_path.startswith("."):
+    #
+    # Stray whitespace and a trailing dot are the fourth: they stay inside the
+    # ImportError contract but land in the missing-dependency branch, which
+    # then advertises a distribution named `json.` or `json ` -- text that
+    # cannot work, and where the space is invisible in the rendered hint. A
+    # dotted module path has neither, so the same format guidance applies.
+    # Whitespace is checked inside both halves (not just at the ends), because
+    # `"json :loads"` and `"json:attr\n"` each hide the typo on one side.
+    if (
+        not module_path
+        or not variable_name
+        or ":" in module_path
+        or module_path.startswith(".")
+        or module_path.endswith(".")
+        or any(character.isspace() for character in module_path)
+        or any(character.isspace() for character in variable_name)
+    ):
         raise ImportError(f"{variable_path} doesn't look like a variable path. Example: parent_package_name.sub_package_name.module_name:variable_name")
 
     try:
