@@ -41,6 +41,7 @@ from deerflow.sandbox.lease import (
 )
 from deerflow.sandbox.overwrite import unwrap_sandbox
 from deerflow.sandbox.path_patterns import build_output_mask_pattern, normalize_mask_tail, replace_output_path_matches
+from deerflow.sandbox.prewarm import claim_sandbox_prewarm
 from deerflow.sandbox.read_file_contract import (
     READ_FILE_EMPTY,
     READ_FILE_INVALID_END_LINE,
@@ -1928,14 +1929,16 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
     provider = get_sandbox_provider()
     user_id = resolve_runtime_user_id(runtime)
     owner_id = sandbox_lease_owner(runtime.context)
-    if owner_id is None:
-        sandbox_id = await provider.acquire_async(thread_id, user_id=user_id)
-    else:
-        sandbox_id = await get_sandbox_lease_manager(provider).acquire_async(
-            owner_id,
-            thread_id,
-            user_id=user_id,
-        )
+    sandbox_id = await claim_sandbox_prewarm(runtime, provider=provider)
+    if sandbox_id is None:
+        if owner_id is None:
+            sandbox_id = await provider.acquire_async(thread_id, user_id=user_id)
+        else:
+            sandbox_id = await get_sandbox_lease_manager(provider).acquire_async(
+                owner_id,
+                thread_id,
+                user_id=user_id,
+            )
 
     runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
 
