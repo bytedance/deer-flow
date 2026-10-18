@@ -129,10 +129,13 @@ FastAPI 应用程序，为前端集成提供 REST 接口：
 | `GET /api/memory/config` | 获取记忆配置 |
 | `GET /api/memory/status` | 获取组合后的配置和数据状态 |
 | `GET /api/threads/{id}/runs/{run_id}/events` | 获取某次运行的调试或审计事件；可使用 `event_types=context:memory` 筛选实际记忆标识 |
-| `POST /api/threads/{id}/uploads` | 上传文件（自动将 PDF、PPT、Excel、Word 转换为 Markdown；拒绝目录路径；自动重命名单次请求中的重复文件名） |
+| `POST /api/threads/{id}/uploads` | 上传文件（可选地将 PDF、PPT、Excel、Word 转换为 Markdown；拒绝目录路径；自动重命名单次请求中的重复文件名） |
 | `GET /api/threads/{id}/uploads/list` | 列出已上传的文件 |
 | `DELETE /api/threads/{id}` | 删除 LangGraph 线程后，清除由 DeerFlow 管理的本地线程数据；意外错误会记录在服务端，并返回通用的 500 错误信息 |
 | `GET /api/threads/{id}/artifacts/{path}` | 提供生成产物的访问 |
+
+文档自动转换默认关闭。受信任的部署可以在 `config.yaml` 中设置
+`uploads.auto_convert_documents: true` 来启用，详见[文件上传配置](docs/FILE_UPLOAD.md#支持的文档格式)。
 
 ### 即时通信渠道
 

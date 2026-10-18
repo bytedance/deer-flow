@@ -1,0 +1,347 @@
+{
+  "schema_version": 1,
+  "baseline_revision": "34316550dffbe8fbaed5678a6be87c5d3c65155b",
+  "fix_revision": "997cb9bc30a0aec5804d1cd55bda3b87f36f5c31",
+  "environment": {
+    "os": "macOS",
+    "architecture": "arm64",
+    "python": "3.12.13",
+    "docker_client": "29.7.2",
+    "docker_server": "29.7.2",
+    "aio_image": "enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:1.11.0",
+    "local_image_id": "sha256:6328d7fd2f0ff0b4c147c3d05b3df1ce331f4a482eb6e550ecd64ed1fcf906e7"
+  },
+  "method": {
+    "stop_fault": "One injected TimeoutExpired for an owned test container; inspection and later stops use real Docker",
+    "models_called": 0,
+    "redaction": "Allowlisted fields only; no host paths, account names, raw errors, container prefixes or resource IDs"
+  },
+  "candidate_production_sha256": {
+    "backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox_provider.py": "09657b79e1bd6ca272945018ad8bc085635e26538a1b2bb330a19af5303794e7",
+    "backend/packages/harness/deerflow/community/aio_sandbox/local_backend.py": "7d6af6d83f52829c8be03d3451a2db3f34c6b0293e6d10827165909d8b8190f1",
+    "backend/packages/harness/deerflow/sandbox/sandbox_provider.py": "de39a17853c5275fe8d2735427151f5859196c533b6dc807d3a4196589329cee"
+  },
+  "scenarios": [
+    {
+      "case": "explicit",
+      "baseline": {
+        "first": {
+          "raised": "TimeoutExpired"
+        },
+        "second": {
+          "returned": true
+        },
+        "final_shutdown": {
+          "returned": null
+        },
+        "after_first": {
+          "bad_absent": false,
+          "quarantined": false,
+          "singleton_retained": false,
+          "stop_attempts": 1,
+          "owned_container_count": 1
+        },
+        "after_second": {
+          "bad_absent": false,
+          "quarantined": false,
+          "singleton_retained": false,
+          "stop_attempts": 1,
+          "owned_container_count": 1
+        },
+        "final_owned_container_count": 0,
+        "auxiliary_cleanup_error_count": 1
+      },
+      "candidate": {
+        "first": {
+          "raised": "TimeoutExpired"
+        },
+        "second": {
+          "returned": true
+        },
+        "final_shutdown": {
+          "returned": null
+        },
+        "after_first": {
+          "bad_absent": false,
+          "quarantined": true,
+          "singleton_retained": false,
+          "stop_attempts": 1,
+          "owned_container_count": 1
+        },
+        "after_second": {
+          "bad_absent": true,
+          "quarantined": false,
+          "singleton_retained": false,
+          "stop_attempts": 2,
+          "owned_container_count": 0
+        },
+        "final_owned_container_count": 0,
+        "auxiliary_cleanup_error_count": 0
+      }
+    },
+    {
+      "case": "shutdown-active",
+      "baseline": {
+        "first": {
+          "returned": null
+        },
+        "second": {
+          "returned": null
+        },
+        "final_shutdown": {
+          "returned": null
+        },
+        "after_first": {
+          "bad_absent": false,
+          "quarantined": false,
+          "singleton_retained": false,
+          "stop_attempts": 2,
+          "owned_container_count": 1
+        },
+        "after_second": {
+          "bad_absent": false,
+          "quarantined": false,
+          "singleton_retained": false,
+          "stop_attempts": 2,
+          "owned_container_count": 1
+        },
+        "final_owned_container_count": 0,
+        "auxiliary_cleanup_error_count": 2
+      },
+      "candidate": {
+        "first": {
+          "raised": "RuntimeError"
+        },
+        "second": {
+          "returned": null
+        },
+        "final_shutdown": {
+          "returned": null
+        },
+        "after_first": {
+          "bad_absent": false,
+          "quarantined": true,
+          "singleton_retained": true,
+          "stop_attempts": 2,
+          "owned_container_count": 1
+        },
+        "after_second": {
+          "bad_absent": true,
+          "quarantined": false,
+          "singleton_retained": false,
+          "stop_attempts": 3,
+          "owned_container_count": 0
+        },
+        "final_owned_container_count": 0,
+        "auxiliary_cleanup_error_count": 0
+      }
+    },
+    {
+      "case": "shutdown-warm",
+      "baseline": {
+        "first": {
+          "returned": null
+        },
+        "second": {
+          "returned": null
+        },
+        "final_shutdown": {
+          "returned": null
+        },
+        "after_first": {
+          "bad_absent": false,
+          "quarantined": false,
+          "singleton_retained": false,
+          "stop_attempts": 2,
+          "owned_container_count": 1
+        },
+        "after_second": {
+          "bad_absent": false,
+          "quarantined": false,
+          "singleton_retained": false,
+          "stop_attempts": 2,
+          "owned_container_count": 1
+        },
+        "final_owned_container_count": 0,
+        "auxiliary_cleanup_error_count": 2
+      },
+      "candidate": {
+        "first": {
+          "raised": "RuntimeError"
+        },
+        "second": {
+          "returned": null
+        },
+        "final_shutdown": {
+          "returned": null
+        },
+        "after_first": {
+          "bad_absent": false,
+          "quarantined": true,
+          "singleton_retained": true,
+          "stop_attempts": 2,
+          "owned_container_count": 1
+        },
+        "after_second": {
+          "bad_absent": true,
+          "quarantined": false,
+          "singleton_retained": false,
+          "stop_attempts": 3,
+          "owned_container_count": 0
+        },
+        "final_owned_container_count": 0,
+        "auxiliary_cleanup_error_count": 0
+      }
+    },
+    {
+      "case": "shutdown-held",
+      "baseline": {
+        "first": {
+          "returned": null
+        },
+        "second": {
+          "returned": null
+        },
+        "final_shutdown": {
+          "returned": null
+        },
+        "after_first": {
+          "bad_absent": false,
+          "quarantined": false,
+          "singleton_retained": false,
+          "stop_attempts": 2,
+          "execution_still_bound": true,
+          "owned_container_count": 1
+        },
+        "after_second": {
+          "bad_absent": false,
+          "quarantined": false,
+          "singleton_retained": false,
+          "stop_attempts": 2,
+          "owned_container_count": 1
+        },
+        "final_owned_container_count": 0,
+        "auxiliary_cleanup_error_count": 2
+      },
+      "candidate": {
+        "first": {
+          "raised": "RuntimeError"
+        },
+        "second": {
+          "returned": null
+        },
+        "final_shutdown": {
+          "returned": null
+        },
+        "after_first": {
+          "bad_absent": false,
+          "quarantined": true,
+          "singleton_retained": true,
+          "stop_attempts": 2,
+          "execution_still_bound": true,
+          "owned_container_count": 1
+        },
+        "after_second": {
+          "bad_absent": true,
+          "quarantined": false,
+          "singleton_retained": false,
+          "stop_attempts": 3,
+          "owned_container_count": 0
+        },
+        "final_owned_container_count": 0,
+        "auxiliary_cleanup_error_count": 0
+      }
+    },
+    {
+      "case": "replacement",
+      "baseline": {
+        "first": {
+          "raised": "TimeoutExpired"
+        },
+        "second": {
+          "returned": true
+        },
+        "final_shutdown": {
+          "returned": null
+        },
+        "after_first": {
+          "bad_absent": false,
+          "quarantined": false,
+          "singleton_retained": false,
+          "stop_attempts": 1,
+          "owned_container_count": 1
+        },
+        "after_second": {
+          "bad_absent": false,
+          "quarantined": false,
+          "singleton_retained": false,
+          "stop_attempts": 1,
+          "owned_container_count": 1
+        },
+        "final_owned_container_count": 0,
+        "auxiliary_cleanup_error_count": 2,
+        "replacement_survived": true
+      },
+      "candidate": {
+        "first": {
+          "raised": "TimeoutExpired"
+        },
+        "second": {
+          "returned": false
+        },
+        "final_shutdown": {
+          "returned": null
+        },
+        "after_first": {
+          "bad_absent": false,
+          "quarantined": true,
+          "singleton_retained": false,
+          "stop_attempts": 1,
+          "owned_container_count": 1
+        },
+        "after_second": {
+          "bad_absent": false,
+          "quarantined": true,
+          "singleton_retained": false,
+          "stop_attempts": 1,
+          "owned_container_count": 1
+        },
+        "final_owned_container_count": 0,
+        "auxiliary_cleanup_error_count": 0,
+        "replacement_survived": true
+      }
+    }
+  ],
+  "checks": {
+    "scoped": {
+      "passed": 633,
+      "live_deselected": 3
+    },
+    "blocking_io": {
+      "passed": 256,
+      "skipped": 1
+    },
+    "full_backend": {
+      "passed": 32407,
+      "skipped": 564,
+      "failed": 3,
+      "exit_code": 2
+    },
+    "baseline_full_backend": {
+      "passed": 32384,
+      "skipped": 565,
+      "failed": 3
+    },
+    "lint": "passed"
+  },
+  "known_full_failures": [
+    "tests/test_agent_guidance_check.py::test_repository_guidance_chains_fit_hard_budget",
+    "tests/test_agent_guidance_check.py::test_repository_guidance_stays_below_hard_budgets_and_avoids_doc_indexes",
+    "tests/test_cargo_acceptance.py::test_native_cargo_output_reaches_parent_acceptance_through_tool_node[unit-with-empty-doc]"
+  ],
+  "limitations": [
+    "Controlled single-host Docker fault injection; no live Kubernetes, Apple Container or Redis multi-Gateway run",
+    "One earlier unchanged orphan E2E failure did not repeat in isolated, baseline split, or final full reruns; cause not proven",
+    "Supplemental restricted-network live invocation: 281 passed, 1 failed with HTTPS CONNECT 403; not counted as successful network acceptance"
+  ]
+}

@@ -40,6 +40,10 @@ class _FakeAgent:
 
 
 class _FakeRunManager:
+    async def record_assembly_evidence(self, run_id: str, evidence: dict) -> None:
+        assert evidence["run_id"] == run_id
+        self.assembly_evidence = evidence
+
     async def try_start(self, _run_id: str) -> RunStartOutcome:
         return RunStartOutcome.started
 
