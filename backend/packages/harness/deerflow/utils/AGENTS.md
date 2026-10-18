@@ -9,6 +9,9 @@ for both tool imports live in `tests/test_browser_outputs_atomic.py`.
 Failure cleanup must preserve the original publication exception, including
 interruptions. Descriptor close and sibling unlink are separate best-effort
 operations: a close failure must not prevent the unlink attempt.
+Log each cleanup `OSError` at warning level with the temporary path and exception
+details so leaked siblings are observable; logging must not replace the primary
+publication exception or interruption.
 
 ### Model Retry Hints
 

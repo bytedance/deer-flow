@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import stat
-from contextlib import suppress
 from pathlib import Path
 from uuid import uuid4
+
+logger = logging.getLogger(__name__)
 
 
 def publish_bytes_atomically(path: Path, content: bytes) -> None:
@@ -44,8 +46,12 @@ def publish_bytes_atomically(path: Path, content: bytes) -> None:
         # Cleanup is best-effort: keep the publication error (or interruption)
         # and attempt unlink even if closing an untransferred descriptor fails.
         if fd is not None:
-            with suppress(OSError):
+            try:
                 os.close(fd)
-        with suppress(OSError):
+            except OSError:
+                logger.warning("Failed to close temporary output descriptor for %s", temporary, exc_info=True)
+        try:
             temporary.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Failed to remove temporary output file %s", temporary, exc_info=True)
         raise

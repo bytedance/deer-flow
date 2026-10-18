@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 import os
 import stat
 from pathlib import Path
@@ -119,7 +120,7 @@ def test_publish_failure_preserves_target_and_cleans_temporary(tmp_path, monkeyp
         assert list(tmp_path.iterdir()) == []
 
 
-def test_descriptor_cleanup_failure_still_attempts_unlink(tmp_path, monkeypatch, publisher):
+def test_descriptor_cleanup_failure_still_attempts_unlink(tmp_path, monkeypatch, publisher, caplog):
     target = tmp_path / "shot.png"
     publish_error = OSError("fdopen failed")
     close = os.close
@@ -142,6 +143,11 @@ def test_descriptor_cleanup_failure_still_attempts_unlink(tmp_path, monkeypatch,
     assert caught.value is publish_error
     assert len(closed) == 1
     assert list(tmp_path.iterdir()) == []
+    records = [record for record in caplog.records if record.name == "deerflow.utils.atomic_write"]
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    assert "close" in records[0].getMessage()
+    assert records[0].exc_info[1].args == ("close failed",)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor permissions")
@@ -186,7 +192,7 @@ def test_both_tools_share_the_atomic_publisher():
 
 @pytest.mark.parametrize("publish_error", [OSError("publication failed"), KeyboardInterrupt("publication interrupted")], ids=["io-error", "interrupt"])
 @pytest.mark.parametrize("existing", [False, True], ids=["new", "existing"])
-def test_cleanup_failure_preserves_publication_error(tmp_path, monkeypatch, publisher, publish_error, existing):
+def test_cleanup_failure_preserves_publication_error(tmp_path, monkeypatch, publisher, publish_error, existing, caplog):
     target = tmp_path / "shot.png"
     if existing:
         target.write_bytes(b"old")
@@ -209,7 +215,40 @@ def test_cleanup_failure_preserves_publication_error(tmp_path, monkeypatch, publ
     assert len(cleanup_attempts) == 1
     assert cleanup_attempts[0].parent == tmp_path
     assert cleanup_attempts[0].read_bytes() == b"new complete capture"
+    records = [record for record in caplog.records if record.name == "deerflow.utils.atomic_write"]
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    assert str(cleanup_attempts[0]) in records[0].getMessage()
+    assert isinstance(records[0].exc_info[1], PermissionError)
     if existing:
         assert target.read_bytes() == b"old"
     else:
         assert not target.exists()
+
+
+def test_both_cleanup_failures_are_logged_without_masking_interruption(tmp_path, monkeypatch, publisher, caplog):
+    interruption = KeyboardInterrupt("publication interrupted")
+    close = os.close
+
+    def fail_fdopen(*args):
+        raise interruption
+
+    def fail_close(fd):
+        close(fd)
+        raise OSError("close failed")
+
+    def fail_unlink(*args, **kwargs):
+        raise PermissionError("unlink failed")
+
+    with monkeypatch.context() as patches:
+        patches.setattr(os, "fdopen", fail_fdopen)
+        patches.setattr(os, "close", fail_close)
+        patches.setattr(Path, "unlink", fail_unlink)
+        with pytest.raises(KeyboardInterrupt) as caught:
+            publisher(tmp_path / "shot.png", b"new")
+
+    assert caught.value is interruption
+    records = [record for record in caplog.records if record.name == "deerflow.utils.atomic_write"]
+    assert [record.levelno for record in records] == [logging.WARNING, logging.WARNING]
+    assert [record.exc_info[1].args for record in records] == [("close failed",), ("unlink failed",)]
+    assert len(list(tmp_path.glob("*.tmp"))) == 1
