@@ -9,6 +9,16 @@ description: Use this skill when the user uploads Excel (.xlsx/.xls) or CSV file
 
 This skill analyzes user-uploaded Excel/CSV files using DuckDB — an in-process analytical SQL engine. It supports schema inspection, SQL-based querying, statistical summaries, and result export, all through a single Python script.
 
+## Environment setup
+
+Prepare the Python environment before running analyses. Install the required packages explicitly using the same interpreter that will run the script:
+
+```bash
+python -m pip install duckdb openpyxl
+```
+
+If either package is missing, the script exits with a setup instruction; it does not invoke an installer or modify the environment. DuckDB's existing spatial-extension setup for loading files is unchanged.
+
 ## Core Capabilities
 
 - Inspect Excel/CSV file structure (sheets, columns, types, row counts)

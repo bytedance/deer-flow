@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-# Import guards precede script loading: its optional-dependency fallback installs packages.
+# Real-engine regressions require explicitly prepared optional dependencies.
 duckdb = pytest.importorskip("duckdb")
 pytest.importorskip("openpyxl")
 SCRIPT = (

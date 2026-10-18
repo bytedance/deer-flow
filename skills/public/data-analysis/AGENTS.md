@@ -19,3 +19,7 @@ column identifiers by doubling embedded double quotes. Never rewrite user SQL
 with regular expressions: unique original names resolve through temporary views
 over canonical tables in the main schema, including on read-only cache hits.
 Keep these views connection-local and preserve normal CTE shadowing.
+
+Prepare DuckDB and openpyxl explicitly in the execution environment. Missing
+packages produce setup instructions without launching installers; keep those
+import-failure regressions offline in the root skill tests.
