@@ -361,9 +361,9 @@ class InfoQuestClient:
                 logger.error("web search API return wrong format, no search_result nor content field found in JSON response, content: %s", raw_results["content"])
                 return f"Error: {error_message}"
             else:
-                # If neither field exists, return the original response
-                logger.warning("InfoQuest Web-Search - Neither search_result nor content field found in JSON response")
-                return json.dumps(raw_results, indent=2, ensure_ascii=False)
+                # Unknown envelopes must not bypass result-URL screening.
+                logger.warning("InfoQuest Web-Search - Missing search_result envelope")
+                return "Error: InfoQuest returned an unexpected response format"
 
         except InfoQuestResponseError:
             return "Error: InfoQuest returned an unexpected response format"
@@ -488,9 +488,9 @@ class InfoQuestClient:
                 logger.error("image search API return wrong format, no search_result nor content field found in JSON response, content: %s", raw_results["content"])
                 return f"Error: {error_message}"
             else:
-                # If neither field exists, return the original response
-                logger.warning("InfoQuest Image Search - Neither search_result nor content field found in JSON response")
-                return json.dumps(raw_results, indent=2, ensure_ascii=False)
+                # Unknown envelopes must not bypass result-URL screening.
+                logger.warning("InfoQuest Image Search - Missing search_result envelope")
+                return "Error: InfoQuest returned an unexpected response format"
 
         except InfoQuestResponseError:
             return "Error: InfoQuest returned an unexpected response format"

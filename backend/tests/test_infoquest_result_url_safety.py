@@ -143,3 +143,25 @@ def test_image_search_output_never_carries_a_non_public_result_url():
 
     assert json.loads(output) == [{"image_url": PUBLIC_URL, "title": "Public"}]
     assert hostile not in output
+
+
+@pytest.mark.parametrize("method", ["web_search", "image_search"])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"url": "http://169.254.169.254/latest/meta-data", "marker": "untrusted-provider-payload"},
+        {"results": [{"url": PUBLIC_URL}, {"url": "http://127.0.0.1/admin"}]},
+        {"unexpected": {"images_results": [{"original": "http://169.254.169.254/latest/meta-data"}]}},
+    ],
+)
+def test_search_without_result_envelope_never_returns_raw_payload(method, payload):
+    client = InfoQuestClient()
+    with patch.object(type(client), f"{method}_raw_results", new=AsyncMock(return_value=payload)) as request:
+        output = asyncio.run(getattr(client, method)("query"))
+
+    assert output == "Error: InfoQuest returned an unexpected response format"
+    assert "169.254.169.254" not in output
+    assert "127.0.0.1" not in output
+    assert "untrusted-provider-payload" not in output
+    request.assert_awaited_once()
