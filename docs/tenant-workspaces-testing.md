@@ -503,3 +503,43 @@ Jenkinsfile 与 #90 逐字节相同，另存摘要。本文件此前 12 项用�
 接 scoped dispatcher/远端 C 准入与恢复；AIO namespace、外部效应及 account/token/
 policy 等撤权域保留未完成。M4/M0–M11 父项不勾选、租户启动 false、启动 schema
 fence 不变；无部署、推送、真实模型请求或本机应用/pytest/Node/浏览器/Docker 运行。
+
+
+## 2026-10-18 原生 C 快照、持久暂存与 pending 所有权交接
+
+上海 `deerflow-tenant-execution-m4-sql #95 SUCCESS`：**13 passed in 27.75s**，
+35 文件 Ruff 检查/格式通过。当前 38 个相关源码摘要与归档一致，五轮测试专属
+容器/网络及精确记录的 PG 临时卷均已移除。证据：`native_c_dispatch_staging`。
+
+- #91 两失败仅是新夹具缺少 AppConfig 必填 sandbox；未执行派发，不算产品 RED。
+- #92 两种数据库真实 RED：切换空间后，派发使用当前选择读取线程，无法读取原准入线程。
+- #93 主干两项通过（18.55s）：实际 SQL Run/线程 → 原生 snapshot → C 账本/亲和性 → pending owner CAS。
+- #94 仅在主干后加必要边界：交接前成员版本变化的两项通过；外层空间字段被剥离后内层 scoped C 仍按 legacy 创建，两项失败（22.35s）。
+- #95 四项原生主干/撤权边界，加六项既有 B 账本/迁移检查及三项旧签名/接收/操作策略检查，固定十三项通过。没有重跑无关完整套件。
+
+`native_admission_workspace` 只绑定已准入 Run 的私有快照并在 finally 恢复之前的选择；
+它的形状检查不授予新权限。读取仍须通过实时空间/成员/父线程检查，交接使用既有
+原生短事务 CAS，再检查原代次与 lifetime。SQL 锁不跨快照/外部 IO。
+
+`make_native_snapshot` 保留 workspace_id/context，校对 RunContext 与实际线程；
+派发不从 token/客户端 JSON 补授权。既有 e0003 独立 execution_identity 列扩展到
+C，绑定整个原生 payload、profile、固定 resident budget 与 affinity。修改身份或
+剥离外层空间字段不能降级。亲和性保存原 workspace，已有冲突/未归属行不自动赋权。
+B 身份摘要规则和既有旧格式继续回归，无新增表或迁移。
+
+```bash
+python scripts/render_tenant_run_control_pipeline.py native-c-stage <归档SHA256> --suite native-dispatch
+python scripts/render_tenant_run_control_pipeline.py native-c-stage-final <归档SHA256> --suite native-dispatch-final
+```
+
+#95 归档 SHA256：`f07ba8655ed92830ce513e5e712eb8c165d44f44bf2b7d9e1f40c6a0bd2fbd17`。
+旧 operator policy 用例改用实际 RunRecord，原有 remote_all 必须为字面 true 的断言保留。
+定向用例中 app 容器只是实际依赖的装配；存储/准入/CAS/账本/亲和性不替换为授权 mock。
+
+**限制：这不是已可使用的远端 C。** 本轮到持久暂存/交接为止；旧池仍拒绝领取
+scoped C。队列续租与 staged/孤儿/拒绝清理必须先接原生持久控制，撤权不能靠旧空间
+读取或猜测 NoStart/STOP。随后才接 scoped claim/owned、v2 原生 launch 的独立 SQL
+接收校验、worker RunContext/adoption、重启恢复和物理 C→B→C。这里没有 v2 launch、
+远端 worker、AIO、实际网络/模型或物理停止证明。其他撤权域、完整 M0–M11 仍未验收。
+租户开关 false，启动 schema fence 不变；无部署、推送或本机应用/pytest/Node/浏览器/
+Docker Desktop 运行。串行自审，不代表独立全量审计。

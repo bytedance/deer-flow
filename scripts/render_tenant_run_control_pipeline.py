@@ -31,6 +31,8 @@ def main():
             "sandbox-main",
             "sandbox-final",
             "sandbox-reuse",
+            "native-dispatch",
+            "native-dispatch-final",
         ),
         default="revocation",
     )
@@ -92,6 +94,10 @@ def main():
         tests = "tests/test_workspace_model_service_lifetime.py::test_native_system_model_stop_is_not_an_ordinary_fallback"
     if args.suite in ("direct-final", "sandbox-final"):
         tests += " tests/test_goal_worker.py::test_goal_worker_records_a_failed_evaluator_call tests/test_goal_worker.py::test_goal_worker_returns_hidden_continuation_when_goal_is_unmet tests/test_goal_worker.py::test_goal_worker_defers_satisfied_goal_completion_until_run_finalization tests/test_extension_system_model_calls.py::test_goal_evaluator_observes_success_and_failure_with_explicit_snapshot"
+    if args.suite in ("native-dispatch", "native-dispatch-final"):
+        tests = "tests/test_workspace_native_dispatch.py"
+    if args.suite == "native-dispatch-final":
+        tests += " tests/test_workspace_execution_ledger.py tests/test_ecs_executor_agent_dispatch.py::test_native_capability_rejects_changed_snapshot_and_assignment tests/test_ecs_executor_agent_dispatch.py::test_native_adoption_rejects_changed_durable_payload_before_owner_transfer tests/test_ecs_executor_operations.py::test_controller_remote_all_requires_literal_operator_true"
     if args.suite == "sandbox-reuse":
         tests = "tests/test_workspace_sandbox_dispatch.py::test_native_sandbox_thread_recreation_does_not_restore_old_report"
     if args.suite == "sandbox-main":

@@ -1664,3 +1664,19 @@ unchanged; retain #88 fixed 134-item evidence rather than repeat it. Internal
 entry proof only; HTTP/JWT/browser, AIO/provider namespace, crash/revocation during
 cleanup, scoped dispatcher/remote C, other revocation domains and all M0-M11
 parents remain open. Activation/schema fences unchanged; no deployment or push.
+
+
+M4 native C staging checkpoint (2026-10-18): #91 fixture configuration failure is
+not a product RED. #92 reproduced two original-thread failures after UI selection;
+#93 actual SQL/snapshot/independent ledger/affinity/pending CAS main two passed.
+Only then #94 exposed two scope-stripping legacy creations; two pre-handoff
+member-version refusal cases passed. #95 fixed thirteen passed (27.75s), thirty-five
+file cloud Ruff. Bind the private admitted Run context, preserve scoped snapshot,
+freeze complete C intent and fixed budget in the existing identity column, retain
+native ownership CAS and reject scoped-to-legacy downgrade. Evidence:
+native_c_dispatch_staging. No new migration or deployment; default pool still
+refuses scoped C. This is durable staging/handoff, not a functioning remote C
+queue. Next scoped queued maintenance/control-only NoStart, then claim/owned/v2
+launch with independent SQL authorization, adoption/context, recovery and physical
+C->B->C. All remaining domains and M0-M11 parents stay open; activation false,
+startup schema fence unchanged. No local runtime, model call, push or PR.

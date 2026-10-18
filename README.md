@@ -3082,3 +3082,11 @@ The native Local conversation-deletion flow also clears generated report files
 before a same-ID conversation is recreated; normal continuation keeps them.
 [Validation scope](docs/tenant-workspaces-testing.md) records both database checks.
 Remote providers and complete tenant deployment still have separate pending gates.
+
+
+Native remote-Agent dispatch now preserves the admitted workspace while staging
+the existing Run for handoff. Its C snapshot, fixed budget and affinity are
+immutable, and scope stripping cannot downgrade it to legacy execution.
+[Validation scope](docs/tenant-workspaces-testing.md) covers SQL staging and
+ownership transfer; remote claiming, recovery and complete tenant deployment
+remain pending.

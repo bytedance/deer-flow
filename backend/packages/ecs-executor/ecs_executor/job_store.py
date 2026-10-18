@@ -33,6 +33,9 @@ def _execution_identity(record):
     """Capture only explicitly supplied intent; attribution never creates a grant."""
     snapshot = record.get("workspace_context")
     if snapshot is None:
+        native = record.get("native")
+        if record.get("kind") == "C" and isinstance(native, dict) and (native.get("workspace_id") is not None or native.get("workspace_context") is not None):
+            raise ValueError("Native execution identity cannot downgrade to legacy")
         return None
     from deerflow.authz.workspace import WorkspaceContext
 
@@ -40,7 +43,8 @@ def _execution_identity(record):
         context = WorkspaceContext(**snapshot)
     except (TypeError, ValueError):
         raise ValueError("Execution identity snapshot is invalid") from None
-    if context.workspace_id != record.get("workspace_id") or context.actor_user_id != record.get("user_id") or record.get("kind", "B") != "B":
+    kind = record.get("kind", "B")
+    if context.workspace_id != record.get("workspace_id") or context.actor_user_id != record.get("user_id") or kind not in {"B", "C"}:
         raise ValueError("Execution identity workspace/actor/kind mismatch")
     identity = {key: record.get(key) for key in ("user_id", "thread_id", "incarnation", "run_id", "spec_digest")}
     for key, limit in (("user_id", 64), ("thread_id", 64), ("incarnation", 32), ("run_id", 64), ("spec_digest", 255)):
@@ -50,8 +54,20 @@ def _execution_identity(record):
     # Bind operator profile and effective input spec without duplicating potentially
     # large snapshotted file content in the identity column.
     intent = {key: record.get(key) for key in ("spec", "profile", "max_input_bytes")}
+    if kind == "C":
+        native = record.get("native")
+        if (
+            not isinstance(native, dict)
+            or native.get("workspace_id") != context.workspace_id
+            or native.get("workspace_context") != snapshot
+            or any(native.get(key) != identity[key] for key in ("user_id", "thread_id", "incarnation", "run_id"))
+        ):
+            raise ValueError("Native execution identity snapshot mismatch")
+        # The existing independent identity column binds the COMPLETE native
+        # payload and fixed resident budget; no second execution authority.
+        intent.update(native=native, node_budget=record.get("node_budget"), affinity_node=record.get("affinity_node"))
     encoded = json.dumps(intent, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode("ascii")
-    return {**identity, "kind": "B", "workspace_id": context.workspace_id, "workspace_context": dict(snapshot), "intent_sha256": hashlib.sha256(encoded).hexdigest()}
+    return {**identity, "kind": kind, "workspace_id": context.workspace_id, "workspace_context": dict(snapshot), "intent_sha256": hashlib.sha256(encoded).hexdigest()}
 
 
 def _validated_record(row):

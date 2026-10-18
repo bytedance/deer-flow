@@ -421,6 +421,14 @@ python -m pytest tests/test_workspace_execution.py tests/test_workspace_revocati
 - [x] 保存源码/归档/日志/精确资源回执及文档；此主干复用现有原生机制，没有新增生产 namespace 实现。
 - [ ] AIO/其他 provider、失败/撤权/崩溃中删除、scoped dispatcher/远端 C、其他撤权域与完整 M0–M11 继续待验收。租户启动关闭。
 
+#### M4 第二十小步：原生 C 空间快照、不可变暂存与 pending 交接（2026-10-18 已验证）
+
+- [x] 先用真实原生 SQL 准入/线程/快照/独立账本/亲和性/CAS，复现界面空间切换后读取原线程失败；初始化夹具错误与产品 RED 分开。
+- [x] 只绑定私有已准入 Run 的原始身份，保留快照空间和线程代次；既有 C 交接仍由原生 pending CAS/实时权限/lifetime 控制。
+- [x] 复用 e0003 独立 identity 列冻结完整 C payload、operator profile、node budget 和 affinity；内层 scoped 快照缺外层身份不得降级，旧 B/旧格式回归。
+- [x] 主干先两项通过，再验证交接前成员版本变化及不可变/降级；最终固定十三项、35 文件云端 Ruff、回执/文档和本地提交。
+- [ ] 此步只到 durable staging/handoff；queued lease maintenance/staged/refusal/NoStart/重启控制、scoped pool claim/owned、v2 launch 独立 SQL 接收、worker adoption/context、物理 C→B→C 和完整 M0–M11 仍须继续。旧池门禁及租户启动保持关闭。
+
 ### M5：记忆、知识检索与工具凭据隔离
 
 **修改接点：**

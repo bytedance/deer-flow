@@ -8,6 +8,7 @@ import os
 import time
 import uuid
 from contextlib import suppress
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -86,12 +87,15 @@ _AFFINITIES = Table(
 )
 
 
-def _affinity(store, user_id, thread_id, incarnation, *, node_id=None):
+def _affinity(store, user_id, thread_id, incarnation, *, node_id=None, workspace_id=None):
     with store.engine.begin() as connection:
         conditions = (_AFFINITIES.c.user_id == user_id, _AFFINITIES.c.thread_id == thread_id, _AFFINITIES.c.incarnation == incarnation)
         if node_id is not None:
-            connection.execute(insert(_AFFINITIES).values(user_id=user_id, thread_id=thread_id, incarnation=incarnation, node_id=node_id).on_conflict_do_nothing())
-        value = connection.execute(select(_AFFINITIES.c.node_id).where(*conditions)).scalar_one_or_none()
+            connection.execute(insert(_AFFINITIES).values(user_id=user_id, thread_id=thread_id, incarnation=incarnation, node_id=node_id, workspace_id=workspace_id).on_conflict_do_nothing())
+        row = connection.execute(select(_AFFINITIES.c.node_id, _AFFINITIES.c.workspace_id).where(*conditions)).first()
+        if row is not None and row.workspace_id != workspace_id:
+            raise ValueError("Native affinity workspace identity changed")
+        value = row.node_id if row is not None else None
         if node_id is not None and value != node_id:
             raise ValueError("Native thread incarnation affinity changed")
         return value
@@ -127,50 +131,67 @@ class NativeDispatchHost:
         await asyncio.to_thread(self.pool.store.mutate, job["id"], lambda row: row["dependency_wait"].update(continuation_run_id=run_id))
 
     async def admit_native(self, record, snapshot_factory):
-        if self.quiescing:
-            raise RuntimeError("Native dispatcher is quiescing")
-        # Origin is server-stamped before admission, never external metadata.
-        origin = (record.metadata or {}).get("deerflow_origin") or {}
-        node = None
-        if record.user_id:
-            thread = await self.app.state.thread_store.get(record.thread_id, user_id=record.user_id)
-            if thread is not None:
-                node = await asyncio.to_thread(_affinity, self.pool.store, record.user_id, record.thread_id, thread["incarnation"])
-        if node is None and self.config.get("remote_all") is not True and getattr(self, "browser_control", None) is None and origin.get("kind") not in self.config.get("remote_origins", ["schedule"]):
-            return False
-        node = node or self.config["native_node"]
-        snapshot = await snapshot_factory(transport_node=node, transport_secret=self.credentials[node])
-        wait = snapshot["execution"].get("dependency_continuation")
-        scheduled = snapshot["execution"].get("scheduled_task_runtime")
-        if wait is not None and not wait.get("notification_only") and scheduled is not None:
-            await self.app.state.scheduled_task_run_repo.transfer_dependency_run(
-                task_id=scheduled["task_id"], occurrence_id=scheduled["occurrence_id"], user_id=record.user_id, source_run_id=wait["source_run_id"], continuation_run_id=record.run_id
+        from app.gateway.native_admission import native_admission_workspace
+
+        with native_admission_workspace(record):
+            if self.quiescing:
+                raise RuntimeError("Native dispatcher is quiescing")
+            # Origin is server-stamped before admission, never external metadata.
+            origin = (record.metadata or {}).get("deerflow_origin") or {}
+            node = None
+            if record.user_id:
+                thread = await self.app.state.thread_store.get(record.thread_id, user_id=record.user_id)
+                if thread is not None:
+                    node = await asyncio.to_thread(_affinity, self.pool.store, record.user_id, record.thread_id, thread["incarnation"], workspace_id=record.workspace_id)
+            if node is None and self.config.get("remote_all") is not True and getattr(self, "browser_control", None) is None and origin.get("kind") not in self.config.get("remote_origins", ["schedule"]):
+                return False
+            node = node or self.config["native_node"]
+            snapshot = await snapshot_factory(transport_node=node, transport_secret=self.credentials[node])
+            identity_fields = {}
+            if record.workspace_context is not None:
+                context = asdict(record.workspace_context)
+                if (
+                    snapshot.get("workspace_context") != context
+                    or snapshot.get("workspace_id") != record.workspace_id
+                    or any(snapshot.get(key) != getattr(record, key) for key in ("run_id", "user_id", "thread_id"))
+                    or snapshot.get("incarnation") != record.thread_incarnation
+                ):
+                    raise ValueError("Native dispatch snapshot differs from its captured admission")
+                identity_fields = {"workspace_id": record.workspace_id, "workspace_context": context, "user_id": record.user_id, "thread_id": record.thread_id, "incarnation": record.thread_incarnation, "run_id": record.run_id}
+            elif snapshot.get("workspace_id") is not None or snapshot.get("workspace_context") is not None:
+                raise ValueError("Native dispatch cannot infer workspace authority")
+            wait = snapshot["execution"].get("dependency_continuation")
+            scheduled = snapshot["execution"].get("scheduled_task_runtime")
+            if wait is not None and not wait.get("notification_only") and scheduled is not None:
+                await self.app.state.scheduled_task_run_repo.transfer_dependency_run(
+                    task_id=scheduled["task_id"], occurrence_id=scheduled["occurrence_id"], user_id=record.user_id, source_run_id=wait["source_run_id"], continuation_run_id=record.run_id
+                )
+            if not record.user_id:
+                raise ValueError("Remote native admission requires an authenticated owner")
+            node = node or self.config["native_node"]
+            profile = self.config["profile"]
+            job = await asyncio.to_thread(
+                self.pool.store.create,
+                namespace="native-C",
+                request_key=record.run_id,
+                spec_digest=arguments_sha256(snapshot),
+                record={
+                    **identity_fields,
+                    "kind": "C",
+                    "node_budget": self.pool.nodes[node].model_dump(mode="json"),
+                    "native": snapshot,
+                    "affinity_node": node,
+                    "spec": {"profile": profile},
+                    "profile": self.config["profiles"][profile],
+                    "staged_deadline": time.time() + 120,
+                    "cancel_requested": False,
+                    "physical_stopped": False,
+                },
             )
-        if not record.user_id:
-            raise ValueError("Remote native admission requires an authenticated owner")
-        node = node or self.config["native_node"]
-        profile = self.config["profile"]
-        job = await asyncio.to_thread(
-            self.pool.store.create,
-            namespace="native-C",
-            request_key=record.run_id,
-            spec_digest=arguments_sha256(snapshot),
-            record={
-                "kind": "C",
-                "node_budget": self.pool.nodes[node].model_dump(mode="json"),
-                "native": snapshot,
-                "affinity_node": node,
-                "spec": {"profile": profile},
-                "profile": self.config["profiles"][profile],
-                "staged_deadline": time.time() + 120,
-                "cancel_requested": False,
-                "physical_stopped": False,
-            },
-        )
-        await asyncio.to_thread(_affinity, self.pool.store, record.user_id, record.thread_id, snapshot["incarnation"], node_id=node)
-        await self.app.state.run_manager.handoff_pending(record.run_id, owner_worker_id="dispatch:" + job["id"])
-        await asyncio.to_thread(self.pool.store.mutate, job["id"], lambda row: row.update(state="queued"))
-        return True
+            await asyncio.to_thread(_affinity, self.pool.store, record.user_id, record.thread_id, snapshot["incarnation"], node_id=node, workspace_id=record.workspace_id)
+            await self.app.state.run_manager.handoff_pending(record.run_id, owner_worker_id="dispatch:" + job["id"])
+            await asyncio.to_thread(self.pool.store.mutate, job["id"], lambda row: row.update(state="queued"))
+            return True
 
     async def refuse(self, job):
         if job.get("settlement_kind") == "refusal":

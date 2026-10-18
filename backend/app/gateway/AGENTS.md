@@ -544,3 +544,13 @@ extension owns HTTP STOP delivery and receipt verification; core Gateway imports
 no executor module. This readiness wiring is not complete tenant binding for the
 MCP HTTP router and does not open compiled workspace activation. Full
 Run/browser/Scheduler/credential revocation and notifications remain pending.
+
+
+Native C staging: native_admission_workspace binds only a captured admitted
+RunRecord, validates its shape with existing native transition rules, and restores
+the prior context in finally. This is not a membership grant: actual thread reads
+and pending handoff CAS reauthorize. make_native_snapshot preserves scoped
+workspace/context and checks the RunContext and actual parent incarnation. C
+ledger/affinity capture is verified (#95), while scoped queued maintenance,
+independent v2 launch verification, remote adoption/context and recovery remain
+unintegrated. Do not enable the tenant startup or default pool claim fences.

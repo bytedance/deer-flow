@@ -9,6 +9,8 @@ recovery; this hook does not create a second graph or execution runtime.
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from contextlib import contextmanager
+from dataclasses import asdict
 
 from deerflow.runtime.runs.manager import RunManager, RunRecord, RunStartupError
 
@@ -39,58 +41,83 @@ async def attach_native_admission(request, manager: RunManager, record: RunRecor
         raise
 
 
+@contextmanager
+def native_admission_workspace(record):
+    """Bind a private admitted Run snapshot, never the current UI selection.
+
+    This shape check grants no new authority: scoped repository reads and the
+    pending-owner CAS still reauthorize membership and the original generation.
+    """
+    from deerflow.authz.workspace import reset_current_workspace, set_current_workspace
+
+    RunManager._workspace_transition_kwargs(record)
+    token = set_current_workspace(record.workspace_context) if record.workspace_context is not None else None
+    try:
+        yield record.workspace_context
+    finally:
+        if token is not None:
+            reset_current_workspace(token)
+
+
 async def make_native_snapshot(request, record, *, run_ctx, body, config, graph_input, admitted_knowledge_scope, scope_assistant_id, scheduled_task_runtime, require_existing_thread, transport_node=None, transport_secret=None):
     """Capture admission output, never live request secrets or closure objects."""
-    from langchain_core.messages import messages_to_dict
-    from langgraph.types import Command
+    with native_admission_workspace(record):
+        from langchain_core.messages import messages_to_dict
+        from langgraph.types import Command
 
-    from app.gateway.services import _ensure_thread_metadata
-    from deerflow.runtime.goal import read_thread_goal
-    from deerflow.runtime.secret_context import redact_config_secrets
+        from app.gateway.services import _ensure_thread_metadata
+        from deerflow.runtime.goal import read_thread_goal
+        from deerflow.runtime.secret_context import redact_config_secrets
 
-    metadata = await _ensure_thread_metadata(run_ctx, record, owner_user_id=record.user_id, require_existing_thread=require_existing_thread)
-    if metadata is None or not metadata.get("incarnation"):
-        raise RunStartupError("Remote native execution requires thread incarnation")
-    if isinstance(graph_input, Command):
-        encoded_input = {"command": {"resume": graph_input.resume}}
-    else:
-        encoded_input = {"input": {**graph_input, "messages": messages_to_dict(graph_input.get("messages", []))}} if graph_input is not None else {"input": None}
-    from app.gateway.conversation_access import _source_id
+        metadata = await _ensure_thread_metadata(run_ctx, record, owner_user_id=record.user_id, require_existing_thread=require_existing_thread)
+        if metadata is None or not metadata.get("incarnation"):
+            raise RunStartupError("Remote native execution requires thread incarnation")
+        if isinstance(graph_input, Command):
+            encoded_input = {"command": {"resume": graph_input.resume}}
+        else:
+            encoded_input = {"input": {**graph_input, "messages": messages_to_dict(graph_input.get("messages", []))}} if graph_input is not None else {"input": None}
+        from app.gateway.conversation_access import _source_id
 
-    body_snapshot = body.model_dump(mode="json", exclude={"input", "config", "metadata", "context"})
-    body_snapshot["conversation_references"] = [_source_id(value, str(request.url)) for value in body.conversation_references or []]
-    conversation_sources = body_snapshot["conversation_references"] if run_ctx.conversation_reader is not None else []
-    if not conversation_sources and run_ctx.conversation_reader is not None and scheduled_task_runtime is not None:
-        previous = record.metadata.get("scheduled_previous_thread_id")
-        if isinstance(previous, str):
-            conversation_sources = [previous]
-    snapshot = {
-        "run_id": record.run_id,
-        "user_id": record.user_id,
-        "thread_id": record.thread_id,
-        "incarnation": metadata["incarnation"],
-        "assistant_id": record.assistant_id,
-        "kwargs": record.kwargs,
-        "metadata": record.metadata,
-        "goal": await read_thread_goal(run_ctx.checkpointer, record.thread_id),
-        "execution": {
-            **encoded_input,
-            "config": redact_config_secrets(config),
-            "body": body_snapshot,
-            "conversation_sources": conversation_sources,
-            "knowledge_scope": admitted_knowledge_scope,
-            "scope_assistant_id": scope_assistant_id,
-            "scheduled_task_runtime": scheduled_task_runtime,
-            "dependency_continuation": run_ctx.dependency_continuation,
-            "require_existing_thread": require_existing_thread,
-        },
-    }
+        body_snapshot = body.model_dump(mode="json", exclude={"input", "config", "metadata", "context"})
+        body_snapshot["conversation_references"] = [_source_id(value, str(request.url)) for value in body.conversation_references or []]
+        conversation_sources = body_snapshot["conversation_references"] if run_ctx.conversation_reader is not None else []
+        if not conversation_sources and run_ctx.conversation_reader is not None and scheduled_task_runtime is not None:
+            previous = record.metadata.get("scheduled_previous_thread_id")
+            if isinstance(previous, str):
+                conversation_sources = [previous]
+        snapshot = {
+            "run_id": record.run_id,
+            "user_id": record.user_id,
+            "thread_id": record.thread_id,
+            "incarnation": metadata["incarnation"],
+            "assistant_id": record.assistant_id,
+            "kwargs": record.kwargs,
+            "metadata": record.metadata,
+            "goal": await read_thread_goal(run_ctx.checkpointer, record.thread_id),
+            "execution": {
+                **encoded_input,
+                "config": redact_config_secrets(config),
+                "body": body_snapshot,
+                "conversation_sources": conversation_sources,
+                "knowledge_scope": admitted_knowledge_scope,
+                "scope_assistant_id": scope_assistant_id,
+                "scheduled_task_runtime": scheduled_task_runtime,
+                "dependency_continuation": run_ctx.dependency_continuation,
+                "require_existing_thread": require_existing_thread,
+            },
+        }
 
-    if transport_secret is not None:
-        from ecs_executor.agent_dispatch import seal_native_secrets
+        if record.workspace_context is not None:
+            context = record.workspace_context
+            if run_ctx.workspace_context != context or metadata.get("workspace_id") != context.workspace_id or metadata.get("user_id") != record.user_id or metadata["incarnation"] != record.thread_incarnation:
+                raise RunStartupError("Remote native snapshot differs from its captured admission")
+            snapshot.update(workspace_id=context.workspace_id, workspace_context=asdict(context))
 
-        snapshot["secret_carrier"] = seal_native_secrets(snapshot, transport_node, transport_secret, config.get("context"))
-    return snapshot
+        if transport_secret is not None:
+            from ecs_executor.agent_dispatch import seal_native_secrets
+
+            snapshot["secret_carrier"] = seal_native_secrets(snapshot, transport_node, transport_secret, config.get("context"))
+        return snapshot
 
 
 async def adopt_native_run(app, job, token, secret, *, admission_check=None):

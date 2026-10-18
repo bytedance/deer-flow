@@ -723,3 +723,21 @@ verify exact owned-container absence/removal. Terminal metadata alone cannot
 produce a STOP receipt or settle native cancellation; a running or unobservable
 object still retains uncertainty. The companion test uses actual Docker
 observation after the old ordinary queued-cancel path.
+
+
+### Scoped native C staging (partial M4)
+
+NativeDispatchHost now binds the admitted Run's private workspace while capturing
+its snapshot and handing off the existing pending Run. C jobs persist original
+workspace/actor/thread/incarnation/Run and fixed affinity. Existing e0003 immutable
+execution_identity also hashes the complete native payload, profile and node
+budget. Removing outer scope while retaining a scoped native payload is refused;
+legacy B identity hashing remains unchanged. Native reads/ownership CAS still
+reauthorize; snapshot JSON alone never grants execution.
+
+Shanghai SQL #95 verifies thirteen focused checks and thirty-five-file Ruff.
+This is staging/handoff only: queued lease maintenance/NoStart/refusal settlement,
+scoped pool claim/owned, independent v2 launch verification, receiver RunContext,
+recovery and physical C->B->C remain pending. Default pool claims still refuse
+scoped C, and tenant activation remains closed. See the current
+[validation evidence](../../../docs/tenant-workspaces-testing.md).
