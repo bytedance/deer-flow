@@ -54,26 +54,36 @@ async def test_repeated_screenshots_with_one_filename_keep_every_capture(tmp_pat
 
 @pytest.mark.asyncio
 async def test_a_name_claimed_after_the_choice_is_not_replaced(tmp_path, monkeypatch):
-    # A peer (another tool call, or the user) can create a name after an
-    # existence check chose it. Simulate that window: whenever bytes are about
-    # to be written onto a visible name, a peer claims that name first. Only a
-    # publication that itself refuses occupied names keeps every peer file.
-    publish = tools._publish_bytes_atomically
+    # A peer (another tool call, or the user) can create a name after the
+    # publisher chose it. Simulate that window at the publication step itself:
+    # right before a link or replace lands the capture on a visible name, a
+    # peer claims that name. Only a publication that refuses occupied names at
+    # that step keeps the peer file.
+    link, replace = os.link, os.replace
     claimed: list[Path] = []
 
-    def peer_claims_name_before_write(path, content):
-        if not path.name.startswith(".") and not path.exists():
-            path.write_bytes(b"peer output")
-            claimed.append(path)
-        publish(path, content)
+    def peer_claims(destination) -> None:
+        destination = Path(destination)
+        if not claimed and not destination.name.startswith("."):
+            destination.write_bytes(b"peer output")
+            claimed.append(destination)
 
-    monkeypatch.setattr(tools, "_publish_bytes_atomically", peer_claims_name_before_write)
+    def link_after_peer(source, destination, *args, **kwargs):
+        peer_claims(destination)
+        return link(source, destination, *args, **kwargs)
+
+    def replace_after_peer(source, destination, *args, **kwargs):
+        peer_claims(destination)
+        return replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(os, "link", link_after_peer)
+    monkeypatch.setattr(os, "replace", replace_after_peer)
     result = await _screenshot(tmp_path)
 
-    saved = tmp_path / _artifact(result).rsplit("/", 1)[1]
-    assert saved.read_bytes() == _SHOT
-    assert saved not in claimed
-    assert all(path.read_bytes() == b"peer output" for path in claimed)
+    assert claimed == [tmp_path / "report.png"]
+    assert _artifact(result) == "/mnt/user-data/outputs/report-1.png"
+    assert (tmp_path / "report.png").read_bytes() == b"peer output"
+    assert (tmp_path / "report-1.png").read_bytes() == _SHOT
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX symlink creation")
