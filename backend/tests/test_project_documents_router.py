@@ -320,6 +320,23 @@ class TestFailClosed:
             projects_root = get_paths().user_projects_dir("user-a")
             assert not projects_root.exists() or list(projects_root.iterdir()) == []
 
+    def test_project_archived_after_the_early_check_is_still_404_and_unstaged(self, tmp_path):
+        app = _build_app(tmp_path)
+        real_stage = project_documents.stage_document_bytes
+
+        async def _archive_then_stage(*args, **kwargs):
+            # Lose the race: the project is archived between the early check
+            # and the shelf insert, whose row lock is the authority.
+            await app.state.project_repo.set_status(kwargs["project_id"], "archived")
+            return await real_stage(*args, **kwargs)
+
+        with TestClient(app) as client:
+            pid = _create_project(client)["id"]
+            with patch.object(project_documents, "stage_document_bytes", side_effect=_archive_then_stage):
+                assert _upload(client, pid, "a.txt", b"body").status_code == 404
+            assert list((get_paths().project_documents_dir("user-a", pid) / ".staging").iterdir()) == []
+            assert client.get(f"/api/projects/{pid}/documents").json()["total"] == 0
+
     def test_503_when_document_repo_unavailable(self, tmp_path):
         app = _build_app(tmp_path, document_repo=None)
         with TestClient(app) as client:
