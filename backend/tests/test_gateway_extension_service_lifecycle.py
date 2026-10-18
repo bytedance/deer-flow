@@ -53,6 +53,46 @@ def _patch_runtime_resources(monkeypatch, events: list[str]) -> None:
 
 
 @pytest.mark.asyncio
+async def test_host_capabilities_outlive_extension_stop_and_close_before_database(monkeypatch):
+    from app.gateway.deps import langgraph_runtime
+
+    events = []
+    _patch_runtime_resources(monkeypatch, events)
+    evidence, mutations = object(), object()
+
+    class Host:
+        def __init__(self, *args):
+            self.bindings = {"example:install": (evidence, mutations)}
+
+        async def start(self):
+            events.append("host_start")
+
+        async def close(self):
+            events.append("host_close")
+
+    class Service:
+        async def start(self, deps):
+            assert deps.completed_run_evidence is evidence
+            assert deps.skill_mutations is mutations
+            events.append("service_start")
+
+        async def stop(self):
+            events.append("service_stop")
+
+    monkeypatch.setattr("deerflow.extensions.host_capabilities.HostCapabilities", Host)
+    monkeypatch.setattr("deerflow.persistence.thread_meta.make_thread_store", lambda *_: (_ for _ in ()).throw(RuntimeError("later failure")))
+    registry = ExtensionRegistry()
+    with registry.attributed_to("example:install"):
+        registry.service(Service())
+    app = FastAPI()
+    app.state.extensions = registry.build()
+    with pytest.raises(RuntimeError, match="later failure"):
+        async with langgraph_runtime(app, SimpleNamespace(database=_database_config())):
+            pytest.fail("must not yield")
+    assert events == ["host_start", "service_start", "service_stop", "host_close", "engine_close"]
+
+
+@pytest.mark.asyncio
 async def test_runtime_owns_engine_cleanup_before_initialization(monkeypatch):
     from app.gateway.deps import langgraph_runtime
 

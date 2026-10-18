@@ -323,6 +323,37 @@ class TestLoadAgentSoul:
 
         assert soul == expected_soul
 
+    def test_strips_a_leading_bom_from_named_agent_soul(self, tmp_path):
+        """A SOUL.md saved by a Windows editor keeps a UTF-8 BOM.
+
+        ``str.strip()`` does not remove U+FEFF, so without normalization the mark
+        becomes the first character of the text injected into the lead agent's
+        ``<soul>`` block. SOUL.md is edited outside DeerFlow (Notepad, PowerShell
+        5.1), which is exactly where a BOM comes from.
+        """
+        expected_soul = "You are a specialized code review expert."
+        _write_agent(tmp_path, "code-reviewer", {"name": "code-reviewer"}, soul="\ufeff" + expected_soul)
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
+            from deerflow.config.agents_config import AgentConfig, load_agent_soul
+
+            cfg = AgentConfig(name="code-reviewer")
+            soul = load_agent_soul(cfg.name)
+
+        assert soul == expected_soul
+
+    def test_strips_a_leading_bom_from_the_default_agent_soul(self, tmp_path):
+        """The default agent reads ``{base_dir}/SOUL.md`` directly — a second read site."""
+        expected_soul = "You are the default agent."
+        (tmp_path / "SOUL.md").write_text("\ufeff" + expected_soul, encoding="utf-8")
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
+            from deerflow.config.agents_config import load_agent_soul
+
+            soul = load_agent_soul(None)
+
+        assert soul == expected_soul
+
     def test_missing_soul_file_returns_none(self, tmp_path):
         agent_dir = tmp_path / "agents" / "no-soul"
         agent_dir.mkdir(parents=True)

@@ -1,4 +1,4 @@
-"""Exercise the GitHub research client's dependency-free HTTP fallback."""
+"""Exercise the GitHub research client's HTTP transports without network IO."""
 
 import http.client
 import io
@@ -35,6 +35,54 @@ def fallback_client(monkeypatch):
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     return module["GitHubAPI"](), captured
+
+
+@pytest.fixture(params=["requests", "urllib"])
+def file_content_client(request, monkeypatch):
+    if request.param == "urllib":
+        return request.getfixturevalue("fallback_client")
+
+    requests = pytest.importorskip("requests")
+    script = (
+        Path(__file__).resolve().parents[2]
+        / "skills/public/github-deep-research/scripts/github_api.py"
+    )
+    module = runpy.run_path(str(script))
+    captured = {}
+
+    def fake_send(session, prepared_request, **kwargs):
+        captured["url"] = prepared_request.url
+        response = requests.Response()
+        response.status_code = 200
+        response._content = b'{"ok": true}'
+        return response
+
+    monkeypatch.setattr(requests.Session, "send", fake_send)
+    return module["GitHubAPI"](), captured
+
+
+@pytest.mark.parametrize(
+    ("path", "encoded_path"),
+    [
+        ("docs/C# guide.md", "docs/C%23%20guide.md"),
+        ("docs/query?draft.md", "docs/query%3Fdraft.md"),
+        ("docs/literal%20name.md", "docs/literal%2520name.md"),
+        ("文档/入门 guide.md", "%E6%96%87%E6%A1%A3/%E5%85%A5%E9%97%A8%20guide.md"),
+        ("docs/file name.md", "docs/file%20name.md"),
+        ("src/nested/README.md", "src/nested/README.md"),
+    ],
+)
+def test_file_content_preserves_repository_path(
+    file_content_client, path, encoded_path
+):
+    client, captured = file_content_client
+
+    assert client.get_file_content("owner", "repo", path) == '{"ok": true}'
+
+    url = urlsplit(captured["url"])
+    assert url.path == f"/repos/owner/repo/contents/{encoded_path}"
+    assert url.query == ""
+    assert url.fragment == ""
 
 
 @pytest.mark.parametrize("query", ["bug fix", "C++ & retry#fragment", "模型请求"])

@@ -14,9 +14,10 @@ from pydantic import BaseModel, Field
 
 from app.channels.capabilities import supports_proactive_group_notifications, supports_proactive_notifications
 from app.channels.runtime_config_store import (
-    ChannelRuntimeConfigStore,
+    RuntimeConfigStore,
     apply_runtime_connection_config,
     merge_runtime_channel_configs,
+    resolve_runtime_config_store,
 )
 from app.channels.wechat_qr_login import QRLoginError, WechatQRLogin
 from app.gateway.deps import require_admin_user
@@ -182,34 +183,34 @@ def _get_app_config():
     return get_app_config()
 
 
-async def _get_runtime_config_store(request: Request) -> ChannelRuntimeConfigStore:
+async def _get_runtime_config_store(request: Request) -> RuntimeConfigStore:
+    """The runtime config store, resolved once per process; every call on it blocks, so offload them."""
     store = getattr(request.app.state, "channel_runtime_config_store", None)
-    if isinstance(store, ChannelRuntimeConfigStore):
+    if store is not None:
         return store
-    # Constructing the store reads its JSON file from disk; keep it off the
-    # event loop.
-    store = await asyncio.to_thread(ChannelRuntimeConfigStore)
+    # Resolving reads paths (and the JSON store's file) from disk; keep it off
+    # the event loop. The database store holds no state of its own.
+    store = await asyncio.to_thread(resolve_runtime_config_store, _get_app_config(), cipher=getattr(request.app.state, "credentials_cipher", None))
     request.app.state.channel_runtime_config_store = store
     return store
 
 
 async def _get_channel_connections_config(request: Request) -> ChannelConnectionsConfig:
+    # Re-read on every request, never cached on app.state: another Gateway
+    # instance may have saved the runtime config (e.g. the Telegram username)
+    # since the last one.
     config = getattr(request.app.state, "channel_connections_config", None)
     if not isinstance(config, ChannelConnectionsConfig):
         config = _get_app_config().channel_connections
-    config = apply_runtime_connection_config(config, store=await _get_runtime_config_store(request))
-    request.app.state.channel_connections_config = config
-    return config
+    if not (config.enabled and config.telegram.enabled):
+        # Only the Telegram deep-link username comes from the runtime store.
+        return config
+    return await asyncio.to_thread(apply_runtime_connection_config, config, store=await _get_runtime_config_store(request))
 
 
 async def _get_channels_config(request: Request) -> dict[str, Any]:
-    state_config = getattr(request.app.state, "channels_config", None)
-    if isinstance(state_config, dict):
-        return state_config
-
-    result = await _load_channels_config(request, await _get_channel_connections_config(request))
-    request.app.state.channels_config = result
-    return result
+    """``channels.*`` from config.yaml with the runtime config overlaid, read fresh for every request."""
+    return await _load_channels_config(request, await _get_channel_connections_config(request))
 
 
 async def _load_channels_config(request: Request, config: ChannelConnectionsConfig) -> dict[str, Any]:
@@ -217,11 +218,7 @@ async def _load_channels_config(request: Request, config: ChannelConnectionsConf
     extra = app_config.model_extra or {}
     channels_config = extra.get("channels")
     result = dict(channels_config) if isinstance(channels_config, dict) else {}
-    merge_runtime_channel_configs(
-        result,
-        config,
-        store=await _get_runtime_config_store(request),
-    )
+    await asyncio.to_thread(merge_runtime_channel_configs, result, config, store=await _get_runtime_config_store(request))
     return result
 
 
@@ -743,7 +740,11 @@ async def _commit_runtime_channel_config(
     provider: str,
     runtime_config: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Persist one runtime config change and reconcile the live cache atomically to cancellation."""
+    """Persist one runtime config change, owned across cancellation, and return the config as now stored.
+
+    The write bumps the provider's version in a database store, which is how
+    the instance holding the provider's leader lease learns about it.
+    """
 
     async def _commit() -> dict[str, Any]:
         store = await _get_runtime_config_store(request)
@@ -751,22 +752,21 @@ async def _commit_runtime_channel_config(
             await run_drained_write("Disconnect channel runtime config", store.set_provider_disconnected, (), provider)
         else:
             await run_drained_write("Save channel runtime config", store.set_provider_config, (), provider, runtime_config)
-
-        # Re-read the live cached config after the durable write so concurrent
-        # mutations for sibling providers are preserved. The outer drain keeps
-        # cancellation owned until this in-memory reconciliation also lands.
-        live_channels_config = await _get_channels_config(request)
-        if runtime_config is None:
-            live_channels_config.pop(provider, None)
-        else:
-            live_channels_config[provider] = runtime_config
-        request.app.state.channels_config = live_channels_config
-        return live_channels_config
+        # Read back, so the response also reflects sibling providers saved
+        # meanwhile (on this or another instance).
+        return await _get_channels_config(request)
 
     return await await_drained(_commit())
 
 
 async def _apply_runtime_channel_config(request: Request, config: ChannelConnectionsConfig, provider: str, runtime_config: dict[str, Any]) -> ChannelProviderResponse:
+    # Refuse before starting anything: a transport started on credentials the
+    # store then cannot persist would run on settings nobody can see.
+    if not (await _get_runtime_config_store(request)).can_store_credentials:
+        raise HTTPException(
+            status_code=503,
+            detail="Channel credentials cannot be stored: the credentials encryption key (DEER_FLOW_CREDENTIALS_KEY) is unavailable. Check the Gateway logs, or configure the channel in config.yaml.",
+        )
     started = await _restart_runtime_channel_if_available(provider, runtime_config)
     if started is False:
         display_name = _PROVIDER_META[provider]["display_name"]

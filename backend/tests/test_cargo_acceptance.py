@@ -134,6 +134,11 @@ class SandboxMessages(MessagesState):
     ids=["unit-with-empty-doc", "doc-with-empty-unit", "ignored", "failed-unit", "failed-doc", "filtered"],
 )
 async def test_native_cargo_output_reaches_parent_acceptance_through_tool_node(tmp_path, monkeypatch, executor_module, source, selection, expected):
+    # LocalSandbox starts an independent subprocess without inheriting make's
+    # jobserver FDs. Stale flags produce long Cargo/rustdoc warnings that can
+    # displace the test summaries from the intentionally bounded evidence tail.
+    for variable in ("MAKEFLAGS", "MFLAGS", "CARGO_MAKEFLAGS"):
+        monkeypatch.delenv(variable, raising=False)
     (tmp_path / "src").mkdir()
     (tmp_path / "Cargo.toml").write_text('[package]\nname = "acceptance_fixture"\nversion = "0.1.0"\nedition = "2021"\n', encoding="utf-8")
     (tmp_path / "src/lib.rs").write_text(source, encoding="utf-8")

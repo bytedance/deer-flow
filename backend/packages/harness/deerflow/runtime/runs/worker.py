@@ -95,7 +95,7 @@ from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
 from deerflow.runtime.stream_modes import normalize_stream_modes, to_langgraph_stream_modes
 from deerflow.runtime.user_context import get_current_user, get_effective_user_id, resolve_runtime_user_id
-from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS
+from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS, register_sandbox_prewarm_cleanup
 from deerflow.scheduler.runtime import SCHEDULER_CAPABILITY_CONTEXT_KEY, SchedulerRunCapability
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_id
 from deerflow.tracing import inject_langfuse_metadata
@@ -988,6 +988,7 @@ async def run_agent(
     accessor: CheckpointStateAccessor | None = None
     rollback_point: RollbackPoint | None = None
     journal = None
+    seq_stamper: _MessageSeqStamper | None = None
     runtime_ctx: dict[str, Any] | None = None
     runtime: Any | None = None
     agent: Any | None = None
@@ -1004,6 +1005,7 @@ async def run_agent(
     # checkpoint failures / cancellation while waiting did not write an empty
     # completion snapshot into RunStore.
     persist_completion = False
+    evidence_execution_started = False
     completion_data: dict[str, Any] | None = None
     # Buffers subagent step events for batched persistence (#3779); assigned once
     # streaming starts and flushed in the finally block. Pre-bound to None so the
@@ -1072,6 +1074,7 @@ async def run_agent(
                 thread_id=thread_id,
                 event_store=event_store,
                 track_token_usage=getattr(run_events_config, "track_token_usage", True),
+                user_id=record.user_id,
                 progress_reporter=lambda snapshot: run_manager.update_run_progress(run_id, **snapshot),
             )
 
@@ -1215,6 +1218,7 @@ async def run_agent(
             thread_incarnation=thread_incarnation,
             scheduler_capability=ctx.scheduler_capability,
         )
+        register_sandbox_prewarm_cleanup(runtime_ctx)
         # Bind every checkpoint produced by this run to the effective agent
         # identity that produced its state. Manual compaction uses only this
         # server-overwritten value for memory policy; request metadata cannot
@@ -1270,14 +1274,21 @@ async def run_agent(
         if ctx.app_config is not None and _agent_factory_supports_app_config(agent_factory):
             agent_factory_kwargs["app_config"] = ctx.app_config
         from deerflow.extensions import bind_agent_build_extensions
+        from deerflow.runtime.assembly_evidence import capture_assembly, project_assembly_evidence
 
-        with bind_agent_build_extensions(extensions):
+        with bind_agent_build_extensions(extensions), capture_assembly():
             # Assemble off-loop: agent construction re-enters
             # get_available_tools(), which may block on MCP cache
             # initialization — it must not stall the calling event loop
             # (issue #5172).
             agent_result = await run_assembly(agent_factory, **agent_factory_kwargs)
             agent = _agent_graph(agent_result)
+        from deerflow.agents.lead_agent.agent import LeadAgentAssembly
+
+        if isinstance(agent_result, LeadAgentAssembly):
+            evidence = project_assembly_evidence(agent_result.descriptor, thread_id=thread_id, run_id=run_id)
+            if evidence is not None:
+                await run_manager.record_assembly_evidence(run_id, evidence)
 
         # Assembly resolves request, agent, and authorization fallbacks. Trace the
         # model that will run, rather than the model name originally requested.
@@ -1387,16 +1398,11 @@ async def run_agent(
                         graph_input["goal"] = Overwrite(copy.deepcopy(current_values.get("goal")))
                     graph_input["goal_outcome"] = None
 
-        # Capture the effective (resolved) model name from the agent's metadata.
-        # _resolve_model_name in agent.py may return the default model if the
-        # requested name is not in the allowlist — this update ensures the
-        # persisted model_name reflects the actual model used.
-        if record.model_name is not None:
-            resolved = getattr(agent, "metadata", {}) or {}
-            if isinstance(resolved, dict):
-                effective = resolved.get("model_name")
-                if effective and effective != record.model_name:
-                    await run_manager.update_model_name(record.run_id, effective)
+        # Persist the model assembly resolved — the default when the request
+        # named none, or a fallback when the requested model is unavailable —
+        # so the stored model_name reflects the actual model used (#3109).
+        if effective_model and effective_model != record.model_name:
+            await run_manager.update_model_name(record.run_id, effective_model)
 
         # 4. Attach checkpointer and store
         if checkpointer is not None:
@@ -1564,6 +1570,7 @@ async def run_agent(
                 if stand_down_reason.startswith("thread_changed"):
                     final_goal_verdict.update(satisfied=False, blocker="missing_evidence", relied_on_assumption=False)
 
+        evidence_execution_started = True
         await _stream_once(graph_input, initial_runnable_config)
         while not record.abort_event.is_set() and not llm_error_fallback_message and (journal is None or not journal.had_llm_error_fallback):
             continuation_input = await _prepare_goal_continuation_input(
@@ -1688,6 +1695,7 @@ async def run_agent(
 
         async def finalize() -> None:
             nonlocal completion_hook_task
+            nonlocal journal, seq_stamper
             nonlocal accessor, agent, agent_result, cancel_action, checkpoint_rollback_completed
             nonlocal completion_data, deferred_finalization_interrupt, delivery_content, goal_completion, goal_evaluator_model
             nonlocal graph_input, pre_run_workspace_snapshot, produced_output_paths, rollback_point, runtime
@@ -1973,6 +1981,29 @@ async def run_agent(
                             "Extension task-stop notification interrupted for run %s; completing cleanup first",
                             run_id,
                         )
+                if not record.ownership_lost and journal is not None:
+                    evidence_failure = None
+                    try:
+                        evidence_receipt = await journal.finish_evidence()
+                        if evidence_receipt is not None:
+                            if not evidence_execution_started:
+                                evidence_failure = "Lead graph execution did not begin; producer coverage is partial."
+                            elif not await run_manager.seal_completed_evidence(run_id, evidence_receipt):
+                                evidence_failure = "The owning worker could not persist the journal seal."
+                    except BaseException as exc:
+                        evidence_failure = f"Journal seal failed ({type(exc).__name__})."
+                        if not isinstance(exc, Exception):
+                            deferred_finalization_interrupt = _defer_finalization_interrupt(deferred_finalization_interrupt, exc)
+                        logger.warning("Failed to seal completed-run evidence for %s (non-fatal)", run_id, exc_info=True)
+                    if evidence_failure is not None:
+                        try:
+                            await run_manager.mark_evidence_partial(run_id, error=evidence_failure)
+                        except Exception:
+                            logger.warning("Failed to persist partial evidence for %s (non-fatal)", run_id, exc_info=True)
+                        except BaseException as exc:
+                            deferred_finalization_interrupt = _defer_finalization_interrupt(deferred_finalization_interrupt, exc)
+                            logger.warning("Partial evidence persistence interrupted for %s; completing cleanup first", run_id)
+
                 if record.finalizing:
                     await run_manager.set_finalizing(run_id, False)
 
@@ -2012,6 +2043,10 @@ async def run_agent(
                         )
                     # Drop graph and per-run payload references before the terminal
                     # worker task itself becomes collectable.
+                    # Diagnostic tracebacks can retain this frame. Release both
+                    # the journal and the stamper callback that closes over it.
+                    seq_stamper = None
+                    journal = None
                     agent = None
                     agent_result = None
                     accessor = None

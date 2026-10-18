@@ -43,7 +43,7 @@ export const zhCN: Translations = {
       workflows: {
         title: "脚本工作流",
         description:
-          "通过可检查的脚本编排 Agent，支持受限并发、进度与取消。第一阶段不支持恢复、人工审批或硬金额预算。",
+          "保存版本化 Agent 工作流，在同一 Gateway 进程内恢复，并确认确切的保留输出版本。不支持重启回放或硬金额预算。",
       },
       agentTeams: {
         title: "Agent 团队",
@@ -75,6 +75,11 @@ export const zhCN: Translations = {
         title: "本地检索示例",
         description:
           "使用固定示例文档演示只读检索与结构化工具结果，不连接外部知识库。",
+      },
+      weknora: {
+        title: "WeKnora 知识检索",
+        description:
+          "检索 WeKnora 知识库和所选文档，并展示来源引用。需要管理员安装并配置访问权限。",
       },
       knowledge: {
         title: "知识范围选择示例",

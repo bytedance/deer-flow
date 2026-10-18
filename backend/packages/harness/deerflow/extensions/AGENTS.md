@@ -440,6 +440,12 @@ to delegation. Browser fields are allowlisted. Code is trusted, not sandboxed.
 within 64 KiB and snapshot artifacts. Keep identity, policy/deadline and citation
 gates. Test ToolNode and checkpoint replay. See `docs/full-stack-plugins.md`.
 
+Evolution host grants (`host_access.evidence` / `skill_mutations`) compose with
+`host_access.model_invocation` through `HostAccess`. Evolution grants require a
+unique stable name and entry point; model-only grants retain their per-install
+identity and permit repeated entry points. Keep all granted dependencies when
+wrapping services with `ModelInvocationService`. The additive evolution contracts
+ship in extension API 0.2.7, after 0.2.6's PluginToolResult contract.
 Full Agent run control is an optional `deerflow_extension_api.AgentRuns` handle
 on action/tool contexts and the request resolver. Gateway owns principal binding,
 revocation and ordinary route admission in `app/gateway/extension_agent_runs.py`.
@@ -449,6 +455,13 @@ and revoked before host shutdown; PAT/internal grants remain unsupported.
 Unstamped internal launches receive no handle and must still start normally.
 Action/tool dispatch scopes handles to each registered plugin namespace for
 idempotency isolation; request-resolved handles use `for_plugin` explicitly.
+`configuration_revision` (API 0.2.7) rechecks grants and returns a process-local
+HMAC of declarative app/extensions and Agent config/SOUL, not effective assembly,
+memory, referenced files or provider state. Never expose raw secret configuration.
+`configuration_evidence` reads persisted, run-bound actual assembly versions; the
+worker captures descriptors even without observers and persists before execution.
+`read_artifact` authorizes bounded output bytes off-loop; extensions retain immutable
+versions themselves. Workflow preview/approval/consumption must share those bytes.
 
 **Recorded extension-first exception.** The project-shelf summary pipeline
 (`projects/summaries.py`) ships in core: its consumer-visible surface (the

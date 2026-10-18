@@ -19,6 +19,47 @@ REPRESENTATIVE_LIVE_NODE_IDS = (
 )
 
 
+# A Python child on Windows cannot boot from a scrubbed environment: without
+# SystemRoot, `import asyncio` dies with WinError 10106 (winsock provider init),
+# and tempfile cannot resolve a usable directory without TEMP/TMP/USERPROFILE.
+# These base system variables carry no credentials, so passing them through
+# keeps the isolation contract (no API keys, no real .env) intact while letting
+# the child start at all. POSIX behavior is unchanged.
+_WINDOWS_BASE_ENV_VARS = (
+    "SystemRoot",
+    "windir",
+    "COMSPEC",
+    "PATHEXT",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+)
+
+
+def _child_pytest_env(*, opt_in: bool, ci: bool) -> dict[str, str]:
+    """Build the minimal pytest child env without inheriting the real one."""
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONUTF8": "1",
+        "PYTHONPATH": os.pathsep.join(
+            [
+                str(BACKEND_ROOT),
+                str(BACKEND_ROOT / "packages" / "harness"),
+            ]
+        ),
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+    }
+    if opt_in:
+        env[LIVE_OPT_IN] = "1"
+    if ci:
+        env["CI"] = "1"
+    if os.name == "nt":
+        env.update({name: os.environ[name] for name in _WINDOWS_BASE_ENV_VARS if name in os.environ})
+    return env
+
+
 def _collect_live_tests(
     tmp_path: Path,
     *,
@@ -37,23 +78,7 @@ def _collect_live_tests(
     if config_exists:
         (temp_repo / "config.yaml").write_text("models: []\n", encoding="utf-8")
 
-    env = {
-        "PATH": os.environ.get("PATH", ""),
-        "PYTHONDONTWRITEBYTECODE": "1",
-        "PYTHONIOENCODING": "utf-8",
-        "PYTHONUTF8": "1",
-        "PYTHONPATH": os.pathsep.join(
-            [
-                str(BACKEND_ROOT),
-                str(BACKEND_ROOT / "packages" / "harness"),
-            ]
-        ),
-        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
-    }
-    if opt_in:
-        env[LIVE_OPT_IN] = "1"
-    if ci:
-        env["CI"] = "1"
+    env = _child_pytest_env(opt_in=opt_in, ci=ci)
 
     return subprocess.run(
         [
@@ -122,6 +147,57 @@ def test_opt_in_without_config_reports_missing_config(tmp_path: Path) -> None:
     result = _collect_live_tests(tmp_path, config_exists=False, opt_in=True, ci=False)
 
     _assert_collection_skipped(result, "No config.yaml found")
+
+
+_BASE_ENV_KEYS = frozenset(
+    {
+        "PATH",
+        "PYTHONDONTWRITEBYTECODE",
+        "PYTHONIOENCODING",
+        "PYTHONUTF8",
+        "PYTHONPATH",
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD",
+    }
+)
+
+
+# Representative values for the Windows base variables. The contract test
+# below seeds them so its assertions do not depend on which optional
+# variables the host happens to export: a host without TEMP/TMP still lets
+# CPython fall back to %USERPROFILE%\AppData\Local\Temp, so an unseeded
+# assertion would fail on valid host configurations.
+_SEEDED_WINDOWS_BASE_ENV = {
+    "SystemRoot": r"C:\Windows",
+    "windir": r"C:\Windows",
+    "COMSPEC": r"C:\Windows\System32\cmd.exe",
+    "PATHEXT": ".COM;.EXE;.BAT;.CMD",
+    "TEMP": r"C:\Windows\Temp",
+    "TMP": r"C:\Windows\Temp",
+    "USERPROFILE": r"C:\Users\runneradmin",
+}
+
+
+def test_child_env_stays_isolated_but_bootable_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The scrubbed child env must not starve the Windows interpreter.
+
+    A child spawned with only the pytest-relevant variables fails on Windows
+    during `import asyncio` (WinError 10106, missing SystemRoot) and cannot
+    resolve a temp directory, so the live-policy tests below spuriously fail.
+    """
+    if os.name == "nt":
+        for name, value in _SEEDED_WINDOWS_BASE_ENV.items():
+            monkeypatch.setenv(name, value)
+
+    env = _child_pytest_env(opt_in=True, ci=True)
+
+    extra = set(env) - _BASE_ENV_KEYS - {LIVE_OPT_IN, "CI"}
+    if os.name == "nt":
+        # Exactly the base system variables pass through — never credentials.
+        # The seeded set covers the bootability-critical names: SystemRoot for
+        # winsock init, TEMP/TMP/USERPROFILE for tempfile resolution.
+        assert extra == set(_WINDOWS_BASE_ENV_VARS)
+    else:
+        assert not extra
 
 
 def test_make_targets_keep_default_tests_offline_and_support_live_opt_in() -> None:
@@ -208,3 +284,40 @@ def test_blocking_io_ci_workflow_owns_dedicated_suite() -> None:
 
     assert "pytest tests/blocking_io" in command
     assert "make test-blocking-io" in workflow
+
+
+def test_windows_workflow_collects_all_five_policy_checks() -> None:
+    """Execute CI's selection so missing cases or accidental make tests fail."""
+    import shlex
+
+    import yaml
+
+    workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "backend-windows-live-policy.yml").read_text(encoding="utf-8"))
+    job = workflow["jobs"]["windows-live-policy"]
+    assert job["runs-on"] == "windows-latest"
+    assert workflow["permissions"] == {"contents": "read"}
+    assert job["defaults"]["run"]["working-directory"] == "backend"
+    assert not job.get("services")
+    step = next(step for step in job["steps"] if "python -m pytest" in step.get("run", ""))
+    command = shlex.split(step["run"])
+    assert command[:5] == ["uv", "run", "python", "-m", "pytest"]
+
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", *command[5:], "--collect-only", "-p", "no:cacheprovider"],
+        cwd=BACKEND_ROOT,
+        env=_child_pytest_env(opt_in=False, ci=True),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    collected = {line.strip() for line in output.splitlines() if line.startswith("tests/test_client_live_policy.py::")}
+    assert collected == {
+        "tests/test_client_live_policy.py::test_child_env_stays_isolated_but_bootable_on_windows",
+        "tests/test_client_live_policy.py::test_config_alone_does_not_enable_live_collection",
+        "tests/test_client_live_policy.py::test_explicit_opt_in_collects_live_tests",
+        "tests/test_client_live_policy.py::test_ci_blocks_live_collection_even_with_opt_in",
+        "tests/test_client_live_policy.py::test_opt_in_without_config_reports_missing_config",
+    }, output
