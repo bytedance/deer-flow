@@ -13998,6 +13998,25 @@
       "submit_script": "/private/tmp/submit-native-shared-bc-revocation.py",
       "uploaded": false,
       "submitted": false
+    },
+    "two_host_readiness_audit": {
+      "status": "read_only_audit_complete_runtime_not_run",
+      "evidence": "docs/tenant-workspaces-evidence/native-shared-bc-two-host-readiness.md",
+      "product_base": "c6e9b9e88",
+      "next": "Finish pending exact-payload shared-pool withdrawal acceptance first; then one real two-host main using native worker/CLI, PG checkpoints and TCP.",
+      "aio_contract": "Preserve warm resident AIO; execution_drained releases dynamic allocation; final fixture cleanup is not normal-loop physical STOP proof.",
+      "open_prerequisites": [
+        "PG/Redis fixed images and native image dependencies",
+        "actual MemTotal/allocatable/cgroup envelope",
+        "fresh test-owned component app; production startup stays closed"
+      ],
+      "last_owned_job_readback": {
+        "build": 18,
+        "result": "SUCCESS",
+        "building": false,
+        "owned_queue": []
+      },
+      "latest_reply_scope": "Exact #18 payload approval already consumed; step39 different frozen payload remains unapproved."
     }
   },
   "native_0041_execution_compatibility_wip": {
