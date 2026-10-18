@@ -1,0 +1,45 @@
+{
+  "build": 150,
+  "queue": 1108,
+  "phase": "m4-native-scheduler-installed-dependency-red-20261018-38",
+  "result": "FAILURE",
+  "duration_ms": 39966,
+  "pytest": "1 failed in 20.38s",
+  "first_error": "Real Scheduler -> C1 dependency wait -> no-sandbox STOP/report passed; actual control.run_once dependency_wait_sources raised scoped WorkspaceAccessDenied, installed reconciler never called. Notification/transfer/C2 not yet reached.",
+  "source_sha256": "0ad8b2b3b407fb3539a0a9b4d783c36b752c9e8119f7cc9501cb352506acc5bb",
+  "pipeline_sha256": "1cd7a78a374e456d746f9a83640297063aea6c7e1bba78914f0e5233642507b7",
+  "source_archive": "/private/tmp/m4-native-scheduler-installed-dependency-red-20261018-38-source.tar.gz",
+  "log_path": "/private/tmp/m4-native-scheduler-installed-dependency-red-20261018-38.log",
+  "log_sha256": "39e80a6dc2cc6724bf0694c5b1d8c0c09181e61e4f2922ce4b2ca7b6aa7608da",
+  "cleanup_path": "/private/tmp/native-scheduler-installed-dependency-build150-cleanup.json",
+  "submission_note": "First SCP attempt timed out before remote submit; root verified no new build. Same frozen input retransmitted once to queue1108.",
+  "job": "deerflow-tenant-execution-m4-sql",
+  "cleanup": {
+    "build": 150,
+    "read_only": true,
+    "cleanup": [
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-150",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-150"
+      },
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-150-db",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-150-db"
+      },
+      {
+        "kind": "network",
+        "name": "deerflow-tenant-execution-m4-sql-150",
+        "exit": 1,
+        "stderr": "Error response from daemon: network deerflow-tenant-execution-m4-sql-150 not found"
+      }
+    ]
+  },
+  "root_review": "Root independently read live Jenkins terminal, SHA-verified source archive and byte-compared changed source files. Exact owned harness/db/network absent. Product patch reviewed before application with added workspace/trigger selection checks.",
+  "limits": [
+    "Only source wait/STOP/report and installed source-query refusal were reached; continuation/transfer unverified in this RED."
+  ]
+}

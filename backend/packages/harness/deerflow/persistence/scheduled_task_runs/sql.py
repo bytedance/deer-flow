@@ -225,8 +225,64 @@ class ScheduledTaskRunRepository:
 
     async def transfer_dependency_run(self, *, task_id: str, occurrence_id: str, user_id: str, source_run_id: str, continuation_run_id: str) -> None:
         """Move an existing occurrence's run association without new admission/accounting."""
-        if self.workspace_scope_required or get_current_workspace() is not None:
-            raise WorkspaceAccessDenied("Scoped occurrence mutation requires its native control integration")
+        if self.workspace_scope_required:
+            if source_run_id == continuation_run_id:
+                raise WorkspaceAccessDenied("Dependency transfer requires a distinct continuation")
+            async with self._sf() as session:
+                # Original identity comes from SQL, never the ambient UI or
+                # notification payload. Preserve parents -> task -> occurrence
+                # -> sorted Run rows; this changes no native Run/clock receipt.
+                task, occurrence, context = await lock_scheduled_identity(session, self._sf, task_id, occurrence_id=occurrence_id)
+                if task.user_id != user_id or occurrence.status != "running":
+                    raise WorkspaceAccessDenied("Scheduled dependency occurrence is unavailable")
+                rows = (await session.scalars(select(RunRow).where(RunRow.run_id.in_((source_run_id, continuation_run_id))).order_by(RunRow.run_id).with_for_update())).all()
+                native = {row.run_id: row for row in rows}
+                source, continuation = native.get(source_run_id), native.get(continuation_run_id)
+                for run in (source, continuation):
+                    metadata = (run.metadata_json or {}) if run is not None else {}
+                    if (
+                        run is None
+                        or not isinstance(metadata, dict)
+                        or run.operation_kind != "run"
+                        or run.workspace_id != task.workspace_id
+                        or run.user_id != user_id
+                        or run.thread_id != occurrence.thread_id
+                        or run.thread_incarnation != occurrence.thread_incarnation
+                        or run.workspace_context_json != asdict(context)
+                        or metadata.get("scheduled_task_id") != task_id
+                        or metadata.get("scheduled_task_run_id") != occurrence_id
+                        or metadata.get("scheduled_trigger") != occurrence.trigger
+                    ):
+                        raise WorkspaceAccessDenied("Scheduled dependency native identity differs")
+                if continuation.idempotency_key != "mcp-dependencies:" + source_run_id:
+                    raise WorkspaceAccessDenied("Scheduled dependency continuation key differs")
+                if source.status != "success" or source.cancel_action is not None or (source.goal_verdict or {}).get("native_dependency_wait") is not True:
+                    raise WorkspaceAccessDenied("Scheduled dependency source was superseded")
+                if occurrence.run_id == continuation_run_id:
+                    # Repeated exact association observes history only. It does
+                    # not renew a lease, recreate work or grant native launch.
+                    await session.commit()
+                    return
+                if occurrence.run_id != source_run_id or continuation.status != "pending" or continuation.cancel_action is not None:
+                    raise WorkspaceAccessDenied("Scheduled dependency continuation was superseded")
+                expiry = continuation.lease_expires_at
+                if expiry is not None and expiry.tzinfo is None:
+                    expiry = expiry.replace(tzinfo=UTC)
+                if expiry is None or expiry <= datetime.now(UTC) or await session.scalar(select(pending_run_stop(run_id=continuation_run_id))):
+                    raise WorkspaceAccessDenied("Scheduled dependency continuation is not live")
+                await execution_lifetime(session, NativeRunStopTarget.from_row(continuation))
+                # Native admission already enforces the source cleanup barrier;
+                # independently require its execution lifetime to be closed.
+                lifetime = await execution_lifetime(session, NativeRunStopTarget.from_row(source), open_only=False)
+                if lifetime.state != "completed":
+                    raise WorkspaceAccessDenied("Scheduled dependency source execution has not drained")
+                occurrence.run_id = continuation_run_id
+                if task.last_run_id == source_run_id:
+                    task.last_run_id = continuation_run_id
+                await session.commit()
+                return
+        if get_current_workspace() is not None:
+            raise WorkspaceAccessDenied("Legacy dependency transfer cannot inherit workspace authority")
         async with self._sf() as session:
             task = await self._lock_task(session, task_id)
             occurrence = await session.get(ScheduledTaskRunRow, occurrence_id, with_for_update=True)
@@ -1388,8 +1444,34 @@ class ScheduledTaskRunRepository:
 
     async def dependency_wait_sources(self) -> frozenset[str]:
         """Snapshot sources to examine before recovery takes writer locks."""
-        if self.workspace_scope_required or get_current_workspace() is not None:
-            raise WorkspaceAccessDenied("Scoped occurrence mutation requires its native control integration")
+        if self.workspace_scope_required:
+            async with self._sf() as session:
+                # IDs are control locators only. Original SQL task identity,
+                # private parents and exact normal Run metadata filter before
+                # selection; the host independently revalidates every receipt.
+                result = await session.scalars(
+                    select(RunRow.run_id)
+                    .select_from(ScheduledTaskRunRow)
+                    .join(ScheduledTaskRow, ScheduledTaskRow.id == ScheduledTaskRunRow.task_id)
+                    .join(RunRow, resource_native_run_predicate())
+                    .where(
+                        ScheduledTaskRunRow.workspace_id.is_not(None),
+                        ScheduledTaskRunRow.workspace_id == ScheduledTaskRow.workspace_id,
+                        ScheduledTaskRunRow.status.in_(EXECUTING_RUN_STATUSES),
+                        RunRow.metadata_json["scheduled_trigger"].as_string() == ScheduledTaskRunRow.trigger,
+                        live_task_predicate(),
+                        live_occurrence_predicate(ScheduledTaskRunRow, ScheduledTaskRow),
+                        RunRow.status == "success",
+                        RunRow.cancel_action.is_(None),
+                        RunRow.goal_verdict["native_dependency_wait"].as_boolean().is_(True),
+                    )
+                    .order_by(RunRow.run_id)
+                )
+                # No bounded first page can indefinitely hide later sources
+                # behind already-protected waiting occurrences.
+                return frozenset(result)
+        if get_current_workspace() is not None:
+            raise WorkspaceAccessDenied("Legacy dependency sources cannot inherit workspace authority")
         async with self._sf() as session:
             result = await session.execute(
                 select(RunRow.run_id)

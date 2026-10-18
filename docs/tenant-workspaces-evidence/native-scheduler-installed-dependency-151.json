@@ -1,0 +1,53 @@
+{
+  "build": 151,
+  "queue": 1110,
+  "phase": "m4-native-scheduler-installed-dependency-green-20261018-39",
+  "result": "SUCCESS",
+  "duration_ms": 39777,
+  "pytest": "1 passed in 21.58s",
+  "ruff": "All checks passed; 67 files already formatted",
+  "source_sha256": "5b00a00561374ab92917fda246a50d511339ad98836ea55aa1a4d0a2b5c5abec",
+  "pipeline_sha256": "af91636d442bff3f628de4d14803437a6a972ff89fd6c4ebde21d73de6b54fae",
+  "source_archive_exact_match": {
+    "backend/packages/harness/deerflow/persistence/scheduled_task_runs/sql.py": "82b8b03c22bba5fa70c322b1eed5ce684471201171ad0e9d63b184149a4227b1",
+    "backend/tests/test_workspace_native_dependencies.py": "5b453f7e48fe41793785247c31afc816998b43a018251347934a860efbc37522",
+    "scripts/render_tenant_run_control_pipeline.py": "ed6e2f39e70f14791017aa00008fa80b086912a61c3c6e682c4bd3840ffeeedd"
+  },
+  "approved_patch_sha256": "5401ee4edc824dbd1aad666ebde9dc788f4a45a9e515c1b5a82514cf8000f5b2",
+  "log_path": "/private/tmp/m4-native-scheduler-installed-dependency-green-20261018-39.log",
+  "log_sha256": "d1cf557da09be25b948ce60fe2eb2f3d3326c3d8a7f43c1f870b52ce53b4b8b3",
+  "cleanup_path": "/private/tmp/native-scheduler-installed-dependency-build151-cleanup.json",
+  "scope": "One PostgreSQL Scheduler -> real native C1 dependency wait/no-sandbox STOP-report -> installed actual dependency_wait_reconciler protects original occurrence -> real MCP service deterministic remoteIO result/notification -> native C2 transfers same occurrence -> completion/event/count1. Late C1 completion rejected and repeat drain/notification does not create another Run. RemoteIO is deterministic, not actual B wire/physical execution. Original three non-scheduled selectors not rerun. Invalid/unknown wait control settlement remains retained and outside this slice.",
+  "job": "deerflow-tenant-execution-m4-sql",
+  "cleanup": {
+    "build": 151,
+    "read_only": true,
+    "cleanup": [
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-151",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-151"
+      },
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-151-db",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-151-db"
+      },
+      {
+        "kind": "network",
+        "name": "deerflow-tenant-execution-m4-sql-151",
+        "exit": 1,
+        "stderr": "Error response from daemon: network deerflow-tenant-execution-m4-sql-151 not found"
+      }
+    ]
+  },
+  "root_review": "Root independently read live Jenkins terminal, SHA-verified source archive and byte-compared changed source files. Exact owned harness/db/network absent. Product patch reviewed before application with added workspace/trigger selection checks.",
+  "limits": [
+    "One actual installed reconciler/native Scheduler/MCP notification continuation story with deterministic graph/remote IO; no provider API, actual B execution wire, physical sandbox or two-host TCP claim.",
+    "Superseded/invalid/unknown scoped waits remain retained; independent control settlement/recovery is a subsequent required gate. Original three non-scheduled selectors were not rerun after the shared helper extraction.",
+    "Complete M4/M0-M11 remains open and tenant activation false. No deployment/push/local runtime."
+  ],
+  "red_evidence": "docs/tenant-workspaces-evidence/native-scheduler-installed-dependency-red-150.json"
+}

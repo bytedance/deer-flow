@@ -1549,17 +1549,17 @@
   },
   "latest_checkpoint": {
     "work_package": "M4",
-    "status": "partial M4: native Scheduler notes/manual trials/own-stop main verified; installed dependencies and remaining lifecycle/full goal open",
+    "status": "partial M4: installed Scheduler dependency continuation main verified; invalid-wait settlement and real B/physical/full lifecycle remain open",
     "last_verified_job": "deerflow-tenant-execution-m4-sql",
-    "last_verified_build": 149,
-    "next": "Continue installed scheduled dependency C->B->C and original-occurrence transfer, then IM/recovery and remaining M0-M11 entry/physical/rollout gates. Keep business main first and only key necessary boundaries; narrow own-stop refusal/manual revoke windows are not separately tested.",
+    "last_verified_build": 151,
+    "next": "Resolve superseded/invalid scoped scheduled waits through narrow control settlement, then real B wire/physical lifecycle, IM/recovery and remaining M0-M11 gates. Business main first; no broad boundary matrix.",
     "tenant_activation": "closed",
     "deployment": "none",
     "previous_backend_job": "deerflow-tenant-m1-postgres",
     "previous_backend_build": 89,
     "native_candidate_schema": "0041_scheduler_workspace",
     "last_verified_database_job": "deerflow-tenant-execution-m4-sql",
-    "last_verified_database_build": 149,
+    "last_verified_database_build": 151,
     "executor_candidate_schema": "e0003_execution_identity",
     "execution_status": "active",
     "resumed_at": "2026-10-18",
@@ -1583,7 +1583,9 @@
       "docs/tenant-workspaces-evidence/native-scheduler-management-146.json",
       "docs/tenant-workspaces-evidence/native-scheduler-management-boundaries-147.json",
       "docs/tenant-workspaces-evidence/native-scheduler-manual-red-148.json",
-      "docs/tenant-workspaces-evidence/native-scheduler-manual-own-stop-149.json"
+      "docs/tenant-workspaces-evidence/native-scheduler-manual-own-stop-149.json",
+      "docs/tenant-workspaces-evidence/native-scheduler-installed-dependency-red-150.json",
+      "docs/tenant-workspaces-evidence/native-scheduler-installed-dependency-151.json"
     ]
   },
   "workspace_feedback": {
@@ -13772,7 +13774,7 @@
     ]
   },
   "scheduler_workspace_wip": {
-    "status": "native_notes_manual_trials_own_stop_main_verified_installed_lifecycle_open",
+    "status": "installed_dependency_normal_main_verified_invalid_control_and_physical_open",
     "native_schema_candidate": "0041_scheduler_workspace",
     "main": "conversation-origin fresh_thread_per_run, real PG queue/launcher/native Run completion/event",
     "required_boundaries": [
@@ -13781,7 +13783,7 @@
       "no scoped legacy recovery fallback",
       "workspace-bound event/IM publication"
     ],
-    "next": "Continue installed scheduled dependency C->B->C and original-occurrence transfer, then IM/recovery and remaining M0-M11 entry/physical/rollout gates. Keep business main first and only key necessary boundaries; narrow own-stop refusal/manual revoke windows are not separately tested.",
+    "next": "Resolve superseded/invalid scoped scheduled waits through narrow control settlement, then real B wire/physical lifecycle, IM/recovery and remaining M0-M11 gates. Business main first; no broad boundary matrix.",
     "red": {
       "job": "deerflow-tenant-execution-m4-sql",
       "build": 122,
@@ -13817,7 +13819,7 @@
     },
     "entry_matrix": "docs/tenant-workspaces-evidence/native-scheduler-entry-matrix.md",
     "remaining": [
-      "installed scheduled dependencies and remaining native Run entry/lifecycle coverage; own-stop refusal/manual revocation windows not separately tested",
+      "superseded/invalid scoped dependency wait control settlement; real B execution wire/physical and remaining lifecycle",
       "Page fresh/reuse runtime acceptance",
       "Installed scheduled dependency reconciler, MCP continuation/own-stop",
       "Expired queue and unknown launch recovery/control",
@@ -13915,6 +13917,15 @@
         "Scoped own-stop management refusal and manual revocation windows are code-reviewed; no additional negative matrix was run.",
         "Installed scheduled dependencies, IM/recovery, remaining Run entry/physical/rollout gates and full M0-M11 remain open; tenant activation false."
       ]
+    },
+    "installed_dependency_wip": {
+      "status": "single_normal_main_verified",
+      "plan": "M4 step 33 in Superpowers/OpenSpec",
+      "scope": "Installed actual Scheduler reconciler, original scoped source locator/Run transfer, real MCP notification/native C continuation; deterministic remote IO, not physical B",
+      "remaining": "Superseded wait control settlement and real B wire/physical/recovery remain full M4 requirements; do not infer from normal main",
+      "build": 151,
+      "tests": "1 passed in 21.58s",
+      "evidence": "docs/tenant-workspaces-evidence/native-scheduler-installed-dependency-151.json"
     }
   },
   "native_0041_execution_compatibility_wip": {

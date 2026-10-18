@@ -6,7 +6,7 @@ AIO acceptance; both C admissions, SQL task/outbox and launcher are real.
 
 import asyncio
 import json
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -19,6 +19,10 @@ from test_workspace_mcp import _in_workspace_case
 @pytest.mark.parametrize("executor_engine", ["postgres"], indirect=True)
 @pytest.mark.parametrize("revocation_phase", ["normal", "notification_member", "dispatched_member"])
 def test_scoped_native_dependency_notification_resumes_original_goal(native_engine, executor_engine, monkeypatch, tmp_path, revocation_phase):  # noqa: F811
+    _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp_path, revocation_phase=revocation_phase)
+
+
+def _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp_path, *, revocation_phase="normal", scheduled=False):  # noqa: F811
     from ecs_executor.agent_dispatch import NativeDispatchHost, NativeWorkerHost, install_native_dispatch
     from ecs_executor.dispatch import PROTOCOL, WORKER_VERSION
     from ecs_executor.job_store import JobStore
@@ -37,6 +41,7 @@ def test_scoped_native_dependency_notification_resumes_original_goal(native_engi
     from app.gateway.native_admission import make_native_snapshot
     from app.gateway.run_models import RunCreateRequest
     from app.mcp_tasks.service import McpTaskService
+    from app.scheduler.service import ScheduledTaskService
     from deerflow.agents.thread_state import ThreadState
     from deerflow.authz.workspace import get_current_workspace, reset_current_workspace, set_current_workspace
     from deerflow.config import paths as paths_module
@@ -50,6 +55,12 @@ def test_scoped_native_dependency_notification_resumes_original_goal(native_engi
     from deerflow.persistence.projects import ProjectDocumentRepository, ProjectRepository
     from deerflow.persistence.run.model import RunRow
     from deerflow.persistence.run.sql import RunRepository
+    from deerflow.persistence.scheduled_task_events.model import ScheduledTaskEventRow
+    from deerflow.persistence.scheduled_task_events.sql import ScheduledTaskEventRepository
+    from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
+    from deerflow.persistence.scheduled_task_runs.sql import ScheduledTaskRunRepository
+    from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
+    from deerflow.persistence.scheduled_tasks.sql import ScheduledTaskRepository
     from deerflow.persistence.thread_meta import ThreadMetaRepository
     from deerflow.persistence.workspaces.model import WorkspaceMembershipRow
     from deerflow.runtime import MemoryStreamBridge, RunContext, RunManager
@@ -64,11 +75,18 @@ def test_scoped_native_dependency_notification_resumes_original_goal(native_engi
     owner_user_id = "11111111-1111-4111-8111-111111111111"
     configuration = AppConfig(models=[], sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"))
     monkeypatch.setattr(services, "get_app_config", lambda: configuration)
+    if scheduled:
+        import deerflow.config as config_facade
+        from deerflow.config import app_config
+
+        configuration.scheduler.enabled = True
+        for module in (config_facade, app_config, deps):
+            monkeypatch.setattr(module, "get_app_config", lambda: configuration)
     monkeypatch.setattr(paths_module, "_paths", Paths(tmp_path / "owned-files"))
 
     async def scenario(case):
         threads = ThreadMetaRepository(case.sf, workspace_required=True)
-        await threads.create("native-dependency-main", user_id=owner_user_id)
+        origin = await threads.create("native-dependency-main", user_id=owner_user_id)
         run_store = RunRepository(case.sf, workspace_required=True)
         task_repo = McpTaskRepository(case.sf, workspace_required=True)
         ownership = RunOwnershipConfig(heartbeat_enabled=True, lease_seconds=120)
@@ -99,6 +117,40 @@ def test_scoped_native_dependency_notification_resumes_original_goal(native_engi
         host = NativeWorkerHost.__new__(NativeWorkerHost)
         host.app, host.secret, host.adoption_lock = worker_app, secret, asyncio.Lock()
         host.config = {"node_id": "worker"}
+        scheduler_tasks = scheduler_occurrences = foreground = control = None
+        scheduler_id, occurrence_id = "task-installed-dependency", None
+        reconciled = []
+        if scheduled:
+            scheduler_tasks = ScheduledTaskRepository(case.sf, run_repository=run_store, workspace_required=True)
+            scheduler_occurrences = ScheduledTaskRunRepository(case.sf, run_repository=run_store, workspace_required=True)
+            history = ScheduledTaskEventRepository(case.sf, workspace_required=True)
+
+            async def launch_scheduled(**kwargs):
+                return await services.launch_scheduled_thread_run(app=central_app, **kwargs)
+
+            actual_reconciler = dispatcher.reconcile_dependency_waits
+
+            async def observe_reconciler(source_run_ids):
+                valid = await actual_reconciler(source_run_ids)
+                reconciled.append((frozenset(source_run_ids), frozenset(valid)))
+                return valid
+
+            foreground = ScheduledTaskService(
+                task_repo=scheduler_tasks, task_run_repo=scheduler_occurrences, launch_run=launch_scheduled, poll_interval_seconds=1, lease_seconds=120, max_concurrent_runs=1, dispatch_enabled=False, multi_instance=True
+            )
+            control = ScheduledTaskService(
+                task_repo=scheduler_tasks,
+                task_run_repo=scheduler_occurrences,
+                launch_run=launch_scheduled,
+                poll_interval_seconds=1,
+                lease_seconds=120,
+                max_concurrent_runs=1,
+                multi_instance=True,
+                dependency_wait_reconciler=observe_reconciler,
+            )
+            for app in (central_app, worker_app):
+                app.state.scheduled_task_repo, app.state.scheduled_task_run_repo = scheduler_tasks, scheduler_occurrences
+                app.state.scheduled_task_event_repo, app.state.scheduled_task_service = history, foreground
         notification_trace = []
         withdrawn = False
         host.executions, host.stop_tasks, host.sandbox_captures = {}, {}, {}
@@ -261,30 +313,64 @@ def test_scoped_native_dependency_notification_resumes_original_goal(native_engi
             return record
 
         try:
-            original_goal = goal_runtime.build_goal_state("Deliver the owned asynchronous report")
-            await graph.aupdate_state({"configurable": {"thread_id": "native-dependency-main"}}, {"goal": original_goal}, as_node="answer")
-            source = await central.create_or_reject("native-dependency-main", user_id=owner_user_id)
-            first = source
-            # The receiver hydrates its own RunRecord; the first graph uses
-            # that SQL-adopted record, rather than the former central owner.
-            request = SimpleNamespace(app=central_app, url="https://native.example.invalid/")
-
-            async def snapshot_factory(**transport):
-                return await make_native_snapshot(
-                    request,
-                    source,
-                    run_ctx=replace(ctx, workspace_context=case.original),
-                    body=RunCreateRequest(),
-                    config={"configurable": {"thread_id": source.thread_id}},
-                    graph_input={"messages": [HumanMessage(content="Deliver this report")]},
-                    admitted_knowledge_scope=None,
-                    scope_assistant_id=None,
-                    scheduled_task_runtime=None,
-                    require_existing_thread=True,
-                    **transport,
+            if scheduled:
+                await foreground.start()
+                ctx = replace(ctx, on_run_completed=control.handle_run_completion)
+                now = datetime.now(UTC)
+                await scheduler_tasks.create(
+                    task_id=scheduler_id,
+                    user_id=owner_user_id,
+                    thread_id=None,
+                    origin_thread_id=origin["thread_id"],
+                    context_mode="fresh_thread_per_run",
+                    assistant_id="lead_agent",
+                    title="Installed dependency follow-up",
+                    prompt="Deliver the owned asynchronous report",
+                    goal_objective="Deliver the owned asynchronous report",
+                    schedule_type="once",
+                    schedule_spec={"run_at": now.isoformat()},
+                    timezone="UTC",
+                    next_run_at=now,
                 )
+                due = await scheduler_tasks.claim_due_tasks(now=now, lease_owner=foreground._lease_owner, lease_seconds=120, limit=1)
+                assert len(due) == 1 and due[0]["id"] == scheduler_id
+                queued = await foreground.dispatch_task(due[0], now=now, trigger="scheduled")
+                occurrence_id = queued["task_run_id"]
+                assert queued["outcome"] == "queued"
+                await control.run_once(now=now)
+                async with case.sf() as session:
+                    occurrence = await session.get(ScheduledTaskRunRow, occurrence_id)
+                    assert occurrence.run_id is not None and occurrence.status == "running"
+                    source_id = occurrence.run_id
+                source = await central.get(source_id, user_id=owner_user_id)
+                assert source is not None
+                first = source
+                original_goal = None
+            else:
+                original_goal = goal_runtime.build_goal_state("Deliver the owned asynchronous report")
+                await graph.aupdate_state({"configurable": {"thread_id": "native-dependency-main"}}, {"goal": original_goal}, as_node="answer")
+                source = await central.create_or_reject("native-dependency-main", user_id=owner_user_id)
+                first = source
+                # The receiver hydrates its own RunRecord; the first graph uses
+                # that SQL-adopted record, rather than the former central owner.
+                request = SimpleNamespace(app=central_app, url="https://native.example.invalid/")
 
-            assert await dispatcher.admit_native(source, snapshot_factory)
+                async def snapshot_factory(**transport):
+                    return await make_native_snapshot(
+                        request,
+                        source,
+                        run_ctx=replace(ctx, workspace_context=case.original),
+                        body=RunCreateRequest(),
+                        config={"configurable": {"thread_id": source.thread_id}},
+                        graph_input={"messages": [HumanMessage(content="Deliver this report")]},
+                        admitted_knowledge_scope=None,
+                        scope_assistant_id=None,
+                        scheduled_task_runtime=None,
+                        require_existing_thread=True,
+                        **transport,
+                    )
+
+                assert await dispatcher.admit_native(source, snapshot_factory)
             selected = set_current_workspace(case.other)
             try:
                 polled = await request_worker("poll")
@@ -300,11 +386,23 @@ def test_scoped_native_dependency_notification_resumes_original_goal(native_engi
                 waiting = await asyncio.to_thread(ledger.get, job["id"])
                 assert waiting["dependency_wait"]["source_run_id"] == first.run_id
                 preserved = await goal_runtime.read_thread_goal(saver, first.thread_id)
-                assert preserved["status"] == "active" and preserved["created_at"] == original_goal["created_at"]
+                assert preserved["status"] == "active"
+                if scheduled:
+                    original_goal = preserved
+                else:
+                    assert preserved["created_at"] == original_goal["created_at"]
                 await host.stop_owned(job)
                 await host.report(job, {"state": "completed", "physical_stopped": True})
                 host.executions.pop(job["id"])
                 assert (await asyncio.to_thread(pool.node_status, "worker"))["unreleased"] == 0
+                if scheduled:
+                    await control.run_once(now=datetime.now(UTC))
+                    assert any(first.run_id in checked and first.run_id in valid for checked, valid in reconciled), "Installed dependency reconciler did not validate/protect C1: " + repr(reconciled)
+                    async with case.sf() as session:
+                        occurrence = await session.get(ScheduledTaskRunRow, occurrence_id)
+                        parent_task = await session.get(ScheduledTaskRow, scheduler_id)
+                        assert occurrence.status == "running" and occurrence.run_id == first.run_id and occurrence.launch_accounted is True
+                        assert parent_task.status == "running" and parent_task.run_count == 1
                 now = datetime.now(UTC) + timedelta(seconds=30)
                 await tasks.run_once(now=now)
                 resumed = await request_worker("poll")
@@ -386,6 +484,18 @@ def test_scoped_native_dependency_notification_resumes_original_goal(native_engi
                     assert io_scopes == previous_io and len(executed) == 1
                     assert get_current_workspace() == case.other
                     return
+                if scheduled:
+                    pending_id = resumed["claim"]["job"]["native"]["run_id"]
+                    async with case.sf() as session:
+                        occurrence = await session.get(ScheduledTaskRunRow, occurrence_id)
+                        parent_task = await session.get(ScheduledTaskRow, scheduler_id)
+                        assert occurrence.run_id == pending_id and occurrence.status == "running" and occurrence.launch_accounted is True
+                        assert parent_task.last_run_id == pending_id and parent_task.run_count == 1
+                    assert not await scheduler_tasks.complete_run(
+                        scheduler_id, user_id=owner_user_id, task_run_id=occurrence_id, run_id=first.run_id, status="success", error=None, finished_at=datetime.now(UTC), goal_verdict=first.goal_verdict
+                    )
+                    async with case.sf() as session:
+                        assert (await session.get(ScheduledTaskRunRow, occurrence_id)).run_id == pending_id
                 continuation = await execute_envelope(resumed["claim"])
                 assert continuation.run_id != first.run_id and continuation.workspace_context == case.original
                 assert continuation.thread_incarnation == first.thread_incarnation
@@ -396,6 +506,27 @@ def test_scoped_native_dependency_notification_resumes_original_goal(native_engi
                     assert durable.notification_status == "delivered" and durable.notified_version == durable.event_version
                     assert len(runs) == 2 and all(row.workspace_id == case.original.workspace_id and row.user_id == owner_user_id for row in runs)
                     assert all(row.status == "success" for row in runs)
+                if scheduled:
+                    for _ in range(2):
+                        await control.run_once(now=datetime.now(UTC))
+                        await tasks.run_once(now=now + timedelta(seconds=60))
+                    async with case.sf() as session:
+                        occurrence = await session.get(ScheduledTaskRunRow, occurrence_id)
+                        parent_task = await session.get(ScheduledTaskRow, scheduler_id)
+                        child_rows = (await session.scalars(select(ScheduledTaskRunRow).where(ScheduledTaskRunRow.task_id == scheduler_id))).all()
+                        history_rows = (await session.scalars(select(ScheduledTaskEventRow).where(ScheduledTaskEventRow.task_id == scheduler_id))).all()
+                        assert len(child_rows) == 1 and occurrence.occurrence_seq == 1 and occurrence.launch_accounted is True
+                        assert occurrence.status == "success" and occurrence.run_id == continuation.run_id
+                        assert parent_task.status == "completed" and parent_task.run_count == 1 and parent_task.last_run_id == continuation.run_id
+                        assert occurrence.workspace_context_json == parent_task.workspace_context_json == asdict(case.original)
+                        assert len(history_rows) == 1 and history_rows[0].event == "task_finished"
+                        assert history_rows[0].thread_id == origin["thread_id"] and history_rows[0].thread_incarnation == origin["incarnation"]
+                    scoped = set_current_workspace(case.original)
+                    try:
+                        assert (await scheduler_tasks.automatic_runs_used_for([scheduler_id]))[scheduler_id] == 1
+                    finally:
+                        reset_current_workspace(scoped)
+                    assert (await asyncio.to_thread(pool.node_status, "worker"))["unreleased"] == 0
                 assert len(executed) == 2 and executed[1]["created_at"] == original_goal["created_at"]
                 assert executed[1]["continuation_count"] == original_goal.get("continuation_count", 0) + 1
                 assert io_scopes == [("submit", case.original, case.original), ("status", case.original, case.original)]
@@ -411,6 +542,8 @@ def test_scoped_native_dependency_notification_resumes_original_goal(native_engi
                         await record.task
                     except asyncio.CancelledError:
                         pass
+            if foreground is not None:
+                await foreground.stop()
             await central.stop_heartbeat()
             await receiver.stop_heartbeat()
             reset_current_user(principal_token)
@@ -419,3 +552,8 @@ def test_scoped_native_dependency_notification_resumes_original_goal(native_engi
         _in_workspace_case(native_engine, scenario, owner_user_id=owner_user_id)
     finally:
         ledger.engine.dispose()
+
+
+@pytest.mark.parametrize("executor_engine", ["postgres"], indirect=True)
+def test_scoped_installed_scheduler_dependency_transfers_original_occurrence(native_engine, executor_engine, monkeypatch, tmp_path):  # noqa: F811
+    _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp_path, scheduled=True)

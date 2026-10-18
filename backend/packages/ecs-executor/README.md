@@ -751,3 +751,6 @@ Scoped receiver acceptance now uses v2 capabilities plus independent native SQL 
 
 
 Scoped C pool main now passes Shanghai #104 (seven cases): exact candidate/version reservation, pending native SQL preflight/recheck and v2 launch, real ASGI/native graph result and usage writeback. Ordinary claim/owned stay isolated. Running/withdrawn polls plus scoped get/report expose control scalars only; worker reuses only its already-held snapshot. Unknown work retains capacity; scoped dependency wait/refuse remain closed. This deterministic in-process evidence does not establish two-host TCP, AIO namespace/physical STOP or restart recovery.
+
+
+Scoped Scheduler development checkpoint (#151): the actual installed dependency reconciler now protects original waiting occurrences and the native notification continuation transfers C1→C2 on that same occurrence without another automatic launch/count. The PostgreSQL story uses real native/MCP services with deterministic graph/remote IO. Actual B wire/physical execution, invalid-wait control settlement and full installed recovery remain separate required acceptance; tenant activation stays disabled.
