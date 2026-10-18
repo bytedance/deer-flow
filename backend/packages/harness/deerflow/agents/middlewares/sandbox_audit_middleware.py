@@ -47,9 +47,11 @@ _CODE_STRING_INTERPRETERS = r"(?:(?:ba|da|k|z)?sh|python[\d.]*|perl|ruby|node|ph
 _LEADING_FLAGS = r"(?:-\w+\s+){0,4}"
 
 # ``$HOME`` and ``${HOME}`` name the same directory as ``~``, so a destructive
-# target written with a variable is the same command. Quotes need no branch of
-# their own: ``_split_compound_command`` already folds the command down to the
-# shell words it matches, which is why a quoted ``rm -rf "~/"`` blocks on main.
+# target written with a variable is the same command. No quote branch is needed
+# here: ``_classify_single_command`` also matches these rules against its
+# ``shlex`` token pass, and that is what removes the quotes in
+# ``rm -rf "$HOME/"``. ``_split_compound_command`` keeps quote characters
+# verbatim, so the raw-text rule alone would never see a bare ``$HOME`` there.
 _HOME_TARGET = r"(?:~|\$HOME|\$\{HOME\})"
 
 # Each pattern is compiled once at import time.
