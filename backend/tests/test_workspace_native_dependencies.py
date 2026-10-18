@@ -6,6 +6,7 @@ AIO acceptance; both C admissions, SQL task/outbox and launcher are real.
 
 import asyncio
 import json
+from copy import deepcopy
 from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -22,7 +23,7 @@ def test_scoped_native_dependency_notification_resumes_original_goal(native_engi
     _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp_path, revocation_phase=revocation_phase)
 
 
-def _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp_path, *, revocation_phase="normal", scheduled=False):  # noqa: F811
+def _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp_path, *, revocation_phase="normal", scheduled=False, goal_replacement=False):  # noqa: F811
     from ecs_executor.agent_dispatch import NativeDispatchHost, NativeWorkerHost, install_native_dispatch
     from ecs_executor.dispatch import PROTOCOL, WORKER_VERSION
     from ecs_executor.job_store import JobStore
@@ -82,6 +83,11 @@ def _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp
         configuration.scheduler.enabled = True
         for module in (config_facade, app_config, deps):
             monkeypatch.setattr(module, "get_app_config", lambda: configuration)
+    if goal_replacement:
+        from app.gateway.auth import config as auth_config
+
+        monkeypatch.setattr(auth_config, "_auth_config", auth_config.AuthConfig(jwt_secret="synthetic-scheduled-goal-replacement-key-at-least-64-characters!!"))
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
     monkeypatch.setattr(paths_module, "_paths", Paths(tmp_path / "owned-files"))
 
     async def scenario(case):
@@ -403,6 +409,90 @@ def _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp
                         parent_task = await session.get(ScheduledTaskRow, scheduler_id)
                         assert occurrence.status == "running" and occurrence.run_id == first.run_id and occurrence.launch_accounted is True
                         assert parent_task.status == "running" and parent_task.run_count == 1
+                if goal_replacement:
+                    from ecs_executor.job_store import _JOBS
+
+                    from app.gateway.auth import create_access_token
+                    from app.gateway.auth_middleware import AuthMiddleware
+                    from app.gateway.csrf_middleware import CSRFMiddleware
+                    from app.gateway.routers import threads as threads_router
+
+                    # Freeze the canonical source, not checkpoint-write reservations.
+                    # These native control operations may legitimately create rows.
+                    async def native_snapshot():
+                        async with case.sf() as session:
+                            source = dict((await session.execute(select(RunRow.__table__).where(RunRow.run_id == first.run_id))).mappings().one())
+                            normal_ids = frozenset(await session.scalars(select(RunRow.run_id).where(RunRow.operation_kind == "run")))
+                            child = dict((await session.execute(select(ScheduledTaskRunRow.__table__).where(ScheduledTaskRunRow.id == occurrence_id))).mappings().one())
+                            parent = dict((await session.execute(select(ScheduledTaskRow.__table__).where(ScheduledTaskRow.id == scheduler_id))).mappings().one())
+                            event_rows = [dict(row) for row in (await session.execute(select(ScheduledTaskEventRow.__table__).where(ScheduledTaskEventRow.task_id == scheduler_id).order_by(ScheduledTaskEventRow.id))).mappings()]
+                        return deepcopy((source, normal_ids, child, parent, event_rows))
+
+                    def c_job_ids():
+                        with ledger.engine.connect() as connection:
+                            return frozenset(row.id for row in connection.execute(select(_JOBS)) if row.record.get("kind") == "C")
+
+                    before = await native_snapshot()
+                    pool_ids = await asyncio.to_thread(c_job_ids)
+                    browser_app = FastAPI()
+                    browser_app.state = central_app.state
+                    browser_app.state.workspace_service = case.service
+                    browser_app.include_router(threads_router.router)
+                    browser_app.add_middleware(AuthMiddleware)
+                    browser_app.add_middleware(CSRFMiddleware)
+                    assert get_current_workspace() == case.other
+                    async with httpx.AsyncClient(
+                        transport=httpx.ASGITransport(app=browser_app),
+                        base_url="http://localhost",
+                        headers={"Origin": "http://localhost", "X-CSRF-Token": "goal-replacement-csrf", "X-Deerflow-Workspace": case.original.workspace_id},
+                    ) as client:
+                        client.cookies.set("access_token", create_access_token(owner_user_id))
+                        client.cookies.set("csrf_token", "goal-replacement-csrf")
+                        response = await client.put("/api/threads/" + first.thread_id + "/goal", json={"objective": "Investigate the revised research objective instead of the old report"})
+                    assert response.status_code == 200, response.text
+                    new_goal = response.json()["goal"]
+                    assert new_goal["objective"] != original_goal["objective"] and new_goal["status"] == "active"
+                    assert await goal_runtime.read_thread_goal(saver, first.thread_id) == new_goal
+                    assert get_current_workspace() == case.other
+                    await control.run_once(now=datetime.now(UTC))
+                    after = await native_snapshot()
+                    assert after[0] == before[0] and after[1] == before[1]
+                    assert after[2]["status"] == "interrupted" and after[2]["run_id"] == first.run_id and after[2]["launch_accounted"] is True
+                    assert after[3]["status"] == "cancelled" and after[3]["run_count"] == 1
+                    assert after[4] == before[4]  # Native interrupted once occurrences are silent.
+                    assert (await asyncio.to_thread(ledger.get, job["id"]))["dependency_wait"]["active"] is False
+                    assert await goal_runtime.read_thread_goal(saver, first.thread_id) == new_goal
+                    scoped = set_current_workspace(case.original)
+                    try:
+                        assert (await scheduler_tasks.automatic_runs_used_for([scheduler_id]))[scheduler_id] == 1
+                    finally:
+                        reset_current_workspace(scoped)
+                    await control.run_once(now=datetime.now(UTC))
+                    assert await native_snapshot() == after  # Exact first-terminal replay, no duplicate event.
+                    assert await asyncio.to_thread(c_job_ids) == pool_ids
+                    assert await goal_runtime.read_thread_goal(saver, first.thread_id) == new_goal
+                    assert (await request_worker("poll"))["claim"] is None
+                    assert (await asyncio.to_thread(pool.node_status, "worker"))["unreleased"] == 0
+                    # The late real MCP result remains available, but cannot
+                    # revive the superseded goal or launch another native C.
+                    await tasks.run_once(now=datetime.now(UTC) + timedelta(seconds=30))
+                    assert (await request_worker("poll"))["claim"] is None
+                    async with case.sf() as session:
+                        durable = await session.get(McpTaskRow, created_tasks[0]["id"])
+                        assert durable.status == "completed"
+                        assert durable.result == {"report": "owned dependency report"} and durable.result_preview == "owned dependency report"
+                        assert durable.notification_status == "dead_letter" and durable.notified_version == 0, {
+                            "status": durable.notification_status,
+                            "error": durable.notification_error,
+                            "trace": notification_trace,
+                        }
+                        assert durable.notification_run_id is None
+                    assert await native_snapshot() == after
+                    assert await asyncio.to_thread(c_job_ids) == pool_ids
+                    assert await goal_runtime.read_thread_goal(saver, first.thread_id) == new_goal
+                    assert len(admitted) == 1 and len(executed) == 1
+                    assert get_current_workspace() == case.other
+                    return
                 now = datetime.now(UTC) + timedelta(seconds=30)
                 await tasks.run_once(now=now)
                 resumed = await request_worker("poll")
@@ -557,3 +647,8 @@ def _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp
 @pytest.mark.parametrize("executor_engine", ["postgres"], indirect=True)
 def test_scoped_installed_scheduler_dependency_transfers_original_occurrence(native_engine, executor_engine, monkeypatch, tmp_path):  # noqa: F811
     _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp_path, scheduled=True)
+
+
+@pytest.mark.parametrize("executor_engine", ["postgres"], indirect=True)
+def test_scoped_scheduled_dependency_goal_replacement_preserves_new_goal(native_engine, executor_engine, monkeypatch, tmp_path):  # noqa: F811
+    _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp_path, scheduled=True, goal_replacement=True)

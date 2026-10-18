@@ -754,3 +754,5 @@ Scoped C pool main now passes Shanghai #104 (seven cases): exact candidate/versi
 
 
 Scoped Scheduler development checkpoint (#151): the actual installed dependency reconciler now protects original waiting occurrences and the native notification continuation transfers C1→C2 on that same occurrence without another automatic launch/count. The PostgreSQL story uses real native/MCP services with deterministic graph/remote IO. Actual B wire/physical execution, invalid-wait control settlement and full installed recovery remain separate required acceptance; tenant activation stays disabled.
+
+Live-original-scope goal replacement is verified in #152 without product changes: the existing installed wait reconciler ends the obsolete occurrence, retains the new goal and original result, and rejects late notification continuation. This does not cover revoked/private-parent/unknown control settlement or physical execution.

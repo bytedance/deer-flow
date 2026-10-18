@@ -1,4 +1,4 @@
-# Resume checkpoint — 2026-10-18: installed Scheduler continuation main #151 verified; invalid wait control next
+# Resume checkpoint — 2026-10-18: native live goal-replacement settlement #152 verified; revoked/unknown control next
 > **执行中，M4 部分完成。** Jenkins #112：单 Worker 真实 AIO 创建、文件写读、warm STOP、失败保留和 report 后释放已通过（1 项，53.79s）。两机 HTTP、恢复和 C→B→C 仍待完成；通知主干与必要撤权控制已验证；HTTP创建/列表/详情已通过#130；租户启动关闭。
 
 # 2026-10-16 暂停与恢复检查点
@@ -1297,3 +1297,12 @@ Root reviewed the precise seven-file patch, independently checked terminal, SHA-
 The sole product file adds original-live/private/exact normal Run/trigger source locators and scoped transfer under workspace/actor→sorted parents→task→occurrence→sorted Run locks. Transfer checks original immutable context, metadata and canonical dependency idempotency, successful waiting C1 with closed native execution lifetime, and pending live/open C2 with no cancellation/STOP. It changes only occurrence.run_id and eligible task.last_run_id. It does not re-admit a schedule, count another occurrence, renew a lease or infer physical STOP.
 
 Root reviewed the exact patch, independently checked terminal and SHA/three archive source bytes plus exact fixture cleanup. Evidence: `docs/tenant-workspaces-evidence/native-scheduler-installed-dependency-151.json`. MCP service/SQL/notification/native launches are real; graph and remote IO are deterministic. No actual B wire/physical/provider/two-host acceptance. Shared helper extraction preserves existing branches; the three non-scheduled selectors were not rerun. Invalid/unexamined waits remain held and need subsequent control settlement; IM/recovery and full M0–M11 remain open, activation false. No deployment/push/local runtime.
+
+
+### 2026-10-18 — Existing native goal-replacement settlement (#152)
+
+`deerflow-tenant-execution-m4-sql #152 SUCCESS`: exactly one PostgreSQL business boundary passed (21.57s), Ruff/67-file formatting passed. Product code is unchanged from `3119eddf3`; no new control API was needed. After real installed scheduled C1 wait, no-sandbox STOP/report and actual reconciler protection, a real JWT/CSRF PUT replaces the native goal while ambient UI scope remains other. Control reconciliation settles the old occurrence as interrupted/once task cancelled, retires the old wait and preserves canonical C1's complete SQL row, original launch accounting/count1/automatic1, normal Run/C job identities and the complete replacement goal. A repeat retains exact first-terminal rows and the original silent interrupted-once event baseline.
+
+The same story then completes the actual MCP poll/result/notification path with deterministic remote IO. The result remains stored, the superseded notification becomes dead_letter/notified_version0 without a continuation Run, and the replacement goal/source rows stay unchanged. Native checkpoint-write reservations are legitimate control rows and are excluded from normal-model Run counting.
+
+Root reviewed the exact test, independently checked live terminal, SHA/two source bytes and exact cleanup; backend/app and backend/packages have no product diff. Evidence: `docs/tenant-workspaces-evidence/native-scheduler-goal-replacement-152.json`. This verifies the existing live-original-scope path; member-revoked/private-parent-retired/unknown control settlement and full recovery remain open. No actual B wire/physical/provider/two-host acceptance, no other selectors rerun. Full M0–M11 remains open; activation false, no deployment/push/local runtime.
