@@ -635,6 +635,7 @@ def test_install_runtime_context_removes_caller_sandbox_execution_identities():
         "context": {
             SANDBOX_LEASE_OWNER_CONTEXT_KEY: "forged-owner",
             SANDBOX_COMMAND_SCOPE_CONTEXT_KEY: "forged-scope",
+            "__deerflow_sandbox_prewarm": "forged-prewarm",
         }
     }
 
@@ -648,6 +649,7 @@ def test_install_runtime_context_removes_caller_sandbox_execution_identities():
 
     assert SANDBOX_LEASE_OWNER_CONTEXT_KEY not in config["context"]
     assert SANDBOX_COMMAND_SCOPE_CONTEXT_KEY not in config["context"]
+    assert "__deerflow_sandbox_prewarm" not in config["context"]
 
 
 def test_build_runtime_context_ignores_caller_project_context_key():
@@ -2808,12 +2810,14 @@ def test_build_runtime_context_ignores_caller_sandbox_execution_identities():
     caller_context = {
         SANDBOX_LEASE_OWNER_CONTEXT_KEY: "forged-owner",
         SANDBOX_COMMAND_SCOPE_CONTEXT_KEY: "forged-scope",
+        "__deerflow_sandbox_prewarm": "forged-prewarm",
     }
 
     ctx = _build_runtime_context("thread-1", "run-1", caller_context)
 
     assert SANDBOX_LEASE_OWNER_CONTEXT_KEY not in ctx
     assert SANDBOX_COMMAND_SCOPE_CONTEXT_KEY not in ctx
+    assert "__deerflow_sandbox_prewarm" not in ctx
 
 
 def test_build_runtime_context_ignores_caller_audit_attribution_and_recorders():
