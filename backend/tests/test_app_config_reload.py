@@ -1122,7 +1122,7 @@ def test_app_config_migrates_legacy_memory_settings_before_validation(tmp_path, 
     try:
         with caplog.at_level("WARNING", logger="deerflow.config.memory_config"):
             config = AppConfig.from_file(str(config_path))
-        expected = {"max_facts": 17, "model": {"model": "memory-model"}, "storage_path": "memory-root"}
+        expected = {"max_facts": 17, "model_name": "memory-model", "storage_path": "memory-root"}
         assert config.memory.backend_config == expected
         assert get_memory_config().backend_config == expected
         assert "Migrated legacy top-level memory fields" in caplog.text

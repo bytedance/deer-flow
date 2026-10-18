@@ -24,8 +24,8 @@ _SHARED_FIELDS = frozenset({"enabled", "mode", "injection_enabled", "shutdown_fl
 # DeerMem-private fields that used to live at the top level of `memory:` in
 # config.yaml (pre-abstraction). On load they are auto-migrated into
 # `backend_config` so an upgrade does NOT silently revert customized settings
-# to defaults. `model_name` maps to `backend_config.model.model` (the new nested
-# model sub-config); the rest are 1:1.
+# to defaults. `model_name` remains a host profile selector under
+# `backend_config`, not a provider model ID; the rest are 1:1.
 _LEGACY_DEERMEM_FIELDS = frozenset(
     {
         "storage_path",
@@ -133,12 +133,14 @@ def _migrate_legacy_memory_fields(config_dict: dict) -> dict:
             if value is None or value == "":
                 continue  # default / empty value, no migration needed
             if key == "model_name":
-                # old top-level model_name -> backend_config.model.model
-                model_cfg = dict(backend_config.get("model") or {})
-                if "model" not in model_cfg:
-                    model_cfg["model"] = value
-                    backend_config["model"] = model_cfg
-                    migrated.append(f"{key} -> backend_config.model.model")
+                # Keep the host registry name separate from DeerMem's wire
+                # model ID. The host factory resolves credentials/provider
+                # settings together with this profile. Explicit model config
+                # and an explicit selector both retain precedence.
+                model_cfg = backend_config.get("model") or {}
+                if "model" not in model_cfg and "model_name" not in backend_config:
+                    backend_config["model_name"] = value
+                    migrated.append(f"{key} -> backend_config.model_name")
             elif key == "storage_path" and str(value).endswith(".json"):
                 # Pre-abstraction storage_path was a FILE path (absolute = shared
                 # file opting out of per-user; a relative value like the old default

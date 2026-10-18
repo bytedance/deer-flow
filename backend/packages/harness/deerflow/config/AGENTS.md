@@ -90,6 +90,11 @@ The legacy locations are anchored to the installed harness source, not to the ca
 Config values starting with `$` are resolved as environment variables (e.g., `$OPENAI_API_KEY`).
 `ModelConfig` also declares `use_responses_api` and `output_version` so OpenAI `/v1/responses` can be enabled explicitly while still using `langchain_openai:ChatOpenAI`.
 
+Legacy `memory.model_name` migrates to `backend_config.model_name`, a host
+profile selector consumed by the host LLM factory. It must not become
+`backend_config.model.model` (a provider model ID), which loses profile settings.
+An explicit backend model or host LLM keeps precedence over the legacy selector.
+
 `ModelConfig.request_admission` is optional and is not a provider parameter.
 Its positive RPM, finite wait deadline, queue bound and optional quota-group name
 configure process-local model pacing. `requests_per_minute` and `max_queue_size` are strict
