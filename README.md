@@ -1593,6 +1593,8 @@ SkillScan treats HTTP/HTTPS scheme spellings and HTTP hostnames case-insensitive
 loopback (`[::1]`) URLs as local. External IPv6 endpoints still trigger network findings,
 and cloud-metadata hostname detection is case-insensitive.
 
+SkillScan recognizes unquoted integer model-usage counters such as `total_tokens` and `input_tokens` in skill examples as measurements. Benchmark token statistics and signed deltas are also recognized; credential fields and other string values remain subject to secret detection.
+
 For Python credential mappings, SkillScan checks literal values while treating ordinary dictionary keys as labels. A mapping such as `tokens = {"access_token": os.getenv("ACCESS_TOKEN")}` does not report a hardcoded credential. Keys matching a recognized cloud or API token format are still checked as embedded credentials.
 
 SkillScan blocks embedded legacy and modern `sk-` API tokens, including OpenAI project, service-account, and admin keys and Anthropic keys, even in Bearer headers without a secret assignment. Token bodies may contain `-` and `_`; finding evidence is fully redacted. Placeholder examples do not suppress detection of later credentials in the same file. Scheduled-task notification summaries also redact these key formats before sending them to external IM platforms.
