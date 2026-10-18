@@ -103,6 +103,20 @@ test("capMarkdownNesting caps both blockquote and list nesting", () => {
   expect(/^[ \t]*/.exec(lines[1]!)![0].length).toBe(200);
 });
 
+test("capMarkdownNesting preserves code examples inside a longer fence", () => {
+  const quote = ">".repeat(150) + "literal";
+  const indent = " ".repeat(250) + "- literal";
+  const code = ["````markdown", "```", quote, indent, "```", "````"];
+  const input = [...code, quote, indent].join("\n");
+  const expected = [
+    ...code,
+    ">".repeat(100) + "literal",
+    " ".repeat(200) + "- literal",
+  ].join("\n");
+
+  expect(capMarkdownNesting(input)).toBe(expected);
+});
+
 test("normalizeStreamdownMathMarkdown converts inline math delimiters", () => {
   expect(
     normalizeStreamdownMathMarkdown("Given \\(x\\), compute \\(x^2\\)."),
@@ -150,6 +164,104 @@ test("normalizeStreamdownMathMarkdown leaves fenced and indented code untouched"
     "    \\(literal\\)",
   ].join("\n");
   expect(normalizeStreamdownMathMarkdown(input)).toBe(expected);
+});
+
+test("normalizeStreamdownMathMarkdown preserves math examples inside a longer fence", () => {
+  const code = [
+    "````markdown",
+    "```tex",
+    "\\(literal\\)",
+    "$$",
+    "a",
+    "+ b",
+    "$$",
+    "```",
+    "````",
+  ];
+  const input = [...code, "Outside \\(x\\)", "$$", "x", "+ y", "$$"].join("\n");
+  const expected = [...code, "Outside $x$", "$$", "x + y", "$$"].join("\n");
+
+  expect(normalizeStreamdownMathMarkdown(input)).toBe(expected);
+});
+
+test.each([
+  { opener: "````markdown", inner: "```", closer: "````" },
+  { opener: "~~~~markdown", inner: "~~~", closer: "~~~~" },
+  { opener: "~~~markdown", inner: "```", closer: "~~~" },
+  { opener: "```markdown", inner: "~~~", closer: "```" },
+  { opener: "```", inner: "```python", closer: "```` \t" },
+  { opener: "  ~~~", inner: "~~~python", closer: "   ~~~~ \t" },
+])(
+  "preprocessors protect $opener across $inner until $closer",
+  ({ opener, inner, closer }) => {
+    const quote = ">".repeat(150) + "literal";
+    const indent = " ".repeat(250) + "- literal";
+    const code = [
+      opener,
+      inner,
+      quote,
+      indent,
+      "\\(literal\\)",
+      "$$",
+      "a",
+      "+ b",
+      "$$",
+    ];
+    const input = [
+      ...code,
+      closer,
+      quote,
+      indent,
+      "\\(x\\)",
+      "$$",
+      "x",
+      "+ y",
+      "$$",
+    ].join("\n");
+
+    expect(capMarkdownNesting(input)).toBe(
+      [
+        ...code,
+        closer,
+        ">".repeat(100) + "literal",
+        " ".repeat(200) + "- literal",
+        "\\(x\\)",
+        "$$",
+        "x",
+        "+ y",
+        "$$",
+      ].join("\n"),
+    );
+    expect(normalizeStreamdownMathMarkdown(input)).toBe(
+      [...code, closer, quote, indent, "$x$", "$$", "x + y", "$$"].join("\n"),
+    );
+  },
+);
+
+test("preprocessors preserve an unfinished fence during streaming", () => {
+  const input = [
+    "~~~~markdown",
+    "```",
+    ">".repeat(150),
+    " ".repeat(250) + "- code",
+    "\\(literal\\)",
+    "$$",
+    "a",
+    "+ b",
+    "$$",
+  ].join("\n");
+
+  expect(capMarkdownNesting(input)).toBe(input);
+  expect(normalizeStreamdownMathMarkdown(input)).toBe(input);
+});
+
+test("math normalization keeps fence-like lines inside open math blocks", () => {
+  expect(
+    normalizeStreamdownMathMarkdown("\\[\n~~~\nx\n\\]\nOutside \\(y\\)"),
+  ).toBe("$$\n~~~ x\n$$\nOutside $y$");
+  expect(compactDisplayMathBlocks("$$\n~~~\nx\n$$\n$$\na\n+ b\n$$")).toBe(
+    "$$\n~~~ x\n$$\n$$\na + b\n$$",
+  );
 });
 
 test("compactDisplayMathBlocks keeps display math as display math", () => {

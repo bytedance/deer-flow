@@ -22,7 +22,6 @@ const DEEP_BLOCKQUOTE_HINT_RE = new RegExp(
 // Only up to 3 leading spaces can start a blockquote; 4+ (or a tab) is an
 // indented code block, where ">" runs are literal content.
 const BLOCKQUOTE_PREFIX_RE = /^ {0,3}(?:[ \t]*>)+/;
-const CODE_FENCE_RE = /^ {0,3}(?:```|~~~)/;
 
 // marked's list tokenizer recurses once per nesting level too (list ->
 // blockTokens -> list -> ...). In the browser's tighter stack a deeply nested
@@ -41,17 +40,22 @@ export function capBlockquoteNesting(markdown: string): string {
     return markdown;
   }
 
-  let insideFence = false;
+  let fenceMarker: string | null = null;
   return markdown
     .split("\n")
     .map((line) => {
-      if (CODE_FENCE_RE.test(line)) {
-        insideFence = !insideFence;
+      const fenceMatch = FENCE_MARKER_RE.exec(line);
+      if (fenceMatch) {
+        if (fenceMarker === null) {
+          fenceMarker = fenceMatch[1]!;
+        } else if (isClosingFence(line, fenceMarker)) {
+          fenceMarker = null;
+        }
         return line;
       }
       // ">" runs inside fenced or indented code blocks are literal text, not
       // nesting — rewriting them would silently corrupt code content.
-      if (insideFence || INDENTED_CODE_RE.test(line)) {
+      if (fenceMarker !== null || INDENTED_CODE_RE.test(line)) {
         return line;
       }
       const match = BLOCKQUOTE_PREFIX_RE.exec(line);
@@ -78,17 +82,22 @@ export function capListNesting(markdown: string): string {
     return markdown;
   }
 
-  let insideFence = false;
+  let fenceMarker: string | null = null;
   return markdown
     .split("\n")
     .map((line) => {
-      if (CODE_FENCE_RE.test(line)) {
-        insideFence = !insideFence;
+      const fenceMatch = FENCE_MARKER_RE.exec(line);
+      if (fenceMatch) {
+        if (fenceMarker === null) {
+          fenceMarker = fenceMatch[1]!;
+        } else if (isClosingFence(line, fenceMarker)) {
+          fenceMarker = null;
+        }
         return line;
       }
       // Indentation inside fenced code is literal layout (ASCII art, pasted
       // source); collapsing it would corrupt the rendered block.
-      if (insideFence) {
+      if (fenceMarker !== null) {
         return line;
       }
       const whitespace = /^[ \t]*/.exec(line)![0];
@@ -208,7 +217,7 @@ export function normalizeLatexMathDelimiters(markdown: string): string {
     return markdown;
   }
 
-  let insideFence = false;
+  let fenceMarker: string | null = null;
   let mathState: DelimiterState = {
     openBlock: null,
     inlineCodeDelimiterLength: null,
@@ -217,12 +226,17 @@ export function normalizeLatexMathDelimiters(markdown: string): string {
   return markdown
     .split("\n")
     .map((line) => {
-      if (CODE_FENCE_RE.test(line) && !mathState.openBlock) {
-        insideFence = !insideFence;
+      const fenceMatch = FENCE_MARKER_RE.exec(line);
+      if (fenceMatch && !mathState.openBlock) {
+        if (fenceMarker === null) {
+          fenceMarker = fenceMatch[1]!;
+        } else if (isClosingFence(line, fenceMarker)) {
+          fenceMarker = null;
+        }
         return line;
       }
       if (
-        insideFence ||
+        fenceMarker !== null ||
         (INDENTED_CODE_RE.test(line) && !mathState.openBlock)
       ) {
         return line;
@@ -278,17 +292,25 @@ export function compactDisplayMathBlocks(markdown: string): string {
   }
 
   const output: string[] = [];
-  let insideFence = false;
+  let fenceMarker: string | null = null;
   let mathLines: string[] | null = null;
 
   for (const line of markdown.split("\n")) {
-    if (CODE_FENCE_RE.test(line) && mathLines === null) {
-      insideFence = !insideFence;
+    const fenceMatch = FENCE_MARKER_RE.exec(line);
+    if (fenceMatch && mathLines === null) {
+      if (fenceMarker === null) {
+        fenceMarker = fenceMatch[1]!;
+      } else if (isClosingFence(line, fenceMarker)) {
+        fenceMarker = null;
+      }
       output.push(line);
       continue;
     }
 
-    if (insideFence || (INDENTED_CODE_RE.test(line) && mathLines === null)) {
+    if (
+      fenceMarker !== null ||
+      (INDENTED_CODE_RE.test(line) && mathLines === null)
+    ) {
       output.push(line);
       continue;
     }
