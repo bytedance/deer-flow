@@ -105,6 +105,8 @@ export UV_INDEX_URL=https://pypi.org/simple
 export NPM_REGISTRY=https://registry.npmjs.org
 ```
 
+Keep `UV_INDEX_URL` at `https://pypi.org/simple`: the gateway image installs with `uv sync --locked`, and `uv.lock` is locked to that index, so a mirror makes the build fail with ``The lockfile at `uv.lock` needs to be updated, but `--locked` was provided``.
+
 #### Recommended host resources
 
 Use these as practical starting points for development and review environments:

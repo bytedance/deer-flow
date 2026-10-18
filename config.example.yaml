@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 60
+config_version: 61
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -1703,6 +1703,13 @@ sandbox:
   # not a secure isolation boundary for shell access. Enable only for fully
   # trusted, single-user local workflows.
   allow_host_bash: false
+  # For AioSandboxProvider only: overlap likely sandbox work with the first
+  # model call. It is disabled by default and ignored by other providers.
+  prewarm: false
+  # Bound pending/ready-unused speculation per provider instance, per process.
+  # A full budget skips prewarming; foreground tools still acquire normally.
+  # This is not a total container or deployment-wide capacity limit.
+  prewarm_max_concurrent: 1
   # Optional: Mount additional host directories into the sandbox.
   # Each mount maps a host path to a virtual container path accessible by the agent.
   # Note: with LocalSandboxProvider under `make up` (docker-compose), host_path is

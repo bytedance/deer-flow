@@ -972,6 +972,10 @@ async def test_transient_renewal_exception_before_deadline_keeps_run_alive():
         return await original_update_lease(*args, **kwargs)
 
     store.update_lease = fail_once_then_renew
+    # Keep the confirmed deadline inside the 30-second lease window. Renewal
+    # computes a fresh now+lease value; Windows' coarse clock can otherwise make
+    # two immediate samples identical and defeat the strict > below.
+    record.lease_expires_at = (datetime.now(UTC) + timedelta(seconds=10)).isoformat()
     original_expiry = record.lease_expires_at
 
     try:

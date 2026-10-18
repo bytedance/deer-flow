@@ -3528,6 +3528,47 @@ def test_start_run_strips_project_context_message_marker_from_input(_stub_app_co
 
 
 @pytest.mark.asyncio
+async def test_self_update_removing_knowledge_allows_next_gateway_run(_stub_app_config, tmp_path, monkeypatch):
+    from unittest.mock import patch
+
+    from app.gateway.services import start_run
+    from deerflow.persistence.agents import get_agent_store
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+    from deerflow.runtime.user_context import get_effective_user_id
+    from deerflow.tools.builtins.update_agent_tool import update_agent
+
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    set_app_config(
+        AppConfig.model_validate(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "knowledge_base": {"enabled": True},
+                "tools": [{"name": "knowledge_search", "group": "knowledge", "use": "deerflow.community.ragflow.tools:knowledge_search_tool"}],
+            }
+        )
+    )
+    user_id = get_effective_user_id()
+    scope = {"version": 1, "mode": "selected", "dataset_ids": ["policies"]}
+    get_agent_store().create("researcher", {"tool_groups": ["web", "knowledge"], "knowledge_scope": scope}, "Soul", user_id=user_id)
+    runtime = SimpleNamespace(context={"agent_name": "researcher", "user_id": user_id}, tool_call_id="update-1")
+    assert update_agent.func(runtime=runtime, tool_groups=["web"]).update["messages"][0].status == "success"
+    request = _make_start_run_request(RunManager(store=MemoryRunStore()))
+    captured = {}
+
+    async def fake_run_agent(*_args, **kwargs):
+        captured.update(kwargs)
+
+    # Keep persistence, config reload and admission real; replace only execution.
+    with patch("app.gateway.services.resolve_agent_factory", return_value=object()), patch("app.gateway.services.run_agent", side_effect=fake_run_agent):
+        record = await start_run(_run_create_request("Hello", assistant_id="researcher"), "thread-after-self-update", request)
+        await record.task
+    assert captured["knowledge_scope"] is None
+    assert "knowledge_scope" not in captured["graph_input"]["messages"][0].additional_kwargs
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("run_store_backend", ["memory", "sql"])
 async def test_start_run_peer_idempotent_reuse_does_not_reject_later_runs_after_owner_completes(_stub_app_config, run_store_backend, tmp_path):
     """Two Gateway workers share one run store; a retry landing on the peer must not strand the thread.
@@ -4494,6 +4535,8 @@ class TestInjectAuthenticatedUserContextAuthz:
                 section: {
                     "sandbox_lease_owner_id": "forged-owner",
                     "sandbox_command_scope_id": "forged-scope",
+                    "__deerflow_sandbox_prewarm": "forged-prewarm",
+                    "__deerflow_sandbox_prewarm_cleanup": True,
                 }
             },
             request,
@@ -4501,6 +4544,8 @@ class TestInjectAuthenticatedUserContextAuthz:
 
         assert "sandbox_lease_owner_id" not in config[section]
         assert "sandbox_command_scope_id" not in config[section]
+        assert "__deerflow_sandbox_prewarm" not in config[section]
+        assert "__deerflow_sandbox_prewarm_cleanup" not in config[section]
 
     def test_session_body_context_cannot_inject_channel_user_id(self):
         request = _make_request_with_auth_source("session")

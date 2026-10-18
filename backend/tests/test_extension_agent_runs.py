@@ -155,7 +155,26 @@ async def runtime(host, monkeypatch, tmp_path):
         builder.add_node("answer", answer)
         builder.set_entry_point("answer")
         builder.set_finish_point("answer")
-        return builder.compile()
+        from deerflow_extension_api import AgentAssemblyDescriptor
+
+        from deerflow.agents.lead_agent.agent import LeadAgentAssembly
+
+        descriptor = AgentAssemblyDescriptor(
+            namespace="fixture",
+            agent_name="lead-agent",
+            requested_model=None,
+            effective_model="fixture-model",
+            model_parameters={"temperature": 0},
+            thinking_enabled=False,
+            reasoning_effort=None,
+            base_prompt_hash="fixture-prompt",
+            tools=(),
+            middlewares=(),
+            deferred_tool_names=(),
+            enabled_skills=(),
+            effective_policies={"skill_catalog_hash": "fixture-skills"},
+        )
+        return LeadAgentAssembly(graph=builder.compile(), descriptor=descriptor, effective_model="fixture-model")
 
     monkeypatch.setattr("app.gateway.services.resolve_agent_factory", lambda _: factory)
     try:
@@ -364,3 +383,65 @@ def test_action_and_tool_context_keep_positional_compatibility():
     principal = ExtensionPrincipal("owner")
     assert ActionContext(principal, {}).agent_runs is None
     assert ToolContext(principal, {}, "thread").agent_runs is None
+
+
+@pytest.mark.asyncio
+async def test_configuration_revision_is_private_scoped_and_detects_changes(host, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    control, request, load_user = host
+    app_config = {"models": [{"api_key": "secret", "name": "a"}]}
+    agent_config = {"name": "reviewer", "model": "a"}
+    soul = Mock(return_value="review carefully")
+    monkeypatch.setattr("deerflow.config.app_config.get_app_config", lambda: SimpleNamespace(model_dump=lambda **kw: app_config))
+    monkeypatch.setattr("deerflow.config.extensions_config.get_extensions_config", lambda: SimpleNamespace(model_dump=lambda **kw: {}))
+    monkeypatch.setattr("deerflow.config.agents_config.load_agent_config", lambda *a, **kw: SimpleNamespace(model_dump=lambda **kw: agent_config))
+    monkeypatch.setattr("deerflow.config.agents_config.load_agent_soul", soul)
+    runs = control.bind(request)
+    before = await runs.configuration_revision(assistant_ids=["reviewer", "lead_agent"])
+    assert len(before) == 64 and "secret" not in before
+    assert before == await runs.configuration_revision(assistant_ids=["lead_agent", "reviewer"])
+    soul.return_value = "changed instructions"
+    assert before != await runs.configuration_revision(assistant_ids=["reviewer", "lead_agent"])
+    soul.return_value = "review carefully"
+    agent_config["model"] = "b"
+    assert before != await runs.configuration_revision(assistant_ids=["reviewer", "lead_agent"])
+    load_user.return_value = None
+    with pytest.raises(AgentRunError, match="revoked"):
+        await runs.configuration_revision(assistant_ids=["lead_agent"])
+
+
+@pytest.mark.asyncio
+async def test_actual_assembly_evidence_is_retained_and_bound(runtime):
+    runs, state, request, _, _ = runtime
+    thread = await runs.create_thread(thread_id="proof-thread")
+    run = await runs.start(thread_id=thread, input={"messages": [{"role": "user", "content": "proof"}]})
+    assert (await runs.wait(thread_id=thread, run_id=run.run_id, timeout=5)).status == "success"
+    evidence = await runs.configuration_evidence(thread_id=thread, run_id=run.run_id)
+    assert evidence["model"] == "fixture-model"
+    assert evidence["run_id"] == run.run_id
+    evidence["model"] = "tampered"
+    retained = await runs.configuration_evidence(thread_id=thread, run_id=run.run_id)
+    assert retained["model"] == "fixture-model"
+    with pytest.raises(ValueError, match="immutable"):
+        await state.run_manager.record_assembly_evidence(run.run_id, evidence)
+    other = await runs.create_thread(thread_id="other-proof-thread")
+    with pytest.raises(AgentRunError):
+        await runs.configuration_evidence(thread_id=other, run_id=run.run_id)
+
+
+@pytest.mark.asyncio
+async def test_evidence_persistence_failure_prevents_execution(runtime, monkeypatch):
+    runs, state, _, _, handles = runtime
+
+    async def fail(*args, **kwargs):
+        raise RuntimeError("evidence persistence unavailable")
+
+    monkeypatch.setattr(state.run_manager, "record_assembly_evidence", fail)
+    thread = await runs.create_thread(thread_id="proof-failure")
+    run = await runs.start(thread_id=thread, input={"messages": [{"role": "user", "content": "must not run"}]})
+    assert (await runs.wait(thread_id=thread, run_id=run.run_id, timeout=5)).status == "error"
+    assert not handles
+    with pytest.raises(AgentRunError, match="unavailable"):
+        await runs.configuration_evidence(thread_id=thread, run_id=run.run_id)

@@ -32,6 +32,7 @@ async def test_0042_remains_in_the_single_migration_chain():
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
     assert len(script.get_heads()) == 1
     assert REVISION in {revision.revision for revision in script.walk_revisions()}
+    assert script.get_revision("0044_channel_runtime_configs").down_revision == NEXT
     assert script.get_revision(NEXT).down_revision == REVISION
     assert script.get_revision(REVISION).down_revision == PREVIOUS
     # alembic_version.version_num is VARCHAR(32).

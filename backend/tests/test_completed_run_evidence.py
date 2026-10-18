@@ -694,8 +694,8 @@ def test_migration_is_additive_current_chain():
     from deerflow.persistence.bootstrap import _MIGRATIONS_DIR
 
     script = ScriptDirectory(str(_MIGRATIONS_DIR))
-    rev = script.get_revision("0044_completed_run_evidence")
-    assert rev.down_revision == "0043_runtime_im_notices"
+    rev = script.get_revision("0045_completed_run_evidence")
+    assert rev.down_revision == "0044_channel_runtime_configs"
 
 
 @pytest.mark.asyncio
@@ -790,6 +790,7 @@ def test_migration_upgrades_real_sqlite_and_preserves_legacy_partial(tmp_path):
     with engine.begin() as conn:
         Base.metadata.create_all(conn)
         conn.execute(RunRow.__table__.insert().values(run_id="old", thread_id="thread", user_id="alice", status="success"))
+        conn.execute(text("INSERT INTO channel_runtime_configs VALUES ('telegram', 'synthetic-ciphertext', 0, 7, 1.0)"))
         conn.execute(text("DROP TABLE completed_run_snapshots"))
         conn.execute(RunEventRow.__table__.insert().values(thread_id="thread", run_id="old", user_id="alice", event_type="test", category="message", content="legacy", seq=1))
         conn.execute(text("ALTER TABLE run_events DROP COLUMN content_sha256"))
@@ -797,13 +798,14 @@ def test_migration_upgrades_real_sqlite_and_preserves_legacy_partial(tmp_path):
             conn.execute(text(f"ALTER TABLE runs DROP COLUMN {name}"))
     config = _get_alembic_config(engine)
     config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{tmp_path / 'migration.db'}")
-    command.stamp(config, "0043_runtime_im_notices")
-    command.upgrade(config, "0044_completed_run_evidence")
+    command.stamp(config, "0044_channel_runtime_configs")
+    command.upgrade(config, "0045_completed_run_evidence")
     with engine.connect() as conn:
         row = conn.execute(text("SELECT evidence_seal_state, evidence_revision, evidence_retention_revision FROM runs WHERE run_id='old'")).one()
         assert tuple(row) == (None, None, 0)
         assert conn.scalar(text("SELECT content_sha256 FROM run_events WHERE run_id='old'")) is None
         assert "completed_run_snapshots" in inspect(conn).get_table_names()
+        assert conn.execute(text("SELECT config_ciphertext, version FROM channel_runtime_configs WHERE provider='telegram'")).one() == ("synthetic-ciphertext", 7)
     engine.dispose()
 
 
