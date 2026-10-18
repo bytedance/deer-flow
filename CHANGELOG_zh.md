@@ -14,6 +14,19 @@
 
 ### 新增
 
+- **渠道：** 在 Web UI 中填写的 IM 机器人凭据改存到共享的 `channel_runtime_configs`
+  表（迁移 `0044_channel_runtime_configs`），不再写入每台主机上明文的
+  `channels/runtime-config.json`。每个 provider 的配置用 `DEER_FLOW_CREDENTIALS_KEY`
+  加密；断开连接记为一条明文墓碑，仍会覆盖 `config.yaml` 中的配置；每次保存都会递增
+  该 provider 的 `version`。每个 Gateway 实例在每次请求时重新读表（路由不再把合并后
+  的配置缓存在 `app.state` 上）；启用 `channels.leader_lease` 时，持有者在每个续约
+  周期比对版本号，因此在任一实例上保存凭据或断开连接，都会在一个续约周期内到达平台
+  连接，而不必等持有者下次重启；接管租约的实例会读到断开状态，不会复活缓存中的旧凭据。
+  首次启动会导入已有的 `runtime-config.json`（表中已有的 provider 保留其行）并删除该
+  明文文件，因此回退到旧版本需要重新填写 UI 配置的机器人。没有可用密钥时，保存凭据
+  返回 `503` 而不是以明文存储，密钥无法解密的行视为未配置。`database.backend: memory`
+  仍使用 JSON 文件。 ([#6988])
+
 - **渠道：** 飞书渠道上基于选项的澄清改为渲染为可交互的按钮卡片，而不是纯文本：每个
   选项变成一个按钮（最多 4 个——再多时纯文本路径更易读），点击选项即可完成澄清，
   效果与输入该选项完全相同，卡片会原地更新以显示所作决定。渠道管理器把澄清中间件
@@ -1001,6 +1014,15 @@
   原因。([#6556])
 
 ### 修复
+
+- **浏览器：** `browser_screenshot` 不再替换线程 outputs 目录中已存在的文件。此前以
+  `report.png` 保存的截图会覆盖用户自己的 `report.png`、更早的截图，或同一秒内生成的
+  另一张默认命名截图；现在会像 `web_capture` 一样改用下一个空闲名称（`report-1.png`、
+  `report-2.png`……），工具结果会报告实际使用的名称。完整截图通过硬链接发布到目标名称，
+  因此并发占用的名称会被跳过而不是被替换，最终名称也不会暴露写了一半的文件。与 Gateway
+  上传相同，outputs 目录需要支持硬链接；不支持时工具会报错，而不会覆盖已有文件。发布前
+  被替换的暂存截图（例如换成指向宿主机文件的符号链接）绝不会被链接到 outputs，工具会
+  报错。 ([#6913])
 
 - **llm：** 流式响应已返回 `200` 之后才在流内报告的 provider 错误，现在会像以 HTTP
   状态码返回的同一错误一样重试。为了用 SSE keepalive 维持慢请求而提前返回 `200` 的
@@ -9396,5 +9418,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6876]: https://github.com/bytedance/deer-flow/pull/6876
 [#6897]: https://github.com/bytedance/deer-flow/pull/6897
 [#6909]: https://github.com/bytedance/deer-flow/pull/6909
+[#6913]: https://github.com/bytedance/deer-flow/pull/6913
 [#6930]: https://github.com/bytedance/deer-flow/pull/6930
+[#6988]: https://github.com/bytedance/deer-flow/pull/6988
 [#6991]: https://github.com/bytedance/deer-flow/pull/6991

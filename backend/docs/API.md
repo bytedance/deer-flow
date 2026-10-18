@@ -1734,6 +1734,19 @@ see `backend/docs/CONFIGURATION.md` for the events and the merge rule.
 { "provider": "wecom", "display_name": "WeCom", "connection_status": "connected", "proactive_notifications": true }
 ```
 
+**Runtime bot credentials.** `POST /api/channels/{provider}/runtime-config`
+(body `{"values": {...}}`, keyed by the provider's `credential_fields`) and
+`DELETE /api/channels/{provider}/runtime-config` are admin-only; they save or
+disconnect the deployment's bot for that provider and answer with its provider
+item. Password values come back masked (`********`); sending the mask back
+keeps the stored value. A save whose channel fails to start on the serving
+instance, or a disconnect whose channel fails to stop there, answers `400` and
+stores nothing (under `channels.leader_lease` a non-holder stores the save and
+the holder applies it on its next renewal tick). With a SQLite or
+PostgreSQL database the values are stored encrypted with
+`DEER_FLOW_CREDENTIALS_KEY` and shared by every Gateway instance; without a
+usable key a save answers `503`. See `backend/docs/IM_CHANNEL_CONNECTIONS.md`.
+
 ---
 
 ## Error Responses

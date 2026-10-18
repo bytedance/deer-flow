@@ -55,6 +55,7 @@ EXPECTED_GUIDANCE_PATHS = {
     "scripts/AGENTS.md",
     "examples/deerflow-extension-agent-teams/AGENTS.md",
     "examples/deerflow-extension-workflows/AGENTS.md",
+    "examples/deerflow-extension-weknora/AGENTS.md",
 }
 
 

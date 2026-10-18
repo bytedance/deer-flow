@@ -17,6 +17,7 @@ from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.tools.types import Runtime
 from deerflow.utils.atomic_write import publish_bytes_atomically as _publish_bytes_atomically
+from deerflow.utils.output_names import output_name_candidates
 from deerflow.utils.readability import ReadabilityExtractor
 
 from .browserless_client import BrowserlessClient, BrowserlessFetchResult, BrowserlessScreenshotResult
@@ -32,11 +33,6 @@ _OUTPUT_FORMAT_TO_EXTENSION = {
     "webp": "webp",
 }
 _SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
-# Cap collision-suffix probing so a saturated outputs directory cannot spin forever.
-_MAX_FILENAME_COLLISION_PROBES = 1000
-# Retry bound for the timestamped fallback: the microseconds stamp can only repeat
-# when another writer claimed that exact name within the same microsecond.
-_MAX_TIMESTAMP_CLAIM_ATTEMPTS = 5
 DEFAULT_BASE_URL = "http://localhost:3032"
 _UNSET = object()
 
@@ -257,21 +253,9 @@ def _dedupe_output_name(outputs_path: Path, output_name: str) -> str:
             means another writer is holding them; returning a name anyway would
             reintroduce the silent overwrite this function exists to prevent.
     """
-    stem = Path(output_name).stem
-    suffix = Path(output_name).suffix
-    if _reserve_output_name(outputs_path, output_name):
-        return output_name
-
-    for index in range(1, _MAX_FILENAME_COLLISION_PROBES + 1):
-        probe = f"{stem}-{index}{suffix}"
-        if _reserve_output_name(outputs_path, probe):
-            return probe
-
-    for _ in range(_MAX_TIMESTAMP_CLAIM_ATTEMPTS):
-        timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S-%f")
-        fallback = f"{stem}-{timestamp}{suffix}"
-        if _reserve_output_name(outputs_path, fallback):
-            return fallback
+    for candidate in output_name_candidates(output_name):
+        if _reserve_output_name(outputs_path, candidate):
+            return candidate
 
     raise RuntimeError(f"could not reserve an output filename for {output_name!r} in {outputs_path}")
 
