@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -17,7 +18,12 @@ def evaluator(monkeypatch):
     monkeypatch.syspath_prepend(str(SKILL_ROOT))
     spec = importlib.util.spec_from_file_location("skill_creator_run_eval", SKILL_ROOT / "scripts/run_eval.py")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    previous = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = previous
     return module
 
 
@@ -52,3 +58,15 @@ def test_drains_completed_child_output(evaluator, monkeypatch, tmp_path, event_k
     assert not list((tmp_path / ".claude/commands").glob("*.md"))
     for child in children:
         child.stdout.close()
+
+
+def test_evaluator_import_preserves_bytecode_setting(monkeypatch, tmp_path):
+    isolated = tmp_path / "skill"
+    shutil.copytree(SKILL_ROOT, isolated, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    monkeypatch.setattr(sys.modules[__name__], "SKILL_ROOT", isolated)
+    monkeypatch.setattr(sys, "dont_write_bytecode", False)
+    monkeypatch.delitem(sys.modules, "scripts.utils", raising=False)
+    monkeypatch.delitem(sys.modules, "scripts", raising=False)
+    evaluator.__wrapped__(monkeypatch)
+    assert not list(isolated.rglob("*.pyc"))
+    assert sys.dont_write_bytecode is False
