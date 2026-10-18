@@ -122,6 +122,9 @@ class Scheduling:
         with self.transaction() as connection:
             jobs = []
             query = select(_JOBS).where(
+                # Ordinary recovery is not scoped payload/launch authority.
+                # Scoped reservations remain counted until control proves STOP.
+                _JOBS.c.workspace_id.is_(None),
                 _JOBS.c.record["node_id"].as_string() == node_id,
                 func.coalesce(_JOBS.c.record["kind"].as_string(), "B") == kind,
                 func.coalesce(_JOBS.c.record["physical_stopped"].as_boolean(), False).is_(False),

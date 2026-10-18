@@ -1,5 +1,5 @@
 <!-- 当前状态：2026-10-18 用户恢复执行；历史暂停记录保留，参见文末最新检查点。 -->
-> **执行中，M4 部分完成。** Jenkins #99：C 队列恢复与撤权 NoStart 关键回归 20 项、35 文件 Ruff 通过。下一步 scoped claim/v2 接收与远端执行；完整 M0–M11 保留，租户启动关闭。
+> **执行中，M4 部分完成。** Jenkins #102：C 接收端独立 SQL 授权、原生接管和上下文传递，8 项关键测试及 37 文件 Ruff 通过。下一步 scoped 池派发与真实远端执行；完整 M0–M11 保留，租户启动关闭。
 
 # 2026-10-16 暂停与恢复检查点
 
@@ -1051,3 +1051,28 @@ Next: scoped claim/owned, independent v2 SQL authorization, receiver context and
 adoption, then physical C execution/recovery. Full M0–M11 remains open; activation
 false and startup schema fence unchanged. No deployment, push, model call or
 local application runtime.
+
+
+## M4 scoped C receiver checkpoint — 2026-10-18
+
+#100 reproduced scoped legacy-token acceptance and ordinary pool recovery
+returning scoped assignments: six failures. #101 passed seven cases, but the
+legacy adoption case failed because set_current_workspace rejects None. Fixed
+legacy admission to avoid that setter and reject inherited ambient workspace.
+#102 passed all eight focused cases and 37-file Ruff checks. Exact timings,
+archive/log/source hashes and owned cleanup: progress JSON `native_c_receiver`.
+Forty source hashes match the verified tree. No full-suite repeat.
+
+Receiver independently reads canonical native SQL pending authority before
+checking v2 claims; admission binds that context through reads, RunContext,
+owner CAS and task creation. CAS rechecks scoped lease and pending STOP under
+native locks. Ordinary owned recovery filters scoped payloads without releasing
+their capacity. Worker/browser entry uses the same preflight; scoped refusal
+retains uncertain capacity instead of using legacy settlement.
+
+Evidence limit: real SQL handoff/adoption and captured task context, but the
+execution entry is a context-observation stub. Membership-version withdrawal is
+an SQL fixture; this does not claim full removal lifecycle, actual graph/model,
+physical STOP, browser isolation or distributed delivery. Scoped claim/owned
+integration, actual C execution/recovery and C->B->C remain next. Full M0–M11
+and activation remain open/closed respectively; no push or deployment.

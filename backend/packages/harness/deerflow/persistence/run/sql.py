@@ -526,6 +526,10 @@ class RunRepository(RunStore):
         """Transfer only the exact uncancelled admission; keep its identity and payload."""
         async with self._sf() as session:
             change_seq, scope_conditions = await self._pending_transition_scope(session, run_id, user_id=user_id, thread_id=thread_id, thread_incarnation=thread_incarnation, workspace_context=workspace_context)
+            if expected_owner_worker_id.startswith("dispatch:"):
+                # The receiver preflight is read-only. Fence lease expiry and
+                # durable STOP again at the scoped adoption's locked owner CAS.
+                scope_conditions.append(or_(RunRow.workspace_id.is_(None), and_(RunRow.lease_expires_at > datetime.now(UTC), ~pending_run_stop(run_id=run_id))))
             result = await session.execute(
                 update(RunRow)
                 .where(*scope_conditions, RunRow.run_id == run_id, RunRow.thread_id == thread_id, RunRow.user_id == user_id, RunRow.status == "pending", RunRow.cancel_action.is_(None), RunRow.owner_worker_id == expected_owner_worker_id)

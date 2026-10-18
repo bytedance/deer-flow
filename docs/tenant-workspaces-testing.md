@@ -568,3 +568,28 @@ Next: scoped claim/owned, independent v2 SQL authorization, receiver context and
 adoption, then physical C execution/recovery. Full M0–M11 remains open; activation
 false and startup schema fence unchanged. No deployment, push, model call or
 local application runtime.
+
+
+## M4 scoped C receiver checkpoint — 2026-10-18
+
+#100 reproduced scoped legacy-token acceptance and ordinary pool recovery
+returning scoped assignments: six failures. #101 passed seven cases, but the
+legacy adoption case failed because set_current_workspace rejects None. Fixed
+legacy admission to avoid that setter and reject inherited ambient workspace.
+#102 passed all eight focused cases and 37-file Ruff checks. Exact timings,
+archive/log/source hashes and owned cleanup: progress JSON `native_c_receiver`.
+Forty source hashes match the verified tree. No full-suite repeat.
+
+Receiver independently reads canonical native SQL pending authority before
+checking v2 claims; admission binds that context through reads, RunContext,
+owner CAS and task creation. CAS rechecks scoped lease and pending STOP under
+native locks. Ordinary owned recovery filters scoped payloads without releasing
+their capacity. Worker/browser entry uses the same preflight; scoped refusal
+retains uncertain capacity instead of using legacy settlement.
+
+Evidence limit: real SQL handoff/adoption and captured task context, but the
+execution entry is a context-observation stub. Membership-version withdrawal is
+an SQL fixture; this does not claim full removal lifecycle, actual graph/model,
+physical STOP, browser isolation or distributed delivery. Scoped claim/owned
+integration, actual C execution/recovery and C->B->C remain next. Full M0–M11
+and activation remain open/closed respectively; no push or deployment.

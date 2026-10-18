@@ -738,7 +738,10 @@ reauthorize; snapshot JSON alone never grants execution.
 Shanghai SQL #95 verifies thirteen focused checks and thirty-five-file Ruff.
 Queued restart/lease and pre-assignment NoStart control now pass Shanghai #99
 (20 focused cases). Refusal recovery,
-scoped pool claim/owned, independent v2 launch verification, receiver RunContext,
-recovery and physical C->B->C remain pending. Default pool claims still refuse
+scoped pool claim/owned integration, recovery and physical C->B->C remain pending.
+Independent v2 receiver authorization and RunContext adoption are verified below. Default pool claims still refuse
 scoped C, and tenant activation remains closed. See the current
 [validation evidence](../../../docs/tenant-workspaces-testing.md).
+
+
+Scoped receiver acceptance now uses v2 capabilities plus independent native SQL authorization and the existing RunManager adoption path. Ordinary Scheduling.owned excludes scoped payloads while their capacity remains reserved. Shanghai #102 validates eight focused checks using a context-observation execution entry; scoped dispatch and physical execution remain pending.

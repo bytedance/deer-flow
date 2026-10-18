@@ -94,5 +94,12 @@ def test_pool_claim_filters_unintegrated_scope_before_limit(executor_engine):  #
         store.mutate(legacy["id"], lambda row: row.update(state="uncertain", lease_until=0))
         assert pool.claim("one", "worker") is None
         assert pool.node_status("one")["unreleased"] == 1
+        # A historical scoped assignment is control-only, never a payload grant
+        # for the ordinary pool's recovery endpoint. Keep charging its capacity.
+        assigned = store.mutate(scoped["id"], lambda row: row.update(state="starting", node_id="one", worker_owner="old-owner", generation="old-generation", attempt=1, lease_until=0))
+        recovered = pool.owned("one", "restarted-worker")
+        assert [job["id"] for job in recovered] == [legacy["id"]]
+        assert store.get(scoped["id"]) == assigned
+        assert pool.node_status("one")["unreleased"] == 2
     finally:
         store.engine.dispose()

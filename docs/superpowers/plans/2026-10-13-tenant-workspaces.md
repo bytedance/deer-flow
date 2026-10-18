@@ -909,3 +909,14 @@ release evidence before activation, rather than opening the current guard.
 
 Evidence: `docs/tenant-workspaces-progress.json` → `native_c_queue_control`.
 Full M4 and M0–M11 are not complete.
+
+
+### M4 step 22 — scoped C receiver
+
+- [x] v2 claims require independently resolved native SQL workspace authority.
+- [x] Preserve original context through native reads, ownership adoption and task attachment.
+- [x] Refuse legacy/stripped scope and expired adoption leases; keep ordinary pool recovery isolated.
+- [x] Eight focused cloud checks, #102; execution context fixture only, not physical graph evidence.
+- [ ] Scoped pool dispatch, actual remote execution and recovery remain next.
+
+Evidence: `docs/tenant-workspaces-progress.json` → `native_c_receiver`. Full M4/M0–M11 remains open.

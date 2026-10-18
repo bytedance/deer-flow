@@ -1549,23 +1549,23 @@
   },
   "latest_checkpoint": {
     "work_package": "M4",
-    "status": "partial M4: scoped C queued restart and control-only NoStart verified; scoped remote execution pending",
+    "status": "partial M4: scoped C receiver independent SQL authorization and native adoption/context verified; scoped pool dispatch and physical execution pending",
     "last_verified_job": "deerflow-tenant-execution-m4-sql",
-    "last_verified_build": 99,
-    "next": "Scoped claim/owned and independent SQL authorization for v2 launch/receiver adoption; then remote execution and recovery. Keep activation closed.",
+    "last_verified_build": 102,
+    "next": "Wire scoped claim/owned to native authorization and v2 launch, then actual C execution/STOP/recovery and C->B->C. Do not infer physical execution from receiver context fixture.",
     "tenant_activation": "closed",
     "deployment": "none",
     "previous_backend_job": "deerflow-tenant-m1-postgres",
     "previous_backend_build": 89,
     "native_candidate_schema": "0040_mcp_workspace_identity",
     "last_verified_database_job": "deerflow-tenant-execution-m4-sql",
-    "last_verified_database_build": 99,
+    "last_verified_database_build": 102,
     "executor_candidate_schema": "e0003_execution_identity",
     "execution_status": "active",
     "resumed_at": "2026-10-18",
     "last_full_regression_build": 88,
     "last_full_regression_tests": 134,
-    "last_verified_tests": 20
+    "last_verified_tests": 8
   },
   "workspace_feedback": {
     "status": "partial_M3_verified_repository_and_HTTP_main",
@@ -13163,5 +13163,209 @@
     },
     "historical_volume_limit": "Only recorded exact fixture volumes are confirmed removed; no ownership is inferred for old unrecorded volumes and no global prune is performed.",
     "scope": "Real SQLite/Postgres queued restart, owner lease, member revocation NoStart and assigned-work retention. Assigned worker identity is a ledger fixture, not physical execution. No live Redis, receiver or remote C proof."
+  },
+  "native_c_receiver": {
+    "builds": [
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 39951,
+        "number": 100,
+        "result": "FAILURE",
+        "job": "deerflow-tenant-execution-m4-sql",
+        "phase": "m4-native-c-receiver-red",
+        "source_archive_sha256": "fd3c4e14aabd28b1d37f967fed29417f00565303adbf4aa5bc835ee8b3741b67",
+        "log_sha256": "9d4b18e664c837e961add528ee62b20e330060190ce3cef940fda60db7836a05",
+        "test_summaries": [
+          "6 failed in 22.77s"
+        ],
+        "format_summaries": [],
+        "code_sha256": {
+          "backend/packages/harness/deerflow/runtime/invocation.py": "4317568884be10564cc96fe7a78ae1321d0102c9a2c8fdef84e13b7d495f6a90",
+          "backend/packages/harness/deerflow/agents/middlewares/workspace_execution_middleware.py": "01ca371d14d405cef011f311edbfe9793c32a8479f355b98fa61e0946d816e26",
+          "backend/packages/harness/deerflow/agents/middlewares/tool_error_handling_middleware.py": "3264704eb49e85603525930ccb29f25d4143b2bcee1da334609c3b515832c290",
+          "backend/packages/harness/deerflow/models/factory.py": "c465e437c1ed5728edbe9d1bfbb4271a7bbb5807760ccdf8ab159b0cfb006ac2",
+          "backend/packages/harness/deerflow/extensions/ordering.py": "9fd1da7df3c947faf154b665858ef80243af66cb4f6c0251bf2a9495d0ec485c",
+          "backend/tests/test_workspace_invocation_gate.py": "583ad7ffe9c0609711df578d88b681c7c16ddca52c2f5bac4c6dee86c8ccaba9",
+          "backend/tests/test_tool_error_handling_middleware.py": "a8e47a40593906131a868533bdeffc2d5b5d184ebf17eaa88a81257207caca04",
+          "backend/packages/harness/deerflow/runtime/stream_bridge/scoped_worker.py": "b38b4ad73551f131e990b561cf7ced1ef9752fad3e886e42efa5639e786fdb29",
+          "backend/packages/harness/deerflow/persistence/thread_meta/sql.py": "441873f52c58edda20b82492e7da3941fc0429d8aface45352913817d251465a",
+          "backend/packages/harness/deerflow/runtime/events/store/db.py": "acd2c54995fccce534310a0ca0cc9b558eff3105cec7f0019f3ccc5048a098f8",
+          "backend/packages/harness/deerflow/runtime/journal.py": "b7858524ac3526893b426962943f4e6052898b42b87f19ea47cfcab77f6c91fb",
+          "backend/tests/test_workspace_worker_effects.py": "b9986c0e8bbe617f6f94755a562c78cae57333d5d6dcb28ee5a55a587c75625e",
+          "backend/packages/harness/deerflow/runtime/checkpointer/scoped_run.py": "031673eed7357d2525df89860bfdda97db98afa2738663a94121067a36b5acf4",
+          "backend/tests/test_workspace_run_checkpoints.py": "51b7b4f4d1f4416297748e93abc47c4bc7594269f1344aa6a2443b219bc359f4",
+          "backend/packages/harness/deerflow/persistence/workspaces/run_control.py": "9093d1553768db39e898a65224454f4bc30f7b38e65781aa0f77a9fcda5d4dfa",
+          "backend/packages/harness/deerflow/persistence/workspaces/execution_control.py": "8af23b8c9ad22ace9d11e0895edee9004a6f08005a9ab2eee9d13e333a5f75fa",
+          "backend/packages/harness/deerflow/persistence/run/sql.py": "fc8c488e14b57f3f31b53b2203e85e8ea26662fe1fbea7679dae8e7ddffc05a6",
+          "backend/packages/harness/deerflow/runtime/runs/store/base.py": "63ace590b6f6ed997dd40dad6d3641aed2a0f6a7821f7f1cb5594d10a6107a57",
+          "backend/packages/harness/deerflow/runtime/runs/manager.py": "d64feffac7e04f4116277579900e77917799773d623836e2c77c41bba6454a88",
+          "backend/packages/harness/deerflow/runtime/runs/worker.py": "33c834ccb3e75c93e95fd576259f6f7b2137127ba2d9364af360f84558621455",
+          "backend/tests/test_workspace_revocation.py": "3a8ffc933f0a5d970467a3be4976021780e6540c818277f55898db3c690fd3c6",
+          "backend/tests/test_workspace_run_lifetime.py": "bcc80edcba722388824c0ba1a2070819bcc405af0b40de960e26fb392736a3df",
+          "backend/tests/test_workspace_startup.py": "8506825ce9830feb1db64e6edac97b0ec2c8071062eccd967e90aea701cab887",
+          "scripts/render_tenant_run_control_pipeline.py": "8ef126940e20c55944d7b4df1dafb2b59853664e74359166f3a5f37c4de9be4f",
+          "examples/ecs-native/deploy/Jenkinsfile.tenant-run-control.in": "0e67edae683bd5fc4b91f846a8a143b47f2779f09ea7da65544cdda6bd5863fc",
+          "backend/packages/harness/deerflow/extensions/model_invocation.py": "85256fc9164004511c79ff5fb9f55632fce1580c6bfe9ec243fc212df6213de8",
+          "backend/packages/harness/deerflow/agents/middlewares/title_middleware.py": "31aed7631685f60c2628c9a91bad53c93cd20d7279194e9d16a6221590f5ee20",
+          "backend/packages/harness/deerflow/agents/middlewares/summarization_middleware.py": "52f929ec81c732dbdee12c3974dea536a13500be3c75e7376d489310c9536aec",
+          "backend/tests/test_workspace_model_service_lifetime.py": "b558e5a10ec5ddbfa0dd83459c5d871bed13fbdaa93c7e5c0deacec80699b5e4",
+          "backend/packages/harness/deerflow/runtime/goal.py": "520a268fe77ffe1b945a2e9fe7ba652c97756a68ef155427a87b207089546526",
+          "backend/packages/harness/deerflow/sandbox/tools.py": "e32ebdbfce3f09df31be61c2007b645994b8a5bc220c612a50d2bc54f58c7471",
+          "backend/packages/harness/deerflow/agents/middlewares/read_before_write_middleware.py": "1fa173212f8e7da576c7d500d7163653938355e18ce7988317e7d225893f26f2",
+          "backend/tests/test_workspace_sandbox_dispatch.py": "91a606f95ab8e5bbcefe3f4718e1176dc23175e6f4a2e4a12ae053ad166b06e3",
+          "backend/app/gateway/native_admission.py": "f9c5e0fb4f0a0a2e883b02a1b6452d80d4f1549ab376ceda6dfdb3c0342dd3d2",
+          "backend/packages/ecs-executor/ecs_executor/agent_dispatch.py": "3a696d5832baefedbe666696aba398798368052f3007335c2294bb8142174a4f",
+          "backend/packages/ecs-executor/ecs_executor/job_store.py": "bd01b51430fcf1e4281d92b8944e2d660ba3e265055420513e86ee0c30b40f72",
+          "backend/tests/test_workspace_native_dispatch.py": "645b2c637226a38377de58aab9a94a76f5bc9e3cc60d6b8dabda6ed2aa05eed6",
+          "backend/tests/test_ecs_executor_operations.py": "7a2872ca6e018b3e6492d57b1c1b4bf7523c1bf4d2b9ea3b6f204973ecbd049f",
+          "backend/packages/ecs-executor/ecs_executor/scheduling.py": "80b7219a36e5fae5cd603e88694526f2a49d7877b06f64b4df2742718bd34b4d",
+          "backend/tests/test_workspace_execution_ledger.py": "e26987dbd4e35511dde90447f2f76357171e720af8fb3b34e289d81356f03d2c"
+        },
+        "recorded_removed_fixture_volumes": [
+          "ff96f59aacfb6a568b700991062fb53e388758c4d5f2c916def2e99668784f42"
+        ]
+      },
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 40006,
+        "number": 101,
+        "result": "FAILURE",
+        "job": "deerflow-tenant-execution-m4-sql",
+        "phase": "m4-native-c-receiver-main",
+        "source_archive_sha256": "570963fc00e31883ca820f54fa11f904f27e44279e0afcb7c030591f7d11fc74",
+        "log_sha256": "814905324934f1830a30a0df929615a68167bf9d2e0224f7a227e718381699a4",
+        "test_summaries": [
+          "1 failed, 7 passed in 23.54s"
+        ],
+        "format_summaries": [],
+        "code_sha256": {
+          "backend/packages/harness/deerflow/runtime/invocation.py": "4317568884be10564cc96fe7a78ae1321d0102c9a2c8fdef84e13b7d495f6a90",
+          "backend/packages/harness/deerflow/agents/middlewares/workspace_execution_middleware.py": "01ca371d14d405cef011f311edbfe9793c32a8479f355b98fa61e0946d816e26",
+          "backend/packages/harness/deerflow/agents/middlewares/tool_error_handling_middleware.py": "3264704eb49e85603525930ccb29f25d4143b2bcee1da334609c3b515832c290",
+          "backend/packages/harness/deerflow/models/factory.py": "c465e437c1ed5728edbe9d1bfbb4271a7bbb5807760ccdf8ab159b0cfb006ac2",
+          "backend/packages/harness/deerflow/extensions/ordering.py": "9fd1da7df3c947faf154b665858ef80243af66cb4f6c0251bf2a9495d0ec485c",
+          "backend/tests/test_workspace_invocation_gate.py": "583ad7ffe9c0609711df578d88b681c7c16ddca52c2f5bac4c6dee86c8ccaba9",
+          "backend/tests/test_tool_error_handling_middleware.py": "a8e47a40593906131a868533bdeffc2d5b5d184ebf17eaa88a81257207caca04",
+          "backend/packages/harness/deerflow/runtime/stream_bridge/scoped_worker.py": "b38b4ad73551f131e990b561cf7ced1ef9752fad3e886e42efa5639e786fdb29",
+          "backend/packages/harness/deerflow/persistence/thread_meta/sql.py": "441873f52c58edda20b82492e7da3941fc0429d8aface45352913817d251465a",
+          "backend/packages/harness/deerflow/runtime/events/store/db.py": "acd2c54995fccce534310a0ca0cc9b558eff3105cec7f0019f3ccc5048a098f8",
+          "backend/packages/harness/deerflow/runtime/journal.py": "b7858524ac3526893b426962943f4e6052898b42b87f19ea47cfcab77f6c91fb",
+          "backend/tests/test_workspace_worker_effects.py": "b9986c0e8bbe617f6f94755a562c78cae57333d5d6dcb28ee5a55a587c75625e",
+          "backend/packages/harness/deerflow/runtime/checkpointer/scoped_run.py": "031673eed7357d2525df89860bfdda97db98afa2738663a94121067a36b5acf4",
+          "backend/tests/test_workspace_run_checkpoints.py": "51b7b4f4d1f4416297748e93abc47c4bc7594269f1344aa6a2443b219bc359f4",
+          "backend/packages/harness/deerflow/persistence/workspaces/run_control.py": "9093d1553768db39e898a65224454f4bc30f7b38e65781aa0f77a9fcda5d4dfa",
+          "backend/packages/harness/deerflow/persistence/workspaces/execution_control.py": "8af23b8c9ad22ace9d11e0895edee9004a6f08005a9ab2eee9d13e333a5f75fa",
+          "backend/packages/harness/deerflow/persistence/run/sql.py": "366e6cf2dc66c92b6f1a22be6ad0069e42a1a147715acf0950594593dd8d244a",
+          "backend/packages/harness/deerflow/runtime/runs/store/base.py": "63ace590b6f6ed997dd40dad6d3641aed2a0f6a7821f7f1cb5594d10a6107a57",
+          "backend/packages/harness/deerflow/runtime/runs/manager.py": "d64feffac7e04f4116277579900e77917799773d623836e2c77c41bba6454a88",
+          "backend/packages/harness/deerflow/runtime/runs/worker.py": "33c834ccb3e75c93e95fd576259f6f7b2137127ba2d9364af360f84558621455",
+          "backend/tests/test_workspace_revocation.py": "3a8ffc933f0a5d970467a3be4976021780e6540c818277f55898db3c690fd3c6",
+          "backend/tests/test_workspace_run_lifetime.py": "bcc80edcba722388824c0ba1a2070819bcc405af0b40de960e26fb392736a3df",
+          "backend/tests/test_workspace_startup.py": "8506825ce9830feb1db64e6edac97b0ec2c8071062eccd967e90aea701cab887",
+          "scripts/render_tenant_run_control_pipeline.py": "8ef126940e20c55944d7b4df1dafb2b59853664e74359166f3a5f37c4de9be4f",
+          "examples/ecs-native/deploy/Jenkinsfile.tenant-run-control.in": "0e67edae683bd5fc4b91f846a8a143b47f2779f09ea7da65544cdda6bd5863fc",
+          "backend/packages/harness/deerflow/extensions/model_invocation.py": "85256fc9164004511c79ff5fb9f55632fce1580c6bfe9ec243fc212df6213de8",
+          "backend/packages/harness/deerflow/agents/middlewares/title_middleware.py": "31aed7631685f60c2628c9a91bad53c93cd20d7279194e9d16a6221590f5ee20",
+          "backend/packages/harness/deerflow/agents/middlewares/summarization_middleware.py": "52f929ec81c732dbdee12c3974dea536a13500be3c75e7376d489310c9536aec",
+          "backend/tests/test_workspace_model_service_lifetime.py": "b558e5a10ec5ddbfa0dd83459c5d871bed13fbdaa93c7e5c0deacec80699b5e4",
+          "backend/packages/harness/deerflow/runtime/goal.py": "520a268fe77ffe1b945a2e9fe7ba652c97756a68ef155427a87b207089546526",
+          "backend/packages/harness/deerflow/sandbox/tools.py": "e32ebdbfce3f09df31be61c2007b645994b8a5bc220c612a50d2bc54f58c7471",
+          "backend/packages/harness/deerflow/agents/middlewares/read_before_write_middleware.py": "1fa173212f8e7da576c7d500d7163653938355e18ce7988317e7d225893f26f2",
+          "backend/tests/test_workspace_sandbox_dispatch.py": "91a606f95ab8e5bbcefe3f4718e1176dc23175e6f4a2e4a12ae053ad166b06e3",
+          "backend/app/gateway/native_admission.py": "14665d22fb79d580ea380f5a9ceae58b24f48bc6c9510574e7ac6dc80e4ca258",
+          "backend/packages/ecs-executor/ecs_executor/agent_dispatch.py": "02eb5722783725309c1c17894a2a6d6f84bbe72953be1b7931892d1eaeff667f",
+          "backend/packages/ecs-executor/ecs_executor/job_store.py": "bd01b51430fcf1e4281d92b8944e2d660ba3e265055420513e86ee0c30b40f72",
+          "backend/tests/test_workspace_native_dispatch.py": "ba8c7e14cbfdd165a0916062998c6d8fdfa492e3839411e724b751844f34e909",
+          "backend/tests/test_ecs_executor_operations.py": "7a2872ca6e018b3e6492d57b1c1b4bf7523c1bf4d2b9ea3b6f204973ecbd049f",
+          "backend/packages/ecs-executor/ecs_executor/scheduling.py": "bea2ac9dc479df1bbbb8e1536a1e19b0812e188d28c5b640ab6d93b805e8267c",
+          "backend/tests/test_workspace_execution_ledger.py": "e26987dbd4e35511dde90447f2f76357171e720af8fb3b34e289d81356f03d2c"
+        },
+        "recorded_removed_fixture_volumes": [
+          "86815bd49bff81b9bace633b77b39cea61e144c5d35461a4399fd5130405c6a5"
+        ]
+      },
+      {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "building": false,
+        "duration": 39874,
+        "number": 102,
+        "result": "SUCCESS",
+        "job": "deerflow-tenant-execution-m4-sql",
+        "phase": "m4-native-c-receiver-final",
+        "source_archive_sha256": "647f06448f0b4f228e097427d46bf553ff0ca1c0109f3b9d3661e1e0db63ac0b",
+        "log_sha256": "cbdac68093a08f5ebd140bb953a0527204821b8134626e55a281ab3a9cbe2bd5",
+        "test_summaries": [
+          "8 passed in 22.68s"
+        ],
+        "format_summaries": [
+          "37 files already formatted"
+        ],
+        "code_sha256": {
+          "backend/packages/harness/deerflow/runtime/invocation.py": "4317568884be10564cc96fe7a78ae1321d0102c9a2c8fdef84e13b7d495f6a90",
+          "backend/packages/harness/deerflow/agents/middlewares/workspace_execution_middleware.py": "01ca371d14d405cef011f311edbfe9793c32a8479f355b98fa61e0946d816e26",
+          "backend/packages/harness/deerflow/agents/middlewares/tool_error_handling_middleware.py": "3264704eb49e85603525930ccb29f25d4143b2bcee1da334609c3b515832c290",
+          "backend/packages/harness/deerflow/models/factory.py": "c465e437c1ed5728edbe9d1bfbb4271a7bbb5807760ccdf8ab159b0cfb006ac2",
+          "backend/packages/harness/deerflow/extensions/ordering.py": "9fd1da7df3c947faf154b665858ef80243af66cb4f6c0251bf2a9495d0ec485c",
+          "backend/tests/test_workspace_invocation_gate.py": "583ad7ffe9c0609711df578d88b681c7c16ddca52c2f5bac4c6dee86c8ccaba9",
+          "backend/tests/test_tool_error_handling_middleware.py": "a8e47a40593906131a868533bdeffc2d5b5d184ebf17eaa88a81257207caca04",
+          "backend/packages/harness/deerflow/runtime/stream_bridge/scoped_worker.py": "b38b4ad73551f131e990b561cf7ced1ef9752fad3e886e42efa5639e786fdb29",
+          "backend/packages/harness/deerflow/persistence/thread_meta/sql.py": "441873f52c58edda20b82492e7da3941fc0429d8aface45352913817d251465a",
+          "backend/packages/harness/deerflow/runtime/events/store/db.py": "acd2c54995fccce534310a0ca0cc9b558eff3105cec7f0019f3ccc5048a098f8",
+          "backend/packages/harness/deerflow/runtime/journal.py": "b7858524ac3526893b426962943f4e6052898b42b87f19ea47cfcab77f6c91fb",
+          "backend/tests/test_workspace_worker_effects.py": "b9986c0e8bbe617f6f94755a562c78cae57333d5d6dcb28ee5a55a587c75625e",
+          "backend/packages/harness/deerflow/runtime/checkpointer/scoped_run.py": "031673eed7357d2525df89860bfdda97db98afa2738663a94121067a36b5acf4",
+          "backend/tests/test_workspace_run_checkpoints.py": "51b7b4f4d1f4416297748e93abc47c4bc7594269f1344aa6a2443b219bc359f4",
+          "backend/packages/harness/deerflow/persistence/workspaces/run_control.py": "9093d1553768db39e898a65224454f4bc30f7b38e65781aa0f77a9fcda5d4dfa",
+          "backend/packages/harness/deerflow/persistence/workspaces/execution_control.py": "8af23b8c9ad22ace9d11e0895edee9004a6f08005a9ab2eee9d13e333a5f75fa",
+          "backend/packages/harness/deerflow/persistence/run/sql.py": "366e6cf2dc66c92b6f1a22be6ad0069e42a1a147715acf0950594593dd8d244a",
+          "backend/packages/harness/deerflow/runtime/runs/store/base.py": "63ace590b6f6ed997dd40dad6d3641aed2a0f6a7821f7f1cb5594d10a6107a57",
+          "backend/packages/harness/deerflow/runtime/runs/manager.py": "d64feffac7e04f4116277579900e77917799773d623836e2c77c41bba6454a88",
+          "backend/packages/harness/deerflow/runtime/runs/worker.py": "33c834ccb3e75c93e95fd576259f6f7b2137127ba2d9364af360f84558621455",
+          "backend/tests/test_workspace_revocation.py": "3a8ffc933f0a5d970467a3be4976021780e6540c818277f55898db3c690fd3c6",
+          "backend/tests/test_workspace_run_lifetime.py": "bcc80edcba722388824c0ba1a2070819bcc405af0b40de960e26fb392736a3df",
+          "backend/tests/test_workspace_startup.py": "8506825ce9830feb1db64e6edac97b0ec2c8071062eccd967e90aea701cab887",
+          "scripts/render_tenant_run_control_pipeline.py": "8ef126940e20c55944d7b4df1dafb2b59853664e74359166f3a5f37c4de9be4f",
+          "examples/ecs-native/deploy/Jenkinsfile.tenant-run-control.in": "0e67edae683bd5fc4b91f846a8a143b47f2779f09ea7da65544cdda6bd5863fc",
+          "backend/packages/harness/deerflow/extensions/model_invocation.py": "85256fc9164004511c79ff5fb9f55632fce1580c6bfe9ec243fc212df6213de8",
+          "backend/packages/harness/deerflow/agents/middlewares/title_middleware.py": "31aed7631685f60c2628c9a91bad53c93cd20d7279194e9d16a6221590f5ee20",
+          "backend/packages/harness/deerflow/agents/middlewares/summarization_middleware.py": "52f929ec81c732dbdee12c3974dea536a13500be3c75e7376d489310c9536aec",
+          "backend/tests/test_workspace_model_service_lifetime.py": "b558e5a10ec5ddbfa0dd83459c5d871bed13fbdaa93c7e5c0deacec80699b5e4",
+          "backend/packages/harness/deerflow/runtime/goal.py": "520a268fe77ffe1b945a2e9fe7ba652c97756a68ef155427a87b207089546526",
+          "backend/packages/harness/deerflow/sandbox/tools.py": "e32ebdbfce3f09df31be61c2007b645994b8a5bc220c612a50d2bc54f58c7471",
+          "backend/packages/harness/deerflow/agents/middlewares/read_before_write_middleware.py": "1fa173212f8e7da576c7d500d7163653938355e18ce7988317e7d225893f26f2",
+          "backend/tests/test_workspace_sandbox_dispatch.py": "91a606f95ab8e5bbcefe3f4718e1176dc23175e6f4a2e4a12ae053ad166b06e3",
+          "backend/app/gateway/native_admission.py": "5fa65990a00fd7ffc1bd31ba6432d76533c0b83741c41135f74436f22fbafbb8",
+          "backend/packages/ecs-executor/ecs_executor/agent_dispatch.py": "02eb5722783725309c1c17894a2a6d6f84bbe72953be1b7931892d1eaeff667f",
+          "backend/packages/ecs-executor/ecs_executor/job_store.py": "bd01b51430fcf1e4281d92b8944e2d660ba3e265055420513e86ee0c30b40f72",
+          "backend/tests/test_workspace_native_dispatch.py": "ba8c7e14cbfdd165a0916062998c6d8fdfa492e3839411e724b751844f34e909",
+          "backend/tests/test_ecs_executor_operations.py": "7a2872ca6e018b3e6492d57b1c1b4bf7523c1bf4d2b9ea3b6f204973ecbd049f",
+          "backend/packages/ecs-executor/ecs_executor/scheduling.py": "bea2ac9dc479df1bbbb8e1536a1e19b0812e188d28c5b640ab6d93b805e8267c",
+          "backend/tests/test_workspace_execution_ledger.py": "e26987dbd4e35511dde90447f2f76357171e720af8fb3b34e289d81356f03d2c"
+        },
+        "recorded_removed_fixture_volumes": [
+          "ea7acfcf5ac514079686a36185094963a8538945fa9ae0b2f9c6691276305707"
+        ]
+      }
+    ],
+    "images": [
+      {
+        "id": "sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01",
+        "declared_volumes": []
+      },
+      {
+        "id": "sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea",
+        "declared_volumes": [
+          "/var/lib/postgresql/data"
+        ]
+      }
+    ],
+    "remaining_owned_resources": {
+      "container": [],
+      "network": []
+    },
+    "historical_volume_limit": "Only recorded exact fixture volumes are confirmed removed; no ownership is inferred for old unrecorded volumes and no global prune is performed.",
+    "scope": "Real SQLite/Postgres handoff and receiver owner CAS; execution entry is a context-observation stub, not graph/model/tool/physical C evidence. Membership version change, legacy/stripped scope, lease expiry during admission, ordinary pool recovery isolation and two legacy regressions. Scoped pool launch remains closed."
   }
 }

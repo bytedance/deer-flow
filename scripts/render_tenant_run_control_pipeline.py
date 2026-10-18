@@ -35,6 +35,8 @@ def main():
             "native-dispatch-final",
             "native-queue-main",
             "native-queue-final",
+            "native-receiver-main",
+            "native-receiver-final",
         ),
         default="revocation",
     )
@@ -110,6 +112,10 @@ def main():
         tests = "tests/test_workspace_sandbox_dispatch.py"
     if args.suite == "sandbox-final":
         tests += " tests/test_workspace_sandbox_dispatch.py tests/test_ensure_sandbox_initialized.py::test_post_acquire_lookup_failure_unwinds_async_execution_lease tests/test_ensure_sandbox_initialized.py::test_async_fork_restored_owner_holds_non_releasing_scope_lease tests/test_ensure_sandbox_initialized.py::test_async_reuse_replaces_stale_checkpoint_and_owner_binding tests/test_sandbox_authorization.py::test_async_sandbox_tool_authorizes_once_via_async_provider tests/test_sandbox_authorization.py::test_composed_write_authorization_deny_is_not_swallowed tests/test_read_before_write_middleware.py::TestWriteGate::test_new_file_write_allowed tests/test_read_before_write_middleware.py::TestWriteGate::test_overwrite_existing_without_read_blocked"
+    if args.suite in ("native-receiver-main", "native-receiver-final"):
+        tests = "tests/test_workspace_native_dispatch.py::test_native_c_receiver_uses_original_sql_authority tests/test_workspace_execution_ledger.py::test_pool_claim_filters_unintegrated_scope_before_limit"
+    if args.suite == "native-receiver-final":
+        tests += " tests/test_ecs_executor_agent_dispatch.py::test_native_capability_rejects_changed_snapshot_and_assignment tests/test_ecs_executor_agent_dispatch.py::test_native_adoption_rejects_changed_durable_payload_before_owner_transfer"
     rendered = rendered.replace("@@TEST_PATHS@@", tests)
     if "@@" in rendered:
         parser.error("unresolved pipeline marker")

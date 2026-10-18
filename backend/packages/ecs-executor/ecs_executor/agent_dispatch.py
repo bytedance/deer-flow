@@ -54,17 +54,37 @@ def _arguments(job):
     return {**{key: job[key] for key in ("id", "node_id", "generation", "worker_owner", "native")}, "node_budget": job.get("node_budget")}
 
 
-def sign_native_launch(job, secret):
+def _native_workspace(job, context):
     native = job["native"]
+    scoped = any(value.get(key) is not None for value in (job, native) for key in ("workspace_id", "workspace_context"))
+    if scoped or context is not None:
+        if context is None or any(value.get("workspace_id") != context.workspace_id or value.get("workspace_context") != asdict(context) for value in (job, native)):
+            raise ValueError("Native launch capability requires matching workspace authority")
+
+
+def sign_native_launch(job, secret, *, workspace_context=None):
+    native = job["native"]
+    _native_workspace(job, workspace_context)
     return mint_execution_scope(
-        secret=secret.encode(), audience=job["node_id"], user_id=native["user_id"], thread_id=native["thread_id"], incarnation=native["incarnation"], run_id=native["run_id"], operation="native_launch", arguments=_arguments(job)
+        secret=secret.encode(),
+        audience=job["node_id"],
+        user_id=native["user_id"],
+        thread_id=native["thread_id"],
+        incarnation=native["incarnation"],
+        run_id=native["run_id"],
+        operation="native_launch",
+        arguments=_arguments(job),
+        workspace_context=workspace_context,
     )
 
 
-def verify_native_launch(job, token, secret):
+def verify_native_launch(job, token, secret, *, expected_workspace_context=None):
     try:
         native = job["native"]
-        claims = verify_execution_scope(token, secret=secret.encode(), authenticated_user_id=native["user_id"], arguments=_arguments(job), expected_audience=job["node_id"], expected_operation="native_launch")
+        _native_workspace(job, expected_workspace_context)
+        claims = verify_execution_scope(
+            token, secret=secret.encode(), authenticated_user_id=native["user_id"], arguments=_arguments(job), expected_audience=job["node_id"], expected_operation="native_launch", expected_workspace_context=expected_workspace_context
+        )
         if any(claims[key] != native[key] for key in ("user_id", "thread_id", "incarnation", "run_id")):
             raise ValueError("Native identity mismatch")
         return native
@@ -658,7 +678,9 @@ class NativeWorkerHost:
                 if browser is not None:
                     # Verify the launch before its identity may bind browser
                     # state; adoption itself verifies it again at the native fence.
-                    native = verify_native_launch(job, token, self.secret)
+                    from app.gateway.native_admission import verify_native_launch_for_receiver
+
+                    native, _ = await verify_native_launch_for_receiver(self.app, job, token, self.secret)
                     with await browser.execution_scope(native) as attach_browser_task:
                         record = await adopt_native_run(self.app, job, token, self.secret, admission_check=self.check_admission)
                         attach_browser_task(record.task)
@@ -689,7 +711,9 @@ class NativeWorkerHost:
     async def execute(self, job, token):
 
         try:
-            verify_native_launch(job, token, self.secret)
+            from app.gateway.native_admission import verify_native_launch_for_receiver
+
+            await verify_native_launch_for_receiver(self.app, job, token, self.secret)
             budget = job["node_budget"]
             if budget["max_concurrency"] != 1 or budget["resident_cpu_millis"] < 1500 or budget["resident_memory_mib"] < 2048 or job["node_id"] != self.config["node_id"]:
                 raise ValueError("Native worker resident budget mismatch")
@@ -716,7 +740,10 @@ class NativeWorkerHost:
                     await asyncio.sleep(1)
         except Exception:
             native = job["native"]
-            row = await self.app.state.run_store.get(native["run_id"], user_id=native["user_id"])
+            # Scoped rejection retains the reservation. The legacy refusal
+            # path cannot prove scoped NoStart or close its native lifetime.
+            scoped = getattr(self.app.state.run_store, "workspace_scope_required", False) or any(value.get(key) is not None for value in (job, native) for key in ("workspace_id", "workspace_context"))
+            row = None if scoped else await self.app.state.run_store.get(native["run_id"], user_id=native["user_id"])
             if row is not None and row.get("owner_worker_id") == "dispatch:" + job["id"] and row["status"] == "pending":
                 while not getattr(self, "closing", False):
                     try:

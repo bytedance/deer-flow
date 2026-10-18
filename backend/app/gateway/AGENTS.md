@@ -557,3 +557,6 @@ unintegrated. Do not enable the tenant startup or default pool claim fences.
 
 
 Scoped native C snapshots include canonical created_at for exact control binding. Queued recovery uses native control-only inspection and pre-assignment ledger CAS; it does not authorize worker launch. Tenant activation remains closed.
+
+
+verify_native_launch_for_receiver resolves the exact pending target from native SQL before accepting v2 workspace claims. The canonical context binds repository reads, RunContext and adopt_pending/task creation. Legacy calls reject inherited workspace context. Scoped refusal retains reservation; it cannot use legacy terminal settlement.

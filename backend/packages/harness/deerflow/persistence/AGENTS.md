@@ -376,3 +376,6 @@ or permit deletion of a foreign lane.
 
 
 inspect_dispatch_control compares all original C bindings against canonical native SQL and returns control facts only, without payload/result reads or a member grant. renew_lease dispatch_target fences the exact pending target. finish_dispatch_pending is unscoped compatibility only; scoped NoStart uses confirm_workspace_run_stop.
+
+
+transfer_pending from dispatch ownership rechecks nonexpired lease and absence of pending native STOP for scoped rows at the locked CAS, based on canonical workspace_id. A preflight read never replaces this fence; legacy rows preserve their existing behavior.

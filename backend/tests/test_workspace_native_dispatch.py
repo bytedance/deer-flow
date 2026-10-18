@@ -4,7 +4,7 @@ import asyncio
 from contextvars import Context
 from copy import deepcopy
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -188,3 +188,118 @@ def test_native_c_dispatch_preserves_original_workspace(native_engine, executor_
         _in_workspace_case(native_engine, scenario)
     finally:
         ledger.engine.dispose()
+
+
+@pytest.mark.parametrize("withdrawn", [False, True])
+def test_native_c_receiver_uses_original_sql_authority(native_engine, monkeypatch, withdrawn):  # noqa: F811
+    from ecs_executor.agent_dispatch import _arguments, sign_native_launch, verify_native_launch
+    from ecs_executor.scope import mint_execution_scope
+    from langgraph.checkpoint.memory import MemorySaver
+
+    from app.gateway import services
+    from app.gateway.native_admission import adopt_native_run
+    from deerflow.authz.workspace import get_current_workspace, reset_current_workspace, set_current_workspace
+    from deerflow.config.run_ownership_config import RunOwnershipConfig
+    from deerflow.persistence.run.sql import RunRepository
+    from deerflow.persistence.thread_meta import ThreadMetaRepository
+    from deerflow.persistence.user.model import UserRow
+    from deerflow.persistence.workspaces.model import WorkspaceMembershipRow
+    from deerflow.persistence.workspaces.run_control import NativeRunStopTarget
+    from deerflow.runtime import RunContext, RunManager
+    from deerflow.runtime.user_context import reset_current_user, set_current_user
+
+    async def scenario(case):
+        threads = ThreadMetaRepository(case.sf, workspace_required=True)
+        await threads.create("receiver-private", user_id="owner")
+        store = RunRepository(case.sf, workspace_required=True)
+        ownership = RunOwnershipConfig(heartbeat_enabled=True, lease_seconds=120)
+        central = RunManager(store, worker_id="central", run_ownership_config=ownership)
+        worker = RunManager(store, worker_id="receiver", run_ownership_config=ownership)
+        async with case.sf() as session:
+            principal = await session.get(UserRow, "owner")
+        owner_token = set_current_user(principal)
+        try:
+            record = await central.create_or_reject("receiver-private", user_id="owner")
+            target = NativeRunStopTarget.from_record(record)
+            native = {
+                "run_id": record.run_id,
+                "user_id": record.user_id,
+                "thread_id": record.thread_id,
+                "incarnation": record.thread_incarnation,
+                "assistant_id": record.assistant_id,
+                "kwargs": record.kwargs,
+                "metadata": record.metadata,
+                "goal": None,
+                "workspace_id": case.original.workspace_id,
+                "workspace_context": asdict(case.original),
+                "created_at": target.created_at,
+                "execution": {"input": None, "body": {}, "config": {}, "conversation_sources": [], "knowledge_scope": None, "scope_assistant_id": None, "scheduled_task_runtime": None, "dependency_continuation": None},
+            }
+            job = {"id": "receiver-job", "node_id": "worker", "generation": "assignment", "worker_owner": "worker-owner", "native": native, "workspace_id": case.original.workspace_id, "workspace_context": asdict(case.original)}
+            await central.handoff_pending(record.run_id, owner_worker_id="dispatch:" + job["id"])
+            app = SimpleNamespace(state=SimpleNamespace(run_manager=worker, run_store=store))
+            ctx = RunContext(checkpointer=MemorySaver(), thread_store=threads)
+            monkeypatch.setattr(services, "get_run_context", lambda request: ctx)
+
+            async def owner(*args, **kwargs):
+                return principal
+
+            monkeypatch.setattr(services, "resolve_trusted_internal_owner_for_attribution", owner)
+            monkeypatch.setattr(services, "resolve_agent_factory", lambda assistant_id: object())
+            observed = []
+
+            async def execute(request, adopted, **kwargs):
+                observed.append((get_current_workspace(), kwargs["run_ctx"].workspace_context, adopted.workspace_context))
+
+            monkeypatch.setattr(services, "execute_admitted_native_run", execute)
+            secret = "native-node-offline-fixture-32-bytes"
+            selected = set_current_workspace(case.other)
+            try:
+                legacy = mint_execution_scope(
+                    secret=secret.encode(), audience="worker", user_id="owner", thread_id=record.thread_id, incarnation=record.thread_incarnation, run_id=record.run_id, operation="native_launch", arguments=_arguments(job)
+                )
+                with pytest.raises(ValueError, match="capability"):
+                    verify_native_launch(job, legacy, secret)
+                stripped = {key: value for key, value in job.items() if key not in ("workspace_id", "workspace_context")}
+                stripped["native"] = {key: value for key, value in native.items() if key not in ("workspace_id", "workspace_context")}
+                with pytest.raises(ValueError, match="capability"):
+                    await adopt_native_run(app, stripped, sign_native_launch(stripped, secret), secret)
+                token = sign_native_launch(job, secret, workspace_context=case.original)
+                with pytest.raises(ValueError, match="capability"):
+                    verify_native_launch(job, token, secret)
+                if withdrawn:
+                    async with case.sf() as session:
+                        await session.execute(
+                            sa.update(WorkspaceMembershipRow).where(WorkspaceMembershipRow.workspace_id == case.original.workspace_id, WorkspaceMembershipRow.user_id == "owner").values(version=WorkspaceMembershipRow.version + 1)
+                        )
+                        await session.commit()
+                    with pytest.raises((ValueError, PermissionError)):
+                        await adopt_native_run(app, job, token, secret)
+                    assert not observed and not worker._runs
+                else:
+                    from deerflow.persistence.run.model import RunRow
+                    from deerflow.runtime.runs.manager import RunStartupError
+
+                    with native_engine.connect() as connection:
+                        original_lease = connection.execute(sa.select(RunRow.lease_expires_at).where(RunRow.run_id == record.run_id)).scalar_one()
+
+                    def expire_before_cas():
+                        with native_engine.begin() as connection:
+                            connection.execute(sa.update(RunRow).where(RunRow.run_id == record.run_id).values(lease_expires_at=datetime.now(UTC) - timedelta(seconds=1)))
+
+                    with pytest.raises(RunStartupError):
+                        await adopt_native_run(app, job, token, secret, admission_check=expire_before_cas)
+                    assert not observed and not worker._runs
+                    with native_engine.begin() as connection:
+                        connection.execute(sa.update(RunRow).where(RunRow.run_id == record.run_id).values(lease_expires_at=original_lease))
+                    adopted = await adopt_native_run(app, job, token, secret)
+                    await adopted.task
+                    assert observed == [(case.original, case.original, case.original)]
+                    assert adopted.owner_worker_id == "receiver"
+                assert get_current_workspace() == case.other
+            finally:
+                reset_current_workspace(selected)
+        finally:
+            reset_current_user(owner_token)
+
+    _in_workspace_case(native_engine, scenario)
