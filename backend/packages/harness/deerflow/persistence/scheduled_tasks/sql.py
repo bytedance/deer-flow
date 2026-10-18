@@ -839,15 +839,15 @@ class ScheduledTaskRepository:
 
     async def list_manageable_from_thread(self, user_id: str, thread_id: str) -> list[dict[str, Any]]:
         """Tasks a conversation may manage: created in it, or whose run it is."""
-        if self.workspace_scope_required or get_current_workspace() is not None:
-            raise WorkspaceAccessDenied("Scoped Scheduler listing requires private-parent integration")
-        ran_in_thread = exists(select(ScheduledTaskRunRow.id).where(ScheduledTaskRunRow.workspace_id.is_(None), ScheduledTaskRunRow.task_id == ScheduledTaskRow.id, ScheduledTaskRunRow.thread_id == thread_id))
-        stmt = (
-            select(ScheduledTaskRow)
-            .where(ScheduledTaskRow.workspace_id.is_(None))
-            .where(ScheduledTaskRow.user_id == user_id, or_(ScheduledTaskRow.origin_thread_id == thread_id, ran_in_thread))
-            .order_by(ScheduledTaskRow.created_at.desc(), ScheduledTaskRow.id.desc())
-        )
+        context = resolve_resource_scope(None, user_id, required=self.workspace_scope_required)
+        if context is not None:
+            related = exists(select(ScheduledTaskRunRow.id).where(ScheduledTaskRunRow.task_id == ScheduledTaskRow.id, ScheduledTaskRunRow.thread_id == thread_id, resource_occurrence_predicate(context)).correlate(ScheduledTaskRow))
+            private_thread = ThreadMetaRepository._owned_scope(select(ThreadMetaRow.thread_id).where(ThreadMetaRow.thread_id == thread_id), user_id, context).exists()
+            stmt = select(ScheduledTaskRow).where(resource_task_predicate(context), private_thread, or_(ScheduledTaskRow.origin_thread_id == thread_id, related))
+        else:
+            related = exists(select(ScheduledTaskRunRow.id).where(ScheduledTaskRunRow.workspace_id.is_(None), ScheduledTaskRunRow.task_id == ScheduledTaskRow.id, ScheduledTaskRunRow.thread_id == thread_id))
+            stmt = select(ScheduledTaskRow).where(ScheduledTaskRow.workspace_id.is_(None), ScheduledTaskRow.user_id == user_id, or_(ScheduledTaskRow.origin_thread_id == thread_id, related))
+        stmt = stmt.order_by(ScheduledTaskRow.created_at.desc(), ScheduledTaskRow.id.desc())
         async with self._sf() as session:
             return [self._row_to_dict(row) for row in (await session.execute(stmt)).scalars()]
 

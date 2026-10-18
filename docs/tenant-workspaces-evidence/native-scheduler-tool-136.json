@@ -1,0 +1,102 @@
+{
+  "build": 136,
+  "queue": 1078,
+  "phase": "m4-native-scheduler-tool-green-20261018-24",
+  "result": "SUCCESS",
+  "duration_ms": 39809,
+  "pytest": "1 passed in 18.54s",
+  "ruff": "check passed; 67 files already formatted",
+  "source_sha256": "2dc487d5007a875df3bbfa16aa945e2b10464de1ee32956355345ea34c287c1d",
+  "pipeline_sha256": "8b9fda4cce8fe7cfc5f2c29c47a02bfb8e9288e95716df618c00ecc7496d7a27",
+  "log_path": "/private/tmp/m4-native-scheduler-tool-green-20261018-24.log",
+  "log_sha256": "7b487bedf411dcfd6d3af21dec5c838823150449811281e220ab43d2765fd64e",
+  "cleanup_path": "/private/tmp/native-scheduler-tool-build136-cleanup.json",
+  "archive_matches_current_files": {
+    "backend/app/gateway/scheduled_task_access.py": "1de9c70a4cab9deb04442fe8fada0bff7a2fa05e2e2ec18d56f8dfd97c7dda40",
+    "backend/app/gateway/services.py": "95ac1847db14e1abbb596dcb66a5251e232006e2be3ffce87bdc6b740670b99e",
+    "backend/packages/harness/deerflow/persistence/scheduled_tasks/sql.py": "b3f4b9d568b0997faebf279188494ef0e8a9a232bdaafdcbe9baef49021bb03e",
+    "backend/app/gateway/routers/thread_runs.py": "c7ff7ffe4c61a8b515d23bf2f7d33fc6170572e017d95a1e86a2b744d7e6e22c",
+    "backend/tests/test_workspace_native_scheduler.py": "2c69c9580ba7b38e68d2e853c1e9800d9ba8422bce05b2fe7038590730952551",
+    "scripts/render_tenant_run_control_pipeline.py": "31965111512d219f5aebfb7c63a9e4c93aa4e4a632c81b34f4ca31b6cfa6fc8d",
+    "examples/ecs-native/deploy/Jenkinsfile.tenant-run-control.in": "055296bb8e012c5a3808f463974db349d0eda9a26e2125c11b8943c8b3e7f2a3"
+  },
+  "scope": "One PG local-session actual native services.start_run/run_agent/ToolNode list main. Existing original conversation task seeded via real repository origin create; other task via real authenticated HTTP. UI-other before real production POST still admits original header scope. Tool lists only original task; canonical Run/journal verified; captured capability denied after worker closes. Scoped non-list/ownstop and remote internal interactive remain explicitly withheld; remote eligibility and management not accepted.",
+  "job": "deerflow-tenant-execution-m4-sql",
+  "history": [
+    {
+      "build": 133,
+      "queue": 1072,
+      "phase": "m4-native-scheduler-tool-red-20261018-21",
+      "result": "FAILURE",
+      "duration_ms": 39908,
+      "pytest": "1 failed in 18.46s",
+      "first_error": "Native Run succeeded but observed coded error lacked action; KeyError was a weak observation, not an exact authorization RED. Original fixture page reuse did not establish tool manageable origin relation.",
+      "log_path": "/private/tmp/m4-native-scheduler-tool-red-20261018-21.log",
+      "log_sha256": "ecad00f73909f854274eec2b584ffa6220fa00162cc3fdbb1752ba5eeb58762b",
+      "source_sha256": "38100596d146d652befae2878babffb23f0d2c029440023f2875d2eb5c46a989",
+      "pipeline_sha256": "37cd9f516a79ef58f28ce521e6db0022e1f49981f17427fda32a60b9dbaa9fe1",
+      "cleanup_path": "/private/tmp/native-scheduler-tool-red-cleanups.json"
+    },
+    {
+      "build": 134,
+      "queue": 1074,
+      "phase": "m4-native-scheduler-tool-red-20261018-22",
+      "result": "FAILURE",
+      "duration_ms": 39881,
+      "pytest": "1 failed in 18.77s",
+      "first_error": "Corrected real conversation-origin fixture: prepared session interactive capability present/config enabled; actual ToolNode list returned invalid_request: Scoped Scheduler listing requires private-parent integration. Exact business RED.",
+      "log_path": "/private/tmp/m4-native-scheduler-tool-red-20261018-22.log",
+      "log_sha256": "00ec02e3471315d1bdc2562e338594b5113e79e224f603fe6bad01fab90c1180",
+      "source_sha256": "cd5fdeb7cbae40061cc4707cb71d959aedc727e796fb277dcdd4df9733ad54c8",
+      "pipeline_sha256": "d73c73c213e88838d374c7a080030b53841f27e7a42fe83a5a4ef44e4c97c42c",
+      "cleanup_path": "/private/tmp/native-scheduler-tool-red-cleanups.json"
+    },
+    {
+      "build": 135,
+      "queue": 1076,
+      "phase": "m4-native-scheduler-tool-green-20261018-23",
+      "result": "FAILURE",
+      "duration_ms": 39979,
+      "pytest": "1 failed in 17.80s",
+      "first_error": "Fixture reads manager.get under selected other workspace immediately after successful actual original-scope HTTP POST; get correctly returnsNone. Tool business assertions not reached. Early fixture abort also left running task during async DB disposal, causing teardown warnings. Only fixture lookup binding corrected in next run.",
+      "source_sha256": "5176208190bcb2d17e7e3da83c9897da813ac107adf9236d2f0aab9f9d7584e3",
+      "pipeline_sha256": "b9da99a102b3cba06aa610e115cb7aef624a70955e6185931e6e82ac52b506f6",
+      "log_path": "/private/tmp/m4-native-scheduler-tool-green-20261018-23.log",
+      "log_sha256": "e9efc12249683b57e72006a39d6a915e41686649a648fb9e82edc225151069f8",
+      "cleanup_path": "/private/tmp/native-scheduler-tool-build135-cleanup.json"
+    }
+  ],
+  "cleanup": {
+    "build": 136,
+    "read_only": true,
+    "cleanup": [
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-136",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-136"
+      },
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-136-db",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-136-db"
+      },
+      {
+        "kind": "network",
+        "name": "deerflow-tenant-execution-m4-sql-136",
+        "exit": 1,
+        "stderr": "Error response from daemon: network deerflow-tenant-execution-m4-sql-136 not found"
+      }
+    ]
+  },
+  "root_archive_comparison": "All seven changed source files independently byte-matched successful archive; root independently read #134 and #135 failures and #136 terminal/test output.",
+  "reviewed_patch_sha256": "67c82760bbd8b0731668a484ce04ec8adc459f58611cbb99bc5c3ae01d2f0d46",
+  "limits": [
+    "Local session eligibility only; remote internal interactive has no trusted original credential source/permission ceiling receipt and explicitly yields no capability.",
+    "Only background Run POST creation is newly resource-scoped; other creation/stream/wait variants are not proved by this story.",
+    "Existing origin task is a true repository fixture, not falsely described as HTTP page-created conversation authority.",
+    "Tool create/update/resume/pause/delete/note/trial/own-stop, installed dependency, IM/timeout/recovery and full M4/M0–M11 remain required.",
+    "No physical worker or model provider API, deployment/push/activation, migration receipt or full browser acceptance."
+  ]
+}

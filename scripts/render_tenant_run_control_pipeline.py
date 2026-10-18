@@ -50,6 +50,7 @@ def main():
             "native-scheduler-resource-http",
             "native-scheduler-history-http",
             "native-scheduler-history-http-final",
+            "native-scheduler-tool-list",
         ),
         default="revocation",
     )
@@ -161,6 +162,8 @@ def main():
             "tests/test_workspace_native_scheduler.py::test_scoped_scheduler_http_history_and_thread_relations_keep_private_run[postgres] "
             "tests/test_workspace_native_scheduler.py::test_scoped_scheduler_http_create_list_detail_use_current_resource_scope[postgres]"
         )
+    if args.suite == "native-scheduler-tool-list":
+        tests = "tests/test_workspace_native_scheduler.py::test_scoped_scheduler_tool_list_uses_original_native_invocation[postgres]"
     rendered = rendered.replace("@@TEST_PATHS@@", tests)
     if "@@" in rendered:
         parser.error("unresolved pipeline marker")

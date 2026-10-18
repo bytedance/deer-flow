@@ -1,4 +1,4 @@
-Scheduler main #123, boundaries #125, HTTP create/list/detail #130 and history/thread relations #132 verified; full Scheduler/M4 acceptance remains open.
+Scheduler main #123, boundaries #125, HTTP create/list/detail #130 history/thread relations #132 and local-session tool list #136 verified; full Scheduler/M4 acceptance remains open.
 
 Implemented for this once/conversation-origin/fresh main:
 - Task create captures current live workspace/user context and pins real origin (and fixed reuse parent when present); context is immutable.
@@ -12,7 +12,7 @@ Implemented for this once/conversation-origin/fresh main:
 - Scoped event writes and reads carry workspace/origin nonce and private parent checks; legacy rows/joins/ID mutations are NULL-isolated.
 
 Withheld / not accepted:
-- HTTP create/list/detail are scoped and verified in #130. Tool listing, management and manual trigger remain withheld. HTTP history/thread relations are verified in #132. Current resource reads never renew original execution context.
+- HTTP create/list/detail are scoped and verified in #130. Local-session tool listing is verified in #136; remote eligibility, management and manual trigger remain withheld. HTTP history/thread relations are verified in #132. Current resource reads never renew original execution context.
 - HTTP task creation response enrichment is verified in #130; complete tool/UI and lifecycle acceptance remains open.
 - Page fresh with no origin and reuse branches have identity handling but no runtime acceptance in this single story.
 - Scheduled C->B->C transfer/own-stop and installed dependency_wait_reconciler path are explicitly withheld. The main uses no async dependency reconciler and does not represent the complete installed host.

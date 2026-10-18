@@ -591,3 +591,229 @@ def test_scoped_scheduler_http_history_and_thread_relations_keep_private_run(nat
         assert get_current_workspace() == case.other
 
     _exercise_scoped_scheduler_occurrence(native_engine, executor_engine, monkeypatch, tmp_path, after_completion=read_completed)
+
+
+@pytest.mark.parametrize("executor_engine", ["postgres"], indirect=True)
+def test_scoped_scheduler_tool_list_uses_original_native_invocation(native_engine, executor_engine, monkeypatch, tmp_path):  # noqa: F811
+    import json
+
+    from fastapi import FastAPI
+    from langchain_core.messages import AIMessage
+    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.graph import END, START, StateGraph
+    from langgraph.prebuilt import ToolNode
+    from langgraph.runtime import Runtime as GraphRuntime
+    from sqlalchemy import select
+
+    import deerflow.config as config_facade
+    from app.gateway import deps, scheduled_task_access, services
+    from app.gateway.auth import config as auth_config
+    from app.gateway.auth import create_access_token
+    from app.gateway.auth.local_provider import LocalAuthProvider
+    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+    from app.gateway.auth_middleware import AuthMiddleware
+    from app.gateway.csrf_middleware import CSRFMiddleware
+    from app.gateway.routers import scheduled_tasks, thread_runs
+    from app.scheduler.service import ScheduledTaskService
+    from deerflow.agents.thread_state import ThreadState
+    from deerflow.authz.workspace import get_current_workspace, reset_current_workspace, set_current_workspace
+    from deerflow.config import app_config
+    from deerflow.config import paths as paths_module
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.paths import Paths
+    from deerflow.config.run_ownership_config import RunOwnershipConfig
+    from deerflow.persistence.mcp_tasks.sql import McpTaskRepository
+    from deerflow.persistence.models.run_event import RunEventRow
+    from deerflow.persistence.projects import ProjectDocumentRepository, ProjectRepository
+    from deerflow.persistence.run.model import RunRow
+    from deerflow.persistence.run.sql import RunRepository
+    from deerflow.persistence.scheduled_task_runs.sql import ScheduledTaskRunRepository
+    from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
+    from deerflow.persistence.scheduled_tasks.sql import ScheduledTaskRepository
+    from deerflow.persistence.thread_meta import ThreadMetaRepository
+    from deerflow.runtime import MemoryStreamBridge, RunContext, RunManager
+    from deerflow.runtime.events.store.db import DbRunEventStore
+    from deerflow.runtime.invocation import WorkerInvocationDenied, get_invocation_guard
+    from deerflow.scheduler.runtime import SCHEDULER_CAPABILITY_CONTEXT_KEY, is_scheduler_capability, scheduler_tools_enabled
+    from deerflow.tools.scheduled_tasks import schedule_task
+
+    assert native_engine.dialect.name == executor_engine.dialect.name == "postgresql"
+    owner = "11111111-1111-4111-8111-111111111111"
+    configuration = AppConfig.model_validate(
+        {
+            "models": [],
+            "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+            "memory": {"enabled": False},
+            "scheduler": {"enabled": True, "tool_enabled": True},
+            "authorization": {"enabled": True, "provider": {"use": "deerflow.authz.rbac:RbacAuthorizationProvider", "config": {"roles": {"user": {"routes": {"allow": "*"}}}}}},
+        }
+    )
+    for module in (config_facade, app_config, deps, services):
+        monkeypatch.setattr(module, "get_app_config", lambda: configuration)
+    monkeypatch.setattr(paths_module, "_paths", Paths(tmp_path / "tool-list-files"))
+    monkeypatch.setattr(auth_config, "_auth_config", auth_config.AuthConfig(jwt_secret="synthetic-native-scheduler-tool-list-key-64-characters-for-test!!"))
+    monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+
+    async def scenario(case):
+        threads = ThreadMetaRepository(case.sf, workspace_required=True)
+        origin = await threads.create("scheduler-tool-origin", user_id=owner)
+        other_token = set_current_workspace(case.other)
+        try:
+            other_parent = await threads.create("scheduler-tool-other", user_id=owner)
+        finally:
+            reset_current_workspace(other_token)
+        users = SQLiteUserRepository(case.sf)
+        monkeypatch.setattr(deps, "_cached_repo", users)
+        monkeypatch.setattr(deps, "_cached_local_provider", LocalAuthProvider(repository=users))
+        store = RunRepository(case.sf, workspace_required=True)
+        manager = RunManager(store, worker_id="scheduler-tool-worker", run_ownership_config=RunOwnershipConfig(heartbeat_enabled=True, lease_seconds=120))
+        tasks = ScheduledTaskRepository(case.sf, run_repository=store, workspace_required=True)
+        occurrences = ScheduledTaskRunRepository(case.sf, run_repository=store, workspace_required=True)
+        events, saver = DbRunEventStore(case.sf, workspace_required=True), MemorySaver()
+        ctx = RunContext(checkpointer=saver, thread_store=threads, event_store=events, app_config=configuration)
+        monkeypatch.setattr(services, "get_run_context", lambda request: ctx)
+
+        async def no_scheduled_launch(**kwargs):
+            raise AssertionError("The list tool cannot dispatch scheduled work")
+
+        foreground = ScheduledTaskService(
+            task_repo=tasks, task_run_repo=occurrences, launch_run=no_scheduled_launch, poll_interval_seconds=1, lease_seconds=120, max_concurrent_runs=1, dispatch_enabled=False, multi_instance=True, own_stop_available=False
+        )
+        app = FastAPI()
+        app.state.workspace_service, app.state.thread_store = case.service, threads
+        app.state.run_manager, app.state.run_store = manager, store
+        app.state.stream_bridge, app.state.checkpointer, app.state.store = MemoryStreamBridge(), saver, None
+        app.state.run_event_store = events
+        app.state.mcp_task_repo = McpTaskRepository(case.sf, workspace_required=True)
+        app.state.project_repo, app.state.project_document_repo = ProjectRepository(case.sf, workspace_required=True), ProjectDocumentRepository(case.sf, workspace_required=True)
+        app.state.scheduled_task_repo, app.state.scheduled_task_run_repo, app.state.scheduled_task_service = tasks, occurrences, foreground
+        app.include_router(scheduled_tasks.router)
+        app.add_middleware(AuthMiddleware)
+        app.add_middleware(CSRFMiddleware)
+
+        app.include_router(thread_runs.router)
+
+        captured, observed, preparation, runtime_diagnostics = [], [], [], []
+        original_prepare = scheduled_task_access.prepare_scheduler_capability
+
+        async def observe_prepare(*args, **kwargs):
+            capability = await original_prepare(*args, **kwargs)
+            captured.append(capability)
+            preparation.append({"present": capability is not None, "source": getattr(args[0].state, "auth_source", None), "mode": kwargs["interaction_policy"].mode.value, "config_enabled": scheduler_tools_enabled(configuration)})
+            return capability
+
+        monkeypatch.setattr(scheduled_task_access, "prepare_scheduler_capability", observe_prepare)
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def emit_list(state, config, runtime: GraphRuntime):
+            runtime_diagnostics.append({"enabled": scheduler_tools_enabled(runtime.context.get("app_config")), "capability": is_scheduler_capability(runtime.context.get(SCHEDULER_CAPABILITY_CONTEXT_KEY))})
+            guard = get_invocation_guard()
+            assert guard is not None and guard.target.workspace_context == case.original
+            assert get_current_workspace() == case.original
+            entered.set()
+            await release.wait()
+            return {"messages": [AIMessage(content="", tool_calls=[{"name": "schedule_task", "args": {"action": "list"}, "id": "native-schedule-list", "type": "tool_call"}])]}
+
+        async def observe_result(state, config):
+            observed.append(json.loads(state["messages"][-1].content))
+            return {"messages": [AIMessage(content="The conversation's schedules were listed")]}
+
+        builder = StateGraph(ThreadState, context_schema=dict)
+        builder.add_node("call", emit_list)
+        builder.add_node("tools", ToolNode([schedule_task], handle_tool_errors=False))
+        builder.add_node("observed", observe_result)
+        builder.add_edge(START, "call")
+        builder.add_edge("call", "tools")
+        builder.add_edge("tools", "observed")
+        builder.add_edge("observed", END)
+        graph = builder.compile(checkpointer=saver)
+        monkeypatch.setattr(services, "resolve_agent_factory", lambda assistant_id: lambda **kwargs: graph)
+        record, selected = None, None
+        await foreground.start()
+        try:
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost", headers={"Origin": "http://localhost", "X-CSRF-Token": "synthetic-tool-csrf"}) as client:
+                client.cookies.set("access_token", create_access_token(owner))
+                client.cookies.set("csrf_token", "synthetic-tool-csrf")
+                # Existing conversation task: HTTP page reuse alone does not
+                # grant the conversation's origin/occurrence list relationship.
+                original_task = await tasks.create(
+                    task_id="native-tool-conversation-task",
+                    user_id=owner,
+                    thread_id=None,
+                    origin_thread_id=origin["thread_id"],
+                    context_mode="fresh_thread_per_run",
+                    assistant_id=None,
+                    title="Original tool follow-up",
+                    prompt="Private follow-up",
+                    schedule_type="once",
+                    schedule_spec={"run_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat()},
+                    timezone="UTC",
+                    next_run_at=datetime.now(UTC) + timedelta(hours=1),
+                )
+                ids = [original_task["id"]]
+                response = await client.post(
+                    "/api/scheduled-tasks",
+                    headers={"X-Deerflow-Workspace": case.other.workspace_id},
+                    json={
+                        "thread_id": other_parent["thread_id"],
+                        "context_mode": "reuse_thread",
+                        "title": "Other private tool schedule",
+                        "prompt": "Private follow-up",
+                        "schedule_type": "once",
+                        "schedule_spec": {"run_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat()},
+                        "timezone": "UTC",
+                    },
+                )
+                assert response.status_code == 200, response.text
+                ids.append(response.json()["id"])
+                selected = set_current_workspace(case.other)
+                response = await client.post(
+                    "/api/threads/" + origin["thread_id"] + "/runs", headers={"X-Deerflow-Workspace": case.original.workspace_id}, json={"input": {"messages": [{"type": "human", "content": "List the schedules for this conversation"}]}}
+                )
+                assert response.status_code == 200, response.text
+                run_id = response.json()["run_id"]
+                lookup_scope = set_current_workspace(case.original)
+                try:
+                    record = await manager.get(run_id, user_id=owner)
+                finally:
+                    reset_current_workspace(lookup_scope)
+                assert get_current_workspace() == case.other
+                assert record is not None and record.task is not None
+                await asyncio.wait_for(entered.wait(), timeout=20)
+                ui = await client.get("/api/scheduled-tasks", headers={"X-Deerflow-Workspace": case.other.workspace_id})
+                assert ui.status_code == 200 and [row["id"] for row in ui.json()] == [ids[1]]
+                release.set()
+                await asyncio.wait_for(record.task, timeout=20)
+                assert record.status.value == "success", record.error
+                assert len(observed) == 1 and observed[0].get("action") == "list", {"preparation": preparation, "runtime": runtime_diagnostics, "tool_error": [{key: value.get(key) for key in ("code", "error")} for value in observed]}
+                assert [row["id"] for row in observed[0]["tasks"]] == [ids[0]]
+                assert "Other private tool schedule" not in json.dumps(observed)
+                assert captured and captured[0] is not None
+                assert get_invocation_guard() is None
+                with pytest.raises(WorkerInvocationDenied):
+                    await captured[0].manage(action="list", request={})
+                assert get_current_workspace() == case.other
+                async with case.sf() as session:
+                    durable = await session.get(RunRow, run_id)
+                    original_task = await session.get(ScheduledTaskRow, ids[0])
+                    journal = (await session.scalars(select(RunEventRow).where(RunEventRow.run_id == run_id))).all()
+                    assert durable.status == "success" and durable.workspace_context_json == asdict(case.original)
+                    assert durable.thread_id == origin["thread_id"] and durable.thread_incarnation == origin["incarnation"]
+                    assert original_task.workspace_context_json == asdict(case.original) and original_task.run_count == 0
+                    assert journal and all(row.workspace_id == case.original.workspace_id and row.user_id == owner for row in journal)
+                    assert any(ids[0] in row.content for row in journal), "The actual tool result was not journaled"
+                    assert not any("Other private tool schedule" in row.content for row in journal)
+        finally:
+            release.set()
+            if record is not None and record.task is not None and not record.task.done():
+                record.task.cancel()
+                try:
+                    await record.task
+                except asyncio.CancelledError:
+                    pass
+            if selected is not None:
+                reset_current_workspace(selected)
+            await foreground.stop()
+            await manager.stop_heartbeat()
+
+    _in_workspace_case(native_engine, scenario, owner_user_id=owner)

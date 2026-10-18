@@ -959,6 +959,7 @@ async def prepare_edit_regenerate_run(
 
 
 @router.post("/{thread_id}/runs", response_model=RunResponse)
+@workspace_resource_scope()
 @require_permission("runs", "create", owner_check=True, require_existing=True)
 async def create_run(
     thread_id: ThreadId,

@@ -28,7 +28,11 @@ from app.gateway.scheduled_task_errors import active_occurrence_error, repositor
 from app.gateway.scheduled_task_validation import prepare_resume_updates, validate_scheduled_task_create, validate_scheduled_task_update
 from app.scheduler.service import TASK_CHANGED_ERROR
 from deerflow.agents.interaction_policy import RunInteractionMode, RunInteractionPolicy
+from deerflow.authz.workspace import WorkspaceContext, get_current_workspace, reset_current_workspace, set_current_workspace
 from deerflow.persistence.scheduled_tasks import ActiveScheduledTaskMutationConflict
+from deerflow.persistence.workspaces.run_control import NativeRunStopTarget
+from deerflow.runtime import RunRecord
+from deerflow.runtime.invocation import WorkerInvocationDenied, WorkerInvocationGuard, get_invocation_guard
 from deerflow.scheduler import host_notes
 from deerflow.scheduler.runtime import SchedulerCapabilityMode, SchedulerRunCapability, scheduler_tools_enabled
 
@@ -312,6 +316,47 @@ async def _owner(owner_id: str, token_version: int, *, auth_disabled_owner: bool
 
 
 @dataclass(frozen=True, repr=False)
+class _SchedulerRunBinding:
+    """Original server Run identity only; the actual worker guard grants IO."""
+
+    workspace_context: WorkspaceContext
+    user_id: str
+    run_id: str
+    thread_id: str
+    thread_incarnation: str
+    created_at: str
+
+    @classmethod
+    def capture(cls, record, *, owner_id, run_id, thread_id):
+        if type(record) is not RunRecord or type(record.workspace_context) is not WorkspaceContext:
+            raise ValueError("Scheduler scope requires its admitted native Run")
+        context = record.workspace_context
+        if record.user_id != owner_id or context.actor_user_id != owner_id or record.workspace_id != context.workspace_id or record.run_id != run_id or record.thread_id != thread_id:
+            raise ValueError("Scheduler Run identity differs")
+        if not isinstance(record.thread_incarnation, str) or not record.thread_incarnation:
+            raise ValueError("Scheduler Run parent is unavailable")
+        created = datetime.fromisoformat(record.created_at)
+        if created.tzinfo is None:
+            raise ValueError("Scheduler Run creation time is unavailable")
+        return cls(context, owner_id, run_id, thread_id, record.thread_incarnation, created.astimezone(UTC).isoformat())
+
+    async def check(self):
+        guard = get_invocation_guard()
+        target = guard.target if type(guard) is WorkerInvocationGuard else None
+        if type(target) is not NativeRunStopTarget or (target.workspace_context, target.user_id, target.run_id, target.thread_id, target.thread_incarnation, target.created_at) != (
+            self.workspace_context,
+            self.user_id,
+            self.run_id,
+            self.thread_id,
+            self.thread_incarnation,
+            self.created_at,
+        ):
+            raise WorkerInvocationDenied("Scheduler list requires its original live native worker")
+        await guard.check()
+        return guard
+
+
+@dataclass(frozen=True, repr=False)
 class _SchedulerCapability:
     mode: SchedulerCapabilityMode
     _owner_id: str
@@ -334,6 +379,7 @@ class _SchedulerCapability:
     _display: str = "text"
     # The browser timezone sent with this turn; only new tasks default to it.
     _client_timezone: str | None = None
+    _run_binding: _SchedulerRunBinding | None = None
 
     async def _require(self, permissions: frozenset[str], *, check_origin: bool = True) -> None:
         if not scheduler_tools_enabled(await asyncio.to_thread(get_config)):
@@ -380,6 +426,23 @@ class _SchedulerCapability:
         return {"action": action, "display": self._display, **values}
 
     async def manage(self, *, action: str, request: dict[str, Any]) -> dict[str, Any]:
+        if self._run_binding is None:
+            if getattr(self._task_repo, "workspace_scope_required", False) or get_current_workspace() is not None:
+                raise WorkerInvocationDenied("Scoped Scheduler calls require their original native Run binding")
+            return await self._manage(action=action, request=request)
+        guard = await self._run_binding.check()
+        token = set_current_workspace(self._run_binding.workspace_context)
+        try:
+            if action != "list":
+                result = tool_error_payload(scheduler_error(503, "scheduler_scoped_management_unavailable", "Scoped schedule management requires its native integration"))
+            else:
+                result = await self._manage(action=action, request=request)
+            await guard.check()
+            return result
+        finally:
+            reset_current_workspace(token)
+
+    async def _manage(self, *, action: str, request: dict[str, Any]) -> dict[str, Any]:
         try:
             if self.mode != "interactive":
                 raise scheduler_error(403, "interactive_run_required", "Schedule management requires an interactive run")
@@ -583,6 +646,10 @@ class _SchedulerCapability:
         return self._result("pause", task=await self._view(paused))
 
     async def stop_current_schedule(self) -> dict[str, Any]:
+        if self._run_binding is None and (getattr(self._task_repo, "workspace_scope_required", False) or get_current_workspace() is not None):
+            raise WorkerInvocationDenied("Scoped Scheduler calls require their original native Run binding")
+        if self._run_binding is not None:
+            return tool_error_payload(scheduler_error(503, "scheduler_scoped_stop_unavailable", "Scoped own-schedule stop requires its native integration"))
         try:
             if self.mode != "scheduled" or not self._task_id or not self._occurrence_id:
                 raise scheduler_error(403, "no_stop_authority", "This run has no own-schedule stop authority")
@@ -611,6 +678,54 @@ async def prepare_scheduler_capability(
     interaction_policy: RunInteractionPolicy,
     scheduled_task_runtime: Mapping[str, Any] | None = None,
     client_timezone: str | None = None,
+    run_record: RunRecord | None = None,
+) -> SchedulerRunCapability | None:
+    """Capture only server admission; never reconstruct scope from request data."""
+    state = getattr(getattr(request, "app", None), "state", None)
+    scoped_repository = getattr(getattr(state, "scheduled_task_repo", None), "workspace_scope_required", False)
+    binding = None
+    if run_record is not None and getattr(run_record, "workspace_context", None) is not None:
+        try:
+            binding = _SchedulerRunBinding.capture(run_record, owner_id=str(user.id), run_id=run_id, thread_id=thread_id)
+        except (ValueError, TypeError, AttributeError):
+            return None
+    elif scoped_repository or get_current_workspace() is not None:
+        return None
+    # Remote adoption currently has no trusted original session/PAT source or
+    # permission ceiling. Internal transport must not manufacture eligibility.
+    if binding is not None and interaction_policy.mode is RunInteractionMode.INTERACTIVE and getattr(request.state, "auth_source", None) != AUTH_SOURCE_SESSION:
+        return None
+    token = set_current_workspace(binding.workspace_context) if binding is not None else None
+    try:
+        return await _prepare_scheduler_capability(
+            request,
+            user=user,
+            thread_id=thread_id,
+            run_id=run_id,
+            assistant_id=assistant_id,
+            original_user_text=original_user_text,
+            interaction_policy=interaction_policy,
+            scheduled_task_runtime=scheduled_task_runtime,
+            client_timezone=client_timezone,
+            run_binding=binding,
+        )
+    finally:
+        if token is not None:
+            reset_current_workspace(token)
+
+
+async def _prepare_scheduler_capability(
+    request: Request,
+    *,
+    user: Any,
+    thread_id: str,
+    run_id: str,
+    assistant_id: str,
+    original_user_text: str,
+    interaction_policy: RunInteractionPolicy,
+    scheduled_task_runtime: Mapping[str, Any] | None = None,
+    client_timezone: str | None = None,
+    run_binding: _SchedulerRunBinding | None = None,
 ) -> SchedulerRunCapability | None:
     """Bind private host authority; do not retain the Request or internal user.
 
@@ -686,4 +801,5 @@ async def prepare_scheduler_capability(
         _occurrence_id=occurrence_id,
         _display="card" if source in {AUTH_SOURCE_SESSION, AUTH_SOURCE_AUTH_DISABLED} else "text",
         _client_timezone=client_timezone if isinstance(client_timezone, str) and client_timezone else None,
+        _run_binding=run_binding,
     )

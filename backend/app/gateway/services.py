@@ -1891,6 +1891,7 @@ async def execute_admitted_native_run(
         try:
             scheduler_capability = await prepare_scheduler_capability(
                 request,
+                run_record=record,
                 user=internal_owner_user or user,
                 thread_id=thread_id,
                 run_id=record.run_id,
