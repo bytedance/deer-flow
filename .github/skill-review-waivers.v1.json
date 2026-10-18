@@ -20,11 +20,12 @@
       "source": "skillscan",
       "rule_id": "python-subprocess",
       "path": "scripts/run_eval.py",
-      "line": 85,
+      "line": 80,
       "evidence": "subprocess.Popen",
-      "file_sha256": "sha256:43e3b8f80dbf69c343967ba77e268fae991d9fa3ed68b32a0ff02532cd48657f",
+      "file_sha256": "sha256:690fed07ff9c689025c632d8697e599be54f82a0b0937023e9484a5ac569b38e",
       "preapproved_file_sha256s": [
-        "sha256:ea2521ba41c8fd16b2900758c890bb6c6d2b4b01da10b4a860facb8587ed0bde"
+        "sha256:ea2521ba41c8fd16b2900758c890bb6c6d2b4b01da10b4a860facb8587ed0bde",
+        "sha256:43e3b8f80dbf69c343967ba77e268fae991d9fa3ed68b32a0ff02532cd48657f"
       ],
       "reason": "Required Claude CLI invocation uses a fixed executable, an argv list, captured output streams, and shell=False.",
       "expires_on": "2027-02-28"
