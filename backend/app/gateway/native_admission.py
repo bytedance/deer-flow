@@ -225,6 +225,12 @@ async def _adopt_native_run(app, job, native, secret, workspace_context, *, admi
         admission_check()
     record = await manager.adopt_pending(native["run_id"], thread_id=native["thread_id"], user_id=native["user_id"], expected_owner_worker_id="dispatch:" + job["id"], workspace_context=workspace_context)
 
+    from deerflow.sandbox.execution_capture import current_execution_capture
+
+    capture = current_execution_capture()
+    if capture is not None:
+        capture.bind_execution(record)
+
     async def execute():
         from deerflow.runtime.user_context import reset_current_user, set_current_user
 

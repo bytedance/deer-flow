@@ -423,3 +423,13 @@ No automatic start replay or STOP/capacity inference from failed inspection.
 Pool scoped claims stay closed. Native outbox/task control settlement and remote
 C/full lifecycle remain required; Gateway activation remains compiled false.
 Reproduction and exact limits: ../docs/tenant-workspaces-testing.md.
+
+
+Scoped native C sandbox cancellation uses execution-local captures bound to the
+SQL-adopted Run before task creation. AIO acquire/identity-checked reuse captures
+immutable physical IDs across warm release; STOP never recalculates IDs from a
+mutable workspace or skills projection. Captured teardown retains native provider
+ownership/lease fences and refuses unknown outcomes. A drained task that never
+entered acquisition can prove text-only NoStart; failed/in-flight acquisition
+cannot. Captures are private in-memory receipts: restart without them retains
+reservations. Cloud AIO lifecycle acceptance and tenant activation remain separate.

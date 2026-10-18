@@ -322,7 +322,7 @@ def test_native_c_pool_dispatch_executes_original_run(native_engine, executor_en
     from langgraph.graph import END, START, MessagesState, StateGraph
 
     from app.gateway import services
-    from app.gateway.native_admission import adopt_native_run, make_native_snapshot
+    from app.gateway.native_admission import make_native_snapshot
     from app.gateway.run_models import RunCreateRequest
     from deerflow.authz.workspace import get_current_workspace, reset_current_workspace, set_current_workspace
     from deerflow.config.app_config import AppConfig
@@ -470,7 +470,10 @@ def test_native_c_pool_dispatch_executes_original_run(native_engine, executor_en
 
                 monkeypatch.setattr(services, "resolve_trusted_internal_owner_for_attribution", owner)
                 app.state.run_manager = worker
-                adopted = await adopt_native_run(app, job, envelope["capability"], secret)
+                reporter.app, reporter.secret, reporter.adoption_lock = app, secret, asyncio.Lock()
+                reporter.stop_tasks = {}
+                adopted = await reporter.adopt_owned(job, envelope["capability"])
+                assert reporter.sandbox_captures[job["id"]].record is adopted
                 await asyncio.wait_for(entered.wait(), timeout=15)
                 current = await worker_request("get", job_id=job["id"], generation=job["generation"])
                 await worker_request("report", job_id=job["id"], generation=job["generation"], changes={"state": "running"}, expected=current)
@@ -481,6 +484,10 @@ def test_native_c_pool_dispatch_executes_original_run(native_engine, executor_en
                 assert control["job"]["id"] == job["id"] and not control["job"]["cancel_requested"]
                 release.set()
                 await asyncio.wait_for(adopted.task, timeout=20)
+                # Real receiver/task capture proves this deterministic graph
+                # drained without ever entering physical sandbox acquisition.
+                reporter.sandbox_captures[job["id"]].execution_drained(adopted)
+                await reporter.stop_owned(job)
                 async with case.sf() as session:
                     row = await session.get(RunRow, record.run_id)
                     events = (await session.scalars(sa.select(RunEventRow).where(RunEventRow.run_id == record.run_id))).all()

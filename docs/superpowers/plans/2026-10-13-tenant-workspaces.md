@@ -931,3 +931,17 @@ Evidence: `docs/tenant-workspaces-progress.json` → `native_c_receiver`. Full M
 - [ ] Two-host/AIO/physical STOP/restart and scoped dependencies/notifications C->B->C remain next.
 
 Evidence: `native_c_pool_main` in progress JSON. No physical lifecycle or full M4/M0–M11 completion claimed.
+
+
+### M4 step 24 — captured native C sandbox STOP (focused main verified)
+
+- [x] Reproduce wrong-container STOP with actual provider tracking and worker control path: #105, one expected failing regression; simulated backend only.
+- [x] Capture actual acquired/reused sandbox identity under the adopted native execution, retaining it through warm release.
+- [x] Stop and inspect the captured physical object through native ownership/teardown; unknown outcomes retain capacity. Never recompute identity from mutable skill projection paths.
+- [x] Preserve legitimate no-sandbox completion only after the bound execution and acquire work have drained.
+- [x] Run the focused successful STOP main and necessary failure boundary in Shanghai CI; reuse existing cancellation/ownership checks where relevant.
+- [ ] Actual AIO container lifecycle on Shanghai ECS when current hosts are reachable. No Docker physical proof claimed by simulated-backend tests.
+
+Root owns sequence/review/verification; one 6.1-sol medium coding agent implements. No broad test matrix, deployment, push, or activation. #105 fixture containers/networks were verified absent after its terminal failure.
+
+Step 24 evidence: #106 eight passed in 25.67s, 44-file Ruff; physical backend simulated. Actual AIO and whole M4 remain open.

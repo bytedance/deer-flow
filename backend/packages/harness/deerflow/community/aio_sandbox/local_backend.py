@@ -49,6 +49,7 @@ class _ContainerInspection:
     networks: frozenset[str]
     relay_token: str | None = None
     max_shell_sessions: int | None = None
+    container_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1369,6 +1370,7 @@ class LocalContainerBackend(SandboxBackend):
             sandbox_id=sandbox_id,
             sandbox_url=sandbox_url,
             container_name=container_name,
+            container_id=sandbox_inspection.container_id if sandbox_inspection is not None else None,
             created_at=created_at,
             request_headers=request_headers,
         )
@@ -1510,6 +1512,7 @@ class LocalContainerBackend(SandboxBackend):
                     sandbox_id=sandbox_id,
                     sandbox_url=sandbox_url,
                     container_name=container_name,
+                    container_id=data.container_id,
                     created_at=created_at,
                     request_headers=request_headers,
                     requires_replacement=requires_replacement,
@@ -1691,6 +1694,7 @@ class LocalContainerBackend(SandboxBackend):
                 networks=frozenset(str(value) for value in (network_settings.get("Networks") or {})),
                 relay_token=_extract_container_environment(config, RELAY_TOKEN_ENV),
                 max_shell_sessions=max_shell_sessions,
+                container_id=str(entry["Id"]) if entry.get("Id") else None,
             )
         return out
 

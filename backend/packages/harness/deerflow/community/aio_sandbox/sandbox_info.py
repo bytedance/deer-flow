@@ -49,3 +49,17 @@ class SandboxInfo:
             container_id=data.get("container_id"),
             created_at=data.get("created_at", time.time()),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class CapturedSandbox:
+    """Physical object obtained by a trusted execution, without client secrets."""
+
+    sandbox_id: str
+    user_id: str
+    thread_id: str
+    container_id: str
+    container_name: str
+    sandbox_url: str
+    created_at: float
+    requires_replacement: bool = False

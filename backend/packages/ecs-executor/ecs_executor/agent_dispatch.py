@@ -633,6 +633,7 @@ class NativeWorkerHost:
         self.owner, self.task = uuid.uuid4().hex, None
         self.active = {}
         self.stop_tasks = {}
+        self.sandbox_captures = {}
         self.closing = False
         self.quiescing = False
         self.adoption_lock = asyncio.Lock()
@@ -716,9 +717,13 @@ class NativeWorkerHost:
     async def stop_native(self, job):
         # Cancellation polling and the native task finalizer share one owned
         # physical stop. Failed/unknown proofs are retryable, never successes.
+        capture = getattr(self, "sandbox_captures", {}).get(job["id"])
+        if capture is not None:
+            capture.validate_assignment(job)
         task = self.stop_tasks.get(job["id"])
         if task is None:
-            task = asyncio.create_task(asyncio.to_thread(stop_native_sandbox, job["native"]))
+            work = asyncio.to_thread(stop_native_sandbox, job["native"], capture=capture) if capture is not None else asyncio.to_thread(stop_native_sandbox, job["native"])
+            task = asyncio.create_task(work)
             self.stop_tasks[job["id"]] = task
         try:
             await asyncio.shield(task)
@@ -756,26 +761,46 @@ class NativeWorkerHost:
             raise RuntimeError("Native worker is quiescing")
 
     async def adopt_owned(self, job, token):
-        from app.gateway.native_admission import adopt_native_run
-
         async with self.adoption_lock:
             self.check_admission()
             self.adopting = asyncio.current_task()
-            try:
-                browser = getattr(self, "browser_control", None)
-                if browser is not None:
-                    # Verify the launch before its identity may bind browser
-                    # state; adoption itself verifies it again at the native fence.
-                    from app.gateway.native_admission import verify_native_launch_for_receiver
+            from contextlib import nullcontext
 
-                    native, _ = await verify_native_launch_for_receiver(self.app, job, token, self.secret)
-                    with await browser.execution_scope(native) as attach_browser_task:
-                        record = await adopt_native_run(self.app, job, token, self.secret, admission_check=self.check_admission)
-                        attach_browser_task(record.task)
-                        return record
-                return await adopt_native_run(self.app, job, token, self.secret, admission_check=self.check_admission)
+            from deerflow.sandbox.execution_capture import sandbox_execution_capture
+
+            capture_scope = nullcontext()
+            if job.get("workspace_id") is not None:
+                from ecs_executor.native_sandbox import NativeSandboxCapture
+
+                captures = getattr(self, "sandbox_captures", None)
+                if captures is None:
+                    captures = self.sandbox_captures = {}
+                capture = captures.get(job["id"])
+                if capture is None:
+                    capture = captures[job["id"]] = NativeSandboxCapture(job)
+                capture.validate_assignment(job)
+                capture_scope = sandbox_execution_capture(capture)
+            try:
+                with capture_scope:
+                    return await self._adopt_with_capture(job, token)
             finally:
                 self.adopting = None
+
+    async def _adopt_with_capture(self, job, token):
+        from app.gateway.native_admission import adopt_native_run
+
+        browser = getattr(self, "browser_control", None)
+        if browser is not None:
+            # Verify the launch before its identity may bind browser
+            # state; adoption itself verifies it again at the native fence.
+            from app.gateway.native_admission import verify_native_launch_for_receiver
+
+            native, _ = await verify_native_launch_for_receiver(self.app, job, token, self.secret)
+            with await browser.execution_scope(native) as attach_browser_task:
+                record = await adopt_native_run(self.app, job, token, self.secret, admission_check=self.check_admission)
+                attach_browser_task(record.task)
+                return record
+        return await adopt_native_run(self.app, job, token, self.secret, admission_check=self.check_admission)
 
     async def quiesce(self):
         self.quiescing = True
@@ -812,6 +837,10 @@ class NativeWorkerHost:
             await asyncio.shield(record.task)
             if record.ownership_lost:
                 raise RuntimeError("Native task ownership was lost; physical outcome requires reconciliation")
+            capture = getattr(self, "sandbox_captures", {}).get(job["id"])
+            if capture is not None:
+                capture.validate_assignment(job)
+                capture.execution_drained(record)
             # AIO container remains within the continuously charged resident
             # budget. The native task has fully drained its finalizers here.
             while not getattr(self, "closing", False):
@@ -821,6 +850,9 @@ class NativeWorkerHost:
                     if state == "cancelled":
                         await self.stop_owned(job)
                     await self.report(job, {"state": state, "error": record.error, "physical_stopped": True, "physical_stopped_at": time.time()})
+                    captures = getattr(self, "sandbox_captures", {})
+                    if captures.get(job["id"]) is capture:
+                        captures.pop(job["id"], None)
                     break
                 except (httpx.HTTPError, RuntimeError):
                     # Retry this settled native outcome/owned STOP, never the
@@ -948,8 +980,13 @@ class NativeWorkerHost:
                     task.add_done_callback(release_after_drain)
 
 
-def stop_native_sandbox(native):
-    """Destroy the exact native sandbox, and prove physical STOP before release."""
+def stop_native_sandbox(native, *, capture=None):
+    """STOP a captured scoped object; legacy derives only its historical ID."""
+    if capture is not None:
+        capture.stop()
+        return
+    if native.get("workspace_id") is not None or native.get("workspace_context") is not None:
+        raise RuntimeError("Scoped native physical STOP requires its acquired object")
     from deerflow.sandbox.sandbox_provider import get_initialized_sandbox_provider
 
     provider = get_initialized_sandbox_provider()

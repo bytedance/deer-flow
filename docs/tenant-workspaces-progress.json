@@ -1549,9 +1549,9 @@
   },
   "latest_checkpoint": {
     "work_package": "M4",
-    "status": "partial M4: scoped C pool-to-native execution main verified; physical lifecycle and C->B->C pending",
+    "status": "partial M4: captured sandbox STOP and native text completion verified; actual AIO lifecycle and C->B->C pending",
     "last_verified_job": "deerflow-tenant-execution-m4-sql",
-    "last_verified_build": 104,
+    "last_verified_build": 106,
     "next": "Verify scoped C provider namespace, physical STOP and worker recovery; integrate scoped dependency wait/notifications for C->B->C. Preserve all remaining M0-M11 requirements and closed activation.",
     "tenant_activation": "closed",
     "deployment": "none",
@@ -1559,13 +1559,13 @@
     "previous_backend_build": 89,
     "native_candidate_schema": "0040_mcp_workspace_identity",
     "last_verified_database_job": "deerflow-tenant-execution-m4-sql",
-    "last_verified_database_build": 104,
+    "last_verified_database_build": 106,
     "executor_candidate_schema": "e0003_execution_identity",
     "execution_status": "active",
     "resumed_at": "2026-10-18",
     "last_full_regression_build": 88,
     "last_full_regression_tests": 134,
-    "last_verified_tests": 7
+    "last_verified_tests": 8
   },
   "workspace_feedback": {
     "status": "partial_M3_verified_repository_and_HTTP_main",
@@ -13511,5 +13511,45 @@
     },
     "historical_volume_limit": "Only recorded exact fixture volumes are confirmed removed; no ownership is inferred for old unrecorded volumes and no global prune is performed.",
     "scope": "Real SQLite/Postgres, ASGI poll/get/report, pool capacity CAS, native snapshot/handoff/receiver/services.execute_admitted_native_run/run_agent, deterministic model, private SQL journal and usage, completion reservation release. No TCP/two-host/AIO/provider STOP or crash/restart evidence; membership version withdrawal is a fixture. Scoped wait/refuse and dependency continuations remain closed."
+  },
+  "native_c_physical_stop_wip": {
+    "status": "focused_main_verified_physical_cloud_pending",
+    "date": "2026-10-18",
+    "job": "deerflow-tenant-execution-m4-sql",
+    "build": 105,
+    "result": "FAILURE",
+    "tests": "1 failed in 10.73s",
+    "phase": "m4-native-stop-red",
+    "archive_sha256": "20dd502e31fe69f09bcdfe1eb717b10cfbf0a65853c4b94ba294f67d65e72708",
+    "failure": "stop_owned missing workspace context re-derives absent legacy sandbox ID and acknowledges STOP while captured policy container remains running",
+    "proof_scope": "real AIO provider tracking/destruction and worker stop_owned, simulated physical backend; not actual Docker proof",
+    "next": "Actual Shanghai AIO lifecycle, restart/recovery and scoped C->B->C; do not treat simulated backend STOP as physical proof.",
+    "cloud": "Jenkins reachable; historical ECS public SSH and private TCP22 timed out, awaiting current addresses; no local runtime or deployment",
+    "activation": false,
+    "green": {
+      "build": 106,
+      "result": "SUCCESS",
+      "phase": "m4-native-stop-main",
+      "tests": 8,
+      "pytest_seconds": 25.67,
+      "duration_ms": 47817,
+      "ruff_files": 44,
+      "archive_sha256": "361200d1a9d52e697b127dd0a2aa2fff6b824bac86b0201b4aab813d94d74eac",
+      "source_hashes": {
+        "backend/app/gateway/native_admission.py": "1220b078712b3092cef97614148aab18159c869d3a4242dde4a9697c8d707d31",
+        "backend/packages/ecs-executor/ecs_executor/agent_dispatch.py": "2686bd593c6b45ef1f3b127b45bb905dce56298b15c657bc75eed001c89d4863",
+        "backend/packages/ecs-executor/ecs_executor/native_sandbox.py": "ddbbdcca6384e89efc650d55d4d0437239cd17cbb5231405523c0c7b39896ee0",
+        "backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox_provider.py": "4bd6b4ad6cb9a78d586c9a6621b88bcc75c59575f21db71f5279e44ee644f9ba",
+        "backend/packages/harness/deerflow/community/aio_sandbox/local_backend.py": "aa1a83f1ac8ada0eaec68e15264889e2ba1e82aeac40a7844c627107447587e6",
+        "backend/packages/harness/deerflow/community/aio_sandbox/sandbox_info.py": "4991d40e6b11b43d70e66ac4728d6a3f773e9009d495f879ee695e483677c2aa",
+        "backend/packages/harness/deerflow/sandbox/execution_capture.py": "21019169407fb076c3cfcdc9b4b2ab9fa3ac99488b0f8513212cf53d3cd8095a",
+        "backend/packages/harness/deerflow/sandbox/lease.py": "fd1f4c6074d8da9b36fddb2c5fdcd40e74da32dd598e86fcdb8b34457abefb0f",
+        "backend/tests/test_ecs_executor_agent_dispatch.py": "4dc3c7c70c88af53b0e96858e91f5ceff1a81aa4d9417d66cad7167f50c88b0a",
+        "backend/tests/test_workspace_native_dispatch.py": "18cbf35ba7b70e2ba9cad42201ddc09b99c894b5b3b8da3192bdad9cc192390b",
+        "examples/ecs-native/deploy/Jenkinsfile.tenant-run-control.in": "51b912ff7a083ef44e12d46fb70081a66b55ee96483acc62cdafa2c52d97440c",
+        "scripts/render_tenant_run_control_pipeline.py": "a41ded0b76ad8ac4c55147c3cfb831f21e130c79d02ad62fad134089747d2854"
+      },
+      "owned_containers_networks": "none after terminal build"
+    }
   }
 }

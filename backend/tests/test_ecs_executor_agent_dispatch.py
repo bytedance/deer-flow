@@ -524,3 +524,156 @@ async def test_pre_adoption_refusal_recovers_native_commit_and_end_failure(tmp_p
     finally:
         jobs.engine.dispose()
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_scoped_native_stop_cannot_acknowledge_a_different_missing_container(tmp_path, monkeypatch):
+    """Poll cancellation runs without the admission workspace ContextVar.
+
+    A policy sandbox belongs to the scoped skills projection. Inspecting the
+    absent legacy name cannot establish that this acquired object stopped.
+    Unknown capture/STOP may fail closed, retaining the reservation for retry.
+    """
+    import asyncio
+    from contextvars import Context
+    from dataclasses import asdict
+    from types import SimpleNamespace
+
+    from ecs_executor.agent_dispatch import NativeWorkerHost
+    from ecs_executor.native_sandbox import NativeSandboxCapture
+    from test_aio_sandbox_provider import _make_provider_with_active_sandbox
+
+    from deerflow.authz.workspace import WorkspaceContext, reset_current_workspace, set_current_workspace
+    from deerflow.community.aio_sandbox import aio_sandbox_provider as aio_module
+    from deerflow.config.paths import Paths
+    from deerflow.sandbox import sandbox_provider
+    from deerflow.sandbox.execution_capture import current_execution_capture, sandbox_execution_capture
+
+    paths = Paths(base_dir=tmp_path / "owned-home")
+    monkeypatch.setattr(aio_module, "get_paths", lambda: paths)
+    context = WorkspaceContext("11111111-1111-4111-8111-111111111111", "owner", 1, 1)
+    probe = aio_module.AioSandboxProvider.__new__(aio_module.AioSandboxProvider)
+    probe._config = {"skills_container_path": "/mnt/skills"}
+    workspace_token = set_current_workspace(context)
+    try:
+        paths.thread_skills_view_dir("private-thread", user_id="owner").mkdir(parents=True)
+        acquired_id = probe._sandbox_id_for_thread("private-thread", "owner")
+    finally:
+        reset_current_workspace(workspace_token)
+    unscoped_id = probe._sandbox_id_for_thread("private-thread", "owner")
+    assert acquired_id != unscoped_id
+    provider, sandbox, _ = _make_provider_with_active_sandbox(tmp_path, acquired_id)
+    provider._config.update(hard_capacity=True, skills_container_path="/mnt/skills")
+    provider._thread_sandboxes[("owner", "private-thread")] = acquired_id
+    provider._active_sandbox_identity[acquired_id] = ("owner", "private-thread")
+    info = provider._sandbox_infos[acquired_id]
+    info.container_name, info.container_id = "owned-aio-" + acquired_id, "captured-physical-container"
+    physical = {info.container_id: True}
+    stopped = []
+
+    def destroy(target):
+        stopped.append(target.container_id)
+        if len(stopped) == 1:
+            raise RuntimeError("owned physical STOP transport failed")
+        physical[target.container_id] = False
+
+    def running(name):
+        return physical[info.container_id] if name in (info.container_name, info.container_id) else False
+
+    provider._backend = SimpleNamespace(_container_prefix="owned-aio", destroy=destroy, _is_container_running=running, is_alive=lambda actual: True)
+    monkeypatch.setattr(provider, "_ensure_skills_projection", lambda user_id: None)
+    monkeypatch.setattr(sandbox_provider, "get_initialized_sandbox_provider", lambda: provider)
+    host = NativeWorkerHost.__new__(NativeWorkerHost)
+    host.stop_tasks = {}
+    job = {
+        "id": "owned-c-job",
+        "workspace_id": context.workspace_id,
+        "physical_stopped": False,
+        "native": {"run_id": "bound-native-run", "user_id": "owner", "thread_id": "private-thread", "incarnation": "original-incarnation", "workspace_id": context.workspace_id, "workspace_context": asdict(context)},
+    }
+    job.update(node_id="worker", worker_owner="assignment-owner", generation="assignment-generation")
+    capture = NativeSandboxCapture(job)
+    record = SimpleNamespace(run_id="bound-native-run", user_id="owner", thread_id="private-thread", thread_incarnation="original-incarnation", workspace_context=context)
+    capture.bind_execution(record)
+    host.sandbox_captures = {job["id"]: capture}
+    try:
+        workspace_token = set_current_workspace(context)
+        try:
+            with sandbox_execution_capture(capture):
+                assert provider.acquire("private-thread", user_id="owner") == acquired_id
+                assert provider.get_scoped(acquired_id, user_id="owner", thread_id="private-thread") is sandbox
+                provider.release(acquired_id)
+            assert current_execution_capture() is None
+        finally:
+            reset_current_workspace(workspace_token)
+        assert acquired_id in provider._warm_pool and physical[info.container_id]
+        with pytest.raises(RuntimeError, match="STOP remains unconfirmed"):
+            await asyncio.create_task(host.stop_owned(job), context=Context())
+        assert physical[info.container_id] and acquired_id in provider._warm_pool and not job["physical_stopped"]
+        assert job["id"] not in host.stop_tasks, "failed STOP must remain retryable"
+        await asyncio.create_task(host.stop_owned(job), context=Context())
+        assert not physical[info.container_id], "Missing legacy container was accepted as STOP while the acquired policy sandbox is still running"
+        assert stopped == [info.container_id, info.container_id]
+        assert acquired_id not in provider._warm_pool
+        with pytest.raises(RuntimeError, match="no longer accepts acquisition"):
+            with sandbox_execution_capture(capture):
+                provider.acquire("private-thread", user_id="owner")
+    finally:
+        sandbox.close()
+        provider.reset()
+
+
+@pytest.mark.asyncio
+async def test_scoped_native_text_run_proves_no_sandbox_start_after_drain():
+    import asyncio
+    from dataclasses import asdict
+    from types import SimpleNamespace
+
+    from ecs_executor.agent_dispatch import NativeWorkerHost
+    from ecs_executor.native_sandbox import NativeSandboxCapture
+
+    from deerflow.authz.workspace import WorkspaceContext
+
+    context = WorkspaceContext("11111111-1111-4111-8111-111111111111", "owner", 1, 1)
+    job = {
+        "id": "text-job",
+        "node_id": "worker",
+        "worker_owner": "worker-owner",
+        "generation": "one",
+        "workspace_id": context.workspace_id,
+        "native": {
+            "run_id": "text-run",
+            "user_id": "owner",
+            "thread_id": "text-thread",
+            "incarnation": "text-incarnation",
+            "workspace_context": asdict(context),
+        },
+    }
+    release = asyncio.Event()
+    task = asyncio.create_task(release.wait())
+    record = SimpleNamespace(run_id="text-run", user_id="owner", thread_id="text-thread", thread_incarnation="text-incarnation", workspace_context=context, task=task, workspace_execution_closed=False)
+    capture = NativeSandboxCapture(job)
+    capture.bind_execution(record)
+    host = NativeWorkerHost.__new__(NativeWorkerHost)
+    host.stop_tasks, host.sandbox_captures = {}, {job["id"]: capture}
+    try:
+        with pytest.raises(RuntimeError, match="STOP remains unconfirmed"):
+            await host.stop_owned(job)
+        release.set()
+        await task
+        record.workspace_execution_closed = True
+        await host.stop_owned(job)
+        # The successful proof seals future acquire, rather than guessing from
+        # an empty provider map or from a task which could still start a tool.
+        with pytest.raises(RuntimeError, match="no longer accepts acquisition"):
+            capture.acquire_started("text-thread", "owner")
+        capture.validate_assignment(job)
+        unknown = NativeSandboxCapture(job)
+        unknown.bind_execution(record)
+        unknown.acquire_started("text-thread", "owner")
+        unknown.acquire_failed()
+        with pytest.raises(RuntimeError, match="unknown"):
+            unknown.stop()
+    finally:
+        release.set()
+        await task

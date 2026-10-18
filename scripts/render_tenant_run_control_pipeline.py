@@ -39,6 +39,8 @@ def main():
             "native-receiver-final",
             "native-pool-main",
             "native-pool-final",
+            "native-stop-main",
+            "native-stop-final",
         ),
         default="revocation",
     )
@@ -122,6 +124,10 @@ def main():
         tests = "tests/test_workspace_native_dispatch.py::test_native_c_pool_dispatch_executes_original_run"
     if args.suite == "native-pool-final":
         tests += " tests/test_workspace_execution_ledger.py::test_pool_claim_filters_unintegrated_scope_before_limit tests/test_ecs_executor_agent_dispatch.py::test_native_capability_rejects_changed_snapshot_and_assignment"
+    if args.suite in ("native-stop-main", "native-stop-final"):
+        tests = "tests/test_ecs_executor_agent_dispatch.py::test_scoped_native_stop_cannot_acknowledge_a_different_missing_container tests/test_ecs_executor_agent_dispatch.py::test_scoped_native_text_run_proves_no_sandbox_start_after_drain"
+    if args.suite == "native-stop-final":
+        tests += " tests/test_ecs_executor_agent_dispatch.py::test_native_cancel_stop_is_shared_with_task_finalizer tests/test_ecs_executor_agent_dispatch.py::test_native_lost_ownership_retains_attempt_reservation tests/test_workspace_native_dispatch.py::test_native_c_pool_dispatch_executes_original_run"
     rendered = rendered.replace("@@TEST_PATHS@@", tests)
     if "@@" in rendered:
         parser.error("unresolved pipeline marker")

@@ -1763,3 +1763,13 @@ acceptance. The withdrawal fixture changes SQL membership version; earlier #99
 contains actual member-operation NoStart evidence. Next physical C lifecycle and
 scoped C->B->C dependencies/notifications, then remaining M4 domains and M0–M11.
 Activation remains false; no deployment/push or local runtime.
+
+
+M4 physical STOP follow-up (#105, implementation in progress): one focused cloud
+regression fails because background STOP recomputes a legacy sandbox name and
+accepts its absence while the captured policy sandbox remains running. Actual
+provider tracking/ownership is exercised; physical backend is simulated. Follow
+the bounded capture/STOP/NoStart plan in M4 step 24; parent acceptance remains
+open until successful flow and actual physical lifecycle evidence exist.
+
+Follow-up #106 SUCCESS: 8 focused tests/44-file Ruff. Actual acquire/reuse captures, warm STOP failure retention/retry and native text NoStart/receiver wiring verified. Physical backend is simulated; actual AIO lifecycle/restart and full M4 acceptance remain open. No new activation or deployment.

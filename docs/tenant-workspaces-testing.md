@@ -626,3 +626,9 @@ acceptance. The withdrawal fixture changes SQL membership version; earlier #99
 contains actual member-operation NoStart evidence. Next physical C lifecycle and
 scoped C->B->C dependencies/notifications, then remaining M4 domains and M0–M11.
 Activation remains false; no deployment/push or local runtime.
+
+
+## Captured native C STOP — #105 / #106 (2026-10-18)
+
+#105 reproduces false STOP against a missing legacy name (one failing regression).
+#106 passes eight focused cases in 25.67s plus 44-file Ruff: actual provider acquire/reuse/warm tracking, first STOP failure retains tracking and second STOP consumes the captured Docker ID, late acquisition denied; text NoStart only after native drain; existing cancellation sharing/ownership retention; actual SQL/ASGI/graph via worker adoption confirms receiver capture wiring. Only physical backend state is simulated. Actual ECS AIO lifecycle, restart recovery and scoped dependencies remain pending. Exact archive/source hashes and cleanup are in progress JSON `native_c_physical_stop_wip.green`; activation remains closed.

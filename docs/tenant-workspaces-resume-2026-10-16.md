@@ -1,5 +1,5 @@
 <!-- 当前状态：2026-10-18 用户恢复执行；历史暂停记录保留，参见文末最新检查点。 -->
-> **执行中，M4 部分完成。** Jenkins #104：租户 C 真实池派发→原生图执行→私有报告/用量写回→进程内完成释放，7 项关键测试及 37 文件 Ruff 通过。下一步物理 C 生命周期与 C→B→C；尚未完成两机/AIO验收，租户启动关闭。
+> **执行中，M4 部分完成。** Jenkins #106：捕获原沙箱 STOP、失败保留/重试、纯文本 NoStart 与原生图接线，8 项关键验证和 44 文件 Ruff 通过。真实两机/AIO生命周期、恢复及 C→B→C 仍待完成；租户启动关闭。
 
 # 2026-10-16 暂停与恢复检查点
 
@@ -1109,3 +1109,14 @@ acceptance. The withdrawal fixture changes SQL membership version; earlier #99
 contains actual member-operation NoStart evidence. Next physical C lifecycle and
 scoped C->B->C dependencies/notifications, then remaining M4 domains and M0–M11.
 Activation remains false; no deployment/push or local runtime.
+
+
+### 2026-10-18 C physical STOP RED (#105)
+
+One focused cloud regression reproduces wrong-container STOP acknowledgment: actual AIO tracking/ownership/destroy and worker stop_owned return success after inspecting an absent legacy name while the captured policy sandbox remains running. Backend physical state is simulated; this is not Docker acceptance. Jenkins #105 terminal FAILURE, 1 failed in 10.73s; source SHA256 `20dd502e31fe69f09bcdfe1eb717b10cfbf0a65853c4b94ba294f67d65e72708`. Production fix is in progress with the single 6.1-sol medium coding agent under root review: capture actual execution identity rather than recompute mutable projection paths, preserve unknown STOP reservation and no-sandbox completion. No completion claimed. Jenkins reachable; historical ECS public and private SSH endpoints timed out; current IP confirmation pending. No local runtime/deploy/push. Full M0–M11 remains active.
+
+### Captured STOP checkpoint (#106 SUCCESS)
+
+The worker now binds a private capture to the SQL-adopted native Run before task creation. Actual acquire and explicit reuse retain immutable Docker IDs through warm release. Cancellation stops that captured object using existing provider ownership/teardown; late acquisition is sealed. Failed STOP keeps tracking and can retry. NoStart requires the bound task to drain with no acquisition, not an empty provider map. Normal resident warm reuse stays intact. Discovery retains Docker IDs; process restart without a capture remains unknown.
+
+#106: 8 passed in 25.67s, 44-file Ruff check/format. Archive `361200d1a9d52e697b127dd0a2aa2fff6b824bac86b0201b4aab813d94d74eac`; 12 changed code/pipeline file hashes match tested bytes, exact owned containers/networks absent. OpenSpec strict validation passes. Includes actual SQL/ASGI/native graph text completion through worker.adopt_owned. STOP physical backend is simulated: no two-host/AIO acceptance, restart recovery or full M4/M0–M11 completion claimed. No deploy/push/local runtime; activation stays closed.

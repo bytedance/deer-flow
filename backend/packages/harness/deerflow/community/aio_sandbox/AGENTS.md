@@ -19,3 +19,18 @@ input. Window overrides must be finite positive seconds, at most 600. Broker
 INFO logs contain argc/exit/elapsed only, never argument values.
 
 Regressions: `tests/test_aio_sandbox.py`, `tests/test_lark_broker.py`.
+
+
+Scoped native C workers install an execution-local physical capture observer only
+around receiver adoption. The SQL-adopted Run binds that observer before task
+creation. AIO acquisition and identity-checked reuse capture the actual immutable
+container ID, retained across warm release; ordinary `get()` reads do not capture.
+`destroy_captured` reuses local teardown reservations, ownership and teardown
+leases, validates active/warm user-thread identity, and strictly inspects the
+captured ID after STOP. It never derives STOP identity from live skills paths.
+Missing/ambiguous capture and failed or in-flight acquisition retain capacity.
+A text-only NoStart proof requires the same bound native task to have drained
+without any acquisition/reuse; sealing capture refuses later acquisitions.
+Created and discovered Docker resources preserve immutable container IDs.
+These receipts are process-private; restart without a receipt stays unknown,
+and this component does not open tenant activation or remote physical acceptance.
