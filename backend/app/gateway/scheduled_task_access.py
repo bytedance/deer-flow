@@ -480,16 +480,16 @@ class _SchedulerCapability:
         guard = await self._run_binding.check()
         token = set_current_workspace(self._run_binding.workspace_context)
         try:
-            if action != "list":
+            if action not in {"list", "create"}:
                 result = tool_error_payload(scheduler_error(503, "scheduler_scoped_management_unavailable", "Scoped schedule management requires its native integration"))
             else:
-                result = await self._manage(action=action, request=request)
+                result = await self._manage(action=action, request=request, worker_target=guard.target if action == "create" else None)
             await guard.check()
             return result
         finally:
             reset_current_workspace(token)
 
-    async def _manage(self, *, action: str, request: dict[str, Any]) -> dict[str, Any]:
+    async def _manage(self, *, action: str, request: dict[str, Any], worker_target: NativeRunStopTarget | None = None) -> dict[str, Any]:
         try:
             if self.mode != "interactive":
                 raise scheduler_error(403, "interactive_run_required", "Schedule management requires an interactive run")
@@ -499,7 +499,7 @@ class _SchedulerCapability:
             if not isinstance(request, dict):
                 raise scheduler_error(422, "unsupported_fields", "Unsupported scheduled task fields")
             if action == "create":
-                return await self._create(request)
+                return await self._create(request, worker_target=worker_target)
             if action == "update":
                 return await self._update(request)
             if action == "resume":
@@ -544,7 +544,7 @@ class _SchedulerCapability:
             return "UTC", "not_needed"
         raise _with_now_local(_timezone_required(), None)
 
-    async def _create(self, request: dict[str, Any]) -> dict[str, Any]:
+    async def _create(self, request: dict[str, Any], *, worker_target: NativeRunStopTarget | None = None) -> dict[str, Any]:
         from app.gateway.routers.scheduled_tasks import ScheduledTaskCreateRequest, resolve_scheduled_task_assistant_id
 
         if request.keys() - _CREATE_FIELDS:
@@ -570,7 +570,14 @@ class _SchedulerCapability:
             )
         except HTTPException as exc:
             raise _with_now_local(exc, timezone) from None
-        task = await self._task_repo.create(task_id=f"task-{uuid.uuid4().hex}", user_id=self._owner_id, origin_thread_id=self._origin_thread_id, standing_notes=None, **definition)
+        task = await self._task_repo.create(
+            task_id=f"task-{uuid.uuid4().hex}",
+            user_id=self._owner_id,
+            origin_thread_id=self._origin_thread_id,
+            standing_notes=None,
+            **({"worker_target": worker_target, "expected_token_version": self._token_version} if worker_target is not None else {}),
+            **definition,
+        )
         browser = self._client_timezone if timezone_source == "explicit" and self._client_timezone and self._client_timezone != timezone else None
         view = _task_view(task, used=0, active_run_status=None, timezone_source=timezone_source, browser_timezone=browser)
         return self._result("create", task=view, now_local=_now_local(timezone))

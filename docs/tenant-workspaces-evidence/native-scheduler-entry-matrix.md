@@ -21,3 +21,5 @@ Withheld / not accepted:
 - Scoped event deletion/full tool/UI/lifecycle and withdrawal/recovery fault acceptance remain required; activation stays false.
 
 One PostgreSQL story: RED #122, GREEN #123 (19.61s). Queued withdrawal and pre-insert lease takeover boundaries passed in #125 (two PostgreSQL cases); no dialect matrix. See `native-scheduler-boundaries-125.json`.
+
+Conversation ToolNode create/fresh → due queue main passed #143 with atomic original parent/token/Run checks. Only list/create are open; terminal-between-validation-and-write probe is next. Other management/manual/own-stop and complete runtime/lifecycle remain unaccepted.

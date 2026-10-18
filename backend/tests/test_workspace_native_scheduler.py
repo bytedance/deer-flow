@@ -598,7 +598,7 @@ def test_scoped_scheduler_tool_list_uses_original_native_invocation(native_engin
     _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, tmp_path)
 
 
-def _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, tmp_path, *, remote=False, boundary="normal"):  # noqa: F811
+def _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, tmp_path, *, remote=False, boundary="normal", tool_action="list"):  # noqa: F811
     import json
 
     from fastapi import FastAPI
@@ -775,7 +775,18 @@ def _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, t
             assert get_current_workspace() == case.original
             entered.set()
             await release.wait()
-            return {"messages": [AIMessage(content="", tool_calls=[{"name": "schedule_task", "args": {"action": "list"}, "id": "native-schedule-list", "type": "tool_call"}])]}
+            arguments = {"action": tool_action}
+            if tool_action == "create":
+                arguments.update(
+                    title="Remote conversation follow-up",
+                    prompt="Deliver the private follow-up",
+                    schedule_type="once",
+                    schedule_spec={"run_at": (datetime.now(UTC) + timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%S")},
+                    timezone="UTC",
+                    context_mode="fresh_thread_per_run",
+                    max_runs=1,
+                )
+            return {"messages": [AIMessage(content="", tool_calls=[{"name": "schedule_task", "args": arguments, "id": "native-schedule-operation", "type": "tool_call"}])]}
 
         async def observe_result(state, config):
             observed.append(json.loads(state["messages"][-1].content))
@@ -910,8 +921,40 @@ def _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, t
                     assert (await request_worker("poll"))["claim"] is None
                     assert (await asyncio.to_thread(pool.node_status, "worker"))["unreleased"] == 0
                 if boundary == "normal":
-                    assert len(observed) == 1 and observed[0].get("action") == "list", {"preparation": preparation, "runtime": runtime_diagnostics, "tool_error": [{key: value.get(key) for key in ("code", "error")} for value in observed]}
-                    assert [row["id"] for row in observed[0]["tasks"]] == [ids[0]]
+                    assert len(observed) == 1 and observed[0].get("action") == tool_action, {
+                        "preparation": preparation,
+                        "runtime": runtime_diagnostics,
+                        "tool_error": [{key: value.get(key) for key in ("code", "error")} for value in observed],
+                    }
+                    if tool_action == "list":
+                        assert [row["id"] for row in observed[0]["tasks"]] == [ids[0]]
+                    else:
+                        from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
+
+                        created_id = observed[0]["task"]["id"]
+                        async with case.sf() as session:
+                            created = await session.get(ScheduledTaskRow, created_id)
+                            assert created.workspace_context_json == asdict(case.original) and created.user_id == owner
+                            assert created.origin_thread_id == origin["thread_id"] and created.origin_thread_incarnation == origin["incarnation"]
+                            assert created.thread_id is None and created.thread_incarnation is None and created.context_mode == "fresh_thread_per_run"
+                            assert created.max_runs == 1 and created.run_count == 0
+                        # Only the new tool-created task is due; both setup
+                        # tasks are scheduled an hour from now. Queueing is
+                        # durable, and does not launch another native Run.
+                        queue_at = datetime.now(UTC) + timedelta(minutes=45)
+                        due = await tasks.claim_due_tasks(now=queue_at, lease_owner=foreground._lease_owner, lease_seconds=120, limit=1)
+                        assert len(due) == 1 and due[0]["id"] == created_id
+                        queued = await foreground.dispatch_task(due[0], now=queue_at, trigger="scheduled")
+                        assert queued["outcome"] == "queued" and queued["run_id"] is None
+                        assert get_current_workspace() == case.other
+                        async with case.sf() as session:
+                            occurrence = await session.get(ScheduledTaskRunRow, queued["task_run_id"])
+                            assert occurrence.workspace_context_json == asdict(case.original)
+                            assert occurrence.task_id == created_id and occurrence.status == "queued" and occurrence.run_id is None
+                            queued_task = await session.get(ScheduledTaskRow, occurrence.task_id)
+                            assert queued_task.user_id == owner and queued_task.workspace_id == case.original.workspace_id
+                            assert occurrence.thread_id is not None and occurrence.thread_incarnation is not None
+                        assert (await asyncio.to_thread(pool.node_status, "worker"))["unreleased"] == 0
                 else:
                     expected_code = "scheduler_tools_disabled" if boundary == "token_version" else "permission_denied"
                     assert len(observed) == 1 and observed[0].get("code") == expected_code, observed
@@ -932,7 +975,7 @@ def _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, t
                     assert original_task.workspace_context_json == asdict(case.original) and original_task.run_count == 0
                     assert journal and all(row.workspace_id == case.original.workspace_id and row.user_id == owner for row in journal)
                     if boundary == "normal":
-                        assert any(ids[0] in row.content for row in journal), "The actual tool result was not journaled"
+                        assert any((ids[0] if tool_action == "list" else created_id) in row.content for row in journal), "The actual tool result was not journaled"
                     else:
                         assert any(expected_code in row.content for row in journal), "The actual tool denial was not journaled"
                         assert not any(value in row.content for row in journal for value in (*ids, "Original tool follow-up", "Other private tool schedule"))
@@ -969,3 +1012,8 @@ def test_scoped_scheduler_remote_tool_list_preserves_admitted_session(native_eng
 @pytest.mark.parametrize("boundary", ["token_version", "permission_ceiling"])
 def test_scoped_scheduler_remote_tool_retains_original_authority(native_engine, executor_engine, monkeypatch, tmp_path, boundary):  # noqa: F811
     _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, tmp_path, remote=True, boundary=boundary)
+
+
+@pytest.mark.parametrize("executor_engine", ["postgres"], indirect=True)
+def test_scoped_scheduler_remote_tool_create_queues_original_workspace(native_engine, executor_engine, monkeypatch, tmp_path):  # noqa: F811
+    _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, tmp_path, remote=True, tool_action="create")

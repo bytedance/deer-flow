@@ -20,6 +20,8 @@ from deerflow.persistence.scheduled_task_runs.scope import bound_native_run, liv
 from deerflow.persistence.scheduled_tasks.model import ACTIVE_RUN_STATUSES, LIVE_TASK_STATUSES, ONCE_TASK_STATUS_BY_RUN_STATUS, TERMINAL_RUN_STATUSES, TERMINAL_TASK_STATUSES, ScheduledTaskRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
+from deerflow.persistence.user.model import UserRow
+from deerflow.persistence.workspaces.run_control import NativeRunStopTarget
 from deerflow.persistence.workspaces.scope import lock_resource_scope, resolve_resource_scope
 from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 from deerflow.scheduler.host_notes import RUN_ERROR_END_REACHED
@@ -159,6 +161,8 @@ class ScheduledTaskRepository:
         end_at: datetime | str | None = None,
         standing_notes: list[str] | None = None,
         stop_condition: str | None = None,
+        worker_target: NativeRunStopTarget | None = None,
+        expected_token_version: int | None = None,
     ) -> dict[str, Any]:
         if goal_objective is not None:
             normalize_goal_objective(goal_objective)
@@ -169,6 +173,19 @@ class ScheduledTaskRepository:
         if standing_notes is not None and (len(standing_notes) > 10 or any(not isinstance(note, str) or not note.strip() or len(note) > 500 for note in standing_notes)):
             raise ValueError("standing notes allow at most 10 nonempty notes of 500 characters")
         context = resolve_resource_scope(None, user_id, required=self.workspace_scope_required)
+        if worker_target is None:
+            if expected_token_version is not None:
+                raise WorkspaceAccessDenied("Scheduler worker credential requires its original execution")
+        elif (
+            type(worker_target) is not NativeRunStopTarget
+            or context is None
+            or type(expected_token_version) is not int
+            or expected_token_version < 0
+            or worker_target.workspace_context != context
+            or worker_target.user_id != user_id
+            or worker_target.thread_id != origin_thread_id
+        ):
+            raise WorkspaceAccessDenied("Scheduler create requires its original native execution")
         now = datetime.now(UTC)
         row = ScheduledTaskRow(
             id=task_id,
@@ -203,6 +220,8 @@ class ScheduledTaskRepository:
                     if parent_id == thread_id:
                         row.thread_incarnation = parent.incarnation
                     if parent_id == origin_thread_id:
+                        if worker_target is not None and parent.incarnation != worker_target.thread_incarnation:
+                            raise WorkspaceAccessDenied("Scheduler origin execution parent changed")
                         row.origin_thread_incarnation = parent.incarnation
                 if context_mode == "reuse_thread" and thread_id is None:
                     raise WorkspaceAccessDenied("Scheduler reuse requires its existing private thread")
@@ -210,6 +229,16 @@ class ScheduledTaskRepository:
                 if context is None or session.get_bind().dialect.name != "sqlite":
                     await self._serialize_owner_quota(session, user_id)
                 await self._check_owner_quota(session, user_id)
+            if worker_target is not None:
+                # workspace/actor -> sorted parents -> quota -> Run -> insert.
+                # The actor is already locked: never renew the original
+                # Session credential between tool preflight and this write.
+                version = await session.scalar(select(UserRow.token_version).where(UserRow.id == user_id))
+                if version != expected_token_version:
+                    raise WorkspaceAccessDenied("Scheduler original credential changed")
+                execution, _ = await self._run_repository._lock_worker_effect_after_parent(session, worker_target)
+                if execution.status != "running":
+                    raise WorkspaceAccessDenied("Scheduler create requires its running native execution")
             session.add(row)
             await session.commit()
             await session.refresh(row)

@@ -423,6 +423,10 @@ class RunRepository(RunStore):
         parent = await ThreadMetaRepository(self._sf)._locked_row(session, target.thread_id, target.user_id, target.workspace_context)
         if parent is None or parent.incarnation != target.thread_incarnation:
             raise WorkspaceAccessDenied("worker effect parent changed")
+        return await self._lock_worker_effect_after_parent(session, target, change_clock=change_clock)
+
+    async def _lock_worker_effect_after_parent(self, session, target: NativeRunStopTarget, *, change_clock=False):
+        """Internal: caller holds the original live workspace/actor/parent locks."""
         sequence = await self._next_change_seq(session) if change_clock else None
         row = await session.scalar(select(RunRow).where(RunRow.run_id == target.run_id).with_for_update())
         try:
