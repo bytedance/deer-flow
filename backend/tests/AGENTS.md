@@ -10,6 +10,11 @@ ownership and capture cleanup. Retain the real XLSX conversion coverage.
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+InfoQuest fetch log assertions install the real `UrlRedactionFilter` on the
+capture handler with fixture-scoped cleanup. Expect scheme/host context with
+redacted paths, so isolated runs and full-suite logging configuration agree;
+keep payload omission and tool-result assertions intact.
+
 `.github/workflows/backend-windows-live-policy.yml` runs the child-env contract and all
 four live-test collection policy cases on Windows/Python 3.12, weekly, manually,
 and for relevant PR changes. These children only collect live tests. Keep the
