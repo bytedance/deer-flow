@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
 import deerflow.community.ragflow.tools as ragflow_tools
 from deerflow.community.ragflow.client import RAGFlowAPIError, RAGFlowConnectionError
@@ -1265,3 +1266,56 @@ async def test_large_document_scope_batches_share_global_concurrency_limit() -> 
     assert error is None
     assert result == {item["dataset_id"]: item["document_ids"] for item in filters}
     assert peak == 4
+
+
+RAGFLOW_BOOLEAN_FIELDS = (
+    ("timeout", "a number"),
+    ("page_size", "an integer"),
+    ("similarity_threshold", "a number"),
+    ("vector_similarity_weight", "a number"),
+    ("top_k", "an integer"),
+    ("max_chars_per_chunk", "an integer"),
+    ("max_total_chars", "an integer"),
+)
+
+
+@pytest.mark.parametrize("value", [True, False])
+@pytest.mark.parametrize(("field", "kind"), RAGFLOW_BOOLEAN_FIELDS)
+def test_ragflow_settings_reject_booleans(field: str, kind: str, value: bool) -> None:
+    with pytest.raises(ValidationError, match=f"{field} must be {kind}, not a boolean"):
+        ragflow_tools._RAGFlowRetrievalSettings.model_validate({field: value})
+
+
+def test_ragflow_settings_keep_numeric_values() -> None:
+    settings = ragflow_tools._RAGFlowRetrievalSettings.model_validate(
+        {
+            "timeout": 45,
+            "page_size": 20,
+            "similarity_threshold": 0.5,
+            "vector_similarity_weight": 0.6,
+            "top_k": 64,
+            "max_chars_per_chunk": 400,
+            "max_total_chars": 2000,
+        }
+    )
+    assert (settings.timeout, settings.page_size) == (45.0, 20)
+    assert (settings.similarity_threshold, settings.vector_similarity_weight) == (0.5, 0.6)
+    assert (settings.top_k, settings.max_chars_per_chunk, settings.max_total_chars) == (64, 400, 2000)
+
+
+def test_ragflow_boolean_setting_reports_invalid_configuration() -> None:
+    """A boolean in config.yaml must not silently become a single result at a one-second timeout."""
+    entry = ToolConfig(
+        name="knowledge_search",
+        group="knowledge",
+        use="deerflow.community.ragflow.tools:knowledge_search_tool",
+        base_url="http://ragflow.test",
+        api_key="ragflow-secret",
+        top_k=True,
+    )
+    app_config = SimpleNamespace(get_tool_config=lambda name: entry if name == "knowledge_search" else None)
+
+    settings, error = ragflow_tools._settings_or_error(app_config)
+
+    assert settings is None
+    assert error == "Error: Invalid RAGFlow settings for knowledge_search; check config.yaml."
