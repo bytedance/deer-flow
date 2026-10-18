@@ -695,6 +695,12 @@ class ScheduledTaskService:
         if claimed is None:
             return self._queued_result(task_run_id, execution_thread_id)
 
+        # Every claim increments attempt_count. Late bookkeeping from this
+        # attempt must carry that generation: after lease expiry the same
+        # process can reclaim the occurrence, so the lease owner alone cannot
+        # distinguish the two attempts.
+        claim_attempt = int(claimed["attempt_count"]) if claimed.get("attempt_count") is not None else None
+
         # Track whether _launch_run has produced a live run. A bookkeeping
         # failure after launch must retain the non-terminal slot so a later
         # poll cannot start the same occurrence twice.
@@ -767,6 +773,7 @@ class ScheduledTaskService:
                     task_run_id,
                     lease_owner=self._lease_owner,
                     error=str(exc),
+                    expected_attempt_count=claim_attempt,
                 )
                 return self._queued_result(task_run_id, execution_thread_id, error=str(exc))
 
@@ -839,6 +846,7 @@ class ScheduledTaskService:
                 lease_owner=self._lease_owner,
                 error=str(exc),
                 now=now,
+                expected_attempt_count=claim_attempt,
             )
             if not finalized:
                 logger.warning(
