@@ -588,7 +588,7 @@ class Workflows(Lifecycle, Artifacts):
                         encoded(outcome["value"], 12000)
                         record.update(status="completed", result=outcome["value"])
                         break
-                    # Poll cancel/fault while a response is pending. An idle worker can only progress
+                    # Poll cancel/fault/worker exit while a response is pending. An idle worker can only progress
                     # on a response, so keep waiting here instead of sending empty frames (turns).
                     if entry["tasks"]:
                         while True:
@@ -597,6 +597,8 @@ class Workflows(Lifecycle, Artifacts):
                                 timeout=0.02,
                                 return_when=asyncio.FIRST_COMPLETED,
                             )
+                            if process.returncode is not None:
+                                raise ValueError("Worker exited while waiting for Agent calls")
                             if finished or not frame.get("idle", False) or entry["cancel"].is_set() or entry["fault"]:
                                 break
                     else:

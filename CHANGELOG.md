@@ -1253,8 +1253,8 @@ This release closes that milestone with **621 merged pull requests**.
   every 20 ms poll while a step was pending, and each round trip counted toward
   the 10,000-turn cap. The worker now reports when its job queue has drained,
   and the supervisor then waits on the pending calls locally (still checking
-  cancellation and faults every 20 ms) without exchanging frames, so idle waits
-  no longer consume turns and `timeout_seconds` is the only wall-clock bound;
+  cancellation, faults and worker exits every 20 ms) without exchanging frames,
+  so idle waits no longer consume turns and `timeout_seconds` is the only wall-clock bound;
   scripts that spin the job queue still hit the turn cap. (issue #7022)
 
 - **llm:** A provider error that arrives inside a streaming response that has

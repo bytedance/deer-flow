@@ -540,6 +540,47 @@ async def test_pending_agent_wait_does_not_consume_worker_turns(plugin, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_worker_exit_while_agent_pending_fails_promptly(plugin):
+    _, actions, service, runs = plugin
+    service.config["timeout_seconds"] = 60
+    result = await launch(plugin, "return await agent({stepId:'a',agentRef:'lead_agent',task:'blocked'});")
+    await asyncio.wait_for(runs.entered.wait(), 5)
+    assert runs.active == 1
+    process = service.processes[result["run_id"]]
+    process.kill()
+    await asyncio.wait_for(process.wait(), 3)
+
+    # A dead idle worker must fail before the workflow's 60-second deadline,
+    # without waiting for the blocked Agent to complete by itself.
+    await asyncio.wait_for(service.wait_idle(result["run_id"]), 3)
+    final = await actions["get"]({"run_id": result["run_id"]}, context(runs))
+    assert final["status"] == "failed", final
+    assert final["error"] == "Worker exited while waiting for Agent calls"
+    assert final["steps"][0]["child_status"] == "interrupted"
+    assert all(run.status == "interrupted" for run in runs.runs.values())
+    assert not service.processes
+
+
+@pytest.mark.asyncio
+async def test_work_frames_still_count_against_worker_turn_budget(plugin, monkeypatch):
+    """Work-carrying frames retain the turn cap (regression from PR #7025)."""
+    service = plugin[2]
+    monkeypatch.setattr(sys.modules[type(service).__module__], "TURN_LIMIT", 2)
+    result = await launch(
+        plugin,
+        """
+      await agent({stepId:'a',agentRef:'lead_agent',task:'one'});
+      await agent({stepId:'b',agentRef:'lead_agent',task:'two'});
+      return 1;
+    """,
+    )
+    final = await done(plugin, result["run_id"])
+    assert final["status"] == "failed", final
+    assert final["error"] == "Worker turn limit"
+    assert not service.processes
+
+
+@pytest.mark.asyncio
 async def test_cancel_while_agent_pending_stops_promptly(plugin):
     _, actions, service, runs = plugin
     result = await launch(plugin, "return await agent({stepId:'a',agentRef:'lead_agent',task:'blocked'});")
