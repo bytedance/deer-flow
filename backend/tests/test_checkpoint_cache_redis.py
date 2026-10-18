@@ -94,11 +94,23 @@ class _FailingRedis(_FakeRedis):
         raise RedisError("connection refused")
 
 
-def _make_cache(monkeypatch: pytest.MonkeyPatch, fake: _FakeRedis, ttl_seconds: int = 60, **kwargs: Any):
+def _make_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    fake: _FakeRedis,
+    ttl_seconds: int = 60,
+    *,
+    serde: Any | None = None,
+    **kwargs: Any,
+):
     import deerflow.runtime.checkpoint_cache.redis as redis_mod
 
     monkeypatch.setattr(redis_mod, "_create_client", lambda *a, **k: fake)
-    return redis_mod.RedisCheckpointHistoryCache("redis://unused", serde=JsonPlusSerializer(), ttl_seconds=ttl_seconds, **kwargs)
+    return redis_mod.RedisCheckpointHistoryCache(
+        "redis://unused",
+        serde=serde if serde is not None else JsonPlusSerializer(),
+        ttl_seconds=ttl_seconds,
+        **kwargs,
+    )
 
 
 def _entry(i: int) -> dict:
@@ -159,6 +171,37 @@ async def test_redis_outage_skips_write(monkeypatch: pytest.MonkeyPatch, caplog:
         await cache.aset_many({"k1": _entry(1)})  # must not raise
     assert fake.store == {}
     assert "write failed" in caplog.text
+
+
+@pytest.mark.anyio
+async def test_redis_serialization_failure_preserves_neighbor_writes(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    class _SelectiveFailingSerde:
+        def dumps_typed(self, entry: dict) -> tuple[str, bytes]:
+            if entry.get("bad"):
+                raise TypeError("sensitive serializer detail")
+            return "json", b"encoded"
+
+    fake = _FakeRedis()
+    cache = _make_cache(monkeypatch, fake, serde=_SelectiveFailingSerde())
+    with caplog.at_level("WARNING"):
+        await cache.aset_many(
+            {
+                "before": {"writes": []},
+                "broken": {"writes": [], "bad": True},
+                "after": {"writes": []},
+            }
+        )
+
+    assert fake.store == {
+        "before": b"json\x00encoded",
+        "after": b"json\x00encoded",
+    }
+    assert fake.ttls == {"before": 60, "after": 60}
+    assert "broken" in caplog.text
+    assert "TypeError" in caplog.text
+    assert "sensitive serializer detail" not in caplog.text
+    assert cache.stats().write_serialization_failures == 1
+    assert cache.stats().as_dict()["write_serialization_failures"] == 1
 
 
 @pytest.mark.anyio

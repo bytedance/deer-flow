@@ -354,6 +354,10 @@ class RunJournal(BaseCallbackHandler):
         # late result is retrieved and logged rather than dropped. This is not a
         # termination guarantee: it only keeps settlement responsibility.
         self._abandoned_store_tasks: dict[asyncio.Task[None], int] = {}
+        # Progress persistence is best-effort, but a cancellation-resistant
+        # reporter must not block lease-loss close. Keep any task that outlives
+        # bounded teardown strongly referenced until its result is retrieved.
+        self._abandoned_progress_tasks: set[asyncio.Task[None]] = set()
         # Batches whose outcome is UNKNOWN (a generic store failure) must never
         # be replayed: the store may have committed before losing its ACK.
         # Keeping them here also fences every successor write for this run.
@@ -1184,6 +1188,57 @@ class RunJournal(BaseCallbackHandler):
                 batch_size,
             )
 
+    def _supervise_abandoned_progress_task(self, task: asyncio.Task[None]) -> None:
+        """Retain a progress task that outlived bounded journal teardown."""
+        if task in self._abandoned_progress_tasks:
+            return
+        self._abandoned_progress_tasks.add(task)
+        task.add_done_callback(self._on_abandoned_progress_task_settled)
+
+    def _observe_progress_task_failure(self, task: asyncio.Task[None], *, after_abandonment: bool) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is None:
+            return
+        logger.warning(
+            "RunJournal progress reporter for run %s failed %s (%s: %s)",
+            self.run_id,
+            "after journal abandonment" if after_abandonment else "during journal teardown",
+            type(exc).__name__,
+            exc,
+        )
+
+    def _on_abandoned_progress_task_settled(self, task: asyncio.Task[None]) -> None:
+        self._abandoned_progress_tasks.discard(task)
+        if task.cancelled():
+            return
+        if task.exception() is not None:
+            self._observe_progress_task_failure(task, after_abandonment=True)
+            return
+        logger.warning(
+            "RunJournal progress reporter for run %s settled after journal abandonment",
+            self.run_id,
+        )
+
+    async def _settle_cancelled_progress_task(self, task: asyncio.Task[None]) -> None:
+        """Bound teardown of a progress task already cancelled by force-close."""
+        try:
+            done, _pending = await asyncio.wait(
+                {task},
+                timeout=_WRITE_SETTLE_TIMEOUT_SECONDS,
+            )
+        except asyncio.CancelledError:
+            if task.done():
+                self._observe_progress_task_failure(task, after_abandonment=False)
+            else:
+                self._supervise_abandoned_progress_task(task)
+            raise
+        if task not in done:
+            self._supervise_abandoned_progress_task(task)
+            return
+        self._observe_progress_task_failure(task, after_abandonment=False)
+
     async def _drain_pending_writes(self) -> None:
         """Settle every journal-owned write before any successor may start.
 
@@ -1653,8 +1708,8 @@ class RunJournal(BaseCallbackHandler):
         self._pending_llm_response = None
         self._owned_writes = {}
         self._draining_tasks = set()
-        # Intentionally NOT cleared: abandoned inner store tasks stay strongly
-        # referenced here until they settle and their result is logged.
+        # Intentionally NOT cleared: abandoned store/progress tasks stay strongly
+        # referenced by their supervisor collections until they settle.
         self._pending_progress_task = None
         self._pending_progress_delayed = False
         self._progress_dirty = False
@@ -1713,12 +1768,20 @@ class RunJournal(BaseCallbackHandler):
             pending_owned = tuple(self._owned_writes)
             for task in pending_owned:
                 task.cancel()
-            if pending_owned:
-                await asyncio.gather(*pending_owned, return_exceptions=True)
             pending_progress_task = self._pending_progress_task
+            cleanup_tasks = list(pending_owned)
             if pending_progress_task is not None:
+                # Revoke both write classes before the first await. Progress
+                # teardown must not queue behind an unrelated event write.
                 pending_progress_task.cancel()
-                await asyncio.gather(pending_progress_task, return_exceptions=True)
+                cleanup_tasks.append(
+                    asyncio.create_task(
+                        self._settle_cancelled_progress_task(pending_progress_task),
+                        name=f"run-journal-progress-teardown-{self.run_id}",
+                    )
+                )
+            if cleanup_tasks:
+                await asyncio.gather(*cleanup_tasks, return_exceptions=True)
         finally:
             self._detach_runtime_dependencies()
 

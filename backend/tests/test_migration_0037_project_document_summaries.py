@@ -23,7 +23,8 @@ USER_DISABLED = "0039_user_disabled"
 GROUP_NOTICE = "0040_scheduled_group_notice"
 IM_NOTICE_PREFERENCES = "0041_im_notice_preferences"
 CHANNEL_LEASES = "0042_channel_leases"
-CURRENT_HEAD = "0043_runtime_im_notices"
+RUNTIME_IM_NOTICES = "0043_runtime_im_notices"
+CURRENT_HEAD = "0044_channel_runtime_configs"
 pytestmark = pytest.mark.asyncio
 
 
@@ -35,7 +36,8 @@ async def test_0037_chains_after_0036_and_is_single_head():
     assert script.get_revision(GROUP_NOTICE).down_revision == USER_DISABLED
     assert script.get_revision(IM_NOTICE_PREFERENCES).down_revision == GROUP_NOTICE
     assert script.get_revision(CHANNEL_LEASES).down_revision == IM_NOTICE_PREFERENCES
-    assert script.get_revision(CURRENT_HEAD).down_revision == CHANNEL_LEASES
+    assert script.get_revision(RUNTIME_IM_NOTICES).down_revision == CHANNEL_LEASES
+    assert script.get_revision(CURRENT_HEAD).down_revision == RUNTIME_IM_NOTICES
     assert script.get_revision(REVISION).down_revision == PREVIOUS
     # alembic_version.version_num is VARCHAR(32).
     assert len(REVISION) <= 32

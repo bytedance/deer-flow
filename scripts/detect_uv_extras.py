@@ -65,10 +65,14 @@ def parse_env_extras(value: str) -> list[str]:
 
 
 def find_config_file() -> Path | None:
-    """Locate config.yaml using the same precedence as serve.sh."""
+    """Prefer explicit config and project-root settings before legacy locations."""
     explicit = os.environ.get("DEER_FLOW_CONFIG_PATH")
     if explicit:
         candidate = Path(explicit)
+        if candidate.is_file():
+            return candidate
+    if project_root := os.environ.get("DEER_FLOW_PROJECT_ROOT"):
+        candidate = Path(project_root) / "config.yaml"
         if candidate.is_file():
             return candidate
     for path in (Path("config.yaml"), Path("backend/config.yaml")):
