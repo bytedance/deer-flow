@@ -66,6 +66,11 @@ with best-effort cleanup, preserving the original publication outcome.
 - **A scan selects candidates; it grants nothing.** After you take the row locks,
   check status and lease expiry again. The row can have been requeued and
   reclaimed while recovery waited, also by the same process.
+  Late launch bookkeeping is generation-fenced: `claim_queued_run` increments
+  `attempt_count`, and the service passes that value to
+  `requeue_claimed_run`/`fail_launching_run`, so an expired attempt that
+  resurfaces after a same-owner reclaim cannot clear the fresh claim's lease or
+  free its execution slot. The fence is optional for legacy/custom repositories.
 - **Check expiry against the database clock after the lock wait.** The
   transaction-start time is already stale. A lease that expires exactly at scan
   time is still live.

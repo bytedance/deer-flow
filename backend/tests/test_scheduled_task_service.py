@@ -141,6 +141,16 @@ class DummyRunRepo:
         return 0
 
 
+class GenerationRunRepo(DummyRunRepo):
+    """Return a claim generation so service tests can pin the fence plumbing."""
+
+    async def claim_queued_run(self, run_record_id, **kwargs):
+        claimed = await super().claim_queued_run(run_record_id, **kwargs)
+        if claimed is not None:
+            claimed["attempt_count"] = 7
+        return claimed
+
+
 @pytest.mark.asyncio
 async def test_service_claims_and_dispatches_due_task():
     async def fake_launch(**kwargs):
@@ -432,6 +442,84 @@ async def test_busy_thread_http_conflict_is_kept_in_queue():
 
     assert result["outcome"] == "queued"
     assert run_repo.updated[-1][1]["status"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_overlap_requeue_is_fenced_by_the_claim_generation():
+    async def fake_launch(**_kwargs):
+        raise ConflictError("Thread thread-1 already has an active run")
+
+    task_repo = DummyTaskRepo(
+        [
+            {
+                "id": "task-generation-requeue",
+                "user_id": "user-1",
+                "thread_id": "thread-1",
+                "context_mode": "reuse_thread",
+                "assistant_id": "lead_agent",
+                "prompt": "Summarize thread",
+                "schedule_type": "cron",
+                "schedule_spec": {"cron": "0 9 * * *"},
+                "timezone": "UTC",
+                "status": "enabled",
+                "overlap_policy": "enqueue",
+            }
+        ]
+    )
+    run_repo = GenerationRunRepo()
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=fake_launch,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+    )
+
+    result = await service.dispatch_task(task_repo.rows[0], now=datetime.now(UTC), trigger="scheduled")
+
+    assert result["outcome"] == "queued"
+    assert run_repo.updated[-1][1]["status"] == "queued"
+    assert run_repo.updated[-1][1]["expected_attempt_count"] == 7
+
+
+@pytest.mark.asyncio
+async def test_pre_launch_failure_is_fenced_by_the_claim_generation():
+    async def fake_launch(**_kwargs):
+        raise RuntimeError("runtime refused to start the run")
+
+    task_repo = DummyTaskRepo(
+        [
+            {
+                "id": "task-generation-failure",
+                "user_id": "user-1",
+                "thread_id": "thread-1",
+                "context_mode": "reuse_thread",
+                "assistant_id": "lead_agent",
+                "prompt": "Summarize thread",
+                "schedule_type": "cron",
+                "schedule_spec": {"cron": "0 9 * * *"},
+                "timezone": "UTC",
+                "status": "enabled",
+                "overlap_policy": "enqueue",
+            }
+        ]
+    )
+    run_repo = GenerationRunRepo()
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=fake_launch,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+    )
+
+    result = await service.dispatch_task(task_repo.rows[0], now=datetime.now(UTC), trigger="scheduled")
+
+    assert result["outcome"] == "failed"
+    assert run_repo.updated[-1][1]["status"] == "failed"
+    assert run_repo.updated[-1][1]["expected_attempt_count"] == 7
 
 
 @pytest.mark.asyncio
