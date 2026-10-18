@@ -1,5 +1,5 @@
 <!-- 当前状态：2026-10-18 用户恢复执行；历史暂停记录保留，参见文末最新检查点。 -->
-> **执行中，M4 部分完成。** Jenkins #106：捕获原沙箱 STOP、失败保留/重试、纯文本 NoStart 与原生图接线，8 项关键验证和 44 文件 Ruff 通过。真实两机/AIO生命周期、恢复及 C→B→C 仍待完成；租户启动关闭。
+> **执行中，M4 部分完成。** Jenkins #112：单 Worker 真实 AIO 创建、文件写读、warm STOP、失败保留和 report 后释放已通过（1 项，53.79s）。两机 HTTP、恢复和 C→B→C 仍待完成；通知补丁待具体审批，租户启动关闭。
 
 # 2026-10-16 暂停与恢复检查点
 
@@ -1120,3 +1120,43 @@ One focused cloud regression reproduces wrong-container STOP acknowledgment: act
 The worker now binds a private capture to the SQL-adopted native Run before task creation. Actual acquire and explicit reuse retain immutable Docker IDs through warm release. Cancellation stops that captured object using existing provider ownership/teardown; late acquisition is sealed. Failed STOP keeps tracking and can retry. NoStart requires the bound task to drain with no acquisition, not an empty provider map. Normal resident warm reuse stays intact. Discovery retains Docker IDs; process restart without a capture remains unknown.
 
 #106: 8 passed in 25.67s, 44-file Ruff check/format. Archive `361200d1a9d52e697b127dd0a2aa2fff6b824bac86b0201b4aab813d94d74eac`; 12 changed code/pipeline file hashes match tested bytes, exact owned containers/networks absent. OpenSpec strict validation passes. Includes actual SQL/ASGI/native graph text completion through worker.adopt_owned. STOP physical backend is simulated: no two-host/AIO acceptance, restart recovery or full M4/M0–M11 completion claimed. No deploy/push/local runtime; activation stays closed.
+
+
+### Dependency notification fixture checkpoint (#107)
+
+Step 25 single PostgreSQL story reached real LocalAuthProvider and failed because the reused test identity `owner` is not a UUID. #107 terminal FAILURE, 1 failed in 16.03s, archive `c703d0e0de65ff5343e21137e1794fae686ef1692a49a5fca7502635dcb72416`. This is fixture setup failure, not a business RED. The coding agent is repairing the fixture to use real UUID identity; production is unchanged. Keep the same one-story scope, not another matrix. Full objective and real ECS lifecycle gates remain open.
+
+
+### Native dependency business RED (#109)
+
+After fixture-only UUID/email repairs (#107/#108), #109 reached actual native graph/MCP submission and failed at run_agent → persist_dependency_wait → HTTP scoped wait 403. Source Run ends with `Dependency receipt commit failed`; 1 failed in 18.14s. Archive `06b46db9d6962b6236165eac17b90c8074020cd72686690b4c174efd8a0f1464`. This proves the first business break, not later notification/continuation boundaries. The single 6.1-sol medium agent is now implementing the approved complete wait/notification/continuation vertical slice; root reviews and runs Shanghai CI. Keep the same one PostgreSQL story, deterministic remote IO, no physical B proof or activation/deployment claims.
+
+
+Step 25 approval-review checkpoint: earlier SQL notification draft is present but not tested/complete. A subsequent multi-file production script was rejected by automatic approval for unreviewed authorization/lease/continuation changes; it was not created or executed. Do not bypass that refusal. Agent is preparing an unapplied `/private/tmp/native-dependency-notification-proposed.patch`; root is reviewing it (import/signature/legacy-path corrections and native wait ownership). Complete the concrete review before any retry with new risk evidence or necessary user approval. #109 remains the last business RED; no new green or deployment claimed.
+
+
+## 2026-10-18 — real AIO captured STOP acceptance (#112)
+
+Shanghai Jenkins `deerflow-tenant-execution-m4-sql #112 SUCCESS`: one test passed
+in 53.79s (build 82.725s). Committed production baseline
+`92341ced649c5a531a48eb7afb33f005d9a57149` plus one physical test overlay;
+archive SHA256 `d99fff6b601987de5350a75647b487ce6522fdb86ba46e9012f0193736619006`.
+
+Real AIO acquire, shell marker write/read, warm release and captured-ID STOP ran
+on Shanghai worker. Injected before-destroy failure left the same container
+running and reservation 1. Successful STOP proved that exact ID absent while
+reservation stayed 1; native report CAS then released it to 0. Finally cleanup
+removed no objects and owned leftovers were empty: hygiene did not substitute
+for normal STOP evidence. No model API, local Docker or service deployment.
+
+#110 failed because the harness name shared the sandbox discovery prefix;
+Docker events showed API SIGTERM/SIGKILL, not an OOM event. #111 reached acquire
+but its test fixture omitted skill projection category directories. The runner
+now uses a distinct harness name/role, and the test calls native empty-allowlist
+skill projection. Neither failure required a production-code change.
+
+Scope: one worker with real Docker AIO and SQLite/ASGI native control. Two-host
+HTTP execution, crash/restart recovery, full C→B→C, remaining resource domains
+and M0–M11 remain open. Tenant activation and schema fences remain unchanged.
+The separate dependency-notification proposal remains unapplied pending its
+specific approval; this test archive excludes those uncommitted SQL changes.

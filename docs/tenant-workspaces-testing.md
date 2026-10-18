@@ -632,3 +632,41 @@ Activation remains false; no deployment/push or local runtime.
 
 #105 reproduces false STOP against a missing legacy name (one failing regression).
 #106 passes eight focused cases in 25.67s plus 44-file Ruff: actual provider acquire/reuse/warm tracking, first STOP failure retains tracking and second STOP consumes the captured Docker ID, late acquisition denied; text NoStart only after native drain; existing cancellation sharing/ownership retention; actual SQL/ASGI/graph via worker adoption confirms receiver capture wiring. Only physical backend state is simulated. Actual ECS AIO lifecycle, restart recovery and scoped dependencies remain pending. Exact archive/source hashes and cleanup are in progress JSON `native_c_physical_stop_wip.green`; activation remains closed.
+
+
+## 2026-10-18 — real AIO captured STOP acceptance (#112)
+
+Shanghai Jenkins `deerflow-tenant-execution-m4-sql #112 SUCCESS`: one test passed
+in 53.79s (build 82.725s). Committed production baseline
+`92341ced649c5a531a48eb7afb33f005d9a57149` plus one physical test overlay;
+archive SHA256 `d99fff6b601987de5350a75647b487ce6522fdb86ba46e9012f0193736619006`.
+
+Real AIO acquire, shell marker write/read, warm release and captured-ID STOP ran
+on Shanghai worker. Injected before-destroy failure left the same container
+running and reservation 1. Successful STOP proved that exact ID absent while
+reservation stayed 1; native report CAS then released it to 0. Finally cleanup
+removed no objects and owned leftovers were empty: hygiene did not substitute
+for normal STOP evidence. No model API, local Docker or service deployment.
+
+#110 failed because the harness name shared the sandbox discovery prefix;
+Docker events showed API SIGTERM/SIGKILL, not an OOM event. #111 reached acquire
+but its test fixture omitted skill projection category directories. The runner
+now uses a distinct harness name/role, and the test calls native empty-allowlist
+skill projection. Neither failure required a production-code change.
+
+Scope: one worker with real Docker AIO and SQLite/ASGI native control. Two-host
+HTTP execution, crash/restart recovery, full C→B→C, remaining resource domains
+and M0–M11 remain open. Tenant activation and schema fences remain unchanged.
+The separate dependency-notification proposal remains unapplied pending its
+specific approval; this test archive excludes those uncommitted SQL changes.
+
+### 复用 #112 的真实 AIO 验收
+
+- 测试：`backend/tests/test_scoped_c_aio_physical.py`，仅显式设置 `ECS_C_AIO_PHYSICAL_TEST=1` 时执行。
+- 执行及精确清理：`scripts/ecs-native-c-aio/run_worker.sh`、同目录 `cleanup_exact.py`。
+- Jenkins 模板：`examples/ecs-native/deploy/Jenkinsfile.c-aio-physical.in`；沿用 DeerFlow 专属任务和 `shanghai-deploy-ssh`，严格校验 Worker 主机公钥。
+- 固化证据：`docs/tenant-workspaces-evidence/native-c-aio-112.json`，含已验证源码、镜像和脚本摘要；原始日志在 Jenkins #112 的 `c-aio-112/` artifacts。
+
+重新执行时先打包指定提交及已审测试，计算源码包摘要；将两个脚本、专用 `worker-known_hosts` 公钥文件、预检回执和源码包放在 Jenkins 工作目录，并生成 `c-aio-inputs.sha256`。模板的 `PHASE` 对应源码包文件名前缀，`INPUTS_SHA256` 对应清单摘要，`SOURCE_SHA256` 对应源码包摘要，`NATIVE_IMAGE_ID`/`AIO_IMAGE_ID` 必须是已存在镜像的完整不可变 ID。替换所有 `@@...@@` 后再提交，禁止复用旧摘要冒充新源码。
+
+运行仅使用 Worker 内网 `192.168.0.189` 和唯一 `/var/tmp` 测试目录；公网地址重启后可变。需至少 2560 MiB 可用内存。harness 和 AIO 各限制 1 GiB；harness 名称必须保持 `deer-c-harness-*`，不能与 `deer-c-aio-*` 沙箱发现前缀重合。脚本不安装、拉取或构建镜像，不挂载业务 NAS，不启动正式 Gateway。失败后先读取本次日志和精确容器状态，不因超时重新启动同一次任务。

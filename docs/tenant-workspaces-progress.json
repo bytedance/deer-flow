@@ -1549,10 +1549,10 @@
   },
   "latest_checkpoint": {
     "work_package": "M4",
-    "status": "partial M4: captured sandbox STOP and native text completion verified; actual AIO lifecycle and C->B->C pending",
+    "status": "partial M4: real single-worker AIO capture, shell, warm STOP and capacity release verified",
     "last_verified_job": "deerflow-tenant-execution-m4-sql",
-    "last_verified_build": 106,
-    "next": "Verify scoped C provider namespace, physical STOP and worker recovery; integrate scoped dependency wait/notifications for C->B->C. Preserve all remaining M0-M11 requirements and closed activation.",
+    "last_verified_build": 112,
+    "next": "Apply dependency proposal only after its pending approval; finish C->B->C and control cleanup, two-host/recovery and remaining M0-M11 acceptance.",
     "tenant_activation": "closed",
     "deployment": "none",
     "previous_backend_job": "deerflow-tenant-m1-postgres",
@@ -1565,7 +1565,7 @@
     "resumed_at": "2026-10-18",
     "last_full_regression_build": 88,
     "last_full_regression_tests": 134,
-    "last_verified_tests": 8
+    "last_verified_tests": 1
   },
   "workspace_feedback": {
     "status": "partial_M3_verified_repository_and_HTTP_main",
@@ -13551,5 +13551,102 @@
       },
       "owned_containers_networks": "none after terminal build"
     }
+  },
+  "native_dependency_notification_wip": {
+    "status": "sql_draft_present_remaining_patch_under_review_after_auto_approval_rejection",
+    "scope": "one PostgreSQL native async dependency/notification story; deterministic RemoteIO, not physical B",
+    "builds": [
+      {
+        "build": 107,
+        "job": "deerflow-tenant-execution-m4-sql",
+        "phase": "m4-native-dependency-red",
+        "result": "FAILURE",
+        "tests": "1 failed in 16.03s",
+        "archive_sha256": "c703d0e0de65ff5343e21137e1794fae686ef1692a49a5fca7502635dcb72416",
+        "failure": "Fixture owner ID is not a UUID required by real LocalAuthProvider; business path not reached"
+      },
+      {
+        "build": 108,
+        "job": "deerflow-tenant-execution-m4-sql",
+        "phase": "m4-native-dependency-red-uuid",
+        "result": "FAILURE",
+        "tests": "1 failed in 16.59s",
+        "archive_sha256": "5805d6e8a4567dd3114f029febe074a6d790c393b75254ddf49e3a9b77352303",
+        "failure": "Real User EmailStr rejects fixture example.invalid; business path not reached"
+      },
+      {
+        "build": 109,
+        "job": "deerflow-tenant-execution-m4-sql",
+        "phase": "m4-native-dependency-red-principal",
+        "archive_sha256": "06b46db9d6962b6236165eac17b90c8074020cd72686690b4c174efd8a0f1464",
+        "result": "FAILURE",
+        "tests": "1 failed in 18.14s",
+        "duration_ms": 39899,
+        "failure": "Real run_agent dependency wait callback receives HTTP403 scoped wait; source Run ends error: Dependency receipt commit failed",
+        "proof_scope": "First real business break only; later notification and continuation assertions not yet reached"
+      }
+    ],
+    "next": "Integrate original-authority wait, notification SQL/service/v2 receiver and actual start_run continuation on this same PostgreSQL story",
+    "activation": false,
+    "review": {
+      "rejected_action": "Unreviewed scripted mutation of production notification authorization, leases and continuation across multiple files",
+      "reason": "Automatic approval requested review or explicit implementation authorization; possible security boundary bypass/broken APIs",
+      "not_applied": "Rejected script was not created or executed; only earlier SQL draft is present",
+      "proposed_patch": "/private/tmp/native-dependency-notification-proposed.patch",
+      "review_findings": [
+        "Correct WorkspaceAccessDenied import",
+        "Preserve explicit public launcher signature",
+        "Keep legacy notification path compatible",
+        "Verify original native Run ownership for wait"
+      ],
+      "next": "Finish and review concrete proposed patch before retry or requesting any needed approval"
+    }
+  },
+  "native_c_aio_physical": {
+    "status": "verified_single_worker_physical_main",
+    "job": "deerflow-tenant-execution-m4-sql",
+    "build": 112,
+    "result": "SUCCESS",
+    "tests_passed": 1,
+    "test_seconds": 53.79,
+    "build_seconds": 82.725,
+    "production_commit": "92341ced649c5a531a48eb7afb33f005d9a57149",
+    "archive_sha256": "d99fff6b601987de5350a75647b487ce6522fdb86ba46e9012f0193736619006",
+    "evidence": {
+      "capacity_after_report": 0,
+      "capacity_after_unknown": 1,
+      "capacity_before_report": 1,
+      "container_id": "d2746427d74665a17d01bedaea5f473dc9f4ca0a9cbb8092d3667ae873c6e21a",
+      "container_name": "deer-c-aio-4c210e28165b4f7da0ec03fa-3b42a72eaea1b489",
+      "finally_cleanup_started": true,
+      "image_id": "sha256:6328d7fd2f0ff0b4c147c3d05b3df1ce331f4a482eb6e550ecd64ed1fcf906e7",
+      "injected_stop_failed": true,
+      "missing_exact_id_after_stop": true,
+      "native_run_id": "504d4347-9437-4e5f-93de-8288b0f6e28d",
+      "native_status": "success",
+      "normal_stop_confirmed": true,
+      "prefix": "deer-c-aio-4c210e28165b4f7da0ec03fa",
+      "running_after_unknown": true,
+      "running_before_stop": true,
+      "sandbox_id": "3b42a72eaea1b489",
+      "shell_marker": "aio-c-deer-c-aio-4c210e28165b4f7da0ec03fa",
+      "warm_release_running": true
+    },
+    "cleanup": {
+      "normal_acceptance_evidence": false,
+      "removed_ids": []
+    },
+    "owned_leftovers": [],
+    "artifact_path": "job/deerflow-tenant-execution-m4-sql/112/artifact/c-aio-112/",
+    "fixture_failures": {
+      "110": "harness name collided with sandbox discovery prefix; API stop, no OOM event",
+      "111": "empty projection root omitted category directories"
+    },
+    "limits": [
+      "single worker SQLite/ASGI, not two-host HTTP",
+      "no crash/restart acceptance",
+      "no C-to-B-to-C acceptance",
+      "no tenant activation or deployment"
+    ]
   }
 }

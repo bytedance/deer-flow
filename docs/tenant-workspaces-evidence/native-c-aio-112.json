@@ -1,0 +1,46 @@
+{
+  "build": 112,
+  "cleanup_removed_ids": [],
+  "duration_ms": 82725,
+  "exact_container_absent": true,
+  "exact_harness_absent": true,
+  "files": {
+    "Jenkinsfile.c-aio-physical": "0b95cce0092a08cef61d164faac057c2ab6799fa3cc7182e5a5c190866143a18",
+    "c-aio-inputs.sha256": "27032ba284fcc1fa056452b83e51c8acda9ade4ecbe1a502a3039e4fd228c9cf",
+    "cleanup_exact.py": "7829f5019d09d46c72546690a7a1a20f4f3072ebe1f3f618923a787bcf3adcb2",
+    "m4-native-c-aio-physical-source.tar.gz": "d99fff6b601987de5350a75647b487ce6522fdb86ba46e9012f0193736619006",
+    "run_worker.sh": "b660ba4b1c5c79ab33912771e0ab9f9a49d6f6f5644ee0ceec278a5e0d726200",
+    "test_scoped_c_aio_physical.py": "3707841cf473aa59efcf654c9d6ff4303a4f9a181de58e24f075906bd8c45928"
+  },
+  "harness_container_id": "d5bc2d7b0c07891b3392070cff30cf56f233f60b9320a2b311b47bedf3549343",
+  "owned_leftovers": [],
+  "physical_container_id": "d2746427d74665a17d01bedaea5f473dc9f4ca0a9cbb8092d3667ae873c6e21a",
+  "result": "SUCCESS",
+  "source_archive_sha256": "d99fff6b601987de5350a75647b487ce6522fdb86ba46e9012f0193736619006",
+  "source_commit": "92341ced649c5a531a48eb7afb33f005d9a57149",
+  "test_result": "1 passed in 53.79s",
+  "normal_path": {
+    "capacity_after_report": 0,
+    "capacity_after_unknown": 1,
+    "capacity_before_report": 1,
+    "container_id": "d2746427d74665a17d01bedaea5f473dc9f4ca0a9cbb8092d3667ae873c6e21a",
+    "container_name": "deer-c-aio-4c210e28165b4f7da0ec03fa-3b42a72eaea1b489",
+    "finally_cleanup_started": true,
+    "image_id": "sha256:6328d7fd2f0ff0b4c147c3d05b3df1ce331f4a482eb6e550ecd64ed1fcf906e7",
+    "injected_stop_failed": true,
+    "missing_exact_id_after_stop": true,
+    "native_run_id": "504d4347-9437-4e5f-93de-8288b0f6e28d",
+    "native_status": "success",
+    "normal_stop_confirmed": true,
+    "prefix": "deer-c-aio-4c210e28165b4f7da0ec03fa",
+    "running_after_unknown": true,
+    "running_before_stop": true,
+    "sandbox_id": "3b42a72eaea1b489",
+    "shell_marker": "aio-c-deer-c-aio-4c210e28165b4f7da0ec03fa",
+    "warm_release_running": true
+  },
+  "cleanup": {
+    "normal_acceptance_evidence": false,
+    "removed_ids": []
+  }
+}

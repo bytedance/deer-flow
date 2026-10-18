@@ -1773,3 +1773,32 @@ the bounded capture/STOP/NoStart plan in M4 step 24; parent acceptance remains
 open until successful flow and actual physical lifecycle evidence exist.
 
 Follow-up #106 SUCCESS: 8 focused tests/44-file Ruff. Actual acquire/reuse captures, warm STOP failure retention/retry and native text NoStart/receiver wiring verified. Physical backend is simulated; actual AIO lifecycle/restart and full M4 acceptance remain open. No new activation or deployment.
+
+M4 next: original-workspace C→B→C vertical slice, plan step 25. Scoped wait, notification claiming and original-task continuation binding remain intentionally closed until jointly integrated; no acceptance claimed by the captured STOP checkpoint.
+
+
+## 2026-10-18 — real AIO captured STOP acceptance (#112)
+
+Shanghai Jenkins `deerflow-tenant-execution-m4-sql #112 SUCCESS`: one test passed
+in 53.79s (build 82.725s). Committed production baseline
+`92341ced649c5a531a48eb7afb33f005d9a57149` plus one physical test overlay;
+archive SHA256 `d99fff6b601987de5350a75647b487ce6522fdb86ba46e9012f0193736619006`.
+
+Real AIO acquire, shell marker write/read, warm release and captured-ID STOP ran
+on Shanghai worker. Injected before-destroy failure left the same container
+running and reservation 1. Successful STOP proved that exact ID absent while
+reservation stayed 1; native report CAS then released it to 0. Finally cleanup
+removed no objects and owned leftovers were empty: hygiene did not substitute
+for normal STOP evidence. No model API, local Docker or service deployment.
+
+#110 failed because the harness name shared the sandbox discovery prefix;
+Docker events showed API SIGTERM/SIGKILL, not an OOM event. #111 reached acquire
+but its test fixture omitted skill projection category directories. The runner
+now uses a distinct harness name/role, and the test calls native empty-allowlist
+skill projection. Neither failure required a production-code change.
+
+Scope: one worker with real Docker AIO and SQLite/ASGI native control. Two-host
+HTTP execution, crash/restart recovery, full C→B→C, remaining resource domains
+and M0–M11 remain open. Tenant activation and schema fences remain unchanged.
+The separate dependency-notification proposal remains unapplied pending its
+specific approval; this test archive excludes those uncommitted SQL changes.
