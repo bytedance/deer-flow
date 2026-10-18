@@ -1549,23 +1549,23 @@
   },
   "latest_checkpoint": {
     "work_package": "M4",
-    "status": "partial M4: HTTP/native tool management mains and two necessary control boundaries verified; remaining lifecycle and full goal open",
+    "status": "partial M4: native Scheduler notes/manual trials/own-stop main verified; installed dependencies and remaining lifecycle/full goal open",
     "last_verified_job": "deerflow-tenant-execution-m4-sql",
-    "last_verified_build": 147,
-    "next": "Continue native Scheduler note/manual trial/own-stop with original native authority, then installed scheduled dependencies, IM/recovery and remaining M0-M11 entry/physical/rollout gates. Prioritize business main and necessary boundaries only.",
+    "last_verified_build": 149,
+    "next": "Continue installed scheduled dependency C->B->C and original-occurrence transfer, then IM/recovery and remaining M0-M11 entry/physical/rollout gates. Keep business main first and only key necessary boundaries; narrow own-stop refusal/manual revoke windows are not separately tested.",
     "tenant_activation": "closed",
     "deployment": "none",
     "previous_backend_job": "deerflow-tenant-m1-postgres",
     "previous_backend_build": 89,
     "native_candidate_schema": "0041_scheduler_workspace",
     "last_verified_database_job": "deerflow-tenant-execution-m4-sql",
-    "last_verified_database_build": 147,
+    "last_verified_database_build": 149,
     "executor_candidate_schema": "e0003_execution_identity",
     "execution_status": "active",
     "resumed_at": "2026-10-18",
     "last_full_regression_build": 88,
     "last_full_regression_tests": 134,
-    "last_verified_tests": 2,
+    "last_verified_tests": 1,
     "checkpoint_evidence": [
       "docs/tenant-workspaces-evidence/native-dependency-118.json",
       "docs/tenant-workspaces-evidence/native-dependency-119.json",
@@ -1581,7 +1581,9 @@
       "docs/tenant-workspaces-evidence/native-scheduler-tool-create-143.json",
       "docs/tenant-workspaces-evidence/native-scheduler-tool-create-terminal-144.json",
       "docs/tenant-workspaces-evidence/native-scheduler-management-146.json",
-      "docs/tenant-workspaces-evidence/native-scheduler-management-boundaries-147.json"
+      "docs/tenant-workspaces-evidence/native-scheduler-management-boundaries-147.json",
+      "docs/tenant-workspaces-evidence/native-scheduler-manual-red-148.json",
+      "docs/tenant-workspaces-evidence/native-scheduler-manual-own-stop-149.json"
     ]
   },
   "workspace_feedback": {
@@ -13770,7 +13772,7 @@
     ]
   },
   "scheduler_workspace_wip": {
-    "status": "native_core_management_mains_and_two_control_boundaries_verified_remaining_lifecycle_open",
+    "status": "native_notes_manual_trials_own_stop_main_verified_installed_lifecycle_open",
     "native_schema_candidate": "0041_scheduler_workspace",
     "main": "conversation-origin fresh_thread_per_run, real PG queue/launcher/native Run completion/event",
     "required_boundaries": [
@@ -13779,7 +13781,7 @@
       "no scoped legacy recovery fallback",
       "workspace-bound event/IM publication"
     ],
-    "next": "Continue native Scheduler note/manual trial/own-stop with original native authority, then installed scheduled dependencies, IM/recovery and remaining M0-M11 entry/physical/rollout gates. Prioritize business main and necessary boundaries only.",
+    "next": "Continue installed scheduled dependency C->B->C and original-occurrence transfer, then IM/recovery and remaining M0-M11 entry/physical/rollout gates. Keep business main first and only key necessary boundaries; narrow own-stop refusal/manual revoke windows are not separately tested.",
     "red": {
       "job": "deerflow-tenant-execution-m4-sql",
       "build": 122,
@@ -13815,7 +13817,7 @@
     },
     "entry_matrix": "docs/tenant-workspaces-evidence/native-scheduler-entry-matrix.md",
     "remaining": [
-      "note/manual trial/own-stop and remaining native Run entry/lifecycle coverage",
+      "installed scheduled dependencies and remaining native Run entry/lifecycle coverage; own-stop refusal/manual revocation windows not separately tested",
       "Page fresh/reuse runtime acceptance",
       "Installed scheduled dependency reconciler, MCP continuation/own-stop",
       "Expired queue and unknown launch recovery/control",
@@ -13897,6 +13899,22 @@
       "boundary_build": 147,
       "boundary_tests": "2 passed in 20.02s",
       "boundary_evidence": "docs/tenant-workspaces-evidence/native-scheduler-management-boundaries-147.json"
+    },
+    "note_trial_ownstop_wip": {
+      "status": "single_main_verified",
+      "plan": "M4 step 32 in Superpowers/OpenSpec",
+      "scope": "Original-session note/trial and current-resource HTTP manual; exact SQL-bound scheduled own-stop only, no Session impersonation or runner fork",
+      "verification": "One PG business story: separate note and strict explicit-trial user turns, tool/HTTP queue entry, enabled own-stop and explicit paused re-trial with canonical previous occurrence (four native Runs, no model/physical sandbox); main before necessary boundaries",
+      "red_build": 148,
+      "red_evidence": "docs/tenant-workspaces-evidence/native-scheduler-manual-red-148.json",
+      "verified_build": 149,
+      "verified_tests": "1 passed in 25.61s",
+      "verified_evidence": "docs/tenant-workspaces-evidence/native-scheduler-manual-own-stop-149.json",
+      "limits": [
+        "One deterministic PostgreSQL native lifecycle story, no model API or physical sandbox. Native no-sandbox STOP/report does not establish physical cleanup.",
+        "Scoped own-stop management refusal and manual revocation windows are code-reviewed; no additional negative matrix was run.",
+        "Installed scheduled dependencies, IM/recovery, remaining Run entry/physical/rollout gates and full M0-M11 remain open; tenant activation false."
+      ]
     }
   },
   "native_0041_execution_compatibility_wip": {

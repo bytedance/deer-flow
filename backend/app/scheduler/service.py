@@ -493,13 +493,27 @@ class ScheduledTaskService:
             return "paused"
         return "enabled"
 
-    async def dispatch_task(self, task, *, now, trigger):
+    async def dispatch_task(self, task, *, now, trigger, worker_target=None, expected_token_version=None):
         if not getattr(self._task_repo, "workspace_scope_required", False):
             return await self._dispatch_task_in_workspace(task, now=now, trigger=trigger)
         from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 
-        if trigger != "scheduled":
-            raise WorkspaceAccessDenied("Scoped manual Scheduler dispatch requires current-resource integration")
+        if trigger == "manual":
+            from deerflow.authz.workspace import get_current_workspace
+
+            manual_context = get_current_workspace()
+            if manual_context is None or manual_context.actor_user_id != task.get("user_id"):
+                raise WorkspaceAccessDenied("Manual Scheduler requires current resource identity")
+            accepted = await self._task_repo.validate_manual_task(
+                task["id"], user_id=task["user_id"], expected_status=task.get("status"), expected_updated_at=task.get("updated_at"), worker_target=worker_target, expected_token_version=expected_token_version
+            )
+            if not accepted:
+                return {"outcome": "not_found", "task_run_id": None, "run_id": None, "thread_id": None, "error": "Scheduled task not found"}
+            # Preserve the caller's exact confirmation for final SQL CAS;
+            # get_internal must never silently replace status/updated_at.
+            return await self._dispatch_task_in_workspace(task, now=now, trigger=trigger, manual_context=manual_context, worker_target=worker_target, expected_token_version=expected_token_version)
+        if trigger != "scheduled" or worker_target is not None or expected_token_version is not None:
+            raise WorkspaceAccessDenied("Scheduler dispatch source differs")
         return await self._run_in_original_workspace(task["id"], lambda canonical: self._dispatch_task_in_workspace(canonical, now=now, trigger=trigger))
 
     async def _run_in_original_workspace(self, task_id, operation):
@@ -522,6 +536,9 @@ class ScheduledTaskService:
         *,
         now: datetime,
         trigger: str,
+        manual_context=None,
+        worker_target=None,
+        expected_token_version=None,
     ) -> dict[str, Any]:
         end_check = getattr(self._task_repo, "complete_if_ended", None)
         if trigger == "scheduled" and callable(end_check) and await end_check(task["id"], user_id=task.get("user_id"), now=now):
@@ -585,6 +602,7 @@ class ScheduledTaskService:
                 expected_task_updated_at=task.get("updated_at") if trigger == "manual" else None,
                 expected_task_lease_owner=self._lease_owner if trigger == "scheduled" else None,
                 release_task_lease_status="enabled" if trigger == "scheduled" else None,
+                **({"manual_context": manual_context, "worker_target": worker_target, "expected_token_version": expected_token_version} if manual_context is not None else {}),
             )
         except ActiveScheduledRunConflict:
             active = await self._task_run_repo.get_active_run(task["id"])

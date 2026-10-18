@@ -16,7 +16,7 @@ from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.finalization import FinalizationObserver, automatic_runs_used, end_condition_reached, finalize_occurrence, finish_task_at_end_condition, is_host_pause_marker, utc
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project
-from deerflow.persistence.scheduled_task_runs.scope import bound_native_run, live_task_predicate, lock_scheduled_identity, resource_occurrence_predicate, resource_task_predicate
+from deerflow.persistence.scheduled_task_runs.scope import bound_native_run, live_task_predicate, lock_scheduled_identity, occurrence_launch_status, resource_occurrence_predicate, resource_task_predicate
 from deerflow.persistence.scheduled_tasks.model import ACTIVE_RUN_STATUSES, LIVE_TASK_STATUSES, ONCE_TASK_STATUS_BY_RUN_STATUS, TERMINAL_RUN_STATUSES, TERMINAL_TASK_STATUSES, ScheduledTaskRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
@@ -482,6 +482,20 @@ class ScheduledTaskRepository:
             await session.refresh(task)
             return self._row_to_dict(task)
 
+    async def validate_manual_task(self, task_id, *, user_id, expected_status, expected_updated_at, worker_target=None, expected_token_version=None):
+        """Read-only preflight; final occurrence admission repeats the CAS."""
+        async with self._sf() as session:
+            task, _, identity = await self._lock_management_resource(session, task_id, user_id, worker_target=worker_target, expected_token_version=expected_token_version)
+            if task is None:
+                return False
+            context, _, _ = identity
+            if task.workspace_context_json != asdict(context):
+                raise WorkspaceAccessDenied("Original task authority expired; create/copy a new task")
+            if task.status not in LIVE_TASK_STATUSES | TERMINAL_TASK_STATUSES or task.status != expected_status or coerce_iso(task.updated_at) != coerce_iso(expected_updated_at):
+                raise WorkspaceAccessDenied("Scheduled task changed before manual admission")
+            await session.commit()
+            return True
+
     async def pause_with_queue_cancellation(
         self,
         task_id: str,
@@ -860,7 +874,13 @@ class ScheduledTaskRepository:
                 occurrence = await session.scalar(select(ScheduledTaskRunRow).where(ScheduledTaskRunRow.task_id == task_id, ScheduledTaskRunRow.run_id == last_run_id).with_for_update())
             if self.workspace_scope_required:
                 await bound_native_run(session, row, occurrence, last_run_id)
-                if status != ("running" if row.schedule_type == "once" else "enabled"):
+                if protect_terminal and occurrence.status in TERMINAL_RUN_STATUSES:
+                    # Completion may already have applied own-stop/terminal
+                    # presentation. Preserve that exact bound Run outcome.
+                    allowed = {"running"} if row.schedule_type == "once" else {"enabled", "paused"}
+                    if status not in allowed:
+                        raise WorkspaceAccessDenied("Scoped task launch bookkeeping cannot set a terminal outcome")
+                elif status != occurrence_launch_status(row, occurrence):
                     raise WorkspaceAccessDenied("Scoped task launch bookkeeping cannot set a terminal outcome")
             should_increment_run_count = increment_run_count and (last_run_id is None or row.last_run_id != last_run_id)
             if occurrence is not None:
@@ -1039,10 +1059,25 @@ class ScheduledTaskRepository:
         async with self._sf() as session:
             return [self._row_to_dict(row) for row in (await session.execute(stmt)).scalars()]
 
-    async def append_standing_note(self, task_id: str, *, user_id: str, note: str, origin_thread_id: str | None = None) -> dict[str, Any] | None:
+    async def append_standing_note(self, task_id: str, *, user_id: str, note: str, origin_thread_id: str | None = None, worker_target: NativeRunStopTarget | None = None, expected_token_version: int | None = None) -> dict[str, Any] | None:
         """Append one standing note; ``origin_thread_id`` additionally scopes the task when given."""
-        if self.workspace_scope_required or get_current_workspace() is not None:
-            raise WorkspaceAccessDenied("Scoped Scheduler management requires current private-resource integration")
+        if self.workspace_scope_required or get_current_workspace() is not None or worker_target is not None or expected_token_version is not None:
+            if not isinstance(note, str) or not note.strip() or len(note) > 500:
+                raise ValueError("a standing note must contain 1 to 500 characters")
+            async with self._sf() as session:
+                task, active, _ = await self._lock_management_resource(session, task_id, user_id, worker_target=worker_target, expected_token_version=expected_token_version)
+                if task is None or (origin_thread_id is not None and task.origin_thread_id != origin_thread_id):
+                    return None
+                if active is not None or task.status == "running":
+                    raise ActiveScheduledTaskMutationConflict(active.status if active is not None else "running")
+                notes = list(task.standing_notes or [])
+                if len(notes) >= 10:
+                    raise ValueError("at most 10 standing notes per scheduled task")
+                task.standing_notes = notes + [note]
+                task.unmet_streak_after_seq, task.updated_at = task.last_occurrence_seq, datetime.now(UTC)
+                await session.commit()
+                await session.refresh(task)
+                return self._row_to_dict(task)
         if not isinstance(note, str) or not note.strip() or len(note) > 500:
             raise ValueError("a standing note must contain 1 to 500 characters")
         async with self._sf() as session:

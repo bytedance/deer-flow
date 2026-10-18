@@ -1274,13 +1274,13 @@ class RunRepository(RunStore):
             values["workspace_id"] = context.workspace_id
         async with self._sf() as session:
             if scheduled_admission is not None:
-                from deerflow.persistence.scheduled_task_runs.scope import ScheduledAdmissionReceipt, lock_scheduled_identity
+                from deerflow.persistence.scheduled_task_runs.scope import ScheduledAdmissionReceipt, lock_scheduled_identity, permits_occurrence_launch
 
                 if type(scheduled_admission) is not ScheduledAdmissionReceipt or context is None or operation_kind != "run" or multitask_strategy != "reject":
                     raise WorkspaceAccessDenied("Scheduler admission requires a scoped normal Run")
 
                 task, occurrence, original = await lock_scheduled_identity(session, self._sf, scheduled_admission.task_id, occurrence_id=scheduled_admission.occurrence_id, receipt=scheduled_admission)
-                if context != original or occurrence.thread_id != thread_id or idempotency_key != "scheduled-task:" + occurrence.id or task.status not in ("enabled", "running"):
+                if context != original or occurrence.thread_id != thread_id or idempotency_key != "scheduled-task:" + occurrence.id or not permits_occurrence_launch(task, occurrence):
                     raise WorkspaceAccessDenied("Scheduler native admission identity differs")
                 if occurrence.run_id is not None:
                     existing = await session.get(RunRow, occurrence.run_id)

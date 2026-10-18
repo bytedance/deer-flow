@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
-from deerflow.authz.workspace import get_current_workspace, reset_current_workspace, set_current_workspace
+from deerflow.authz.workspace import WorkspaceContext, get_current_workspace, reset_current_workspace, set_current_workspace
 from deerflow.persistence.run import RunRepository
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.finalization import FinalizationObserver, end_condition_reached, finalize_occurrence, finish_task_at_end_condition, is_host_pause_marker
@@ -24,6 +24,7 @@ from deerflow.persistence.scheduled_task_runs.scope import (
     live_occurrence_predicate,
     live_task_predicate,
     lock_scheduled_identity,
+    permits_occurrence_launch,
     resource_native_run_predicate,
     resource_occurrence_predicate,
     resource_task_predicate,
@@ -35,6 +36,8 @@ from deerflow.persistence.scheduled_tasks.model import (
     ScheduledTaskRunStatus,
 )
 from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
+from deerflow.persistence.user.model import UserRow
+from deerflow.persistence.workspaces.run_control import NativeRunStopTarget, execution_lifetime, pending_run_stop
 from deerflow.persistence.workspaces.scope import resolve_resource_scope
 from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 from deerflow.scheduler.host_notes import RUN_ERROR_END_REACHED
@@ -337,12 +340,22 @@ class ScheduledTaskRunRepository:
         expected_task_updated_at: datetime | str | None = None,
         expected_task_lease_owner: str | None = None,
         release_task_lease_status: str | None = None,
+        manual_context: WorkspaceContext | None = None,
+        worker_target: NativeRunStopTarget | None = None,
+        expected_token_version: int | None = None,
     ) -> dict[str, Any]:
         queue_parent = None
         original_context = None
         if self.workspace_scope_required:
+            manual = trigger == "manual"
+            if trigger not in {"manual", "scheduled"} or (manual and type(manual_context) is not WorkspaceContext):
+                raise WorkspaceAccessDenied("Manual Scheduler admission requires current resource identity")
+            if not manual and (manual_context is not None or worker_target is not None or expected_token_version is not None):
+                raise WorkspaceAccessDenied("Scheduled admission cannot inherit manual authority")
             async with self._sf() as validation:
-                source = (await lock_scheduled_identity(validation, self._sf, task_id))[0]
+                source = (await lock_scheduled_identity(validation, self._sf, task_id, context=manual_context if manual else None))[0]
+                if manual and source.workspace_context_json != asdict(manual_context):
+                    raise WorkspaceAccessDenied("Original task authority expired; create/copy a new task")
                 original_context = captured_context(source)
                 context_mode, fixed_thread = source.context_mode, source.thread_id
                 await validation.commit()
@@ -377,7 +390,48 @@ class ScheduledTaskRunRepository:
             # ordering, including terminal records and uncoordinated callers.
             if not self.workspace_scope_required and await session.scalar(select(ScheduledTaskRow.workspace_id).where(ScheduledTaskRow.id == task_id)) is not None:
                 raise WorkspaceAccessDenied("Legacy occurrence cannot attach to a scoped task")
-            task = (await lock_scheduled_identity(session, self._sf, task_id, execution_parent=queue_parent))[0] if self.workspace_scope_required else await self._lock_task(session, task_id)
+            if self.workspace_scope_required:
+                extra = ((worker_target.thread_id, worker_target.thread_incarnation),) if type(worker_target) is NativeRunStopTarget else ()
+                task = (await lock_scheduled_identity(session, self._sf, task_id, context=manual_context if trigger == "manual" else None, execution_parent=queue_parent, extra_parents=extra))[0]
+                if trigger == "manual":
+                    if task.workspace_context_json != asdict(manual_context):
+                        raise WorkspaceAccessDenied("Original task authority expired; create/copy a new task")
+                    if not coordinate_with_task or expected_task_user_id != manual_context.actor_user_id or expected_task_status is None or expected_task_updated_at is None:
+                        raise WorkspaceAccessDenied("Manual admission requires its original resource confirmation")
+                    if worker_target is None:
+                        if expected_token_version is not None:
+                            raise WorkspaceAccessDenied("Manual worker credential requires its execution")
+                    elif type(worker_target) is not NativeRunStopTarget or worker_target.workspace_context != manual_context or worker_target.user_id != task.user_id or type(expected_token_version) is not int or expected_token_version < 0:
+                        raise WorkspaceAccessDenied("Manual admission execution differs")
+                    if not permits_occurrence_launch(task, row):
+                        raise WorkspaceAccessDenied("Manual task state is unavailable")
+                    if worker_target is not None:
+                        related = task.origin_thread_id == worker_target.thread_id and task.origin_thread_incarnation == worker_target.thread_incarnation
+                        if not related:
+                            related = bool(
+                                await session.scalar(
+                                    select(ScheduledTaskRunRow.id)
+                                    .join(ScheduledTaskRow, ScheduledTaskRow.id == ScheduledTaskRunRow.task_id)
+                                    .where(
+                                        ScheduledTaskRunRow.task_id == task.id,
+                                        ScheduledTaskRunRow.thread_id == worker_target.thread_id,
+                                        ScheduledTaskRunRow.thread_incarnation == worker_target.thread_incarnation,
+                                        resource_occurrence_predicate(manual_context),
+                                    )
+                                    .limit(1)
+                                )
+                            )
+                        if not related:
+                            raise WorkspaceAccessDenied("Manual task is outside its original conversation")
+                        if await session.scalar(select(UserRow.token_version).where(UserRow.id == task.user_id)) != expected_token_version:
+                            raise WorkspaceAccessDenied("Scheduler original credential changed")
+                        execution, _ = await self._run_repository._lock_worker_effect_after_parent(session, worker_target)
+                        if execution.status != "running":
+                            raise WorkspaceAccessDenied("Manual admission requires its running native execution")
+            else:
+                if manual_context is not None or worker_target is not None or expected_token_version is not None:
+                    raise WorkspaceAccessDenied("Legacy occurrence cannot inherit manual scope")
+                task = await self._lock_task(session, task_id)
             if coordinate_with_task:
                 if task is None or (expected_task_user_id is not None and task.user_id != expected_task_user_id):
                     await session.rollback()
@@ -441,9 +495,51 @@ class ScheduledTaskRunRepository:
             await session.refresh(row)
             return self._row_to_dict(row)
 
-    async def request_stop(self, task_run_id: str, *, task_id: str, run_id: str, user_id: str) -> bool:
+    async def _lock_own_stop(self, session, occurrence_id, *, task_id, run_id, user_id, target, preparing=False):
+        if type(target) is not NativeRunStopTarget or target.run_id != run_id or target.user_id != user_id:
+            raise WorkspaceAccessDenied("Own-stop requires its actual native execution")
+        task, occurrence, context = await lock_scheduled_identity(session, self._sf, task_id, occurrence_id=occurrence_id, context=target.workspace_context)
+        if context != target.workspace_context or task.user_id != user_id or occurrence.status not in {"launching", "running"} or occurrence.run_id != run_id:
+            raise WorkspaceAccessDenied("Own-stop occurrence is not this bound execution")
+        if preparing:
+            # Assembly happens before run_agent's pending -> running barrier.
+            # Bind only immutable identity here; no control write is granted.
+            native = await session.scalar(select(RunRow).where(RunRow.run_id == run_id).with_for_update())
+            if native is None or NativeRunStopTarget.from_row(native) != target or native.status not in {"pending", "running"} or native.cancel_action is not None:
+                raise WorkspaceAccessDenied("Own-stop assembly execution is unavailable")
+            expiry = native.lease_expires_at
+            if expiry is not None and expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=UTC)
+            if expiry is None or expiry <= datetime.now(UTC) or await session.scalar(select(pending_run_stop(run_id=run_id))):
+                raise WorkspaceAccessDenied("Own-stop assembly execution is not live")
+            await execution_lifetime(session, target)
+        else:
+            native, _ = await self._run_repository._lock_worker_effect_after_parent(session, target)
+            if native.status != "running":
+                raise WorkspaceAccessDenied("Own-stop requires its running native execution")
+        await bound_native_run(session, task, occurrence, run_id)
+        return occurrence
+
+    async def validate_own_stop(self, *, task_id, occurrence_id, worker_target):
+        """Independent canonical SQL check, never a Session or manage grant."""
+        async with self._sf() as session:
+            if type(worker_target) is not NativeRunStopTarget:
+                raise WorkspaceAccessDenied("Own-stop assembly requires canonical native identity")
+            await self._lock_own_stop(session, occurrence_id, task_id=task_id, run_id=worker_target.run_id, user_id=worker_target.user_id, target=worker_target, preparing=True)
+            await session.commit()
+        return True
+
+    async def request_stop(self, task_run_id: str, *, task_id: str, run_id: str, user_id: str, worker_target: NativeRunStopTarget | None = None) -> bool:
         if self.workspace_scope_required or get_current_workspace() is not None:
-            raise WorkspaceAccessDenied("Scoped occurrence mutation requires its native control integration")
+            async with self._sf() as session:
+                row = await self._lock_own_stop(session, task_run_id, task_id=task_id, run_id=run_id, user_id=user_id, target=worker_target)
+                if row.stop_requested_run_id not in (None, run_id):
+                    return False
+                row.stop_requested_run_id = run_id
+                await session.commit()
+                return True
+        if worker_target is not None:
+            raise WorkspaceAccessDenied("Legacy own-stop cannot inherit native execution")
         async with self._sf() as session:
             task = await self._lock_task(session, task_id)
             row = await session.get(ScheduledTaskRunRow, task_run_id, with_for_update=True)
@@ -467,7 +563,19 @@ class ScheduledTaskRunRepository:
 
     async def previous_occurrence(self, task_id: str, *, before_task_run_id: str) -> dict[str, Any] | None:
         if self.workspace_scope_required or get_current_workspace() is not None:
-            raise WorkspaceAccessDenied("Scoped Scheduler status/history requires current private-resource integration")
+            async with self._sf() as session:
+                task, current, context = await lock_scheduled_identity(session, self._sf, task_id, occurrence_id=before_task_run_id)
+                previous = await session.scalar(
+                    select(ScheduledTaskRunRow)
+                    .join(ScheduledTaskRow, ScheduledTaskRow.id == ScheduledTaskRunRow.task_id)
+                    .join(RunRow, resource_native_run_predicate())
+                    .where(ScheduledTaskRunRow.task_id == task_id, ScheduledTaskRunRow.occurrence_seq < current.occurrence_seq, resource_occurrence_predicate(context), ScheduledTaskRunRow.status.in_(TERMINAL_RUN_STATUSES))
+                    .order_by(ScheduledTaskRunRow.occurrence_seq.desc())
+                    .limit(1)
+                )
+                result = self._row_to_dict(previous) if previous is not None else None
+                await session.commit()
+                return result
         async with self._sf() as session:
             current = await session.get(ScheduledTaskRunRow, before_task_run_id)
             if current is None or current.workspace_id is not None or current.task_id != task_id:
@@ -730,7 +838,7 @@ class ScheduledTaskRunRepository:
                 if locator is None or locator.workspace_id is None:
                     return None
                 task, row, _ = await lock_scheduled_identity(session, self._sf, locator.task_id, occurrence_id=run_record_id, budget_key=_SCHEDULER_BUDGET_LOCK_KEY)
-                if row.status != "queued" or task.status not in ("enabled", "running"):
+                if row.status != "queued" or not permits_occurrence_launch(task, row):
                     return None
                 executing = await session.scalar(select(func.count()).select_from(ScheduledTaskRunRow).where(ScheduledTaskRunRow.status.in_(EXECUTING_RUN_STATUSES)))
                 if int(executing or 0) >= global_max_concurrent_runs:

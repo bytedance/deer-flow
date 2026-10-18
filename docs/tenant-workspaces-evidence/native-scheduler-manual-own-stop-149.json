@@ -1,0 +1,59 @@
+{
+  "build": 149,
+  "queue": 1106,
+  "phase": "m4-native-scheduler-manual-own-stop-green-20261018-37",
+  "result": "SUCCESS",
+  "duration_ms": 47808,
+  "pytest": "1 passed in 25.61s",
+  "ruff": "All checks passed; 67 files already formatted",
+  "source_sha256": "646d8dc2c85c6e1b5ac4f3c905bbef905a0d6d0dbbe1835abd0d0aa0883306b8",
+  "pipeline_sha256": "4b85b6446fea6713dee827a90ba8ae9f150912c3cb9423d929c924f00fa44557",
+  "source_archive_exact_match": {
+    "backend/packages/harness/deerflow/persistence/scheduled_task_runs/scope.py": "0734556e174641c1d7e14967ab1f38abaa979873d20a2a24f57f77cf97ef2669",
+    "backend/packages/harness/deerflow/persistence/scheduled_tasks/sql.py": "e66c9f88938220a45934a5d92bb846a4d2b74e4815cb6bf863495a2bccf368c6",
+    "backend/packages/harness/deerflow/persistence/scheduled_task_runs/sql.py": "a3592021cb7eea3766560887013b292686a6bf83eed73447c1ddb0af4f18d7fe",
+    "backend/packages/harness/deerflow/persistence/run/sql.py": "6654e1c355658e37e7fe0e964f7d474bc5f80f2826b31a9e53f43232c43c148a",
+    "backend/app/scheduler/service.py": "b3fef7c5f514104927633b03275707a628b11220276b961b2df56453db62a43a",
+    "backend/app/gateway/scheduled_task_access.py": "5e2b20aebf3625ddb31c494d6ffc431550f544ce473814c50add8edbc5243806",
+    "backend/app/gateway/routers/scheduled_tasks.py": "7bd484d6445d73eacd1b4ff82f8717faca9f55db1481ccefacb3ea5ee2f95c1d",
+    "backend/tests/test_workspace_native_scheduler.py": "e5b5751822796111d22a035a369f88c4bbe7e955ba2b86af1961479f02e73b54",
+    "scripts/render_tenant_run_control_pipeline.py": "14ec5fe3ca7c7199a7ffb302615cb4bddd4d4c4a038c9aa6e85e3c0a0fc10c10"
+  },
+  "approved_patch_sha256": "54cc95128d1c951b35006dd990c6b41b380c596aea35652ddbe520e4e233d4c0",
+  "log_path": "/private/tmp/m4-native-scheduler-manual-own-stop-green-20261018-37.log",
+  "log_sha256": "bc7a897fa2e8195658b463bfb0a33bb9091b3713890b18759c5c1fcc70279c10",
+  "cleanup_path": "/private/tmp/native-scheduler-manual-build149-cleanup.json",
+  "scope": "One PostgreSQL real native pool/adopt/ToolNode lifecycle story: meaningful verbatim note turn; strict explicit trial turn produces q1; HTTP reuse q1 then pause/resume and new manual q2; actual scheduled native q2 own-stop completes enabled->paused/event1; paused HTTP manual q3 executes with positive exact canonical q2 previous thread, remains paused and own-stop event stays unique. Four native Runs, total manual launches2/automatic0; actual no-sandbox STOP/report reservation1 before and0 after each. No model API or physical sandbox proof; no boundary matrix.",
+  "job": "deerflow-tenant-execution-m4-sql",
+  "cleanup": {
+    "build": 149,
+    "read_only": true,
+    "cleanup": [
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-149",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-149"
+      },
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-149-db",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-149-db"
+      },
+      {
+        "kind": "network",
+        "name": "deerflow-tenant-execution-m4-sql-149",
+        "exit": 1,
+        "stderr": "Error response from daemon: network deerflow-tenant-execution-m4-sql-149 not found"
+      }
+    ]
+  },
+  "root_review": "Root reviewed the exact seven-file product patch, independently read live Jenkins terminal, SHA-verified the source archive and byte-compared all nine source files. Exact harness/db/network absent.",
+  "red_evidence": "docs/tenant-workspaces-evidence/native-scheduler-manual-red-148.json",
+  "limits": [
+    "One deterministic PostgreSQL native lifecycle story, no model API or physical sandbox. Native no-sandbox STOP/report does not establish physical cleanup.",
+    "Scoped own-stop management refusal and manual revocation windows are code-reviewed; no additional negative matrix was run.",
+    "Installed scheduled dependencies, IM/recovery, remaining Run entry/physical/rollout gates and full M0-M11 remain open; tenant activation false."
+  ]
+}

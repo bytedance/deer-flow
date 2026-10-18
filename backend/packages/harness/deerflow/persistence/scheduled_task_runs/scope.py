@@ -14,12 +14,25 @@ from deerflow.authz.workspace import WorkspaceContext
 from deerflow.persistence.projects.model import ProjectRow
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
-from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
+from deerflow.persistence.scheduled_tasks.model import LIVE_TASK_STATUSES, TERMINAL_TASK_STATUSES, ScheduledTaskRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
 from deerflow.persistence.workspaces.model import WorkspaceMembershipRow, WorkspaceRow
 from deerflow.persistence.workspaces.scope import live_workspace_predicate, lock_resource_scope
 from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied, WorkspaceRepository
+
+
+def permits_occurrence_launch(task, occurrence):
+    """Only the durable trigger preserves native manual-trial semantics."""
+    if occurrence.trigger == "manual":
+        return task.status in LIVE_TASK_STATUSES | TERMINAL_TASK_STATUSES
+    return occurrence.trigger == "scheduled" and task.status in {"enabled", "running"}
+
+
+def occurrence_launch_status(task, occurrence):
+    if task.schedule_type == "once":
+        return "running"
+    return "paused" if occurrence.trigger == "manual" and task.status == "paused" else "enabled"
 
 
 def resource_task_predicate(context, task=ScheduledTaskRow):

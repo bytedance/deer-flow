@@ -387,6 +387,7 @@ async def resume_scheduled_task(task_id: str, request: Request, body: ScheduledT
 
 
 @router.post("/scheduled-tasks/{task_id}/trigger")
+@workspace_resource_scope()
 @require_permission("threads", "write")
 @require_permission("runs", "create")
 async def trigger_scheduled_task(task_id: str, request: Request):
@@ -399,7 +400,10 @@ async def trigger_scheduled_task(task_id: str, request: Request):
     task = await repo.get(task_id, user_id=str(user.id))
     if task is None:
         raise _task_not_found()
-    result = await service.dispatch_task(task, now=datetime.now(UTC), trigger="manual")
+    try:
+        result = await service.dispatch_task(task, now=datetime.now(UTC), trigger="manual")
+    except ValueError as exc:
+        raise repository_error(exc) from exc
     outcome = result.get("outcome")
     if outcome == "not_found":
         raise scheduler_error(404, "task_not_found", result.get("error") or "Scheduled task not found")

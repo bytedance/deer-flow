@@ -1,0 +1,45 @@
+{
+  "build": 148,
+  "queue": 1102,
+  "phase": "m4-native-scheduler-manual-own-stop-red-20261018-36",
+  "result": "FAILURE",
+  "duration_ms": 39898,
+  "pytest": "1 failed in 19.64s",
+  "first_error": "Actual Session -> native pool/adopt -> ToolNode note returned503 scheduler_scoped_management_unavailable. Subsequent manual/own-stop story not reached.",
+  "source_sha256": "fb3a29a3bdb1c8f44c7ae08570863b2a12733002a264387c304bd53b1c817df3",
+  "source_archive": "/private/tmp/m4-native-scheduler-manual-own-stop-red-20261018-36-source.tar.gz",
+  "pipeline_sha256": "26d13dec9daa358a5ecc155d891a3c9fac8773bc5e8de27390988d70a4f509b4",
+  "log_path": "/private/tmp/m4-native-scheduler-manual-own-stop-red-20261018-36.log",
+  "log_sha256": "dc1018b340d8668ee69e9dc791cd9e5ab916a56097b11ea628a8111872fba947",
+  "cleanup_path": "/private/tmp/native-scheduler-manual-build148-cleanup.json",
+  "cleanup": {
+    "build": 148,
+    "read_only": true,
+    "cleanup": [
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-148",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-148"
+      },
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-148-db",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-148-db"
+      },
+      {
+        "kind": "network",
+        "name": "deerflow-tenant-execution-m4-sql-148",
+        "exit": 1,
+        "stderr": "Error response from daemon: network deerflow-tenant-execution-m4-sql-148 not found"
+      }
+    ]
+  },
+  "job": "deerflow-tenant-execution-m4-sql",
+  "root_review": "Root independently read live Jenkins terminal and SHA-verified source archive; both changed test/selector files byte-match current source. Product unchanged from 9a7a81ce8. No later trial/manual/own-stop acceptance is claimed.",
+  "reviewed_test_patch_sha256": "a09f4d41acaa9112e827980af38d0472f7c1508bc7c53330317ff871602ef983",
+  "limits": [
+    "RED prerequisite only; remaining story not reached. No provider/model or physical sandbox acceptance. Full M0-M11 open; activation false."
+  ]
+}

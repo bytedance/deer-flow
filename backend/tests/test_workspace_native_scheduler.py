@@ -1318,3 +1318,311 @@ async def _management_control_snapshot(session):
 @pytest.mark.parametrize("boundary", ["unknown_wait", "stale_snapshot"])
 def test_scoped_scheduler_http_management_preserves_control_boundaries(native_engine, executor_engine, monkeypatch, tmp_path, boundary):  # noqa: F811
     _exercise_scheduler_resource_http(native_engine, executor_engine, monkeypatch, tmp_path, management=True, boundary=boundary)
+
+
+@pytest.mark.parametrize("executor_engine", ["postgres"], indirect=True)
+def test_scoped_scheduler_note_manual_and_own_stop_use_native_lifecycle(native_engine, executor_engine, monkeypatch, tmp_path):  # noqa: F811
+    import json
+
+    from ecs_executor.agent_dispatch import NativeDispatchHost, NativeWorkerHost, install_native_dispatch
+    from ecs_executor.dispatch import PROTOCOL, WORKER_VERSION
+    from ecs_executor.job_store import JobStore
+    from ecs_executor.nodes import Node
+    from ecs_executor.scheduling import Scheduling
+    from ecs_executor.schema import SCHEMA_REVISION, upgrade_schema
+    from fastapi import FastAPI
+    from langchain_core.messages import AIMessage
+    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.graph import END, START, StateGraph
+    from langgraph.prebuilt import ToolNode
+    from sqlalchemy import select
+
+    import deerflow.config as config_facade
+    from app.gateway import deps, services
+    from app.gateway.auth import config as auth_config
+    from app.gateway.auth import create_access_token
+    from app.gateway.auth.local_provider import LocalAuthProvider
+    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+    from app.gateway.auth_middleware import AuthMiddleware
+    from app.gateway.csrf_middleware import CSRFMiddleware
+    from app.gateway.routers import scheduled_tasks, thread_runs
+    from app.scheduler.service import ScheduledTaskService
+    from deerflow.agents.thread_state import ThreadState
+    from deerflow.authz.workspace import get_current_workspace, reset_current_workspace, set_current_workspace
+    from deerflow.config import app_config
+    from deerflow.config import paths as paths_module
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.paths import Paths
+    from deerflow.config.run_ownership_config import RunOwnershipConfig
+    from deerflow.persistence.mcp_tasks.sql import McpTaskRepository
+    from deerflow.persistence.models.run_event import RunEventRow
+    from deerflow.persistence.projects import ProjectDocumentRepository, ProjectRepository
+    from deerflow.persistence.run.model import RunRow
+    from deerflow.persistence.run.sql import RunRepository
+    from deerflow.persistence.scheduled_task_events.model import ScheduledTaskEventRow
+    from deerflow.persistence.scheduled_task_events.sql import ScheduledTaskEventRepository
+    from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
+    from deerflow.persistence.scheduled_task_runs.sql import ScheduledTaskRunRepository
+    from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
+    from deerflow.persistence.scheduled_tasks.sql import ScheduledTaskRepository
+    from deerflow.persistence.thread_meta import ThreadMetaRepository
+    from deerflow.runtime import MemoryStreamBridge, RunContext, RunManager
+    from deerflow.runtime.events.store.db import DbRunEventStore
+    from deerflow.runtime.invocation import get_invocation_guard
+    from deerflow.tools.scheduled_tasks import schedule_task, stop_scheduled_task
+
+    assert native_engine.dialect.name == executor_engine.dialect.name == "postgresql"
+    owner, task_id = "11111111-1111-4111-8111-111111111111", "task-native-manual-follow-up"
+    note = "Always distinguish verified findings from open questions."
+    configuration = AppConfig.model_validate(
+        {
+            "models": [],
+            "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+            "memory": {"enabled": False},
+            "scheduler": {"enabled": True, "tool_enabled": True},
+            "authorization": {"enabled": True, "provider": {"use": "deerflow.authz.rbac:RbacAuthorizationProvider", "config": {"roles": {"user": {"routes": {"allow": "*"}}}}}},
+        }
+    )
+    for module in (config_facade, app_config, deps, services):
+        monkeypatch.setattr(module, "get_app_config", lambda: configuration)
+    monkeypatch.setattr(paths_module, "_paths", Paths(tmp_path / "manual-owned-files"))
+    monkeypatch.setattr(auth_config, "_auth_config", auth_config.AuthConfig(jwt_secret="synthetic-native-manual-own-stop-key-64-characters-for-test-only!!"))
+    monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+    upgrade_schema(executor_engine)
+    ledger = JobStore(executor_engine.url.render_as_string(hide_password=False))
+
+    async def scenario(case):
+        threads = ThreadMetaRepository(case.sf, workspace_required=True)
+        origin = await threads.create("native-manual-origin", user_id=owner)
+        store = RunRepository(case.sf, workspace_required=True)
+        ownership = RunOwnershipConfig(heartbeat_enabled=True, lease_seconds=120)
+        central, receiver = RunManager(store, worker_id="manual-central", run_ownership_config=ownership), RunManager(store, worker_id="manual-worker", run_ownership_config=ownership)
+        users = SQLiteUserRepository(case.sf)
+        monkeypatch.setattr(deps, "_cached_repo", users)
+        monkeypatch.setattr(deps, "_cached_local_provider", LocalAuthProvider(repository=users))
+        tasks = ScheduledTaskRepository(case.sf, run_repository=store, workspace_required=True)
+        occurrences = ScheduledTaskRunRepository(case.sf, run_repository=store, workspace_required=True)
+        history = ScheduledTaskEventRepository(case.sf, workspace_required=True)
+        events, saver = DbRunEventStore(case.sf, workspace_required=True), MemorySaver()
+        central_app, worker_app, control_app = FastAPI(), FastAPI(), FastAPI()
+
+        async def launch(**kwargs):
+            return await services.launch_scheduled_thread_run(app=central_app, **kwargs)
+
+        foreground = ScheduledTaskService(task_repo=tasks, task_run_repo=occurrences, launch_run=launch, poll_interval_seconds=1, lease_seconds=120, max_concurrent_runs=1, multi_instance=True, dispatch_enabled=False)
+        control = ScheduledTaskService(task_repo=tasks, task_run_repo=occurrences, launch_run=launch, poll_interval_seconds=1, lease_seconds=120, max_concurrent_runs=1, multi_instance=True)
+        for app, manager in ((central_app, central), (worker_app, receiver)):
+            app.state.workspace_service, app.state.thread_store = case.service, threads
+            app.state.run_manager, app.state.run_store = manager, store
+            app.state.stream_bridge, app.state.checkpointer, app.state.store = MemoryStreamBridge(), saver, None
+            app.state.run_event_store = events
+            app.state.mcp_task_repo = McpTaskRepository(case.sf, workspace_required=True)
+            app.state.project_repo, app.state.project_document_repo = ProjectRepository(case.sf, workspace_required=True), ProjectDocumentRepository(case.sf, workspace_required=True)
+            app.state.scheduled_task_repo, app.state.scheduled_task_run_repo, app.state.scheduled_task_event_repo = tasks, occurrences, history
+            app.state.scheduled_task_service = foreground
+        central_app.include_router(scheduled_tasks.router)
+        central_app.include_router(thread_runs.router)
+        central_app.add_middleware(AuthMiddleware)
+        central_app.add_middleware(CSRFMiddleware)
+        ctx = RunContext(checkpointer=saver, thread_store=threads, event_store=events, app_config=configuration, on_run_completed=control.handle_run_completion)
+        monkeypatch.setattr(services, "get_run_context", lambda request: ctx)
+        node = Node(cpu_millis=4000, memory_mib=8192, resident_cpu_millis=1500, resident_memory_mib=2048, max_concurrency=1, profiles={"report"}, kinds={"C"})
+        pool, secret = Scheduling(ledger, nodes={"worker": node}), "native-manual-owner-secret-at-least-32-bytes"
+        dispatcher = NativeDispatchHost(
+            central_app, pool, {"artifact_root": str(tmp_path / "manual-pool"), "native_node": "worker", "remote_all": True, "profile": "report", "profiles": {"report": {"cpu_millis": 100, "memory_mib": 64}}}, {"worker": secret}
+        )
+        central_app.state.native_run_admission_host = dispatcher
+        install_native_dispatch(control_app, dispatcher)
+        host = NativeWorkerHost.__new__(NativeWorkerHost)
+        host.app, host.secret, host.adoption_lock, host.config = worker_app, secret, asyncio.Lock(), {"node_id": "worker"}
+        host.executions, host.stop_tasks, host.sandbox_captures = {}, {}, {}
+
+        async def request_worker(operation, **values):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=control_app), base_url="http://native-manual-fixture") as client:
+                response = await client.post(
+                    f"/api/native-workers/worker/{operation}",
+                    headers={"Authorization": "Bearer " + secret},
+                    json={"schema_revision": SCHEMA_REVISION, "protocol": PROTOCOL, "worker_version": WORKER_VERSION, "mount_id": dispatcher.mount_id, "owner": "native-manual-owner", **values},
+                )
+                response.raise_for_status()
+                return response.json()
+
+        host.request, worker_app.state.native_run_admission_host = request_worker, host
+        stage, observed = ["note"], {}
+        tool_ready = {name: asyncio.Event() for name in ("note", "trial", "own1", "own2")}
+        finish = {name: asyncio.Event() for name in tool_ready}
+
+        async def emit(state, config):
+            guard = get_invocation_guard()
+            assert guard is not None and guard.target.workspace_context == case.original
+            assert get_current_workspace() == case.original
+            phase = stage[0]
+            arguments = {"action": "note", "task_id": task_id, "note": note} if phase == "note" else {"action": "trial", "task_id": task_id}
+            name = "stop_scheduled_task" if phase.startswith("own") else "schedule_task"
+            return {"messages": [AIMessage(content="", tool_calls=[{"name": name, "args": {} if phase.startswith("own") else arguments, "id": "manual-" + phase, "type": "tool_call"}])]}
+
+        async def observe(state, config):
+            phase = stage[0]
+            observed[phase] = json.loads(state["messages"][-1].content)
+            tool_ready[phase].set()
+            await finish[phase].wait()
+            return {"messages": [AIMessage(content="The requested schedule operation is complete")]}
+
+        builder = StateGraph(ThreadState, context_schema=dict)
+        builder.add_node("emit", emit)
+        builder.add_node("tools", ToolNode([schedule_task, stop_scheduled_task], handle_tool_errors=False))
+        builder.add_node("observe", observe)
+        builder.add_edge(START, "emit")
+        builder.add_edge("emit", "tools")
+        builder.add_edge("tools", "observe")
+        builder.add_edge("observe", END)
+        graph = builder.compile(checkpointer=saver)
+        monkeypatch.setattr(services, "resolve_agent_factory", lambda assistant_id: lambda **kwargs: graph)
+        await tasks.create(
+            task_id=task_id,
+            user_id=owner,
+            origin_thread_id=origin["thread_id"],
+            thread_id=None,
+            context_mode="fresh_thread_per_run",
+            assistant_id="lead_agent",
+            title="Private manual follow-up",
+            prompt="Report the verified findings",
+            schedule_type="interval",
+            schedule_spec={"every_seconds": 86400},
+            timezone="UTC",
+            next_run_at=datetime.now(UTC) + timedelta(days=1),
+            max_runs=1,
+        )
+        async with case.sf() as session:
+            initial_run_ids = set(await session.scalars(select(RunRow.run_id)))
+        selected, active = set_current_workspace(case.other), []
+        await foreground.start()
+
+        async def adopt():
+            envelope = (await request_worker("poll"))["claim"]
+            assert envelope is not None, "No native pool claim for " + stage[0]
+            job = await host.report(envelope["job"], {"start_intent": True})
+            record = await host.adopt_owned(job, envelope["capability"])
+            host.executions[job["id"]] = (job, record)
+            active.append(record)
+            await host.report(job, {"state": "running"})
+            waiting = asyncio.create_task(tool_ready[stage[0]].wait())
+            done, _ = await asyncio.wait({waiting, record.task}, timeout=20, return_when=asyncio.FIRST_COMPLETED)
+            if waiting not in done:
+                waiting.cancel()
+                await asyncio.gather(waiting, return_exceptions=True)
+                if record.task.done():
+                    await record.task
+                raise AssertionError({"stage": stage[0], "run_error": record.error})
+            return job, record
+
+        async def complete(job, record):
+            assert (await asyncio.to_thread(pool.node_status, "worker"))["unreleased"] == 1
+            finish[stage[0]].set()
+            await asyncio.wait_for(record.task, timeout=20)
+            assert record.status.value == "success", record.error
+            await host.stop_owned(job)
+            await host.report(job, {"state": "completed", "physical_stopped": True})
+            host.executions.pop(job["id"])
+            assert (await asyncio.to_thread(pool.node_status, "worker"))["unreleased"] == 0
+
+        try:
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=central_app), base_url="http://localhost", headers={"Origin": "http://localhost", "X-CSRF-Token": "native-manual-csrf", "X-Deerflow-Workspace": case.original.workspace_id}
+            ) as client:
+                client.cookies.set("access_token", create_access_token(owner))
+                client.cookies.set("csrf_token", "native-manual-csrf")
+                for phase, text in (("note", "Please keep this standing note: " + note), ("trial", "Run this task now")):
+                    stage[0] = phase
+                    response = await client.post("/api/threads/" + origin["thread_id"] + "/runs", json={"input": {"messages": [{"type": "human", "content": text}]}})
+                    assert response.status_code == 200, response.text
+                    job, record = await adopt()
+                    assert observed[phase].get("action") == phase, observed[phase]
+                    if phase == "note":
+                        async with case.sf() as session:
+                            task = await session.get(ScheduledTaskRow, task_id)
+                            assert task.standing_notes == [note] and task.workspace_context_json == asdict(case.original)
+                    else:
+                        async with case.sf() as session:
+                            q1 = (await session.scalars(select(ScheduledTaskRunRow).where(ScheduledTaskRunRow.task_id == task_id))).one()
+                            q1_id = q1.id
+                            assert q1.status == "queued" and q1.trigger == "manual" and q1.run_id is None and q1.launch_accounted is False
+                        repeat = await client.post("/api/scheduled-tasks/" + task_id + "/trigger")
+                        assert repeat.status_code == 200 and repeat.json()["existing"] is True, repeat.text
+                        assert (await client.post("/api/scheduled-tasks/" + task_id + "/pause")).status_code == 200
+                        assert (await client.post("/api/scheduled-tasks/" + task_id + "/resume")).status_code == 200
+                        fresh = await client.post("/api/scheduled-tasks/" + task_id + "/trigger")
+                        assert fresh.status_code == 200 and fresh.json()["existing"] is False, fresh.text
+                        async with case.sf() as session:
+                            waits = (await session.scalars(select(ScheduledTaskRunRow).where(ScheduledTaskRunRow.task_id == task_id).order_by(ScheduledTaskRunRow.occurrence_seq))).all()
+                            assert len(waits) == 2 and [value.occurrence_seq for value in waits] == [1, 2]
+                            assert waits[0].id == q1_id and waits[0].status == "interrupted" and waits[0].run_id is None and waits[0].launch_accounted is False
+                            q2_id = waits[1].id
+                            assert waits[1].status == "queued" and waits[1].trigger == "manual" and waits[1].run_id is None
+                    await complete(job, record)
+                previous_thread = None
+                for phase, occurrence_id, expected_count in (("own1", q2_id, 1), ("own2", None, 2)):
+                    stage[0] = phase
+                    if phase == "own2":
+                        triggered = await client.post("/api/scheduled-tasks/" + task_id + "/trigger")
+                        assert triggered.status_code == 200 and triggered.json()["existing"] is False, triggered.text
+                        async with case.sf() as session:
+                            q3 = (await session.scalars(select(ScheduledTaskRunRow).where(ScheduledTaskRunRow.task_id == task_id).order_by(ScheduledTaskRunRow.occurrence_seq.desc()))).first()
+                            occurrence_id = q3.id
+                            assert q3.occurrence_seq == 3 and q3.status == "queued" and q3.trigger == "manual"
+                            assert (await session.get(ScheduledTaskRow, task_id)).status == "paused"
+                    await control.run_once(now=datetime.now(UTC))
+                    job, record = await adopt()
+                    assert observed[phase] == {"action": "stop", "stop_requested": True}, observed[phase]
+                    async with case.sf() as session:
+                        task = await session.get(ScheduledTaskRow, task_id)
+                        occurrence = await session.get(ScheduledTaskRunRow, occurrence_id)
+                        native = await session.get(RunRow, record.run_id)
+                        assert occurrence.run_id == record.run_id and occurrence.stop_requested_run_id == record.run_id and occurrence.trigger == "manual"
+                        assert native.status == "running" and native.workspace_context_json == task.workspace_context_json == asdict(case.original)
+                        assert "scheduler_origin" not in native.kwargs_json, "Scheduled control must not fabricate Session eligibility"
+                        assert task.status == ("enabled" if phase == "own1" else "paused")
+                        assert native.metadata_json["scheduled_task_id"] == task_id and native.metadata_json["scheduled_task_run_id"] == occurrence_id
+                        if previous_thread is not None:
+                            assert native.metadata_json["scheduled_previous_thread_id"] == previous_thread
+                        else:
+                            assert "scheduled_previous_thread_id" not in native.metadata_json
+                        assert note in json.dumps(native.kwargs_json["input"])
+                    await complete(job, record)
+                    async with case.sf() as session:
+                        task = await session.get(ScheduledTaskRow, task_id)
+                        occurrence = await session.get(ScheduledTaskRunRow, occurrence_id)
+                        notifications = (await session.scalars(select(ScheduledTaskEventRow).where(ScheduledTaskEventRow.task_id == task_id))).all()
+                        assert task.status == "paused" and task.run_count == expected_count and task.max_runs == 1
+                        assert task.workspace_context_json == asdict(case.original) and task.standing_notes == [note]
+                        assert task.last_error == "stopped by the agent in run " + record.run_id
+                        assert occurrence.status == "success" and occurrence.launch_accounted is True
+                        assert len(notifications) == 1 and notifications[0].event == "task_stopped"
+                        assert notifications[0].workspace_id == case.original.workspace_id and notifications[0].thread_id == origin["thread_id"] and notifications[0].thread_incarnation == origin["incarnation"]
+                        journal = (await session.scalars(select(RunEventRow).where(RunEventRow.run_id == record.run_id))).all()
+                        assert any("stop_requested" in value.content for value in journal)
+                    resource_scope = set_current_workspace(case.original)
+                    try:
+                        assert (await tasks.automatic_runs_used_for([task_id]))[task_id] == 0
+                    finally:
+                        reset_current_workspace(resource_scope)
+                    previous_thread = record.thread_id
+                async with case.sf() as session:
+                    assert len(set(await session.scalars(select(RunRow.run_id))) - initial_run_ids) == 4
+                assert get_current_workspace() == case.other and (await request_worker("poll"))["claim"] is None
+        finally:
+            for event in finish.values():
+                event.set()
+            for record in active:
+                if record.task is not None and not record.task.done():
+                    record.task.cancel()
+                    await asyncio.gather(record.task, return_exceptions=True)
+            await foreground.stop()
+            await central.stop_heartbeat()
+            await receiver.stop_heartbeat()
+            reset_current_workspace(selected)
+
+    try:
+        _in_workspace_case(native_engine, scenario, owner_user_id=owner)
+    finally:
+        ledger.engine.dispose()

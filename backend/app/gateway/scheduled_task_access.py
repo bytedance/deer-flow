@@ -483,7 +483,7 @@ class _SchedulerCapability:
         guard = await self._run_binding.check()
         token = set_current_workspace(self._run_binding.workspace_context)
         try:
-            if action not in {"list", "create", "update", "pause", "resume", "delete"}:
+            if action not in {"list", "create", "update", "pause", "resume", "delete", "note", "trial"}:
                 result = tool_error_payload(scheduler_error(503, "scheduler_scoped_management_unavailable", "Scoped schedule management requires its native integration"))
             else:
                 result = await self._manage(action=action, request=request, worker_target=guard.target if action != "list" else None)
@@ -514,9 +514,9 @@ class _SchedulerCapability:
                 return await self._list()
             task = await self._task(request.get("task_id"))
             if action == "note":
-                return await self._note(task, request.get("note"))
+                return await self._note(task, request.get("note"), worker_target=worker_target)
             if action == "trial":
-                return await self._trial(task)
+                return await self._trial(task, worker_target=worker_target)
             return await self._pause_or_delete(action, task, worker_target=worker_target)
         except HTTPException as exc:
             return tool_error_payload(exc)
@@ -657,19 +657,19 @@ class _SchedulerCapability:
             raise scheduler_error(404, "task_not_found", "Scheduled task not found")
         return self._result("resume", task=await self._view(updated))
 
-    async def _note(self, task: dict[str, Any], note: Any) -> dict[str, Any]:
+    async def _note(self, task: dict[str, Any], note: Any, *, worker_target: NativeRunStopTarget | None = None) -> dict[str, Any]:
         if not isinstance(note, str) or not note.strip() or len(note) > 500 or note not in self._original_user_text:
             raise scheduler_error(422, "note_not_verbatim", "A standing note must be the current user's explicit words verbatim, at most 500 characters")
         # _task() already authorized this task for the conversation.
-        updated = await self._task_repo.append_standing_note(task["id"], user_id=self._owner_id, note=note)
+        updated = await self._task_repo.append_standing_note(task["id"], user_id=self._owner_id, note=note, **self._worker_arguments(worker_target))
         if updated is None:
             raise scheduler_error(404, "task_not_found", "Scheduled task not found")
         return self._result("note", task=await self._view(updated))
 
-    async def _trial(self, task: dict[str, Any]) -> dict[str, Any]:
+    async def _trial(self, task: dict[str, Any], *, worker_target: NativeRunStopTarget | None = None) -> dict[str, Any]:
         if not _has_explicit_trial_request(self._original_user_text, task):
             raise scheduler_error(403, "trial_requires_direct_request", "A trial requires a direct request in the current user turn, such as 'Run this task now' or '先跑一次'; a task mention or bare confirmation is insufficient")
-        result = await self._service.dispatch_task(task, now=datetime.now(UTC), trigger="manual")
+        result = await self._service.dispatch_task(task, now=datetime.now(UTC), trigger="manual", **self._worker_arguments(worker_target))
         outcome = result.get("outcome")
         error = result.get("error") or "Scheduled task trial could not be dispatched"
         if outcome == "not_found":
@@ -729,6 +729,36 @@ class _SchedulerCapability:
             return tool_error_payload(exc)
 
 
+@dataclass(frozen=True, repr=False)
+class _ScopedOwnStopCapability:
+    """Only the canonical occurrence's own deferred-stop control operation."""
+
+    _binding: _SchedulerRunBinding
+    _task_id: str
+    _occurrence_id: str
+    _occurrences: Any
+    mode: SchedulerCapabilityMode = "scheduled"
+
+    async def manage(self, *, action: str, request: dict[str, Any]):
+        return tool_error_payload(scheduler_error(403, "scheduled_control_only", "This run may only stop its own schedule"))
+
+    async def stop_current_schedule(self):
+        if not scheduler_tools_enabled(await asyncio.to_thread(get_config)):
+            return tool_error_payload(scheduler_error(503, "scheduler_tools_disabled", "Conversation schedule tools are disabled"))
+        guard = await self._binding.check()
+        token = set_current_workspace(self._binding.workspace_context)
+        try:
+            requested = await self._occurrences.request_stop(self._occurrence_id, task_id=self._task_id, run_id=self._binding.run_id, user_id=self._binding.user_id, worker_target=guard.target)
+            await guard.check()
+            if not requested:
+                return tool_error_payload(scheduler_error(409, "occurrence_not_active", "The scheduled occurrence is no longer active"))
+            return {"action": "stop", "stop_requested": True}
+        except ValueError as exc:
+            return tool_error_payload(repository_error(exc))
+        finally:
+            reset_current_workspace(token)
+
+
 async def prepare_scheduler_capability(
     request: Request,
     *,
@@ -753,6 +783,23 @@ async def prepare_scheduler_capability(
             return None
     elif scoped_repository or get_current_workspace() is not None:
         return None
+    if binding is not None and interaction_policy.mode is RunInteractionMode.SCHEDULED:
+        # This is SQL-bound lifecycle control, not original Session eligibility.
+        # Transport/runtime declarations alone never mint an own-stop grant.
+        if getattr(request.state, "auth_source", None) != AUTH_SOURCE_INTERNAL or not scheduler_tools_enabled(await asyncio.to_thread(get_config)):
+            return None
+        metadata = run_record.metadata
+        task_id, occurrence_id = metadata.get("scheduled_task_id"), metadata.get("scheduled_task_run_id")
+        if not isinstance(task_id, str) or not isinstance(occurrence_id, str):
+            return None
+        try:
+            occurrences = get_scheduled_task_run_repo(request)
+            if not getattr(occurrences, "workspace_scope_required", False):
+                return None
+            await occurrences.validate_own_stop(task_id=task_id, occurrence_id=occurrence_id, worker_target=NativeRunStopTarget.from_record(run_record))
+        except (HTTPException, ValueError):
+            return None
+        return _ScopedOwnStopCapability(binding, task_id, occurrence_id, occurrences)
     origin = _SchedulerOrigin.from_record(run_record) if binding is not None else None
     if binding is not None:
         # Internal transport is not a session. Only the canonical admitted

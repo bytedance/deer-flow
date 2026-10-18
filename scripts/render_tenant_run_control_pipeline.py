@@ -58,6 +58,7 @@ def main():
             "native-scheduler-tool-create-terminal",
             "native-scheduler-management",
             "native-scheduler-management-boundaries",
+            "native-scheduler-manual-own-stop",
         ),
         default="revocation",
     )
@@ -194,6 +195,8 @@ def main():
             "tests/test_workspace_native_scheduler.py::test_scoped_scheduler_http_management_preserves_control_boundaries[unknown_wait-postgres] "
             "tests/test_workspace_native_scheduler.py::test_scoped_scheduler_http_management_preserves_control_boundaries[stale_snapshot-postgres]"
         )
+    if args.suite == "native-scheduler-manual-own-stop":
+        tests = "tests/test_workspace_native_scheduler.py::test_scoped_scheduler_note_manual_and_own_stop_use_native_lifecycle[postgres]"
     rendered = rendered.replace("@@TEST_PATHS@@", tests)
     if "@@" in rendered:
         parser.error("unresolved pipeline marker")
