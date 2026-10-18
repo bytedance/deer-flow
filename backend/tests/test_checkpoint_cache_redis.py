@@ -174,9 +174,7 @@ async def test_redis_outage_skips_write(monkeypatch: pytest.MonkeyPatch, caplog:
 
 
 @pytest.mark.anyio
-async def test_redis_serialization_failure_preserves_neighbor_writes(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
+async def test_redis_serialization_failure_preserves_neighbor_writes(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     class _SelectiveFailingSerde:
         def dumps_typed(self, entry: dict) -> tuple[str, bytes]:
             if entry.get("bad"):
