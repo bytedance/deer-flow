@@ -275,13 +275,19 @@ class TestSearxngClient:
             "payload-is-a-string",
         ],
     )
-    async def test_search_malformed_payload_reports_a_format_error(self, payload):
+    async def test_search_malformed_payload_reports_a_format_error(self, payload, caplog):
         """A malformed 200 payload is a format error, not an empty search.
 
         An instance behind a reverse proxy or captive portal answers an HTML or
         plain-text error page with HTTP 200. Returning an empty list for it would
         tell the agent the query legitimately matched nothing -- and indexing the
         raw payload first leaked an AttributeError/TypeError instead.
+
+        The raise must come from the dedicated ``except SearxngResponseError``
+        clause, not the generic ``except Exception`` below: the generic branch
+        logs "An unexpected error occurred" at ERROR for every contained page
+        before re-raising, so without this assertion the clause can be deleted
+        with the whole file still green.
         """
         with patch("deerflow.community.searxng.searxng_client.httpx.AsyncClient") as mock_cls:
             mock_ctx = MagicMock()
@@ -294,8 +300,11 @@ class TestSearxngClient:
             mock_ctx.get = AsyncMock(return_value=mock_resp)
 
             client = SearxngClient(base_url="http://searxng:8080")
-            with pytest.raises(SearxngResponseError):
-                await client.search("test query")
+            with caplog.at_level(logging.ERROR, logger="deerflow.community.searxng.searxng_client"):
+                with pytest.raises(SearxngResponseError):
+                    await client.search("test query")
+
+        assert "An unexpected error occurred" not in caplog.text
 
     async def test_search_keeps_valid_rows_from_a_mixed_page(self):
         """Non-object entries in an otherwise valid page are skipped in order.
