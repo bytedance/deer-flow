@@ -9,7 +9,7 @@ def main():
     parser = argparse.ArgumentParser(description="Render the owned Shanghai physical CI template")
     parser.add_argument("phase")
     parser.add_argument("source_sha256")
-    parser.add_argument("--suite", choices=("physical", "control", "scheduled-dependency", "shared-pool-dependency"), default="physical")
+    parser.add_argument("--suite", choices=("physical", "control", "scheduled-dependency", "shared-pool-dependency", "shared-pool-revocation"), default="physical")
     args = parser.parse_args()
     if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,79}", args.phase) is None or re.fullmatch(r"[0-9a-f]{64}", args.source_sha256) is None:
         parser.error("phase and source SHA256 must be canonical")
@@ -24,6 +24,8 @@ def main():
             "tests/test_workspace_execution_physical.py::test_scoped_shared_pool_c_real_b_docker_resumes_original_occurrence[postgres] "
             "tests/test_workspace_execution_ledger.py::test_pool_claim_filters_unintegrated_scope_before_limit[postgres]"
         )
+    if args.suite == "shared-pool-revocation":
+        test_path = "tests/test_workspace_execution_physical.py::test_scoped_shared_pool_revocation_stops_original_b_without_continuation[postgres]"
     rendered = rendered.replace("@@TEST_PATH@@", test_path)
     if "@@" in rendered:
         parser.error("unresolved pipeline template marker")

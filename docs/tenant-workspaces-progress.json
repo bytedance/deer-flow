@@ -1552,7 +1552,7 @@
     "status": "partial M4: normal shared B/C pool actual B Docker→C2 verified; scoped withdrawal/control, CLI/restart and two-host/C physical gates remain open",
     "last_verified_job": "deerflow-tenant-execution-m4-physical",
     "last_verified_build": 18,
-    "next": "One necessary shared-pool withdrawal/control story, then actual two-host TCP/C AIO main. Keep complete unknown/recovery/IM and all M0-M11 gates; no field/dialect matrix.",
+    "next": "Await exact step39 archive/pipeline approval, then run one shared-pool withdrawal/STOP story. No upload/build yet. Frozen script and hashes are in pending receipt. Two-host TCP/C AIO and full M0-M11 remain required.",
     "tenant_activation": "closed",
     "deployment": "none",
     "previous_backend_job": "deerflow-tenant-m1-postgres",
@@ -13984,6 +13984,20 @@
       "tests": "2 passed in 28.00s",
       "evidence": "docs/tenant-workspaces-evidence/native-shared-bc-pool-18.json",
       "red_build": 17
+    },
+    "shared_pool_withdrawal_wip": {
+      "status": "test_applied_static_verified_pending_exact_payload_approval",
+      "plan": "M4 step 39 in Superpowers/OpenSpec",
+      "scope": "Actual member removal → durable signed STOP → real shared-pool B removal/cancel settlement; no business publication or C2",
+      "verification": "One PG real Docker story, products unchanged until observed failure; no boundary matrix",
+      "remaining": "Two-host TCP/C AIO, CLI/restart/full revocation/recovery/IM and all M0-M11 gates",
+      "runtime_result": "not_run",
+      "source_sha256": "73d729dbfa606c5ac0cb0d08c41339317d2d477da89970e3498c5dd0b0a48b4d",
+      "pipeline_sha256": "95bf48030996aed3327c064c355a906b5382b81f2f039290a3244f30fdaefe8f",
+      "pending_evidence": "docs/tenant-workspaces-evidence/native-shared-bc-revocation-pending-approval.json",
+      "submit_script": "/private/tmp/submit-native-shared-bc-revocation.py",
+      "uploaded": false,
+      "submitted": false
     }
   },
   "native_0041_execution_compatibility_wip": {

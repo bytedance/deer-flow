@@ -263,6 +263,11 @@ def _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp
             get_run=receiver.get,
         )
         if physical_state is not None:
+
+            async def drain_cancelled():
+                await tasks.run_once(now=datetime.now(UTC) + timedelta(seconds=30))
+
+            physical_state.drain_cancelled = drain_cancelled
             from deerflow.mcp.tasks import runtime as task_runtime
 
             previous_submitter = task_runtime._submitter
@@ -815,7 +820,7 @@ def _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp
                 now = datetime.now(UTC) + timedelta(seconds=30)
                 await tasks.run_once(now=now)
                 if physical_state is not None:
-                    if pool_b:
+                    if pool_b and not physical_state.withdrawal:
 
                         async def before_b_stop():
                             assert (await asyncio.to_thread(pool.node_status, "worker"))["unreleased"] == 1
@@ -836,6 +841,10 @@ def _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp
                     # This first real status call activates the committed B job;
                     # the physical worker must finish before result polling.
                     await physical_state.execute(created_tasks[0], first)
+                    if physical_state.withdrawal:
+                        assert len(admitted) == len(executed) == 1
+                        assert get_current_workspace() == case.other
+                        return  # Revocation proves STOP, never a successful result/continuation.
                     await tasks.run_once(now=now + timedelta(seconds=30))
                 resumed = await request_worker("poll")
                 diagnostic = {}
