@@ -2,8 +2,9 @@
 
 With the Skill tool policy removed, `allowed-tools` never filters
 model-visible schemas, execution, or tool_search promotions. These tests pin
-the still-supported deferred behaviors: the deferred filter gates promotion by
-catalog hash, promoted names come only from the build-time catalog, the
+the still-supported deferred behaviors: the deferred filter scopes promotion by
+catalog hash and the genuine user turn, promoted names come only from the
+build-time catalog, the
 promotion audit records the final Command, and skill discovery metadata
 (describe_skill) stays catalog scoped. Genuine authorization denials are
 covered by the authorization suites.
@@ -226,7 +227,11 @@ def test_enabled_skills_preserve_deferred_mcp_discovery_and_calling(tmp_path):
     # Still hidden because it was not promoted — not by any skill declaration.
     assert "other_lookup" not in model.bound_tool_names[1]
     assert _CALC_CALLS == ["2 + 2"]
-    assert result["promoted"] == {"catalog_hash": setup.catalog_hash, "names": ["calc"]}
+    assert result["promoted"] == {
+        "catalog_hash": setup.catalog_hash,
+        "names": ["calc"],
+        "turn_id": "msg-1",
+    }
 
 
 def test_promotion_is_scoped_to_the_build_time_catalog():
@@ -259,11 +264,15 @@ def test_promotion_is_scoped_to_the_build_time_catalog():
     )
 
     result = graph.invoke(
-        {"messages": [HumanMessage(content="search for a non-deferred tool")]},
+        {"messages": [HumanMessage(content="search for a non-deferred tool", id="user-catalog-miss")]},
         context={},
     )
 
-    assert result["promoted"] == {"catalog_hash": setup.catalog_hash, "names": []}
+    assert result["promoted"] == {
+        "catalog_hash": setup.catalog_hash,
+        "names": [],
+        "turn_id": "user-catalog-miss",
+    }
     assert all("calc" not in names for names in model.bound_tool_names[1:])
 
 

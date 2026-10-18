@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 import pytest
 
 tools = importlib.import_module("deerflow.community.browserless.tools")
+output_names = importlib.import_module("deerflow.utils.output_names")
 
 
 @pytest.fixture()
@@ -152,7 +153,7 @@ def test_interruption_propagates_and_frees_the_name(outputs, monkeypatch):
 
 def test_probe_bound_is_inclusive(outputs, monkeypatch):
     """The last probe index is reachable, so a directory full of ``-1``/``-2`` still gets ``-3``."""
-    monkeypatch.setattr(tools, "_MAX_FILENAME_COLLISION_PROBES", 3)
+    monkeypatch.setattr(output_names, "MAX_COLLISION_PROBES", 3)
     for name in ("report.png", "report-1.png", "report-2.png"):
         (outputs / name).write_bytes(b"earlier")
 
@@ -160,7 +161,7 @@ def test_probe_bound_is_inclusive(outputs, monkeypatch):
 
 
 def test_saturated_probe_range_still_reserves_a_fresh_name(outputs, monkeypatch):
-    monkeypatch.setattr(tools, "_MAX_FILENAME_COLLISION_PROBES", 2)
+    monkeypatch.setattr(output_names, "MAX_COLLISION_PROBES", 2)
     taken = ["report.png", "report-1.png", "report-2.png", "report-3.png"]
     for name in taken:
         (outputs / name).write_bytes(b"earlier")
@@ -185,8 +186,8 @@ def test_exhausted_timestamp_claims_refuse_to_overwrite(outputs, monkeypatch):
         def now(cls, tz=None):
             return datetime(2026, 10, 14, 12, 0, 0, 123456, tzinfo=UTC)
 
-    monkeypatch.setattr(tools, "_MAX_FILENAME_COLLISION_PROBES", 1)
-    monkeypatch.setattr(tools, "datetime", _FrozenClock)
+    monkeypatch.setattr(output_names, "MAX_COLLISION_PROBES", 1)
+    monkeypatch.setattr(output_names, "datetime", _FrozenClock)
     held = ["report.png", "report-1.png", "report-20261014-120000-123456.png"]
     for name in held:
         (outputs / name).write_bytes(b"earlier")
