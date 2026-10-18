@@ -127,6 +127,12 @@ class RunStore(abc.ABC):
     # Inheriting the opted-in method unchanged preserves its capability.
     supports_idempotency_request_kwargs = False
 
+    # Strict completion requires explicit require_terminal and owner_worker_id
+    # keywords, or this opt-in on the class defining update_run_completion.
+    # Inheriting that method preserves support; overriding it must opt in again.
+    # Accepting **kwargs alone never promises the atomic terminal/owner guards.
+    supports_terminal_completion_kwargs = False
+
     async def list_changed(
         self,
         *,

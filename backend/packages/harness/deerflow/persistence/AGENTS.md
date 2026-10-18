@@ -56,6 +56,11 @@ changed row, but cannot distinguish deletion/recreation with the same run ID,
 owner and outcome without a persistent generation. Third-party heartbeat stores
 must implement these keyword contracts and atomic predicates, returning explicit
 commit results; accepting `**kwargs` alone does not establish that guarantee.
+For strict completion, explicitly declare both `require_terminal` and
+`owner_worker_id`, or set `supports_terminal_completion_kwargs=True` on the class
+defining `update_run_completion`. A flag-only child cannot opt in an inherited
+method, and an override must declare its own opt-in. Manager skips unsupported
+completion calls with a diagnostic before invoking the Store.
 Unsupported owned calls fail closed; single-worker legacy calls remain supported.
 These are scoped guards, not a generation
 protocol covering every mutation. Contract/lock-wait tests live in

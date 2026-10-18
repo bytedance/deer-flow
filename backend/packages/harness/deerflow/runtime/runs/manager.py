@@ -209,6 +209,29 @@ def _store_accepts_idempotency_parameter(store: RunStore, parameter_name: str) -
     return bool(implementation_owner and implementation_owner.__dict__.get("supports_idempotency_request_kwargs", False))
 
 
+def _store_supports_terminal_completion(store: RunStore) -> bool:
+    """Require explicit strict keywords or an opt-in on the method's owner."""
+    callable_ = store.update_run_completion
+    if getattr(callable_, "__func__", None) is RunStore.update_run_completion:
+        return False
+    try:
+        parameters = inspect.signature(callable_).parameters
+    except (TypeError, ValueError):
+        return False
+    required = [parameters.get(name) for name in ("require_terminal", "owner_worker_id")]
+    if all(parameter is not None and parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY) for parameter in required):
+        return True
+    if any(parameter is not None and parameter.kind is inspect.Parameter.POSITIONAL_ONLY for parameter in required):
+        return False
+    if not any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
+        return False
+    implementation_owner = next(
+        (candidate for candidate in type(store).__mro__ if "update_run_completion" in candidate.__dict__),
+        None,
+    )
+    return bool(implementation_owner and implementation_owner.__dict__.get("supports_terminal_completion_kwargs", False))
+
+
 @dataclass(frozen=True)
 class TerminalCommitProof:
     """Process-local evidence returned by one completed durable write."""
@@ -746,6 +769,13 @@ class RunManager:
         if self.heartbeat_enabled:
             if record is None or record.store_only or not self._has_final_terminal_ack(record) or kwargs.get("status") != record.status.value:
                 logger.warning("Skipped completion data without an attributable terminal ack for run %s", run_id)
+                return
+            if not _store_supports_terminal_completion(self._store):
+                logger.warning(
+                    "Skipped terminal completion metadata for run %s: Store %s must explicitly support require_terminal and owner_worker_id or declare supports_terminal_completion_kwargs on the class defining update_run_completion",
+                    run_id,
+                    type(self._store).__name__,
+                )
                 return
             try:
                 updated = await self._call_store_with_retry(
