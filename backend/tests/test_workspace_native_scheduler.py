@@ -5,8 +5,9 @@ queue/launch/completion and origin history, not IM or physical B execution.
 """
 
 import asyncio
+from copy import deepcopy
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -15,7 +16,8 @@ from test_workspace_mcp import _in_workspace_case
 
 
 @pytest.mark.parametrize("executor_engine", ["postgres"], indirect=True)
-def test_scoped_scheduler_occurrence_keeps_original_workspace(native_engine, executor_engine, monkeypatch, tmp_path):  # noqa: F811
+@pytest.mark.parametrize("boundary", ["normal", "queued_member", "launch_lease"])
+def test_scoped_scheduler_occurrence_keeps_original_workspace(native_engine, executor_engine, monkeypatch, tmp_path, boundary):  # noqa: F811
     from ecs_executor.agent_dispatch import NativeDispatchHost, NativeWorkerHost, install_native_dispatch
     from ecs_executor.dispatch import PROTOCOL, WORKER_VERSION
     from ecs_executor.job_store import JobStore
@@ -26,7 +28,7 @@ def test_scoped_scheduler_occurrence_keeps_original_workspace(native_engine, exe
     from langchain_core.messages import AIMessage
     from langgraph.checkpoint.memory import MemorySaver
     from langgraph.graph import END, START, StateGraph
-    from sqlalchemy import select
+    from sqlalchemy import select, text, update
 
     from app.gateway import deps, services
     from app.gateway.auth.local_provider import LocalAuthProvider
@@ -51,6 +53,8 @@ def test_scoped_scheduler_occurrence_keeps_original_workspace(native_engine, exe
     from deerflow.persistence.scheduled_tasks.sql import ScheduledTaskRepository
     from deerflow.persistence.thread_meta import ThreadMetaRepository
     from deerflow.persistence.thread_meta.model import ThreadMetaRow
+    from deerflow.persistence.workspaces.model import WorkspaceMembershipRow
+    from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
     from deerflow.runtime import MemoryStreamBridge, RunContext, RunManager
     from deerflow.runtime.events.store.db import DbRunEventStore
     from deerflow.runtime.user_context import reset_current_user, set_current_user
@@ -58,12 +62,26 @@ def test_scoped_scheduler_occurrence_keeps_original_workspace(native_engine, exe
     assert native_engine.dialect.name == executor_engine.dialect.name == "postgresql"
     upgrade_schema(executor_engine)
     ledger = JobStore(executor_engine.url.render_as_string(hide_password=False))
+
+    def ledger_snapshot():
+        with ledger.engine.connect() as connection:
+            return deepcopy([dict(row) for row in connection.execute(text("SELECT * FROM ecs_execution_jobs ORDER BY id")).mappings()])
+
+    initial_jobs = ledger_snapshot()
     owner_user_id = "11111111-1111-4111-8111-111111111111"
     configuration = AppConfig(models=[], sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"))
     monkeypatch.setattr(services, "get_app_config", lambda: configuration)
     monkeypatch.setattr(paths_module, "_paths", Paths(tmp_path / "owned-files"))
 
     async def scenario(case):
+        async def native_snapshot(session, row_type):
+            table = row_type.__table__
+            rows = (await session.execute(select(*table.c).order_by(*table.primary_key.columns))).mappings().all()
+            return deepcopy([dict(row) for row in rows])
+
+        async with case.sf() as session:
+            initial_runs = await native_snapshot(session, RunRow)
+            initial_events = await native_snapshot(session, ScheduledTaskEventRow)
         threads = ThreadMetaRepository(case.sf, workspace_required=True)
         origin = await threads.create("native-scheduler-origin", user_id=owner_user_id)
         run_store = RunRepository(case.sf, workspace_required=True)
@@ -160,6 +178,33 @@ def test_scoped_scheduler_occurrence_keeps_original_workspace(native_engine, exe
         builder.add_edge("answer", END)
         graph = builder.compile(checkpointer=saver)
         monkeypatch.setattr(services, "resolve_agent_factory", lambda assistant_id: lambda **kwargs: graph)
+        lease_injections = []
+        admission_errors = []
+        original_create = run_store.create_thread_operation_atomic
+
+        async def change_lease_before_atomic_create(*args, **kwargs):
+            receipt = kwargs.get("scheduled_admission")
+            assert receipt is not None
+            assert not lease_injections, "Repeat drain replayed the stale launch"
+            successor_expiry = datetime.now(UTC) + timedelta(seconds=300)
+            async with case.sf() as session, session.begin():
+                occurrence = await session.get(ScheduledTaskRunRow, receipt.occurrence_id)
+                assert occurrence.status == "launching" and occurrence.run_id is None
+                assert occurrence.lease_owner == receipt.lease_owner and occurrence.attempt_count == receipt.attempt_count
+                occurrence.lease_owner = "scheduler-successor"
+                occurrence.attempt_count = receipt.attempt_count + 1
+                occurrence.lease_expires_at = successor_expiry
+            lease_injections.append((receipt.occurrence_id, receipt.attempt_count + 1, successor_expiry))
+            try:
+                # The real launcher preflight has completed; keep the original
+                # SQL admission and its permission/lease checks intact.
+                return await original_create(*args, **kwargs)
+            except Exception as exc:
+                admission_errors.append((type(exc), str(exc)[:160]))
+                raise
+
+        if boundary == "launch_lease":
+            monkeypatch.setattr(run_store, "create_thread_operation_atomic", change_lease_before_atomic_create)
         adopted = None
         selected = None
         try:
@@ -172,8 +217,43 @@ def test_scoped_scheduler_occurrence_keeps_original_workspace(native_engine, exe
                 occurrence = await session.get(ScheduledTaskRunRow, queued["task_run_id"])
                 assert occurrence.status == "queued" and occurrence.workspace_id == case.original.workspace_id
                 assert occurrence.workspace_context_json == asdict(case.original)
+            if boundary == "queued_member":
+                async with case.sf() as session, session.begin():
+                    changed = await session.execute(
+                        update(WorkspaceMembershipRow).where(WorkspaceMembershipRow.workspace_id == case.original.workspace_id, WorkspaceMembershipRow.user_id == owner_user_id).values(version=WorkspaceMembershipRow.version + 1)
+                    )
+                    assert changed.rowcount == 1
             selected = set_current_workspace(case.other)
             await control.run_once(now=now)
+            if boundary != "normal":
+                await control.run_once(now=datetime.now(UTC))
+                # Independent SQL checks remain valid after revocation; no
+                # business repository read can accidentally restore authority.
+                async with case.sf() as session:
+                    occurrence = await session.get(ScheduledTaskRunRow, queued["task_run_id"])
+                    stored = await session.get(ScheduledTaskRow, created["id"])
+                    assert await native_snapshot(session, RunRow) == initial_runs
+                    assert await native_snapshot(session, ScheduledTaskEventRow) == initial_events
+                    assert occurrence.run_id is None and stored.last_run_id is None and stored.run_count == 0
+                    assert occurrence.workspace_context_json == asdict(case.original)
+                    assert occurrence.thread_incarnation is not None
+                    if boundary == "queued_member":
+                        assert occurrence.status == "queued" and occurrence.attempt_count == 0
+                        assert not lease_injections and not admission_errors
+                    else:
+                        assert len(lease_injections) == len(admission_errors) == 1
+                        assert admission_errors[0][0] is WorkspaceAccessDenied, admission_errors
+                        assert "Scheduler launch lease changed" in admission_errors[0][1], admission_errors
+                        occurrence_id, attempt, expiry = lease_injections[0]
+                        assert occurrence.id == occurrence_id and occurrence.status == "launching"
+                        assert occurrence.lease_owner == "scheduler-successor" and occurrence.attempt_count == attempt
+                        assert occurrence.lease_expires_at == expiry and expiry > datetime.now(UTC)
+
+                assert await asyncio.to_thread(ledger_snapshot) == initial_jobs
+                assert not executed and not host.executions and not host.sandbox_captures
+                assert get_current_workspace() == case.other
+                assert (await asyncio.to_thread(pool.node_status, "worker"))["unreleased"] == 0
+                return
             envelope = (await request_worker("poll"))["claim"]
             assert envelope is not None, "Scheduler did not launch its original native occurrence"
             job = await host.report(envelope["job"], {"start_intent": True})

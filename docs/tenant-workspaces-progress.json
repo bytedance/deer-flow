@@ -1549,28 +1549,29 @@
   },
   "latest_checkpoint": {
     "work_package": "M4",
-    "status": "partial M4: Scheduler conversation-origin/fresh once main verified",
+    "status": "partial M4: Scheduler main and two necessary authority/lease boundaries verified",
     "last_verified_job": "deerflow-tenant-execution-m4-sql",
-    "last_verified_build": 123,
-    "next": "Two necessary PG boundaries: queued member withdrawal and pre-insert occurrence lease takeover; then remaining Scheduler/public/installed-host requirements.",
+    "last_verified_build": 125,
+    "next": "Fix explicit 0041 B/control runtime compatibility using one real PostgreSQL wire/control story; remaining Scheduler and M0–M11 gates stay open.",
     "tenant_activation": "closed",
     "deployment": "none",
     "previous_backend_job": "deerflow-tenant-m1-postgres",
     "previous_backend_build": 89,
     "native_candidate_schema": "0041_scheduler_workspace",
     "last_verified_database_job": "deerflow-tenant-execution-m4-sql",
-    "last_verified_database_build": 123,
+    "last_verified_database_build": 125,
     "executor_candidate_schema": "e0003_execution_identity",
     "execution_status": "active",
     "resumed_at": "2026-10-18",
     "last_full_regression_build": 88,
     "last_full_regression_tests": 134,
-    "last_verified_tests": 1,
+    "last_verified_tests": 2,
     "checkpoint_evidence": [
       "docs/tenant-workspaces-evidence/native-dependency-118.json",
       "docs/tenant-workspaces-evidence/native-dependency-119.json",
       "docs/tenant-workspaces-evidence/native-dispatched-control-121.json",
-      "docs/tenant-workspaces-evidence/native-scheduler-123.json"
+      "docs/tenant-workspaces-evidence/native-scheduler-123.json",
+      "docs/tenant-workspaces-evidence/native-scheduler-boundaries-125.json"
     ]
   },
   "workspace_feedback": {
@@ -13759,7 +13760,7 @@
     ]
   },
   "scheduler_workspace_wip": {
-    "status": "scheduler_once_origin_fresh_main_verified_boundaries_next",
+    "status": "main_and_two_authority_lease_boundaries_verified_remaining_scope_open",
     "native_schema_candidate": "0041_scheduler_workspace",
     "main": "conversation-origin fresh_thread_per_run, real PG queue/launcher/native Run completion/event",
     "required_boundaries": [
@@ -13768,7 +13769,7 @@
       "no scoped legacy recovery fallback",
       "workspace-bound event/IM publication"
     ],
-    "next": "Two necessary PG boundaries: queued member withdrawal and pre-insert occurrence lease takeover; then remaining Scheduler/public/installed-host requirements.",
+    "next": "Fix explicit 0041 B/control runtime compatibility using one real PostgreSQL wire/control story; remaining Scheduler and M0–M11 gates stay open.",
     "red": {
       "job": "deerflow-tenant-execution-m4-sql",
       "build": 122,
@@ -13804,13 +13805,31 @@
     },
     "entry_matrix": "docs/tenant-workspaces-evidence/native-scheduler-entry-matrix.md",
     "remaining": [
-      "Necessary queued withdrawal and pre-insert lease takeover boundaries",
       "Scoped HTTP/tool full replies, lists/status/history/management/manual dispatch",
       "Page fresh/reuse runtime acceptance",
       "Installed scheduled dependency reconciler, MCP continuation/own-stop",
       "Expired queue and unknown launch recovery/control",
       "Workspace-qualified IM delivery and full lifecycle",
       "Physical B/two-host story and remaining M0–M11 gates"
-    ]
+    ],
+    "boundary_verification": {
+      "status": "verified",
+      "build124": "2 failed in 21.10s at invalid global empty-Run assertion; native fixture intentionally seeds 2 historical Runs; executor fixture seeds an unknown job. Later assertions unproven by #124.",
+      "source_archive_sha256": "28ae7875bf515413265e015b237cc9185024ede2fefed621d4eb18a90cbdb1e0",
+      "scope": "Only queued member withdrawal and pre-insert lease takeover; native Run/event and execution-job full-column baselines must remain unchanged.",
+      "build": 125,
+      "result": "SUCCESS",
+      "tests": "2 passed in 21.04s",
+      "evidence": "docs/tenant-workspaces-evidence/native-scheduler-boundaries-125.json"
+    }
+  },
+  "native_0041_execution_compatibility_wip": {
+    "status": "known_runtime_version_gate_gap_to_fix_next",
+    "evidence": [
+      "ecs_executor/native_authority.py validate_mode accepts only exact 0040",
+      "ecs_executor/control.py ExecutionControlService.start accepts only exact 0040"
+    ],
+    "required": "Review explicit compatible 0040/0041 runtime allowlist, preserve unknown/multiple-head rejection; prove actual B wire/control initialization on 0041.",
+    "migration_receipts": "Native backfill/export and executor tenant import also pin 0040; do not blindly change these stopped-writer receipt contracts. Their 0041 inventory/restore proof remains M1/M10 work."
   }
 }

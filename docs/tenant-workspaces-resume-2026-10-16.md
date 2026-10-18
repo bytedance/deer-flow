@@ -1,4 +1,4 @@
-# Resume checkpoint — 2026-10-18: Scheduler main #123 verified; M4 and M0–M11 remain partial
+# Resume checkpoint — 2026-10-18: Scheduler main #123 and boundaries #125 verified; B/control 0041 compatibility next; M4 and M0–M11 remain partial
 > **执行中，M4 部分完成。** Jenkins #112：单 Worker 真实 AIO 创建、文件写读、warm STOP、失败保留和 report 后释放已通过（1 项，53.79s）。两机 HTTP、恢复和 C→B→C 仍待完成；通知补丁已获用户批准，正在应用和验证；租户启动关闭。
 
 # 2026-10-16 暂停与恢复检查点
@@ -1186,3 +1186,10 @@ Jenkins #119 SUCCESS: one PostgreSQL negative passed in 18.49s; Ruff/50 files pa
 #122 RED proved a real bound task create persisted NULL workspace. #123 GREEN: one PostgreSQL story passed in 19.61s; Ruff/61 files passed. Native task/occurrence snapshots and parent incarnations (0041_scheduler_workspace), durable queue, UI switch, SQL-resolved typed launch receipt, atomic occurrence/Run association, actual native pool/adoption/graph/completion and original-origin event are verified. Root independently matched all 16 reviewed files to the successful source archive. Exact fixture containers/network are absent.
 
 Scope is one conversation-origin/fresh-thread/once story with deterministic graph, no sandbox and ASGI transport. Public management/status/history/manual, installed scheduled MCP/reconciler/own-stop, scoped IM, expired queue and unknown launch control remain withheld or unaccepted; page/reuse branches and physical integration are not accepted by this test. See `docs/tenant-workspaces-evidence/native-scheduler-123.json` and `native-scheduler-entry-matrix.md`. Next: only queued-withdrawal and pre-insert lease-takeover checks before continuing remaining requirements. Activation remains false; no deployment or push.
+
+
+### 2026-10-18 — Scheduler necessary boundaries (#125)
+
+Jenkins `deerflow-tenant-execution-m4-sql #125 SUCCESS`: only queued-member withdrawal and pre-insert occurrence lease takeover passed (2 tests, 21.04s); Ruff check and 61-file format check passed. #124 failed because its test incorrectly assumed empty fixture tables; the retry preserves and compares every seeded Run/event/executor job. No product change was made to accommodate those seeds. Root independently matched all three changed source files to the successful archive; exact fixture containers/network are absent.
+
+Withdrawal retains the original queued row without launching. Lease takeover reaches the real atomic insert, rejects the stale receipt, and retains the successor launching lease without creating a Run, job or event, or releasing capacity. This does not prove STOP, queue retirement, full Scheduler, physical execution or migration compatibility. Evidence: `docs/tenant-workspaces-evidence/native-scheduler-boundaries-125.json`. Next: the two runtime gates still reject native schema 0041; fix and verify that compatibility separately. Tenant activation remains false; no deployment or push.

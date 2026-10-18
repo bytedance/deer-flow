@@ -755,6 +755,14 @@ class ScheduledTaskService:
                 "error": None,
             }
         except Exception as exc:
+            from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
+
+            if getattr(self._task_run_repo, "workspace_scope_required", False) and not launch_succeeded and isinstance(exc, WorkspaceAccessDenied):
+                # Admission may have lost its lease or authority, including an
+                # unknown commit outcome. Preserve SQL ownership/accounting;
+                # legacy failure settlement cannot prove that no Run exists.
+                logger.warning("Scoped scheduled task-run %s admission was fenced; preserving recovery-owned state", task_run_id)
+                return self._queued_result(task_run_id, execution_thread_id, error="Scheduled admission unavailable; state retained")
             if not launch_succeeded and self._is_overlap_conflict(exc):
                 await self._task_run_repo.requeue_claimed_run(
                     task_run_id,

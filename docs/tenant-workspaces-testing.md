@@ -685,6 +685,15 @@ Jenkins `deerflow-tenant-execution-m4-sql`：#118 主流程 1 passed / 19.91s；
 
 ## Scheduler 原工作区主干（#123）
 
-`--suite native-scheduler-main` 精确选择 `tests/test_workspace_native_scheduler.py::test_scoped_scheduler_occurrence_keeps_original_workspace[postgres]`。#122 真实创建写NULL空间失败，#123 单次主干通过（19.61s），Ruff/61文件通过。沿用既有上海隔离 PostgreSQL、native工具镜像与资源限额；不运行本地runtime或多数据库矩阵。证据见 `tenant-workspaces-evidence/native-scheduler-123.json`。
+`--suite native-scheduler-main` 精确选择 `tests/test_workspace_native_scheduler.py::test_scoped_scheduler_occurrence_keeps_original_workspace[normal-postgres]`。#122 真实创建写NULL空间失败，#123 单次主干通过（19.61s），Ruff/61文件通过。沿用既有上海隔离 PostgreSQL、native工具镜像与资源限额；不运行本地runtime或多数据库矩阵。证据见 `tenant-workspaces-evidence/native-scheduler-123.json`。
 
 真实链：会话来源任务创建→持久队列→切换UI空间→control service dispatch→真实launcher/start_run/原子Run关联→native pool/receiver/graph→真实completion→原会话事件。模型图确定性、无sandbox、控制传输ASGI。必须以 `native-scheduler-entry-matrix.md` 判断完整Scheduler剩余入口，不以此单主干推断全包完成。必要撤权/租约检查随后单独选择。
+
+
+### 2026-10-18 — Scheduler necessary boundaries (#125)
+
+Jenkins `deerflow-tenant-execution-m4-sql #125 SUCCESS`: only queued-member withdrawal and pre-insert occurrence lease takeover passed (2 tests, 21.04s); Ruff check and 61-file format check passed. #124 failed because its test incorrectly assumed empty fixture tables; the retry preserves and compares every seeded Run/event/executor job. No product change was made to accommodate those seeds. Root independently matched all three changed source files to the successful archive; exact fixture containers/network are absent.
+
+Withdrawal retains the original queued row without launching. Lease takeover reaches the real atomic insert, rejects the stale receipt, and retains the successor launching lease without creating a Run, job or event, or releasing capacity. This does not prove STOP, queue retirement, full Scheduler, physical execution or migration compatibility. Evidence: `docs/tenant-workspaces-evidence/native-scheduler-boundaries-125.json`. Next: the two runtime gates still reject native schema 0041; fix and verify that compatibility separately. Tenant activation remains false; no deployment or push.
+
+Current `--suite native-scheduler-boundaries` selects only `[queued_member-postgres]` and `[launch_lease-postgres]`; the main selector is now `[normal-postgres]`. #123 used the historical `[postgres]` name before parameterization.
