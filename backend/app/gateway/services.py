@@ -834,6 +834,18 @@ def strip_internal_context_keys(config: dict[str, Any]) -> None:
                 value.pop(key, None)
 
 
+def _sanitize_request_client_context(raw: Any) -> dict[str, Any] | None:
+    """Sanitize a caller's ``context.client``, logging when fields are dropped.
+
+    The log line carries no values: ``client.name`` and preference values are
+    caller-controlled text.
+    """
+    client = sanitize_client_context(raw)
+    if client != raw:
+        logger.debug("Dropped or normalized context.client fields from the run request (kept_any=%s)", client is not None)
+    return client
+
+
 def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, Any] | None, *, internal: bool = False) -> None:
     """Merge whitelisted keys from ``body.context`` into both ``config['configurable']``
     and ``config['context']`` so they are visible to legacy configurable readers and
@@ -862,7 +874,7 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
     """
     existing_runtime_context = config.get("context")
     if isinstance(existing_runtime_context, dict) and "client" in existing_runtime_context:
-        existing_client_context = sanitize_client_context(existing_runtime_context.get("client"))
+        existing_client_context = _sanitize_request_client_context(existing_runtime_context.get("client"))
         if existing_client_context is None:
             existing_runtime_context.pop("client", None)
         else:
@@ -890,9 +902,10 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
     if "user_id" in context and isinstance(runtime_context, dict):
         runtime_context.setdefault("user_id", context["user_id"])
 
-    client_context = sanitize_client_context(context.get("client"))
-    if client_context is not None and isinstance(runtime_context, dict):
-        runtime_context.setdefault("client", client_context)
+    if "client" in context:
+        client_context = _sanitize_request_client_context(context["client"])
+        if client_context is not None and isinstance(runtime_context, dict):
+            runtime_context.setdefault("client", client_context)
 
 
 async def resolve_trusted_internal_owner_for_attribution(request: Request, owner_user_id: str | None) -> Any | None:

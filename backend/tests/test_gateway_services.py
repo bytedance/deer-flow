@@ -2308,6 +2308,44 @@ def test_merge_run_context_overrides_preserves_explicit_config_context_client():
     }
 
 
+def test_merge_run_context_overrides_sanitizes_config_context_client_without_body_context():
+    """``config.context.client`` is copied verbatim by ``build_run_config``, so it is sanitized even without ``body.context``."""
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-1", {"context": {"client": {"name": "config-client", "access_token": "secret"}}}, None)
+    merge_run_context_overrides(config, None)
+    assert config["context"]["client"] == {"name": "config-client"}
+
+    config = build_run_config("thread-1", {"context": {"client": {"access_token": "secret"}}}, None)
+    merge_run_context_overrides(config, None)
+    assert "client" not in config["context"]
+
+
+def test_merge_run_context_overrides_logs_dropped_client_fields_without_values(caplog):
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    caplog.set_level(logging.DEBUG, logger="app.gateway.services")
+    config = build_run_config("thread-1", {"context": {"client": {"name": "config-secret-name", "token": "x"}}}, None)
+    merge_run_context_overrides(config, {"client": {"name": "body-secret-name", "capabilities": {"charts": "yes"}, "preferences": {"csv": "pref-secret-value", "bad key": 1}}})
+
+    messages = [record.getMessage() for record in caplog.records if "context.client" in record.getMessage()]
+    assert len(messages) == 2
+    assert all("kept_any=True" in message for message in messages)
+    assert not any(secret in caplog.text for secret in ("config-secret-name", "body-secret-name", "pref-secret-value", "charts", "bad key"))
+
+
+def test_merge_run_context_overrides_does_not_log_a_clean_client(caplog):
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    caplog.set_level(logging.DEBUG, logger="app.gateway.services")
+    config = build_run_config("thread-1", None, None)
+    merge_run_context_overrides(config, {"client": {"name": "custom-analytics-frontend", "capabilities": {"charts": True}}})
+
+    assert config["context"]["client"] == {"name": "custom-analytics-frontend", "capabilities": {"charts": True}}
+    assert "context.client" not in caplog.text
+    assert "custom-analytics-frontend" not in caplog.text
+
+
 def test_merge_run_context_overrides_noop_for_empty_context():
     from app.gateway.services import build_run_config, merge_run_context_overrides
 
@@ -5521,3 +5559,32 @@ async def test_client_timezone_reaches_only_the_schedule_capability(_stub_app_co
     config = captured["config"]
     assert "client_timezone" not in config.get("context", {})
     assert "client_timezone" not in config.get("configurable", {})
+
+
+@pytest.mark.asyncio
+async def test_start_run_forwards_sanitized_client_context_to_runtime_context_only(_stub_app_config):
+    from unittest.mock import patch
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from app.gateway.services import start_run
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    client = {"name": "custom-analytics-frontend", "access_token": "secret", "capabilities": {"csv_download": True, "charts": "yes"}}
+    body = RunCreateRequest(input={"messages": [{"role": "user", "content": "Analyze this dataset"}]}, context={"client": client})
+    request = _make_start_run_request(RunManager(store=MemoryRunStore()))
+    captured: dict[str, object] = {}
+
+    async def fake_run_agent(*_args, **kwargs):
+        captured["config"] = kwargs["config"]
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+    ):
+        record = await start_run(body, "thread-client-context", request)
+        await record.task
+
+    config = captured["config"]
+    assert config["context"]["client"] == {"name": "custom-analytics-frontend", "capabilities": {"csv_download": True}}
+    assert "client" not in config.get("configurable", {})
