@@ -22,7 +22,6 @@ import logging
 import os
 import re
 import stat
-from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -40,6 +39,7 @@ from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.constants import BROWSER_FRAMES_DIRNAME
 from deerflow.tools.types import Runtime
 from deerflow.utils.atomic_write import publish_bytes_atomically as _publish_bytes_atomically
+from deerflow.utils.output_names import output_name_candidates
 
 from .session import BrowserSession, BrowserSessionManager, PageSnapshot, ScreenshotType, get_browser_session_manager
 
@@ -53,7 +53,6 @@ _OUTPUTS_VIRTUAL_PREFIX = f"{VIRTUAL_PATH_PREFIX}/outputs"
 _BROWSER_FRAMES_DIRNAME = BROWSER_FRAMES_DIRNAME
 _FRAMES_VIRTUAL_PREFIX = f"{_OUTPUTS_VIRTUAL_PREFIX}/{_BROWSER_FRAMES_DIRNAME}"
 _SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
-_MAX_FILENAME_COLLISION_PROBES = 1000
 # Without no-follow support, os.link may follow a symlink at the staged name.
 _LINK_CAN_SKIP_SYMLINKS = os.link in os.supports_follow_symlinks
 
@@ -448,14 +447,6 @@ def _write_screenshot(outputs_path: Path, name: str, content: bytes) -> str:
     return name
 
 
-def _screenshot_name_candidates(name: str) -> Iterator[str]:
-    yield name
-    stem, suffix = Path(name).stem, Path(name).suffix
-    for index in range(1, _MAX_FILENAME_COLLISION_PROBES + 1):
-        yield f"{stem}-{index}{suffix}"
-    yield f"{stem}-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S-%f')}{suffix}"
-
-
 def _publish_screenshot_no_overwrite(outputs_path: Path, name: str, content: bytes) -> str:
     """Publish *content* under *name*, or its first free ``-1``, ``-2``, ... variant.
 
@@ -492,7 +483,7 @@ def _publish_screenshot_no_overwrite(outputs_path: Path, name: str, content: byt
             handle.flush()
             os.fsync(handle.fileno())
             staged_stat = os.fstat(handle.fileno())
-            for candidate in _screenshot_name_candidates(name):
+            for candidate in output_name_candidates(name):
                 destination = outputs_path / candidate
                 try:
                     if _LINK_CAN_SKIP_SYMLINKS:
