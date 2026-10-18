@@ -939,3 +939,17 @@ python scripts/render_tenant_run_control_pipeline.py sandbox-final <归档SHA256
 及旧缓存复用，先证明主干问题再修。完整 M0–M11、其他撤权域、scoped dispatcher/
 recovery/API 和产品验收仍待推进。租户开关 false、启动 schema fence 不变；
 没有本机应用/pytest/Node/浏览器/Docker 测试、真实模型调用、部署或推送。
+
+
+### 下一主干的源码审计（尚未运行新用例）
+
+Local provider 没有覆写 get_scoped，继承实现返回 None；普通 checkpoint 恢复会
+重新 acquire，并比较新路径映射。因此不能由 user/thread 缓存键直接宣称串空间。
+仍须核验同 ID 删除重建：Local ID 不含空间/代次，映射替换复制写入提示；线程目录
+含空间但不含 incarnation。AIO 的 get_scoped 则仅比较 user/thread；lease owner
+短路也复用这个键。以上是源码发现，不是已复现漏洞或物理容器验收。
+
+下一次先复用真实 SQL create/delete/recreate + 原生 Run，观察旧/新报告字节和句柄，
+并对照正常同代次续写。先确定存储、API 读取、执行与清理一致的身份，再改 namespace；
+仅给 provider ID 加字段不足以解决目录复用。保持旧 scope token 契约及 fork 借用/
+owner 清理兼容。不开新的 provider 大矩阵，不启动真实模型或部署。

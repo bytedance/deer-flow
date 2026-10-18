@@ -12419,5 +12419,18 @@
     "tests_passed": 134,
     "scope": "Actual native Run/SQL/LocalSandbox write_file readiness, read-before-write STOP and full shared SDK middleware. Native lease owners unwind. Not host/process/network isolation or remote C physical STOP.",
     "next": "Audit actual provider cache workspace/thread-incarnation identity and same-ID reuse before changes; then external effects, other revocation domains, signed dispatcher/recovery and full M0-M11."
+  },
+  "sandbox_namespace_audit": {
+    "status": "source_audit_only_not_runtime_verified",
+    "date": "2026-10-18",
+    "findings": [
+      "LocalSandboxProvider inherits default get_scoped -> None, so ordinary checkpoint restoration reacquires; acquire compares all fresh path mappings. A user/thread-only cache key alone does not demonstrate cross-workspace leakage.",
+      "LocalSandboxProvider still generates the same local:user:thread ID and copies agent-written hints when replacing mappings. Paths.thread_dir includes workspace but not thread incarnation. File lifecycle and cached handles need joint proof after actual delete/recreate.",
+      "AIO get_scoped validates only the recorded user/thread tuple; workspace/incarnation are not part of that recorded identity. This is a source-level gap, not live-container proof.",
+      "Lease manager active owner short-circuits via provider.get and user/thread key. Any change must preserve server-created fork borrowing, native owner cleanup and legacy IDs.",
+      "Existing derive_sandbox_scope_token SHA-256/16-hex legacy contract must not be changed silently."
+    ],
+    "next_main": "Use actual SQL create/delete/recreate and native Run with the same public thread ID. Observe old/new report bytes and sandbox bindings with real LocalSandbox first. Establish native storage/API/cleanup identity before adding a namespace or touching AIO. Normal same-incarnation continuation must keep its report.",
+    "limits": "No new runtime case or container claim from this source audit. Physical files/API retrieval and resource lifecycle must agree; changing only provider IDs is insufficient."
   }
 }
