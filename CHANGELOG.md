@@ -1255,6 +1255,7 @@ This release closes that milestone with **621 merged pull requests**.
   and an id longer than one path component failed with `ENAMETOOLONG`. They
   now check for an owned, active project first and answer the same `404`
   without writing; the shelf insert still re-checks under the project row lock.
+  ([#7040])
 
 - **llm:** A provider error that arrives inside a streaming response that has
   already returned `200` is now retried like the same error sent as an HTTP
@@ -11796,3 +11797,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6909]: https://github.com/bytedance/deer-flow/pull/6909
 [#6930]: https://github.com/bytedance/deer-flow/pull/6930
 [#6991]: https://github.com/bytedance/deer-flow/pull/6991
+[#7040]: https://github.com/bytedance/deer-flow/pull/7040

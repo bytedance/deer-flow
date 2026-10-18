@@ -1007,7 +1007,7 @@
   `users/{user_id}/projects/{project_id}/` 下才检查项目，因此不存在、属于他人或已归档
   的 id 会留下一个回收站对账永远不会清理的空 `{project_id}/documents/` 目录，而超过单个
   路径分量长度的 id 会因 `ENAMETOOLONG` 失败。现在会先确认项目归调用者所有且处于活跃
-  状态，不写任何内容即返回同样的 `404`；书架插入仍会在项目行锁下再次检查。
+  状态，不写任何内容即返回同样的 `404`；书架插入仍会在项目行锁下再次检查。 ([#7040])
 
 - **llm：** 流式响应已返回 `200` 之后才在流内报告的 provider 错误，现在会像以 HTTP
   状态码返回的同一错误一样重试。为了用 SSE keepalive 维持慢请求而提前返回 `200` 的
@@ -9405,3 +9405,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6909]: https://github.com/bytedance/deer-flow/pull/6909
 [#6930]: https://github.com/bytedance/deer-flow/pull/6930
 [#6991]: https://github.com/bytedance/deer-flow/pull/6991
+[#7040]: https://github.com/bytedance/deer-flow/pull/7040
