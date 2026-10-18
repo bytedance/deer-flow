@@ -46,7 +46,7 @@ class Runs:
 
     file_content = b"original file"
 
-    async def configuration_revision(self, *, assistant_ids):
+    async def configuration_revision(self, *, assistant_ids, durable=False):
         if self.denied:
             raise AgentRunError(403, "revoked")
         return self.revision
@@ -356,7 +356,7 @@ async def test_service_shutdown_drains_children_and_worker(plugin):
     assert all(r.status == "interrupted" for r in plugin[3].runs.values())
     await plugin[2].start(None)
     final = await plugin[1]["get"]({"run_id": result["run_id"]}, context(plugin[3]))
-    assert final["status"] == "cancelled"
+    assert final["status"] == "needs_reconciliation"
 
 
 @pytest.mark.asyncio
@@ -453,6 +453,7 @@ async def test_startup_marks_unfinished_records_interrupted_without_replay(plugi
     await done(plugin, result["run_id"])
     record = await asyncio.to_thread(plugin[2].store.get, "alice", result["run_id"])
     record["status"] = "running"
+    record.pop("recovery_version", None)
     await asyncio.to_thread(plugin[2].store.put, "alice", record)
     await plugin[2].stop()
     await plugin[2].start(None)
@@ -744,7 +745,7 @@ async def test_cancelled_launch_caller_keeps_committed_sqlite_launch_owned(plugi
             await asyncio.wait_for(runs.entered.wait(), 5)
             await plugin[1]["cancel"]({"run_id": retry["run_id"]}, context(runs))
         final = await done(plugin, retry["run_id"])
-        assert final["status"] == "cancelled", final
+        assert final["status"] in ({"recoverable", "needs_reconciliation"} if shutdown else {"cancelled"}), final
         assert len(runs.starts) <= 1
         assert not service.entries and not service.workers and not service.processes
         await plugin[1]["delete"]({"run_id": retry["run_id"]}, context(runs))
@@ -912,7 +913,7 @@ async def test_phase2_fail_closed_checkpoint_and_restart(plugin, script):
         replacement = Workflows(service.config)
         await replacement.start(None)
         try:
-            assert (await replacement.get({"run_id": run_id}, context(runs)))["status"] == "interrupted"
+            assert (await replacement.get({"run_id": run_id}, context(runs)))["status"] == "recoverable"
             with pytest.raises(ValueError):
                 await replacement.resume({"run_id": run_id, "step_id": "p", "attempt": 1, "fingerprint": paused["fingerprint"]}, context(runs))
         finally:
