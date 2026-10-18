@@ -1,18 +1,18 @@
 # AGENTS.md
 
-This is the source of truth for DeerFlow frontend coding agents; the sibling `CLAUDE.md` imports it via `@AGENTS.md`.
+Frontend guidance; `CLAUDE.md` imports `@AGENTS.md`.
 
 ## Project Overview
 
-DeerFlow's Next.js 16 frontend provides thread-based AI conversations with streaming responses, artifacts, skills, and tools through a LangGraph backend.
+Next.js frontend for LangGraph conversations, streaming, artifacts, skills and tools.
 
-**Stack**: Next.js 16, React 19, TypeScript 5.8, Tailwind CSS 4, pnpm 10.26.2. Requires Node.js 22+ and pnpm 10.26.2+.
+**Stack**: Next.js 16, React 19, TypeScript 5.8, Tailwind CSS 4. Requires Node.js 22+ and pnpm 10.26.2+.
 
 ### Core dependencies
 
-- **LangGraph SDK** (`@langchain/langgraph-sdk` ^1.5.3) — Agent orchestration and streaming
-- **LangChain Core** (`@langchain/core` ^1.1.15) — Fundamental AI building blocks
-- **TanStack Query** (`@tanstack/react-query` ^5.90.17) — Server state management
+- **LangGraph SDK** (`@langchain/langgraph-sdk` ^1.5.3) — orchestration/streaming
+- **LangChain Core** (`@langchain/core` ^1.1.15) — AI primitives
+- **TanStack Query** (`@tanstack/react-query` ^5.90.17) — server state
 - **UI**: Shadcn UI, MagicUI, React Bits, and Vercel AI SDK elements (generated from registries — see Code Style)
 
 `pnpm-workspace.yaml` overrides vulnerable `@xmldom/xmldom` 0.9.x releases to
@@ -23,11 +23,8 @@ upstream dependency chain resolves a patched version without it; regenerate
 
 ## Commands
 
-New upload turns keep server descriptions in `additional_kwargs.deerflow_upload_context`
-version 1 and user prose in `content`. Use `hasStructuredUploadContext` before legacy
-inline cleanup in display/copy/export/outline paths; never parse file chips from
-literal user tags on those turns. Keep the old cleanup for unversioned history and
-assistant/hidden-context containment. See `docs/upload-context.md` at repository root.
+Upload visibility: [contract](../docs/upload-context.md). Use
+`hasStructuredUploadContext` before legacy cleanup; preserve literal user tags.
 
 | Command          | Purpose                                       |
 | ---------------- | --------------------------------------------- |
