@@ -1,4 +1,4 @@
-# Script workflows (Phase 1)
+# Script workflows (Phase 2)
 
 An opt-in packaged extension that runs inspectable JavaScript orchestration in the
 background. Scripts call full DeerFlow Agents through the public `AgentRuns`
@@ -6,15 +6,15 @@ capability. A chat tool or authenticated plugin action returns a workflow run ID
 promptly; **Script workflows** shows the script, argument hashes, execution limits,
 progress, child conversation/run identities, and final result.
 
-Phase 1 has no saved definition library, resume, authenticated output sign-off,
-continuation serialization, automatic restart replay, or hard monetary budget.
-It therefore does not complete the inspection-report scenario requiring human
-approval between stages. Agent execution success, a script verdict and human
-approval are separate facts.
+Versioned definitions, retained output snapshots, explicit same-process pause/resume,
+and authenticated human checkpoints support staged inspection reports. Agent success,
+script verdicts, tool permission approval and human output approval remain separate facts.
+No arbitrary JavaScript continuation serialization, restart replay or hard monetary
+budget is provided.
 
 ## Install and enable
 
-Requires a POSIX Gateway (Linux/macOS), Python 3.12+, the public extension API 0.2.5,
+Requires a POSIX Gateway (Linux/macOS), Python 3.12+, the public extension API 0.2.7,
 and a **single Gateway process per storage file**. Windows execution is unsupported.
 The package holds an exclusive process lock; another process using that same file
 fails service startup rather than recovering another worker's live workflows.
@@ -52,6 +52,7 @@ plugins:
       max_workflows_per_owner: 2
       timeout_seconds: 300
       admission_timeout_seconds: 10
+      pause_timeout_seconds: 86400  # Separate bound for each human/pause wait, maximum 7 days.
       cpu_seconds: 5
       memory_bytes: 16777216
 ```
@@ -107,7 +108,7 @@ log('Two checks finished');
 return checks.map(check => check.output);
 ```
 
-`agent()` resolves to `{output, threadId, runId, status: 'success'}`. `output` is the
+`agent()` resolves to `{output, threadId, runId, status: 'success', artifactVersion}`. `output` is the
 last attributable non-tool assistant answer: parsed JSON if valid, otherwise text
 or content blocks. There is no provider-enforced structured output schema in this
 API; validate verdicts in the script before branching. Every Agent call must be
@@ -128,6 +129,95 @@ The host binds that thread's target Agent, checks current authorization on each
 operation, and uses its normal agent assembly, models, tools, skills, memory and
 checkpoints. The ledger records the requested agent reference and child IDs;
 it does **not** claim to record a per-run effective assembly fingerprint.
+
+## Saved versions, live resume and human review
+
+Use **Workflow name → Save workflow version**, then select an exact saved version.
+The immutable version is the SHA-256 of the script; identical saves are idempotent.
+Definitions are owner-scoped (100 versions per owner). Launching the same saved version
+with new arguments requires a new request ID and records both argument and script hashes.
+Saved scripts never silently follow the latest version. Editing the script detaches
+it from the selected definition. Chat tools `save_workflow` and `list_workflows`
+provide the same library; `launch_workflow` accepts either `script` or
+`definition: {name, version}` with `args` and `request_id`.
+
+```js
+const evidence = await agent({stepId:'evidence',agentRef:'lead_agent',task:args.product});
+await humanCheckpoint({
+  stepId:'confirm-evidence', sourceStepId:'evidence', artifactVersion:evidence.artifactVersion
+});
+await pause({stepId:'before-report'});
+return await agent({stepId:'report',agentRef:'lead_agent',task:{evidence:evidence.output}});
+```
+
+Checkpoints must be **awaited alone after all outstanding calls**. They share the
+unique step-ID namespace; each attempt is 1 and has at most one decision. Up to
+`max_calls` checkpoints are allowed in addition to the Agent call limit.
+A pause retains the same isolated worker and its live JS variables. **Resume this
+checkpoint** continues there, reusing completed values without reading newer thread
+state or replaying earlier script code. It cannot retry a failed/cancelled workflow,
+answer a child's graph interrupt, change script/arguments, or resume after restart.
+An old resume request names its exact step/attempt and cannot release a later pause.
+Paused workers consume normal active workflow slots and memory; cancel unused waits.
+The execution wall budget is suspended while waiting; each wait has its own
+`pause_timeout_seconds` deadline (default 24 hours, maximum 7 days). CPU, call and
+log limits remain cumulative. Expiry fails closed and never approves anything.
+
+The host records an opaque process-local **declarative configuration revision**:
+app configuration, extension configuration, and allowed Custom Agent config/SOUL.
+It rechecks this revision before each new child and when continuing a checkpoint;
+changes require a new workflow. Operator limits/allowlist changes also invalidate
+continuation. This is deliberately conservative (even unrelated declarative config
+changes invalidate), and **not** a full effective-assembly fingerprint: mutable
+memory, referenced Skill/tool file contents, remote provider state and external
+side effects are not attested. Completed results are historical snapshots, not a
+claim that rerunning against changed external data would produce the same result.
+Each new child still goes through ordinary current authorization and Agent assembly.
+
+**Review exact output** displays the captured source-step output. Only then are
+**Approve this version / Reject this version** offered. The host decision action
+requires an authenticated browser session for the owner, exact checkpoint ID,
+attempt and server-derived output hash. Model tools, internal/PAT callers and
+auth-disabled sessions cannot approve. Auth-disabled deployments can run workflows
+and ordinary pauses, but must enable login to use human checkpoints. Approvals
+cannot be submitted through script messages; model-written “approved” has no effect.
+Matching duplicate decisions return the saved receipt without duplicate dispatch;
+a contradictory decision conflicts. Rejection stops downstream execution.
+
+For files, use `captureArtifact({stepId, sourceStepId, path})` after the source
+Agent completes. This stores independent bytes with SHA-256 and an immutable
+version, rather than approving a mutable path. Pass the capture step/version to
+`humanCheckpoint`. The browser reads that version, verifies its hash, and offers
+safe text/image/PDF preview or an exact-version download before approval.
+Completed checkpoint records retain this review/download entry after approval
+and when reopened; only pending checkpoints offer decision controls.
+A failed saved-definition lookup blocks launch until a version loads or the user
+explicitly selects a new script or edits the editor.
+`agent({..., artifacts:[version]})` admits only approved versions and includes
+version/hash references in the child input. The child reads bytes through
+`read_workflow_artifact`; scripts can use `readArtifact({artifactVersion, offset})`.
+Both return base64 chunks with `next_offset` (null at EOF). Neither reopens the
+source path. Limits: 2 MiB/file, 16 files/workflow, 64 MiB retained bytes/owner,
+and 16 KiB per read. Deleting a retained workflow also deletes its snapshots.
+See [`examples/file-review.workflow.js`](examples/file-review.workflow.js).
+JSON/text output checkpoints remain supported; links inside them require explicit
+file capture. No Agent success or reviewer verdict implicitly approves a version.
+
+Each completed child also retains **host assembly evidence**, bound to its run ID.
+The host records it before graph execution from resolved instructions, actual
+model/parameters, authorized tools, Skills and middleware/policies. Only safe
+numeric parameters and opaque keyed component versions are exposed, never raw
+prompts, provider kwargs or credentials. `get_step` exposes this historical proof;
+missing proof fails the workflow step. This is separate from the declarative
+preflight guard above. Versions compare within one host lifetime; stored proof
+survives restart. It describes assembly-time configuration, not later external
+service state, runtime tool results or deterministic replay.
+
+The UI exposes retained outputs one at a time to keep responses bounded. Checkpoint
+receipts retain who decided, when, source attempt and output version. On restart
+these records remain inspectable but execution is interrupted; there is no automatic
+replay, authorization reattachment or continuation serialization. Start a new run
+only after considering prior external effects.
 
 ## Limits and status
 
@@ -162,6 +252,7 @@ reservation/enforcement contract before advertising that guarantee.
 | completed | Script and awaited child calls returned; output is unapproved task data |
 | failed | Script, resource limit (including wall deadline), attribution, child execution or observation failed |
 | cancelled | Stop requested and known active children interrupted or already terminal |
+| paused / waiting_approval | Live worker retained at an explicit script checkpoint; occupies an active workflow slot |
 | waiting_input | Child has a graph interrupt or human-input artifact; downstream stopped |
 | needs_reconciliation | Admission/cancellation outcome uncertain; inspect child identities before new work |
 | interrupted | Supervisor externally cancelled, or unfinished record recovered after Gateway restart; no execution replay |
@@ -181,8 +272,8 @@ run ID, then explicitly interrupts and observes that child. If admission times
 out or authorization is revoked during cleanup, it retains `needs_reconciliation`
 with stable thread/input/idempotency identity. It never automatically retries an
 uncertain admission. Stable request IDs return an existing workflow record; they
-never resume it or reexecute completed work. Changed scripts/args/limits with the
-same request ID conflict. Phase 2 definition/config invalidation is not implemented.
+never themselves resume it or reexecute completed work; use the explicit checkpoint action. Changed scripts/args/limits with the
+same request ID conflict. Definition versions are pinned; editing a definition creates a new version.
 
 Caller cancellation during launch does not abandon a committed record: the service
 owns persistence through supervisor publication, including shutdown coordination.
@@ -194,13 +285,12 @@ Result collection anchors on the visible human input, including the host's canon
 cannot become the anchor; genuinely later human input still conflicts.
 Result collection checks input message/run attribution and rejects an intervening
 human turn, because `get_state()` is the thread's latest state, not immutable run
-output. Results are copied before further script calls. Raw per-step input/results
-are retained privately; public inspection returns a bounded final result and step
-metadata. Child conversations remain accessible through normal host authorization.
+output. Results are copied before further script calls. Per-step inputs remain private. Owner-scoped `get_step` returns one immutable retained
+output with its attempt and artifact version; run inspection returns bounded metadata. Child conversations remain accessible through normal host authorization.
 
 At startup, unfinished records become `interrupted`; retained IDs do not recreate
 a capability or arbitrary JS continuation. Gateway revokes handles during shutdown,
-so cleanup may require reconciliation. Neither graph resume nor tool permission
+so cleanup may require reconciliation. Paused/approval records also become interrupted; their old decisions cannot resume a new worker. Neither graph resume nor tool permission
 approval is interpreted as authenticated approval of an artifact version.
 
 ## Verify

@@ -462,8 +462,14 @@ class E2BSandbox(Sandbox):
         case_sensitive: bool = False,
         max_results: int = 100,
     ) -> tuple[list[GrepMatch], bool]:
-        regex_source = re.escape(pattern) if literal else pattern
-        re.compile(regex_source, 0 if case_sensitive else re.IGNORECASE)
+        # Sanity-check a regex pattern as a Python regex at the boundary (grep uses
+        # POSIX ERE, but this catches gross errors); a literal needs no validation.
+        # grep receives the RAW pattern: -F matches it literally, -E as a regex.
+        # Escaping it first would double-escape -- fixed-string grep would then
+        # search for the added backslashes as text (``alpha\.beta``) and never
+        # match the exact line (#5626).
+        if not literal:
+            re.compile(pattern, 0 if case_sensitive else re.IGNORECASE)
 
         resolved = self._resolve_path(path)
         # Build a portable ``grep`` invocation:
@@ -492,7 +498,7 @@ class E2BSandbox(Sandbox):
         total_cap = max(max_results * 4, max_results + 50)
         flags.append(f"-m{per_file_cap}")
 
-        search = "grep " + " ".join(flags) + f" -- {shlex.quote(regex_source)} {shlex.quote(resolved)} 2>/dev/null"
+        search = "grep " + " ".join(flags) + f" -- {shlex.quote(pattern)} {shlex.quote(resolved)} 2>/dev/null"
 
         with self._lock:
             client = self._client

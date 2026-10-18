@@ -12,6 +12,9 @@ exit, so tests never leak a provider into one another.
 
 import threading
 import time
+from unittest.mock import Mock
+
+import pytest
 
 import deerflow.sandbox.sandbox_provider as sandbox_provider
 from deerflow.sandbox.sandbox import Sandbox
@@ -291,3 +294,42 @@ def test_losing_cold_start_racer_shuts_down_its_orphan(monkeypatch):
         assert all(inst.shutdown_calls == 1 for inst in losers)
     finally:
         sandbox_provider.reset_sandbox_provider()
+
+
+def test_failed_shutdown_remains_reachable_with_its_execution_manager():
+    from deerflow.sandbox.lease import get_sandbox_lease_manager
+
+    provider = ShutdownSandboxProvider()
+    provider.shutdown = Mock(side_effect=[RuntimeError("cleanup failed"), None])
+    sandbox_provider.set_sandbox_provider(provider)
+    manager = get_sandbox_lease_manager(provider)
+    try:
+        with pytest.raises(RuntimeError, match="cleanup failed"):
+            sandbox_provider.shutdown_sandbox_provider()
+        assert sandbox_provider.get_initialized_sandbox_provider() is provider
+        assert get_sandbox_lease_manager(provider) is manager
+        sandbox_provider.shutdown_sandbox_provider()
+        assert provider.shutdown.call_count == 2
+        assert sandbox_provider.get_initialized_sandbox_provider() is None
+    finally:
+        sandbox_provider.reset_sandbox_provider()
+
+
+def test_failed_shutdown_does_not_replace_a_concurrently_installed_provider():
+    from deerflow.sandbox.lease import discard_sandbox_lease_manager
+
+    old, replacement = ShutdownSandboxProvider(), ShutdownSandboxProvider()
+
+    def stop():
+        sandbox_provider.set_sandbox_provider(replacement)
+        raise RuntimeError("old cleanup failed")
+
+    old.shutdown = Mock(side_effect=stop)
+    sandbox_provider.set_sandbox_provider(old)
+    try:
+        with pytest.raises(RuntimeError, match="old cleanup failed"):
+            sandbox_provider.shutdown_sandbox_provider()
+        assert sandbox_provider.get_initialized_sandbox_provider() is replacement
+    finally:
+        sandbox_provider.reset_sandbox_provider()
+        discard_sandbox_lease_manager(old)

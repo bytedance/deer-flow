@@ -43,7 +43,7 @@ export const enUS: Translations = {
       workflows: {
         title: "Script workflows",
         description:
-          "Run inspectable Agent workflows with bounded parallel steps, progress and cancellation. Phase 1 has no resume, human approval or hard monetary budget.",
+          "Save versioned Agent workflows, resume within the same Gateway process and review exact retained output versions. No restart replay or hard monetary budget.",
       },
       agentTeams: {
         title: "Agent teams",
@@ -79,6 +79,11 @@ export const enUS: Translations = {
         title: "Local retrieval example",
         description:
           "Demonstrate read-only retrieval and structured tool results using fixed sample documents, without an external knowledge service.",
+      },
+      weknora: {
+        title: "WeKnora knowledge retrieval",
+        description:
+          "Search WeKnora knowledge bases and selected documents with source citations. Requires administrator installation and access configuration.",
       },
       knowledge: {
         title: "Knowledge scope example",
@@ -1434,6 +1439,13 @@ export const enUS: Translations = {
       "Save tool access before choosing default knowledge bases.",
     settingsModel: "Default model",
     settingsModelDefault: "Use global default",
+    settingsModelSwitchNeedsCatalog:
+      "Load the selected model before saving this model change. Retry loading, or restore the original model to save other changes.",
+    settingsReasoningUnsupported: "not supported",
+    settingsThinkingRequiredHint:
+      "This model requires thinking. The saved Off setting can prevent runs from starting. Choose Inherit or On to replace it.",
+    settingsReasoningUnsupportedHint:
+      "This saved value is not supported by the selected model. Choose Inherit or a supported value to replace it.",
     settingsTemperature: "Temperature",
     settingsTemperatureHint: "0 = deterministic, higher = more creative (0–2).",
     settingsMaxTokens: "Max output tokens",

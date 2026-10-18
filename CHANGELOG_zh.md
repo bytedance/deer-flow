@@ -14,6 +14,19 @@
 
 ### 新增
 
+- **渠道：** 在 Web UI 中填写的 IM 机器人凭据改存到共享的 `channel_runtime_configs`
+  表（迁移 `0044_channel_runtime_configs`），不再写入每台主机上明文的
+  `channels/runtime-config.json`。每个 provider 的配置用 `DEER_FLOW_CREDENTIALS_KEY`
+  加密；断开连接记为一条明文墓碑，仍会覆盖 `config.yaml` 中的配置；每次保存都会递增
+  该 provider 的 `version`。每个 Gateway 实例在每次请求时重新读表（路由不再把合并后
+  的配置缓存在 `app.state` 上）；启用 `channels.leader_lease` 时，持有者在每个续约
+  周期比对版本号，因此在任一实例上保存凭据或断开连接，都会在一个续约周期内到达平台
+  连接，而不必等持有者下次重启；接管租约的实例会读到断开状态，不会复活缓存中的旧凭据。
+  首次启动会导入已有的 `runtime-config.json`（表中已有的 provider 保留其行）并删除该
+  明文文件，因此回退到旧版本需要重新填写 UI 配置的机器人。没有可用密钥时，保存凭据
+  返回 `503` 而不是以明文存储，密钥无法解密的行视为未配置。`database.backend: memory`
+  仍使用 JSON 文件。 ([#6988])
+
 - **渠道：** 飞书渠道上基于选项的澄清改为渲染为可交互的按钮卡片，而不是纯文本：每个
   选项变成一个按钮（最多 4 个——再多时纯文本路径更易读），点击选项即可完成澄清，
   效果与输入该选项完全相同，卡片会原地更新以显示所作决定。渠道管理器把澄清中间件
@@ -1001,6 +1014,15 @@
   原因。([#6556])
 
 ### 修复
+
+- **浏览器：** `browser_screenshot` 不再替换线程 outputs 目录中已存在的文件。此前以
+  `report.png` 保存的截图会覆盖用户自己的 `report.png`、更早的截图，或同一秒内生成的
+  另一张默认命名截图；现在会像 `web_capture` 一样改用下一个空闲名称（`report-1.png`、
+  `report-2.png`……），工具结果会报告实际使用的名称。完整截图通过硬链接发布到目标名称，
+  因此并发占用的名称会被跳过而不是被替换，最终名称也不会暴露写了一半的文件。与 Gateway
+  上传相同，outputs 目录需要支持硬链接；不支持时工具会报错，而不会覆盖已有文件。发布前
+  被替换的暂存截图（例如换成指向宿主机文件的符号链接）绝不会被链接到 outputs，工具会
+  报错。 ([#6913])
 
 - **llm：** 流式响应已返回 `200` 之后才在流内报告的 provider 错误，现在会像以 HTTP
   状态码返回的同一错误一样重试。为了用 SSE keepalive 维持慢请求而提前返回 `200` 的
@@ -4528,6 +4550,22 @@
   数据库升级时都会记录一条，丢失 head stamp 的 schema 会记录 29 条（SQLite）或
   36 条（Postgres），淹没了这个警告本应发现的真实类型不一致。现在两侧都按所连接
   数据库的写法进行比较。([#6865])
+- **沙箱：** 启用 host bash 时，本地路径守卫现在会拒绝把 shell 变量用作路径前缀的
+  命令，例如 `cat $HOME/.ssh/id_rsa`。`~/`、`${HOME}/` 和 `"$HOME"/` 原本就会被拒绝，
+  但绝对路径扫描会跳过紧跟在单词字符之后的 `/`，因此不带花括号的 `$HOME/...`
+  （无论是否加引号）会直达主机。位置参数同样会被检查：`bash -c` 不带位置参数，
+  因此 `$1/etc/passwd` 会打开 `/etc/passwd`；awk 风格的 `$1/1024` 和 `$1/$2` 仍然
+  允许。`~root/.ssh/id_rsa` 这类指定用户的主目录同样会被拒绝，变量之后的非 ASCII
+  路径段（`$HOME/文档`）按路径处理，不再视为普通文本。提及 `CDPATH` 的命令会被拒绝，
+  因为它会把相对路径的 `cd` 移出工作区。`$PWD/...` 仍然允许，因为它与对应的相对路径
+  指向同一文件，除非命令自己重新绑定了 `PWD`。URL 中的变量不受影响。该守卫仍是尽力
+  而为的检查，并非隔离边界。([#6930])
+- **沙箱：** 在本地沙箱中，`ls` 现在接受 `/mnt/user-data` 根目录本身，并像 AIO 一样
+  列出 `workspace`、`uploads` 和 `outputs`。提供方有意映射了这个根目录，但工具层只允许
+  其下的路径，因此返回 `Permission denied`（带结尾斜杠时来自内部的
+  “path traversal detected” 检查）。列表只包含这三个目录，直接存放在根目录下的其他内容
+  仍然不可见。`glob`、`grep`、`read_file` 和写入仍然拒绝根目录，因为搜索会读取其下的
+  所有文件。([#6991])
 
 ### 安全
 
@@ -9380,3 +9418,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6876]: https://github.com/bytedance/deer-flow/pull/6876
 [#6897]: https://github.com/bytedance/deer-flow/pull/6897
 [#6909]: https://github.com/bytedance/deer-flow/pull/6909
+[#6913]: https://github.com/bytedance/deer-flow/pull/6913
+[#6930]: https://github.com/bytedance/deer-flow/pull/6930
+[#6988]: https://github.com/bytedance/deer-flow/pull/6988
+[#6991]: https://github.com/bytedance/deer-flow/pull/6991
