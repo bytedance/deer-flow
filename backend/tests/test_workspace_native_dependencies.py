@@ -23,7 +23,7 @@ def test_scoped_native_dependency_notification_resumes_original_goal(native_engi
     _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp_path, revocation_phase=revocation_phase)
 
 
-def _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp_path, *, revocation_phase="normal", scheduled=False, goal_replacement=False, member_control=False):  # noqa: F811
+def _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp_path, *, revocation_phase="normal", scheduled=False, goal_replacement=False, member_control=False, queued_control=False):  # noqa: F811
     from ecs_executor.agent_dispatch import NativeDispatchHost, NativeWorkerHost, install_native_dispatch
     from ecs_executor.dispatch import PROTOCOL, WORKER_VERSION
     from ecs_executor.job_store import JobStore
@@ -343,6 +343,146 @@ def _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp
                 queued = await foreground.dispatch_task(due[0], now=now, trigger="scheduled")
                 occurrence_id = queued["task_run_id"]
                 assert queued["outcome"] == "queued"
+                if queued_control:
+                    from ecs_executor import dependencies as dependency_module
+                    from ecs_executor.job_store import _JOBS
+
+                    from deerflow.persistence.user.model import UserRow
+                    from deerflow.persistence.workspaces.model import WorkspaceAuditEventRow, WorkspaceOperationOutboxRow
+                    from deerflow.persistence.workspaces.sql import WorkspaceRepository
+
+                    unknown_id = "task-unknown-queued-control"
+                    await scheduler_tasks.create(
+                        task_id=unknown_id,
+                        user_id=owner_user_id,
+                        thread_id=None,
+                        origin_thread_id=origin["thread_id"],
+                        context_mode="fresh_thread_per_run",
+                        assistant_id="lead_agent",
+                        title="Retain unknown queued accounting",
+                        prompt="Retain the original queued intent",
+                        schedule_type="once",
+                        schedule_spec={"run_at": now.isoformat()},
+                        timezone="UTC",
+                        next_run_at=now,
+                    )
+                    due_unknown = await scheduler_tasks.claim_due_tasks(now=now, lease_owner=foreground._lease_owner, lease_seconds=120, limit=2)
+                    unknown_task = next(row for row in due_unknown if row["id"] == unknown_id)
+                    unknown_queued = await foreground.dispatch_task(unknown_task, now=now, trigger="scheduled")
+                    assert unknown_queued["outcome"] == "queued"
+                    unknown_occurrence_id = unknown_queued["task_run_id"]
+                    async with case.sf() as session:
+                        await session.execute(update(ScheduledTaskRunRow).where(ScheduledTaskRunRow.id == unknown_occurrence_id).values(launch_accounted=None))
+                        await session.commit()
+
+                    async def queued_snapshot():
+                        async with case.sf() as session:
+                            parent_rows = {row["id"]: dict(row) for row in (await session.execute(select(ScheduledTaskRow.__table__).where(ScheduledTaskRow.id.in_((scheduler_id, unknown_id))))).mappings()}
+                            occurrence_rows = {row["id"]: dict(row) for row in (await session.execute(select(ScheduledTaskRunRow.__table__).where(ScheduledTaskRunRow.task_id.in_((scheduler_id, unknown_id))))).mappings()}
+                            native_ids = frozenset(await session.scalars(select(RunRow.run_id).where(RunRow.operation_kind == "run")))
+                            event_rows = [
+                                dict(row) for row in (await session.execute(select(ScheduledTaskEventRow.__table__).where(ScheduledTaskEventRow.task_id.in_((scheduler_id, unknown_id))).order_by(ScheduledTaskEventRow.id))).mappings()
+                            ]
+                            audit_rows = [
+                                dict(row)
+                                for row in (
+                                    await session.execute(
+                                        select(WorkspaceAuditEventRow.__table__)
+                                        .where(
+                                            WorkspaceAuditEventRow.workspace_id == case.original.workspace_id,
+                                            WorkspaceAuditEventRow.action == "scheduler.revoke_settled",
+                                        )
+                                        .order_by(WorkspaceAuditEventRow.id)
+                                    )
+                                ).mappings()
+                            ]
+                            revoke_rows = [
+                                dict(row)
+                                for row in (
+                                    await session.execute(
+                                        select(WorkspaceOperationOutboxRow.__table__)
+                                        .where(
+                                            WorkspaceOperationOutboxRow.workspace_id == case.original.workspace_id,
+                                            WorkspaceOperationOutboxRow.user_id == owner_user_id,
+                                            WorkspaceOperationOutboxRow.kind == "workspace_revoke",
+                                        )
+                                        .order_by(WorkspaceOperationOutboxRow.operation_id)
+                                    )
+                                ).mappings()
+                            ]
+                        return deepcopy((parent_rows, occurrence_rows, native_ids, event_rows, audit_rows, revoke_rows))
+
+                    def queued_pool_snapshot():
+                        with ledger.engine.connect() as connection:
+                            return deepcopy([dict(row) for row in connection.execute(select(_JOBS).order_by(_JOBS.c.id)).mappings()])
+
+                    before_membership = await queued_snapshot()
+                    known = before_membership[1][occurrence_id]
+                    unknown = before_membership[1][unknown_occurrence_id]
+                    assert known["status"] == unknown["status"] == "queued" and known["run_id"] is unknown["run_id"] is None
+                    assert known["launch_accounted"] is False and unknown["launch_accounted"] is None
+                    assert known["attempt_count"] == unknown["attempt_count"] == 0
+                    for row in (known, unknown):
+                        assert row["started_at"] is row["lease_owner"] is row["lease_expires_at"] is None
+                        assert row["workspace_context_json"] == asdict(case.original)
+                    successor = "22222222-2222-4222-8222-222222222222"
+                    async with case.sf() as session:
+                        session.add(UserRow(id=successor, email="queued-control-successor@example.com", email_verified_at=datetime.now(UTC)))
+                        await session.commit()
+                    workspaces = WorkspaceRepository(case.sf)
+                    await workspaces.add_member(case.original.workspace_id, owner_user_id, successor, role="admin")
+                    await workspaces.transfer_owner(case.original.workspace_id, owner_user_id, successor)
+                    await workspaces.remove_member(case.original.workspace_id, successor, owner_user_id)
+                    before = await queued_snapshot()
+                    assert before[:5] == before_membership[:5]
+                    assert len(before[5]) == 2 and all(row["state"] == "pending" and "scheduler" in row["payload"]["pending_domains"] for row in before[5])
+                    pool_before = await asyncio.to_thread(queued_pool_snapshot)
+                    forbidden_calls = []
+
+                    async def forbid_business_or_physical(*args, **kwargs):
+                        forbidden_calls.append("business_read_or_physical_action")
+                        raise AssertionError("Queued revocation attempted business work or a physical receipt")
+
+                    selected = set_current_workspace(case.other)
+                    try:
+                        with monkeypatch.context() as control_only:
+                            for module, name in (
+                                (dependency_module, "checkpoint_receipt"),
+                                (goal_runtime, "read_thread_goal"),
+                                (native_worker, "clear_recovered_scheduled_goal"),
+                                (central, "get"),
+                                (receiver, "get"),
+                                (task_repo, "get"),
+                                (task_repo, "list_by_run"),
+                                (host, "stop_owned"),
+                                (host, "report"),
+                            ):
+                                control_only.setattr(module, name, forbid_business_or_physical)
+                            await control.run_once(now=datetime.now(UTC))
+                            after = await queued_snapshot()
+                            assert after[0][unknown_id] == before[0][unknown_id] and after[1][unknown_occurrence_id] == before[1][unknown_occurrence_id]
+                            assert after[0][scheduler_id]["status"] == "cancelled" and after[1][occurrence_id]["status"] == "interrupted"
+                            for key, value in before[0][scheduler_id].items():
+                                if key not in {"status", "next_run_at", "updated_at"}:
+                                    assert after[0][scheduler_id][key] == value
+                            for key, value in before[1][occurrence_id].items():
+                                if key not in {"status", "error", "finished_at"}:
+                                    assert after[1][occurrence_id][key] == value
+                            assert after[1][occurrence_id]["run_id"] is None and after[1][occurrence_id]["launch_accounted"] is False
+                            assert after[0][scheduler_id]["run_count"] == 0
+                            assert after[2:4] == before[2:4] and after[5] == before[5]
+                            assert len(after[4]) == 1 and after[4][0]["resource_id"] == occurrence_id and after[4][0]["actor_user_id"] is None
+                            assert after[4][0]["request_id"] in {row["operation_id"] for row in before[5]}
+                            assert await asyncio.to_thread(queued_pool_snapshot) == pool_before
+                            await control.run_once(now=datetime.now(UTC))
+                            assert await queued_snapshot() == after
+                            assert await asyncio.to_thread(queued_pool_snapshot) == pool_before
+                        assert forbidden_calls == [] and get_current_workspace() == case.other
+                        assert (await asyncio.to_thread(pool.node_status, "worker"))["unreleased"] == 0
+                        assert admitted == [] and executed == [] and created_tasks == []
+                    finally:
+                        reset_current_workspace(selected)
+                    return
                 await control.run_once(now=now)
                 async with case.sf() as session:
                     occurrence = await session.get(ScheduledTaskRunRow, occurrence_id)
@@ -780,3 +920,8 @@ def test_scoped_scheduled_dependency_goal_replacement_preserves_new_goal(native_
 @pytest.mark.parametrize("executor_engine", ["postgres"], indirect=True)
 def test_scoped_scheduler_revocation_settles_closed_dependency_control_only(native_engine, executor_engine, monkeypatch, tmp_path):  # noqa: F811
     _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp_path, scheduled=True, member_control=True)
+
+
+@pytest.mark.parametrize("executor_engine", ["postgres"], indirect=True)
+def test_scoped_scheduler_revocation_retires_only_proven_queued_no_start(native_engine, executor_engine, monkeypatch, tmp_path):  # noqa: F811
+    _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp_path, scheduled=True, queued_control=True)
