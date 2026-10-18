@@ -1,6 +1,4 @@
-### IM Channels
-
-IM: `langgraph-sdk` HTTP; Gateway owns threads.
+### IM Channels System (`app/channels/`)
 
 WeChat `_read_outbound_bytes`: cap+1 off-loop; overflow: `None` before encryption/upload; <=0 unlimited.
 Drain cursor writes on cancel; expiry drains cursor/auth clearing under `_auth_lock`.
