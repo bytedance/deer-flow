@@ -113,8 +113,9 @@ Fork lookups reject invalidated clients; cancelled acquires leave borrowers a pe
 Local `find_grep_matches` applies its long-line guard only to regex searches.
 Escaped fixed-string patterns can scan long lines without regex backtracking;
 retain file-size, binary-file, glob, symlink and result-summary limits.
-Offline regressions: `tests/test_local_grep_long_lines.py`, including the real
-LocalSandbox virtual-path entry point and unchanged regex protection.
+`tests/test_local_grep_long_lines.py` covers virtual paths and regex safety;
+`tests/test_sandbox_search_contract.py` covers six providers. Previews may omit
+late matches; `truncated` concerns result limits, not shortened line prefixes.
 
 Remote `list_dir` prints the root, then prunes ignored descendants before the
 500-entry cap. Preserve root literals, host case policy, status markers and the
