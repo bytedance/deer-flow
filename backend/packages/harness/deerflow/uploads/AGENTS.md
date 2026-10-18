@@ -19,9 +19,11 @@ metadata; every attempt reads the held private capture. Replacement copies share
 this capture helper. Never copy snapshot permission bits onto the saved upload.
 Close the caller's descriptor after capture and finish conversion workers before
 removing captures. Never reopen the caller/sandbox upload path for conversion.
-Names already present in the call's initial regular-file snapshot retain
-replacement behavior; these replacements are not serialized. Apply source
-timestamps after new-file publication so cleanup cannot sweep an in-flight copy
+Original upload names already present in the call's initial regular-file snapshot
+retain replacement behavior; these replacements are not serialized. Converted
+Markdown always uses no-replace publication, including across upload calls, and
+registers the actual saved name. An existing basename does not establish companion
+ownership. Apply source timestamps after new-file publication so cleanup cannot sweep an in-flight copy
 of an old source. New final names must expose complete copies.
 
 No-replace publication binds pre-link staging and post-link destination checks to
