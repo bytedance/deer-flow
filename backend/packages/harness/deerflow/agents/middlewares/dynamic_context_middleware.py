@@ -60,7 +60,7 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.message_utils import insert_after_leading_system_messages
 from deerflow.projects.context import build_project_context_message, is_project_context_message, pinned_project_snapshot, project_context_insertion_index, render_documents_block, render_project_block
-from deerflow.runtime.client_context import render_client_context_for_prompt
+from deerflow.runtime.client_context import client_context_limits, render_client_context_for_prompt
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.utils.messages import INJECTED_USER_MESSAGE_ID_SUFFIX, ORIGINAL_USER_CONTENT_KEY, strip_injected_user_message_id_suffix
@@ -406,12 +406,13 @@ class DynamicContextMiddleware(AgentMiddleware):
         self._injected_memory_message_id: str | None = None
 
     def release_policy_parameters(self) -> dict[str, object]:
-        """Declare memory/date behavior and the shelf index's rendering caps.
+        """Declare memory/date behavior, the shelf index's rendering caps and client delivery.
 
         ``memory_enabled`` gates the memory half of the injected context;
         ``shelf_index_max_entries`` / ``shelf_index_max_bytes`` change the
-        model-visible ``<documents>`` block this middleware renders. All three
-        are model-visible policy, so the effective (post-config-resolution)
+        model-visible ``<documents>`` block this middleware renders, and the
+        ``client_context_*`` entries describe the request-only ``<client_context>``
+        block. All are model-visible policy, so the effective (post-config-resolution)
         values are part of the assembly identity — runs under different
         policies must not share a fingerprint.
         """
@@ -421,6 +422,8 @@ class DynamicContextMiddleware(AgentMiddleware):
             "memory_enabled": self._memory_enabled,
             "shelf_index_max_entries": max_entries,
             "shelf_index_max_bytes": max_bytes,
+            "client_context_delivery": "framed_request_message_after_system_prompt",
+            "client_context_limits": client_context_limits(),
         }
 
     def _build_full_reminder(self, runtime: Runtime | None = None, *, query: str | None = None) -> tuple[str, str | None]:

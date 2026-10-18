@@ -2321,6 +2321,21 @@ def test_merge_run_context_overrides_sanitizes_config_context_client_without_bod
     assert "client" not in config["context"]
 
 
+def test_merge_run_context_overrides_drops_configurable_client():
+    """``config.configurable`` is copied verbatim and checkpointed, so a ``client`` placed there never survives."""
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-1", {"configurable": {"client": {"name": "configurable-client", "token": "secret"}}}, None)
+    merge_run_context_overrides(config, None)
+    assert "client" not in config["configurable"]
+    assert "client" not in config.get("context", {})
+
+    config = build_run_config("thread-1", {"configurable": {"client": {"name": "configurable-client", "token": "secret"}}}, None)
+    merge_run_context_overrides(config, {"client": {"name": "body-client"}})
+    assert "client" not in config["configurable"]
+    assert config["context"]["client"] == {"name": "body-client"}
+
+
 def test_merge_run_context_overrides_logs_dropped_client_fields_without_values(caplog):
     from app.gateway.services import build_run_config, merge_run_context_overrides
 

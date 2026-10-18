@@ -24,6 +24,16 @@ _MAX_CLIENT_VALUE_LENGTH = 200
 _MAX_CLIENT_INTEGER = 2**53 - 1
 
 
+def client_context_limits() -> dict[str, int]:
+    """The sanitizer's model-visible limits, for release-policy declarations."""
+    return {
+        "max_items": _MAX_CLIENT_CONTEXT_ITEMS,
+        "max_name_length": _MAX_CLIENT_NAME_LENGTH,
+        "max_value_length": _MAX_CLIENT_VALUE_LENGTH,
+        "max_integer": _MAX_CLIENT_INTEGER,
+    }
+
+
 def _clean_key(value: Any) -> str | None:
     if not isinstance(value, str):
         return None

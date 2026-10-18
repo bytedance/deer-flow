@@ -511,6 +511,13 @@ take precedence, and `max_recursion_limit` (default `1000`) caps both. Changes
 apply to the next run without restarting the Gateway. This top-level setting
 applies to Gateway API runs; IM channel and embedded `DeerFlowClient` runs
 retain their own defaults and per-call override paths.
+
+A custom frontend can add an optional `context.client` to a Gateway run request:
+a client name, capabilities such as `artifacts` or `charts`, and display
+preferences. DeerFlow sanitizes it and passes the values to the agent as
+untrusted, request-scoped hints, so skills can pick an output shape the client
+can show. It is never an authorization or identity signal. See
+[Create Run](backend/docs/API.md#create-run).
 The checkpoint storage settings `database.checkpoint_channel_mode` and
 `database.checkpoint_delta.snapshot_frequency` (default `10`) are exceptions:
 both are frozen when the process first builds an agent (including through

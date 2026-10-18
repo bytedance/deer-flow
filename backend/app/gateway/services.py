@@ -872,6 +872,11 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
     Client capability context is runtime-only: it is sanitized and copied into
     ``config['context']['client']`` but never into ``configurable``.
     """
+    existing_configurable = config.get("configurable")
+    if isinstance(existing_configurable, dict):
+        # ``build_run_config`` copies ``body.config['configurable']`` verbatim,
+        # and ``configurable`` is persisted in checkpoints.
+        existing_configurable.pop("client", None)
     existing_runtime_context = config.get("context")
     if isinstance(existing_runtime_context, dict) and "client" in existing_runtime_context:
         existing_client_context = _sanitize_request_client_context(existing_runtime_context.get("client"))
