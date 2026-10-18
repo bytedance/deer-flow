@@ -7,7 +7,7 @@ from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, case, or_, select, text, update
+from sqlalchemy import Text, and_, case, cast, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -911,6 +911,103 @@ class McpTaskRepository:
             .exists()
         )
         return live & source & parent
+
+    async def retire_revoked_dispatched_notifications(self, *, now: datetime, limit: int) -> int:
+        """Retire notification control receipts, never grant or read business work.
+
+        Expired/unowned dispatched receipts alone are eligible. The original
+        persisted scope and every observed receipt fence must still match when
+        SQL independently confirms that business authority is no longer live.
+        This does not cancel the launched Run or acknowledge physical STOP.
+        """
+        if not self.workspace_scope_required or limit <= 0:
+            return 0
+        identity_columns = (
+            McpTaskRow.id,
+            McpTaskRow.workspace_id,
+            McpTaskRow.user_id,
+            McpTaskRow.thread_id,
+            McpTaskRow.thread_incarnation,
+            McpTaskRow.run_id,
+            McpTaskRow.server_name,
+            McpTaskRow.remote_task_id,
+        )
+        receipt_columns = (
+            McpTaskRow.notification_status,
+            McpTaskRow.notification_run_id,
+            McpTaskRow.event_version,
+            McpTaskRow.notified_version,
+            McpTaskRow.dispatch_version,
+            McpTaskRow.dispatch_attempt,
+            McpTaskRow.next_notification_at,
+            McpTaskRow.notification_lease_owner,
+            McpTaskRow.notification_lease_token,
+            McpTaskRow.notification_lease_expires_at,
+        )
+        eligible = (
+            McpTaskRow.workspace_id.is_not(None),
+            McpTaskRow.notification_status == "dispatched",
+            McpTaskRow.notification_run_id.is_not(None),
+            McpTaskRow.event_version > McpTaskRow.notified_version,
+            or_(McpTaskRow.next_notification_at.is_(None), McpTaskRow.next_notification_at <= now),
+            or_(
+                and_(McpTaskRow.notification_lease_owner.is_(None), McpTaskRow.notification_lease_token.is_(None), McpTaskRow.notification_lease_expires_at.is_(None)),
+                and_(
+                    McpTaskRow.notification_lease_owner.is_not(None),
+                    McpTaskRow.notification_lease_owner != "",
+                    McpTaskRow.notification_lease_token.is_not(None),
+                    McpTaskRow.notification_lease_token != "",
+                    McpTaskRow.notification_lease_expires_at < now,
+                ),
+            ),
+            ~self._live_notification_candidate(),
+        )
+        snapshot_text = cast(McpTaskRow.workspace_context_json, Text)
+        # Select only identity/control columns. Neither ORM hydration nor a
+        # result/event/driver payload crosses this control-only boundary.
+        candidates = select(*identity_columns, *receipt_columns, McpTaskRow.workspace_context_json, snapshot_text.label("snapshot_text")).where(*eligible).order_by(McpTaskRow.id).limit(limit)
+        async with self._sf() as session:
+            retired = 0
+            for observed in (await session.execute(candidates)).mappings():
+                try:
+                    context = WorkspaceContext(**observed["workspace_context_json"])
+                    reference = TaskReference(
+                        local_task_id=observed["id"],
+                        user_id=observed["user_id"],
+                        thread_id=observed["thread_id"],
+                        thread_incarnation=observed["thread_incarnation"],
+                        run_id=observed["run_id"],
+                        server_name=observed["server_name"],
+                        remote_task_id=observed["remote_task_id"],
+                        workspace_context=context,
+                    )
+                    if context.workspace_id != observed["workspace_id"]:
+                        continue
+                except (TypeError, ValueError):
+                    # An unknown historical identity cannot be reconstructed
+                    # from a current selection or treated as a business grant.
+                    continue
+                exact = [column.is_not_distinct_from(observed[column.key]) for column in (*identity_columns, *receipt_columns)]
+                result = await session.execute(
+                    update(McpTaskRow)
+                    .where(*self._notification_scope_filters(reference), *exact, snapshot_text == observed["snapshot_text"], *eligible)
+                    .values(
+                        notification_status="dead_letter",
+                        notification_error="Original notification authority is no longer live",
+                        next_notification_at=None,
+                        notification_lease_owner=None,
+                        notification_lease_token=None,
+                        notification_lease_expires_at=None,
+                        dispatch_version=None,
+                        dispatch_attempt=0,
+                        dispatch_event=None,
+                        notification_run_id=None,
+                        updated_at=now,
+                    )
+                )
+                retired += result.rowcount
+            await session.commit()
+            return retired
 
     async def claim_notification_work(
         self,

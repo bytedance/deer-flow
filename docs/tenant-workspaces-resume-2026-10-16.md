@@ -1,4 +1,4 @@
-# Resume checkpoint — 2026-10-18: dependency main #118 and receive-time revocation #119 passed; M4 remains partial
+# Resume checkpoint — 2026-10-18: dependency main #118, receive-time revocation #119 and dispatched control retirement #121 passed; M4 remains partial
 > **执行中，M4 部分完成。** Jenkins #112：单 Worker 真实 AIO 创建、文件写读、warm STOP、失败保留和 report 后释放已通过（1 项，53.79s）。两机 HTTP、恢复和 C→B→C 仍待完成；通知补丁已获用户批准，正在应用和验证；租户启动关闭。
 
 # 2026-10-16 暂停与恢复检查点
@@ -1176,3 +1176,7 @@ Jenkins #118 SUCCESS: 1 passed in 19.91s; Ruff check and 50-file format verifica
 ### 2026-10-18 — necessary revocation verified (#119)
 
 Jenkins #119 SUCCESS: one PostgreSQL negative passed in 18.49s; Ruff/50 files passed. Real membership version withdrawal after worker signing but before controller receive yields HTTP403, no second Run, exact lease dead-letter settlement and zero unreleased capacity. Current production files exactly match successful #118 archive. Exact fixture containers/network are absent. See `tenant-workspaces-evidence/native-dependency-119.json`. Remaining: control-only recovery of notifications already dispatched before withdrawal, physical B/two-host story, other M4 domains and M0–M11 parent requirements. No new CI run needed for this checkpoint.
+
+### 2026-10-18 — dispatched control retirement verified (#121)
+
+#120 RED reproduced a stranded dispatched notification after real membership withdrawal. #121 GREEN: one PostgreSQL case passed in 19.78s; Ruff/50 files passed. A finite-column control sweep compares original identity/context, notification versions, Run locator, next-at and exact lease values, then rechecks invalid authority before dead-lettering. No business payload/Run/checkpoint read or launch occurs. Notified version stays zero; second Run stays pending and capacity stays charged at 1, so notification cleanup cannot substitute for STOP. Exact #120/#121 fixture containers/networks are absent. Evidence: `docs/tenant-workspaces-evidence/native-dispatched-control-121.json`. M4 remains partial: Scheduler/background identities, physical B/two-host proof and remaining parent requirements are open.

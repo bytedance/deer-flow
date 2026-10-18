@@ -868,6 +868,11 @@ class McpTaskService:
             )
 
     async def _run_notifications(self, *, now: datetime) -> None:
+        # Settlement is a repository-only control operation. It must not bind
+        # a revoked actor or enter Run/checkpoint/result/launch business paths.
+        retire = getattr(self._repository, "retire_revoked_dispatched_notifications", None)
+        if getattr(self._repository, "workspace_scope_required", False) and retire is not None:
+            await retire(now=now, limit=self._max_concurrent_polls)
         if self._launch_notification is None or self._get_run is None:
             return
         records = await self._claim_with_cancellation_release(

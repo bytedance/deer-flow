@@ -678,3 +678,7 @@ Jenkins `deerflow-tenant-execution-m4-sql`：#118 主流程 1 passed / 19.91s；
 复用 `scripts/render_tenant_run_control_pipeline.py`：`--suite native-dependency-main` 只选 `[normal-postgres]`，`--suite native-dependency-revocation` 只选 `[notification_member-postgres]`。沿用现有 Jenkins 隔离 PostgreSQL 工具镜像和资源限额；不运行全矩阵。主流程使用真实 SQL、MCP 通知服务、签名接收、start_run 和 native adoption，模型图/RemoteIO 确定性替代，控制传输为 ASGI。
 
 撤权用例在已签名请求送达前真实增加成员版本，独立 SQL 观察无续跑和精确租约收尾。已 dispatched 后撤权的恢复收尾仍待实现；此处不证明真实 B 容器或两机网络。scoped 启动不执行 legacy checkpoint 补写，checkpoint-only 导入需单独授权迁移。
+
+### 已派发后撤权的通知收尾
+
+#120 复现滞留，#121 单条 PostgreSQL 回归通过（19.78s），Ruff/50 文件通过。`--suite native-dependency-dispatched-revocation` 只运行 `[dispatched_member-postgres]`。用例先通过真实通知派发，再撤权，调用实际 service `run_once` 两次确认幂等收尾；同时禁止业务读取、checkpoint 访问和再次启动。第二个 Run 保持 pending，容量保持 1。证据：`tenant-workspaces-evidence/native-dispatched-control-121.json`。不重复主流程或扩展数据库矩阵。

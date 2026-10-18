@@ -17,8 +17,8 @@ from test_workspace_mcp import _in_workspace_case
 
 
 @pytest.mark.parametrize("executor_engine", ["postgres"], indirect=True)
-@pytest.mark.parametrize("withdraw_before_receive", [False, True], ids=["normal", "notification_member"])
-def test_scoped_native_dependency_notification_resumes_original_goal(native_engine, executor_engine, monkeypatch, tmp_path, withdraw_before_receive):  # noqa: F811
+@pytest.mark.parametrize("revocation_phase", ["normal", "notification_member", "dispatched_member"])
+def test_scoped_native_dependency_notification_resumes_original_goal(native_engine, executor_engine, monkeypatch, tmp_path, revocation_phase):  # noqa: F811
     from ecs_executor.agent_dispatch import NativeDispatchHost, NativeWorkerHost, install_native_dispatch
     from ecs_executor.dispatch import PROTOCOL, WORKER_VERSION
     from ecs_executor.job_store import JobStore
@@ -105,7 +105,7 @@ def test_scoped_native_dependency_notification_resumes_original_goal(native_engi
 
         async def request_worker(operation, **values):
             nonlocal withdrawn
-            if operation == "notification" and withdraw_before_receive and not withdrawn:
+            if operation == "notification" and revocation_phase == "notification_member" and not withdrawn:
                 # The worker has already prepared and signed this request. The
                 # controller must independently reject the original SQL grant.
                 assert values.get("capability")
@@ -319,7 +319,7 @@ def test_scoped_native_dependency_notification_resumes_original_goal(native_engi
                             "source": {key: getattr(source_row, key) for key in ("status", "cancel_action")},
                             "thread_runs": [{"run_id": row.run_id, "status": row.status} for row in (await session.scalars(select(RunRow).where(RunRow.thread_id == first.thread_id))).all()],
                         }
-                if withdraw_before_receive:
+                if revocation_phase == "notification_member":
                     assert withdrawn and resumed["claim"] is None, diagnostic
                     assert {"stage": "controller_http", "status": 403} in notification_trace, diagnostic
                     assert any(item["stage"] == "notification_sql" for item in notification_trace), diagnostic
@@ -344,6 +344,48 @@ def test_scoped_native_dependency_notification_resumes_original_goal(native_engi
                     assert get_current_workspace() == case.other
                     return
                 assert resumed["claim"] is not None, "Native MCP notification did not admit a continuation through start_run: " + json.dumps(diagnostic, sort_keys=True)
+                if revocation_phase == "dispatched_member":
+                    pending_job = resumed["claim"]["job"]
+                    async with case.sf() as session:
+                        durable = await session.get(McpTaskRow, created_tasks[0]["id"])
+                        pending_run_id = durable.notification_run_id
+                        assert durable.notification_status == "dispatched" and pending_run_id != first.run_id
+                        assert durable.notification_lease_token is None
+                        changed = await session.execute(
+                            update(WorkspaceMembershipRow).where(WorkspaceMembershipRow.workspace_id == case.original.workspace_id, WorkspaceMembershipRow.user_id == owner_user_id).values(version=WorkspaceMembershipRow.version + 1)
+                        )
+                        assert changed.rowcount == 1
+                        await session.commit()
+                    assert (await asyncio.to_thread(pool.node_status, "worker"))["unreleased"] == 1
+
+                    async def forbidden_business(*args, **kwargs):
+                        pytest.fail("Revoked dispatched settlement invoked a business read or launch")
+
+                    monkeypatch.setattr(tasks, "_get_run", forbidden_business)
+                    monkeypatch.setattr(tasks, "_launch_notification", forbidden_business)
+                    monkeypatch.setattr(task_repo, "resolve_notification_authority", forbidden_business)
+                    monkeypatch.setattr(services, "ensure_checkpoint_history_seeded", forbidden_business)
+                    previous_io = list(io_scopes)
+                    for _ in range(2):
+                        await tasks.run_once(now=now + timedelta(seconds=30))
+                        # Independent privileged SQL observes control state; no
+                        # revoked business repository or Run accessor is used.
+                        async with case.sf() as session:
+                            durable = await session.get(McpTaskRow, created_tasks[0]["id"])
+                            pending_run = await session.get(RunRow, pending_run_id)
+                            runs = (await session.scalars(select(RunRow).where(RunRow.thread_id == first.thread_id))).all()
+                            assert durable.notification_status == "dead_letter", "Revoked dispatched notification remained stranded: " + durable.notification_status
+                            assert durable.notified_version == 0 and durable.event_version == 1
+                            assert durable.notification_lease_owner is durable.notification_lease_token is durable.notification_lease_expires_at is None
+                            assert durable.dispatch_version is durable.notification_run_id is None
+                            assert pending_run.status == "pending" and pending_run.cancel_action is None
+                            assert len(runs) == 2
+                        assert (await asyncio.to_thread(pool.node_status, "worker"))["unreleased"] == 1
+                        retained = await asyncio.to_thread(ledger.get, pending_job["id"])
+                        assert retained["physical_stopped"] is False
+                    assert io_scopes == previous_io and len(executed) == 1
+                    assert get_current_workspace() == case.other
+                    return
                 continuation = await execute_envelope(resumed["claim"])
                 assert continuation.run_id != first.run_id and continuation.workspace_context == case.original
                 assert continuation.thread_incarnation == first.thread_incarnation

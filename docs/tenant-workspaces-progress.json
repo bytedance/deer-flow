@@ -1549,17 +1549,17 @@
   },
   "latest_checkpoint": {
     "work_package": "M4",
-    "status": "partial M4: native dependency continuation main and receive-time member revocation verified",
+    "status": "partial M4: dependency continuation, receive-time revocation and dispatched control retirement verified",
     "last_verified_job": "deerflow-tenant-execution-m4-sql",
-    "last_verified_build": 119,
-    "next": "Implement control-only settlement for previously dispatched notifications after revocation, then remaining M4 domains; actual physical B/two-host story remains separately open.",
+    "last_verified_build": 121,
+    "next": "Remaining M4 Scheduler/background identities and actual physical B/two-host integration; preserve M0–M11 parent scope.",
     "tenant_activation": "closed",
     "deployment": "none",
     "previous_backend_job": "deerflow-tenant-m1-postgres",
     "previous_backend_build": 89,
     "native_candidate_schema": "0040_mcp_workspace_identity",
     "last_verified_database_job": "deerflow-tenant-execution-m4-sql",
-    "last_verified_database_build": 119,
+    "last_verified_database_build": 121,
     "executor_candidate_schema": "e0003_execution_identity",
     "execution_status": "active",
     "resumed_at": "2026-10-18",
@@ -1568,7 +1568,8 @@
     "last_verified_tests": 1,
     "checkpoint_evidence": [
       "docs/tenant-workspaces-evidence/native-dependency-118.json",
-      "docs/tenant-workspaces-evidence/native-dependency-119.json"
+      "docs/tenant-workspaces-evidence/native-dependency-119.json",
+      "docs/tenant-workspaces-evidence/native-dispatched-control-121.json"
     ]
   },
   "workspace_feedback": {
@@ -13557,7 +13558,7 @@
     }
   },
   "native_dependency_notification_wip": {
-    "status": "main_and_receive_time_revocation_verified",
+    "status": "main_receive_revocation_and_dispatched_control_verified",
     "scope": "one PostgreSQL native async dependency/notification story; deterministic RemoteIO, not physical B",
     "builds": [
       {
@@ -13667,9 +13668,24 @@
         "archive_sha256": "235d01090acc2c85dd002d62ffb421eb99f1b050a0f6e2957a1eaeb72641c900",
         "pipeline_sha256": "6c6299dcaaf7f318f1f3d33d9bbbbaa52e85fba3c9b73d14db2177873f23138c",
         "evidence": "docs/tenant-workspaces-evidence/native-dependency-119.json"
+      },
+      {
+        "build": 120,
+        "job": "deerflow-tenant-execution-m4-sql",
+        "result": "FAILURE",
+        "tests": "1 failed in 19.24s",
+        "failure": "Revoked dispatched notification remained stranded: dispatched"
+      },
+      {
+        "build": 121,
+        "job": "deerflow-tenant-execution-m4-sql",
+        "result": "SUCCESS",
+        "tests": "1 passed in 19.78s",
+        "archive_sha256": "44b981b6d657281c20c8f97987916cf9dc013495d62cb1116a198ea536d53cc9",
+        "evidence": "docs/tenant-workspaces-evidence/native-dispatched-control-121.json"
       }
     ],
-    "next": "Implement control-only settlement for previously dispatched notifications after revocation, then remaining M4 domains; actual physical B/two-host story remains separately open.",
+    "next": "Remaining M4 Scheduler/background identities and actual physical B/two-host integration; preserve M0–M11 parent scope.",
     "activation": false,
     "review": {
       "rejected_action": "Unreviewed scripted mutation of production notification authorization, leases and continuation across multiple files",
@@ -13691,7 +13707,8 @@
       },
       "application": "Approved patch applied; notification owner principal and legacy-only checkpoint seed integration corrections independently reviewed. Main #118 and receive-time revocation #119 passed."
     },
-    "architecture_decision": "Scoped startup checks bound-actor live/private event access but never performs legacy synthetic checkpoint-history backfill. Only SQL-adopted workers write scoped execution journals; scoped checkpoint-only imports need separate authorized migration."
+    "architecture_decision": "Scoped startup checks bound-actor live/private event access but never performs legacy synthetic checkpoint-history backfill. Only SQL-adopted workers write scoped execution journals; scoped checkpoint-only imports need separate authorized migration.",
+    "dispatched_control": "Verified finite-column original-identity/version/lease CAS to dead_letter, no business reads/launch; notified_version unchanged. Pending Run and unreleased capacity retained."
   },
   "native_c_aio_physical": {
     "status": "verified_single_worker_physical_main",

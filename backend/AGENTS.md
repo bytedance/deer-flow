@@ -448,3 +448,5 @@ Scoped starts never synthesize checkpoint-only journal history. An empty native
 message feed is valid for graphs without a model callback. Importing scoped
 checkpoint-only history requires a separately authorized migration; launchers
 do not receive a worker journal-write grant for backfill.
+
+Scoped MCP notification control settlement: `McpTaskRepository.retire_revoked_dispatched_notifications` is a bounded repository-only sweep before notification business claims. It selects identity/control columns, compares original context and observed versions/Run locator/lease/next-at, and rechecks invalid original authority before `dead_letter`. Active leases and malformed identity remain untouched; no business payload or Run/checkpoint access is allowed. Retirement never advances `notified_version`, cancels a Run, or releases execution capacity. Those remain native execution/STOP responsibilities.

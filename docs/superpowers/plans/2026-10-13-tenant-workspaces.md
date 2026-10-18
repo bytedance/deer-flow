@@ -989,3 +989,7 @@ specific approval; this test archive excludes those uncommitted SQL changes.
 ### Step 25 checkpoint — #118/#119
 
 Main passed (19.91s) and receive-time membership withdrawal passed (18.49s), each one PostgreSQL story. Original goal/scope/incarnation and duplicate prevention verified through actual native continuation. Exact leased compensation on receive denial verified. Already-dispatched notification recovery after revocation remains open, so control-cleanup/parent step acceptance stays partial. See committed evidence JSONs and testing guide. Current production matches #118 archive; #119 adds only a negative fixture branch and exact renderer selection.
+
+### 2026-10-18 — dispatched control retirement verified (#121)
+
+#120 RED reproduced a stranded dispatched notification after real membership withdrawal. #121 GREEN: one PostgreSQL case passed in 19.78s; Ruff/50 files passed. A finite-column control sweep compares original identity/context, notification versions, Run locator, next-at and exact lease values, then rechecks invalid authority before dead-lettering. No business payload/Run/checkpoint read or launch occurs. Notified version stays zero; second Run stays pending and capacity stays charged at 1, so notification cleanup cannot substitute for STOP. Exact #120/#121 fixture containers/networks are absent. Evidence: `docs/tenant-workspaces-evidence/native-dispatched-control-121.json`. M4 remains partial: Scheduler/background identities, physical B/two-host proof and remaining parent requirements are open.
