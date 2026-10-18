@@ -828,3 +828,10 @@ Root reviewed the precise patch (including a required future-version upper fence
 
 
 #155 SUCCESS: one PG actual queue story (17.49s), product unchanged from `52446f3f9`. Revoked explicit NoStart retires; accounting None retains every task/occurrence field; no native Run, event, executor job or physical action is added. Repeat is idempotent, parent domains pending. Root verified source/terminal/exact cleanup. Evidence: `docs/tenant-workspaces-evidence/native-scheduler-revoked-queued-control-155.json`. This is one representative unknown boundary, not full domain/physical acceptance. Next prioritize actual B wire/physical continuation main.
+
+
+### 2026-10-18 — Real B Docker drives scheduled C continuation (#16)
+
+Shanghai physical job #15 reproduced output publication into ambient UI-other. The minimal publication fix derives input/output paths from the captured job context, restores the caller before existing SQL/no-follow authorization and IO, and explicitly isolates legacy path calculation. Physical #16 passes the same main plus the existing nonroot publication permission case (two tests). Actual ToolNode → Ordinary MCP HTTP serialization (ASGI transport) → dedicated B ledger/LocalWorker/Docker → original-space output → native notification/C2 completes one original occurrence/count. The admitted input snapshot survives later upload changes; UI-other output is absent; repeated drain adds no Run. Exact B container normal cleanup succeeds without finally removal. C1/C2 use native no-sandbox STOP/report, not C physical STOP.
+
+Evidence: `docs/tenant-workspaces-evidence/native-scheduler-real-b-physical-16.json`; RED: `docs/tenant-workspaces-evidence/native-scheduler-real-b-physical-red-15.json`. Root independently reviewed source/terminal/cleanup. This proves single-host B with a separate owned B ledger, not shared B/C pool, two-host TCP, model/C AIO, OS restart, full control/recovery/IM or M0–M11 completion. Tenant activation remains false; no deployment or push.

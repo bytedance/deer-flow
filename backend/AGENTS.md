@@ -460,3 +460,6 @@ Scheduler workspace main uses native revision `0041_scheduler_workspace`: tasks 
 
 
 Scheduler revoked-control sweep runs before live recovery in scoped mode. It consumes only canonical original revoke/control identity, retires known logically closed or explicit NoStart derived occurrences without business data/observer publication, and sends separate retryable control locators to the existing host reconciler. Native Run and physical pool lifecycle are unchanged; parent revoke/scheduler domains remain pending. Closed-initial C1 main #154 is verified; other control branches/full domains remain open.
+
+
+Scoped B native snapshots/publication now derive paths from the captured job workspace, restoring caller context before existing SQL authorization and no-follow IO. Shanghai physical #16 verifies real single-host B output returns to the original scheduled C2 after the UI changes spaces; #15 records the prior failure. Separate B ledger and ASGI MCP transport are explicit; shared pool/two-host/C physical/full recovery remain open and tenant activation stays disabled. See `../docs/tenant-workspaces-testing.md`.

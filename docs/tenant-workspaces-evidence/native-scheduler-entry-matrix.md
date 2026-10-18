@@ -75,3 +75,6 @@ Root reviewed the precise patch (including a required future-version upper fence
 
 
 #155 SUCCESS: one PG actual queue story (17.49s), product unchanged from `52446f3f9`. Revoked explicit NoStart retires; accounting None retains every task/occurrence field; no native Run, event, executor job or physical action is added. Repeat is idempotent, parent domains pending. Root verified source/terminal/exact cleanup. Evidence: `docs/tenant-workspaces-evidence/native-scheduler-revoked-queued-control-155.json`. This is one representative unknown boundary, not full domain/physical acceptance. Next prioritize actual B wire/physical continuation main.
+
+
+Step 37: Shanghai physical #16 verifies real single-host B → scheduled native C2 and fixes captured-space publication; #15 preserves the real RED. See `docs/tenant-workspaces-testing.md` and `docs/tenant-workspaces-evidence/native-scheduler-real-b-physical-16.json`. Shared pool/two-host/C physical and complete M0–M11 remain open.

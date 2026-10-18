@@ -1,4 +1,4 @@
-# Resume checkpoint — 2026-10-18: queue NoStart/unknown control #155 verified; actual B continuation next
+# Resume checkpoint — 2026-10-18: real B Docker → scheduled C2 physical #16 verified
 > **执行中，M4 部分完成。** Jenkins #112：单 Worker 真实 AIO 创建、文件写读、warm STOP、失败保留和 report 后释放已通过（1 项，53.79s）。两机 HTTP、恢复和 C→B→C 仍待完成；通知主干与必要撤权控制已验证；HTTP创建/列表/详情已通过#130；租户启动关闭。
 
 # 2026-10-16 暂停与恢复检查点
@@ -1320,3 +1320,6 @@ Root reviewed the precise patch (including a required future-version upper fence
 
 
 #155 SUCCESS: one PG actual queue story (17.49s), product unchanged from `52446f3f9`. Revoked explicit NoStart retires; accounting None retains every task/occurrence field; no native Run, event, executor job or physical action is added. Repeat is idempotent, parent domains pending. Root verified source/terminal/exact cleanup. Evidence: `docs/tenant-workspaces-evidence/native-scheduler-revoked-queued-control-155.json`. This is one representative unknown boundary, not full domain/physical acceptance. Next prioritize actual B wire/physical continuation main.
+
+
+Step 37: Shanghai physical #16 verifies real single-host B → scheduled native C2 and fixes captured-space publication; #15 preserves the real RED. See `docs/tenant-workspaces-testing.md` and `docs/tenant-workspaces-evidence/native-scheduler-real-b-physical-16.json`. Shared pool/two-host/C physical and complete M0–M11 remain open.

@@ -1,0 +1,93 @@
+{
+  "job": "deerflow-tenant-execution-m4-physical",
+  "build": 16,
+  "queue": 1122,
+  "phase": "m4-native-scheduler-real-b-physical-green-20261018-45",
+  "result": "SUCCESS",
+  "duration_ms": 47850,
+  "pytest": "2 passed, 3 warnings in 26.33s",
+  "ruff": "All checks passed; 3 files already formatted",
+  "source_sha256": "fb0a77384f16886f1f77ce11635195d20537ad7209fd8008917f2a0277cd19eb",
+  "pipeline_sha256": "4891e43974784ac479817f43f02bee60c0f10364e26644db83ae7516b08f3044",
+  "source_archive_exact_match": {
+    "backend/packages/ecs-executor/ecs_executor/publication.py": "2422a37e31d36034b756668291b66dcdcb60c102a74a3316a40754ce7d1d1e19",
+    "backend/tests/test_workspace_native_dependencies.py": "317d9a1159ef636f26af6da877d659fbc6eae8b39774272af77feb0eb239f868",
+    "backend/tests/test_workspace_execution_physical.py": "0fb3ec6f1bf34a05ad2e13906c164ae9967476ea1b40986784b2c4233e149755",
+    "scripts/render_tenant_physical_pipeline.py": "cbcad461e2be1739c4f667714a64ff4da8903bdc53e791ad84482deee954f2ce",
+    "examples/ecs-native/deploy/Jenkinsfile.tenant-physical.in": "11ed3e167d8e7b5b324c8652c2a4e287a1b373e2c80d5535a7a13a642906013d",
+    "backend/tests/test_ecs_native_publication_permissions.py": "63e5cb09645b0720a2c1ec5d507a6857609e8d2a5df551a6b63cb7d9ef1676ef"
+  },
+  "approved_product_patch_sha256": "dc5ff07f881fc5444d2eb99478731df2e9b1129a741253ddee75b152c6ed2376",
+  "actual_product_difference": "Only actual-package Ruff import ordering differs from the reviewed tmp copy; path logic unchanged",
+  "log_path": "/private/tmp/m4-native-scheduler-real-b-physical-green-20261018-45.log",
+  "log_sha256": "b5855225c5069feeefd3924b30436df8e7b6407a6a929cf8a650be8b5510d8a8",
+  "artifact_directory": "/private/tmp/native-scheduler-real-b-physical-build16-artifacts",
+  "evidence": {
+    "scope": "single-host-B-Docker-ASGI-MCP",
+    "image": "sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01",
+    "b_database": "tenant_b_physical_fc72db554f10433caa8159c811ffe8e2",
+    "finally_removed": false,
+    "b_job_id": "0f2ddca72e4f42838663d37e9d7e828d",
+    "b_spec_digest": "245a9d2e54326464fc9ef82fe4dc9d6e506bf7596dd5168efb53c6abd9467984",
+    "committed_and_queued": true,
+    "container_id": "b9cc1864e3a4256458a8c72fb704dda5cb05288d9abfffce8d1225350ad9cc64",
+    "created_with_restricted_profile": true,
+    "other_workspace_output_absent": true,
+    "normal_stop_exact_id_absent": true,
+    "native_publication": true,
+    "output_sha256": "23f51bf97557e4f1ac5ae988bfa927d4386ef098f98f1ef6fc9065ccfd1aa5f9",
+    "c2_read_actual_published_report": true,
+    "c1_run_id": "aca752b0-3beb-4358-98ab-6b38535f262d",
+    "c2_run_id": "c449a19f-9fd5-4c6a-9c10-a957377d956f",
+    "occurrence_id": "task-run-1ab3a695b93d479b95bd564873e10131",
+    "task_id": "task-installed-dependency",
+    "final_occurrence_status": "success",
+    "task_run_count": 1
+  },
+  "output_receipt_path": "/private/tmp/native-scheduler-real-b-physical-build16-artifacts/published-report-receipt.json",
+  "cleanup_path": "/private/tmp/native-scheduler-real-b-physical-build16-cleanup.json",
+  "scope": "One PostgreSQL actual Scheduler -> C1 actual ToolNode/background submit -> Ordinary MCP HTTP serialization/receiver via ASGI -> original-v2 SQL/dedicated B ledger -> actual restricted Docker/profile/publication -> actual MCP status/result -> notification/native C2 exact original occurrence success/count1, plus existing legacy nonroot publication permissions case. C2 read real original published report/result digest; other-space output absent; normal worker exact-ID STOP/removal confirmed before finally, finally_removed false, source C no-sandbox report lifecycle retained. Independent exact harness/PG/network/B full-ID/name absence verified. No shared B/C pool, two-host TCP, C AIO physical, model API, deployment or activation acceptance claimed.",
+  "cleanup": {
+    "job": "deerflow-tenant-execution-m4-physical",
+    "build": 16,
+    "read_only": true,
+    "cleanup": [
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-physical-16",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-physical-16"
+      },
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-physical-16-db",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-physical-16-db"
+      },
+      {
+        "kind": "network",
+        "name": "deerflow-tenant-execution-m4-physical-16",
+        "exit": 1,
+        "stderr": "Error response from daemon: network deerflow-tenant-execution-m4-physical-16 not found"
+      },
+      {
+        "kind": "container",
+        "name": "b9cc1864e3a4256458a8c72fb704dda5cb05288d9abfffce8d1225350ad9cc64",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: b9cc1864e3a4256458a8c72fb704dda5cb05288d9abfffce8d1225350ad9cc64"
+      },
+      {
+        "kind": "container",
+        "name": "deerflow-exec-0f2ddca72e4f42838663d37e9d7e828d",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-exec-0f2ddca72e4f42838663d37e9d7e828d"
+      }
+    ]
+  },
+  "published_report": {
+    "path": "/data/jenkins-agent/deerflow/tenant-execution-m4-physical/physical-16/tests/test_scoped_scheduled_c_real_b0/owned-files/workspaces/a783e982-5a0e-4b90-93c6-05725998594a/users/11111111-1111-4111-8111-111111111111/threads/c14afb72-2f86-4136-b4fb-596950e11aee/user-data/outputs/0f2ddca72e4f42838663d37e9d7e828d/files/report.md",
+    "content": "owned dependency report",
+    "sha256": "23f51bf97557e4f1ac5ae988bfa927d4386ef098f98f1ef6fc9065ccfd1aa5f9"
+  },
+  "root_review": "Reviewed exact test/CI and minimal publication patch; independently read Jenkins terminal/log/output/cleanup artifacts and verified archived source hashes. Full M0-M11 remains open."
+}

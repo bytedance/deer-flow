@@ -23,7 +23,7 @@ def test_scoped_native_dependency_notification_resumes_original_goal(native_engi
     _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp_path, revocation_phase=revocation_phase)
 
 
-def _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp_path, *, revocation_phase="normal", scheduled=False, goal_replacement=False, member_control=False, queued_control=False):  # noqa: F811
+def _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp_path, *, revocation_phase="normal", scheduled=False, goal_replacement=False, member_control=False, queued_control=False, physical_b=None):  # noqa: F811
     from ecs_executor.agent_dispatch import NativeDispatchHost, NativeWorkerHost, install_native_dispatch
     from ecs_executor.dispatch import PROTOCOL, WORKER_VERSION
     from ecs_executor.job_store import JobStore
@@ -248,7 +248,11 @@ def _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp
                 raise AssertionError("normal dependency story must not cancel its remote task")
 
         drivers = McpTaskDriverRegistry()
-        drivers.register("deterministic", DeterministicRemoteIO())
+        physical_state = physical_b(case, owner_user_id, tmp_path / "owned-files", io_scopes) if physical_b is not None else None
+        if physical_state is None:
+            drivers.register("deterministic", DeterministicRemoteIO())
+        else:
+            drivers.register("ordinary-tools", physical_state.driver)
         tasks = McpTaskService(
             repository=task_repo,
             drivers=drivers,
@@ -258,6 +262,19 @@ def _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp
             launch_notification=lambda **kwargs: services.launch_mcp_task_notification_run(app=worker_app, **kwargs),
             get_run=receiver.get,
         )
+        if physical_state is not None:
+            from deerflow.mcp.tasks import runtime as task_runtime
+
+            previous_submitter = task_runtime._submitter
+            task_runtime.set_mcp_task_submitter(tasks)
+            actual_submit = tasks.submit
+
+            async def capture_real_submission(**kwargs):
+                created = await actual_submit(**kwargs)
+                created_tasks.append(created)
+                return created
+
+            monkeypatch.setattr(tasks, "submit", capture_real_submission)
         first = None
 
         async def respond(state, config):
@@ -291,6 +308,43 @@ def _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp
         builder.add_node("answer", respond)
         builder.add_edge(START, "answer")
         builder.add_edge("answer", END)
+        if physical_state is not None:
+            from langgraph.prebuilt import ToolNode
+
+            async def plan_physical(state):
+                if created_tasks:
+                    return {"messages": [AIMessage(content="Inspect the completed original execution")]}  # C2 never resubmits B.
+                return {"messages": [AIMessage(content="", tool_calls=[{"name": physical_state.tool.name, "args": physical_state.arguments(first), "id": "real-b-submit", "type": "tool_call"}])]}
+
+            async def physical_answer(state):
+                assert get_current_workspace() == case.original
+                executed.append(state.get("goal"))
+                completed = await task_repo.get(created_tasks[0]["id"], user_id=owner_user_id, thread_id=first.thread_id, thread_incarnation=first.thread_incarnation)
+                if completed["status"] != "completed":
+                    assert completed["status"] in ("submitted", "working")
+                    return {"messages": [AIMessage(content="Waiting for the real Docker report")], "title": "Owned dependency report"}
+                # Both the durable MCP return and the real native publication
+                # must exist. A deterministic success string is never injected.
+                import hashlib
+
+                report_path = physical_state.output_path(first, completed["remote_task_id"])
+                report = report_path.read_text()
+                payload = (report_path.parent.parent / "result.json").read_bytes()
+                result = json.loads(payload)
+                assert report == "owned dependency report" and result["stdout"] == report and result["exit_code"] == 0
+                assert completed["result"] == {"sha256": hashlib.sha256(payload).hexdigest(), "bytes": len(payload), "exit_code": 0}
+                assert completed["result_artifact"]["uri"].endswith("/" + completed["remote_task_id"] + "/result.json")
+                physical_state.evidence["c2_read_actual_published_report"] = True
+                return {"messages": [AIMessage(content="Delivered " + report)], "title": "Owned dependency report"}
+
+            builder = StateGraph(ThreadState, context_schema=dict)
+            builder.add_node("plan", plan_physical)
+            builder.add_node("tools", ToolNode([physical_state.tool], handle_tool_errors=False))
+            builder.add_node("answer", physical_answer)
+            builder.add_edge(START, "plan")
+            builder.add_conditional_edges("plan", lambda state: "tools" if state["messages"][-1].tool_calls else "answer")
+            builder.add_edge("tools", "answer")
+            builder.add_edge("answer", END)
         graph = builder.compile(checkpointer=saver)
         monkeypatch.setattr(services, "resolve_agent_factory", lambda assistant_id: lambda **kwargs: graph)
         outcomes = iter(
@@ -319,6 +373,8 @@ def _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp
             return record
 
         try:
+            if physical_state is not None:
+                await physical_state.open()
             if scheduled:
                 await foreground.start()
                 ctx = replace(ctx, on_run_completed=control.handle_run_completion)
@@ -758,6 +814,11 @@ def _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp
                     return
                 now = datetime.now(UTC) + timedelta(seconds=30)
                 await tasks.run_once(now=now)
+                if physical_state is not None:
+                    # This first real status call activates the committed B job;
+                    # the physical worker must finish before result polling.
+                    await physical_state.execute(created_tasks[0], first)
+                    await tasks.run_once(now=now + timedelta(seconds=30))
                 resumed = await request_worker("poll")
                 diagnostic = {}
                 if resumed["claim"] is None:
@@ -882,7 +943,13 @@ def _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp
                     assert (await asyncio.to_thread(pool.node_status, "worker"))["unreleased"] == 0
                 assert len(executed) == 2 and executed[1]["created_at"] == original_goal["created_at"]
                 assert executed[1]["continuation_count"] == original_goal.get("continuation_count", 0) + 1
-                assert io_scopes == [("submit", case.original, case.original), ("status", case.original, case.original)]
+                if physical_state is None:
+                    assert io_scopes == [("submit", case.original, case.original), ("status", case.original, case.original)]
+                else:
+                    assert [operation for operation, _, _ in io_scopes] == ["submit", "status", "status"]
+                    assert all(expected == actual == case.original for _, expected, actual in io_scopes)
+                    physical_state.evidence.update(c1_run_id=first.run_id, c2_run_id=continuation.run_id, occurrence_id=occurrence_id, task_id=scheduler_id, final_occurrence_status="success", task_run_count=1)
+                    physical_state.save_evidence()
                 assert get_current_workspace() == case.other
                 assert (await request_worker("poll"))["claim"] is None
             finally:
@@ -895,6 +962,11 @@ def _exercise_native_dependency(native_engine, executor_engine, monkeypatch, tmp
                         await record.task
                     except asyncio.CancelledError:
                         pass
+            if physical_state is not None:
+                try:
+                    await physical_state.close()
+                finally:
+                    task_runtime.set_mcp_task_submitter(previous_submitter)
             if foreground is not None:
                 await foreground.stop()
             await central.stop_heartbeat()

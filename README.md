@@ -3097,3 +3097,6 @@ Scoped Scheduler development now supports original-conversation notes and explic
 
 
 Scheduler tenant development now preserves original workspace identity through native execution and authenticated task create/list/detail/history. Local and remote agents can list, create, update, pause, resume and delete conversation tasks through a native Run-bound capability, even after the UI switches spaces. Remote runs preserve original session permissions and credential version; the remaining task-management lifecycle is still in progress; tenant activation remains disabled. See [verification and remaining scope](docs/tenant-workspaces-testing.md).
+
+
+Scoped B native snapshots/publication now derive paths from the captured job workspace, restoring caller context before existing SQL authorization and no-follow IO. Shanghai physical #16 verifies real single-host B output returns to the original scheduled C2 after the UI changes spaces; #15 records the prior failure. Separate B ledger and ASGI MCP transport are explicit; shared pool/two-host/C physical/full recovery remain open and tenant activation stays disabled. See [verification](docs/tenant-workspaces-testing.md).

@@ -8,11 +8,12 @@ import re
 import stat
 import uuid
 from contextlib import contextmanager
+from contextvars import Context
 from pathlib import Path
 
 from sqlalchemy import create_engine, select
 
-from deerflow.authz.workspace import WorkspaceContext
+from deerflow.authz.workspace import WorkspaceContext, reset_current_workspace, set_current_workspace
 from deerflow.config.paths import Paths, make_safe_user_id
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
@@ -160,10 +161,38 @@ class WorkspacePublication:
                 connection.rollback()
                 raise
 
+    def _thread_data_path(self, identity, *, outputs=False):
+        """Select the captured namespace only for pure path derivation.
+
+        This is not authorization. Restore the caller before SQL/no-follow IO;
+        authorized_root must independently recheck the original durable scope.
+        """
+        derive = self.paths.sandbox_outputs_dir if outputs else self.paths.sandbox_user_data_dir
+        user_id = make_safe_user_id(identity["user_id"])
+        captured = identity.get("workspace_context")
+        if captured is None:
+            if identity.get("workspace_id") is not None:
+                raise ValueError("Native file access requires original workspace snapshot")
+            # None is an explicit legacy namespace, never the ambient UI space.
+            # A fresh Context clears only this pure calculation and restores
+            # every caller ContextVar automatically, including on failure.
+            return Context().run(derive, identity["thread_id"], user_id=user_id)
+        try:
+            context = WorkspaceContext(**captured)
+        except (TypeError, ValueError):
+            raise ValueError("Native file scope is invalid") from None
+        if context.actor_user_id != identity["user_id"] or context.workspace_id != identity.get("workspace_id"):
+            raise ValueError("Native file scope owner mismatch")
+        selected = set_current_workspace(context)
+        try:
+            return derive(identity["thread_id"], user_id=user_id)
+        finally:
+            reset_current_workspace(selected)
+
     def snapshot(self, identity, references, *, limit):
         if len(references) > 64:
             raise ValueError("Too many declared input references")
-        root = self.paths.sandbox_user_data_dir(identity["thread_id"], user_id=make_safe_user_id(identity["user_id"]))
+        root = self._thread_data_path(identity)
         result = {}
         with self.authorized_root(identity, root) as fd:
             for name, reference in references.items():
@@ -185,7 +214,7 @@ class WorkspacePublication:
         return result
 
     def publish(self, job, payload: bytes, files: dict[str, bytes]) -> str:
-        outputs = self.paths.sandbox_outputs_dir(job["thread_id"], user_id=make_safe_user_id(job["user_id"]))
+        outputs = self._thread_data_path(job, outputs=True)
         for name in files:
             relative_file(name)
         with self.authorized_root(job, outputs, create=True, require_task=job.get("workspace_id") is not None) as outputs_fd:

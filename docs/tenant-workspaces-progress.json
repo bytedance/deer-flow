@@ -1549,10 +1549,10 @@
   },
   "latest_checkpoint": {
     "work_package": "M4",
-    "status": "partial M4: closed initial and queued NoStart/representative unknown revocation controls verified; actual B integration and complete domains open",
-    "last_verified_job": "deerflow-tenant-execution-m4-sql",
-    "last_verified_build": 155,
-    "next": "Prioritize actual Ordinary MCP HTTP/B queue-publication->native C continuation main, reusing existing scoped B wire/physical fixture. Keep active/transferred/native-lifetime/physical-pending control, replay faults, complete revoke domains/IM/recovery and all remaining M0-M11 gates required; no unknown-field matrix.",
+    "status": "partial M4: real single-host B Docker drives scheduled C2; shared-pool/two-host/C physical and full domains remain open",
+    "last_verified_job": "deerflow-tenant-execution-m4-physical",
+    "last_verified_build": 16,
+    "next": "Prioritize supported shared-pool/two-host native C→B→C main; keep complete revoked/private-parent/control replay, IM/recovery and full M0-M11 gates required. No test matrix expansion.",
     "tenant_activation": "closed",
     "deployment": "none",
     "previous_backend_job": "deerflow-tenant-m1-postgres",
@@ -1565,7 +1565,7 @@
     "resumed_at": "2026-10-18",
     "last_full_regression_build": 88,
     "last_full_regression_tests": 134,
-    "last_verified_tests": 1,
+    "last_verified_tests": 2,
     "checkpoint_evidence": [
       "docs/tenant-workspaces-evidence/native-dependency-118.json",
       "docs/tenant-workspaces-evidence/native-dependency-119.json",
@@ -1589,7 +1589,9 @@
       "docs/tenant-workspaces-evidence/native-scheduler-goal-replacement-152.json",
       "docs/tenant-workspaces-evidence/native-scheduler-revoked-control-red-153.json",
       "docs/tenant-workspaces-evidence/native-scheduler-revoked-control-154.json",
-      "docs/tenant-workspaces-evidence/native-scheduler-revoked-queued-control-155.json"
+      "docs/tenant-workspaces-evidence/native-scheduler-revoked-queued-control-155.json",
+      "docs/tenant-workspaces-evidence/native-scheduler-real-b-physical-red-15.json",
+      "docs/tenant-workspaces-evidence/native-scheduler-real-b-physical-16.json"
     ]
   },
   "workspace_feedback": {
@@ -13959,6 +13961,16 @@
       "tests": "1 passed in 17.49s",
       "evidence": "docs/tenant-workspaces-evidence/native-scheduler-revoked-queued-control-155.json",
       "production_unchanged_base": "52446f3f9"
+    },
+    "actual_B_continuation_wip": {
+      "status": "single_host_B_Docker_ASGI_scheduled_C2_main_verified",
+      "plan": "M4 step 37 in Superpowers/OpenSpec",
+      "scope": "Actual Ordinary MCP wire/B Docker/publication drives original native C continuation, no model; separate owned B ledger matches supported single-host mode",
+      "remaining": "Shared B/C pool, two-host TCP/C AIO, complete revocation/private-parent/recovery/IM/M0-M11 stay required",
+      "build": 16,
+      "tests": "2 passed, 3 warnings in 26.33s",
+      "evidence": "docs/tenant-workspaces-evidence/native-scheduler-real-b-physical-16.json",
+      "red_build": 15
     }
   },
   "native_0041_execution_compatibility_wip": {
