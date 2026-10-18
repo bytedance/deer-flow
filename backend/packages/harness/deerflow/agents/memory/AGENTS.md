@@ -87,6 +87,18 @@ fact-only import payload supplies empty summary defaults.
 It captures `user_id` when it enqueues work.
 This identity survives the background timer boundary.
 
+DeerMem debounces each `(thread_id, user_id, agent_name)` independently using
+monotonic deadlines. Same-key coalescing preserves the first pending arrival;
+`backend_config.max_wait_seconds` (default 300) caps debounce deferral even
+under continuous updates. One timer wakes for the earliest deadline and one
+consumer processes eligible items serially. Other conversations cannot reset
+that deadline. Consumer backlog and LLM latency can still delay completion.
+Early wakeups rearm with a 50 ms minimum; arrivals during extraction wait for
+the finishing worker to rearm. Emergency snapshots are immediately eligible;
+`flush`, `flush_nowait`, and `flush_sync` make all pending items eligible.
+Tests in `tests/test_memory_queue_deadlines.py` use a fake monotonic clock and
+timer to exercise scheduling without timing-sensitive sleeps.
+
 DeerMem and mem0 exclude assistant tool-call intent in every representation:
 `tool_calls`, `invalid_tool_calls`, and provider-raw `tool_calls`/`function_call`.
 An empty parsed call list does not make an attempted call a final response.
@@ -246,6 +258,7 @@ Extraction labels proposals with `scope`, `durability`, and `authority`.
 Automatic writes accept only user-scoped, durable, descriptive facts.
 Summary prose must be user-scoped and descriptive.
 Missing labels reject that item without stopping unrelated updates.
+An out-of-range `confidence` (including a model-emitted percentage) is rejected per item with a warning that names the raw value, and is never rescaled: a silent scale rewrite would change the confidence-threshold semantics. Storage's own `[0, 1]` validation must not fail the batch, because a failed batch keeps the extraction watermark and repeats the same paid call. A batch that also proposes `factsToRemove` still fails closed when any new fact is dropped, because removal `replacementFactIndex` values refer to newFacts positions.
 
 Contradiction removals include `id`, `scope`, `reason`, and optional `replacementFactIndex`.
 Task-scoped and project-scoped removals fail closed.

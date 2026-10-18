@@ -1,11 +1,32 @@
 ### Tool System (`packages/harness/deerflow/tools/`)
 
+Artifact capture accepts standard top-level `url`/`mime_type` content blocks and
+legacy `source.url`/`source.mime_type`. A present top-level `url` selects that
+shape, even when invalid; never mix its MIME metadata with a conflicting legacy
+source. Both shapes use the existing referenceability gate and per-result deduplication.
+
 `artifact_registry.py` checks remote file suffixes against the complete parsed
 URL path without case sensitivity. Free-text URL and sandbox-path extraction
-strips common trailing ASCII/CJK prose punctuation while preserving CJK
-closers paired with openers inside the detected reference (including literal
-glob directory names). Structured references remain literal. See
+strips common trailing ASCII/CJK prose punctuation while preserving ASCII
+`()`, `[]`, `{}` and CJK closers paired with openers inside the detected
+reference (including literal glob directory names). Structured references remain
+literal. See
 [tool artifact middleware](../agents/middlewares/TOOL_ARTIFACTS.md).
+
+Deferred-tool regex discovery uses `regex.VERSION0` with a shared 100 ms
+deadline per ranked query, including required-name scoring. Validate the bounded
+pattern with stdlib `re` first to preserve the invalid-regex literal fallback
+and avoid admitting engine-specific recursion syntax. Compile once per query;
+bound each searchable field before concatenation and count matches with an
+iterator. Budget failure raises `ToolSearchLimitError`; the tool returns a retry
+hint and no promotions, never a partial ranking. `select:` and the literal
+`keywords:` path bypass these regex limits.
+Field-limit errors identify the tool (name preview capped at 128 characters),
+field and length, and direct the model to `keywords:` or `select:` rather than
+query simplification. Log the same bounded identity with the logical MCP server
+name when available; never log the oversized description. Keep the model-visible
+tool description aligned with these limits. Pathological-regex subprocess tests
+allow 30 seconds for cold startup while matching retains its 100 ms budget.
 
 `task` and `batch_task` opt into JSON checks with `file:<path> json-valid`.
 See [subagents/AGENTS.md](../subagents/AGENTS.md) for read limits and UNVERIFIED semantics.
@@ -43,9 +64,9 @@ Only standalone tool discovery without a model falls back to the base profile.
 3. **Built-in tools**:
    - `present_files` - Make output files visible to user (only `/mnt/user-data/outputs`); virtual paths use `resolve_runtime_user_id(runtime)` so validation resolves the same user-scoped outputs directory established by `ThreadDataMiddleware`
    - `ask_clarification` - Request clarification (intercepted by ClarificationMiddleware, which preserves text fallback and adds `artifact.human_input` for Web UI Human Input Cards). Beyond free text and single choice, the request-side v2 protocol supports `fields` (structured form card collecting several values at once; field types: text/textarea/number/select/multi_select/checkbox/date, validated and normalized server-side in the middleware — invalid entries are dropped, unknown types degrade to `text`; a standalone multi-select question is a one-field form). Replies stay on the v1 response protocol (`text`/`option`): the form card submits a readable text summary
-   - `view_image` - Read image bytes for vision-capable models; both sync and async entry points require `sandbox:execute` before any host or sandbox read. With blob storage enabled, validated bytes are persisted as `kind="viewed-image"` and the checkpoint carries a JSON-safe ref beside the compatibility host path; store initialization/write failures return a generic tool error. Blob-backed model reads validate the ref against the separate image metadata before use and fall through to validated compatibility paths on any store failure. Live sandbox bytes remain the fallback for the same sandbox generation, replacement-sandbox recovery uses only SHA-256-verified synchronized host bytes, and async tool invocation drains blocking reads before cancellation may release the sandbox lease
-   - `setup_agent` - Bootstrap-only: persist a custom agent's `SOUL.md` and `config.yaml`. Re-bootstrapping preserves the owner's existing `display_name`. Bound only when `is_bootstrap=True`.
-   - `update_agent` - Custom-agent-only: persist self-updates to the current agent's `SOUL.md` / `config.yaml` from inside a normal chat (partial update + atomic write). Bound when `agent_name` is set and `is_bootstrap=False`.
+   - `view_image` - Pass the 20 MiB caller limit to sandbox downloads (see [sandbox download contract](../sandbox/AGENTS.md)). Read image bytes for vision-capable models; both sync and async entry points require `sandbox:execute` before any host or sandbox read. With blob storage enabled, validated bytes are persisted as `kind="viewed-image"` and the checkpoint carries a JSON-safe ref beside the compatibility host path; store initialization/write failures return a generic tool error. Blob-backed model reads validate the ref against the separate image metadata before use and fall through to validated compatibility paths on any store failure. Live sandbox bytes remain the fallback for the same sandbox generation, replacement-sandbox recovery uses only SHA-256-verified synchronized host bytes, and async tool invocation drains blocking reads before cancellation may release the sandbox lease
+   - `setup_agent` - Bootstrap-only: persist a custom agent's `SOUL.md` and `config.yaml`. Re-bootstrapping preserves the owner's existing `display_name`. Bound only when `is_bootstrap=True`. The default agent's global `SOUL.md` is published through a staged temporary plus `os.replace`, like the agent store's per-agent write, so an interrupted setup keeps the previous persona file instead of leaving it truncated.
+   - `update_agent` - Custom-agent-only: persist self-updates to the current agent's `SOUL.md` / `config.yaml` from inside a normal chat (partial update + atomic write). Bound when `agent_name` is set and `is_bootstrap=False`. An actual tool-group change excluding `knowledge` clears the saved `knowledge_scope` in the same config write; unrelated updates and unchanged groups preserve it. Keep Gateway rejection of explicit scopes without knowledge access intact.
 4. **Subagent tool** (if enabled):
    - `task` - Delegate to subagent (`prompt`, `subagent_type`, optional `acceptance_criteria`, and an optional model-visible `description` used only as a short progress label). Execution never depends on `description`; lifecycle display falls back to `prompt` when a provider omits it. Subagent reports are self-reports: the docstring directs the lead to expect `[rN]` receipt citations and verifiable handles while `verification.receipts_enabled` (and explicitly qualifies that disabled receipts mean no citations and no citation verdict), to read the delegation ledger's citation cross-check as execution evidence only, and to attach `acceptance_criteria` for objectively checkable outcomes (canonical forms `file:<path> exists|non-empty`, `file_written:<path>`, `tests_passed:<command>`); criteria are handed to the executor and appended to the subagent's task message as untrusted data (see `subagents/report_contract.py`).
      Polling safety timeouts carry the latest published tool receipts into the terminal task metadata before requesting background cancellation.
@@ -93,7 +114,7 @@ E2B output sync records remote file versions and actual host file metadata in a 
 - `timeout_seconds` is one deadline shared by initialization, session creation, and prompt after process launch. Keep the SDK process context outside the timeout so teardown finishes before the tool returns; workspace/MCP preparation and teardown are outside the protocol budget. Real-process regressions in `tests/test_invoke_acp_agent_tool.py` cover every hung phase, the shared budget, success, and caller cancellation. Only report budget expiry when the timeout context's `expired()` is true; otherwise propagate SDK `TimeoutError` to `_format_invocation_error`.
 - ACP results collect only `agent_message_chunk` text. Thought chunks remain internal and must not be concatenated into the tool result
 - Missing ACP executables now return an actionable error message instead of a raw `[Errno 2]`
-- A bare configured `command` is resolved before the spawn (`_resolve_agent_command`), off the event loop because the lookup stats the filesystem. The ACP SDK's stdio transport calls `asyncio.create_subprocess_exec`, which performs no `PATHEXT` lookup on Windows, so a bare npm launcher (`npx`, `mcode`) would raise `FileNotFoundError` although its `.cmd` shim is on `PATH`. Resolution consults the `PATH` the agent subprocess will actually see (`acp_agents.<name>.env.PATH` when the agent config sets one, the Gateway's otherwise) and returns an absolute path, so a relative `PATH` entry cannot be re-interpreted inside the ACP workspace. A `command` containing a path separator goes to the spawn unchanged, so the spawn — not `shutil.which` — decides what it refers to, and `_format_invocation_error` always receives the configured value so its remediation still matches `config.yaml`
+- A configured `command` that is a bare name or an absolute path is resolved before the spawn (`_resolve_agent_command`), off the event loop because the lookup stats the filesystem. The ACP SDK's stdio transport calls `asyncio.create_subprocess_exec`, which performs no `PATHEXT` lookup on Windows, so a bare npm launcher (`npx`, `mcode`) would raise `FileNotFoundError`, and an absolute path without an extension (`C:\npm\mcode`, npm's shell script beside its `.cmd` shim) would die with `WinError 193`, although the shim exists. Resolution consults the `PATH` the agent subprocess will actually see (`acp_agents.<name>.env.PATH` when the agent config sets one, the Gateway's otherwise) and returns an absolute path, so a relative `PATH` entry cannot be re-interpreted inside the ACP workspace; an absolute command is resolved inside its own directory. A relative `command` goes to the spawn unchanged, so the spawn — not `shutil.which` — decides what it refers to, and `_format_invocation_error` always receives the configured value so its remediation still matches `config.yaml`
 - Each ACP agent uses a per-thread workspace at `{base_dir}/users/{user_id}/threads/{thread_id}/acp-workspace/`. The workspace is accessible to the lead agent via the virtual path `/mnt/acp-workspace/` (read-only). In docker sandbox mode, the directory is volume-mounted into the container at `/mnt/acp-workspace` (read-only); in local sandbox mode, path translation is handled by `tools.py`
 
 Ordinary `task` results forward bounded `artifact.knowledge_sources` records

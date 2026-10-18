@@ -7,10 +7,12 @@ import shlex
 import threading
 from typing import TYPE_CHECKING
 
-from e2b import CommandExitException, FileNotFoundException
+from e2b import CommandExitException, FileNotFoundException, TimeoutException
 from e2b_code_interpreter import Sandbox as E2BClientSandbox
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT as _MAX_DOWNLOAD_SIZE
+from deerflow.sandbox.download import download_limit, read_download_stream
 from deerflow.sandbox.read_file_contract import split_file_lines
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.remote_search import parse_remote_search_output, remote_search_command
@@ -22,7 +24,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_MAX_DOWNLOAD_SIZE = 100 * 1024 * 1024  # 100 MB
 
 # Where DeerFlow's ``/mnt/user-data`` virtual prefix is materialised inside
 # the e2b sandbox.  e2b code-interpreter templates default to ``/home/user``
@@ -187,6 +188,11 @@ class E2BSandbox(Sandbox):
                     # actual shell status.
                     output = f"{output}\nExit Code: {exit_code}" if output else f"Command exited with code {exit_code}"
                 return output if output else "(no output)"
+            except TimeoutException:
+                # A command deadline is a shell outcome, not a provider hiccup:
+                # end with the same Exit Code: 124 marker Local/AIO/Tenki emit
+                # on timeout so evidence consumers recover the real status.
+                return "Error: command timed out\nExit Code: 124"
             except Exception as e:
                 if _is_sandbox_gone_error(e):
                     self._dead = True
@@ -251,7 +257,8 @@ class E2BSandbox(Sandbox):
             logger.error("Failed to read file %s in e2b sandbox: %s", resolved, e)
             return f"Error: {e}"
 
-    def download_file(self, path: str) -> bytes:
+    def download_file(self, path: str, *, max_bytes: int | None = None) -> bytes:
+        limit = download_limit(max_bytes, _MAX_DOWNLOAD_SIZE)
         normalised = path.replace("\\", "/")
         for segment in normalised.split("/"):
             if segment == "..":
@@ -283,7 +290,9 @@ class E2BSandbox(Sandbox):
                 raise RuntimeError("sandbox client has been closed")
             try:
                 data = client.files.read(resolved, format="stream")
-            except TypeError:
+            except TypeError as error:
+                if max_bytes is not None:
+                    raise OSError("Bounded downloads require E2B streaming support") from error
                 try:
                     data = client.files.read(resolved, format="bytes")
                 except Exception as e:
@@ -293,58 +302,39 @@ class E2BSandbox(Sandbox):
                 logger.error("Failed to download file %s from e2b sandbox: %s", resolved, e)
                 raise OSError(f"Failed to download file '{path}' from sandbox: {e}") from e
 
+        if max_bytes is not None and isinstance(data, (bytes, bytearray, str)):
+            raise OSError("Bounded downloads require an E2B byte stream")
+
         if data is None:
             return b""
 
         # Buffered fallbacks (bytes/bytearray/str): apply the cap up front so
         # we still refuse oversize payloads even on this path.
         if isinstance(data, (bytes, bytearray)):
-            if len(data) > _MAX_DOWNLOAD_SIZE:
+            if len(data) > limit:
                 raise OSError(
                     errno.EFBIG,
-                    f"File exceeds maximum download size of {_MAX_DOWNLOAD_SIZE} bytes",
+                    f"File exceeds maximum download size of {limit} bytes",
                     path,
                 )
             return bytes(data)
         if isinstance(data, str):
             encoded = data.encode("utf-8")
-            if len(encoded) > _MAX_DOWNLOAD_SIZE:
+            if len(encoded) > limit:
                 raise OSError(
                     errno.EFBIG,
-                    f"File exceeds maximum download size of {_MAX_DOWNLOAD_SIZE} bytes",
+                    f"File exceeds maximum download size of {limit} bytes",
                     path,
                 )
             return encoded
 
-        chunks: list[bytes] = []
-        total = 0
-        close = getattr(data, "close", None)
         try:
-            try:
-                for chunk in data:
-                    if not chunk:
-                        continue
-                    chunk_bytes = chunk if isinstance(chunk, bytes) else bytes(chunk)
-                    total += len(chunk_bytes)
-                    if total > _MAX_DOWNLOAD_SIZE:
-                        raise OSError(
-                            errno.EFBIG,
-                            f"File exceeds maximum download size of {_MAX_DOWNLOAD_SIZE} bytes",
-                            path,
-                        )
-                    chunks.append(chunk_bytes)
-            except OSError:
-                raise
-            except Exception as e:
-                logger.error("Failed to stream file %s from e2b sandbox: %s", resolved, e)
-                raise OSError(f"Failed to download file '{path}' from sandbox: {e}") from e
-        finally:
-            if callable(close):
-                try:
-                    close()
-                except Exception:
-                    pass
-        return b"".join(chunks)
+            return read_download_stream(data, limit, path)
+        except OSError:
+            raise
+        except Exception as e:
+            logger.error("Failed to stream file %s from e2b sandbox: %s", resolved, e)
+            raise OSError(f"Failed to download file '{path}' from sandbox: {e}") from e
 
     def list_dir(self, path: str, max_depth: int = 2) -> list[str]:
         resolved = self._resolve_path(path)
@@ -472,8 +462,14 @@ class E2BSandbox(Sandbox):
         case_sensitive: bool = False,
         max_results: int = 100,
     ) -> tuple[list[GrepMatch], bool]:
-        regex_source = re.escape(pattern) if literal else pattern
-        re.compile(regex_source, 0 if case_sensitive else re.IGNORECASE)
+        # Sanity-check a regex pattern as a Python regex at the boundary (grep uses
+        # POSIX ERE, but this catches gross errors); a literal needs no validation.
+        # grep receives the RAW pattern: -F matches it literally, -E as a regex.
+        # Escaping it first would double-escape -- fixed-string grep would then
+        # search for the added backslashes as text (``alpha\.beta``) and never
+        # match the exact line (#5626).
+        if not literal:
+            re.compile(pattern, 0 if case_sensitive else re.IGNORECASE)
 
         resolved = self._resolve_path(path)
         # Build a portable ``grep`` invocation:
@@ -502,7 +498,7 @@ class E2BSandbox(Sandbox):
         total_cap = max(max_results * 4, max_results + 50)
         flags.append(f"-m{per_file_cap}")
 
-        search = "grep " + " ".join(flags) + f" -- {shlex.quote(regex_source)} {shlex.quote(resolved)} 2>/dev/null"
+        search = "grep " + " ".join(flags) + f" -- {shlex.quote(pattern)} {shlex.quote(resolved)} 2>/dev/null"
 
         with self._lock:
             client = self._client

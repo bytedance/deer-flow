@@ -253,6 +253,26 @@ Only the newest entry carries `messages`, the `goal` while it is active, and
 entries carry only `title` and `thread_data`. `goal_outcome` is server-owned:
 state updates and run input that include it are rejected with 400.
 
+External state updates and run input that supply a non-null `goal` must include
+a string `objective` that is non-empty after whitespace normalization and at
+most 4,000 normalized characters. Invalid values return 400 before state writes
+or run admission. Optional goal timestamps and counters are not required or reset.
+When present, `continuation_count`, `max_continuations`, `no_progress_count` and
+`max_no_progress_continuations` must be non-negative integers; booleans, numeric
+strings, floats and null values are rejected with 400. Valid counters and limits
+are preserved, including an already-used continuation budget.
+Goal payloads must be state values, not reducer control wrappers: the reserved
+`__overwrite__` key and `type: "__overwrite__"` are rejected with 400 at both
+external boundaries. Ordinary `type`/`value` fields remain compatible.
+`goal: null` retains its existing semantics: it clears a state update's goal,
+but does not replace a goal through run input.
+
+Replaying messages from an earlier root checkpoint, including response regeneration, preserves
+the thread's current goal and continuation budget. A cleared or achieved goal
+is not restored from history. A valid goal explicitly supplied in run input
+still replaces it. Historical replay clears the old `goal_outcome`, because
+the previous answer's verdict does not certify the replacement answer.
+
 ### Runs
 
 #### Create Run
@@ -1227,6 +1247,11 @@ mounted directory must be writable only by trusted operators.
 
 Upload one or more files to a thread.
 
+Automatic Office/PDF-to-Markdown conversion is disabled by default. To enable
+host-side parsing in a trusted deployment, set
+`uploads.auto_convert_documents: true` in `config.yaml`. See
+[document conversion configuration](FILE_UPLOAD.md#支持的文档格式).
+
 ```http
 POST /api/threads/{thread_id}/uploads
 Content-Type: multipart/form-data
@@ -1235,7 +1260,7 @@ Content-Type: multipart/form-data
 **Request Body:**
 - `files`: One or more files to upload
 
-**Response:**
+**Response** (example with automatic conversion enabled and successful):
 ```json
 {
   "success": true,
@@ -1259,7 +1284,7 @@ Content-Type: multipart/form-data
 
 **Name collisions:** filenames are claimed unique against the thread's existing uploads and reserved atomically — a same-name upload never replaces the existing file; it lands as `document_1.pdf` (the response's `filename`/`original_filename` reflect the claimed name). Use the artifacts `PUT` endpoint for sanctioned in-place updates.
 
-**Supported Document Formats** (auto-converted to Markdown):
+**Supported Document Formats** (converted to Markdown only when automatic conversion is enabled):
 - PDF (`.pdf`)
 - PowerPoint (`.ppt`, `.pptx`)
 - Excel (`.xls`, `.xlsx`)
@@ -1589,14 +1614,20 @@ POST   /api/scheduled-tasks/preview-cron
 | `max_runs` | integer \| null | Safety cap: automatic runs over the task's lifetime (trial runs excluded); at least 1. |
 | `end_at` | date-time \| null | Safety cap: no automatic run after this time. Without a UTC offset it is wall-clock time in the task's timezone. |
 | `stop_condition` | string \| null | The user's "stop when …" rule, stored in its own field. Whitespace collapses to single spaces; at most 500 characters; blank means none. It is never part of `prompt`: each launch appends it as an instruction to call `stop_scheduled_task` (or, with `scheduler.tool_enabled` off, to report a met rule). |
+| `notification_group_connection_id` | string \| null | One additional connected Feishu group belonging to the task owner. Select a group binding returned by `GET /api/channels/connections`; it must record `chat_type=group` and a matching chat/workspace ID. Omitted in PATCH preserves the target; null clears it. Invalid choices return `invalid_notification_group` (422), lookup outages return `scheduler_unavailable` (503). |
 
 In a PATCH, sending `null` clears `goal_objective`, `max_runs`, `end_at` or
-`stop_condition`; for every other field `null` means unchanged (`assistant_id:
+`stop_condition` or `notification_group_connection_id`; for every other field `null` means unchanged (`assistant_id:
 null` restores `lead_agent`). PATCH may change `schedule_type` together with
 `schedule_spec`. Changing the goal, `prompt` or `stop_condition` starts a new
 count for the automatic pause after three unmet runs. A PATCH that changes the
 schedule of a finished task re-arms it (then its safety cap applies); a PATCH
 that only changes the cap leaves a finished task finished.
+
+Group-target edits alone never change the schedule or re-arm a finished task.
+Personal recipients are retained, and pending outbox rows keep their original
+target. `/api/features.scheduled_tasks.group_notifications` reports support;
+the conversation scheduling tool's inputs are unchanged in this version.
 
 Task responses (list, get, create, PATCH, pause, resume) return the stored task
 plus `automatic_runs_used` (integer) and `active_run_status` (`queued` |
@@ -1688,7 +1719,7 @@ Three errors keep their old shape: a `403` from route permissions is the plain
 string `"Permission denied: <permission>"`, FastAPI's own `422` for malformed
 JSON or wrong types (for example `"max_runs": "abc"`) keeps its list `detail`,
 and the shared `503` `"Thread metadata store not available"` (a Gateway without
-a thread store) stays a plain string. Codes the web UI translates: `invalid_request`, `invalid_schedule`, `invalid_schedule_type`, `invalid_timezone`, `interval_too_short`, `interval_too_long`, `once_in_past`, `once_too_soon`, `once_time_passed`, `invalid_context_mode`, `reuse_thread_requires_thread`, `thread_not_found`, `invalid_assistant`, `unknown_assistant`, `invalid_goal`, `goal_requires_fresh_thread`, `invalid_stop_condition`, `invalid_max_runs`, `end_at_in_past`, `end_at_before_first_run`, `frequent_requires_limit`, `max_runs_not_above_used`, `limits_exhausted`, `task_not_found`, `task_running`, `run_queued`, `task_changed`, `task_finished`, `task_quota_exceeded`, `scheduler_not_running`, `scheduler_unavailable` (503: this Gateway has no scheduled-task persistence), `trigger_failed`. Codes only the chat capability
+a thread store) stays a plain string. Codes the web UI translates: `invalid_request`, `invalid_schedule`, `invalid_schedule_type`, `invalid_timezone`, `interval_too_short`, `interval_too_long`, `once_in_past`, `once_too_soon`, `once_time_passed`, `invalid_context_mode`, `reuse_thread_requires_thread`, `thread_not_found`, `invalid_assistant`, `unknown_assistant`, `invalid_goal`, `goal_requires_fresh_thread`, `invalid_stop_condition`, `invalid_notification_group`, `invalid_max_runs`, `end_at_in_past`, `end_at_before_first_run`, `frequent_requires_limit`, `max_runs_not_above_used`, `limits_exhausted`, `task_not_found`, `task_running`, `run_queued`, `task_changed`, `task_finished`, `task_quota_exceeded`, `scheduler_not_running`, `scheduler_unavailable` (503: this Gateway has no scheduled-task persistence), `trigger_failed`. Codes only the chat capability
 returns: `timezone_required`, `authentication_required`, `permission_denied`, `scheduler_tools_disabled`, `authority_expired`, `conversation_not_found`, `interactive_run_required`, `unsupported_action`, `unsupported_fields`, `task_id_required`, `note_not_verbatim`, `note_limit_reached`, `trial_requires_direct_request`, `no_stop_authority`, `occurrence_not_active`. The machine-readable list is
 `contracts/scheduled_task_errors_contract.json`.
 
@@ -1724,7 +1755,7 @@ stripped from client-supplied messages and state updates.
 **IM notices ("scheduled task updates").** With `channel_connections.enabled`,
 each item of `GET /api/channels/providers` carries
 `proactive_notifications` (bool): whether scheduled-task updates are pushed to
-that app. Only providers with proactive push (WeCom today) get notices; the
+that app. Only providers with proactive push (WeCom, Feishu/Lark, WeChat and QQ private chat today) get notices; the
 others get none, and Settings says so. An occurrence sends at most one message,
 in the owner's `locale` preference (see Account Preferences), else
 `channel_connections.notification_locale`. Notices carry no IDs and no links;
@@ -1733,6 +1764,19 @@ see `backend/docs/CONFIGURATION.md` for the events and the merge rule.
 ```json
 { "provider": "wecom", "display_name": "WeCom", "connection_status": "connected", "proactive_notifications": true }
 ```
+
+**Runtime bot credentials.** `POST /api/channels/{provider}/runtime-config`
+(body `{"values": {...}}`, keyed by the provider's `credential_fields`) and
+`DELETE /api/channels/{provider}/runtime-config` are admin-only; they save or
+disconnect the deployment's bot for that provider and answer with its provider
+item. Password values come back masked (`********`); sending the mask back
+keeps the stored value. A save whose channel fails to start on the serving
+instance, or a disconnect whose channel fails to stop there, answers `400` and
+stores nothing (under `channels.leader_lease` a non-holder stores the save and
+the holder applies it on its next renewal tick). With a SQLite or
+PostgreSQL database the values are stored encrypted with
+`DEER_FLOW_CREDENTIALS_KEY` and shared by every Gateway instance; without a
+usable key a save answers `503`. See `backend/docs/IM_CHANNEL_CONNECTIONS.md`.
 
 ---
 
@@ -2096,3 +2140,25 @@ a JSON boolean. Writes containing only boolean pin/archive flags preserve
 `updated_at` and all other metadata. The owner-checked endpoint returns the normal
 thread metadata response; original thread and artifact URLs remain available.
 Archiving does not cancel runs, pause schedules, or change retention.
+
+### Proactive IM notification preferences
+
+`GET/PATCH /api/channels/notification-preferences` is authenticated and owner-scoped.
+Both require `X-Expected-User-Id` matching the authenticated viewer; a stale
+account returns 409. Session mutations retain normal CSRF protection. The local
+auth-disabled default identity is supported without creating an auth account.
+
+GET and PATCH return `{ "feishu": true, "wecom": true, "wechat": true, "qq": true }`
+with the owner's effective booleans. PATCH accepts only supplied provider fields,
+strict booleans or `null` (reset to enabled); other fields are rejected. Missing
+preferences preserve the existing connected-channel default. Browser notification
+preferences and chat connection state remain independent.
+
+Opt-out and cancellation of that owner's pending/sending outbox rows for the
+provider commit together; the internal terminal reason is `disabled_by_owner`.
+Retries consume no additional attempts, and opting back in cannot reopen the
+old rows. The worker rechecks preferences and claim ownership before starting a
+provider send. A provider call already started may still complete; it cannot be
+retracted. All Gateway workers must be upgraded to honor the shared preference.
+Migration `0041_im_notice_preferences` adds only a small owner/provider preference
+table; downgrade removes these choices, so subsequent upgrades use defaults.

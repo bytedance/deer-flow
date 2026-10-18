@@ -542,8 +542,9 @@ export function describeTaskSchedule(
 
 /**
  * Convert a datetime-local wall value (interpreted in `timezone`) to a UTC ISO
- * string. The backend's `datetime.fromisoformat` treats naive strings as UTC,
- * so we must submit an explicit offset. DST-safe via Intl.
+ * string. Match the scheduler's ZoneInfo(fold=0) reading: use the first
+ * occurrence of a repeated time and the pre-transition offset for a skipped
+ * time. Form validation rejects skipped times separately.
  */
 export function zonedLocalToUtcIso(
   localValue: string,
@@ -553,19 +554,20 @@ export function zonedLocalToUtcIso(
   const [y, mo, d] = (date ?? "").split("-").map(Number);
   const [h, mi] = (time ?? "00:00").split(":").map(Number);
   const refMs = Date.UTC(y ?? 1970, (mo ?? 1) - 1, d ?? 1, h ?? 0, mi ?? 0);
-  // The offset at the wall-time-as-UTC instant is stale when a DST transition
-  // sits between that instant and the real one (e.g. "03:30" the morning of
-  // spring-forward resolves with the pre-transition offset, firing an hour
-  // late and breaking the round-trip with `utcToZonedLocalInput`). Resolve
-  // once, then re-derive the offset at the candidate instant; one correction
-  // converges for real timezones.
-  let offsetMs = tzOffsetMs(timezone, new Date(refMs));
-  let utcMs = refMs - offsetMs;
-  const correctedOffsetMs = tzOffsetMs(timezone, new Date(utcMs));
-  if (correctedOffsetMs !== offsetMs) {
-    offsetMs = correctedOffsetMs;
-    utcMs = refMs - offsetMs;
-  }
+  // Look on both sides of a possible transition, including half-hour shifts
+  // and a skipped calendar day. Iterating one offset guess can oscillate in
+  // a gap or settle on the second occurrence of a repeated time.
+  const dayMs = 24 * 60 * 60 * 1000;
+  const before = tzOffsetMs(timezone, new Date(refMs - dayMs));
+  const after = tzOffsetMs(timezone, new Date(refMs + dayMs));
+  const candidates = [...new Set([refMs - before, refMs - after])].sort(
+    (a, b) => a - b,
+  );
+  const utcMs =
+    candidates.find(
+      (candidate) =>
+        candidate + tzOffsetMs(timezone, new Date(candidate)) === refMs,
+    ) ?? Math.max(...candidates);
   const utc = new Date(utcMs);
   return `${utc.getUTCFullYear()}-${pad2(utc.getUTCMonth() + 1)}-${pad2(
     utc.getUTCDate(),
@@ -596,9 +598,19 @@ export function utcToZonedLocalInput(iso: string, timezone: string): string {
  * ("2026-10-07T09:00:00") meant in the task's zone, the same way the server
  * reads it; reading it with `new Date()` would use the viewer's zone instead.
  * A value with an offset is already an instant and is returned unchanged.
+ * A bare date ("2026-10-07") is midnight in the task's zone, as the server's
+ * `datetime.fromisoformat` reads it; it is matched first because its trailing
+ * "-07" would otherwise pass for a UTC offset.
  */
 export function onceRunAtInstant(runAt: string, timezone: string): string {
   const value = runAt.trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    try {
+      return zonedLocalToUtcIso(`${value}T00:00`, timezone || "UTC");
+    } catch {
+      return value;
+    }
+  }
   if (!value || /(?:Z|[+-]\d{2}(?::?\d{2})?)$/i.test(value)) {
     return value;
   }

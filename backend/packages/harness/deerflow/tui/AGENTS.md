@@ -13,6 +13,11 @@ A terminal-native UI over the embedded harness, exposed as the `deerflow` consol
 
 **Web UI visibility**: the Web UI lists threads from the `threads_meta` SQL table (user-scoped), not the checkpointer. `persistence.py` writes a `threads_meta` row under the default user (`"default"`) into the same DB the Gateway reads — via the harness-only `deerflow.persistence.engine.init_engine_from_config()` — so TUI sessions appear in the Web UI sidebar **without** running the Gateway. Best-effort: a no-op on the `memory` backend. All DB work runs on one long-lived background event loop (a SQLAlchemy async engine is bound to its creating loop).
 
+A persistence bridge timeout requests cancellation of its still-pending coroutine.
+This is cooperative cancellation, not rollback of a committed write or ordering
+of normally completed title writes. Preserve coroutine-originated errors and
+keep the background loop usable for subsequent writes.
+
 Thread switching must reject active runs both before resolving/opening a picker
 and when applying the picker callback, which may outlive the idle state in which
 it opened. Keep the current thread and transcript unchanged when rejecting a
@@ -22,6 +27,10 @@ Reserve the run identity and busy state when accepting input, before its worker
 starts. Each run owns its cancellation flag; a later send must not reset it.
 If worker creation fails, cancel and clear that reserved run, restore idle state,
 and show a retryable error. Do not cancel a previously completed run's title write.
+`_send_to_agent` returns False whenever it does not start a run (busy, a stopping
+interrupted run, worker start failure); the submit handler and the launch message
+then restore the text as history recorded it via `_restore_draft`, which keeps the
+palette closed until that draft is edited. Local slash commands still clear it.
 Worker callbacks check both run identity and thread id on UI delivery, rejecting
 cancelled, completed, or superseded runs before updating the reducer. Keep the
 completed run's state available for its worker's title persistence check. An

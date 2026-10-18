@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from enum import Enum
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -21,10 +22,11 @@ class FakeStatus(Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
     @property
     def is_terminal(self) -> bool:
-        return self in {FakeStatus.COMPLETED, FakeStatus.FAILED}
+        return self in {FakeStatus.COMPLETED, FakeStatus.FAILED, FakeStatus.CANCELLED}
 
 
 def _request(**overrides) -> BatchSubmitRequest:
@@ -257,8 +259,8 @@ async def test_execute_item_polls_completion_without_waiting_for_lease_renewal(m
             raise AssertionError("a task that completes between polls need not expose running")
 
         async def renew_item_lease(self, *_args, **_kwargs):
-            # Exactly one pre-launch revalidation is expected; the poll loop
-            # must not renew for a task that completes between polls.
+            # Renew before assembly and revalidate before dispatch; neither
+            # heartbeat nor polling should delay a task completing between polls.
             self.renews = getattr(self, "renews", 0) + 1
             return {"valid": True, "cancel_requested": False}
 
@@ -304,7 +306,178 @@ async def test_execute_item_polls_completion_without_waiting_for_lease_renewal(m
 
     assert repository.finalized is not None
     assert repository.finalized["result"] == "fast result"
-    assert repository.renews == 1
+    assert repository.renews == 2
+
+
+class _Registry:
+    """Executor registry double with the real cleanup and cancellation timing."""
+
+    def __init__(self) -> None:
+        self.results: dict[str, SimpleNamespace] = {}
+        self.cancelled: list[str] = []
+        self.forced: list[str] = []
+
+    def get(self, execution_id):
+        return self.results.get(execution_id)
+
+    def cleanup(self, execution_id) -> None:
+        # The real cleanup_background_task keeps entries that are not terminal.
+        result = self.results.get(execution_id)
+        if result is not None and result.status.is_terminal:
+            del self.results[execution_id]
+
+    def force(self, execution_id) -> None:
+        self.forced.append(execution_id)
+        self.results.pop(execution_id, None)
+
+    def cancel(self, execution_id) -> None:
+        self.cancelled.append(execution_id)
+        result = self.results.get(execution_id)
+        if result is not None:
+            # The executor turns a cancelled run terminal on its own loop,
+            # after the caller has already left its finally block.
+            asyncio.get_running_loop().call_later(0.05, setattr, result, "status", FakeStatus.CANCELLED)
+
+
+def _install_registry(monkeypatch, registry: _Registry) -> None:
+    monkeypatch.setattr(service_module, "SubagentStatus", FakeStatus)
+    monkeypatch.setattr(service_module, "get_background_task_result", registry.get)
+    monkeypatch.setattr(service_module, "cleanup_background_task", registry.cleanup)
+    monkeypatch.setattr(service_module, "force_cleanup_background_task", registry.force)
+    monkeypatch.setattr(service_module, "request_cancel_background_task", registry.cancel)
+    monkeypatch.setattr(service_module, "run_on_isolated_subagent_loop", asyncio.ensure_future)
+
+
+def _running_item_service(monkeypatch, registry: _Registry, *, mark_item_running) -> tuple[SubagentBatchService, SimpleNamespace]:
+    registry.results["execution-1"] = SimpleNamespace(status=FakeStatus.RUNNING, result=None, error=None, stop_reason=None, token_usage_records=None)
+    finalized = SimpleNamespace(kwargs=None)
+
+    class Repository:
+        async def claim_items(self, **_kwargs):
+            return [
+                {
+                    "id": "item-1",
+                    "item_key": "record-1",
+                    "prompt": "Process record 1",
+                    "batch": {"id": "batch-1", "thread_id": "thread-1", "user_id": "user-1", "run_id": "run-1", "execution_spec": _request().execution_spec},
+                }
+            ]
+
+        async def renew_item_lease(self, *_args, **_kwargs):
+            return {"valid": True, "cancel_requested": False}
+
+        async def mark_item_running(self, *_args, **_kwargs):
+            return await mark_item_running()
+
+        async def finalize_item(self, *_args, **kwargs):
+            finalized.kwargs = kwargs
+            return True
+
+    class Executor:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def execute_async(self, _prompt, task_id=None):
+            return "execution-1"
+
+    _install_registry(monkeypatch, registry)
+    monkeypatch.setattr(service_module, "get_app_config", lambda: SimpleNamespace())
+    monkeypatch.setattr(service_module, "resolve_subagent_model_name", lambda *_args, **_kwargs: "model-a")
+    monkeypatch.setattr(service_module, "SubagentExecutor", Executor)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **_kwargs: [])
+    service = SubagentBatchService(
+        repository=Repository(),
+        config=SubagentBatchesConfig(poll_interval_seconds=0.1, lease_seconds=120),
+        runtime_config=SubagentRuntimeConfig(max_running=1),
+    )
+    return service, finalized
+
+
+async def _wait_until(predicate, *, timeout: float = 2.0) -> None:
+    async def poll() -> None:
+        while not predicate():
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(poll(), timeout=timeout)
+
+
+@pytest.mark.asyncio
+async def test_stopped_item_releases_its_execution_once_it_turns_terminal(monkeypatch) -> None:
+    # stop() cancels the item task while its subagent is still running, so the
+    # finally-block cleanup alone saw a live entry, kept it, and nothing ever
+    # removed the SubagentResult (with its whole transcript) afterwards.
+    registry = _Registry()
+    running = asyncio.Event()
+
+    async def mark_item_running():
+        running.set()
+        return True
+
+    service, finalized = _running_item_service(monkeypatch, registry, mark_item_running=mark_item_running)
+    await service.run_once(now=service_module.datetime.now(service_module.UTC))
+    await asyncio.wait_for(running.wait(), timeout=1)
+
+    await asyncio.wait_for(service.stop(), timeout=1)
+
+    assert "execution-1" in registry.cancelled
+    await _wait_until(lambda: "execution-1" not in registry.results)
+    assert registry.forced == []
+    assert finalized.kwargs is None
+
+
+@pytest.mark.asyncio
+async def test_item_error_cancels_and_releases_an_unfinished_execution(monkeypatch) -> None:
+    # A repository error while polling fails the durable item; the subagent
+    # must not keep running unsupervised, nor stay in the registry.
+    registry = _Registry()
+
+    async def mark_item_running():
+        raise RuntimeError("database is locked")
+
+    service, finalized = _running_item_service(monkeypatch, registry, mark_item_running=mark_item_running)
+    await service.run_once(now=service_module.datetime.now(service_module.UTC))
+    await asyncio.wait_for(asyncio.gather(*list(service._executions.values())), timeout=1)
+
+    assert finalized.kwargs is not None and finalized.kwargs["succeeded"] is False
+    assert registry.cancelled == ["execution-1"]
+    await _wait_until(lambda: "execution-1" not in registry.results)
+    assert registry.forced == []
+
+
+@pytest.mark.asyncio
+async def test_release_removes_an_execution_that_never_turns_terminal(monkeypatch) -> None:
+    # Cancellation is cooperative; a run that ignores it must not keep its
+    # entry, or this poll, alive forever.
+    registry = _Registry()
+    registry.results["execution-1"] = SimpleNamespace(status=FakeStatus.RUNNING)
+    _install_registry(monkeypatch, registry)
+
+    await asyncio.wait_for(service_module._release_when_terminal("execution-1", poll_seconds=0.01, max_wait_seconds=0.05), timeout=1)
+
+    assert registry.forced == ["execution-1"]
+    assert registry.results == {}
+
+
+@pytest.mark.asyncio
+async def test_release_survives_an_unavailable_subagent_loop(monkeypatch) -> None:
+    # Runs in a finally block: failing to schedule must not replace the
+    # in-flight CancelledError, and must not strand an unawaited coroutine.
+    registry = _Registry()
+    registry.results["execution-1"] = SimpleNamespace(status=FakeStatus.RUNNING)
+    _install_registry(monkeypatch, registry)
+    submitted = []
+
+    def unavailable(coro):
+        submitted.append(coro)
+        raise RuntimeError("Isolated subagent event loop shutdown is still pending")
+
+    monkeypatch.setattr(service_module, "run_on_isolated_subagent_loop", unavailable)
+    service = SubagentBatchService(repository=SimpleNamespace(), config=SubagentBatchesConfig(), runtime_config=SubagentRuntimeConfig())
+
+    service._release_execution("execution-1")
+
+    assert registry.cancelled == ["execution-1"]
+    assert len(submitted) == 1 and submitted[0].cr_frame is None
 
 
 @pytest.mark.asyncio
@@ -429,7 +602,7 @@ async def test_cancel_during_tool_assembly_skips_launch(monkeypatch, tmp_path) -
         )
         claimed = await repository.claim_items(
             now=datetime.now(UTC),
-            lease_owner=service._lease_owner,
+            lease_owner="assembly-claim",
             lease_seconds=60,
             limit=10,
         )
@@ -475,7 +648,7 @@ async def test_cancel_during_tool_assembly_skips_launch(monkeypatch, tmp_path) -
             ),
         )
 
-        item_task = asyncio.create_task(service._execute_item(item))
+        item_task = asyncio.create_task(service._execute_item(item, lease_owner="assembly-claim"))
         assert await asyncio.to_thread(assembly_started.wait, 15)
 
         cancelled = await service.cancel_batch(batch_id="batch-1", user_id="user-1")
@@ -773,3 +946,34 @@ async def test_batch_stop_cleanup_failure_is_reported_to_retry(monkeypatch: pyte
         await service.stop()
     assert raised.value is cleanup_error
     assert service._stop_cleanup_task is cleanup_task
+
+
+@pytest.mark.asyncio
+async def test_release_logs_a_failure_on_the_subagent_loop(monkeypatch, caplog) -> None:
+    # The release runs as a concurrent future, which never reports an
+    # exception nobody retrieved; a failing release would leak its entry
+    # without a trace.
+    registry = _Registry()
+    registry.results["execution-1"] = SimpleNamespace(status=FakeStatus.RUNNING)
+    _install_registry(monkeypatch, registry)
+    loop = asyncio.get_running_loop()
+    scheduled = []
+
+    def subagent_loop(coro):
+        scheduled.append(asyncio.run_coroutine_threadsafe(coro, loop))
+        return scheduled[-1]
+
+    def registry_unavailable(_execution_id):
+        raise RuntimeError("registry lock poisoned")
+
+    monkeypatch.setattr(service_module, "run_on_isolated_subagent_loop", subagent_loop)
+    service = SubagentBatchService(repository=SimpleNamespace(), config=SubagentBatchesConfig(), runtime_config=SubagentRuntimeConfig())
+
+    service._release_execution("execution-1")
+    monkeypatch.setattr(service_module, "get_background_task_result", registry_unavailable)
+    with caplog.at_level(logging.ERROR, logger=service_module.__name__):
+        await _wait_until(lambda: scheduled[0].done() and not service_module._pending_releases)
+
+    failures = [record for record in caplog.records if "execution-1" in record.getMessage()]
+    assert len(failures) == 1 and failures[0].levelno == logging.ERROR
+    assert str(failures[0].exc_info[1]) == "registry lock poisoned"

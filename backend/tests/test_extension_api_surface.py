@@ -40,6 +40,7 @@ def test_every_contract_kind_added_for_the_0_2_series_is_exported():
         "BackendAction",
         "BrowserModule",
         "ModelTool",
+        "PluginToolResult",
         "PluginContribution",
         "SettingsField",
         "ToolContext",

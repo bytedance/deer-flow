@@ -62,7 +62,7 @@ from deerflow_extension_api.placement import (
     MiddlewarePlacement,
     Placement,
 )
-from deerflow_extension_api.plugins import ActionContext, BackendAction, BrowserAssets, BrowserModule, ModelTool, PluginContribution, ToolContext
+from deerflow_extension_api.plugins import ActionContext, BackendAction, BrowserAssets, BrowserModule, ModelTool, PluginContribution, PluginToolResult, ToolContext
 from deerflow_extension_api.provenance import (
     MESSAGE_CONTENT_KIND_KEY,
     MESSAGE_PRODUCER_ENTITY_ID_KEY,
@@ -99,7 +99,7 @@ from deerflow_extension_api.state import ExtensionData
 
 #: Contract version. Before 1.0, minors may break and patches are additive.
 #: From 1.0 on, bump the major for breaking changes.
-API_VERSION = "0.2.5"
+API_VERSION = "0.2.7"
 
 __all__ = [
     "AGENT_RUNS_CONTEXT_KEY",
@@ -124,6 +124,7 @@ __all__ = [
     "BrowserAssets",
     "BrowserModule",
     "ModelTool",
+    "PluginToolResult",
     "PluginContribution",
     "ToolContext",
     "SettingsField",

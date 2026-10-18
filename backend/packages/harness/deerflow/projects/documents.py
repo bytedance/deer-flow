@@ -303,9 +303,9 @@ async def add_staged_document(
 def _convert_in_thread(original: Path, output_path: Path) -> Path | None:
     """Run the async conversion engine on a private loop inside the worker.
 
-    ``convert_file_to_markdown`` offloads its own heavy work (>1 MiB) but
-    stats and writes on its caller's loop; running the whole coroutine here
-    keeps every byte of the conversion path off the serving event loop.
+    Keep the shelf conversion lifecycle on its worker's private loop.
+    ``convert_file_to_markdown`` offloads parsing for every source size and
+    drains that work before this caller can clean up its staging files.
     """
     return asyncio.run(convert_file_to_markdown(original, output_path=output_path))
 

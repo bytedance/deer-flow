@@ -74,6 +74,8 @@ from typing import Any
 from uuid import uuid4
 from weakref import WeakValueDictionary
 
+from deerflow.utils.file_lock import retry_until_locked
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows fallback
@@ -182,6 +184,8 @@ LARK_SKILL_NAMES: tuple[str, ...] = (
     "lark-workflow-standup-report",
 )
 LARK_SKILL_NAME_SET = frozenset(LARK_SKILL_NAMES)
+# Allow long installs to finish without waiting indefinitely on a stuck holder.
+_INSTALL_LOCK_TIMEOUT_SECONDS = 15 * 60
 _LARK_INSTALL_THREAD_LOCK = threading.Lock()
 _LARK_RUNTIME_INSTALL_THREAD_LOCK = threading.Lock()
 _LARK_CREDENTIAL_LOCKS_GUARD = threading.Lock()
@@ -1248,14 +1252,35 @@ def _extract_lark_cli_runtime_binary(archive: bytes, destination: Path) -> None:
     if not candidate:
         raise ValueError("Lark CLI runtime archive does not contain a lark-cli executable.")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_bytes(candidate)
+    _publish_bytes_atomically(destination, candidate)
     destination.chmod(0o755)
+
+
+def _publish_bytes_atomically(path: Path, content: bytes) -> None:
+    """Publish *content* at *path* without exposing a partial file.
+
+    Flush and fsync a same-directory temporary file before ``os.replace``.
+    Callers own the final mode: runtime binaries and launchers use 0o755;
+    staged skill files and manifests become read-only through
+    ``make_skill_tree_sandbox_readable``. The parent directory is not fsynced,
+    so this helper alone does not guarantee publication survives power loss.
+    """
+    fd, temporary = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
 
 
 def _write_lark_cli_sandbox_launcher(staging: Path) -> None:
     launcher = staging / "bin" / "lark-cli"
     launcher.parent.mkdir(parents=True, exist_ok=True)
-    launcher.write_text(LARK_CLI_SANDBOX_LAUNCHER_SCRIPT, encoding="utf-8")
+    _publish_bytes_atomically(launcher, LARK_CLI_SANDBOX_LAUNCHER_SCRIPT.encode("utf-8"))
     launcher.chmod(0o755)
 
 
@@ -1314,7 +1339,18 @@ def _exclusive_install_lock(lock_path: Path, thread_lock):
         if fcntl is not None:
             fcntl.flock(lock_file, fcntl.LOCK_EX)
         else:  # pragma: no cover - Windows fallback
-            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+
+            def acquire_region() -> None:
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+
+            retry_until_locked(
+                acquire_region,
+                deadline=time.monotonic() + _INSTALL_LOCK_TIMEOUT_SECONDS,
+                sleep=time.sleep,
+                monotonic=time.monotonic,
+                timeout_message="Lark install lock timed out",
+            )
         try:
             yield
         finally:
@@ -2871,7 +2907,7 @@ def _install_lark_skills_from_archive(user_id: str, archive_path: Path, *, versi
 
 @contextmanager
 def _lark_install_lock(parent: Path):
-    """Serialize the cross-process atomic replacement of the global pack."""
+    """Serialize cross-process installers of the global pack."""
     with _exclusive_install_lock(parent / ".lark-cli.install.lock", _LARK_INSTALL_THREAD_LOCK):
         yield
 
@@ -2882,6 +2918,17 @@ def _install_lark_skills_from_archive_locked(
     *,
     version: str | None = None,
 ) -> tuple[tuple[str, ...], str]:
+    """Prepare a private skill tree and publish its body/manifest pair together.
+
+    The caller holds ``_lark_install_lock``. Extraction, validation, guidance,
+    manifest generation and permission changes all happen in staging; the
+    final ``staging_target.rename(target)`` is the publication boundary. An
+    existing target is moved to a backup first, then restored on an ordinary
+    publication error. Staging is discarded on success or failure.
+
+    Extraction writes and parent directories are not fsynced, so this is not
+    a power-loss durability guarantee for the complete tree.
+    """
     target = parent / INTEGRATION_ID
     staging_parent = Path(tempfile.mkdtemp(prefix=".installing-lark-cli-", dir=str(parent)))
     staging_target = staging_parent / INTEGRATION_ID
@@ -3017,7 +3064,7 @@ def _append_deerflow_lark_shared_guidance(root: Path) -> None:
 
 只有在用户明确说明已经完成授权后，才继续调用具体的 `lark-cli` 业务命令。
 """
-    skill_file.write_text(content.rstrip() + guidance + "\n", encoding="utf-8")
+    _publish_bytes_atomically(skill_file, (content.rstrip() + guidance + "\n").encode("utf-8"))
 
 
 def _write_manifest(root: Path, installed_skills: set[str], *, version: str | None, content_sha256: str) -> None:
@@ -3030,4 +3077,7 @@ def _write_manifest(root: Path, installed_skills: set[str], *, version: str | No
         "installed_at": datetime.now(UTC).isoformat(),
         "skills": sorted(installed_skills),
     }
-    (root / LARK_CLI_MANIFEST_FILE).write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _publish_bytes_atomically(
+        root / LARK_CLI_MANIFEST_FILE,
+        (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
+    )

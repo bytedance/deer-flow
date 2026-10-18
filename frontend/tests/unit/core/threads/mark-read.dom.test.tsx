@@ -6,11 +6,7 @@ import {
   rs,
   test,
 } from "@rstest/core";
-import {
-  QueryClient,
-  QueryClientProvider,
-  type InfiniteData,
-} from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, renderHook } from "@testing-library/react";
 import type { PropsWithChildren } from "react";
 
@@ -35,7 +31,10 @@ import {
   useMarkThreadRead,
   useThreadActivity,
 } from "@/core/threads/activity";
-import { INFINITE_THREADS_QUERY_KEY_PREFIX } from "@/core/threads/hooks";
+import {
+  INFINITE_THREADS_QUERY_KEY_PREFIX,
+  type InfiniteThreadsData,
+} from "@/core/threads/hooks";
 import type { AgentThread } from "@/core/threads/types";
 
 const clients: QueryClient[] = [];
@@ -69,9 +68,12 @@ function setup(
 ) {
   const { queryClient, wrapper } = newClient();
   queryClient.setQueryData(["threads", "search", { limit: 50 }], search);
-  queryClient.setQueryData<InfiniteData<AgentThread[]>>(
+  queryClient.setQueryData<InfiniteThreadsData>(
     [...INFINITE_THREADS_QUERY_KEY_PREFIX, {}],
-    { pages: [infinite], pageParams: [0] },
+    {
+      pages: [{ threads: infinite, hiddenCount: 0, hasMore: false }],
+      pageParams: [0],
+    },
   );
   const hook = renderHook(({ id }) => useMarkThreadRead(id), {
     wrapper,
@@ -140,11 +142,11 @@ describe("useMarkThreadRead", () => {
     expect(readPosts()).toHaveLength(1);
     expect(cachedThreadUnread(queryClient, "t-1")).toBe(false);
     expect(cachedThreadUnread(queryClient, "t-2")).toBe(true);
-    const infinite = queryClient.getQueryData<InfiniteData<AgentThread[]>>([
+    const infinite = queryClient.getQueryData<InfiniteThreadsData>([
       ...INFINITE_THREADS_QUERY_KEY_PREFIX,
       {},
     ]);
-    expect(infinite?.pages[0]?.[0]?.unread).toBe(false);
+    expect(infinite?.pages[0]?.threads[0]?.unread).toBe(false);
     await act(async () => {
       finish(Response.json({ unread: false, read_version: 3 }));
       await rs.advanceTimersByTimeAsync(0);

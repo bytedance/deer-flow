@@ -25,11 +25,14 @@ path variables and compare storage defaults with the launcher's actual shell blo
 
 ## Dependency Check Diagnostics
 
-`check.py` captures tool output as UTF-8 with replacement for malformed bytes,
-independently of the host locale. Its Python pnpm runner inherits the environment
-with `PYTHONIOENCODING=utf-8:backslashreplace`, matching the capture encoding.
-Keep Unicode failure diagnostics and exit status available to `make check`.
-Real subprocess regressions live in `backend/tests/test_check_script.py`.
+`check_extension.py` checks wheels with Gateway's asset validator.
+CI builds and checks all bundled examples in `extension-package-check.yml`.
+Tests: `backend/tests/test_extension_check_script.py`.
+
+`check.py` decodes captured output as UTF-8 with replacement and runs pnpm with
+`PYTHONIOENCODING=utf-8:backslashreplace`. Preserve Unicode diagnostics and exit
+status in `make check`, independently of the host locale.
+Tests: `backend/tests/test_check_script.py`.
 
 ## Manual Claude OAuth Export
 
@@ -42,6 +45,14 @@ trimming its contents. Offline CLI coverage:
 `backend/tests/test_claude_keychain_export.py`.
 
 ## Service Startup Contracts
+
+Both launchers call `sandbox-mode.sh` via Bash; keep it Bash/awk-only.
+Dev passes `$PROJECT_ROOT/config.yaml`; prod passes `$DEER_FLOW_CONFIG_PATH`.
+For AIO, omitted/blank/empty-quoted/YAML-null URLs (including comments) select
+`aio`; preserve quoting so `"null"` and `"~"` remain nonempty strings.
+This is not a general YAML parser or URL validator; aliases, multiline values
+and environment expansion are out of scope. Offline helper and launcher tests:
+`backend/tests/test_docker_sandbox_mode_detection.py`.
 
 The setup wizard offers Webz.io as a news-only `web_search` provider using
 `deerflow.community.webz.tools:web_search_tool` and `WEBZ_API_KEY`. Keep its
@@ -61,6 +72,13 @@ indentless lists are supported; nested option names and block-scalar text
 must not enable the browser extra. Keep the detector standard-library-only
 because it runs before dependency synchronization. Read UTF-8 config files
 with or without a leading BOM so the first section remains detectable.
+`detect_uv_extras.py` checks an existing `DEER_FLOW_CONFIG_PATH` first, then
+`DEER_FLOW_PROJECT_ROOT/config.yaml`, before the legacy checkout candidates.
+Keep this lookup standard-library-only; test shadowing checkout configs and
+the CLI under `python -S` in `backend/tests/test_detect_uv_extras.py`.
+`serve.sh`'s config-presence gate also accepts the project-root file when the
+checkout has no config. `tests/test_serve_config_presence.py` runs the full
+launcher through dependency detection with service operations stubbed.
 `setup-sandbox.sh` also strips the leading BOM and normalizes CRLF before selecting the image;
 keep its shell filter compatible with GNU and BSD sed.
 An Apple Container pull that succeeds on macOS must not fail the setup step
@@ -172,6 +190,9 @@ Only "no config anywhere" creates `<checkout>/config.yaml` from the example.
 `dev_multi_instance.{sh,py}` must keep the rendered config passing the real
 multi-instance gate and every endpoint/data root inside its state dir
 (`backend/tests/test_dev_multi_instance_script.py`).
+Unless `keep_channels` is requested, disable provider flags in both `channels`
+and `channel_connections`; UI credentials can otherwise connect a bot
+later. Preserve `channels.leader_lease` and connection metadata.
 
 ## Shell Script Invocation Contract
 

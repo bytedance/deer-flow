@@ -16,10 +16,17 @@ from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypeVar
 
-from app.channels.base import Channel, ChannelStopTimeout
+from app.channels.base import Channel, ChannelStopTimeout, ChannelUnavailable, abort_connection_transport, shutdown_private_loop
 from app.channels.commands import is_known_channel_command, strip_leading_mentions
-from app.channels.connection_identity import attach_connection_identity
+from app.channels.connection_identity import attach_connection_identity, lookup_thread_id
+from app.channels.feishu_card_interaction import (
+    ClarificationCardRequest,
+    PendingCardEntry,
+    PendingCardRegistry,
+    build_button_card,
+)
 from app.channels.message_bus import (
+    HUMAN_INPUT_RESPONSE_METADATA_KEY,
     PENDING_CLARIFICATION_METADATA_KEY,
     RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY,
     InboundMessage,
@@ -29,6 +36,7 @@ from app.channels.message_bus import (
     OutboundMessage,
     ResolvedAttachment,
 )
+from app.channels.notification_groups import is_feishu_notification_group, notification_group_display_name
 from app.channels.sandbox_files import sync_file_to_thread_sandbox
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
@@ -42,6 +50,11 @@ from deerflow.uploads.manager import (
 
 logger = logging.getLogger(__name__)
 PENDING_CLARIFICATION_TTL_SECONDS = 30 * 60
+# stop() budget for the lark-oapi thread: ask its private loop to close the
+# socket (bounded by the close timeout) and stop, then join the thread.
+FEISHU_STOP_TIMEOUT_SECONDS = 5
+FEISHU_WS_CLOSE_TIMEOUT_SECONDS = 2
+_PENDING_CARD_METADATA_KEY = "_feishu_pending_card_id"
 # Channel-store deadlines. ``_on_message`` runs on lark-oapi's private event loop,
 # which also carries the SDK's websocket reads, pongs and its 120s ping loop:
 # every second the bridge blocks that loop is a second the connection cannot
@@ -104,6 +117,7 @@ class _Routing:
     topic_id: str | None
     from_stored_mapping: bool
     from_pending: bool
+    clarification_card_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -158,6 +172,11 @@ class FeishuChannel(Channel):
         super().__init__(name="feishu", bus=bus, config=config)
         self._thread: threading.Thread | None = None
         self._main_loop: asyncio.AbstractEventLoop | None = None
+        # The SDK thread's private loop and client, published under _ws_lock once
+        # constructed so stop() can shut them down from the Gateway loop.
+        self._ws_loop: asyncio.AbstractEventLoop | None = None
+        self._ws_client: Any = None
+        self._ws_lock = threading.Lock()
         self._api_client = None
         self._CreateMessageReactionRequest = None
         self._CreateMessageReactionRequestBody = None
@@ -168,12 +187,19 @@ class FeishuChannel(Channel):
         self._running_card_ids: dict[str, str] = {}
         self._running_card_tasks: dict[str, asyncio.Task] = {}
         self._pending_clarifications: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        # Interactive clarification cards (button answers). Off by default: the
+        # feature needs a one-time console subscription to card.action.trigger.
+        self._card_interaction_enabled = bool(config.get("card_interaction_enabled", False))
+        self._card_registry = PendingCardRegistry()
+        self._CallBackToast = None
+        self._P2CardActionTriggerResponse = None
         self._pending_inbound_batches: dict[tuple[str, str], dict[str, Any]] = {}
         self._CreateFileRequest = None
         self._CreateFileRequestBody = None
         self._CreateImageRequest = None
         self._CreateImageRequestBody = None
         self._GetMessageResourceRequest = None
+        self._GetChatRequest = None
         self._thread_lock = threading.Lock()
         # Per-chat FIFO of messages whose routing is deferred to the Gateway loop
         # (unresolved store lookups); guarded by ``_thread_lock``. A chat with a
@@ -240,15 +266,20 @@ class FeishuChannel(Channel):
         return self._thread is not None and self._thread.is_alive()
 
     def _build_event_handler(self, lark):
-        return (
+        builder = (
             lark.EventDispatcherHandler.builder("", "")
             .register_p2_im_message_receive_v1(self._on_message)
             .register_p2_im_message_message_read_v1(self._on_ignored_message_event)
             .register_p2_im_message_reaction_created_v1(self._on_ignored_message_event)
             .register_p2_im_message_reaction_deleted_v1(self._on_ignored_message_event)
             .register_p2_im_message_recalled_v1(self._on_ignored_message_event)
-            .build()
         )
+        if self._card_interaction_enabled:
+            # Card clicks arrive as WS EVENT frames routed through the SDK's
+            # callback processor map (verified against lark-oapi source); the
+            # synchronous return value becomes the click's toast ack.
+            builder = builder.register_p2_card_action_trigger(self._on_card_action)
+        return builder.build()
 
     async def start(self) -> None:
         if self._running:
@@ -266,6 +297,7 @@ class FeishuChannel(Channel):
                 CreateMessageRequest,
                 CreateMessageRequestBody,
                 Emoji,
+                GetChatRequest,
                 GetMessageResourceRequest,
                 PatchMessageRequest,
                 PatchMessageRequestBody,
@@ -277,6 +309,13 @@ class FeishuChannel(Channel):
             return
 
         self._lark = lark
+        from lark_oapi.event.callback.model.p2_card_action_trigger import (
+            CallBackToast,
+            P2CardActionTriggerResponse,
+        )
+
+        self._CallBackToast = CallBackToast
+        self._P2CardActionTriggerResponse = P2CardActionTriggerResponse
         self._CreateMessageRequest = CreateMessageRequest
         self._CreateMessageRequestBody = CreateMessageRequestBody
         self._ReplyMessageRequest = ReplyMessageRequest
@@ -291,6 +330,7 @@ class FeishuChannel(Channel):
         self._CreateImageRequest = CreateImageRequest
         self._CreateImageRequestBody = CreateImageRequestBody
         self._GetMessageResourceRequest = GetMessageResourceRequest
+        self._GetChatRequest = GetChatRequest
 
         app_id = self.config.get("app_id", "")
         app_secret = self.config.get("app_secret", "")
@@ -332,6 +372,13 @@ class FeishuChannel(Channel):
         We work around this by creating a plain asyncio event loop for this
         thread and patching the SDK's module-level reference before calling
         ``start()``.
+
+        ``stop()`` ends this thread through ``_request_ws_shutdown``: lark-oapi
+        1.7 has no public stop, so ``start()`` only returns once this loop is
+        stopped from a callback scheduled on it — and only after that callback
+        disarmed ``_auto_reconnect``, because otherwise ``start()`` swallows the
+        interrupted ``run_until_complete`` in its reconnect branch and dials
+        again.
         """
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -352,11 +399,93 @@ class FeishuChannel(Channel):
                 log_level=lark.LogLevel.INFO,
                 domain=domain,
             )
+            with self._ws_lock:
+                if not self._running:
+                    # stop() ran before the client existed: never dial.
+                    return
+                self._ws_loop = loop
+                self._ws_client = ws_client
             ws_client.start()
         except Exception:
             if self._running:
                 logger.exception("Feishu WebSocket error")
+            else:
+                logger.debug("[Feishu] SDK loop exited after stop", exc_info=True)
             self._running = False
+        finally:
+            with self._ws_lock:
+                if self._ws_loop is loop:
+                    self._ws_loop = None
+                    self._ws_client = None
+            shutdown_private_loop(loop)
+
+    def _request_ws_shutdown(self) -> None:
+        """Ask the SDK thread to close its socket and stop its loop (non-blocking)."""
+        with self._ws_lock:
+            loop = self._ws_loop
+            ws_client = self._ws_client
+        if loop is None:
+            return
+        try:
+            loop.call_soon_threadsafe(self._begin_ws_shutdown, loop, ws_client)
+        except RuntimeError:
+            # The loop closed between the snapshot and the call: the thread is
+            # already on its way out and the join below observes that.
+            logger.debug("[Feishu] SDK loop already closed before shutdown could be scheduled")
+
+    def _begin_ws_shutdown(self, loop: asyncio.AbstractEventLoop, ws_client: Any) -> None:
+        loop.create_task(self._shutdown_ws(loop, ws_client))
+
+    async def _shutdown_ws(self, loop: asyncio.AbstractEventLoop, ws_client: Any) -> None:
+        """Runs on the SDK loop: disarm reconnects, close the socket, stop the loop."""
+        try:
+            if ws_client is not None:
+                # Must precede any await: once the loop stops, start() lands in
+                # its ``except Exception`` branch and consults this flag.
+                ws_client._auto_reconnect = False
+                deadline = loop.time() + FEISHU_WS_CLOSE_TIMEOUT_SECONDS
+                # _disconnect() clears _conn in its finally (also when cancelled
+                # mid-acquire), so take the handle first — once any in-flight
+                # dial has settled — and release the socket here if the close
+                # handshake does not finish, rather than whenever the
+                # connection object happens to be garbage-collected.
+                connection = await self._settled_ws_connection(ws_client, deadline)
+                disconnect = getattr(ws_client, "_disconnect", None)
+                if disconnect is not None:
+                    try:
+                        async with asyncio.timeout_at(deadline):
+                            await disconnect()
+                    except Exception:
+                        logger.debug("[Feishu] WebSocket close did not complete cleanly", exc_info=True)
+                if abort_connection_transport(connection):
+                    logger.warning("[Feishu] WebSocket close handshake did not finish within %ss; transport aborted", FEISHU_WS_CLOSE_TIMEOUT_SECONDS)
+                    await asyncio.sleep(0)  # let connection_lost run before the loop stops
+        except asyncio.CancelledError:
+            # The thread is already draining this loop; leave it to that.
+            raise
+        loop.stop()
+
+    @staticmethod
+    async def _settled_ws_connection(ws_client: Any, deadline: float) -> Any:
+        """Return the SDK's live connection once any in-flight ``_connect()`` has settled.
+
+        lark holds ``_lock`` across the whole dial and assigns ``_conn`` under
+        it, so a stop that lands mid-handshake would otherwise snapshot
+        ``None`` and leave the socket the dial produces to the SDK's cancelled
+        close. Waiting for the lock is bounded by the close deadline.
+        """
+        lock = getattr(ws_client, "_lock", None)
+        if lock is None:
+            return getattr(ws_client, "_conn", None)
+        try:
+            async with asyncio.timeout_at(deadline):
+                await lock.acquire()
+        except TimeoutError:
+            return getattr(ws_client, "_conn", None)
+        try:
+            return getattr(ws_client, "_conn", None)
+        finally:
+            lock.release()
 
     def _on_ignored_message_event(self, event) -> None:
         logger.debug("[Feishu] ignoring non-content message event: %s", type(event).__name__)
@@ -364,6 +493,9 @@ class FeishuChannel(Channel):
     async def stop(self) -> None:
         self._running = False
         self.bus.unsubscribe_outbound(self._on_outbound)
+        # Signal the SDK thread first so its loop winds down while the
+        # Gateway-side drain below runs.
+        self._request_ws_shutdown()
         await self._close_and_drain_threadsafe_futures()
 
         background_tasks = tuple(self._background_tasks)
@@ -377,14 +509,17 @@ class FeishuChannel(Channel):
         self._background_tasks.clear()
         self._running_card_tasks.clear()
         if self._thread:
-            # The SDK thread only returns on a fatal error, so this join
-            # normally waits out its full timeout; keep it off the event loop.
+            # The thread exits once its loop has stopped; keep the join off the
+            # event loop because a wedged SDK call can still use up the budget.
             thread = self._thread
-            await asyncio.to_thread(thread.join, timeout=5)
+            await asyncio.to_thread(thread.join, timeout=FEISHU_STOP_TIMEOUT_SECONDS)
             if thread.is_alive():
                 raise ChannelStopTimeout("Feishu SDK thread is still running after stop timeout")
             if self._thread is thread:
                 self._thread = None
+        with self._ws_lock:
+            self._ws_loop = None
+            self._ws_client = None
         logger.info("Feishu channel stopped")
 
     async def send(self, msg: OutboundMessage, *, _max_retries: int = 3) -> None:
@@ -404,6 +539,74 @@ class FeishuChannel(Channel):
             max_retries=_max_retries,
             log_prefix="[Feishu]",
         )
+
+    async def send_notification(self, *, target: str, text_markdown: str) -> None:
+        """Send a static card to a bound user's open ID and await its ACK."""
+        await self._send_notification_card(receive_id=target, receive_id_type="open_id", text_markdown=text_markdown)
+
+    async def send_notification_for_owner(self, *, owner_user_id: str | None, target: str, text_markdown: str) -> None:
+        """Prefer a verified private chat when direct user delivery is restricted."""
+        if self._connection_repo is not None and owner_user_id:
+            try:
+                connections = await self._connection_repo.list_connections(owner_user_id)
+            except Exception as exc:
+                raise ChannelUnavailable("Feishu notification binding lookup is unavailable") from exc
+            matching_binding = False
+            for connection in connections:
+                if connection.get("owner_user_id") != owner_user_id or connection.get("provider") != self.name or connection.get("status") != "connected" or connection.get("external_account_id") != target:
+                    continue
+                matching_binding = True
+                metadata = connection.get("metadata")
+                if not isinstance(metadata, dict) or metadata.get("chat_type") != "p2p":
+                    continue
+                chat_id = self._non_empty_str(metadata.get("chat_id"))
+                if chat_id and chat_id == connection.get("workspace_id"):
+                    await self._send_notification_card(receive_id=chat_id, receive_id_type="chat_id", text_markdown=text_markdown)
+                    return
+            if not matching_binding:
+                raise RuntimeError("Feishu notification identity is no longer connected")
+        # Legacy and group bindings do not prove that their chat is private.
+        await self.send_notification(target=target, text_markdown=text_markdown)
+
+    async def _send_notification_card(self, *, receive_id: str, receive_id_type: Literal["open_id", "chat_id"], text_markdown: str) -> None:
+        """Send once and wait for the SDK ACK.
+
+        The notification outbox owns retries. Transport failures park its row;
+        a platform rejection remains a counted delivery attempt.
+        """
+        if not self.is_running or not self._api_client:
+            raise ChannelUnavailable("Feishu channel is not running")
+
+        from requests.exceptions import ConnectionError as RequestsConnectionError
+        from requests.exceptions import Timeout as RequestsTimeout
+
+        request = (
+            self._CreateMessageRequest.builder()
+            .receive_id_type(receive_id_type)
+            .request_body(self._CreateMessageRequestBody.builder().receive_id(receive_id).msg_type("interactive").content(self._build_card_content(text_markdown)).build())
+            .build()
+        )
+        try:
+            response = await asyncio.to_thread(self._api_client.im.v1.message.create, request)
+        except (RequestsConnectionError, RequestsTimeout, ConnectionError, TimeoutError, OSError) as exc:
+            raise ChannelUnavailable("Feishu notification transport is unavailable") from exc
+        if not response.success():
+            raise RuntimeError(f"Feishu notification rejected: code={response.code}")
+
+    async def send_group_notification_for_owner(self, *, owner_user_id: str | None, target: str, text_markdown: str) -> None:
+        if self._connection_repo is None or not owner_user_id:
+            raise ChannelUnavailable("Feishu notification binding lookup is unavailable")
+        try:
+            connections = await self._connection_repo.list_connections(owner_user_id)
+        except Exception as exc:
+            raise ChannelUnavailable("Feishu notification binding lookup is unavailable") from exc
+        for connection in connections:
+            if connection.get("owner_user_id") != owner_user_id or connection.get("id") != target:
+                continue
+            if is_feishu_notification_group(provider=connection.get("provider"), status=connection.get("status"), workspace_id=connection.get("workspace_id"), metadata=connection.get("metadata")):
+                await self._send_notification_card(receive_id=connection["workspace_id"], receive_id_type="chat_id", text_markdown=text_markdown)
+                return
+        raise RuntimeError("Feishu notification group is no longer connected")
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
         if not self._api_client:
@@ -667,12 +870,12 @@ class FeishuChannel(Channel):
         except Exception:
             logger.exception("[Feishu] failed to add reaction '%s' to message %s", emoji_type, message_id)
 
-    async def _reply_card(self, message_id: str, text: str) -> str | None:
-        """Reply with an interactive card and return the created card message ID."""
+    async def _reply_card(self, message_id: str, text: str, *, raw_card_content: bool = False) -> str | None:
+        """Reply with text or serialized card JSON and return the card message ID."""
         if not self._api_client:
             return None
 
-        content = self._build_card_content(text)
+        content = text if raw_card_content else self._build_card_content(text)
         request = self._ReplyMessageRequest.builder().message_id(message_id).request_body(self._ReplyMessageRequestBody.builder().msg_type("interactive").content(content).build()).build()
         response = await asyncio.to_thread(self._api_client.im.v1.message.reply, request)
         if not response.success():
@@ -691,12 +894,15 @@ class FeishuChannel(Channel):
         if not response.success():
             raise RuntimeError(f"Feishu card creation failed: code={response.code}, msg={response.msg}, log_id={response.get_log_id()}")
 
-    async def _update_card(self, message_id: str, text: str) -> None:
-        """Patch an existing card message in place."""
+    async def _update_card(self, message_id: str, text: str, *, raw_card_content: bool = False) -> None:
+        """Patch an existing card message in place.
+
+        ``raw_card_content=True`` means *text* is already a serialized card JSON.
+        """
         if not self._api_client or not self._PatchMessageRequest:
             return
 
-        content = self._build_card_content(text)
+        content = text if raw_card_content else self._build_card_content(text)
         request = self._PatchMessageRequest.builder().message_id(message_id).request_body(self._PatchMessageRequestBody.builder().content(content).build()).build()
         response = await asyncio.to_thread(self._api_client.im.v1.message.patch, request)
         if not response.success():
@@ -781,9 +987,71 @@ class FeishuChannel(Channel):
         except Exception:
             logger.exception("[Feishu] failed to send running reply for message %s", message_id)
 
+    async def _bind_card_thread(self, msg: OutboundMessage) -> str | None:
+        """Bind answers to their thread without changing the chat's /new route."""
+        user_id = self._non_empty_str(msg.metadata.get("user_id"))
+        if not (user_id and msg.thread_id and msg.thread_ts):
+            return None
+        # Provider message IDs cannot address this namespace, and the alias
+        # is reused across a thread's cards without exposing callback tokens.
+        topic_id = f"feishu-card:{msg.thread_id}"
+        try:
+            if msg.connection_id:
+                if self._connection_repo is None or not msg.owner_user_id:
+                    return None
+                await self._connection_repo.set_thread_id(connection_id=msg.connection_id, owner_user_id=msg.owner_user_id, provider=self.name, external_conversation_id=msg.chat_id, thread_id=msg.thread_id, external_topic_id=topic_id)
+            else:
+                store = self.config.get("channel_store")
+                if store is None:
+                    return None
+                await store.set_thread_id(self.name, msg.chat_id, msg.thread_id, topic_id=topic_id, user_id=user_id)
+        except Exception:
+            logger.exception("[Feishu] cannot bind clarification card to thread %s; using text fallback", msg.thread_id)
+            return None
+        return topic_id
+
+    def _register_pending_card(self, msg: OutboundMessage, request: ClarificationCardRequest, card_message_id: str | None, *, topic_id: str) -> None:
+        """Register a delivered button card so its clicks can be validated later."""
+        user_id = self._non_empty_str(msg.metadata.get("user_id"))
+        if not (user_id and msg.thread_id and card_message_id):
+            logger.warning("[Feishu] button card delivered without full binding context, clicks will fail closed: request_id=%s", request.request_id)
+            return
+        self._card_registry.register(
+            callback_token=request.callback_token,
+            request_id=request.request_id,
+            source=request.source,
+            thread_id=msg.thread_id,
+            chat_id=msg.chat_id,
+            originator_open_id=user_id,
+            options=request.options,
+            option_ids=request.option_ids,
+            card_message_id=card_message_id,
+            topic_id=topic_id,
+            connection_id=msg.connection_id,
+            owner_user_id=msg.owner_user_id,
+        )
+
+    async def _remember_card_delivery(self, msg: OutboundMessage, request: ClarificationCardRequest | None, card_message_id: str | None, *, topic_id: str | None) -> None:
+        # Admit callbacks immediately after the SDK returns. Auxiliary message
+        # aliases may involve slow storage, but the thread alias is already bound.
+        if request and topic_id:
+            self._register_pending_card(msg, request, card_message_id, topic_id=topic_id)
+        self._remember_pending_clarification(msg, card_message_id, topic_id=topic_id)
+        await self._remember_thread_mapping(msg, msg.thread_ts, card_message_id)
+
     async def _send_card_message(self, msg: OutboundMessage) -> None:
         """Send or update the Feishu card tied to the current request."""
         source_message_id = msg.thread_ts
+        # Option clarifications render as an interactive button card on the
+        # final outbound; everything else keeps the plain markdown card.
+        card_request = ClarificationCardRequest.from_metadata(msg.metadata) if (self._card_interaction_enabled and msg.is_final) else None
+        card_topic_id = await self._bind_card_thread(msg) if card_request else None
+        if card_topic_id is None:
+            card_request = None
+        card_text = build_button_card(card_request) if card_request else self._compose_card_text(msg.text, msg.metadata)
+        # Button cards arrive as serialized card JSON and bypass the markdown
+        # wrapper; the plain path keeps its exact historical call signature.
+        raw_card_kw: dict[str, bool] = {"raw_card_content": True} if card_request else {}
         if source_message_id:
             running_card_id = self._running_card_ids.get(source_message_id)
             awaited_running_card_task = False
@@ -795,9 +1063,8 @@ class FeishuChannel(Channel):
                     running_card_id = await running_card_task
 
             if running_card_id:
-                card_text = self._compose_card_text(msg.text, msg.metadata)
                 try:
-                    await self._update_card(running_card_id, card_text)
+                    await self._update_card(running_card_id, card_text, **raw_card_kw)
                 except Exception:
                     if not msg.is_final:
                         raise
@@ -805,20 +1072,18 @@ class FeishuChannel(Channel):
                         "[Feishu] failed to patch running card %s, falling back to final reply",
                         running_card_id,
                     )
-                    fallback_card_id = await self._reply_card(source_message_id, card_text)
-                    await self._remember_thread_mapping(msg, source_message_id, fallback_card_id)
-                    self._remember_pending_clarification(msg, fallback_card_id)
+                    fallback_card_id = await self._reply_card(source_message_id, card_text, **raw_card_kw)
+                    await self._remember_card_delivery(msg, card_request, fallback_card_id, topic_id=card_topic_id)
                 else:
-                    await self._remember_thread_mapping(msg, source_message_id, running_card_id)
-                    self._remember_pending_clarification(msg, running_card_id)
+                    await self._remember_card_delivery(msg, card_request, running_card_id, topic_id=card_topic_id)
                     logger.info("[Feishu] running card updated: source=%s card=%s", source_message_id, running_card_id)
             elif msg.is_final:
                 final_card_id = await self._reply_card(
                     source_message_id,
-                    self._compose_card_text(msg.text, msg.metadata),
+                    card_text,
+                    **raw_card_kw,
                 )
-                await self._remember_thread_mapping(msg, source_message_id, final_card_id)
-                self._remember_pending_clarification(msg, final_card_id)
+                await self._remember_card_delivery(msg, card_request, final_card_id, topic_id=card_topic_id)
             elif awaited_running_card_task:
                 logger.warning(
                     "[Feishu] running card task finished without message_id for source=%s, skipping duplicate non-final creation",
@@ -846,13 +1111,12 @@ class FeishuChannel(Channel):
         if store is None or not msg.thread_id:
             return
 
-        metadata_topic_ids = [
-            msg.metadata.get("message_id"),
-            msg.metadata.get("root_id"),
-            msg.metadata.get("parent_id"),
-            msg.metadata.get("thread_id"),
-            msg.metadata.get("topic_id"),
-        ]
+        topic_id = self._non_empty_str(msg.metadata.get("topic_id"))
+        metadata_topic_ids = [msg.metadata.get("message_id"), topic_id]
+        if not (topic_id and topic_id.startswith("feishu-card:")):
+            metadata_topic_ids.extend([msg.metadata.get("root_id"), msg.metadata.get("parent_id"), msg.metadata.get("thread_id")])
+        # A reply to an older card stays in that card's thread. Its inherited
+        # root/parent must not overwrite the conversation switched by /new.
         user_id = ""
         raw_user_id = msg.metadata.get("user_id")
         if isinstance(raw_user_id, str):
@@ -927,12 +1191,124 @@ class FeishuChannel(Channel):
             logger.info("[Feishu] %s cancelled by channel stop", name)
             raise StoreLookupUnresolved("cancelled by channel stop") from None
 
-    def _remember_pending_clarification(self, msg: OutboundMessage, card_message_id: str | None) -> None:
+    def _card_action_toast(self, content: str, *, toast_type: str = "info"):
+        """Build the synchronous toast ack for a card click."""
+        toast = self._CallBackToast()
+        toast.type = toast_type
+        toast.content = content
+        resp = self._P2CardActionTriggerResponse()
+        resp.toast = toast
+        return resp
+
+    def _on_card_action(self, data):
+        """Sync card-click callback on the lark SDK loop: validate, ack, dispatch.
+
+        Only validation and the toast ack happen on this thread; the state
+        change (terminal card update + hidden synthetic inbound) is dispatched
+        to the Gateway loop. Registry consumption is one-time, so a validated
+        click can never be replayed, and a non-originator click leaves the
+        entry intact for the real originator.
+        """
+        try:
+            value = getattr(data.event.action, "value", None) or {}
+            callback_token = value.get("callback_token")
+            option_id = value.get("option_id")
+            option_value = value.get("option_value")
+            operator_open_id = getattr(data.event.operator, "open_id", None)
+        except AttributeError:
+            return self._card_action_toast("无法处理的卡片操作", toast_type="warning")
+        if not all(isinstance(item, str) and item for item in (callback_token, option_id, option_value, operator_open_id)):
+            return self._card_action_toast("无法处理的卡片操作", toast_type="warning")
+
+        entry, reason = self._card_registry.consume_if_originator(callback_token, operator_open_id, option_id=option_id, option_value=option_value)
+        if reason == "not_originator":
+            return self._card_action_toast("仅提问发起人可操作", toast_type="warning")
+        if entry is None:
+            return self._card_action_toast("此卡片已失效或已处理", toast_type="warning")
+
+        scheduled = False
+        if self._main_loop and self._main_loop.is_running():
+            scheduled = bool(
+                self._submit_threadsafe_coroutine(
+                    self._resolve_card_click(entry, option_id=option_id, option_value=option_value, operator_open_id=operator_open_id),
+                    self._main_loop,
+                    name="resolve_card_click",
+                    msg_id=entry.get("card_message_id") or entry["request_id"],
+                )
+            )
+        if not scheduled:
+            # Never ack success for a click we could not dispatch: the entry is
+            # already consumed, so an honest warning beats a fake "已选择".
+            logger.warning("[Feishu] card click could not be dispatched (no running loop or loop closing): request_id=%s", entry["request_id"])
+            return self._card_action_toast("处理失败，请改用文字回复", toast_type="warning")
+        return self._card_action_toast(f"已选择：{option_value}", toast_type="success")
+
+    async def _resolve_card_click(self, entry: PendingCardEntry, *, option_id: str, option_value: str, operator_open_id: str) -> None:
+        """Apply a validated click: inject the hidden human-input response first
+        (carrying the routing identity the ChannelManager keys on), then flip the
+        card to its terminal state only after the answer is admitted to the bus —
+        a dropped inbound must never leave a card claiming a choice was recorded."""
+        card_message_id = entry.get("card_message_id")
+        response = {
+            "version": 1,
+            "kind": "human_input_response",
+            "source": entry["source"],
+            "request_id": entry["request_id"],
+            "response_kind": "option",
+            "option_id": option_id,
+            "value": option_value,
+        }
+        inbound = self._make_inbound(
+            chat_id=entry["chat_id"],
+            user_id=operator_open_id,
+            text=option_value,
+            thread_ts=card_message_id,
+            metadata={
+                "message_id": card_message_id,
+                "user_id": operator_open_id,
+                "topic_id": entry.get("topic_id"),
+                "hide_from_ui": True,
+                HUMAN_INPUT_RESPONSE_METADATA_KEY: response,
+            },
+        )
+        inbound.topic_id = entry.get("topic_id")
+        inbound.connection_id = entry.get("connection_id")
+        inbound.owner_user_id = entry.get("owner_user_id")
+        # Bound-identity admission re-reads the connection with the message's
+        # workspace_id, and Feishu connections are bound with workspace_id =
+        # chat_id (see _bind_connection_from_connect_code). Without this the
+        # re-read misses and every click is rejected as unbound.
+        inbound.workspace_id = entry.get("chat_id")
+
+        published = await self._publish_inbound_or_drop(inbound)
+        if not published:
+            logger.error("[Feishu] card answer dropped by intake queue; card left clickable but the entry is consumed (request_id=%s)", entry["request_id"])
+            return
+
+        self._forget_pending_card_clarification(entry)
+        if card_message_id:
+            try:
+                await self._update_card(card_message_id, f"✅ 已选择：{option_value}")
+            except Exception:
+                logger.exception("[Feishu] failed to mark card resolved: %s", card_message_id)
+
+    def _forget_pending_card_clarification(self, entry: PendingCardEntry) -> None:
+        """Retire only this accepted card's plain-text continuation hint."""
+        key = self._pending_key(entry["chat_id"], entry["originator_open_id"])
+        with self._thread_lock:
+            pending_items = self._pending_clarifications.get(key, [])
+            remaining = [pending for pending in pending_items if not (pending["card_message_id"] == entry.get("card_message_id") and pending["thread_id"] == entry["thread_id"])]
+            if remaining:
+                self._pending_clarifications[key] = remaining
+            else:
+                self._pending_clarifications.pop(key, None)
+
+    def _remember_pending_clarification(self, msg: OutboundMessage, card_message_id: str | None, *, topic_id: str | None = None) -> None:
         if not msg.is_final or msg.metadata.get(PENDING_CLARIFICATION_METADATA_KEY) is not True:
             return
 
         user_id = self._non_empty_str(msg.metadata.get("user_id"))
-        topic_id = self._non_empty_str(msg.metadata.get("topic_id"))
+        topic_id = topic_id or self._non_empty_str(msg.metadata.get("topic_id"))
         source_message_id = self._non_empty_str(msg.thread_ts) or self._non_empty_str(msg.metadata.get("message_id"))
         if not (user_id and topic_id and msg.thread_id and source_message_id and card_message_id):
             return
@@ -958,7 +1334,7 @@ class FeishuChannel(Channel):
             msg.thread_id,
         )
 
-    def _consume_pending_clarification(self, chat_id: str, user_id: str) -> dict[str, Any] | None:
+    def _consume_pending_clarification(self, chat_id: str, user_id: str, *, reply_to_ids: list[str] | None = None) -> dict[str, Any] | None:
         key = self._pending_key(chat_id, user_id)
         with self._thread_lock:
             pending_items = self._pending_clarifications.get(key)
@@ -966,19 +1342,23 @@ class FeishuChannel(Channel):
                 return None
 
             now = time.time()
-            while pending_items:
-                pending = pending_items.pop(0)
-                created_at = pending.get("created_at")
-                if isinstance(created_at, (int, float)) and now - created_at <= PENDING_CLARIFICATION_TTL_SECONDS:
-                    if pending_items:
-                        self._pending_clarifications[key] = pending_items
-                    else:
-                        self._pending_clarifications.pop(key, None)
-                    return pending
-                logger.info("[Feishu] pending clarification expired: chat_id=%s user_id=%s", chat_id, user_id)
-
-            self._pending_clarifications.pop(key, None)
-            return None
+            pending_items = [pending for pending in pending_items if isinstance(pending.get("created_at"), (int, float)) and now - pending["created_at"] <= PENDING_CLARIFICATION_TTL_SECONDS]
+            # Explicit replies target a card/source, while accepted ordinary
+            # replies use their current thread alias. Shared roots cannot select
+            # a card belonging to a conversation replaced by /new.
+            if reply_to_ids is None:
+                matched = 0 if pending_items else None
+            else:
+                matched = next(
+                    (index for field in ("card_message_id", "source_message_id", "topic_id") for candidate in reply_to_ids for index, pending in enumerate(pending_items) if pending.get(field) == candidate),
+                    None,
+                )
+            pending = pending_items.pop(matched) if matched is not None else None
+            if pending_items:
+                self._pending_clarifications[key] = pending_items
+            else:
+                self._pending_clarifications.pop(key, None)
+            return pending
 
     def _route_without_store(self, parsed: _ParsedMessage) -> _Routing:
         """Routing for a channel constructed without a ``channel_store`` (no lookups possible)."""
@@ -987,11 +1367,14 @@ class FeishuChannel(Channel):
             topic_id = None
         if parsed.msg_type != InboundMessageType.CHAT:
             return _Routing(topic_id, False, False)
-        pending = self._consume_pending_clarification(parsed.chat_id, parsed.sender_id)
+        if self._card_interaction_enabled and parsed.chat_type == "p2p" and not (parsed.root_id or parsed.parent_id or parsed.feishu_thread_id):
+            return _Routing(None, False, False)
+        reply_to_ids = [parsed.parent_id] if self._card_interaction_enabled and parsed.parent_id else None
+        pending = self._consume_pending_clarification(parsed.chat_id, parsed.sender_id, reply_to_ids=reply_to_ids)
         pending_topic_id = self._non_empty_str(pending.get("topic_id")) if pending else None
         if not pending_topic_id:
             return _Routing(topic_id, False, False)
-        return _Routing(pending_topic_id, False, True)
+        return _Routing(pending_topic_id, False, True, self._non_empty_str(pending.get("card_message_id")))
 
     async def _resolve_routing(self, attempt: _RoutingAttempt) -> _Routing:
         """Decide a message's topic on the Gateway loop, consulting and updating the channel store.
@@ -1010,13 +1393,23 @@ class FeishuChannel(Channel):
             if candidates:
                 stored = await self._first_stored_topic(store, parsed.chat_id, candidates)
                 if stored:
+                    pending = (
+                        self._consume_pending_clarification(parsed.chat_id, parsed.sender_id, reply_to_ids=[parsed.parent_id]) if self._card_interaction_enabled and parsed.msg_type == InboundMessageType.CHAT and parsed.parent_id else None
+                    )
+                    if pending:
+                        return _Routing(pending["topic_id"], True, True, self._non_empty_str(pending.get("card_message_id")))
                     return _Routing(stored, True, False)
             topic_id: str | None = parsed.root_id or parsed.msg_id
             if parsed.chat_type == "p2p":
                 topic_id = None
             if parsed.msg_type != InboundMessageType.CHAT:
                 return _Routing(topic_id, False, False)
-            pending = self._consume_pending_clarification(parsed.chat_id, parsed.sender_id)
+            if self._card_interaction_enabled and parsed.chat_type == "p2p" and not candidates:
+                # Unthreaded P2P messages follow the current conversation,
+                # including /new. Only explicit card replies use the old alias.
+                return _Routing(None, False, False)
+            reply_to_ids = [parsed.parent_id] if self._card_interaction_enabled and parsed.parent_id else None
+            pending = self._consume_pending_clarification(parsed.chat_id, parsed.sender_id, reply_to_ids=reply_to_ids)
             if not (pending and self._non_empty_str(pending.get("topic_id"))):
                 return _Routing(topic_id, False, False)
             attempt.pending = pending
@@ -1024,7 +1417,7 @@ class FeishuChannel(Channel):
         thread_id = self._non_empty_str(attempt.pending.get("thread_id"))
         if thread_id:
             await store.set_thread_id(self.name, parsed.chat_id, thread_id, topic_id=pending_topic_id, user_id=parsed.sender_id)
-        return _Routing(pending_topic_id, False, True)
+        return _Routing(pending_topic_id, False, True, self._non_empty_str(attempt.pending.get("card_message_id")))
 
     async def _resolve_routing_bounded(self, attempt: _RoutingAttempt) -> _Routing | StoreLookupUnresolved:
         """``_resolve_routing`` under the store deadline; no answer in time (or a store error) is *unresolved*.
@@ -1183,6 +1576,8 @@ class FeishuChannel(Channel):
             }
             if source_preview:
                 metadata[SOURCE_PREVIEW_METADATA_KEY] = source_preview
+            if routing.clarification_card_id:
+                metadata[_PENDING_CARD_METADATA_KEY] = routing.clarification_card_id
 
             inbound = self._make_inbound(
                 chat_id=parsed.chat_id,
@@ -1373,7 +1768,16 @@ class FeishuChannel(Channel):
     ) -> None:
         """Kick off Feishu side effects without delaying inbound dispatch."""
         try:
+            clarification_card_id = inbound.metadata.pop(_PENDING_CARD_METADATA_KEY, None)
             inbound = await self._attach_connection_identity(inbound)
+            if self._card_interaction_enabled and not clarification_card_id and inbound.msg_type == InboundMessageType.CHAT:
+                # Ordinary answers retire only the current thread's buttons;
+                # older cards cannot redirect a fresh /new conversation.
+                thread_id = await lookup_thread_id(inbound, repo=self._connection_repo, store=self.config.get("channel_store"))
+                pending = self._consume_pending_clarification(inbound.chat_id, inbound.user_id, reply_to_ids=[f"feishu-card:{thread_id}"]) if thread_id else None
+                if pending:
+                    clarification_card_id = pending.get("card_message_id")
+                    inbound.metadata[RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY] = True
             reaction_message_ids = source_message_ids or [msg_id]
             for reaction_message_id in reaction_message_ids:
                 reaction_task = asyncio.create_task(self._add_reaction(reaction_message_id, "OK"))
@@ -1381,8 +1785,11 @@ class FeishuChannel(Channel):
             self._ensure_running_card_started(msg_id, metadata=inbound.metadata)
             if reservation is None:
                 await self.bus.publish_inbound(inbound)
+                published = True
             else:
-                self._commit_reserved_inbound(reservation, inbound)
+                published = self._commit_reserved_inbound(reservation, inbound)
+            if published and clarification_card_id:
+                self._card_registry.discard_card(inbound.chat_id, inbound.user_id, clarification_card_id)
         finally:
             if reservation is not None:
                 reservation.release()
@@ -1395,7 +1802,20 @@ class FeishuChannel(Channel):
             workspace_id=inbound.chat_id,
         )
 
-    async def _bind_connection_from_connect_code(self, *, message_id: str, chat_id: str, user_id: str, code: str) -> bool:
+    async def _get_group_name(self, chat_id: str) -> str | None:
+        """Best-effort display name; missing read permission must not break binding."""
+        if not self._api_client or not self._GetChatRequest:
+            return None
+        try:
+            request = self._GetChatRequest.builder().chat_id(chat_id).build()
+            response = await asyncio.to_thread(self._api_client.im.v1.chat.get, request)
+            if response.success():
+                return self._non_empty_str(getattr(response.data, "name", None))
+        except Exception:
+            logger.debug("[Feishu] group name lookup unavailable; binding without a display name")
+        return None
+
+    async def _bind_connection_from_connect_code(self, *, message_id: str, chat_id: str, user_id: str, code: str, chat_type: str | None = None) -> bool:
         if self._connection_repo is None or not code:
             return False
 
@@ -1413,9 +1833,11 @@ class FeishuChannel(Channel):
             provider="feishu",
             external_account_id=user_id,
             workspace_id=chat_id,
+            workspace_name=(notification_group_display_name(state.get("metadata")) or await self._get_group_name(chat_id)) if chat_type == "group" else None,
             metadata={
                 "chat_id": chat_id,
                 "message_id": message_id,
+                "chat_type": chat_type,
             },
             status="connected",
         )
@@ -1536,6 +1958,7 @@ class FeishuChannel(Channel):
                             chat_id=chat_id,
                             user_id=sender_id,
                             code=connect_code,
+                            chat_type=parsed.chat_type,
                         ),
                         self._main_loop,
                         name="bind_connection",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import json
 import threading
 import time
 from collections.abc import Iterator
@@ -10,18 +11,23 @@ from email.utils import format_datetime
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
+import openai
 import pytest
 from langchain.agents import create_agent
 from langchain.agents.middleware.types import ModelResponse
+from langchain_core.callbacks import AsyncCallbackHandler
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import StructuredTool
+from langchain_openai import ChatOpenAI
 from langgraph.errors import GraphBubbleUp
 
 from deerflow.agents.middlewares.llm_error_handling_middleware import (
     EmptyModelResponseError,
     LLMErrorHandlingMiddleware,
+    _extract_in_band_status,
     _extract_retry_after_ms,
 )
 from deerflow.config.app_config import AppConfig, LlmCallConfig
@@ -463,6 +469,27 @@ async def test_async_empty_stop_retries_once(monkeypatch: pytest.MonkeyPatch) ->
     ],
 )
 def test_nonempty_or_non_stop_response_is_not_classified_as_empty(message: AIMessage) -> None:
+    middleware = _build_middleware(retry_max_attempts=3)
+    attempts = 0
+
+    def handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        return message
+
+    result = middleware.wrap_model_call(SimpleNamespace(), handler)
+
+    assert result is message
+    assert attempts == 1
+
+
+@pytest.mark.parametrize("block_type", [[], {}, ["text"], {"type": "text"}])
+def test_unhashable_block_type_does_not_break_empty_response_classification(block_type: object) -> None:
+    """A provider may emit ``type: []`` / ``type: {}``; the visible-text probe must skip, not raise."""
+    message = AIMessage(
+        content=[{"type": block_type, "text": "ignored"}, {"type": "text", "text": "visible answer"}],
+        response_metadata={"finish_reason": "stop"},
+    )
     middleware = _build_middleware(retry_max_attempts=3)
     attempts = 0
 
@@ -1107,11 +1134,14 @@ def test_circuit_breaker_trips_and_recovers(monkeypatch: pytest.MonkeyPatch) -> 
     waits: list[float] = []
     monkeypatch.setattr("time.sleep", lambda d: waits.append(d))
 
-    # Mock time.time to decouple from private implementation details and enable time travel
+    # Drive the breaker's recovery timing through its injectable monotonic clock
+    # so the test can time-travel deterministically. The breaker measures the
+    # recovery window on this clock (not wall time), so advancing it is what
+    # moves the open->half_open transition.
     current_time = 1000.0
-    monkeypatch.setattr("time.time", lambda: current_time)
 
     middleware = _build_middleware(circuit_failure_threshold=3, circuit_recovery_timeout_sec=10)
+    middleware._circuit_clock = lambda: current_time
     monkeypatch.setattr(middleware, "_classify_error", mock_classify_retriable)
 
     request: Any = {"messages": []}
@@ -1273,10 +1303,11 @@ async def test_async_circuit_breaker_trips_and_recovers(monkeypatch: pytest.Monk
 
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
 
+    # Time-travel via the breaker's injectable monotonic clock (see the sync twin).
     current_time = 1000.0
-    monkeypatch.setattr("time.time", lambda: current_time)
 
     middleware = _build_middleware(circuit_failure_threshold=3, circuit_recovery_timeout_sec=10)
+    middleware._circuit_clock = lambda: current_time
     monkeypatch.setattr(middleware, "_classify_error", mock_classify_retriable)
 
     async def async_failing_handler(request: Any) -> Any:
@@ -1646,6 +1677,75 @@ def test_async_index_error_exhausted_returns_user_fallback(
     assert result.additional_kwargs["error_reason"] == "transient"
     assert result.additional_kwargs["error_type"] == "IndexError"
     assert "temporarily unavailable" in str(result.content)
+
+
+def test_classify_error_empty_stream_value_error_is_retriable_transient() -> None:
+    """The streaming path reports an HTTP-200-but-empty response as
+    ``ValueError("No generations found in stream.")`` (raised by
+    ``langchain_core...generate_from_stream``). It is the same upstream glitch
+    as the non-streaming empty-``generations`` IndexError and must be retried.
+    """
+    from langchain_core.language_models.chat_models import generate_from_stream
+
+    middleware = _build_middleware()
+    with pytest.raises(ValueError) as excinfo:
+        generate_from_stream(iter(()))
+    retriable, reason = middleware._classify_error(excinfo.value)
+    assert retriable is True
+    assert reason == "transient"
+
+
+def test_classify_error_unrelated_value_error_stays_generic() -> None:
+    middleware = _build_middleware()
+    retriable, reason = middleware._classify_error(ValueError("invalid literal for int()"))
+    assert retriable is False
+    assert reason == "generic"
+
+
+def test_async_empty_stream_retries_with_configured_budget_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    middleware = _build_middleware(retry_max_attempts=3, retry_base_delay_ms=10, retry_cap_delay_ms=10)
+    attempts = 0
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    async def handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise ValueError("No generations found in stream.")
+        return AIMessage(content="ok")
+
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+    result = asyncio.run(middleware.awrap_model_call(SimpleNamespace(), handler))
+
+    assert isinstance(result, AIMessage)
+    assert result.content == "ok"
+    assert attempts == 3
+
+
+def test_sync_empty_stream_exhausted_uses_configured_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    middleware = _build_middleware(retry_max_attempts=2, retry_base_delay_ms=10, retry_cap_delay_ms=10)
+    attempts = 0
+
+    def handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        raise ValueError("No generations found in stream.")
+
+    monkeypatch.setattr("time.sleep", lambda _delay: None)
+
+    result = middleware.wrap_model_call(SimpleNamespace(), handler)
+
+    assert attempts == 2
+    assert isinstance(result, AIMessage)
+    assert result.additional_kwargs["deerflow_error_fallback"] is True
+    assert result.additional_kwargs["error_reason"] == "transient"
 
 
 # ---------- Process-wide concurrency limiter ----------
@@ -2889,3 +2989,460 @@ def test_concurrent_burst_failures_get_distinct_jittered_delays() -> None:
         _random.setstate(saved_state)
     assert all(5000 <= d <= 8000 for d in delays)
     assert len(set(delays)) > 1  # de-synchronized, not a single 5000ms tick
+
+
+class _FakeMonotonic:
+    """A manually advanced monotonic clock for deterministic recovery timing."""
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self._now = start
+
+    def __call__(self) -> float:
+        return self._now
+
+    def advance(self, seconds: float) -> None:
+        self._now += seconds
+
+
+def _trip_circuit_open(middleware: LLMErrorHandlingMiddleware) -> None:
+    """Drive the breaker to OPEN with a configurable recovery window."""
+    middleware.circuit_failure_threshold = 1
+    middleware.circuit_recovery_timeout_sec = 60
+    middleware._record_failure()
+    assert middleware._circuit_state == "open"
+    assert middleware._check_circuit() is True  # fast-fail while open
+
+
+def test_circuit_recovery_is_measured_on_the_injected_monotonic_clock() -> None:
+    """The open->half_open transition tracks monotonic *elapsed* time.
+
+    The breaker stores ``_circuit_open_until = clock() + recovery_timeout_sec``
+    and fast-fails while ``clock() < _circuit_open_until``. Reading the recovery
+    deadline from the injected monotonic clock means it recovers after exactly
+    ``recovery_timeout_sec`` of elapsed time, independent of any wall-clock move.
+    """
+    clock = _FakeMonotonic()
+    middleware = _build_middleware(retry_max_attempts=1)
+    middleware._circuit_clock = clock
+    _trip_circuit_open(middleware)
+
+    # Just before the window elapses: still open.
+    clock.advance(59.9)
+    assert middleware._check_circuit() is True
+    assert middleware._circuit_state == "open"
+
+    # Once the monotonic window elapses: a single probe is admitted (half_open).
+    clock.advance(0.1)
+    assert middleware._check_circuit() is False
+    assert middleware._circuit_state == "half_open"
+    assert middleware._circuit_probe_in_flight is True
+
+
+def test_circuit_recovery_survives_a_backward_wall_clock_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A backward wall-clock step must not extend the fast-fail window.
+
+    Regression for the breaker measuring recovery with wall-clock ``time.time()``:
+    an NTP correction / VM resume / manual clock change that steps the wall clock
+    backward while the circuit is open would hold ``now < _circuit_open_until``
+    true far past ``recovery_timeout_sec``, shedding every LLM call until the wall
+    clock caught back up. Monotonic timing is immune: the recovery window advances
+    with real elapsed time regardless of what the wall clock does.
+    """
+    import deerflow.agents.middlewares.llm_error_handling_middleware as mod
+
+    clock = _FakeMonotonic()
+    middleware = _build_middleware(retry_max_attempts=1)
+    middleware._circuit_clock = clock
+    _trip_circuit_open(middleware)
+
+    # Simulate a large backward wall-clock step (e.g. the host's clock is pulled
+    # back by an hour) after the circuit opened. Monotonic elapsed time still
+    # reaches the recovery window, so the breaker must probe on schedule.
+    monkeypatch.setattr(mod.time, "time", lambda: 1_000_000.0 - 3600.0)
+    clock.advance(60.0)
+
+    assert middleware._check_circuit() is False
+    assert middleware._circuit_state == "half_open"
+    assert middleware._circuit_probe_in_flight is True
+
+
+# ---------- Provider errors reported inside a 200 stream ----------
+#
+# A provider (or a gateway in front of one) that has already answered ``200``
+# reports a later failure as an SSE ``error`` event. The openai SDK raises it as
+# the base ``APIError``: ``body`` is the event's ``error`` object, ``code`` and
+# ``type`` are copied from it, and there is no status code and no response.
+# ``_in_stream_error`` builds exactly that object.
+
+# What OmniRoute (an OpenAI-compatible gateway) sent after committing to ``200``
+# with SSE keepalives: its combo's error, wrapping the target's own 504 frame.
+_OMNIROUTE_COMBO_504 = (
+    "openai-compatible-chat-conn:7b9b6797/glm-5.3: provider — data: "
+    '{"error":{"message":"[504]: Request exceeded OmniRoute\'s local rate-limit execution expiration '
+    "(legacy resilienceSettings.requestQueue.maxWaitMs=15000ms) for openai-compatible-chat-conn:7b9b6797/glm-5.3. "
+    "Bottleneck applies this deadline only after dispatch; it does not bound queue wait and is not an "
+    'upstream-generated timeout.","type":"server_error","code":"RATE_LIMIT_EXECUTION_TIMEOUT"}}'
+)
+_OMNIROUTE_TARGET_504 = (
+    "[504]: Request exceeded OmniRoute's local rate-limit execution expiration "
+    "(legacy resilienceSettings.requestQueue.maxWaitMs=15000ms) for openai-compatible-chat-conn:7b9b6797/glm-5.3. "
+    "Bottleneck applies this deadline only after dispatch; it does not bound queue wait and is not an "
+    "upstream-generated timeout."
+)
+_STREAM_REQUEST = httpx.Request("POST", "https://llm.invalid/v1/chat/completions")
+
+
+def _in_stream_error(message: str, **error_fields: Any) -> openai.APIError:
+    """Build the ``APIError`` the openai SDK raises for an SSE ``error`` event."""
+    return openai.APIError(message, _STREAM_REQUEST, body={"message": message, **error_fields})
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        pytest.param(_in_stream_error(_OMNIROUTE_COMBO_504, type="server_error", code="gateway_timeout"), id="omniroute-combo"),
+        pytest.param(_in_stream_error(_OMNIROUTE_TARGET_504, type="server_error", code="RATE_LIMIT_EXECUTION_TIMEOUT"), id="omniroute-target"),
+    ],
+)
+def test_omniroute_in_stream_504_is_transient(exc: openai.APIError) -> None:
+    assert _build_middleware()._classify_error(exc) == (True, "transient")
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        pytest.param("[504]: upstream timed out", id="bracketed"),
+        pytest.param("upstream answered HTTP 502", id="http"),
+        pytest.param("upstream failed (HTTP 502)", id="http-in-parens"),
+        pytest.param("HTTP/1.1 502 Bad Gateway", id="http-1.1"),
+        pytest.param("HTTP/2 503 from upstream", id="http-2"),
+        pytest.param("upstream status 503", id="status-space"),
+        pytest.param("upstream status: 503", id="status-colon"),
+        pytest.param("upstream status=503", id="status-equals"),
+        pytest.param("upstream status code: 503", id="status-code"),
+        pytest.param("upstream status_code=503", id="status_code"),
+        pytest.param('upstream replied {"status": 503}', id="json-status"),
+        pytest.param('upstream replied {"status":503}', id="json-status-without-space"),
+        pytest.param('upstream replied {"statusCode": 503}', id="json-statusCode"),
+        pytest.param("gateway [999] relayed HTTP 503", id="out-of-range-match-skipped"),
+        pytest.param("error: [503] overloaded", id="bracketed-in-running-text"),
+        pytest.param("openai-compatible-chat-conn:7b9b6797/glm-5.3: provider — [504]: upstream timed out (HTTP 504)", id="omniroute-combo-text"),
+        pytest.param("upstream answered HTTP 200, then failed with [503]", id="status-200-skipped-for-later-match"),
+    ],
+)
+def test_in_stream_error_takes_its_status_from_the_message(message: str) -> None:
+    assert _build_middleware()._classify_error(_in_stream_error(message)) == (True, "transient")
+
+
+@pytest.mark.parametrize(
+    "error_fields",
+    [
+        pytest.param({"code": 503}, id="int-code"),
+        pytest.param({"code": "503"}, id="str-code"),
+        pytest.param({"code": " 503 "}, id="str-code-with-whitespace"),
+        pytest.param({"code": 503, "status": "UNAVAILABLE"}, id="google-style"),
+        pytest.param({"status": 502}, id="status"),
+        pytest.param({"status_code": 502}, id="status_code"),
+        pytest.param({"error": {"code": 503}}, id="nested-code"),
+        pytest.param({"error": {"status": 502}}, id="nested-status"),
+        pytest.param({"error": {"status_code": 502}}, id="nested-status_code"),
+        pytest.param({"type": "server_error"}, id="server-error-type"),
+        pytest.param({"type": "SERVER_ERROR"}, id="server-error-type-upper-case"),
+        pytest.param({"error": {"type": "server_error"}}, id="nested-server-error-type"),
+        pytest.param({"code": 200, "type": "server_error"}, id="code-200-skipped-for-server-error-type"),
+        pytest.param({"code": 200, "status": 503}, id="code-200-skipped-for-status"),
+        pytest.param({"code": 999, "status": 503}, id="code-999-skipped-for-status"),
+    ],
+)
+def test_in_stream_error_takes_its_status_from_structured_fields(error_fields: dict[str, Any]) -> None:
+    exc = _in_stream_error("Upstream request failed.", **error_fields)
+    assert _build_middleware()._classify_error(exc) == (True, "transient")
+
+
+def test_in_stream_non_error_status_does_not_hide_server_error_type() -> None:
+    exc = _in_stream_error("stream aborted after HTTP 200", type="server_error")
+    assert _build_middleware()._classify_error(exc) == (True, "transient")
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        pytest.param(_in_stream_error("stream aborted after HTTP 200"), id="message-http-200"),
+        pytest.param(_in_stream_error("Upstream request failed.", code=101), id="code-101"),
+        pytest.param(_in_stream_error("upstream redirected: status 302"), id="message-status-302"),
+    ],
+)
+def test_in_band_lookup_skips_non_error_statuses(exc: openai.APIError) -> None:
+    assert _extract_in_band_status(exc) is None
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        pytest.param(_in_stream_error("upstream rate-limit hit"), id="hyphenated-message"),
+        pytest.param(_in_stream_error("Upstream request failed.", code="rate_limit_exceeded"), id="snake-case-code"),
+        pytest.param(_in_stream_error("Request exceeded the local execution expiration.", code="RATE_LIMIT_EXECUTION_TIMEOUT"), id="upper-snake-case-code"),
+        pytest.param(RuntimeError("Codex API response.failed (rate_limit_exceeded): slow down"), id="codex-response-failed"),
+        pytest.param(_in_stream_error("rate-limit header malformed"), id="separator-busy-without-a-status"),
+    ],
+)
+def test_status_less_error_matches_busy_patterns_across_separators(exc: Exception) -> None:
+    assert _build_middleware()._classify_error(exc) == (True, "busy")
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        pytest.param(
+            _in_stream_error("The response was filtered due to the prompt triggering content management policy.", type="invalid_request_error", code="content_filter"),
+            id="content-filter",
+        ),
+        pytest.param(
+            _in_stream_error("This model's maximum context length is 131072 tokens. However, your messages resulted in 130504 tokens.", type="invalid_request_error", code="context_length_exceeded"),
+            id="context-length",
+        ),
+        pytest.param(_in_stream_error("Upstream request failed.", code=400), id="code-400"),
+        pytest.param(_in_stream_error("Upstream request failed.", code=400, type="server_error"), id="code-400-beats-server-error-type"),
+        pytest.param(_in_stream_error("upstream returned HTTP 400", type="server_error"), id="message-400-beats-server-error-type"),
+        pytest.param(_in_stream_error("upstream failed [999]"), id="out-of-range-status"),
+        pytest.param(_in_stream_error("Upstream request failed.", code=True), id="bool-code"),
+        pytest.param(_in_stream_error("upstream failed: [5040]"), id="bracketed-four-digits"),
+        pytest.param(_in_stream_error("upstream failed: [50]"), id="bracketed-two-digits"),
+        pytest.param(_in_stream_error("upstream failed: HTTP502"), id="http-without-space"),
+        pytest.param(_in_stream_error("upstream failed: https://host:5020"), id="url-port"),
+        pytest.param(_in_stream_error("upstream failed: status ok"), id="status-word"),
+        pytest.param(_in_stream_error("upstream failed: status 5030"), id="status-four-digits"),
+        pytest.param(_in_stream_error("upstream failed: status\n503"), id="status-number-on-next-line"),
+        pytest.param(_in_stream_error("upstream failed: status503"), id="status-without-separator"),
+        pytest.param(_in_stream_error("upstream failed: statuscode503"), id="statuscode-without-separator"),
+        pytest.param(_in_stream_error("upstream failed: status_code503"), id="status_code-without-separator"),
+        # Arabic-Indic and fullwidth digits for 503: int() accepts them, the status regex must not.
+        pytest.param(_in_stream_error("upstream answered HTTP \u0665\u0660\u0663"), id="http-arabic-indic-digits"),
+        pytest.param(_in_stream_error("upstream answered HTTP \uff15\uff10\uff13"), id="http-fullwidth-digits"),
+        pytest.param(_in_stream_error("upstream failed: [\u0665\u0660\u0663]"), id="bracketed-arabic-indic-digits"),
+        pytest.param(_in_stream_error("upstream status: \u0665\u0660\u0663"), id="status-arabic-indic-digits"),
+        pytest.param(_in_stream_error("upstream failed: error 504"), id="number-without-keyword"),
+        pytest.param(_in_stream_error("upstream said [503]", code=400), id="code-400-beats-message-503"),
+        pytest.param(_in_stream_error("upstream returned HTTP 400 after [503]"), id="leftmost-message-status-decides"),
+        pytest.param(_in_stream_error("invalid value at messages[502].content"), id="message-index"),
+        pytest.param(_in_stream_error("invalid tool call at tools[0][503].function"), id="nested-index"),
+        pytest.param(_in_stream_error("rate-limit header malformed", code=400), id="code-400-beats-separator-busy"),
+        pytest.param(_in_stream_error("HTTP 400: rate-limit header malformed"), id="message-400-beats-separator-busy"),
+    ],
+)
+def test_in_stream_error_without_a_retriable_signal_stays_generic(exc: openai.APIError) -> None:
+    assert _build_middleware()._classify_error(exc) == (False, "generic")
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        pytest.param(openai.APIError("An error occurred during streaming", _STREAM_REQUEST, body="upstream exploded"), id="string-body"),
+        pytest.param(openai.APIError("An error occurred during streaming", _STREAM_REQUEST, body=["upstream", "exploded"]), id="list-body"),
+        pytest.param(openai.APIError("An error occurred during streaming", _STREAM_REQUEST, body=None), id="no-body"),
+        pytest.param(_in_stream_error("Upstream request failed.", error="upstream timeout"), id="string-error-field"),
+        pytest.param(_in_stream_error("Upstream request failed.", code={"value": 503}), id="dict-code"),
+        pytest.param(_in_stream_error("Upstream request failed.", status=["503"]), id="list-status"),
+        # Arabic-Indic digits for 503: int() accepts them, the status check must not.
+        pytest.param(_in_stream_error("Upstream request failed.", code="\u0665\u0660\u0663"), id="non-ascii-digit-code"),
+    ],
+)
+def test_in_stream_error_with_a_malformed_body_stays_generic(exc: openai.APIError) -> None:
+    assert _build_middleware()._classify_error(exc) == (False, "generic")
+
+
+def test_in_stream_status_parsing_stays_fast_on_a_long_message() -> None:
+    # Spaces before and after ``:``/``=`` must be separate runs in the status
+    # regex; two adjacent ``[ \t]*`` would backtrack quadratically here.
+    exc = _in_stream_error("status" + " " * 50_000 + "x")
+    started = time.perf_counter()
+    assert _build_middleware()._classify_error(exc) == (False, "generic")
+    assert time.perf_counter() - started < 1.0
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected"),
+    [
+        pytest.param(
+            _in_stream_error("You exceeded your current quota, please check your plan and billing details.", type="server_error", code="insufficient_quota"),
+            (False, "quota"),
+            id="quota",
+        ),
+        pytest.param(_in_stream_error("Unauthorized", code=401), (False, "auth"), id="auth"),
+        pytest.param(_in_stream_error("Upstream request failed.", code="limit_burst_rate"), (True, "burst_rate"), id="burst-rate"),
+    ],
+)
+def test_in_stream_quota_auth_and_burst_rate_keep_precedence(exc: openai.APIError, expected: tuple[bool, str]) -> None:
+    assert _build_middleware()._classify_error(exc) == expected
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        pytest.param(_in_stream_error("rate limit exceeded", code=400), id="in-band-400"),
+        pytest.param(FakeError("rate limit exceeded", status_code=400), id="http-400"),
+    ],
+)
+def test_in_band_4xx_keeps_the_plain_busy_match(exc: Exception) -> None:
+    assert _build_middleware()._classify_error(exc) == (True, "busy")
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        pytest.param(FakeError("rate-limit exceeded", status_code=400), id="hyphenated-busy-text"),
+        pytest.param(FakeError("upstream said [503]", status_code=400), id="bracketed-status"),
+        pytest.param(FakeError("upstream said [503]", status_code=200), id="stream-status-200"),
+    ],
+)
+def test_error_with_a_status_ignores_in_band_signals(exc: FakeError) -> None:
+    assert _build_middleware()._classify_error(exc) == (False, "generic")
+
+
+def test_async_in_stream_504_retries_with_the_full_budget_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = _build_middleware(retry_max_attempts=3, retry_base_delay_ms=10, retry_cap_delay_ms=10)
+    attempts = 0
+    events: list[dict] = []
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    async def fake_emit_custom_event(payload, *, writer):
+        writer(payload)
+
+    async def handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise _in_stream_error(_OMNIROUTE_COMBO_504, type="server_error", code="gateway_timeout")
+        return AIMessage(content="recovered")
+
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("langgraph.config.get_stream_writer", lambda: events.append)
+    monkeypatch.setattr("deerflow.agents.middlewares.llm_error_handling_middleware.aemit_custom_event", fake_emit_custom_event)
+
+    result = asyncio.run(middleware.awrap_model_call(SimpleNamespace(), handler))
+
+    assert isinstance(result, AIMessage)
+    assert result.content == "recovered"
+    assert attempts == 3
+    assert [(event["type"], event["reason"], event["max_attempts"]) for event in events] == [("llm_retry", "transient", 3)] * 2
+
+
+def test_sync_in_stream_504_exhausts_the_full_budget_into_the_transient_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = _build_middleware(retry_max_attempts=3, retry_base_delay_ms=10, retry_cap_delay_ms=10)
+    attempts = 0
+
+    def handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        raise _in_stream_error(_OMNIROUTE_COMBO_504, type="server_error", code="gateway_timeout")
+
+    monkeypatch.setattr("time.sleep", lambda _delay: None)
+
+    result = middleware.wrap_model_call(SimpleNamespace(), handler)
+
+    assert attempts == 3
+    assert isinstance(result, AIMessage)
+    assert "temporarily unavailable" in str(result.content)
+    assert result.additional_kwargs["deerflow_error_fallback"] is True
+    assert result.additional_kwargs["error_type"] == "APIError"
+    assert result.additional_kwargs["error_reason"] == "transient"
+    assert result.additional_kwargs["error_detail"] == _OMNIROUTE_COMBO_504
+
+
+def test_exhausted_in_stream_5xx_failures_open_the_circuit_breaker(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("time.sleep", lambda _delay: None)
+    middleware = _build_middleware(retry_max_attempts=2, retry_base_delay_ms=10, retry_cap_delay_ms=10, circuit_failure_threshold=2)
+    calls = 0
+
+    def handler(_request) -> AIMessage:
+        nonlocal calls
+        calls += 1
+        raise _in_stream_error("Upstream request failed.", type="server_error")
+
+    middleware.wrap_model_call(SimpleNamespace(), handler)
+    assert middleware._circuit_failure_count == 1
+    middleware.wrap_model_call(SimpleNamespace(), handler)
+    assert middleware._circuit_state == "open"
+
+    result = middleware.wrap_model_call(SimpleNamespace(), handler)
+
+    assert calls == 4
+    assert result.additional_kwargs["error_reason"] == "circuit_open"
+
+
+@pytest.mark.anyio
+async def test_in_stream_error_from_a_real_openai_stream_is_retried() -> None:
+    """End to end: the first stream answers ``200`` and then carries the error event."""
+    middleware = _build_middleware(retry_max_attempts=3, retry_base_delay_ms=1, retry_cap_delay_ms=1)
+    requests: list[httpx.Request] = []
+
+    def chunk(delta: dict[str, Any], finish_reason: str | None = None) -> dict[str, Any]:
+        return {"id": "chatcmpl-retry", "object": "chat.completion.chunk", "created": 0, "model": "glm-5.3", "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}]}
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            error = {"error": {"message": _OMNIROUTE_COMBO_504, "type": "server_error", "code": "gateway_timeout"}}
+            body = f": keepalive\n\ndata: {json.dumps(error)}\n\n"
+        else:
+            body = "".join(f"data: {json.dumps(event)}\n\n" for event in (chunk({"role": "assistant", "content": "recovered"}), chunk({}, "stop"))) + "data: [DONE]\n\n"
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        model = ChatOpenAI(model="glm-5.3", api_key="offline-test-key", base_url="https://llm.invalid/v1", streaming=True, max_retries=0, http_async_client=client)
+
+        async def handler(_request) -> AIMessage:
+            return await model.ainvoke([HumanMessage(content="hello")])
+
+        result = await middleware.awrap_model_call(SimpleNamespace(), handler)
+
+    assert len(requests) == 2
+    assert isinstance(result, AIMessage)
+    assert result.content == "recovered"
+    assert "deerflow_error_fallback" not in result.additional_kwargs
+
+
+@pytest.mark.anyio
+async def test_in_stream_error_after_partial_output_is_retried_from_the_start() -> None:
+    """An ``error`` event after content chunks retries the whole call.
+
+    The result holds only the retried answer, but the tokens the first attempt
+    already streamed reached the callbacks (which feed a live stream) and are
+    not taken back. Mid-stream ``ReadError`` retries behave the same way; this
+    pins that accepted outcome.
+    """
+    middleware = _build_middleware(retry_max_attempts=3, retry_base_delay_ms=1, retry_cap_delay_ms=1)
+    requests: list[httpx.Request] = []
+    streamed: list[str] = []
+
+    class RecordTokens(AsyncCallbackHandler):
+        async def on_llm_new_token(self, token: str, **kwargs: Any) -> None:
+            streamed.append(token)
+
+    def chunk(delta: dict[str, Any], finish_reason: str | None = None) -> dict[str, Any]:
+        return {"id": "chatcmpl-retry", "object": "chat.completion.chunk", "created": 0, "model": "glm-5.3", "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}]}
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            error = {"error": {"message": "[504]: upstream timed out", "type": "server_error", "code": "gateway_timeout"}}
+            body = "".join(f"data: {json.dumps(event)}\n\n" for event in (chunk({"role": "assistant", "content": "partial answ"}), error))
+        else:
+            body = "".join(f"data: {json.dumps(event)}\n\n" for event in (chunk({"role": "assistant", "content": "recovered"}), chunk({}, "stop"))) + "data: [DONE]\n\n"
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        model = ChatOpenAI(model="glm-5.3", api_key="offline-test-key", base_url="https://llm.invalid/v1", streaming=True, max_retries=0, http_async_client=client)
+
+        async def handler(_request) -> AIMessage:
+            return await model.ainvoke([HumanMessage(content="hello")], config={"callbacks": [RecordTokens()]})
+
+        result = await middleware.awrap_model_call(SimpleNamespace(), handler)
+
+    assert len(requests) == 2
+    assert isinstance(result, AIMessage)
+    assert result.content == "recovered"
+    assert "deerflow_error_fallback" not in result.additional_kwargs
+    assert "".join(streamed) == "partial answrecovered"
