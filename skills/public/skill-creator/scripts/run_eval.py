@@ -57,20 +57,15 @@ def run_single_query(
         project_commands_dir.mkdir(parents=True, exist_ok=True)
         # Use YAML block scalar to avoid breaking on quotes in description
         indented_desc = "\n  ".join(skill_description.split("\n"))
-        command_content = (
-            f"---\n"
-            f"description: |\n"
-            f"  {indented_desc}\n"
-            f"---\n\n"
-            f"# {skill_name}\n\n"
-            f"This skill handles: {skill_description}\n"
-        )
+        command_content = f"---\ndescription: |\n  {indented_desc}\n---\n\n# {skill_name}\n\nThis skill handles: {skill_description}\n"
         command_file.write_text(command_content, encoding="utf-8")
 
         cmd = [
             "claude",
-            "-p", query,
-            "--output-format", "stream-json",
+            "-p",
+            query,
+            "--output-format",
+            "stream-json",
             "--verbose",
             "--include-partial-messages",
         ]
@@ -99,20 +94,20 @@ def run_single_query(
 
         try:
             while time.time() - start_time < timeout:
-                if process.poll() is not None:
-                    remaining = process.stdout.read()
-                    if remaining:
-                        buffer += remaining.decode("utf-8", errors="replace")
-                    break
-
+                # Process exit does not imply its stdout pipe has been drained.
+                # Read through EOF so completed CLI responses still reach the parser.
                 ready, _, _ = select.select([process.stdout], [], [], 1.0)
                 if not ready:
                     continue
 
                 chunk = os.read(process.stdout.fileno(), 8192)
-                if not chunk:
+                if chunk:
+                    buffer += chunk.decode("utf-8", errors="replace")
+                elif buffer:
+                    # Accept a final JSON event without a terminal newline.
+                    buffer += "\n"
+                else:
                     break
-                buffer += chunk.decode("utf-8", errors="replace")
 
                 while "\n" in buffer:
                     line, buffer = buffer.split("\n", 1)
@@ -169,6 +164,9 @@ def run_single_query(
 
                     elif event.get("type") == "result":
                         return triggered
+
+                if not chunk:
+                    break
         finally:
             # Clean up process on any exit path (return, exception, timeout)
             if process.poll() is None:
@@ -232,14 +230,16 @@ def run_eval(
             did_pass = trigger_rate >= trigger_threshold
         else:
             did_pass = trigger_rate < trigger_threshold
-        results.append({
-            "query": query,
-            "should_trigger": should_trigger,
-            "trigger_rate": trigger_rate,
-            "triggers": sum(triggers),
-            "runs": len(triggers),
-            "pass": did_pass,
-        })
+        results.append(
+            {
+                "query": query,
+                "should_trigger": should_trigger,
+                "trigger_rate": trigger_rate,
+                "triggers": sum(triggers),
+                "runs": len(triggers),
+                "pass": did_pass,
+            }
+        )
 
     passed = sum(1 for r in results if r["pass"])
     total = len(results)

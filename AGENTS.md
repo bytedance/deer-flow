@@ -210,6 +210,8 @@ Repo-wide conventions:
 - **Test-driven development** — features and bug fixes ship with tests. Backend tests live
   in `backend/tests/` (TDD is mandatory there; see [backend/AGENTS.md](backend/AGENTS.md));
   frontend tests live in `frontend/tests/`.
+  Skill-creator trigger-evaluation regressions use real offline subprocess pipes;
+  cover exited children and final events without a newline, without invoking Claude.
   Public skill script regressions live in `tests/skills/`; exercise dependency fallbacks
   with the optional import unavailable and mock HTTP transport to keep tests offline.
 - **Before pushing** — backend `make format`, frontend `pnpm check`.
