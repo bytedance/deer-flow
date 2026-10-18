@@ -297,7 +297,11 @@ secrets, shell/Compose dotenv overrides, readable read-only secrets, and teardow
 without secret exports. `down` must not probe, read, or generate secrets.
 Writable-directory cases remain portable.
 
-## Workspace text cache
+## Workspace snapshots and text cache
+
+`test_workspace_changes.py` and `test_run_worker_delivery.py` remove real files
+at the hash-read boundary. A vanished source must not discard other file records
+or produced-output detection; permission and other hash I/O errors still propagate.
 
 `test_scanner_text_cache_atomic.py` verifies complete publication and preservation
 of an existing entry on failure. A cleanup failure must preserve the original

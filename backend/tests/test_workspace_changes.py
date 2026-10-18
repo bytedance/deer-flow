@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import deerflow.workspace_changes.scanner as scanner
 from deerflow.config.paths import Paths
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import RunManager
@@ -74,6 +75,48 @@ def test_compare_snapshots_reports_text_file_changes(tmp_path):
     assert "+gamma" in changes["/mnt/user-data/workspace/draft.md"].diff
     assert changes["/mnt/user-data/outputs/report.md"].status == "created"
     assert changes["/mnt/user-data/workspace/old.txt"].status == "deleted"
+
+
+@pytest.mark.parametrize("include_text", [False, True])
+@pytest.mark.parametrize("size", [16, SAMPLE_BYTES + 1])
+def test_scan_keeps_other_files_when_a_file_disappears_before_hashing(tmp_path, monkeypatch, include_text, size):
+    roots = _roots(tmp_path)
+    workspace, outputs = [root.host_path for root in roots]
+    (workspace / "a-kept.txt").write_text("kept\n", encoding="utf-8")
+    vanished = workspace / "scratch.txt"
+    vanished.write_text("x" * size, encoding="utf-8")
+    (outputs / "report.md").write_text("report\n", encoding="utf-8")
+    real_hash = scanner._sha256_file
+    removed = []
+
+    def remove_before_hash(path):
+        if path == vanished:
+            path.unlink()
+            removed.append(path)
+        return real_hash(path)
+
+    monkeypatch.setattr(scanner, "_sha256_file", remove_before_hash)
+
+    snapshot = scan_workspace_roots(roots, include_text=include_text)
+
+    assert removed == [vanished]
+    assert set(snapshot.files) == {"/mnt/user-data/workspace/a-kept.txt", "/mnt/user-data/outputs/report.md"}
+    assert snapshot.files["/mnt/user-data/outputs/report.md"].sha256 is not None
+    assert snapshot.files["/mnt/user-data/outputs/report.md"].text == ("report\n" if include_text else None)
+
+
+@pytest.mark.parametrize("error", [PermissionError("denied"), OSError("disk read failed")])
+def test_scan_does_not_hide_operational_hash_errors(tmp_path, monkeypatch, error):
+    roots = _roots(tmp_path)
+    (roots[0].host_path / "report.md").write_text("report\n", encoding="utf-8")
+
+    def fail_hash(path):
+        raise error
+
+    monkeypatch.setattr(scanner, "_sha256_file", fail_hash)
+
+    with pytest.raises(type(error), match=str(error)):
+        scan_workspace_roots(roots)
 
 
 def test_get_changed_output_paths_returns_only_created_or_modified_regular_outputs(tmp_path):

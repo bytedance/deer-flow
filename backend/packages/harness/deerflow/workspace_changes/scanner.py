@@ -219,7 +219,10 @@ def _snapshot_file(
         return None
 
     binary = host_file.suffix.lower() in BINARY_EXTENSIONS or _looks_binary(sample)
-    sha256 = _sha256_file(host_file) if size <= limits.max_file_bytes_for_diff else None
+    try:
+        sha256 = _sha256_file(host_file) if size <= limits.max_file_bytes_for_diff else None
+    except FileNotFoundError:
+        return None
     text: str | None = None
     text_path: str | None = None
     reason: DiffUnavailableReason | None = None
