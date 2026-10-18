@@ -1395,6 +1395,8 @@ view. Built-in and user-created/imported skills are listed separately. The
 Community tab supports importing `.skill` archives into My skills.
 General preferences remain in Settings.
 
+The **ppt-generation** skill fits slide images without cropping or stretching and centers any remaining margins when image and slide aspect ratios differ.
+
 Administrators can see **Could not load** warnings in Capability Center > Skills
 when their own custom skill's `SKILL.md` contains invalid YAML. Warnings show the
 package-relative file and, when available, its line and column, with a quoting
