@@ -233,6 +233,13 @@ credential-free environment. The parent kills/reaps it on termination. This is a
 capability-restricted JS interpreter in a separate process, not a general OS
 sandbox or a guarantee against native engine vulnerabilities.
 
+Wall time (`timeout_seconds`) is the only clock bound on a run. A separate cap
+of 10,000 worker turns stops scripts that spin the JS job queue; idle waits on
+pending Agent calls do not exchange frames with the worker and do not consume
+turns, so long child runs are limited only by the wall deadline.
+The local wait checks worker exits every 20 ms alongside cancellation and faults;
+an exit triggers prompt failure handling and cleanup of pending child runs.
+
 IPC frames are bounded to 48 KiB. Script JSON encoding is at most 16,000 bytes,
 arguments 4,000 bytes, task 8,000 bytes, each captured Agent output/final result
 12,000 bytes. There are at most 20 progress messages of 160 JSON bytes each and

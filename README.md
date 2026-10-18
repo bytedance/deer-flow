@@ -190,6 +190,8 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
 
    Serply web search contains malformed HTTP-success payloads the same way in every vertical: a `results`/`entries`/`articles` container that is not a list, or a non-empty list with no object entries, returns the provider's format error, while non-object entries in an otherwise valid list are skipped in order. Missing, null, or empty containers keep the existing "No results found" response.
 
+   SearXNG web search contains malformed HTTP-success payloads the same way: a payload that is not an object, a body that is not JSON, a `results` container that is not a list, or a non-empty list holding no object entries returns the provider's format error, while non-object entries in an otherwise valid page are skipped in order, each skip logged with its entry position, so the valid rows survive and provider-side drift leaves a trace. Missing, null, or empty `results` keep the existing empty result (`[]`). This matters most for a self-hosted instance: one behind a reverse proxy or captive portal answers an HTML or plain-text error page with HTTP 200, and reading that as an empty search ends a research loop as "no hits".
+
    InfoQuest web and image search contain malformed HTTP-success payloads the same way: a `search_result` envelope that is not an object, or an `organic`/`top_stories.items`/`images_results` container that is not a list or that holds no usable entry, returns the provider's format error, while malformed entries in an otherwise valid payload are skipped so the usable rows survive. Missing, null, or empty containers keep the existing empty result. Format errors log the container or entry position only, without queries or payload values.
 
    InfoQuest web and image search screen result URLs through the shared public-URL policy and omit rejected rows. Responses without the required `search_result` envelope return a format error instead of exposing the raw provider payload.
@@ -866,6 +868,11 @@ Outputs with case- or Unicode-equivalent file or directory names are skipped
 before copying, and aliases of existing local paths are rejected, preserving
 previous complete copies.
 
+The [sandbox benchmark](backend/scripts/benchmark/sandbox/README.md#opensandbox)
+also supports OpenSandbox cold acquisition, warm reuse and concurrent scopes,
+using the configured service connection and reporting unconfirmed cleanup as a
+failed run. Live runs require a disposable OpenSandbox service and runtime home.
+
 BoxLite shutdown rejects late VM registration and keeps its SDK loop open while
 in-flight acquisitions finish. If they cannot drain within five seconds,
 shutdown fails with resources still owned and can be retried.
@@ -885,7 +892,7 @@ already received by the browser, without an additional secret-redaction layer.
 
 In plan mode, malformed TODO statuses return normal tool-validation errors without aborting token attribution, so the agent can correct the call.
 
-Tool-produced paths and URLs can be retained as short artifact handles across context compaction (`tool_artifacts` in `config.yaml`). Handles distinguish separate tool-result occurrences, even when a provider reuses call IDs. Standard MCP image URLs are captured alongside file references, including results from stdio and HTTP servers. Detected file URLs preserve their query strings and fragments. When PII redaction is enabled, model-visible artifact labels follow that policy; internal references stay intact for tool argument resolution. The configured registry limit retains the newest artifacts, while checkpointed processing identities prevent evicted results from being recaptured after restart. Resolution runs before authorization and write-safety checks; unknown or expired handles return an error without executing the tool. Small unknown structured results may be retained as complete JSON up to 4096 UTF-8 bytes; empty or oversized payloads are skipped. Handles are agent-local: task arguments resolve parent handles to concrete references, and delegated reports must return concrete references rather than child-local handles. A truncated model projection reports how many handles are omitted.
+Tool-produced paths and URLs can be retained as short artifact handles across context compaction (`tool_artifacts` in `config.yaml`). Handles distinguish separate tool-result occurrences, even when a provider reuses call IDs. Standard MCP image URLs are captured alongside file references, including results from stdio and HTTP servers. Detected file URLs preserve their query strings and fragments. Free-text artifact references retain balanced ASCII and CJK brackets in literal paths and URLs while trimming surrounding prose punctuation. When PII redaction is enabled, model-visible artifact labels follow that policy; internal references stay intact for tool argument resolution. The configured registry limit retains the newest artifacts, while checkpointed processing identities prevent evicted results from being recaptured after restart. Resolution runs before authorization and write-safety checks; unknown or expired handles return an error without executing the tool. Small unknown structured results may be retained as complete JSON up to 4096 UTF-8 bytes; empty or oversized payloads are skipped. Handles are agent-local: task arguments resolve parent handles to concrete references, and delegated reports must return concrete references rather than child-local handles. A truncated model projection reports how many handles are omitted.
 
 DeerFlow supports configurable MCP servers and skills to extend its capabilities.
 When durable MCP background tasks are enabled, agents can use `list_background_tasks(status="failed")` or `status="input_required"` to find failed tasks or tasks awaiting input in the current chat. Other supported statuses are `submitted`, `working`, `completed`, and `cancelled`; omitting the status preserves existing behavior. The database applies the filter before limiting results to the 20 most recent matching tasks. When combined with `active_only=true`, both filters apply: active statuses are `submitted`, `working`, and `input_required`, so terminal statuses return an empty list. `GET /api/threads/{thread_id}/mcp-tasks` supports the same `status` and `active_only` filters before its `limit` (default 50, range 1–100); for example, `?status=failed&limit=20`. Unknown statuses return 422, and omitting the filters preserves the existing response.
@@ -1463,6 +1470,10 @@ Discovery follows operator-managed directory symlinks, but skips links back to a
 
 Skill Markdown and bundled text resources use UTF-8. Skill-creator CLI and review utilities read and write text explicitly as UTF-8 so localized skills behave consistently across operating systems.
 
+Skill-creator benchmark aggregation uses recorded `timing.json` token counts even
+when `grading.json` already contains the run duration. Recorded zero counts are
+preserved; output character counts remain a legacy proxy only when token data is missing.
+
 `SKILL.md` YAML frontmatter must open and close with `---` on its own line (trailing spaces or tabs are allowed). A line such as `---suffix` is not a closing delimiter.
 
 Custom skill history preserves Unicode line separators inside saved content and metadata, keeping those revisions readable for history inspection and rollback. Malformed JSON history records are still rejected.
@@ -1623,6 +1634,8 @@ SkillScan warns about remote downloads piped into common shells, including `env`
 SkillScan treats HTTP/HTTPS scheme spellings and HTTP hostnames case-insensitively and recognizes bracketed IPv6
 loopback (`[::1]`) URLs as local. External IPv6 endpoints still trigger network findings,
 and cloud-metadata hostname detection is case-insensitive.
+
+SkillScan recognizes unquoted integer model-usage counters such as `total_tokens` and `input_tokens` in skill examples as measurements. Benchmark token statistics and signed deltas are also recognized; credential fields and other string values remain subject to secret detection.
 
 For Python credential mappings, SkillScan checks literal values while treating ordinary dictionary keys as labels. A mapping such as `tokens = {"access_token": os.getenv("ACCESS_TOKEN")}` does not report a hardcoded credential. Keys matching a recognized cloud or API token format are still checked as embedded credentials.
 
@@ -1906,6 +1919,24 @@ contributes one such middleware at the visible tool position. After operator opt
 classifies the sanitized text a remote tool result shows the model, PII-redacted when
 `pii_redaction` is enabled, and adds an advisory warning through a lifecycle state
 update; it imports only the extension contract.
+
+Extensions may opt into owner-scoped completed-run evidence and safe updates to
+existing user-custom skills through `host_access` in operator-controlled
+`config.yaml`. These optional APIs stage an immutable candidate, check its exact
+contents, and publish with version conflict detection and crash recovery. They
+do **not** implement a learning/evolution plugin. Automatic changes are limited to
+the body and description of `SKILL.md`; changing permissions, supporting files,
+or enabled state is out of scope. The host contract requires `deerflow-extension-api==0.2.7`. See [Skill evolution host API](docs/skill-evolution-host.md)
+for deployment requirements, grants, recovery, and the plugin integration flow.
+Once an owner is enrolled, use the Gateway for skill management: standalone SDK
+processes without its durable mutation runtime refuse enrolled skill access,
+including custom-skill YAML diagnostics. Gateway diagnostics recover pending
+publications before scanning.
+Skill discovery preserves user scope when the caller uses the default configuration.
+Admin operation lists return `next_cursor: null` at the end of pagination.
+Keyed resume retries preserve the original run's evidence origin and agent identity.
+This host slice follows up the [Skill Self-Evolution RFC](https://github.com/bytedance/deer-flow/issues/1865)
+and the bilingual [Plugin Host APIs RFC](https://github.com/bytedance/deer-flow/issues/5539).
 
 Full-stack contributions can additionally provide browser pages, conversation actions,
 authenticated backend operations and model tools through the
@@ -2363,6 +2394,8 @@ async with runtime:
 
 Gateway run finalization also retains ownership through caller cancellation: it finishes terminal persistence, stream completion, and resource cleanup before propagating the interruption. Backend I/O must terminate or enforce its own timeout. Gateway shutdown includes workers still finalizing after their terminal status commits; an expired shutdown drain budget is logged and does not cancel their outstanding writes.
 
+Terminal cleanup releases the run journal and its message-sequence callback even when diagnostic logs retain a checkpoint-inspection traceback.
+
 The factory still does not load YAML or create SQL infrastructure: the caller supplies the config snapshot, repository, and lifecycle. Because it accepts a caller-owned `system_prompt`, direct integrations also own any model-visible wording about those limits; the default middleware enforces the runtime limits regardless. The factory does not mount the Gateway owner-scoped HTTP routes or Web UI, so direct applications must expose their own result API/UI if they need those surfaces. For ordinary delegation only, `SubagentRuntime(...)` needs no asynchronous startup.
 
 Administrators can add, edit, disable, and delete reusable worker definitions from **Settings → Subagents**. Built-in and `config.yaml` definitions remain visible there as read-only entries. The default Lead Agent can use every enabled runtime sub-agent; each page-created Custom Agent can instead allow all, none, or a selected set. That selection is enforced both in the model-visible directory and by the server-side `task` tool. Managed definitions are deployment-wide in this version and follow `agent_storage.backend`: atomic files for a local deployment or the shared application database for multiple instances.
@@ -2517,6 +2550,9 @@ Ranged `read_file` calls count lines the same way on every sandbox provider: a l
 Concurrent reads and writes to the same file share a gate across synchronous and asynchronous tool calls. Async callers waiting for that gate do not occupy worker threads needed to finish the current read or write. Cancelling a waiting call leaves the current operation running; a call that already started file inspection still waits for that work to finish before releasing its gate.
 
 The built-in `grep` tool searches either one text file or all matching text files below a directory, so an agent can search an uploaded document directly without first broadening the request to the entire uploads directory.
+On the local sandbox, `grep(literal=True)` also searches long lines in minified text or single-line JSON, within the existing file-size limit. Case-insensitive literal matching avoids repeated-prefix rescans while preserving Unicode case behavior. Regex searches retain their long-line safety guard.
+
+Across sandbox providers, returned previews show only the beginning of each matched line (200 characters by default), so a match later in a long line may not appear in the preview. Use the reported path and line number to inspect the source. The `truncated` flag concerns match-count limits, not preview length.
 E2B's `glob` filter preserves spaces, quotes, and dollar signs in filename patterns, while wildcard matching and root-relative directory scoping remain unchanged.
 E2B `grep` also preserves colons in file and directory names when reporting matching paths and line numbers.
 `glob` and `grep` preserve non-LF separator characters, such as vertical tabs and Unicode line separators, inside returned paths on E2B, BoxLite, Tenki, and OpenSandbox; `grep` also preserves them inside matched text.
@@ -2566,6 +2602,11 @@ Sandbox image downloads enforce the 20 MiB vision limit while reading, including
 Image bytes loaded for a vision-model call are transient: DeerFlow removes the hidden base64 message after the model consumes it so later checkpoints do not keep duplicating that payload.
 
 After each run, DeerFlow records a workspace change summary for the run-owned `workspace` and `outputs` directories. The Web UI shows a compact "files changed" badge on the assistant turn; opening it reveals created, modified, and deleted files with text diffs when safe to display. Uploads are excluded because they are user inputs, not agent-generated changes, and stdio MCP temporary/debug files under the DeerFlow-owned `.mcp/` namespace are excluded because they are process-internal state (like `.git/` and `node_modules/`, any directory named `.mcp` is excluded at any depth). Large, binary, or sensitive-looking files are shown as metadata only.
+
+If a file disappears while being hashed, the scan omits that file and continues
+recording the others. A concurrent scratch-file removal therefore does not
+discard the whole snapshot or suppress detection of other produced outputs.
+This remains a best-effort scan, not an atomic filesystem snapshot.
 
 Files presented through `present_files` remain part of the thread's artifact state, and the Web UI restores the artifact panel and selected document after a page refresh. When a completed response successfully presents between 2 and 50 files, its final file card also offers one ZIP download. Archive membership comes from the terminal delivery receipt rather than browser-supplied paths, and the ZIP contains the current file versions, which may have changed since the response. The currently selected formal artifact is refreshed once when the run finishes so edits become visible without a manual reload. Existing UTF-8 text artifacts under `/mnt/user-data/outputs` can also be edited and explicitly saved from the panel on Unix and Windows while the thread is idle; saves use content revisions to prevent overwriting agent changes. Source previews also recognize extensionless `Dockerfile` and `Makefile` artifacts by their file names. Unknown file types, including names such as `constructor` and `__proto__`, retain the download fallback.
 
