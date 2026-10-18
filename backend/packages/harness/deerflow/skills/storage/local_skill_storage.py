@@ -96,7 +96,11 @@ class LocalSkillStorage(SkillStorage):
         with managed_read(self):
             if not self.custom_skill_exists(name):
                 raise FileNotFoundError(f"Custom skill '{name}' not found.")
-            return (self.get_custom_skill_dir(name) / SKILL_MD_FILE).read_text(encoding="utf-8")
+            # Read BOM-tolerantly so a SKILL.md saved by a Windows editor does not
+            # return its BOM as the first character of the content this API hands
+            # back. The frontmatter path tolerates the BOM via ``_FRONTMATTER_RE``
+            # instead, which only covers the front matter, not this whole-file read.
+            return (self.get_custom_skill_dir(name) / SKILL_MD_FILE).read_text(encoding="utf-8-sig")
 
     def write_custom_skill(self, name: str, relative_path: str, content: str) -> None:
         with self._skill_projection_mutation(names=(name,)):
