@@ -186,8 +186,11 @@ Values beginning with `$` are resolved from the environment when the file is loa
 
 `AgentConfig.knowledge_scope` uses the versioned `KnowledgeScope` contract as a
 Gateway new-turn default. The API preserves omitted updates and clears explicit
-null; file and SQL stores persist it in the existing config document. Keep it
-outside `MANAGED_AGENT_CONFIG_FIELDS` so harness self-updates preserve it;
+null; file and SQL stores persist it in the existing config document. Both
+`update_agent` and HTTP PUT pass the effective groups to
+`preserve_non_managed_fields`: a changed list excluding knowledge clears the
+inherited default, but explicit API scope fields still win. Keep it outside
+`MANAGED_AGENT_CONFIG_FIELDS` so unrelated self-updates preserve it;
 `setup_agent` also preserves the binding when re-bootstrapping. Admission uses
 explicit message scope before this default and snapshots it onto the current
 human message. Resolve the executing agent with runtime context over configurable,
