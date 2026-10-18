@@ -23,6 +23,15 @@ class McpTaskProtocolError(RuntimeError):
     """A remote task tool returned a deterministic contract violation."""
 
 
+class McpTaskConnectionUnavailableError(RuntimeError):
+    """The persisted task connection no longer resolves to a configured server.
+
+    Personal server names are content-addressed by their full definition, and
+    deployment servers belong to the startup snapshot. Once that definition
+    changes or disappears, retrying the lookup cannot restore the handle.
+    """
+
+
 class McpTaskToolCaller(Protocol):
     async def call_tool(
         self,

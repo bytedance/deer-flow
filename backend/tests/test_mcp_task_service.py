@@ -18,7 +18,7 @@ from deerflow.mcp.tasks import (
     TaskSubmission,
     TaskSubmitRequest,
 )
-from deerflow.mcp.tasks.ordinary import McpTaskProtocolError
+from deerflow.mcp.tasks.ordinary import McpTaskConnectionUnavailableError, McpTaskProtocolError
 from deerflow.persistence.mcp_tasks import (
     DuplicateMcpRemoteTaskError,
     McpTaskThreadMismatchError,
@@ -653,6 +653,37 @@ async def test_cancel_failure_schedules_retry_from_call_completion_time():
     released = repo.release_cancel_claim.await_args.kwargs
     retry_started_at = released["next_cancel_at"] - timedelta(seconds=5)
     assert retry_started_at > scan_started_at
+
+
+@pytest.mark.asyncio
+async def test_cancel_connection_unavailable_fails_locally_instead_of_retrying_forever():
+    message = "Personal MCP task connection is missing, disabled or changed"
+    record = {**_claimed_row(), "cancel_attempt_count": 1}
+    repo = SimpleNamespace(
+        claim_cancel_requests=AsyncMock(return_value=[record]),
+        apply_cancel_snapshot=AsyncMock(return_value=True),
+        release_cancel_claim=AsyncMock(return_value=True),
+        claim_due_tasks=AsyncMock(return_value=[]),
+    )
+    registry = McpTaskDriverRegistry()
+    registry.register("fake", FakeDriver(cancel_error=McpTaskConnectionUnavailableError(message)))
+    service = McpTaskService(
+        repository=repo,
+        drivers=registry,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+
+    await service.run_once(now=datetime.now(UTC))
+
+    repo.release_cancel_claim.assert_not_awaited()
+    repo.apply_cancel_snapshot.assert_awaited_once()
+    args, applied = repo.apply_cancel_snapshot.await_args
+    assert args[0] == "task-1"
+    assert applied["status"] == "failed"
+    assert applied["error"] == f"{message}; the remote task could not be cancelled"
+    assert applied["lease_token"] == "lease-token-1"
 
 
 @pytest.mark.asyncio
@@ -1519,6 +1550,29 @@ async def test_protocol_error_terminalizes_instead_of_retrying_forever():
     _, applied = repo.applied[0]
     assert applied["status"] == "failed"
     assert applied["error"] == "missing structuredContent"
+    assert applied["next_poll_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_connection_unavailable_error_terminalizes_instead_of_retrying_forever():
+    message = "Personal MCP task connection is missing, disabled or changed"
+    repo = FakeRepository([_claimed_row()])
+    registry = McpTaskDriverRegistry()
+    registry.register("fake", FakeDriver(error=McpTaskConnectionUnavailableError(message)))
+    service = McpTaskService(
+        repository=repo,
+        drivers=registry,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+
+    await service.run_once(now=datetime.now(UTC))
+
+    assert repo.released == []
+    _, applied = repo.applied[0]
+    assert applied["status"] == "failed"
+    assert applied["error"] == message
     assert applied["next_poll_at"] is None
 
 
