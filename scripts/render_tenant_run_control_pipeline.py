@@ -37,6 +37,8 @@ def main():
             "native-queue-final",
             "native-receiver-main",
             "native-receiver-final",
+            "native-pool-main",
+            "native-pool-final",
         ),
         default="revocation",
     )
@@ -116,6 +118,10 @@ def main():
         tests = "tests/test_workspace_native_dispatch.py::test_native_c_receiver_uses_original_sql_authority tests/test_workspace_execution_ledger.py::test_pool_claim_filters_unintegrated_scope_before_limit"
     if args.suite == "native-receiver-final":
         tests += " tests/test_ecs_executor_agent_dispatch.py::test_native_capability_rejects_changed_snapshot_and_assignment tests/test_ecs_executor_agent_dispatch.py::test_native_adoption_rejects_changed_durable_payload_before_owner_transfer"
+    if args.suite in ("native-pool-main", "native-pool-final"):
+        tests = "tests/test_workspace_native_dispatch.py::test_native_c_pool_dispatch_executes_original_run"
+    if args.suite == "native-pool-final":
+        tests += " tests/test_workspace_execution_ledger.py::test_pool_claim_filters_unintegrated_scope_before_limit tests/test_ecs_executor_agent_dispatch.py::test_native_capability_rejects_changed_snapshot_and_assignment"
     rendered = rendered.replace("@@TEST_PATHS@@", tests)
     if "@@" in rendered:
         parser.error("unresolved pipeline marker")

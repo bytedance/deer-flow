@@ -379,3 +379,6 @@ inspect_dispatch_control compares all original C bindings against canonical nati
 
 
 transfer_pending from dispatch ownership rechecks nonexpired lease and absence of pending native STOP for scoped rows at the locked CAS, based on canonical workspace_id. A preflight read never replaces this fence; legacy rows preserve their existing behavior.
+
+
+inspect_native_execution_control is a separate exact-identity, control-only view of the canonical current owner after adoption. It returns no business payload and is never launch authority. inspect_dispatch_control still requires a nonempty explicit owner, and receiver authorization uses that stricter path.

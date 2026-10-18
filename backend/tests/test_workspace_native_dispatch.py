@@ -303,3 +303,214 @@ def test_native_c_receiver_uses_original_sql_authority(native_engine, monkeypatc
             reset_current_user(owner_token)
 
     _in_workspace_case(native_engine, scenario)
+
+
+@pytest.mark.parametrize("withdrawn", [False, True])
+def test_native_c_pool_dispatch_executes_original_run(native_engine, executor_engine, monkeypatch, tmp_path, withdrawn):  # noqa: F811
+    import httpx
+    from ecs_executor.agent_dispatch import NativeDispatchHost, NativeWorkerHost, install_native_dispatch
+    from ecs_executor.dispatch import PROTOCOL, WORKER_VERSION
+    from ecs_executor.job_store import JobStore
+    from ecs_executor.nodes import Node
+    from ecs_executor.scheduling import Scheduling
+    from ecs_executor.schema import SCHEMA_REVISION, upgrade_schema
+    from fastapi import FastAPI
+    from langchain_core.language_models.chat_models import BaseChatModel
+    from langchain_core.messages import AIMessage, HumanMessage
+    from langchain_core.outputs import ChatGeneration, ChatResult
+    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.graph import END, START, MessagesState, StateGraph
+
+    from app.gateway import services
+    from app.gateway.native_admission import adopt_native_run, make_native_snapshot
+    from app.gateway.run_models import RunCreateRequest
+    from deerflow.authz.workspace import get_current_workspace, reset_current_workspace, set_current_workspace
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.run_ownership_config import RunOwnershipConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+    from deerflow.persistence.models.run_event import RunEventRow
+    from deerflow.persistence.run.model import RunRow
+    from deerflow.persistence.run.sql import RunRepository
+    from deerflow.persistence.thread_meta import ThreadMetaRepository
+    from deerflow.persistence.user.model import UserRow
+    from deerflow.persistence.workspaces.model import WorkspaceMembershipRow
+    from deerflow.runtime import MemoryStreamBridge, RunContext, RunManager
+    from deerflow.runtime.events.store.db import DbRunEventStore
+    from deerflow.runtime.user_context import reset_current_user, set_current_user
+
+    upgrade_schema(executor_engine)
+    ledger = JobStore(executor_engine.url.render_as_string(hide_password=False))
+
+    async def scenario(case):
+        threads = ThreadMetaRepository(case.sf, workspace_required=True)
+        await threads.create("pool-native-private", user_id="owner")
+        store = RunRepository(case.sf, workspace_required=True)
+        ownership = RunOwnershipConfig(heartbeat_enabled=True, lease_seconds=120)
+        central = RunManager(store, worker_id="pool-central", run_ownership_config=ownership)
+        worker = RunManager(store, worker_id="pool-receiver", run_ownership_config=ownership)
+        bridge = MemoryStreamBridge()
+        ctx = RunContext(
+            checkpointer=MemorySaver(),
+            thread_store=threads,
+            event_store=DbRunEventStore(case.sf, workspace_required=True),
+            workspace_context=case.original,
+            app_config=AppConfig(models=[], sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider")),
+        )
+        app = FastAPI()
+        app.state.run_manager, app.state.run_store, app.state.thread_store, app.state.stream_bridge = central, store, threads, bridge
+        request = SimpleNamespace(app=app, url="https://deerflow.example.invalid/")
+        node = Node(cpu_millis=4000, memory_mib=8192, resident_cpu_millis=1500, resident_memory_mib=2048, max_concurrency=1, profiles={"report"}, kinds={"C"})
+        pool = Scheduling(ledger, nodes={"worker": node})
+        secret = "native-node-offline-fixture-32-bytes"
+        host = NativeDispatchHost(
+            app, pool, {"artifact_root": str(tmp_path / "pool-native"), "native_node": "worker", "remote_all": True, "profile": "report", "profiles": {"report": {"cpu_millis": 100, "memory_mib": 64}}}, {"worker": secret}
+        )
+        install_native_dispatch(app, host)
+
+        async def worker_request(operation, **values):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://native-fixture") as client:
+                response = await client.post(
+                    f"/api/native-workers/worker/{operation}",
+                    headers={"Authorization": "Bearer " + secret},
+                    json={"schema_revision": SCHEMA_REVISION, "protocol": PROTOCOL, "worker_version": WORKER_VERSION, "mount_id": host.mount_id, "owner": "outbound", **values},
+                )
+            assert response.status_code == 200, response.text
+            return response.json()
+
+        async with case.sf() as session:
+            principal = await session.get(UserRow, "owner")
+        owner_token = set_current_user(principal)
+        entered, release = asyncio.Event(), asyncio.Event()
+        adopted = None
+        try:
+            record = await central.create_or_reject("pool-native-private", user_id="owner")
+            graph_input = {"messages": [HumanMessage(content="research this synthetic document")]}
+
+            async def snapshot_factory(**transport):
+                return await make_native_snapshot(
+                    request,
+                    record,
+                    run_ctx=ctx,
+                    body=RunCreateRequest(stream_mode=["values"]),
+                    config={"configurable": {"thread_id": record.thread_id}},
+                    graph_input=graph_input,
+                    admitted_knowledge_scope=None,
+                    scope_assistant_id=None,
+                    scheduled_task_runtime=None,
+                    require_existing_thread=True,
+                    **transport,
+                )
+
+            assert await host.admit_native(record, snapshot_factory)
+            assert record.ownership_lost
+            assert await asyncio.to_thread(pool.claim, "worker", "legacy-owner", kind="C") is None
+            assert await asyncio.to_thread(pool.owned, "worker", "outbound", kind="C") == []
+            selected = set_current_workspace(case.other)
+            try:
+                if withdrawn:
+                    async with case.sf() as session:
+                        await session.execute(
+                            sa.update(WorkspaceMembershipRow).where(WorkspaceMembershipRow.workspace_id == case.original.workspace_id, WorkspaceMembershipRow.user_id == "owner").values(version=WorkspaceMembershipRow.version + 1)
+                        )
+                        await session.commit()
+                polled = await worker_request("poll")
+                if withdrawn:
+                    assert polled["claim"] is None and not polled["owned"]
+                    assert not worker._runs
+                    assert (await asyncio.to_thread(ledger.list_active, kind="C"))[0]["cancel_requested"]
+                    return
+                envelope = polled["claim"]
+                assert envelope is not None and not polled["owned"]
+                job = envelope["job"]
+                assert job["native"]["run_id"] == record.run_id and job["state"] == "starting" and job["attempt"] == 1
+                assert job["workspace_context"] == asdict(case.original) and job["worker_owner"] == "outbound"
+                assert (await asyncio.to_thread(pool.node_status, "worker"))["unreleased"] == 1
+                again = await worker_request("poll")
+                assert again["claim"] is None and len(again["owned"]) == 1
+                assert again["owned"][0]["job"]["generation"] == job["generation"]
+                assert again["owned"][0]["capability"]
+                control = await worker_request("get", job_id=job["id"], generation=job["generation"])
+                assert not {"native", "spec", "error", "artifact", "workspace_context"}.intersection(control)
+                reporter = NativeWorkerHost.__new__(NativeWorkerHost)
+                reporter.request = worker_request
+                job = await reporter.report(job, {"start_intent": True})
+                assert job["start_intent"] and job["native"]["run_id"] == record.run_id
+                started = await worker_request("get", job_id=job["id"], generation=job["generation"])
+                assert started["start_intent"] and "native" not in started
+
+                class HeldModel(BaseChatModel):
+                    @property
+                    def _llm_type(self):
+                        return "deterministic-native-pool"
+
+                    def _generate(self, *args, **kwargs):
+                        raise AssertionError("native pool main must remain asynchronous")
+
+                    async def _agenerate(self, *args, **kwargs):
+                        assert get_current_workspace() == case.original
+                        entered.set()
+                        await release.wait()
+                        return ChatResult(generations=[ChatGeneration(message=AIMessage(content="private pooled research report", usage_metadata={"input_tokens": 7, "output_tokens": 5, "total_tokens": 12}))])
+
+                model = HeldModel()
+
+                async def respond(state, config):
+                    return {"messages": [await model.ainvoke(state["messages"], config=config)]}
+
+                builder = StateGraph(MessagesState, context_schema=dict)
+                builder.add_node("respond", respond)
+                builder.add_edge(START, "respond")
+                builder.add_edge("respond", END)
+                graph = builder.compile()
+                monkeypatch.setattr(services, "get_run_context", lambda request: ctx)
+                monkeypatch.setattr(services, "resolve_agent_factory", lambda assistant_id: lambda **kwargs: graph)
+
+                async def owner(*args, **kwargs):
+                    return principal
+
+                monkeypatch.setattr(services, "resolve_trusted_internal_owner_for_attribution", owner)
+                app.state.run_manager = worker
+                adopted = await adopt_native_run(app, job, envelope["capability"], secret)
+                await asyncio.wait_for(entered.wait(), timeout=15)
+                current = await worker_request("get", job_id=job["id"], generation=job["generation"])
+                await worker_request("report", job_id=job["id"], generation=job["generation"], changes={"state": "running"}, expected=current)
+                running = await worker_request("poll")
+                assert running["claim"] is None and len(running["owned"]) == 1
+                control = running["owned"][0]
+                assert control["capability"] is None and "native" not in control["job"]
+                assert control["job"]["id"] == job["id"] and not control["job"]["cancel_requested"]
+                release.set()
+                await asyncio.wait_for(adopted.task, timeout=20)
+                async with case.sf() as session:
+                    row = await session.get(RunRow, record.run_id)
+                    events = (await session.scalars(sa.select(RunEventRow).where(RunEventRow.run_id == record.run_id))).all()
+                    assert row.status == "success" and row.last_ai_message == "private pooled research report" and row.total_tokens == 12
+                    assert events and all(event.workspace_id == case.original.workspace_id and event.user_id == "owner" for event in events)
+                    assert any("private pooled research report" in str(event.content) for event in events)
+                current = await worker_request("get", job_id=job["id"], generation=job["generation"])
+                # This fixture's in-process graph has drained; it creates no AIO
+                # container and supplies no evidence about remote physical STOP.
+                settled = await worker_request("report", job_id=job["id"], generation=job["generation"], changes={"state": "completed", "physical_stopped": True}, expected=current)
+                assert settled["state"] == "completed" and "native" not in settled
+                assert (await asyncio.to_thread(pool.node_status, "worker"))["unreleased"] == 0
+                settled_poll = await worker_request("poll")
+                assert settled_poll["claim"] is None and not settled_poll["owned"]
+                assert get_current_workspace() == case.other
+            finally:
+                reset_current_workspace(selected)
+        finally:
+            release.set()
+            if adopted is not None and adopted.task is not None and not adopted.task.done():
+                adopted.task.cancel()
+                try:
+                    await adopted.task
+                except asyncio.CancelledError:
+                    pass
+            await worker.stop_heartbeat()
+            await central.stop_heartbeat()
+            reset_current_user(owner_token)
+
+    try:
+        _in_workspace_case(native_engine, scenario)
+    finally:
+        ledger.engine.dispose()

@@ -560,3 +560,6 @@ Scoped native C snapshots include canonical created_at for exact control binding
 
 
 verify_native_launch_for_receiver resolves the exact pending target from native SQL before accepting v2 workspace claims. The canonical context binds repository reads, RunContext and adopt_pending/task creation. Legacy calls reject inherited workspace context. Scoped refusal retains reservation; it cannot use legacy terminal settlement.
+
+
+Native dispatch poll delegates to poll_envelopes. Scoped launch requires the strict pending-owner SQL read before and after exact pool reservation; general post-adoption control inspection must never sign a launch. Scoped get/report return assignment/control scalars only, with report projections compared before the existing full-snapshot pool CAS. Scoped wait/refuse remain closed until lifecycle integration.

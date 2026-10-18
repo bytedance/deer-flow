@@ -1730,3 +1730,36 @@ an SQL fixture; this does not claim full removal lifecycle, actual graph/model,
 physical STOP, browser isolation or distributed delivery. Scoped claim/owned
 integration, actual C execution/recovery and C->B->C remain next. Full M0–M11
 and activation remain open/closed respectively; no push or deployment.
+
+
+## M4 scoped C pool-to-native execution — 2026-10-18
+
+#103: four failures at missing poll_envelopes after real native staging/handoff;
+this RED proves the missing dispatch entry, not every subsequent boundary.
+#104: seven passed in 25.83s, 37-file cloud Ruff. Forty source hashes match the
+verified checkout. Exact archive/log/source and removed fixture volume evidence:
+progress JSON `native_c_pool_main`; no owned fixture container/network remains.
+
+Real FastAPI ASGI poll/get/report now drives scoped exact-version pool claim,
+v2 envelope, original native receiver/adoption, execute_admitted_native_run and
+run_agent with a deterministic asynchronous model. SQL Run succeeds with the
+private report and 12 tokens; journal rows retain original workspace/user even
+when UI selection differs. Running polls carry no launch token or native payload.
+Control get/report preserve original assignment/expected-snapshot CAS without
+returning inputs/secrets/results; worker retains only its already-held snapshot.
+After this in-process graph drains, completion reporting releases its reservation
+and a subsequent poll does not relaunch. Membership-version withdrawal prevents
+claim; ordinary pool isolation and legacy capability regression also pass.
+
+Defaults still exclude scoped work. Only the explicit C path independently
+reauthorizes native pending ownership before/after exact ledger reservation and
+before signing. General post-adoption control reads never authorize launch;
+unknown ownership/work keeps capacity. Scoped wait/refuse are explicitly rejected
+until their lifecycle integration is complete.
+
+Limits: ASGI and deterministic model are in one isolated CI process, not two-host
+TCP, real model, AIO sandbox, provider namespace, physical STOP or crash/restart
+acceptance. The withdrawal fixture changes SQL membership version; earlier #99
+contains actual member-operation NoStart evidence. Next physical C lifecycle and
+scoped C->B->C dependencies/notifications, then remaining M4 domains and M0–M11.
+Activation remains false; no deployment/push or local runtime.

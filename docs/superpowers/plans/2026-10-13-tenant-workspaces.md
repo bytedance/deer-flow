@@ -920,3 +920,14 @@ Full M4 and M0–M11 are not complete.
 - [ ] Scoped pool dispatch, actual remote execution and recovery remain next.
 
 Evidence: `docs/tenant-workspaces-progress.json` → `native_c_receiver`. Full M4/M0–M11 remains open.
+
+
+### M4 step 23 — scoped C pool-to-native main
+
+- [x] Exact candidate/version C claim shares original capacity lock/accounting.
+- [x] Independent pending SQL checks precede reservation and v2 signing; ordinary pool remains isolated.
+- [x] Poll/get/report control projection preserves assignment and original report CAS, without payload reauthorization.
+- [x] Actual ASGI and native graph execution/journal/usage/completion main: #104 seven passed.
+- [ ] Two-host/AIO/physical STOP/restart and scoped dependencies/notifications C->B->C remain next.
+
+Evidence: `native_c_pool_main` in progress JSON. No physical lifecycle or full M4/M0–M11 completion claimed.

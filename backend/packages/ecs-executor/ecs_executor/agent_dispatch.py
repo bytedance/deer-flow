@@ -92,6 +92,12 @@ def verify_native_launch(job, token, secret, *, expected_workspace_context=None)
         raise ValueError("Native launch capability denied") from None
 
 
+def _native_control_projection(job):
+    """Assignment/control scalars only; never inputs, secrets or result data."""
+    fields = ("id", "node_id", "worker_owner", "generation", "state", "attempt", "start_intent", "started_at", "cancel_requested", "physical_stopped", "physical_stopped_at", "lease_until")
+    return {key: job[key] for key in fields if key in job}
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -131,6 +137,77 @@ class NativeDispatchHost:
 
     async def quiesce(self):
         self.quiescing = True
+
+    async def _scoped_control(self, job, *, pending=False):
+        native = job["native"]
+        identity = {key: native.get(key) for key in ("run_id", "user_id", "workspace_id", "thread_id", "incarnation", "workspace_context", "created_at")}
+        store = self.app.state.run_store
+        if pending:
+            return await store.inspect_dispatch_control(identity=identity, owner_worker_id="dispatch:" + job["id"])
+        return await store.inspect_native_execution_control(identity=identity)
+
+    @staticmethod
+    def _can_launch_scoped(job, control):
+        return (
+            control is not None
+            and control["target"].owner_worker_id == "dispatch:" + job["id"]
+            and control["status"] == "pending"
+            and control["cancel_action"] is None
+            and control["live"]
+            and control["lease_active"]
+            and not control["stop_recorded"]
+            and not control["lifetime_completed"]
+            and job["state"] in ("queued", "starting")
+            and (job.get("start_intent") is None or job.get("start_intent") is False)
+            and not job.get("cancel_requested")
+            and job.get("physical_stopped") is False
+        )
+
+    async def _scoped_envelope(self, job):
+        # Re-read after the ledger CAS. A native revocation cannot be turned
+        # into a grant by the captured job or an expired reservation lease.
+        if job["state"] == "starting" and (job.get("start_intent") is None or job.get("start_intent") is False) and job.get("physical_stopped") is False:
+            pending = await self._scoped_control(job, pending=True)
+            if self._can_launch_scoped(job, pending):
+                return {"job": job, "capability": sign_native_launch(job, self.credentials[job["node_id"]], workspace_context=pending["target"].workspace_context)}
+        control = await self._scoped_control(job)
+        denied = control is None or not control["live"] or control["stop_recorded"] or control["cancel_action"] is not None or (control["status"] in ("pending", "running") and not control["lease_active"])
+        if denied and not job.get("cancel_requested"):
+
+            def cancel(value):
+                if any(value.get(key) != job.get(key) for key in ("node_id", "worker_owner", "generation")):
+                    raise RuntimeError("Native control assignment changed")
+                value["cancel_requested"] = True
+
+            job = await asyncio.to_thread(self.pool.store.mutate, job["id"], cancel)
+        return {"job": _native_control_projection(job), "capability": None}
+
+    async def poll_envelopes(self, node, owner):
+        """Single poll entry for legacy and explicitly authorized native C work."""
+        await self.maintain()
+        owned = await asyncio.to_thread(self.pool.owned, node, owner, kind="C")
+        claim = None if self.quiescing else await asyncio.to_thread(self.pool.claim, node, owner, kind="C")
+        result = {
+            "schema_revision": SCHEMA_REVISION,
+            "owned": [{"job": job, "capability": sign_native_launch(job, self.credentials[node])} for job in owned],
+            "claim": {"job": claim, "capability": sign_native_launch(claim, self.credentials[node])} if claim else None,
+        }
+        for version, candidate in await asyncio.to_thread(self.pool.scoped_native_candidates, node):
+            if candidate["state"] == "queued":
+                if self.quiescing or result["claim"] is not None or not self._can_launch_scoped(candidate, await self._scoped_control(candidate, pending=True)):
+                    continue
+                job = await asyncio.to_thread(self.pool.claim_scoped_native, node, owner, expected=candidate, version=version)
+                if job is not None:
+                    envelope = await self._scoped_envelope(job)
+                    if envelope["capability"] is not None:
+                        result["claim"] = envelope
+                    else:
+                        result["owned"].append(envelope)
+            else:
+                job = await asyncio.to_thread(self.pool.renew_scoped_native, node, owner, expected=candidate, version=version)
+                if job is not None:
+                    result["owned"].append(await self._scoped_envelope(job))
+        return result
 
     async def prepare_notification(self, notification):
         from ecs_executor.dependencies import prepare_notification
@@ -473,16 +550,7 @@ def install_native_dispatch(app, host):
                 await host.maintain()
                 return JSONResponse({"schema_revision": SCHEMA_REVISION, "renewed": True})
             if operation == "poll":
-                await host.maintain()
-                owned = await asyncio.to_thread(host.pool.owned, node, args["owner"], kind="C")
-                claim = None if host.quiescing else await asyncio.to_thread(host.pool.claim, node, args["owner"], kind="C")
-                return JSONResponse(
-                    {
-                        "schema_revision": SCHEMA_REVISION,
-                        "owned": [{"job": job, "capability": sign_native_launch(job, credential)} for job in owned],
-                        "claim": {"job": claim, "capability": sign_native_launch(claim, credential)} if claim else None,
-                    }
-                )
+                return JSONResponse(await host.poll_envelopes(node, args["owner"]))
             if operation == "notification":
                 from app.gateway.services import launch_mcp_task_notification_run
                 from app.mcp_tasks.errors import PermanentNotificationError
@@ -517,6 +585,17 @@ def install_native_dispatch(app, host):
             job = await asyncio.to_thread(host.pool.store.get, args["job_id"])
             if job.get("kind") != "C" or job.get("node_id") != node or job.get("worker_owner") != args["owner"] or job.get("generation") != args.get("generation"):
                 raise ValueError("Native assignment mismatch")
+            if job.get("workspace_id") is not None:
+                if operation == "get":
+                    return JSONResponse(_native_control_projection(job))
+                if operation == "report":
+                    if args["expected"] != _native_control_projection(job):
+                        raise RuntimeError("Native control snapshot changed")
+                    updated = await asyncio.to_thread(host.pool.report, node, args["owner"], job["id"], job["generation"], args["changes"], job)
+                    return JSONResponse(_native_control_projection(updated))
+                # Scoped dependencies and NoStart settlement need their native
+                # lifecycle fences; never route them into legacy handlers.
+                raise ValueError("Scoped native operation is not integrated")
             if operation == "wait":
                 from ecs_executor.dependencies import persist_wait
 
@@ -613,9 +692,18 @@ class NativeWorkerHost:
 
     async def report(self, job, changes):
         current = await self.request("get", job_id=job["id"], generation=job["generation"])
+        scoped = job.get("workspace_id") is not None
+        if scoped and any(current.get(key) != job.get(key) for key in ("id", "node_id", "worker_owner", "generation")):
+            raise ValueError("Native control response assignment mismatch")
         if all(current.get(key) == value for key, value in changes.items()):
-            return current
-        return await self.request("report", job_id=job["id"], generation=job["generation"], expected=current, changes=changes)
+            return {**job, **current} if scoped else current
+        updated = await self.request("report", job_id=job["id"], generation=job["generation"], expected=current, changes=changes)
+        if scoped:
+            if any(updated.get(key) != job.get(key) for key in ("id", "node_id", "worker_owner", "generation")):
+                raise ValueError("Native report response assignment mismatch")
+            # Restore only this caller's already-held immutable snapshot.
+            return {**job, **changes, **updated}
+        return updated
 
     async def report_until_acknowledged(self, job, changes):
         while not getattr(self, "closing", False):
@@ -773,6 +861,19 @@ class NativeWorkerHost:
                     if job["id"] in seen:
                         continue
                     seen.add(job["id"])
+                    if envelope.get("capability") is None:
+                        # No native payload or launch grant is present. Only
+                        # an already-owned local task may consume this control.
+                        execution = self.executions.get(job["id"])
+                        if execution is None:
+                            continue
+                        local_job, record = execution
+                        if any(job.get(key) != local_job.get(key) for key in ("id", "node_id", "worker_owner", "generation")) or record.ownership_lost:
+                            continue
+                        if job.get("cancel_requested"):
+                            await self.app.state.run_manager._signal_local_cancel(record.run_id, action="interrupt")
+                            await self.stop_owned(local_job)
+                        continue
                     if job.get("cancel_requested"):
                         native = job["native"]
                         from app.gateway.internal_auth import get_internal_user

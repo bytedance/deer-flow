@@ -878,6 +878,20 @@ class RunRepository(RunStore):
             return result.rowcount != 0
 
     async def inspect_dispatch_control(self, *, identity, owner_worker_id):
+        if not isinstance(owner_worker_id, str) or not owner_worker_id:
+            raise ValueError("Native dispatch control requires an exact owner")
+        return await self._inspect_native_control(identity=identity, owner_worker_id=owner_worker_id)
+
+    async def inspect_native_execution_control(self, *, identity):
+        """Control-only facts after adoption; never a pending launch grant.
+
+        Exact immutable identity remains mandatory, but the canonical current
+        owner may have moved from dispatcher to native worker. No Run payload
+        is returned and callers must not infer launch permission from this API.
+        """
+        return await self._inspect_native_control(identity=identity, owner_worker_id=None)
+
+    async def _inspect_native_control(self, *, identity, owner_worker_id):
         """Inspect an exact durable dispatch target without a member data grant.
 
         Locators are expectations from the immutable C ledger. Resolve the
@@ -899,7 +913,10 @@ class RunRepository(RunStore):
             RunRow.operation_kind,
         )
         async with self._sf() as session:
-            row = (await session.execute(select(*columns).where(RunRow.run_id == identity.get("run_id"), RunRow.owner_worker_id == owner_worker_id))).first()
+            statement = select(*columns).where(RunRow.run_id == identity.get("run_id"))
+            if owner_worker_id is not None:
+                statement = statement.where(RunRow.owner_worker_id == owner_worker_id)
+            row = (await session.execute(statement)).first()
             try:
                 if row is None or row.operation_kind != "run":
                     return None
