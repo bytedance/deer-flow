@@ -51,7 +51,7 @@ def test_read_file_tool_binary_file_returns_actionable_hint(tmp_path, monkeypatc
 
 def test_read_file_tool_text_file_unaffected(tmp_path, monkeypatch) -> None:
     runtime = _local_runtime(tmp_path)
-    (tmp_path / "uploads" / "notes.txt").write_text("hello 你好\nsecond line", encoding="utf-8")
+    (tmp_path / "uploads" / "notes.txt").write_text("hello 你好\nsecond line", encoding="utf-8", newline="\n")
     monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox("t1"))
     monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
 

@@ -676,6 +676,8 @@ class RunManager:
         raw ``IntegrityError`` instead of a ``ConflictError``. Production
         callers should use :meth:`create_or_reject`.
         """
+        from deerflow.runtime.assembly_evidence import EVIDENCE_KEY
+
         run_id = str(uuid.uuid4())
         now = _now_iso()
         user_id = _resolve_record_user_id(user_id)
@@ -687,7 +689,7 @@ class RunManager:
             status=RunStatus.pending,
             on_disconnect=on_disconnect,
             multitask_strategy=multitask_strategy,
-            metadata=metadata or {},
+            metadata={key: value for key, value in (metadata or {}).items() if key != EVIDENCE_KEY},
             kwargs=kwargs or {},
             user_id=user_id,
             created_at=now,
@@ -1282,6 +1284,23 @@ class RunManager:
         except Exception:
             logger.warning("Failed to persist model_name update for run %s", run_id, exc_info=True)
 
+    async def record_assembly_evidence(self, run_id: str, evidence: dict) -> None:
+        """Publish only host assembly evidence, once, before execution."""
+        from deerflow.runtime.assembly_evidence import EVIDENCE_KEY
+
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is None or evidence.get("run_id") != run_id or evidence.get("thread_id") != record.thread_id:
+                raise ValueError("Assembly/run binding mismatch")
+            if EVIDENCE_KEY in record.metadata:
+                if record.metadata[EVIDENCE_KEY] != evidence:
+                    raise ValueError("Run assembly evidence is immutable")
+                return
+            record.metadata = {**record.metadata, EVIDENCE_KEY: copy.deepcopy(evidence)}
+            if not await self._persist_to_store(record):
+                record.metadata.pop(EVIDENCE_KEY, None)
+                raise RuntimeError("Unable to persist assembly evidence")
+
     async def update_model_name(self, run_id: str, model_name: str | None) -> None:
         """Update the model name for a run."""
         async with self._lock:
@@ -1685,6 +1704,8 @@ class RunManager:
         partial unique index on ``(thread_id) WHERE status IN
         ('pending','running')``.
         """
+        from deerflow.runtime.assembly_evidence import EVIDENCE_KEY
+
         run_id = str(uuid.uuid4())
         now = _now_iso()
         # Resolve before the idempotency checks below compare it with stored rows.
@@ -1706,7 +1727,7 @@ class RunManager:
             on_disconnect=on_disconnect,
             operation_kind=operation_kind,
             multitask_strategy=multitask_strategy,
-            metadata=metadata or {},
+            metadata={key: value for key, value in (metadata or {}).items() if key != EVIDENCE_KEY},
             kwargs=kwargs or {},
             user_id=user_id,
             created_at=now,
@@ -2552,11 +2573,10 @@ class RunManager:
         during the drain keeps its real terminal status instead of being
         blanket-overwritten. Runs whose terminal status is staged in memory with
         a deferred commit are still writing their final duration checkpoint and
-        then commit that status, so they are awaited in the same bounded drain —
-        without cancellation, which would skip their terminal tail (#5542),
-        exactly as ``_renew_leases`` keeps them active through
-        ``_awaits_terminal_commit``. The whole drain, including the trailing status
-        persistence, is bounded by ``timeout`` so a run stuck in cleanup (or a
+        then commit that status. Committed terminal workers may still be running
+        hooks, publishing END or closing resources. Both remain visible in this
+        bounded drain and are awaited without cancellation (#5542). The whole
+        drain, including the trailing status persistence, is bounded by ``timeout`` so a run stuck in cleanup (or a
         slow store under DB pressure) cannot hang worker shutdown — the
         precondition for the signal-reentrancy deadlock guarded by
         ``app.gateway.app._SHUTDOWN_HOOK_TIMEOUT_SECONDS``. Runs still active
@@ -2567,12 +2587,11 @@ class RunManager:
 
         async with self._lock:
             inflight = [record for record in self._runs.values() if record.status in (RunStatus.pending, RunStatus.running) and record.task is not None and not record.task.done()]
-            # A run whose terminal status is staged in memory (deferred commit)
-            # keeps writing the duration checkpoint before committing that
-            # status. Drain it too — but never cancel it — so the write lands
-            # while the checkpointer is still open. ``_renew_leases`` already
-            # treats these runs as active through ``_awaits_terminal_commit``.
-            finalizing = [record for record in self._runs.values() if self._awaits_terminal_commit(record) and record.status not in (RunStatus.pending, RunStatus.running) and record.task is not None and not record.task.done()]
+            # Terminal workers still own finalization, including after the
+            # durable commit (hooks, END and journal/sandbox cleanup). Await them
+            # without cancellation so resource teardown cannot overtake a worker
+            # that settles within this drain's budget.
+            finalizing = [record for record in self._runs.values() if record.status not in (RunStatus.pending, RunStatus.running) and record.task is not None and not record.task.done()]
             finalizing_ids = {record.run_id for record in finalizing}
             for record in inflight:
                 record.abort_action = "interrupt"

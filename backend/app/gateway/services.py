@@ -2071,6 +2071,7 @@ async def start_run(
             agent_config=agent_config,
             recovery_scope=recovery_scope,
             recovery=is_scope_recovery,
+            extensions=getattr(request.app.state, "extensions", None),
         )
         if admitted_knowledge_scope is not None:
             await _validate_scope_thread_binding(
@@ -2775,6 +2776,11 @@ async def wait_for_run_completion(
                     # The wait API only needs terminal completion, not a complete
                     # event replay. Resume at the retained tail rather than
                     # treating a bridge gap as a client disconnect.
+                    if entry.latest_available_event_id is None:
+                        current = await run_mgr.get(record.run_id, user_id=record.user_id) if record.store_only else record
+                        if current is not None and await _terminal_record_stream_missing(bridge, current):
+                            completed = True
+                            return True
                     resume_from_event_id = entry.latest_available_event_id
                     gap_seen = True
                     break

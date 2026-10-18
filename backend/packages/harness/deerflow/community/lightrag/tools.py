@@ -12,7 +12,10 @@ from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr, Valida
 from deerflow.community.provider_credentials import redact_secret, reject_url_userinfo, resolve_api_key
 from deerflow.config import get_app_config
 from deerflow.knowledge import format_result
+from deerflow.knowledge.providers import validate_scope_capabilities
 from deerflow.knowledge.sources import redact_strings, source_artifact
+from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY
+from deerflow.tools.types import Runtime
 
 from .client import LightRAGAPIError, LightRAGClient, LightRAGConnectionError, LightRAGProtocolError
 from .formatting import CAPABILITIES, format_retrieval_result, normalize_retrieval_result
@@ -147,12 +150,20 @@ def _tool_description() -> str:
     return f"{base} Internal identifiers are never shown to the model."
 
 
-async def _knowledge_search_entrypoint(query: str) -> tuple[str, dict]:
+async def _knowledge_search_entrypoint(query: str, runtime: Runtime = None) -> tuple[str, dict | None]:
     """Search the operator-configured LightRAG knowledge base.
 
     Args:
         query: Specific question or search terms to retrieve from the configured private documents.
     """
+    context = getattr(runtime, "context", None)
+    scope = context.get(KNOWLEDGE_SCOPE_RUNTIME_KEY) if isinstance(context, Mapping) else None
+    try:
+        validated = validate_scope_capabilities(scope, CAPABILITIES) if scope is not None else None
+        if validated is not None and validated["mode"] == "disabled":
+            return "Error: Knowledge retrieval is disabled for this turn.", None
+    except ValueError:
+        return "Error: LightRAG does not support the selected knowledge scope.", None
     result = await _search(query, with_sources=True)
     return result if isinstance(result, tuple) else (result, source_artifact([]))
 

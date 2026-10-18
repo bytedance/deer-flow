@@ -23,10 +23,12 @@ EXPECTED_GUIDANCE_PATHS = {
     "backend/packages/harness/deerflow/community/brave/AGENTS.md",
     "backend/packages/harness/deerflow/community/groundroute/AGENTS.md",
     "backend/packages/harness/deerflow/community/image_search/AGENTS.md",
+    "backend/packages/harness/deerflow/community/infoquest/AGENTS.md",
     "backend/packages/harness/deerflow/community/jina_ai/AGENTS.md",
     "backend/packages/harness/deerflow/community/ragflow/AGENTS.md",
     "backend/packages/harness/deerflow/community/serper/AGENTS.md",
     "backend/packages/harness/deerflow/community/tavily/AGENTS.md",
+    "backend/packages/harness/deerflow/community/ddg_search/AGENTS.md",
     "backend/packages/harness/deerflow/community/e2b_sandbox/AGENTS.md",
     "backend/packages/harness/deerflow/community/aio_sandbox/AGENTS.md",
     "backend/packages/harness/deerflow/community/opensandbox/AGENTS.md",
@@ -53,6 +55,7 @@ EXPECTED_GUIDANCE_PATHS = {
     "scripts/AGENTS.md",
     "examples/deerflow-extension-agent-teams/AGENTS.md",
     "examples/deerflow-extension-workflows/AGENTS.md",
+    "examples/deerflow-extension-weknora/AGENTS.md",
 }
 
 

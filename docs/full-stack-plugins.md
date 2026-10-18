@@ -3,7 +3,7 @@
 A deployment-installed Python extension can register a `PluginContribution` with
 optional browser code, authenticated backend actions and model tools. This extends
 the existing `install(registry, config)` workflow. MCP and Skills keep their existing
-APIs and lifecycles. Public contracts live in `deerflow_extension_api` (0.2.6).
+APIs and lifecycles. Public contracts live in `deerflow_extension_api` (0.2.7).
 
 Backend actions and model tools may use the optional host-bound
 `context.agent_runs` capability to create, continue, inspect, resume, and cancel
@@ -40,6 +40,11 @@ the existing positional rollback and source attribution.
   loads a versioned resource manifest from an installed package (details below).
 - `BackendAction(name, handler)` declares an async handler receiving a JSON object and
   `ActionContext(principal, settings)`. The principal comes from host authentication.
+  Since API 0.2.7, keyword-only `interaction` defaults to `"other"`; the Gateway
+  stamps `"session"` only for authenticated session actions. It is not taken from
+  payloads and is never stamped on model `ToolContext`. Plugins implementing human
+  output review must also check resource ownership, exact attempt/version, and
+  reject `ToolContext`; session provenance alone is not business authorization.
 - `ModelTool(name, description, input_schema, handler, group="extensions")` declares
   an async handler with a `ToolContext` that additionally carries the thread ID.
   Object schemas must be inline: reference resolution is rejected. Tools enter the
@@ -510,3 +515,20 @@ is user input, not authorization**: plugins must revalidate the referenced objec
 current installation, and viewer permissions before acting. The host does not
 interpret a reference as delegation or start another Agent. Those behaviors
 belong to the plugin's backend handlers or middleware.
+
+### Immutable file review and run configuration evidence
+
+`AgentRuns.configuration_evidence(thread_id, run_id)` returns host-owned proof
+recorded from actual Agent assembly before graph execution and bound to the run.
+It includes actual model, safe numeric parameters and keyed versions of instructions,
+model configuration, tools, Skills and policies. No raw secrets are exposed.
+Missing evidence fails closed; the declarative revision remains a separate preflight
+guard. Evidence describes assembly-time configuration, not external service state.
+
+`AgentRuns.read_artifact(thread_id, path)` authorizes a bounded (2 MiB) regular
+output-file snapshot, rejects symlink traversal, and reserves the thread against
+concurrent runs/edits while reading off-loop. The workflow extension stores those
+bytes append-only with SHA-256, approves exact versions, and serves preview and
+approved consumer reads from the same snapshot (16 KiB chunks). File versions are
+owner/workflow scoped; consumers cannot use an unapproved version. See the workflow
+extension README for limits and `captureArtifact` / `readArtifact` examples.

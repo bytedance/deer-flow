@@ -32,6 +32,11 @@ both before and after the synopsis head/tail split.
 
 ## Document validation
 
+`RAGFlowClient.list_documents` validates dataset path segments with
+`[A-Za-z0-9_-]+` before HTTP requests. Keep this provider-specific boundary
+shared by catalog browsing and selected-document validation; do not apply
+RAGFlow ID syntax to the generic knowledge contract.
+
 `tools.py` validates each dataset's selected documents in batches of at most
 100 IDs. All batches share the `_bounded_gather` concurrency limit of four.
 Merge validated IDs in input order to retain the complete retrieval scope;

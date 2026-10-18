@@ -1,5 +1,16 @@
 ### Python Extension System (Runtime and Distribution)
 
+`registry.knowledge_provider(name, provider)` (extension-api 0.2.7) adds an
+operator-installed read-only `deerflow.knowledge.RetrievalProvider`. The host
+validates advertised async operations, attributes entries and rolls them back
+positionally with every other contribution. Provider configuration, API calls
+and response mapping stay in extensions; core owns capabilities, Scope
+admission and source validation. Catalog and execution resolve the same loaded
+snapshot, with run-bound snapshots taking precedence over the singleton.
+See [the contract](../../../../docs/KNOWLEDGE.md) and the packaged
+`examples/deerflow-extension-knowledge` sample. Older registry implementations
+return False; never silently ignore unsupported registration.
+
 Third-party Python packages can expose an `install(registry, config)` function and be
 loaded, in deterministic order, from the startup-only top-level `plugins:` list in
 `config.yaml`. Keep this list out of `extensions_config.json`: the latter is writable
@@ -438,6 +449,13 @@ and revoked before host shutdown; PAT/internal grants remain unsupported.
 Unstamped internal launches receive no handle and must still start normally.
 Action/tool dispatch scopes handles to each registered plugin namespace for
 idempotency isolation; request-resolved handles use `for_plugin` explicitly.
+`configuration_revision` (API 0.2.7) rechecks grants and returns a process-local
+HMAC of declarative app/extensions and Agent config/SOUL, not effective assembly,
+memory, referenced files or provider state. Never expose raw secret configuration.
+`configuration_evidence` reads persisted, run-bound actual assembly versions; the
+worker captures descriptors even without observers and persists before execution.
+`read_artifact` authorizes bounded output bytes off-loop; extensions retain immutable
+versions themselves. Workflow preview/approval/consumption must share those bytes.
 
 **Recorded extension-first exception.** The project-shelf summary pipeline
 (`projects/summaries.py`) ships in core: its consumer-visible surface (the

@@ -49,4 +49,4 @@ async def test_ddg_image_search_keeps_safe_thumbnail_when_idna_image_is_private(
         result = json.loads(await tools.image_search_tool.ainvoke({"query": "reference"}))
 
     assert result["total_results"] == 1
-    assert result["results"] == [{"title": "reference", "image_url": "", "thumbnail_url": "https://images.example/thumb.jpg"}]
+    assert result["results"] == [{"title": "reference", "image_url": "", "thumbnail_url": "https://images.example/thumb.jpg", "source_url": ""}]
