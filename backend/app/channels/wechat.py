@@ -1466,13 +1466,23 @@ class WechatChannel(Channel):
             # the same observability gap as a mislabeled skip reason.
             logger.warning("[WeChat] no state directory configured, dropping staged inbound media file %s", filename)
             return None
+        staging_dir = None
         try:
             download_dir.mkdir(parents=True, exist_ok=True)
-            path = download_dir / filename
+            # Keep the display name while giving each attachment exclusive
+            # storage until the manager has consumed the published message.
+            staging_dir = Path(tempfile.mkdtemp(prefix="inbound-", dir=download_dir))
+            path = staging_dir / filename
             path.write_bytes(content)
             return path
         except OSError:
             logger.exception("[WeChat] failed to persist inbound media file %s", filename)
+            if staging_dir is not None:
+                try:
+                    (staging_dir / filename).unlink(missing_ok=True)
+                    staging_dir.rmdir()
+                except OSError:
+                    logger.warning("[WeChat] failed to clean up staged inbound media file %s", filename, exc_info=True)
             return None
 
     @staticmethod

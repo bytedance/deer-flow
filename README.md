@@ -1183,6 +1183,7 @@ Scheduled-task result and lifecycle notices can also be pushed to a bound Feishu
 6. Outbound images/files enforce `max_outbound_image_bytes` / `max_outbound_file_bytes` (20 MiB / 50 MiB defaults) while reading, including files that grow after resolution. Oversize reads are rejected before encryption/upload instead of sending a truncated prefix. Non-positive limits disable the corresponding cap.
 7. `allowed_users` takes iLink user IDs. Unset, `null`, `[]`, or a blank string allows everyone. A single ID is one entry, not a sequence of characters, and an unquoted integer-valued number is stored as that integer's text. A scalar string containing commas or interior whitespace logs a warning but remains one literal ID; use a YAML list for multiple IDs. Invalid entries are ignored with a warning; any other configured value that yields no valid ID denies every user and logs an error. `/connect` is still accepted before that check, and a denied sender is dropped before inbound media is downloaded.
 8. Shutdown waits for in-flight cursor writes. On token expiry, DeerFlow persists the cursor reset and removes the saved token before completing poller cancellation.
+9. Inbound attachments keep separate staged copies even when filenames match within one message or across messages. Their original filenames are preserved for upload ingestion.
 
 **WeCom Setup**
 
