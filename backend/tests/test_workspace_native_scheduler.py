@@ -344,7 +344,7 @@ def test_scoped_scheduler_http_create_list_detail_use_current_resource_scope(nat
     _exercise_scheduler_resource_http(native_engine, executor_engine, monkeypatch, tmp_path)
 
 
-def _exercise_scheduler_resource_http(native_engine, executor_engine, monkeypatch, tmp_path, *, management=False):  # noqa: F811
+def _exercise_scheduler_resource_http(native_engine, executor_engine, monkeypatch, tmp_path, *, management=False, boundary="normal"):  # noqa: F811
     from fastapi import FastAPI
     from sqlalchemy import select, update
 
@@ -454,9 +454,57 @@ def _exercise_scheduler_resource_http(native_engine, executor_engine, monkeypatc
                         assert updated.json()["title"] == "Updated private follow-up"
                         first, first_at = await _queue_management_task(case, tasks, foreground, task_id)
                         clock[0] = first_at
+                        if boundary == "unknown_wait":
+                            async with case.sf() as session:
+                                unknown = await session.get(ScheduledTaskRunRow, first)
+                                assert unknown.launch_accounted is False
+                                unknown.launch_accounted = None
+                                await session.commit()
+                                frozen = await _management_control_snapshot(session)
+                            paused = await client.post("/api/scheduled-tasks/" + task_id + "/pause", headers=selected)
+                            deleted = await client.delete("/api/scheduled-tasks/" + task_id, headers=selected)
+                            for rejected in (paused, deleted):
+                                assert rejected.status_code == 409 and rejected.json()["detail"]["code"] == "task_running", rejected.text
+                            async with case.sf() as session:
+                                assert await _management_control_snapshot(session) == frozen
+                                assert set(await session.scalars(select(RunRow.run_id))) == initial_run_ids
+                            assert get_current_workspace() == case.other
+                            return
+                        if boundary == "stale_snapshot":
+                            async with case.sf() as session, session.begin():
+                                changed = await session.execute(
+                                    update(WorkspaceMembershipRow).where(WorkspaceMembershipRow.workspace_id == case.original.workspace_id, WorkspaceMembershipRow.user_id == owner).values(version=WorkspaceMembershipRow.version + 1)
+                                )
+                                assert changed.rowcount == 1
+                            # Observe the same real resolver used by each HTTP
+                            # request; never replace request authorization by
+                            # binding this freshly resolved context ourselves.
+                            fresh = await case.service.resolve_context(owner, case.original.workspace_id)
+                            assert fresh.membership_version == case.original.membership_version + 1
+                            assert get_current_workspace() == case.other
                         paused = await client.post("/api/scheduled-tasks/" + task_id + "/pause", headers=selected)
                         assert paused.status_code == 200 and paused.json()["status"] == "paused", paused.text
                         await _assert_management_wait_cancelled(case, task_id, first)
+                        if boundary == "stale_snapshot":
+                            async with case.sf() as session:
+                                frozen = await _management_control_snapshot(session)
+                            resumed = await client.post("/api/scheduled-tasks/" + task_id + "/resume", headers=selected)
+                            rearmed = await client.patch("/api/scheduled-tasks/" + task_id, headers=selected, json={"schedule_spec": {"every_seconds": 7200}})
+                            for rejected in (resumed, rearmed):
+                                assert rejected.status_code == 422 and rejected.json()["detail"]["code"] == "invalid_request", rejected.text
+                                assert rejected.json()["detail"]["message"] == "Original task authority expired; create/copy a new task"
+                            async with case.sf() as session:
+                                assert await _management_control_snapshot(session) == frozen
+                                row = await session.get(ScheduledTaskRow, task_id)
+                                assert row.workspace_context_json == original_snapshot and row.status == "paused" and row.run_count == 0
+                                assert set(await session.scalars(select(RunRow.run_id))) == initial_run_ids
+                            deleted = await client.delete("/api/scheduled-tasks/" + task_id, headers=selected)
+                            assert deleted.status_code == 200 and deleted.json()["deleted"] is True, deleted.text
+                            await _assert_management_wait_cancelled(case, task_id, first, deleted=True)
+                            async with case.sf() as session:
+                                assert set(await session.scalars(select(RunRow.run_id))) == initial_run_ids
+                            assert get_current_workspace() == case.other
+                            return
                         resumed = await client.post("/api/scheduled-tasks/" + task_id + "/resume", headers=selected)
                         assert resumed.status_code == 200 and resumed.json()["status"] == "enabled", resumed.text
                         await _assert_management_wait_cancelled(case, task_id, first)
@@ -1250,3 +1298,23 @@ def test_scoped_scheduler_http_management_keeps_original_execution(native_engine
 @pytest.mark.parametrize("executor_engine", ["postgres"], indirect=True)
 def test_scoped_scheduler_remote_tool_management_keeps_original_execution(native_engine, executor_engine, monkeypatch, tmp_path):  # noqa: F811
     _exercise_scheduler_tool_list(native_engine, executor_engine, monkeypatch, tmp_path, remote=True, tool_action="create", management=True)
+
+
+async def _management_control_snapshot(session):
+    from sqlalchemy import select
+
+    from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
+    from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
+
+    snapshot = []
+    for row_type in (ScheduledTaskRow, ScheduledTaskRunRow):
+        table = row_type.__table__
+        rows = (await session.execute(select(*table.c).order_by(*table.primary_key.columns))).mappings().all()
+        snapshot.append(deepcopy([dict(row) for row in rows]))
+    return snapshot
+
+
+@pytest.mark.parametrize("executor_engine", ["postgres"], indirect=True)
+@pytest.mark.parametrize("boundary", ["unknown_wait", "stale_snapshot"])
+def test_scoped_scheduler_http_management_preserves_control_boundaries(native_engine, executor_engine, monkeypatch, tmp_path, boundary):  # noqa: F811
+    _exercise_scheduler_resource_http(native_engine, executor_engine, monkeypatch, tmp_path, management=True, boundary=boundary)

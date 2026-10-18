@@ -24,4 +24,4 @@ One PostgreSQL story: RED #122, GREEN #123 (19.61s). Queued withdrawal and pre-i
 
 Conversation ToolNode create/fresh → due queue main passed #143 with atomic original parent/token/Run checks. List/create/update/pause/resume/delete mains are open and verified in #146; terminal-between-validation-and-write refusal passed #144. Original nonce/token atomic-window refusals are code-reviewed only. Other management/manual/own-stop and complete runtime/lifecycle remain unaccepted.
 
-HTTP and remote ToolNode complete management mains passed #146 (two PG stories). Unknown queued accounting retention and stale snapshot pause/delete versus rearm boundaries are next. No physical scheduled execution, note/manual/own-stop or full lifecycle acceptance is inferred.
+HTTP and remote ToolNode complete management mains passed #146 (two PG stories). Unknown queued accounting retention and stale snapshot pause/delete versus rearm boundaries passed #147. Other unknown fields/races are not inferred. No physical scheduled execution, note/manual/own-stop or full lifecycle acceptance is inferred.

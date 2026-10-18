@@ -57,6 +57,7 @@ def main():
             "native-scheduler-tool-create",
             "native-scheduler-tool-create-terminal",
             "native-scheduler-management",
+            "native-scheduler-management-boundaries",
         ),
         default="revocation",
     )
@@ -187,6 +188,11 @@ def main():
         tests = (
             "tests/test_workspace_native_scheduler.py::test_scoped_scheduler_http_management_keeps_original_execution[postgres] "
             "tests/test_workspace_native_scheduler.py::test_scoped_scheduler_remote_tool_management_keeps_original_execution[postgres]"
+        )
+    if args.suite == "native-scheduler-management-boundaries":
+        tests = (
+            "tests/test_workspace_native_scheduler.py::test_scoped_scheduler_http_management_preserves_control_boundaries[unknown_wait-postgres] "
+            "tests/test_workspace_native_scheduler.py::test_scoped_scheduler_http_management_preserves_control_boundaries[stale_snapshot-postgres]"
         )
     rendered = rendered.replace("@@TEST_PATHS@@", tests)
     if "@@" in rendered:

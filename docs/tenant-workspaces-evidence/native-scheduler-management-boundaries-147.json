@@ -1,0 +1,56 @@
+{
+  "build": 147,
+  "queue": 1100,
+  "phase": "m4-native-scheduler-management-boundaries-20261018-35",
+  "result": "SUCCESS",
+  "duration_ms": 39810,
+  "pytest": "2 passed in 20.02s",
+  "ruff": "All checks passed; 67 files already formatted",
+  "source_sha256": "fe75416e16de1bcffd1231a9b126bf05621d3d494354af21079aaadbe7a30647",
+  "pipeline_sha256": "720901f148816fe80aef4d4c925b2557155a3a77bef71efd759a1dcc400c6c65",
+  "source_archive_exact_match": {
+    "backend/packages/harness/deerflow/persistence/scheduled_task_runs/scope.py": "3ecdb978db34209d3d0fee746fefccfb000daf5286fa0c96ceb448af69289fd1",
+    "backend/packages/harness/deerflow/persistence/scheduled_tasks/sql.py": "bb691ad8678f2bfbc217300c578a22ae7b4f0b94cb65d8aa944abdff77e85892",
+    "backend/app/gateway/scheduled_task_access.py": "732b15cc55855380fe4d643424488c369a8eac656aac80ad6154d11d48632dfa",
+    "backend/app/gateway/routers/scheduled_tasks.py": "d1fd73afa304b5cef61d774e1e1346abef3fa0c26d845edf640abe94eef45e5f",
+    "backend/tests/test_workspace_native_scheduler.py": "910b85a17e0daf24f7fc21d6b5a696d21256808923ee354f39ada59cf6a21c1c",
+    "scripts/render_tenant_run_control_pipeline.py": "8b950c4c3cd63fe1f5ad9b1414bcf4acf60d2a62b7b9619c2146616c2525cb8f"
+  },
+  "production_unchanged_from_HEAD": "7a7f2022b",
+  "log_path": "/private/tmp/m4-native-scheduler-management-boundaries-20261018-35.log",
+  "log_sha256": "ce2f947e286fe2020a4c9b78dfe6e6af46601a66c6bf57d8211f9cab623c4f3c",
+  "cleanup_path": "/private/tmp/native-scheduler-management-build147-cleanup.json",
+  "scope": "Two PostgreSQL HTTP controls: real queued launch_accounted=None rejects both pause/delete with all task/occurrence columns unchanged; real member version increment permits current resource pause/delete but rejects resume/schedule rearm with visible copy-required message, preserves original snapshot/count/occurrence and native Run ID baseline. No model/native execution/physical sandbox or other unknown-field matrix claimed.",
+  "job": "deerflow-tenant-execution-m4-sql",
+  "cleanup": {
+    "build": 147,
+    "read_only": true,
+    "cleanup": [
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-147",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-147"
+      },
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-147-db",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-147-db"
+      },
+      {
+        "kind": "network",
+        "name": "deerflow-tenant-execution-m4-sql-147",
+        "exit": 1,
+        "stderr": "Error response from daemon: network deerflow-tenant-execution-m4-sql-147 not found"
+      }
+    ]
+  },
+  "root_review": "Root reviewed exact two-boundary test patch, independently read live Jenkins terminal, verified source SHA and byte-compared all six source files.",
+  "reviewed_test_patch_sha256": "5a3a4f68d4417846982d0091a1346d9a9113b71c6fc0259c4cc5f0899e739a5c",
+  "limits": [
+    "Unknown accounting None is one representative control boundary; other unknown fields, launch races, alternate private incarnations and tool-write revocation windows are not newly exercised by this build.",
+    "No native execution/model/provider/physical sandbox in these HTTP boundaries. Business scheduling clock is deterministic; native SQL/lease/STOP time remains unchanged.",
+    "note/manual/own-stop, installed dependencies/IM/recovery, remaining Run entries/physical gates and full M0-M11 remain open; activation false."
+  ]
+}
