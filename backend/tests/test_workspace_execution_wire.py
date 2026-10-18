@@ -239,3 +239,89 @@ def _exercise_native_tool_to_b(native_engine, executor_engine, tmp_path, monkeyp
 
 def test_native_tool_to_scoped_b_commit_and_background_status(native_engine, executor_engine, tmp_path, monkeypatch):  # noqa: F811
     _exercise_native_tool_to_b(native_engine, executor_engine, tmp_path, monkeypatch)
+
+
+@pytest.mark.parametrize("executor_engine", ["postgres"], indirect=True)
+def test_known_native_schema_starts_scoped_b_and_control(native_engine, executor_engine, tmp_path, monkeypatch):  # noqa: F811
+    """Real 0041 wire admission; older stamps below only probe startup gates."""
+    from copy import deepcopy
+
+    import httpx
+    from deerflow_extension_api import ExtensionData, ExtensionRuntimeDeps
+    from ecs_executor.control import ControlRoute, ExecutionControlService
+    from ecs_executor.native_authority import NativeSubmissionAuthority
+
+    from deerflow.authz.workspace import get_current_workspace
+    from deerflow.mcp.tasks.control import TaskControlRuntime
+
+    assert native_engine.dialect.name == executor_engine.dialect.name == "postgresql"
+    runtime = TaskControlRuntime()
+    app_store = ExtensionData("known-native-schema")
+    app_store.set(runtime)
+    secret = b"synthetic-schema-control-secret-at-least-32-bytes"
+
+    async def check_control(case):
+        authority = NativeSubmissionAuthority(native_engine)
+        with native_engine.connect() as connection:
+            original_versions = connection.execute(sa.text("SELECT version_num FROM alembic_version ORDER BY version_num")).scalars().all()
+        assert original_versions == ["0041_scheduler_workspace"]
+
+        def ledger_snapshot():
+            with executor_engine.connect() as connection:
+                return deepcopy([dict(row) for row in connection.execute(sa.text("SELECT * FROM ecs_execution_jobs ORDER BY id")).mappings()])
+
+        initial_jobs = ledger_snapshot()
+
+        def set_versions(versions):
+            with native_engine.begin() as connection:
+                connection.execute(sa.text("DELETE FROM alembic_version"))
+                for version in versions:
+                    connection.execute(sa.text("INSERT INTO alembic_version (version_num) VALUES (:version)"), {"version": version})
+
+        async def probe_control(*, accepted):
+            service = ExecutionControlService(
+                routes={"ecs": ControlRoute(url="http://127.0.0.1:8003", audience="B/control", credential="schema-control-only", secret=secret)},
+                poll_seconds=3600,
+                client_factory=lambda route: httpx.AsyncClient(transport=httpx.ASGITransport(app=case.control_app), base_url=route.url, timeout=30, trust_env=False),
+            )
+            clients = []
+            try:
+                deps = ExtensionRuntimeDeps(app_store=app_store, session_factory=case.case.sf)
+                if accepted:
+                    await service.start(deps)
+                    assert runtime.ready and runtime.supports("ecs") and service.task is not None
+                    clients.extend(service.clients.values())
+                    # No control intent exists: this must not invent STOP or
+                    # release the queued native MCP execution reservation.
+                    await service.run_once()
+                else:
+                    with pytest.raises(ValueError, match="incompatible native control schema"):
+                        await service.start(deps)
+                    assert not runtime.ready and service.task is None and not service.clients
+            finally:
+                await service.stop()
+                assert not runtime.ready and service.task is None and not service.clients
+                assert all(client.is_closed for client in clients)
+
+        authority.validate_mode(workspace_required=True)
+        await probe_control(accepted=True)
+        try:
+            # 0040 is a version-gate simulation on this owned 0041 fixture,
+            # not evidence of an old database migration or physical B run.
+            set_versions(["0040_mcp_workspace_identity"])
+            authority.validate_mode(workspace_required=True)
+            await probe_control(accepted=True)
+            for versions in (["9999_unknown"], ["0040_mcp_workspace_identity", "0041_scheduler_workspace"]):
+                set_versions(versions)
+                with pytest.raises(ValueError, match="Native workspace schema is incompatible"):
+                    authority.validate_mode(workspace_required=True)
+                await probe_control(accepted=False)
+        finally:
+            set_versions(original_versions)
+        authority.validate_mode(workspace_required=True)
+        await probe_control(accepted=True)
+        assert ledger_snapshot() == initial_jobs, "Startup probes changed queued work or historical uncertain reservations"
+        assert case.store.get(case.remote_id)["state"] == "queued"
+        assert get_current_workspace() == case.other
+
+    _exercise_native_tool_to_b(native_engine, executor_engine, tmp_path, monkeypatch, after_queue=check_control, control_secret=secret, control_credential="schema-control-only", control_runtime=runtime)

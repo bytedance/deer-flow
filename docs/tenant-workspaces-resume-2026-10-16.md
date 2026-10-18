@@ -1,4 +1,4 @@
-# Resume checkpoint — 2026-10-18: Scheduler main #123 and boundaries #125 verified; B/control 0041 compatibility next; M4 and M0–M11 remain partial
+# Resume checkpoint — 2026-10-18: Scheduler main #123, boundaries #125 and B/control 0041 compatibility #127 verified; Scheduler user entry next; M4 and M0–M11 remain partial
 > **执行中，M4 部分完成。** Jenkins #112：单 Worker 真实 AIO 创建、文件写读、warm STOP、失败保留和 report 后释放已通过（1 项，53.79s）。两机 HTTP、恢复和 C→B→C 仍待完成；通知补丁已获用户批准，正在应用和验证；租户启动关闭。
 
 # 2026-10-16 暂停与恢复检查点
@@ -1193,3 +1193,10 @@ Scope is one conversation-origin/fresh-thread/once story with deterministic grap
 Jenkins `deerflow-tenant-execution-m4-sql #125 SUCCESS`: only queued-member withdrawal and pre-insert occurrence lease takeover passed (2 tests, 21.04s); Ruff check and 61-file format check passed. #124 failed because its test incorrectly assumed empty fixture tables; the retry preserves and compares every seeded Run/event/executor job. No product change was made to accommodate those seeds. Root independently matched all three changed source files to the successful archive; exact fixture containers/network are absent.
 
 Withdrawal retains the original queued row without launching. Lease takeover reaches the real atomic insert, rejects the stale receipt, and retains the successor launching lease without creating a Run, job or event, or releasing capacity. This does not prove STOP, queue retirement, full Scheduler, physical execution or migration compatibility. Evidence: `docs/tenant-workspaces-evidence/native-scheduler-boundaries-125.json`. Next: the two runtime gates still reject native schema 0041; fix and verify that compatibility separately. Tenant activation remains false; no deployment or push.
+
+
+### 2026-10-18 — Native 0041 B/control runtime compatibility (#127)
+
+Jenkins `deerflow-tenant-execution-m4-sql #126` reproduced actual B construction rejecting 0041; its initialization-failure fixture also left an engine open and produced a teardown error, retained in the evidence. Two runtime checks now accept exactly one known native head, 0040 or 0041. `#127 SUCCESS`: one real PostgreSQL ToolNode → durable MCP → HTTP B submission/background status flow and actual control start/run_once/stop passed (16.49s); unknown/multiple heads refused, original version rows restored and all existing ledger rows preserved. The 0040 stamp probe is only a startup-gate simulation on the 0041 fixture. Ruff and 64-file format checks passed; root independently matched all four changed files to the archive. Exact containers/network are absent and normal teardown passed.
+
+Evidence: `docs/tenant-workspaces-evidence/native-schema-compatibility-127.json`. Offline backfill/export/import receipt pins remain unchanged; this is not migration/release or physical execution acceptance. Next: scoped Scheduler create response, list/detail/history with current resource authority, without renewing original execution snapshots. M4/M0–M11 remain partial, activation false, no deployment or push.

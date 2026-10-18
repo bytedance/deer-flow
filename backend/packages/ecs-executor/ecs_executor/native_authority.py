@@ -34,7 +34,7 @@ class NativeSubmissionAuthority:
             inspector = inspect(connection)
             if workspace_required:
                 versions = connection.execute(text("SELECT version_num FROM alembic_version")).scalars().all() if inspector.has_table("alembic_version") else []
-                if versions != ["0040_mcp_workspace_identity"]:
+                if len(versions) != 1 or versions[0] not in {"0040_mcp_workspace_identity", "0041_scheduler_workspace"}:
                     raise ValueError("Native workspace schema is incompatible with this execution receiver")
             elif inspector.has_table("workspaces"):
                 if connection.execute(select(WorkspaceRow.id).where(WorkspaceRow.kind == "team").limit(1)).first() is not None:

@@ -20,4 +20,4 @@ Withheld / not accepted:
 - Scoped IM is suppressed before reading all owner channel bindings; workspace-qualified binding/outbox delivery is still required.
 - Scoped event deletion/full HTTP/tool/UI/lifecycle and withdrawal/recovery fault acceptance remain required; activation stays false.
 
-One PostgreSQL story: RED #122, GREEN #123 (19.61s). Necessary withdrawal/lease boundaries follow; no dialect matrix.
+One PostgreSQL story: RED #122, GREEN #123 (19.61s). Queued withdrawal and pre-insert lease takeover boundaries passed in #125 (two PostgreSQL cases); no dialect matrix. See `native-scheduler-boundaries-125.json`.

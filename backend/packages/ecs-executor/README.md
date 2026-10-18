@@ -104,7 +104,10 @@ from these component proofs; the global startup gate remains closed.
 
 The private executor config accepts `workspace_required` (default false) and
 `native_server_name` (exact native MCP server binding). Scoped mode requires fixed
-metadata/shared-root settings and the matched native 0040/executor e0003 schema.
+metadata/shared-root settings and executor e0003. Receiver/control startup accepts
+exactly one known native revision: `0040_mcp_workspace_identity` or
+`0041_scheduler_workspace`; unknown and multiple heads are rejected. This runtime
+compatibility does not update offline migration/backfill receipt contracts.
 Existing team data refuses legacy B startup. The example keeps scoped mode off;
 single-host B uses the original committed task authority. Gateway tenant
 activation stays closed until the complete runtime/release plan is verified.

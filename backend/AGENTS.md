@@ -2,6 +2,11 @@
 
 ## Project Overview
 
+Scoped B receiver and execution-control startup accept exactly one native head,
+`0040_mcp_workspace_identity` or `0041_scheduler_workspace`. Keep unknown/multiple
+heads rejected. Offline backfill/export/import revision pins are a separate
+stopped-writer receipt contract; runtime compatibility cannot renew those receipts.
+
 Native ECS dependency coordination lives in the independent `ecs_executor.dependencies`
 package. Optional trusted RunContext receipts and lifecycle callbacks preserve the
 native goal/checkpoint authority; harness code imports neither app nor executor.

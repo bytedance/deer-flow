@@ -175,7 +175,7 @@ class ExecutionControlService:
             raise ValueError("native SQL and app-scoped lifecycle are required")
         async with deps.session_factory() as session:
             versions = (await session.scalars(text("SELECT version_num FROM alembic_version"))).all()
-            if versions != ["0040_mcp_workspace_identity"]:
+            if len(versions) != 1 or versions[0] not in {"0040_mcp_workspace_identity", "0041_scheduler_workspace"}:
                 raise ValueError("incompatible native control schema")
         self.runtime = deps.app_store.get_or_init(TaskControlRuntime, TaskControlRuntime)
         if self.runtime.ready:
