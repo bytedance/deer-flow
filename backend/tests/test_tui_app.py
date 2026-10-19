@@ -84,17 +84,18 @@ async def test_app_runs_a_turn_and_renders_streamed_assistant():
 
 
 @pytest.mark.asyncio
-async def test_multiline_paste_reaches_agent_without_dropping_lines():
+@pytest.mark.parametrize("prefix", ["", "/tdd\n", "/tdd\t"])
+async def test_multiline_paste_reaches_agent_without_dropping_lines(prefix):
     session = _FakeSession()
     app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
-    pasted = 'Traceback:\n  File "worker.py", line 7\nRuntimeError: boom'
+    pasted = prefix + 'Traceback:\n  File "worker.py", line 7\nRuntimeError: boom'
 
     async with app.run_test() as pilot:
         await pilot.pause()
         app.post_message(events.Paste(pasted))
         await pilot.pause()
         await pilot.press("enter")
-        await _wait_until(lambda: bool(session.client.stream_calls), pilot)
+        assert await _wait_until(lambda: bool(session.client.stream_calls), pilot)
 
     assert session.client.stream_calls[0][0] == pasted
 

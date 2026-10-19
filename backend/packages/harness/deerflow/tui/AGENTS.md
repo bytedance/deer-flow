@@ -13,6 +13,11 @@ A terminal-native UI over the embedded harness, exposed as the `deerflow` consol
 
 **Web UI visibility**: the Web UI lists threads from the `threads_meta` SQL table (user-scoped), not the checkpointer. `persistence.py` writes a `threads_meta` row under the default user (`"default"`) into the same DB the Gateway reads — via the harness-only `deerflow.persistence.engine.init_engine_from_config()` — so TUI sessions appear in the Web UI sidebar **without** running the Gateway. Best-effort: a no-op on the `memory` backend. All DB work runs on one long-lived background event loop (a SQLAlchemy async engine is bound to its creating loop).
 
+`resolve()` splits the slash token from its arguments on whitespace, including
+tabs and newlines, without collapsing whitespace inside the arguments. The name
+must remain attached to `/`; skill submissions reach the agent as the original
+text. Keep reserved-command checks and the paste-to-submit regression coverage.
+
 A persistence bridge timeout requests cancellation of its still-pending coroutine.
 This is cooperative cancellation, not rollback of a committed write or ordering
 of normally completed title writes. Preserve coroutine-originated errors and
