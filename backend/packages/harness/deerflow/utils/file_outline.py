@@ -73,7 +73,8 @@ def _clean_bold_title(raw: str) -> str:
 
     pymupdf4llm sometimes emits adjacent bold spans as ``**A** **B**`` instead
     of a single ``**A B**`` block.  This helper merges those fragments and then
-    strips the outermost ``**...**`` wrapper so the caller gets plain text.
+    strips a whole-title ``**...**`` wrapper. Mixed bold/plain text keeps its
+    delimiters rather than losing the ends of separate spans.
 
     Examples::
 
@@ -83,9 +84,10 @@ def _clean_bold_title(raw: str) -> str:
     """
     # Merge adjacent bold spans: "** **" → " "
     merged = re.sub(r"\*\*\s*\*\*", " ", raw).strip()
-    # Strip outermost **...** if the whole string is wrapped
+    # Strip one whole-title wrapper, not the ends of separate bold spans.
     if m := re.fullmatch(r"\*\*(.+?)\*\*", merged, re.DOTALL):
-        return m.group(1).strip()
+        if "**" not in m.group(1):
+            return m.group(1).strip()
     return merged
 
 
