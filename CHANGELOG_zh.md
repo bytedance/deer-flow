@@ -1021,6 +1021,22 @@
   仍返回 `500`，此前对其返回 `400` 的 `POST .../rollback` 现在也返回 `500`。用非法
   名称删除技能时不再记录变更尾部（mutation tail）错误日志。 ([#7123])
 
+- **渠道：** 同一条 IM 消息被投递两次不再被执行两次，两个 Gateway 实例也不再把一个新
+  会话拆到两个线程上。Discord 私信此前没有入站去重键（没有 guild id），而 Discord 线程
+  内的回复在不跟踪该线程的实例上会得到另一个键；由于每个实例的会话都会收到每条消息，
+  两个实例都会作答。Discord 消息现在按 guild（私信记为 `dm`）和消息所在频道生成去重键，
+  适配器在创建 Discord 线程之前先认领该键，因此只有一个实例会创建线程。超过 10 分钟
+  去重窗口、重启之后或共享去重存储不可用时，重投递此前会启动第二次运行（GitHub 的
+  “Redeliver”可能发出重复评论）。现在带去重键的消息发起的每个 IM 运行请求都携带由去重键
+  派生的 `Idempotency-Key`，人类消息 id 也由同一个键派生，因此 Gateway 会返回首次投递
+  时已接纳的运行：重投递会重放其事件流、从线程状态读取这条消息对应的轮次，或回复“该消息
+  仍在处理中”，而不会把这一轮再执行一遍——即使首次运行失败，或 `/new` 之后会话已换到新
+  线程也是如此：Gateway 对受信内部调用方的 `Idempotency-Key` 只按 owner 而不再按 owner 与
+  线程划分作用域，在另一个线程上复用已用过的 key 现在返回 `409` 而不是 `500`。
+  两个实例为同一会话的第一条消息各自创建线程时，绑定现在以“不存在才插入”的方式在
+  `channel_conversations` / `channel_thread_bindings` 中认领：落败的实例改用胜出者的线程
+  并删除自己创建的空线程，`/new` 仍会重新绑定到新线程。 (issue #7103, [#7104])
+  
 - **技能：** agent 通过 `skill_manage` 工具创建、编辑、修补或删除的技能，现在会像通过
   技能 API 所做的修改一样，传达到共享同一 home 卷的每个 Gateway 进程。此前该工具只刷新
   本进程的技能提示缓存，对端副本会继续为该用户渲染旧的技能列表；现在它在本地刷新之后、
@@ -9449,4 +9465,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6991]: https://github.com/bytedance/deer-flow/pull/6991
 [#7040]: https://github.com/bytedance/deer-flow/pull/7040
 [#7099]: https://github.com/bytedance/deer-flow/pull/7099
+[#7104]: https://github.com/bytedance/deer-flow/pull/7104
 [#7123]: https://github.com/bytedance/deer-flow/pull/7123
