@@ -2362,6 +2362,40 @@ def test_contract_dialect_auto_infers_disable_payload_from_when_thinking_enabled
     assert "reasoning_effort" not in captured
 
 
+@pytest.mark.parametrize(
+    ("reasoning", "thinking_enabled", "expected"),
+    [
+        ({"thinking": "optional"}, True, {"extra_body": "oops"}),
+        ({"thinking": "optional"}, False, {}),
+        ({"thinking": "optional", "dialect": "anthropic"}, True, {"thinking": {"type": "enabled"}, "extra_body": "oops"}),
+        ({"thinking": "optional", "dialect": "anthropic"}, False, {"thinking": {"type": "disabled"}}),
+    ],
+    ids=["auto-thinking-on", "auto-thinking-off", "anthropic-thinking-on", "anthropic-thinking-off"],
+)
+def test_contract_non_mapping_template_values_build_on_both_thinking_paths(monkeypatch, reasoning, thinking_enabled, expected):
+    """``ModelConfig.when_thinking_enabled`` is ``dict | None`` with unvalidated nested values,
+    so a truthy non-mapping ``extra_body`` loads fine from ``config.yaml`` — and the contract
+    path read it unconditionally: the ``dialect: auto`` inference and the shared
+    ``chat_template_kwargs`` lookup both called ``.get`` on it, so every ``create_chat_model``
+    for the profile crashed with ``AttributeError`` on both thinking directions. The legacy
+    path forwards the identical template unchanged
+    (``test_legacy_non_mapping_template_values_are_forwarded_not_rejected``); the contract
+    path must likewise build, treating the value as absent for its dialect heuristics (the
+    way the existing ``isinstance`` guards treat null template values) while the enable
+    direction still forwards it like any other template value."""
+    model = _contract_model(reasoning=reasoning, when_thinking_enabled={"extra_body": "oops"})
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=thinking_enabled)
+
+    for key in ("extra_body", "thinking"):
+        if key in expected:
+            assert captured[key] == expected[key], f"non-mapping template value broke the {key} payload"
+        else:
+            assert key not in captured, f"non-mapping template value leaked an unexpected {key} payload"
+
+
 @pytest.mark.parametrize(("thinking_enabled", "expected"), [(True, True), (False, False)])
 def test_contract_dialect_vllm_synthesizes_chat_template_kwargs(monkeypatch, thinking_enabled, expected):
     model = _contract_model(reasoning={"thinking": "optional", "dialect": "vllm_chat_template"})

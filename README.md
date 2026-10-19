@@ -190,6 +190,8 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
 
    Serply web search contains malformed HTTP-success payloads the same way in every vertical: a `results`/`entries`/`articles` container that is not a list, or a non-empty list with no object entries, returns the provider's format error, while non-object entries in an otherwise valid list are skipped in order. Missing, null, or empty containers keep the existing "No results found" response.
 
+   SearXNG web search contains malformed HTTP-success payloads the same way: a payload that is not an object, a body that is not JSON, a `results` container that is not a list, or a non-empty list holding no object entries returns the provider's format error, while non-object entries in an otherwise valid page are skipped in order, each skip logged with its entry position, so the valid rows survive and provider-side drift leaves a trace. Missing, null, or empty `results` keep the existing empty result (`[]`). This matters most for a self-hosted instance: one behind a reverse proxy or captive portal answers an HTML or plain-text error page with HTTP 200, and reading that as an empty search ends a research loop as "no hits".
+
    InfoQuest web and image search contain malformed HTTP-success payloads the same way: a `search_result` envelope that is not an object, or an `organic`/`top_stories.items`/`images_results` container that is not a list or that holds no usable entry, returns the provider's format error, while malformed entries in an otherwise valid payload are skipped so the usable rows survive. Missing, null, or empty containers keep the existing empty result. Format errors log the container or entry position only, without queries or payload values.
 
    InfoQuest web and image search screen result URLs through the shared public-URL policy and omit rejected rows. Responses without the required `search_result` envelope return a format error instead of exposing the raw provider payload.
@@ -509,6 +511,15 @@ take precedence, and `max_recursion_limit` (default `1000`) caps both. Changes
 apply to the next run without restarting the Gateway. This top-level setting
 applies to Gateway API runs; IM channel and embedded `DeerFlowClient` runs
 retain their own defaults and per-call override paths.
+
+A custom frontend can add an optional `context.client` to a Gateway run request:
+a client name, capabilities such as `artifacts` or `charts`, and display
+preferences. DeerFlow sanitizes it and passes the values to the agent as
+untrusted, request-scoped hints, so skills can pick an output shape the client
+can show. It is never an authorization or identity signal. See
+[Create Run](backend/docs/API.md#create-run).
+Client hints are omitted from stored run configuration and must be sent again
+for each run; later runs, including server-started tasks, do not inherit them.
 The checkpoint storage settings `database.checkpoint_channel_mode` and
 `database.checkpoint_delta.snapshot_frequency` (default `10`) are exceptions:
 both are frozen when the process first builds an agent (including through
@@ -866,6 +877,11 @@ Outputs with case- or Unicode-equivalent file or directory names are skipped
 before copying, and aliases of existing local paths are rejected, preserving
 previous complete copies.
 
+The [sandbox benchmark](backend/scripts/benchmark/sandbox/README.md#opensandbox)
+also supports OpenSandbox cold acquisition, warm reuse and concurrent scopes,
+using the configured service connection and reporting unconfirmed cleanup as a
+failed run. Live runs require a disposable OpenSandbox service and runtime home.
+
 BoxLite shutdown rejects late VM registration and keeps its SDK loop open while
 in-flight acquisitions finish. If they cannot drain within five seconds,
 shutdown fails with resources still owned and can be retried.
@@ -885,7 +901,7 @@ already received by the browser, without an additional secret-redaction layer.
 
 In plan mode, malformed TODO statuses return normal tool-validation errors without aborting token attribution, so the agent can correct the call.
 
-Tool-produced paths and URLs can be retained as short artifact handles across context compaction (`tool_artifacts` in `config.yaml`). Handles distinguish separate tool-result occurrences, even when a provider reuses call IDs. Standard MCP image URLs are captured alongside file references, including results from stdio and HTTP servers. Detected file URLs preserve their query strings and fragments. When PII redaction is enabled, model-visible artifact labels follow that policy; internal references stay intact for tool argument resolution. The configured registry limit retains the newest artifacts, while checkpointed processing identities prevent evicted results from being recaptured after restart. Resolution runs before authorization and write-safety checks; unknown or expired handles return an error without executing the tool. Small unknown structured results may be retained as complete JSON up to 4096 UTF-8 bytes; empty or oversized payloads are skipped. Handles are agent-local: task arguments resolve parent handles to concrete references, and delegated reports must return concrete references rather than child-local handles. A truncated model projection reports how many handles are omitted.
+Tool-produced paths and URLs can be retained as short artifact handles across context compaction (`tool_artifacts` in `config.yaml`). Handles distinguish separate tool-result occurrences, even when a provider reuses call IDs. Standard MCP image URLs are captured alongside file references, including results from stdio and HTTP servers. Detected file URLs preserve their query strings and fragments. Free-text artifact references retain balanced ASCII and CJK brackets in literal paths and URLs while trimming surrounding prose punctuation. When PII redaction is enabled, model-visible artifact labels follow that policy; internal references stay intact for tool argument resolution. The configured registry limit retains the newest artifacts, while checkpointed processing identities prevent evicted results from being recaptured after restart. Resolution runs before authorization and write-safety checks; unknown or expired handles return an error without executing the tool. Small unknown structured results may be retained as complete JSON up to 4096 UTF-8 bytes; empty or oversized payloads are skipped. Handles are agent-local: task arguments resolve parent handles to concrete references, and delegated reports must return concrete references rather than child-local handles. A truncated model projection reports how many handles are omitted.
 
 DeerFlow supports configurable MCP servers and skills to extend its capabilities.
 When durable MCP background tasks are enabled, agents can use `list_background_tasks(status="failed")` or `status="input_required"` to find failed tasks or tasks awaiting input in the current chat. Other supported statuses are `submitted`, `working`, `completed`, and `cancelled`; omitting the status preserves existing behavior. The database applies the filter before limiting results to the 20 most recent matching tasks. When combined with `active_only=true`, both filters apply: active statuses are `submitted`, `working`, and `input_required`, so terminal statuses return an empty list. `GET /api/threads/{thread_id}/mcp-tasks` supports the same `status` and `active_only` filters before its `limit` (default 50, range 1–100); for example, `?status=failed&limit=20`. Unknown statuses return 422, and omitting the filters preserves the existing response.
@@ -1168,6 +1184,8 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 4. Copy the App ID and App Secret. Set `FEISHU_APP_ID` and `FEISHU_APP_SECRET` in `.env` and enable the channel in `config.yaml`.
 5. The bot supports inbound text, image, and file messages. Inbound attachment downloads are limited to 20 MB per attachment.
 6. _(Optional)_ Interactive clarification cards: set `card_interaction_enabled: true` under `channels.feishu` to let the agent's option-based clarifications render as clickable button cards, preserving any background context before the question. Then, in the developer console, open **Callback Configuration** (回调配置 — a separate tab from **Event Subscriptions**), subscribe to `card.action.trigger` in **Long Connection** mode, and publish a new app version. A click resolves the clarification exactly like typing the choice; only the user who triggered the clarification can operate its card. Button answers are saved in the conversation history, and subsequent clarifications continue in the same thread.
+
+If the SDK repeatedly logs `CERTIFICATE_VERIFY_FAILED`, see [Feishu / Lark TLS troubleshooting](backend/docs/IM_CHANNEL_CONNECTIONS.md#feishu--lark-tls-troubleshooting) to check the Gateway's CA trust configuration.
 
 Scheduled-task result and lifecycle notices can also be pushed to a bound Feishu/Lark user, without a new inbound message. They use the same notification outbox and localized summaries as WeCom. The app must be able to send to that user; see [Feishu scheduled-task notifications](backend/docs/IM_CHANNEL_CONNECTIONS.md#feishu-scheduled-task-notifications).
 
@@ -1463,6 +1481,10 @@ Discovery follows operator-managed directory symlinks, but skips links back to a
 
 Skill Markdown and bundled text resources use UTF-8. Skill-creator CLI and review utilities read and write text explicitly as UTF-8 so localized skills behave consistently across operating systems.
 
+Skill-creator benchmark aggregation uses recorded `timing.json` token counts even
+when `grading.json` already contains the run duration. Recorded zero counts are
+preserved; output character counts remain a legacy proxy only when token data is missing.
+
 `SKILL.md` YAML frontmatter must open and close with `---` on its own line (trailing spaces or tabs are allowed). A line such as `---suffix` is not a closing delimiter.
 
 Custom skill history preserves Unicode line separators inside saved content and metadata, keeping those revisions readable for history inspection and rollback. Malformed JSON history records are still rejected.
@@ -1472,8 +1494,12 @@ Python's standard-library HTTP client. Its fallback preserves spaces, Unicode, a
 reserved characters in search queries and label filters.
 File reads accept raw repository-relative paths and preserve spaces, Unicode,
 `#`, `?`, and literal percent signs with either HTTP client.
+Directory listings ask for the repository's own default branch, so a repository that
+uses neither `main` nor `master` reports its current tree instead of a stale branch.
 
 Users can explicitly activate an enabled skill for a single turn by starting the request with `/skill-name`, for example `/data-analysis analyze uploads/foo.csv`. DeerFlow loads that skill's `SKILL.md` as hidden current-turn context while leaving the base prompt limited to skill metadata. Slash activation respects disabled skills, custom-agent skill whitelists, and existing channel commands such as `/new` and `/help`.
+
+The **data-analysis** skill preserves each CSV file or Excel sheet when names collide across inputs. [Prepare its Python environment](skills/public/data-analysis/SKILL.md#environment-setup) explicitly with DuckDB and openpyxl; missing packages report setup instructions instead of installing themselves during analysis. Use the SQL names printed by `inspect` (such as `report`, `report_1`) for queries and summaries. Its cache follows ordered input basenames and contents, so renaming or reordering inputs rebuilds their table map instead of silently selecting a different source. Quoted original names also resolve without rewriting query text; apostrophes in upload paths and double quotes in column names are preserved through loading, inspection, queries, and summaries.
 
 After an answer loads skills, its toolbar includes **Skills used**. Hover over or click the icon to see the skills and their sources; hovering a skill name underlines it. Select a skill to inspect its `SKILL.md` in the resizable side panel (a drawer on mobile). The view uses snapshots captured during successful configured read-tool loads or explicit slash activation, so later edits or removal of a skill do not rewrite its history. Repeated loads appear once per run, in first-load order. Range reads and bounded snapshots are labeled as partial; older conversations without captured evidence do not show this menu. Copy returns the captured Markdown, including YAML frontmatter. Package-relative links and images remain readable references rather than navigating away from the conversation. Skill loads performed through other tools, such as shell commands, are not inferred from answer text.
 
@@ -1625,6 +1651,8 @@ SkillScan warns about remote downloads piped into common shells, including `env`
 SkillScan treats HTTP/HTTPS scheme spellings and HTTP hostnames case-insensitively and recognizes bracketed IPv6
 loopback (`[::1]`) URLs as local. External IPv6 endpoints still trigger network findings,
 and cloud-metadata hostname detection is case-insensitive.
+
+SkillScan recognizes unquoted integer model-usage counters such as `total_tokens` and `input_tokens` in skill examples as measurements. Benchmark token statistics and signed deltas are also recognized; credential fields and other string values remain subject to secret detection.
 
 For Python credential mappings, SkillScan checks literal values while treating ordinary dictionary keys as labels. A mapping such as `tokens = {"access_token": os.getenv("ACCESS_TOKEN")}` does not report a hardcoded credential. Keys matching a recognized cloud or API token format are still checked as embedded credentials.
 
@@ -1908,6 +1936,24 @@ contributes one such middleware at the visible tool position. After operator opt
 classifies the sanitized text a remote tool result shows the model, PII-redacted when
 `pii_redaction` is enabled, and adds an advisory warning through a lifecycle state
 update; it imports only the extension contract.
+
+Extensions may opt into owner-scoped completed-run evidence and safe updates to
+existing user-custom skills through `host_access` in operator-controlled
+`config.yaml`. These optional APIs stage an immutable candidate, check its exact
+contents, and publish with version conflict detection and crash recovery. They
+do **not** implement a learning/evolution plugin. Automatic changes are limited to
+the body and description of `SKILL.md`; changing permissions, supporting files,
+or enabled state is out of scope. The host contract requires `deerflow-extension-api==0.2.7`. See [Skill evolution host API](docs/skill-evolution-host.md)
+for deployment requirements, grants, recovery, and the plugin integration flow.
+Once an owner is enrolled, use the Gateway for skill management: standalone SDK
+processes without its durable mutation runtime refuse enrolled skill access,
+including custom-skill YAML diagnostics. Gateway diagnostics recover pending
+publications before scanning.
+Skill discovery preserves user scope when the caller uses the default configuration.
+Admin operation lists return `next_cursor: null` at the end of pagination.
+Keyed resume retries preserve the original run's evidence origin and agent identity.
+This host slice follows up the [Skill Self-Evolution RFC](https://github.com/bytedance/deer-flow/issues/1865)
+and the bilingual [Plugin Host APIs RFC](https://github.com/bytedance/deer-flow/issues/5539).
 
 Full-stack contributions can additionally provide browser pages, conversation actions,
 authenticated backend operations and model tools through the
@@ -2207,6 +2253,12 @@ the stable English `name`. API callers can pass `display_name` to agent creation
 or update requests; an omitted update preserves it and `null` clears it. The
 same optional field is supported in the agent's `config.yaml`.
 
+The new-Agent page confirms creation only after the latest `setup_agent` call
+succeeds and the persisted Agent can be read back. A tool failure or an
+unconfirmed write keeps the draft visible and restores **Save agent** so the
+operation can be retried instead of reporting a false success. Read-back results
+from a superseded Save attempt cannot change a newer attempt or its feedback.
+
 Saving an unrelated Agent setting preserves its existing thinking and reasoning
 defaults, including while the model catalog is loading, unavailable, or missing
 the configured model. Explicit reasoning edits are saved independently; choosing
@@ -2365,6 +2417,8 @@ async with runtime:
 
 Gateway run finalization also retains ownership through caller cancellation: it finishes terminal persistence, stream completion, and resource cleanup before propagating the interruption. Backend I/O must terminate or enforce its own timeout. Gateway shutdown includes workers still finalizing after their terminal status commits; an expired shutdown drain budget is logged and does not cancel their outstanding writes.
 
+Terminal cleanup releases the run journal and its message-sequence callback even when diagnostic logs retain a checkpoint-inspection traceback.
+
 The factory still does not load YAML or create SQL infrastructure: the caller supplies the config snapshot, repository, and lifecycle. Because it accepts a caller-owned `system_prompt`, direct integrations also own any model-visible wording about those limits; the default middleware enforces the runtime limits regardless. The factory does not mount the Gateway owner-scoped HTTP routes or Web UI, so direct applications must expose their own result API/UI if they need those surfaces. For ordinary delegation only, `SubagentRuntime(...)` needs no asynchronous startup.
 
 Administrators can add, edit, disable, and delete reusable worker definitions from **Settings → Subagents**. Built-in and `config.yaml` definitions remain visible there as read-only entries. The default Lead Agent can use every enabled runtime sub-agent; each page-created Custom Agent can instead allow all, none, or a selected set. That selection is enforced both in the model-visible directory and by the server-side `task` tool. Managed definitions are deployment-wide in this version and follow `agent_storage.backend`: atomic files for a local deployment or the shared application database for multiple instances.
@@ -2519,6 +2573,9 @@ Ranged `read_file` calls count lines the same way on every sandbox provider: a l
 Concurrent reads and writes to the same file share a gate across synchronous and asynchronous tool calls. Async callers waiting for that gate do not occupy worker threads needed to finish the current read or write. Cancelling a waiting call leaves the current operation running; a call that already started file inspection still waits for that work to finish before releasing its gate.
 
 The built-in `grep` tool searches either one text file or all matching text files below a directory, so an agent can search an uploaded document directly without first broadening the request to the entire uploads directory.
+On the local sandbox, `grep(literal=True)` also searches long lines in minified text or single-line JSON, within the existing file-size limit. Case-insensitive literal matching avoids repeated-prefix rescans while preserving Unicode case behavior. Regex searches retain their long-line safety guard.
+
+Across sandbox providers, returned previews show only the beginning of each matched line (200 characters by default), so a match later in a long line may not appear in the preview. Use the reported path and line number to inspect the source. The `truncated` flag concerns match-count limits, not preview length.
 E2B's `glob` filter preserves spaces, quotes, and dollar signs in filename patterns, while wildcard matching and root-relative directory scoping remain unchanged.
 E2B `grep` also preserves colons in file and directory names when reporting matching paths and line numbers.
 `glob` and `grep` preserve non-LF separator characters, such as vertical tabs and Unicode line separators, inside returned paths on E2B, BoxLite, Tenki, and OpenSandbox; `grep` also preserves them inside matched text.
@@ -2568,6 +2625,11 @@ Sandbox image downloads enforce the 20 MiB vision limit while reading, including
 Image bytes loaded for a vision-model call are transient: DeerFlow removes the hidden base64 message after the model consumes it so later checkpoints do not keep duplicating that payload.
 
 After each run, DeerFlow records a workspace change summary for the run-owned `workspace` and `outputs` directories. The Web UI shows a compact "files changed" badge on the assistant turn; opening it reveals created, modified, and deleted files with text diffs when safe to display. Uploads are excluded because they are user inputs, not agent-generated changes, and stdio MCP temporary/debug files under the DeerFlow-owned `.mcp/` namespace are excluded because they are process-internal state (like `.git/` and `node_modules/`, any directory named `.mcp` is excluded at any depth). Large, binary, or sensitive-looking files are shown as metadata only.
+
+If a file disappears while being hashed, the scan omits that file and continues
+recording the others. A concurrent scratch-file removal therefore does not
+discard the whole snapshot or suppress detection of other produced outputs.
+This remains a best-effort scan, not an atomic filesystem snapshot.
 
 Files presented through `present_files` remain part of the thread's artifact state, and the Web UI restores the artifact panel and selected document after a page refresh. When a completed response successfully presents between 2 and 50 files, its final file card also offers one ZIP download. Archive membership comes from the terminal delivery receipt rather than browser-supplied paths, and the ZIP contains the current file versions, which may have changed since the response. The currently selected formal artifact is refreshed once when the run finishes so edits become visible without a manual reload. Existing UTF-8 text artifacts under `/mnt/user-data/outputs` can also be edited and explicitly saved from the panel on Unix and Windows while the thread is idle; saves use content revisions to prevent overwriting agent changes. Source previews also recognize extensionless `Dockerfile` and `Makefile` artifacts by their file names. Unknown file types, including names such as `constructor` and `__proto__`, retain the download fallback.
 
@@ -2794,6 +2856,10 @@ by sibling deletions or runtime failures (such as unavailable sources or policy 
 become available in the next batch, when rejected additions can be retried.
 
 ### Long-Term Memory
+
+Settings > Memory keeps successful clear, import, and fact edits visible even
+when an older background read finishes afterward. Later reads still refresh
+the view normally; failed actions preserve the existing cached memory.
 
 DeerMem debounces pending updates independently per conversation, user, and agent.
 `memory.backend_config.debounce_seconds` sets the quiet period (default 30 seconds),

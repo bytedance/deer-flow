@@ -49,6 +49,63 @@ explicit destruction. `warm_hit` comes from the actual reclaim path. Keep differ
 images, pool settings, replica limits, user counts and concurrency levels separate;
 the summary's default grouping does so. Percentiles use inclusive interpolation.
 
+## OpenSandbox
+
+`--provider opensandbox` uses the production OpenSandbox provider and reads its
+connection, timeouts and environment from the selected DeerFlow configuration.
+Point `DEER_FLOW_CONFIG_PATH` at a disposable benchmark configuration with the
+[OpenSandbox settings](../../../packages/harness/deerflow/community/opensandbox/README.md)
+and set `DEER_FLOW_HOME` to a disposable local directory. Use a test OpenSandbox
+service; these commands create and destroy real remote resources. Install the
+optional `deerflow-harness[opensandbox]` dependency before running.
+
+```sh
+DEER_FLOW_CONFIG_PATH=/absolute/path/opensandbox-benchmark.yaml \
+DEER_FLOW_HOME=/absolute/path/disposable-home \
+uv run --no-sync python scripts/benchmark/sandbox/bench_provider.py \
+  --provider opensandbox --image <pinned-image> \
+  --scenario warm_same_thread --workload state_reuse --iterations 10 \
+  --output opensandbox-warm.jsonl
+```
+
+All five scenarios are supported. For a cold baseline, use
+`--scenario cold_unique_thread --no-warmpool`; for simultaneous scopes, use
+`--scenario replica_pressure --users 4 --concurrency 4`. Use an image with the
+Python and POSIX utilities required by the selected workload and output sync.
+The normal warm-up creates and destroys a separate remote before measurement.
+
+CLI `--replicas` and `--idle-timeout` override their YAML values, including their
+CLI defaults (3 and 600). `--image` overrides YAML only when supplied. Connection
+settings, including HTTPS and `use_server_proxy`, are retained. The exported
+configuration dimensions contain only image, replicas and idle timeout; credentials,
+endpoint and environment are not copied into result rows. Record non-secret SDK,
+server and deployment versions separately for reproducibility.
+
+`release_ms` includes production best-effort output synchronization. Successful
+command/release timing does not prove that every artifact was mirrored. Warm hits
+come from the actual provider reclaim path, including its health probe. The replica
+limit is a soft cap, not global admission control. `--fault-inject` and nonzero
+`--health-check-skip-seconds` are rejected before provisioning: OpenSandbox does not
+implement the existing BoxLite/AIO fault and health-skip adapters.
+
+The benchmark retains production lifecycle behavior but records reported cleanup
+failures instead of accepting them as success. A final cleanup failure exits nonzero
+and appends a failed `shutdown` / `cleanup` row, so `summarize.py` also exits nonzero.
+These rows are cleanup diagnostics, not command latency samples. Inspect the remote
+IDs in the error and clean up unconfirmed resources through the test service.
+The benchmark cannot establish physical deletion beyond the provider's destroy
+contract. The Docker-prefix resource sampler below does not measure remote
+OpenSandbox resources; collect server-side metrics separately.
+
+Offline regressions use the production provider with an SDK transport double:
+
+```sh
+uv run --no-sync pytest tests/test_bench_opensandbox.py tests/test_bench_sandbox_provider.py -q
+```
+
+They check lifecycle and reporting contracts, not live SDK/server compatibility or
+performance. Keep real-service runs opt-in and report their evidence separately.
+
 ## Resource samples
 
 Run the sampler beside an explicit benchmark run ID:

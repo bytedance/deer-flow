@@ -1265,6 +1265,15 @@ This release closes that milestone with **621 merged pull requests**.
 
 ### Fixed
 
+- **workflows:** A script workflow waiting on a long child Agent run no longer
+  fails with `Worker turn limit` after about 209 seconds regardless of
+  `timeout_seconds`. The supervisor re-sent an empty frame to the QuickJS worker
+  every 20 ms poll while a step was pending, and each round trip counted toward
+  the 10,000-turn cap. The worker now reports when its job queue has drained,
+  and the supervisor then waits on the pending calls locally (still checking
+  cancellation, faults and worker exits every 20 ms) without exchanging frames,
+  so idle waits no longer consume turns and `timeout_seconds` is the only wall-clock bound;
+  scripts that spin the job queue still hit the turn cap. (issue #7022)
 - **browser:** `browser_screenshot` no longer replaces a file that already
   exists in the thread's outputs directory. A screenshot saved as
   `report.png` used to overwrite the user's own `report.png`, an earlier
