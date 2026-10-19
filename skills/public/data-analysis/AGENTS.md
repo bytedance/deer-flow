@@ -23,3 +23,8 @@ Keep these views connection-local and preserve normal CTE shadowing.
 Prepare DuckDB and openpyxl explicitly in the execution environment. Missing
 packages produce setup instructions without launching installers; keep those
 import-failure regressions offline in the root skill tests.
+
+Export paths resolve relative to the caller's working directory, including bare
+filenames. Keep real DuckDB regressions for CSV/JSON/Markdown, empty results,
+existing and missing parent directories, and the cache-hit CLI path in
+`tests/skills/test_data_analysis_export_paths.py`.
