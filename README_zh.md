@@ -19,7 +19,7 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
 ## 官网
 
 想了解更多，或者直接看**真实演示**，可以访问[**官网**](https://deerflow.tech)。
-首页精选案例已配置为免登录白名单只读演示，无需登录即可查看。
+首页精选案例已配置为免登录白名单只读演示。
 
 ## 姐妹项目
 
