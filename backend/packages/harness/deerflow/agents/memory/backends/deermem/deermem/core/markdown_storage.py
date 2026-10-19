@@ -53,7 +53,7 @@ class MarkdownMemoryStorage(FileMemoryStorage):
         if not path.exists():
             return None
         try:
-            raw = path.read_text(encoding="utf-8")
+            raw = path.read_text(encoding="utf-8-sig")
         except (OSError, UnicodeError) as exc:
             logger.warning("Cannot read memory summary %s: %s", path, exc)
             return None
