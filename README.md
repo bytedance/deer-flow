@@ -2871,6 +2871,8 @@ summary reads while keeping JSON writes and the existing UI. A hand-edited
 embedded backticks and later fenced notes are supported. Unparseable summary
 text is moved to `memory.json.corrupt-<timestamp>` for recovery before rebuilding.
 `storage_path` must point to the data root directory, not an existing JSON file.
+Hand-edited DeerMem summaries and fact Markdown files may have a leading UTF-8
+BOM; reads accept it, while writes remain BOM-free UTF-8.
 
 Gateway shutdown drains memory updates before closing the backend, even when
 shutdown is cancelled. Config reload failures are logged without aborting runtime

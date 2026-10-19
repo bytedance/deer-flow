@@ -406,7 +406,7 @@ def _render_fact_markdown(fact: dict[str, Any]) -> bytes:
 
 def _parse_fact_markdown(path: Path) -> dict[str, Any]:
     try:
-        # ``utf-8-sig`` drops a leading BOM, matching the summary loader above.
+        # ``utf-8-sig`` drops a leading BOM, matching ``_load_memory_file``.
         # Facts are hand-editable ``.md`` files, so a Windows editor can add one;
         # the ``startswith("---\n")`` check below would then read a valid fact as
         # "missing YAML front matter" and raise MemoryStorageCorruption over an

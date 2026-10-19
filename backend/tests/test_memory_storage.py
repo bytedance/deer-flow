@@ -433,40 +433,34 @@ class TestMarkdownMemoryStorage:
 
 
 class TestFactMarkdownBom:
-    """A canonical fact is front-matter Markdown, so it can arrive BOM-prefixed.
+    """Hand-edited canonical facts must survive the complete storage read path."""
 
-    Facts live as ``.md`` files that an operator can inspect and edit by hand --
-    the same exposure the memory summary has. A summary saved by Windows
-    Notepad or PowerShell 5.1's ``Set-Content -Encoding UTF8`` gets a BOM, and
-    #7083 fixed exactly that for ``memory.json``. The fact parser checks
-    ``text.startswith("---\n")``, so a BOM makes a perfectly valid fact read as
-    "missing YAML front matter" and raises ``MemoryStorageCorruption``.
-    """
+    def test_fact_saved_with_utf8_bom_round_trips_through_storage(self, tmp_path):
+        storage = _storage_at(tmp_path / "memory.json")
+        memory = create_empty_memory()
+        memory["facts"] = [
+            {
+                "id": "fact_bom",
+                "title": "Shared decision",
+                "content": "Use Postgres. Preserve an interior \ufeff character.",
+                "category": "context",
+                "confidence": 0.9,
+                "createdAt": "2026-10-19T00:00:00Z",
+                "source": "manual",
+            }
+        ]
+        assert storage.save(memory, "agent-a", user_id="alice")
+        before = storage.load("agent-a", user_id="alice")
+        (fact_path,) = tmp_path.rglob("fact_bom.md")
+        original = fact_path.read_bytes()
+        assert not original.startswith(b"\xef\xbb\xbf")
+        fact_path.write_bytes(b"\xef\xbb\xbf" + original)
 
-    _BODY = "---\ntitle: Shared decision\n---\n\n# Shared decision\n\nUse Postgres.\n"
+        reloaded = storage.reload("agent-a", user_id="alice")
 
-    @staticmethod
-    def _write_fact(tmp_path, name: str, content: str):
-        path = tmp_path / name
-        path.write_text(content, encoding="utf-8")
-        return path
-
-    def test_fact_saved_with_utf8_bom_parses(self, tmp_path):
-        from deerflow.agents.memory.backends.deermem.deermem.core.storage import _parse_fact_markdown
-
-        path = self._write_fact(tmp_path, "fact-bom.md", "\ufeff" + self._BODY)
-
-        parsed = _parse_fact_markdown(path)
-
-        assert parsed["title"] == "Shared decision"
-        assert parsed["content"] == "Use Postgres."
-
-    def test_fact_without_bom_is_unaffected(self, tmp_path):
-        from deerflow.agents.memory.backends.deermem.deermem.core.storage import _parse_fact_markdown
-
-        path = self._write_fact(tmp_path, "fact.md", self._BODY)
-
-        parsed = _parse_fact_markdown(path)
-
-        assert parsed["title"] == "Shared decision"
-        assert parsed["content"] == "Use Postgres."
+        assert reloaded["facts"] == before["facts"]
+        (fact,) = reloaded["facts"]
+        assert fact["id"] == "fact_bom"
+        assert fact["title"] == "Shared decision"
+        assert fact["content"] == memory["facts"][0]["content"]
+        assert fact["scope"] == {"userId": "alice", "agentName": "agent-a"}
