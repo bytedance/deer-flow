@@ -22,7 +22,7 @@ from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 
 REVISION = "0044_channel_runtime_configs"
 PREVIOUS = "0043_runtime_im_notices"
-CURRENT_HEAD = REVISION
+CURRENT_HEAD = bootstrap._get_head_revision()
 TABLE = "channel_runtime_configs"
 COLUMNS = {"provider", "config_ciphertext", "disconnected", "version", "updated_at"}
 pytestmark = pytest.mark.asyncio

@@ -113,6 +113,9 @@ Fork lookups reject invalidated clients; cancelled acquires leave borrowers a pe
 
 **Sandbox Tools** (in `packages/harness/deerflow/sandbox/tools.py`):
 
+Case-insensitive literal grep uses KMP + single-character `re.IGNORECASE` for
+linear work and Unicode parity. Regression: `tests/test_local_grep_long_lines.py`.
+
 Remote `list_dir` prints the root, then prunes ignored descendants before the
 500-entry cap. Preserve root literals, host case policy, status markers and the
 subshell. Keep parser filtering as a backstop; test ignored roots, metacharacters,
