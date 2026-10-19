@@ -1143,7 +1143,7 @@ class FileMemoryStorage(MemoryStorage):
         if not path.exists():
             return None
         try:
-            value = json.loads(path.read_text(encoding="utf-8"))
+            value = json.loads(path.read_text(encoding="utf-8-sig"))
         except (json.JSONDecodeError, OSError, UnicodeError) as exc:
             raise MemoryStorageCorruption(f"Failed to load global memory JSON {path}: {exc}") from exc
         if not isinstance(value, dict):
