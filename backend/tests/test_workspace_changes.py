@@ -100,7 +100,12 @@ def test_cached_crlf_text_round_trips_byte_exactly_into_diffs(tmp_path):
     change = {c.path: c for c in result.files}["/mnt/user-data/workspace/notes.md"]
     assert "-second" in change.diff
     assert "+third" in change.diff
-    assert not change.diff.startswith("-\n"), "no spurious blank line from corrupted CRLF cache bytes"
+    # Pin the line counts: a host that translates newlines on the cache write
+    # and re-translates on read rounds the cached text up to "first\n\nsecond\n"
+    # (one spurious blank line per CRLF line), which shows up here as an extra
+    # deletion line. "-second"/"+third" alone stay present under that bug, so
+    # only the counts catch it — on any host, not just native Windows.
+    assert (change.additions, change.deletions) == (1, 1), change.diff
 
 
 @pytest.mark.parametrize("include_text", [False, True])
