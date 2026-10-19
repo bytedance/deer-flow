@@ -462,6 +462,9 @@ Check whether you have access to the `present_files` tool. If you don't, skip th
 python -m scripts.package_skill <path/to/skill-folder>
 ```
 
+The output directory may be inside the skill folder; the packager excludes its
+own output archive while retaining other `.skill` resources.
+
 After packaging, direct the user to the resulting `.skill` file path so they can install it.
 
 ---

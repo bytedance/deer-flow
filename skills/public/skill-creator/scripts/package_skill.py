@@ -93,6 +93,8 @@ def package_skill(skill_path, output_dir=None):
             for file_path in skill_path.rglob('*'):
                 if not file_path.is_file():
                     continue
+                if file_path.resolve() == skill_filename:
+                    continue
                 arcname = file_path.relative_to(skill_path.parent)
                 if should_exclude(arcname):
                     print(f"  Skipped: {arcname}")
