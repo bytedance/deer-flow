@@ -778,7 +778,7 @@ def test_custom_skill_delete_preserves_history_and_allows_restore(monkeypatch, t
         assert refresh_calls == [("refresh", "default"), ("refresh", "default")]
 
 
-def _make_custom_skill_history_app(monkeypatch, tmp_path: Path) -> FastAPI:
+def _make_demo_custom_skill_app(monkeypatch, tmp_path: Path) -> FastAPI:
     from deerflow.config.paths import Paths
 
     custom_dir = _user_custom_dir(tmp_path, "default") / "demo-skill"
@@ -807,7 +807,7 @@ def test_custom_skill_history_rejects_invalid_name(monkeypatch, tmp_path, caplog
     """An invalid name is a 400 like delete and rollback, not a logged 500."""
     import logging
 
-    app = _make_custom_skill_history_app(monkeypatch, tmp_path)
+    app = _make_demo_custom_skill_app(monkeypatch, tmp_path)
 
     with TestClient(app) as client, caplog.at_level(logging.ERROR, logger=skills_router.__name__):
         response = client.get(f"/api/skills/custom/{skill_name}/history")
@@ -817,18 +817,39 @@ def test_custom_skill_history_rejects_invalid_name(monkeypatch, tmp_path, caplog
     assert "Failed to read history" not in caplog.text
 
 
-def test_custom_skill_history_corrupt_record_stays_server_error(monkeypatch, tmp_path):
+def test_custom_skill_delete_rejects_invalid_name_before_mutation_tail(monkeypatch, tmp_path, caplog):
+    """A malformed name is a 400 the drained delete tail never sees, so nothing is logged."""
+    import logging
+
+    app = _make_demo_custom_skill_app(monkeypatch, tmp_path)
+
+    with TestClient(app) as client, caplog.at_level(logging.ERROR, logger=skills_router.__name__):
+        response = client.delete("/api/skills/custom/Bad_Name")
+
+    assert response.status_code == 400
+    assert "hyphen-case" in response.json()["detail"]
+    assert caplog.records == []
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "body", "detail"),
+    [
+        ("GET", "/api/skills/custom/demo-skill/history", None, "Failed to read history:"),
+        ("POST", "/api/skills/custom/demo-skill/rollback", {"history_index": -1}, "Failed to roll back custom skill:"),
+    ],
+)
+def test_custom_skill_corrupt_history_record_stays_server_error(monkeypatch, tmp_path, method, path, body, detail):
     """Only the name maps to 400: a corrupt JSONL line (a ValueError too) is a server fault."""
-    app = _make_custom_skill_history_app(monkeypatch, tmp_path)
+    app = _make_demo_custom_skill_app(monkeypatch, tmp_path)
     history_file = _user_custom_dir(tmp_path, "default") / ".history" / "demo-skill.jsonl"
     history_file.parent.mkdir(parents=True, exist_ok=True)
     history_file.write_text("{not json\n", encoding="utf-8")
 
     with TestClient(app) as client:
-        response = client.get("/api/skills/custom/demo-skill/history")
+        response = client.request(method, path, json=body)
 
     assert response.status_code == 500
-    assert response.json()["detail"].startswith("Failed to read history:")
+    assert response.json()["detail"].startswith(detail)
 
 
 def test_custom_skill_delete_continues_when_history_write_is_readonly(monkeypatch, tmp_path):

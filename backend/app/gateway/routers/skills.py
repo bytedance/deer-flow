@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import tempfile
 import threading
@@ -817,6 +818,9 @@ async def delete_custom_skill(skill_name: str, request: Request, config: AppConf
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
+        # Reject a malformed name (400 below) before the drained tail: failing
+        # there first takes the owner's mutation lock and logs a caller error.
+        SkillStorage.validate_skill_name(skill_name)
         # A cold user-scoped storage resolves the project root and builds
         # absolute paths on construction: blocking filesystem IO.
         storage = await asyncio.to_thread(_get_user_skill_storage, config)
@@ -980,6 +984,11 @@ async def rollback_custom_skill(skill_name: str, body: SkillRollbackRequest, req
         raise HTTPException(status_code=400, detail="history_index is out of range")
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except json.JSONDecodeError as e:
+        # A corrupt history record is a server fault, not a bad request; it is
+        # a ValueError, so it must be caught before the 400 mapping below.
+        logger.error("Failed to roll back custom skill %s: %s", skill_name, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to roll back custom skill: {str(e)}")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:

@@ -1268,8 +1268,10 @@ This release closes that milestone with **621 merged pull requests**.
 - **skills:** `GET /api/skills/custom/{skill_name}/history` now answers an
   invalid skill name (not hyphen-case, or longer than 64 characters) with `400`,
   as delete and rollback already do, instead of `500` with a logged traceback on
-  every request. Only the name check maps to `400`; an unreadable history record
-  is still a server error.
+  every request. Only the name check maps to `400`: a corrupt history record is
+  still a `500`, and `POST .../rollback`, which answered one with `400`, now
+  returns `500` too. Deleting a skill with an invalid name no longer logs a
+  mutation-tail error.
 
 - **projects:** A shelf upload or save-from-thread into a project the caller
   cannot write no longer leaves a directory behind or answers `500`. Both
