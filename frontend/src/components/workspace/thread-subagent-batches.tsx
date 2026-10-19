@@ -1,5 +1,6 @@
 "use client";
 
+import type { Message } from "@langchain/langgraph-sdk";
 import {
   ArchiveIcon,
   CirclePauseIcon,
@@ -12,7 +13,6 @@ import {
   RotateCcwIcon,
 } from "lucide-react";
 import { useMemo, useState } from "react";
-import type { Message } from "@langchain/langgraph-sdk";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -25,14 +25,6 @@ import {
 } from "@/components/ui/dialog";
 import { Progress } from "@/components/ui/progress";
 import {
-  KnowledgeSourcesProvider,
-} from "@/components/workspace/citations/knowledge-source";
-import { CitationLink } from "@/components/workspace/citations/citation-link";
-import {
-  SafeStreamdown,
-  toStreamdownComponents,
-} from "@/core/streamdown/components";
-import {
   Sheet,
   SheetContent,
   SheetDescription,
@@ -40,8 +32,14 @@ import {
   SheetTitle,
   SheetTrigger,
 } from "@/components/ui/sheet";
+import { CitationLink } from "@/components/workspace/citations/citation-link";
+import { KnowledgeSourcesProvider } from "@/components/workspace/citations/knowledge-source";
 import { useSubagentBatchesCapability } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
+import {
+  SafeStreamdown,
+  toStreamdownComponents,
+} from "@/core/streamdown/components";
 import {
   completedSubagentBatchItems,
   isActiveSubagentBatch,
@@ -427,9 +425,7 @@ function BatchItemDetail({ detail }: { detail: SubagentBatchItemDetail }) {
         {
           type: "tool",
           name: "task",
-          artifact: evidence
-            ? { knowledge_sources: evidence }
-            : undefined,
+          artifact: evidence ? { knowledge_sources: evidence } : undefined,
         },
       ] as unknown as Message[],
     [evidence],
@@ -438,65 +434,65 @@ function BatchItemDetail({ detail }: { detail: SubagentBatchItemDetail }) {
     <KnowledgeSourcesProvider messages={citationMessages}>
       <div className="space-y-4 text-sm">
         <section>
-        <h3 className="mb-2 font-medium">{t.subagentBatches.report}</h3>
-        <div className="bg-muted/40 max-h-72 overflow-y-auto rounded-md p-3">
-          {detail.report ? (
-            <SafeStreamdown
-              components={toStreamdownComponents({ a: CitationLink })}
-              className="prose prose-sm dark:prose-invert max-w-none"
-            >
-              {detail.report}
-            </SafeStreamdown>
-          ) : (
-            t.subagentBatches.noReport
+          <h3 className="mb-2 font-medium">{t.subagentBatches.report}</h3>
+          <div className="bg-muted/40 max-h-72 overflow-y-auto rounded-md p-3">
+            {detail.report ? (
+              <SafeStreamdown
+                components={toStreamdownComponents({ a: CitationLink })}
+                className="prose prose-sm dark:prose-invert max-w-none"
+              >
+                {detail.report}
+              </SafeStreamdown>
+            ) : (
+              t.subagentBatches.noReport
+            )}
+          </div>
+          {detail.report_truncated && (
+            <p className="text-muted-foreground mt-1 text-xs">
+              {t.subagentBatches.truncated}
+            </p>
           )}
-        </div>
-        {detail.report_truncated && (
-          <p className="text-muted-foreground mt-1 text-xs">
-            {t.subagentBatches.truncated}
-          </p>
-        )}
         </section>
         <section>
-        <h3 className="mb-2 font-medium">{t.subagentBatches.evidence}</h3>
-        {!evidence || evidence.sources.length === 0 ? (
-          <p className="text-muted-foreground text-xs">
-            {t.subagentBatches.noEvidence}
-          </p>
-        ) : (
-          <div className="space-y-2">
-            {evidence.sources.map((source) => (
-              <article
-                className="border-border rounded-md border p-2"
-                key={source.id}
-              >
-                <p className="font-medium">
-                  {source.dataset_name} / {source.document_name}
-                </p>
-                <p className="text-muted-foreground mt-1 whitespace-pre-wrap">
-                  {source.text}
-                </p>
-                {source.pages.length > 0 && (
-                  <p className="text-muted-foreground mt-1 text-xs">
-                    {t.subagentBatches.pagesLabel}: {source.pages.join(", ")}
+          <h3 className="mb-2 font-medium">{t.subagentBatches.evidence}</h3>
+          {!evidence || evidence.sources.length === 0 ? (
+            <p className="text-muted-foreground text-xs">
+              {t.subagentBatches.noEvidence}
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {evidence.sources.map((source) => (
+                <article
+                  className="border-border rounded-md border p-2"
+                  key={source.id}
+                >
+                  <p className="font-medium">
+                    {source.dataset_name} / {source.document_name}
                   </p>
-                )}
-              </article>
-            ))}
-          </div>
-        )}
-        {evidence && evidence.omitted_count > 0 && (
-          <p className="text-muted-foreground mt-2 text-xs">
-            {t.subagentBatches.omittedEvidence(evidence.omitted_count)}
-          </p>
-        )}
+                  <p className="text-muted-foreground mt-1 whitespace-pre-wrap">
+                    {source.text}
+                  </p>
+                  {source.pages.length > 0 && (
+                    <p className="text-muted-foreground mt-1 text-xs">
+                      {t.subagentBatches.pagesLabel}: {source.pages.join(", ")}
+                    </p>
+                  )}
+                </article>
+              ))}
+            </div>
+          )}
+          {evidence && evidence.omitted_count > 0 && (
+            <p className="text-muted-foreground mt-2 text-xs">
+              {t.subagentBatches.omittedEvidence(evidence.omitted_count)}
+            </p>
+          )}
         </section>
         {detail.acceptance_verdict && (
           <section>
-          <h3 className="mb-2 font-medium">{t.subagentBatches.acceptance}</h3>
-          <pre className="bg-muted/40 overflow-x-auto rounded-md p-3 text-xs">
-            {JSON.stringify(detail.acceptance_verdict, null, 2)}
-          </pre>
+            <h3 className="mb-2 font-medium">{t.subagentBatches.acceptance}</h3>
+            <pre className="bg-muted/40 overflow-x-auto rounded-md p-3 text-xs">
+              {JSON.stringify(detail.acceptance_verdict, null, 2)}
+            </pre>
           </section>
         )}
       </div>

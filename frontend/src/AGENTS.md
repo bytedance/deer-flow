@@ -238,6 +238,11 @@ Markdown. Source records retain retrieval-time evidence, not live documents.
 Resolve knowledge destinations before testing the label in message and artifact
 link renderers: Sources lists use ordinary titles without a `citation:` prefix.
 
+Batch review scopes citations to the selected persisted snapshot. Poll an open
+detail until its own response is terminal, independently of compact-list status;
+stop on close. Show omitted counts with empty source lists and localize page labels.
+Real-hook/HTTP-boundary coverage: `thread-subagent-batch-review.dom.test.tsx`.
+
 Custom Agents save edited `knowledge_scope` defaults; removing knowledge access
 clears them atomically. `knowledgeScopeToSelection` keeps IDs, using IDs for
 missing labels. Catalog needs saved/draft access and exact-Agent capabilities.

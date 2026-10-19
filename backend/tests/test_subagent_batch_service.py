@@ -151,6 +151,46 @@ async def test_read_browser_batch_item_projects_report_and_captured_evidence() -
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("field,limit", [("id", 256), ("text", 16_000)])
+@pytest.mark.parametrize("oversized", [False, True])
+async def test_browser_evidence_bounds_legacy_rows(field, limit, oversized):
+    source = {
+        "id": "a" * 32 + "-1",
+        "provider": "ragflow",
+        "dataset_id": "dataset-1",
+        "document_id": "document-1",
+        "chunk_id": "chunk-1",
+        "dataset_name": "Private KB",
+        "document_name": "report.md",
+        "text": "Captured excerpt",
+        "pages": [2],
+        "truncated": False,
+    }
+    source[field] = "x" * (limit + int(oversized))
+    repository = SimpleNamespace(
+        get_batch=AsyncMock(return_value={"id": "batch-1", "thread_id": "thread-1"}),
+        list_items=AsyncMock(
+            return_value=[
+                {
+                    "position": 0,
+                    "result": "Stored report",
+                    "prompt": "Private prompt",
+                    "execution_spec": {"api_key": "private-key"},
+                    "result_artifact": {"knowledge_sources": {"version": 1, "sources": [source], "omitted_count": 2}},
+                }
+            ]
+        ),
+    )
+    service = SubagentBatchService(repository=repository, config=SubagentBatchesConfig(), runtime_config=SubagentRuntimeConfig())
+    detail = await service.read_browser_batch_item(batch_id="batch-1", user_id="user-1", thread_id="thread-1", position=0)
+    assert detail["report"] == "Stored report"
+    assert detail["evidence"]["sources"] == ([] if oversized else [source])
+    assert detail["evidence"]["omitted_count"] == 2
+    assert "prompt" not in detail
+    assert "execution_spec" not in detail
+
+
+@pytest.mark.asyncio
 async def test_submit_keeps_batch_running_limit_separate_from_one_process_capacity() -> None:
     repository = SimpleNamespace(create_batch=AsyncMock(return_value={"id": "batch-1"}))
     service = SubagentBatchService(
