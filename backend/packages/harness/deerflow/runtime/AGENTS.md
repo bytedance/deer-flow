@@ -391,3 +391,14 @@ unknown or cancelled write outcomes cannot yield a receipt or be replayed. Only
 proven-not-committed batches may be retried. Normal close stops new evidence
 producers and drains already admitted cross-thread callbacks inside its operation
 lock before flushing and detaching; do not reacquire that lock through `flush()`.
+
+The Worker confirms additive `run.terminal` evidence only from its own final
+terminal ACK, after completion hooks and accepted Journal callbacks drain.
+`finish_evidence(before_receipt=...)` serializes that confirmation and Receipt
+capture with normal flush/close; force close invalidates bounds even during the
+Receipt read. Singleton retries validate identity, status, version, and database
+user ownership, distinguishing confirmed-new/existing, conflict, and unknown.
+Publication failure marks evidence partial while preserving business status and
+SSE completion. Legacy `run.end` remains a root invocation output. Recovery
+backfill and cross-store crash-gap liveness are separate contracts. See
+`docs/run-terminal-protocol.md` at repository root.

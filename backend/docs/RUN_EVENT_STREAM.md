@@ -68,6 +68,33 @@ through run-event or specialized APIs:
 | `subagent` | Subagent lifecycle and step history. |
 | `workspace` | Workspace/output file-change evidence. |
 
+## Authoritative Run Outcome
+
+`run.terminal` (`trace`) records the owning Worker's confirmed final business
+status: `success`, `error`, `interrupted`, or `timeout`. Its content is exactly
+`{"status": "<status>"}`; metadata contains `protocol_version: 1` and
+`recovered: false`. The event is a run-scoped singleton confirmed through
+`put_if_absent()`. Graph outputs and error details are excluded.
+
+The Worker publishes it only after its final terminal commit ACK, completion
+hooks, and Journal producer freeze/drain. Rollback's intermediate `interrupted`
+ACK cannot authorize it. Confirmation precedes the Evidence Receipt and Seal;
+a conflicting or unconfirmed event leaves evidence partial without undoing the
+business outcome or disabling SSE completion.
+
+`run.start` and `run.end` keep their root-invocation semantics. A Run may have
+several `run.end` events with opaque graph outputs and success metadata even
+when its eventual business status is error. Use `run.terminal` for the confirmed
+Run outcome. Historical seals without this additive event remain valid under
+their original contract; an event alone does not prove complete evidence.
+
+Publication is best effort across the RunRow/event-store commit gap. A crash
+can leave a terminal row without an event; takeover backfill and a durable
+outbox are not implemented. Memory confirmation lasts for one process lifetime,
+JSONL provides its single-process guarantee, and shared deployments require the
+database store. Missing terminal events do not gate SSE recovery fallbacks.
+See [the terminal event protocol](../../docs/run-terminal-protocol.md).
+
 ## Producers
 
 `RunJournal` emits callback-derived events:

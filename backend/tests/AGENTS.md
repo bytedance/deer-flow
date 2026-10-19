@@ -10,6 +10,14 @@ ownership and capture cleanup. Retain the real XLSX conversion coverage.
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+`test_run_terminal_protocol.py` exercises authoritative `run.terminal`
+evidence through real Worker finalization. Keep final commit authority,
+producer drain, singleton confirmation, and Seal boundaries observable. Release all storage/producer gates before bounded cleanup,
+preserve healthy controls in refusal cases, and retain Journal/Seal compatibility
+coverage. `test_terminal_event_confirmation.py` covers supported stores; use
+`TEST_POSTGRES_URI` for independent PostgreSQL pools and real advisory contention. Protocol and validation boundaries:
+`docs/run-terminal-protocol.md` at repository root.
+
 InfoQuest fetch log assertions install the real `UrlRedactionFilter` on the
 capture handler with fixture-scoped cleanup. Expect scheme/host context with
 redacted paths, so isolated runs and full-suite logging configuration agree;

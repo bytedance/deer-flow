@@ -234,7 +234,7 @@ def _store_supports_terminal_completion(store: RunStore) -> bool:
 
 @dataclass(frozen=True)
 class TerminalCommitProof:
-    """Process-local evidence returned by one completed durable write."""
+    """Process-local proof of an acknowledged terminal transition."""
 
     status: RunStatus
     error: str | None
@@ -524,6 +524,12 @@ class RunManager:
     def _has_final_terminal_ack(self, record: RunRecord) -> bool:
         return not record.rollback_finalization_pending and self._has_terminal_ack(record)
 
+    def terminal_event_status(self, record: RunRecord) -> str | None:
+        """Return an attributable final outcome for this local worker only."""
+        if self._runs.get(record.run_id) is not record or record.store_only or record.owner_worker_id != self._worker_id or record.status in (RunStatus.pending, RunStatus.running) or not self._has_final_terminal_ack(record):
+            return None
+        return record.status.value
+
     def can_release_terminal_barrier(self, record: RunRecord) -> bool:
         """Keep durable ownership barriers through rollback's final error ACK."""
         return not self.heartbeat_enabled or self._store is None or record.ownership_lost or self._has_final_terminal_ack(record)
@@ -544,10 +550,11 @@ class RunManager:
     def _acknowledge_terminal(self, record: RunRecord, outcome: TerminalCommitProof, staged_revision: int) -> None:
         if self._runs.get(record.run_id) is not record or record.ownership_lost:
             return
-        # Publish the acknowledged outcome without an await. An older
-        # interrupted ACK cannot supersede a newer staged/acknowledged error.
+        # Publish the acknowledged outcome without an await. With a backing
+        # store, an older interrupted ACK cannot supersede a newer error.
+        # Storeless transitions are synchronous and retain local mutability.
         previous = record.terminal_commit_proof
-        if previous is None or previous.status == RunStatus.interrupted or outcome.status != RunStatus.interrupted:
+        if self._store is None or previous is None or previous.status == RunStatus.interrupted or outcome.status != RunStatus.interrupted:
             record.terminal_commit_proof = outcome
         authoritative = record.terminal_commit_proof
         if authoritative.status != RunStatus.interrupted or record.terminal_status_revision == staged_revision:
@@ -628,11 +635,14 @@ class RunManager:
                 record.run_id,
             )
             return False
+        terminal = status not in (RunStatus.pending, RunStatus.running)
+        outcome = self._terminal_outcome(record, status, error=error, stop_reason=stop_reason)
+        staged_revision = record.terminal_status_revision
         if self._store is None:
+            if terminal and not record.store_only:
+                self._acknowledge_terminal(record, outcome, staged_revision)
             return True
         if self.heartbeat_enabled and not record.store_only:
-            terminal = status not in (RunStatus.pending, RunStatus.running)
-            outcome = self._terminal_outcome(record, status, error=error, stop_reason=stop_reason)
             if terminal and self._has_terminal_ack(record, outcome):
                 return True
 
@@ -671,6 +681,11 @@ class RunManager:
                 record.run_id,
                 lambda: self._store.update_status(record.run_id, status.value, error=error, stop_reason=stop_reason, **({"goal_verdict": record.goal_verdict} if record.goal_verdict is not None else {})),
             )
+            # Preserve legacy single-worker recovery below, but only an explicit
+            # successful write can authorize a new terminal event. A matching row
+            # or a legacy None return does not attribute the commit to us.
+            if terminal and updated is True and not record.store_only:
+                self._acknowledge_terminal(record, outcome, staged_revision)
             if updated is False:
                 # ``update_status`` is now guarded by ``status IN ('pending','running')``.
                 # False can mean either:
@@ -1354,7 +1369,13 @@ class RunManager:
                 )
                 return
             proof = record.terminal_commit_proof
-            if self.heartbeat_enabled and proof is not None and proof.status != RunStatus.interrupted and self._terminal_outcome(record, status, error=error, stop_reason=stop_reason, goal_verdict=goal_verdict) != proof:
+            if (
+                self.heartbeat_enabled
+                and self._store is not None
+                and proof is not None
+                and proof.status != RunStatus.interrupted
+                and self._terminal_outcome(record, status, error=error, stop_reason=stop_reason, goal_verdict=goal_verdict) != proof
+            ):
                 logger.info("Skipped status change after acknowledged terminal outcome for run %s", run_id)
                 return
             record.status = status
