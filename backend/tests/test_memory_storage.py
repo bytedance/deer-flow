@@ -323,6 +323,15 @@ class TestMarkdownMemoryStorage:
         assert loaded["revision"] == expected_revision
         assert loaded["user"]["workContext"]["summary"] == "recovered"
 
+    @pytest.mark.parametrize("storage_class", [FileMemoryStorage, MarkdownMemoryStorage])
+    def test_bom_prefixed_json_loads_without_corruption(self, tmp_path, storage_class):
+        memory_file = tmp_path / "memory.json"
+        manifest = create_empty_memory()
+        manifest["user"]["workContext"]["summary"] = "edited on Windows"
+        memory_file.write_bytes(b"\\xef\\xbb\\xbf" + json.dumps(manifest).encode("utf-8"))
+        loaded = storage_class(DeerMemConfig(storage_path=str(tmp_path))).load()
+        assert loaded["user"]["workContext"]["summary"] == "edited on Windows"
+        assert not list(tmp_path.glob("memory.json.corrupt-*"))
     def test_hand_edited_markdown_without_fence_is_quarantined(self, tmp_path):
         """Markdown without a fenced block cannot be mapped onto the manifest
         schema losslessly: load() must not crash AND must not return an
