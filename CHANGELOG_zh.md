@@ -1020,11 +1020,11 @@
   本进程的技能提示缓存，对端副本会继续为该用户渲染旧的技能列表；现在它在本地刷新之后、
   于事件循环之外发布同一个按用户限定的共享缓存重置标记。写入、历史记录、刷新与标记作为
   一个整体完成，因此写入途中被取消的运行不再让本进程或对端继续使用过期列表。标记无法写入
-  时，工具会报告修改已生效但未能通知其他进程，而不会让人误以为写入失败。 ([#TBD])
+  时，工具会报告修改已生效但未能通知其他进程，而不会让人误以为写入失败。 ([#7099])
 - **provisioner：** 两个 provisioner 副本在 `K8S_NAMESPACE` 尚不存在时同时启动，输掉
   创建竞争的一方不再在启动时崩溃：它收到的 `409 AlreadyExists` 现在视为命名空间已存在，
   与 Pod 和 Service 的创建一致。Helm 部署中 provisioner 运行在其管理的命名空间内，从不
-  经过这条路径。 ([#TBD])
+  经过这条路径。 ([#7099])
 - **浏览器：** `browser_screenshot` 不再替换线程 outputs 目录中已存在的文件。此前以
   `report.png` 保存的截图会覆盖用户自己的 `report.png`、更早的截图，或同一秒内生成的
   另一张默认命名截图；现在会像 `web_capture` 一样改用下一个空闲名称（`report-1.png`、
@@ -9432,3 +9432,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6930]: https://github.com/bytedance/deer-flow/pull/6930
 [#6988]: https://github.com/bytedance/deer-flow/pull/6988
 [#6991]: https://github.com/bytedance/deer-flow/pull/6991
+[#7099]: https://github.com/bytedance/deer-flow/pull/7099

@@ -1275,13 +1275,13 @@ This release closes that milestone with **621 merged pull requests**.
   one unit, so a run cancelled while the write is in flight no longer leaves
   this or a peer process serving the stale list. When the marker cannot be
   written, the tool reports that the change was applied but other processes
-  were not notified, instead of reading as a failed write. ([#TBD])
+  were not notified, instead of reading as a failed write. ([#7099])
 - **provisioner:** When two provisioner replicas start together and
   `K8S_NAMESPACE` does not exist yet, the one that loses the create race no
   longer crashes at startup: its `409 AlreadyExists` now counts as the
   namespace existing, as the Pod and Service creates already did. Helm
   deployments, where the provisioner runs inside the namespace it manages,
-  never took this path. ([#TBD])
+  never took this path. ([#7099])
 - **workflows:** A script workflow waiting on a long child Agent run no longer
   fails with `Worker turn limit` after about 209 seconds regardless of
   `timeout_seconds`. The supervisor re-sent an empty frame to the QuickJS worker
@@ -11846,3 +11846,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6930]: https://github.com/bytedance/deer-flow/pull/6930
 [#6988]: https://github.com/bytedance/deer-flow/pull/6988
 [#6991]: https://github.com/bytedance/deer-flow/pull/6991
+[#7099]: https://github.com/bytedance/deer-flow/pull/7099
