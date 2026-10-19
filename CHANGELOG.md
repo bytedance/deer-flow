@@ -6031,7 +6031,9 @@ This release closes that milestone with **621 merged pull requests**.
   `nawk` (after options such as `-F` and `-v`, found the way the shell finds
   the command word: after an assignment prefix, with a path reduced to its
   basename, inside `$(...)`) is now exempt, because bash expands nothing there
-  and awk reads it as a field reference or division. Text inside awk string
+  and awk reads it as a field reference or division; for the absolute-path
+  scan only a single-segment match such as `/2` or `/NR` is exempt, so a
+  `/a/b` shape stays rejected even inside awk code. Text inside awk string
   literals, options such as `-v`, input operands, double-quoted programs and
   text re-read by `sh -c` or `eval` are still scanned. No exemption is granted
   to a command that could redefine `awk` or re-read quoted text (`alias`,

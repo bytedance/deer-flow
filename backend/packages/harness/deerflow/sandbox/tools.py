@@ -1192,10 +1192,11 @@ _AWK_COMMAND_NAMES = frozenset({"awk", "gawk", "mawk", "nawk"})
 _AWK_OPTIONS_WITH_VALUE = frozenset({"-F", "-v"})
 # Command words that can make a later ``awk`` word run something other than
 # awk, or re-read quoted text: definitions (``alias``, ``function``, ``name()``
-# handled in the walk), ``eval``, sourcing, ``hash -p`` and a ``PATH`` rebind.
+# handled in the walk), ``eval``, sourcing, ``hash -p``, ``enable -f`` (loads a
+# builtin under any name) and a ``PATH`` rebind.
 # Any of them anywhere in the command forfeits the exemption for the whole
 # command; the words are compared after basename reduction.
-_AWK_EXEMPTION_BLOCKING_COMMANDS = frozenset({".", "alias", "autoload", "eval", "function", "hash", "source"})
+_AWK_EXEMPTION_BLOCKING_COMMANDS = frozenset({".", "alias", "autoload", "enable", "eval", "function", "hash", "source"})
 # ``name[...]=`` at a command start is never an environment prefix for awk, but
 # zsh's ``functions[awk]=...`` / ``aliases[awk]=...`` define a function or alias.
 _SHELL_ARRAY_ASSIGNMENT_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\[")
@@ -1212,16 +1213,17 @@ def _awk_word_before(program: str, position: int) -> str | None:
     """The identifier, number or ``]`` that ends just before *position*, or None.
 
     Scans backward over spaces and tabs only, so the token must sit on the same
-    line. Returns ``"]"`` for a closing bracket, the word for an identifier or
-    number, and None for anything else (operators, punctuation, start of line).
+    line. Returns ``"]"`` or ``")"`` for a closing bracket, the word for an
+    identifier or number, and None for anything else (operators, punctuation,
+    start of line).
     """
     end = position
     while end > 0 and program[end - 1] in " \t":
         end -= 1
     if end == 0:
         return None
-    if program[end - 1] == "]":
-        return "]"
+    if program[end - 1] in "])":
+        return program[end - 1]
     start = end
     while start > 0 and program[start - 1] in _AWK_WORD_CHARS:
         start -= 1
@@ -1270,14 +1272,12 @@ def _awk_program_code_spans(program: str, offset: int) -> list[tuple[int, int]] 
         elif char == ")":
             last_closed_opener = open_parens.pop() if open_parens else None
         elif char == "/":
-            before = program[:position].rstrip(" \t")
-            if before.endswith(")"):
+            word = _awk_word_before(program, position)
+            if word == ")":
                 if last_closed_opener is None or _awk_word_before(program, last_closed_opener) in _AWK_CONDITION_KEYWORDS:
                     return None
-            else:
-                word = _awk_word_before(program, position)
-                if word is None or word in _AWK_REGEX_KEYWORDS:
-                    return None
+            elif word is None or word in _AWK_REGEX_KEYWORDS:
+                return None
         position += 1
     if not in_string:
         spans.append((offset + segment_start, offset + len(program)))
@@ -1462,7 +1462,8 @@ def _awk_program_field_spans(command: str) -> list[tuple[int, int]]:
     exemption assumes the word ``awk`` runs the real awk, so a command that
     defines or could redefine commands (``alias``, ``function``, ``name()``,
     ``autoload``, zsh's ``functions[...]=`` / ``aliases[...]=`` arrays,
-    ``eval``, ``source``, ``hash``, ``PATH=``) gets no exemption at all. That
+    ``eval``, ``source``, ``hash``, ``enable``, ``PATH=``) gets no exemption
+    at all. That
     list is best-effort, like the rest of this guard. Inside the program, awk string
     literals are left out: ``system("cat $HOME/x")`` hands that text to a
     shell. A program whose ``"`` may sit in a regex literal gets no exemption.
@@ -1828,17 +1829,20 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
     path_token_occurrences = _absolute_path_token_occurrences(command, tokens)
     url_spans = _non_file_url_spans(command)
 
-    # Inside the single-quoted program of an awk command a ``/`` is division
-    # or a regex delimiter (``($2+$3)/2``, ``/re/``); only awk string
-    # literals, which the spans leave out, can carry text to a shell.
+    # Inside the single-quoted program of an awk command a ``/`` after ``)``
+    # is division (``($2+$3)/2``); only awk string literals, which the spans
+    # leave out, can carry text to a shell. Only a single-segment match
+    # (``/2``, ``/n``, ``/NR``) is exempt, so anything shaped like ``/a/b``
+    # is still rejected should the scanner ever misjudge a span.
     awk_field_spans: list[tuple[int, int]] | None = None
     for match in _ABSOLUTE_PATH_PATTERN.finditer(command):
         if _is_in_spans(match.start(), url_spans):
             continue
-        if awk_field_spans is None:
-            awk_field_spans = _awk_program_field_spans(command)
-        if _is_in_spans(match.start(), awk_field_spans):
-            continue
+        if "/" not in match.group()[1:]:
+            if awk_field_spans is None:
+                awk_field_spans = _awk_program_field_spans(command)
+            if _is_in_spans(match.start(), awk_field_spans):
+                continue
         absolute_path = match.group()
         if _is_non_path_literal_fragment(absolute_path):
             continue

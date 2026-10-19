@@ -1131,6 +1131,11 @@ def test_validate_local_bash_command_paths_blocks_brace_expansion_host_paths(com
         ("functions[awk]='eval \"$1\"'; awk 'cat /etc/passwd'", "/etc/passwd"),
         ("aliases[awk]=eval; awk 'cat $HOME/.ssh/id_rsa'", "$HOME/.ssh/id_rsa"),
         ("autoload -Uz awk; awk 'cat $HOME/.ssh/id_rsa'", "$HOME/.ssh/id_rsa"),
+        ("enable -f /mnt/user-data/workspace/evil.so awk; awk 'cat $HOME/.ssh/id_rsa'", "$HOME/.ssh/id_rsa"),
+        # Inside awk code only a single-segment ``/x`` skips the absolute-path
+        # scan, so a multi-segment path stays rejected even after ``)``.
+        ("awk '{print ($1)/etc/passwd}' /mnt/user-data/workspace/data.txt", "/etc/passwd"),
+        ("awk 'BEGIN{x = 1 /etc/shadow}'", "/etc/shadow"),
         # An ``awk`` word that is an argument of another command is not a command.
         ("echo $(true) awk '{print $NF/2}'", "$NF/2"),
         ("echo >| awk '{print $NF/2}'", "$NF/2"),
