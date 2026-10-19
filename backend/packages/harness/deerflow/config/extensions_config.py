@@ -24,6 +24,7 @@ from deerflow.constants import (
     MCP_TASK_NAME_MAX_LENGTH,
     MCP_TASK_SERVER_NAME_MAX_LENGTH,
 )
+from deerflow.utils.file_lock import retry_until_locked
 
 logger = logging.getLogger(__name__)
 
@@ -976,7 +977,12 @@ def extensions_config_file_lock(path: Path) -> Iterator[None]:
                 lock_file.write(b"\0")
                 lock_file.flush()
             lock_file.seek(0)
-            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+            # Windows' blocking lock mode (``msvcrt.LK_LOCK``) gives up after
+            # roughly ten seconds and surfaces contention as Permission
+            # denied, while the guarded read-merge-write-reload cycle can
+            # legitimately take longer. Retry the non-blocking acquisition
+            # until the region frees, mirroring the POSIX ``flock`` branch.
+            retry_until_locked(lambda: msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1))
         else:
             import fcntl
 
