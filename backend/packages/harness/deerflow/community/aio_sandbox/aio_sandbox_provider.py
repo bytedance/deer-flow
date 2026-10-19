@@ -199,15 +199,35 @@ def _lock_file_exclusive(lock_file) -> None:
 
 def _try_lock_file_exclusive(lock_file) -> bool:
     """Attempt the cross-process lock once without blocking the worker thread."""
-    try:
-        if fcntl is not None:
+    if fcntl is not None:
+        try:
             fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        else:  # pragma: no cover - Windows
-            lock_file.seek(0)
-            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError as error:
+            if error.errno in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                return False
+            raise
+        return True
+
+    # Windows implementation (``fcntl`` is unavailable).
+    try:  # pragma: no cover - Windows
+        lock_file.seek(0)
+        msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
     except OSError as error:
         if error.errno in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
             return False
+        raise
+
+    try:  # pragma: no cover - Windows
+        # A synchronous contender initializes an empty sidecar before it
+        # attempts its own byte-range lock. Do the initialization only after
+        # this async holder owns byte 0; writing before acquisition would itself
+        # collide with a peer that already holds the byte.
+        lock_file.seek(0, os.SEEK_END)
+        if lock_file.tell() == 0:
+            lock_file.write("\0")
+            lock_file.flush()
+    except Exception:
+        _unlock_file(lock_file)
         raise
     return True
 
