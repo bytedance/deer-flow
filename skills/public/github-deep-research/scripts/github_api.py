@@ -101,17 +101,17 @@ class GitHubAPI:
             return f"[README not found: {e}]"
 
     def get_tree(
-        self, owner: str, repo: str, branch: str = "main", recursive: bool = True
+        self, owner: str, repo: str, branch: str = "HEAD", recursive: bool = True
     ) -> Dict:
-        """Get repository directory tree."""
+        """Get repository directory tree.
+
+        ``HEAD`` is resolved by GitHub to the repository's default branch, so a
+        repository that uses neither ``main`` nor ``master`` gets its current tree.
+        Guessing those two names instead served the tree of an abandoned branch
+        whenever the repository kept a stale ``master`` around.
+        """
         params = {"recursive": "1"} if recursive else {}
-        try:
-            return self._get(f"/repos/{owner}/{repo}/git/trees/{branch}", params)
-        except Exception:
-            # Try 'master' if 'main' fails
-            if branch == "main":
-                return self._get(f"/repos/{owner}/{repo}/git/trees/master", params)
-            raise
+        return self._get(f"/repos/{owner}/{repo}/git/trees/{branch}", params)
 
     def get_file_content(self, owner: str, repo: str, path: str) -> str:
         """Get content of a file using its raw repository-relative path."""

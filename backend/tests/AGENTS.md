@@ -10,6 +10,11 @@ ownership and capture cleanup. Retain the real XLSX conversion coverage.
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+InfoQuest fetch log assertions install the real `UrlRedactionFilter` on the
+capture handler with fixture-scoped cleanup. Expect scheme/host context with
+redacted paths, so isolated runs and full-suite logging configuration agree;
+keep payload omission and tool-result assertions intact.
+
 `.github/workflows/backend-windows-live-policy.yml` runs the child-env contract and all
 four live-test collection policy cases on Windows/Python 3.12, weekly, manually,
 and for relevant PR changes. These children only collect live tests. Keep the
@@ -297,7 +302,11 @@ secrets, shell/Compose dotenv overrides, readable read-only secrets, and teardow
 without secret exports. `down` must not probe, read, or generate secrets.
 Writable-directory cases remain portable.
 
-## Workspace text cache
+## Workspace snapshots and text cache
+
+`test_workspace_changes.py` and `test_run_worker_delivery.py` remove real files
+at the hash-read boundary. A vanished source must not discard other file records
+or produced-output detection; permission and other hash I/O errors still propagate.
 
 `test_scanner_text_cache_atomic.py` verifies complete publication and preservation
 of an existing entry on failure. A cleanup failure must preserve the original

@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import app.mcp_tasks.service as service_module
 from app.mcp_tasks.service import McpTaskService
 from deerflow.config.database_config import DatabaseConfig
-from deerflow.mcp.tasks import McpTaskDriverRegistry, TaskSnapshot, TaskStatus
+from deerflow.mcp.tasks import McpTaskConnectionUnavailableError, McpTaskDriverRegistry, TaskSnapshot, TaskStatus
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.mcp_tasks import McpTaskRepository
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
@@ -98,7 +98,8 @@ async def read_task(repo):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("reclaimed", [False, True])
-async def test_cancel_snapshot_discard_is_logged_without_changing_peer_or_retry_state(task_repo, monkeypatch, caplog, reclaimed):
+@pytest.mark.parametrize("connection_unavailable", [False, True])
+async def test_cancel_snapshot_discard_is_logged_without_changing_peer_or_retry_state(task_repo, monkeypatch, caplog, reclaimed, connection_unavailable):
     repo = task_repo
     await repo.request_cancel("task-1", user_id="user-1", thread_id="thread-1", thread_incarnation=None, requested_at=Clock.current)
     apply = repo.apply_cancel_snapshot
@@ -117,6 +118,12 @@ async def test_cancel_snapshot_discard_is_logged_without_changing_peer_or_retry_
     monkeypatch.setattr(repo, "apply_cancel_snapshot", apply_after_ownership_check)
     driver = SlowDriver()
     driver.finish.set()
+    if connection_unavailable:
+
+        async def missing_connection(_task):
+            raise McpTaskConnectionUnavailableError("MCP task connection was removed")
+
+        monkeypatch.setattr(driver, "cancel", missing_connection)
     with caplog.at_level("INFO", logger=service_module.__name__):
         await make_service(repo, driver)._run_cancellations(now=Clock.current)
 
@@ -127,7 +134,7 @@ async def test_cancel_snapshot_discard_is_logged_without_changing_peer_or_retry_
         assert stored == peer, "discarding the old snapshot must not mutate or retry the peer's claim"
         assert len(messages) == 1 and "task_id=task-1" in messages[0]
     else:
-        assert stored["status"] == "cancelled"
+        assert stored["status"] == ("failed" if connection_unavailable else "cancelled")
         assert messages == [], "an applied cancellation must not be reported as discarded"
 
 
@@ -561,3 +568,30 @@ async def test_concurrent_scans_recheck_control_capacity_at_execution(task_repo,
         return_claim.set()
         driver.finish.set()
         await asyncio.wait_for(asyncio.gather(*[t for t in (first, second) if t is not None], return_exceptions=True), timeout=3)
+
+
+@pytest.mark.asyncio
+async def test_missing_connection_cancel_does_not_persist_after_local_ownership_loss(task_repo, monkeypatch):
+    repo = task_repo
+    await repo.request_cancel("task-1", user_id="user-1", thread_id="thread-1", thread_incarnation=None, requested_at=Clock.current)
+    driver = SlowDriver()
+    applied = []
+    apply = repo.apply_cancel_snapshot
+
+    async def missing_connection(_task):
+        # A transport may finish with an error after ignoring lease-loss cancellation.
+        lost = service_module._control_lease_lost.get()
+        assert lost is not None
+        lost.set()
+        raise McpTaskConnectionUnavailableError("MCP task connection was removed")
+
+    async def record_apply(*args, **kwargs):
+        applied.append(args)
+        return await apply(*args, **kwargs)
+
+    monkeypatch.setattr(driver, "cancel", missing_connection)
+    monkeypatch.setattr(repo, "apply_cancel_snapshot", record_apply)
+    await make_service(repo, driver)._run_cancellations(now=Clock.current)
+
+    assert applied == []
+    assert (await read_task(repo))["status"] == "working"

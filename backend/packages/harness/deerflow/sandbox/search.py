@@ -3,6 +3,7 @@ import fnmatch
 import os
 import re
 import stat
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -196,6 +197,40 @@ def find_glob_matches(root: Path, pattern: str, *, include_dirs: bool = False, m
     return matches, truncated
 
 
+def _make_literal_matcher(pattern: str, *, case_sensitive: bool) -> Callable[[str], bool]:
+    if case_sensitive:
+        return lambda line: pattern in line
+    if not pattern:
+        return lambda _line: True
+
+    # KMP bounds comparisons by pattern + text length. Matching one character
+    # at a time retains re.IGNORECASE's Unicode equivalences without rescanning
+    # a long escaped prefix. Full-string casefold would change cases such as ß.
+    by_character = {character: re.compile(re.escape(character), re.IGNORECASE).fullmatch for character in set(pattern)}
+    character_matches = [by_character[character] for character in pattern]
+    failure = [0] * len(pattern)
+    prefix_length = 0
+    for index in range(1, len(pattern)):
+        while prefix_length and not character_matches[prefix_length](pattern[index]):
+            prefix_length = failure[prefix_length - 1]
+        if character_matches[prefix_length](pattern[index]):
+            prefix_length += 1
+        failure[index] = prefix_length
+
+    def matches_line(line: str) -> bool:
+        matched = 0
+        for character in line:
+            while matched and not character_matches[matched](character):
+                matched = failure[matched - 1]
+            if character_matches[matched](character):
+                matched += 1
+                if matched == len(pattern):
+                    return True
+        return False
+
+    return matches_line
+
+
 def find_grep_matches(
     root: Path,
     pattern: str,
@@ -217,11 +252,14 @@ def find_grep_matches(
     if not root_is_file and not root.is_dir():
         raise NotADirectoryError(root)
 
-    regex_source = re.escape(pattern) if literal else pattern
-    flags = 0 if case_sensitive else re.IGNORECASE
-    regex = re.compile(regex_source, flags)
+    if literal:
+        matches_line = _make_literal_matcher(pattern, case_sensitive=case_sensitive)
+    else:
+        regex = re.compile(pattern, 0 if case_sensitive else re.IGNORECASE)
+        matches_line = regex.search
 
-    # Skip lines longer than this to prevent ReDoS on minified / no-newline files.
+    # Only regex searches need the long-line work guard. Literal matching
+    # avoids repeated-prefix rescans, including case-insensitive searches.
     _max_line_chars = line_summary_length * 10
 
     def handle_search_error(error: OSError) -> None:
@@ -265,9 +303,9 @@ def find_grep_matches(
                 for line_number, line in enumerate(handle, start=1):
                     if line.endswith("\r\n"):
                         line = line[:-2] + "\n"
-                    if len(line) > _max_line_chars:
+                    if not literal and len(line) > _max_line_chars:
                         continue
-                    if regex.search(line):
+                    if matches_line(line):
                         matches.append(
                             GrepMatch(
                                 path=str(file_path),

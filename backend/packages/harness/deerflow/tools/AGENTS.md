@@ -7,9 +7,10 @@ source. Both shapes use the existing referenceability gate and per-result dedupl
 
 `artifact_registry.py` checks remote file suffixes against the complete parsed
 URL path without case sensitivity. Free-text URL and sandbox-path extraction
-strips common trailing ASCII/CJK prose punctuation while preserving CJK
-closers paired with openers inside the detected reference (including literal
-glob directory names). Structured references remain literal. See
+strips common trailing ASCII/CJK prose punctuation while preserving ASCII
+`()`, `[]`, `{}` and CJK closers paired with openers inside the detected
+reference (including literal glob directory names). Structured references remain
+literal. See
 [tool artifact middleware](../agents/middlewares/TOOL_ARTIFACTS.md).
 
 Deferred-tool regex discovery uses `regex.VERSION0` with a shared 100 ms

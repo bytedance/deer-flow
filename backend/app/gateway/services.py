@@ -86,6 +86,7 @@ from deerflow.runtime.checkpoint_mode import (
     inject_checkpoint_mode,
 )
 from deerflow.runtime.checkpoint_state import graph_state_schema
+from deerflow.runtime.client_context import sanitize_client_context
 from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
 from deerflow.runtime.events.message_identity import MESSAGE_SEQ_KEY
 from deerflow.runtime.goal import goal_thread_lock
@@ -93,6 +94,7 @@ from deerflow.runtime.journal import build_checkpoint_history_seed_events
 from deerflow.runtime.keyed_lock import KeyedLockTable
 from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY, make_origin
 from deerflow.runtime.runs.naming import resolve_root_run_name
+from deerflow.runtime.runs.schemas import EVIDENCE_ORIGINS
 from deerflow.runtime.secret_context import (
     LegacyRunMetadataSecretError,
     redact_config_secrets,
@@ -833,6 +835,18 @@ def strip_internal_context_keys(config: dict[str, Any]) -> None:
                 value.pop(key, None)
 
 
+def _sanitize_request_client_context(raw: Any) -> dict[str, Any] | None:
+    """Sanitize a caller's ``context.client``, logging when fields are dropped.
+
+    The log line carries no values: ``client.name`` and preference values are
+    caller-controlled text.
+    """
+    client = sanitize_client_context(raw)
+    if client != raw:
+        logger.debug("Dropped or normalized context.client fields from the run request (kept_any=%s)", client is not None)
+    return client
+
+
 def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, Any] | None, *, internal: bool = False) -> None:
     """Merge whitelisted keys from ``body.context`` into both ``config['configurable']``
     and ``config['context']`` so they are visible to legacy configurable readers and
@@ -855,9 +869,26 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
     secrets / runtime flags read by tools and middlewares from ``runtime.context``;
     keeping them out of ``configurable`` avoids persisting a short-lived token in the
     checkpoint store.
+
+    Client capability context is runtime-only: it is sanitized and copied into
+    ``config['context']['client']`` but never into ``configurable``.
     """
+    existing_configurable = config.get("configurable")
+    if isinstance(existing_configurable, dict):
+        # ``build_run_config`` copies ``body.config['configurable']`` verbatim,
+        # and ``configurable`` is persisted in checkpoints.
+        existing_configurable.pop("client", None)
+    existing_runtime_context = config.get("context")
+    if isinstance(existing_runtime_context, dict) and "client" in existing_runtime_context:
+        existing_client_context = _sanitize_request_client_context(existing_runtime_context.get("client"))
+        if existing_client_context is None:
+            existing_runtime_context.pop("client", None)
+        else:
+            existing_runtime_context["client"] = existing_client_context
+
     if not context:
         return
+
     configurable = config.setdefault("configurable", {})
     runtime_context = config.setdefault("context", {})
     keys = _CONTEXT_CONFIGURABLE_KEYS | _CONTEXT_INTERNAL_CALLER_KEYS if internal else _CONTEXT_CONFIGURABLE_KEYS
@@ -876,6 +907,11 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
                 runtime_context.setdefault(key, context[key])
     if "user_id" in context and isinstance(runtime_context, dict):
         runtime_context.setdefault("user_id", context["user_id"])
+
+    if "client" in context:
+        client_context = _sanitize_request_client_context(context["client"])
+        if client_context is not None and isinstance(runtime_context, dict):
+            runtime_context.setdefault("client", client_context)
 
 
 async def resolve_trusted_internal_owner_for_attribution(request: Request, owner_user_id: str | None) -> Any | None:
@@ -1862,6 +1898,7 @@ async def start_run(
     *,
     idempotency_key: str | None = None,
     require_existing_thread: bool = False,
+    evidence_origin: str | None = None,
     scheduled_task_runtime: Mapping[str, Any] | None = None,
 ) -> RunRecord:
     """Create a RunRecord and launch the background agent task.
@@ -1877,6 +1914,9 @@ async def start_run(
     require_existing_thread : bool
         Reject a missing thread instead of auto-creating metadata. Internal
         notification runs use this so a deleted chat cannot be resurrected.
+    evidence_origin : str | None
+        Trusted Python entry-point provenance, never copied from request data.
+        Internal launches without an explicit origin remain unknown.
     """
     # Cancel-capability gate. interrupt/rollback strategies terminate an already
     # active run — runs:cancel capability, not runs:create — so a create-only
@@ -1976,6 +2016,9 @@ async def start_run(
         # so import-lock waiters cannot starve unrelated default-executor work.
         # Keep this before admission so import failures cannot create a run.
         agent_factory = await run_assembly(resolve_agent_factory, body.assistant_id)
+        admitted_origin = evidence_origin or ("unknown" if is_internal_caller else "interactive")
+        if admitted_origin not in EVIDENCE_ORIGINS:
+            raise ValueError("Unsupported host evidence origin")
         command = getattr(body, "command", None)
         if command and command.get("resume") is not None:
             graph_input = Command(resume=command["resume"])
@@ -2341,10 +2384,10 @@ async def start_run(
                         body.assistant_id,
                         on_disconnect=disconnect,
                         metadata=run_metadata,
-                        # Persist a secret-redacted copy of the config: the run record is
+                        # Persist a redacted copy of the config: the run record is
                         # written to runs.kwargs_json and echoed by the run API, so a
-                        # request-scoped secret (#3861) must not ride along. The live
-                        # config built above keeps the secrets for the actual run.
+                        # request-scoped secret (#3861) or client hint must not ride along.
+                        # The live config built above keeps them for the actual run.
                         kwargs={
                             "input": run_record_input,
                             **({"knowledge_default_request_hash": knowledge_default_request_hash} if accepts_knowledge_default else {}),
@@ -2356,6 +2399,10 @@ async def start_run(
                         model_name=model_name,
                         user_id=owner_user_id,
                         idempotency_key=idempotency_key,
+                        evidence_origin=admitted_origin,
+                        # Canonical agent keys, not routing aliases or display names.
+                        # Bootstrap and unresolved legacy identities stay read-only.
+                        evidence_agent_id=(None if scope_runtime_config.get("is_bootstrap") else (_DEFAULT_ASSISTANT_ID if scope_assistant_id == _DEFAULT_ASSISTANT_ID else getattr(agent_config, "name", None))),
                     )
                 except RunIdempotencyUnsupported as exc:
                     raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -2507,6 +2554,7 @@ async def launch_scheduled_thread_run(
             thread_id,
             request,
             idempotency_key=idempotency_key,
+            evidence_origin="scheduled",
             scheduled_task_runtime=scheduled_task_runtime,
         )
     return {"run_id": record.run_id, "thread_id": record.thread_id}

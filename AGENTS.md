@@ -83,7 +83,8 @@ generic hook to the extension contract plus an extension that uses it — do not
 hard-code business logic into core. Working examples:
 `examples/deerflow-extension-{example,bookmarks,agent-teams}`.
 [Workflow guide](examples/deerflow-extension-workflows/AGENTS.md): public
-AgentRuns; POSIX, one process/store; live resume/approval; no restart replay or hard currency budget.
+AgentRuns; POSIX, one process/store; approval and session-authorized recovery; uncertain admissions need reconciliation;
+no multi-Gateway failover or hard currency budget.
 
 Root runtime configs: copy `config.example.yaml` → `config.yaml` and
 `extensions_config.example.json` → `extensions_config.json` (MCP/skills).
@@ -214,9 +215,9 @@ Repo-wide conventions:
   with the optional import unavailable and mock HTTP transport to keep tests offline.
 - **Before pushing** — backend `make format`, frontend `pnpm check`.
   Backend CI enforces `ruff format --check`.
-- **Skill text encoding** — treat `SKILL.md` and other textual skill resources as UTF-8;
-  Python utilities that read or write them must pass `encoding="utf-8"` rather than
-  relying on the platform locale.
+- **Skill text encoding** — use explicit UTF-8 for textual skill resources.
+  Read `SKILL.md` with `encoding="utf-8-sig"` to strip a leading BOM; write with
+  `encoding="utf-8"`. Never rely on the platform locale.
 - **Version sources must stay in lockstep** — a release version must match identically in
   `backend/pyproject.toml`, `frontend/package.json`, and `deploy/helm/deer-flow/Chart.yaml`
   (`version` + `appVersion`), and `backend/uv.lock` must record the same version for the root
