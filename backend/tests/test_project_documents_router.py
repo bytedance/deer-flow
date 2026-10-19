@@ -639,3 +639,111 @@ class TestDeleteScopesToTheUrlProject:
             assert client.delete(f"/api/projects/{project_a['id']}/documents/{doc['id']}").status_code == 404
             assert client.get(f"/api/projects/{project_b['id']}/documents/{doc['id']}/content").status_code == 200
             assert client.delete(f"/api/projects/{project_b['id']}/documents/{doc['id']}").status_code == 204
+
+
+class TestStagingFailureCleanup:
+    @pytest.mark.parametrize("failure", ["none", "close", "unlink", "logging"])
+    def test_oversize_upload_keeps_413_when_cleanup_fails(self, tmp_path, monkeypatch, caplog, failure):
+        import logging
+        from pathlib import Path
+
+        from deerflow.projects import documents
+        from deerflow.utils import atomic_write
+
+        app = _build_app(tmp_path)
+        app.dependency_overrides[get_config] = lambda: SimpleNamespace(uploads={"max_file_size": 3})
+        with TestClient(app) as client:
+            pid = _create_project(client)["id"]
+            staging = get_paths().project_documents_dir("user-a", pid) / ".staging"
+            if failure == "close":
+                open_staging = documents._open_staging
+
+                def open_with_close_error(*args):
+                    handle = open_staging(*args)
+                    close = handle.close
+
+                    def fail_close():
+                        close()
+                        raise OSError("staging close failed")
+
+                    handle.close = fail_close
+                    return handle
+
+                monkeypatch.setattr(documents, "_open_staging", open_with_close_error)
+            elif failure in {"unlink", "logging"}:
+                unlink = Path.unlink
+
+                def fail_unlink(path, *args, **kwargs):
+                    if path.parent == staging:
+                        raise OSError("staging unlink failed")
+                    return unlink(path, *args, **kwargs)
+
+                monkeypatch.setattr(Path, "unlink", fail_unlink)
+                if failure == "logging":
+
+                    def fail_warning(*args, **kwargs):
+                        raise RuntimeError("logging handler failed")
+
+                    monkeypatch.setattr(atomic_write.logger, "warning", fail_warning)
+            with caplog.at_level(logging.WARNING):
+                response = _upload(client, pid, "large.txt", b"1234")
+            assert response.status_code == 413
+            assert response.json()["detail"] == "File too large: large.txt"
+            assert client.get(f"/api/projects/{pid}/documents").json()["total"] == 0
+            remaining = list(staging.iterdir())
+            if failure in {"unlink", "logging"}:
+                assert len(remaining) == 1
+                if failure == "unlink":
+                    assert str(remaining[0]) in caplog.text
+                    assert "staging unlink failed" in caplog.text
+            else:
+                assert remaining == []
+                if failure == "close":
+                    assert str(staging) in caplog.text
+                    assert "staging close failed" in caplog.text
+
+    @pytest.mark.parametrize("after_commit", [False, True])
+    def test_insert_failure_cleanup_preserves_error_or_committed_document(self, tmp_path, monkeypatch, caplog, after_commit):
+        from pathlib import Path
+
+        from deerflow.projects import documents
+
+        app = _build_app(tmp_path)
+        primary = OSError("original shelf insert failure")
+        insert = app.state.project_document_repo.insert_active
+        if after_commit:
+
+            async def insert_then_fail(*args, **kwargs):
+                await insert(*args, **kwargs)
+                raise primary
+
+            monkeypatch.setattr(app.state.project_document_repo, "insert_active", insert_then_fail)
+        else:
+
+            def fail_replace(*args, **kwargs):
+                raise primary
+
+            monkeypatch.setattr(documents.os, "replace", fail_replace)
+        with TestClient(app) as client:
+            pid = _create_project(client)["id"]
+            staging = get_paths().project_documents_dir("user-a", pid) / ".staging"
+            unlink = Path.unlink
+
+            def fail_unlink(path, *args, **kwargs):
+                if path.parent == staging:
+                    raise OSError("staging unlink failed")
+                return unlink(path, *args, **kwargs)
+
+            monkeypatch.setattr(Path, "unlink", fail_unlink)
+            if after_commit:
+                response = _upload(client, pid, "saved.txt", b"saved bytes")
+                assert response.status_code == 201
+                doc = response.json()["document"]
+                assert client.get(f"/api/projects/{pid}/documents/{doc['id']}/content").content == b"saved bytes"
+                assert client.get(f"/api/projects/{pid}/documents").json()["total"] == 1
+            else:
+                with pytest.raises(OSError) as caught:
+                    _upload(client, pid, "saved.txt", b"saved bytes")
+                assert caught.value is primary
+                assert client.get(f"/api/projects/{pid}/documents").json()["total"] == 0
+            assert "staging unlink failed" in caplog.text

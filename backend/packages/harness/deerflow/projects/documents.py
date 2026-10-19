@@ -32,12 +32,14 @@ import threading
 import uuid
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from deerflow.config.paths import Paths
 from deerflow.uploads.manager import normalize_filename
+from deerflow.utils.atomic_write import cleanup_failed_atomic_write
 from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
 from deerflow.utils.file_io import await_drained, run_file_io
 from deerflow.utils.text_detection import is_text_file_by_content
@@ -143,8 +145,11 @@ def _open_staging(staging_dir: Path, staging_path: Path):
 def _close_and_unlink(handle: Any, staging_path: Path) -> None:
     try:
         handle.close()
+    except OSError:
+        with suppress(Exception):
+            logger.warning("Failed to close shelf staging file %s", staging_path, exc_info=True)
     finally:
-        staging_path.unlink(missing_ok=True)
+        cleanup_failed_atomic_write(staging_path)
 
 
 async def stage_document_bytes(paths: Paths, *, user_id: str, project_id: str, chunks: AsyncIterator[bytes] | list[bytes], max_bytes: int) -> StagedDocument:
@@ -192,7 +197,7 @@ def _place_staging(staging_path: Path, final_path: Path) -> None:
     try:
         os.replace(staging_path, final_path)
     except Exception:
-        staging_path.unlink(missing_ok=True)
+        cleanup_failed_atomic_write(staging_path)
         raise
 
 
@@ -263,7 +268,7 @@ async def add_staged_document(
         # row raced into trash (or a trashing project deletion) before the
         # re-check still owns the placed bytes — trash is recoverable, so
         # deleting the namespace would destroy a recoverable document.
-        await run_file_io(_remove_staging, staged.staging_path)
+        await run_file_io(cleanup_failed_atomic_write, staged.staging_path)
         committed: dict | None
         try:
             committed = await repo.get(document_id, include_trashed=True, user_id=user_id)
