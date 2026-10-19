@@ -12,6 +12,28 @@ from uuid import uuid4
 logger = logging.getLogger(__name__)
 
 
+def cleanup_failed_atomic_write(temporary: Path, fd: int | None = None) -> None:
+    """Release an owned temporary without replacing the caller's active error.
+
+    Pass *fd* only while the raw descriptor is still owned by the caller;
+    successful ``fdopen`` transfers that ownership to the file object.
+    Filesystem and logging-handler errors remain independent best-effort steps.
+    """
+    # Cleanup and diagnostics are best-effort: keep the original error
+    # and attempt unlink even if closing an untransferred descriptor fails.
+    if fd is not None:
+        try:
+            os.close(fd)
+        except OSError:
+            with suppress(Exception):
+                logger.warning("Failed to close temporary output descriptor for %s", temporary, exc_info=True)
+    try:
+        temporary.unlink(missing_ok=True)
+    except OSError:
+        with suppress(Exception):
+            logger.warning("Failed to remove temporary output file %s", temporary, exc_info=True)
+
+
 def publish_bytes_atomically(path: Path, content: bytes) -> None:
     """Replace *path* with complete bytes, preserving its existing mode.
 
@@ -44,17 +66,5 @@ def publish_bytes_atomically(path: Path, content: bytes) -> None:
             os.fsync(handle.fileno())
         os.replace(temporary, path)
     except BaseException:
-        # Cleanup and diagnostics are best-effort: keep the original error
-        # and attempt unlink even if closing an untransferred descriptor fails.
-        if fd is not None:
-            try:
-                os.close(fd)
-            except OSError:
-                with suppress(Exception):
-                    logger.warning("Failed to close temporary output descriptor for %s", temporary, exc_info=True)
-        try:
-            temporary.unlink(missing_ok=True)
-        except OSError:
-            with suppress(Exception):
-                logger.warning("Failed to remove temporary output file %s", temporary, exc_info=True)
+        cleanup_failed_atomic_write(temporary, fd)
         raise
