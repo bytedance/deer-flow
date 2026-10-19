@@ -46,7 +46,9 @@ Phase 3: recovery.py owns session reattachment, exact bridge replay and admissio
 reconciliation classification. Store.put uses conditional revisions; drain SQLite
 writes through repeated cancellation before releasing the write lock. Service-own
 recovered-run cancellation through child cleanup and the terminal write, and drain
-it during shutdown even if its caller disconnects. Persist bridge intent
+it during shutdown even if its caller disconnects. Log failed service-owned actions
+at error level even after caller disconnection; omit raw exception payloads as for
+supervisor failures. Persist bridge intent
 before host effects and responses before worker delivery. Include worker/supervisor
 source and engine version in compatibility checks; Date/random are unavailable.
 Preserve original wait expiry and remaining execution budget. Read captured files

@@ -270,7 +270,12 @@ class Workflows(Recovery, Lifecycle, Artifacts):
     def admission_finished(self, task):
         self.admissions.discard(task)
         if not task.cancelled():
-            task.exception()  # Consume failures even when the launching caller left.
+            error = task.exception()
+            if error is not None:
+                logger.error(
+                    "Workflow background action failed (%s); inspect retained workflow and child records",
+                    type(error).__name__,
+                )
 
     async def admit(self, owner, record, context):
         async with self.launch_lock:

@@ -291,6 +291,8 @@ launch. This does not add execution replay or resume.
 Cancellation of a recoverable workflow is also service-owned: disconnecting the
 caller does not abandon child cleanup or its final status write. Shutdown drains
 that cleanup before releasing the store's process lock.
+If a background action fails after disconnection, the Gateway logs its exception
+type at error level so operators can inspect retained workflow and child records.
 
 Result collection anchors on the visible human input, including the host's canonical
 `__user` rewrite after dynamic context injection. Hidden system/memory reminders

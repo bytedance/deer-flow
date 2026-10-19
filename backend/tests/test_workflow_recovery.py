@@ -373,3 +373,36 @@ async def test_save_drains_repeated_cancellation_before_unlocking(plugin, monkey
     assert (await asyncio.to_thread(service.store.get, "alice", run_id))["revision"] == record["revision"]
     await service.save("alice", record)
     assert record["revision"] == revision + 2
+
+
+async def test_disconnected_cancel_logs_terminal_save_failure(plugin, monkeypatch, caplog):
+    _, actions, service, runs = plugin
+    run_id = (await launch(plugin, "await pause({stepId:'p'}); return 1;"))["run_id"]
+    await waiting(plugin, run_id, "paused")
+    await restart_snapshot(plugin, run_id)
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = service.save
+
+    async def fail_terminal_save(owner, record):
+        if record["status"] == "cancelled":
+            entered.set()
+            await release.wait()
+            raise OSError("synthetic storage failure")
+        await original(owner, record)
+
+    monkeypatch.setattr(service, "save", fail_terminal_save)
+    caller = asyncio.create_task(actions["cancel"]({"run_id": run_id}, context(runs)))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        caller.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+    finally:
+        release.set()
+        await asyncio.gather(caller, *list(service.admissions), return_exceptions=True)
+    final = await actions["get"]({"run_id": run_id}, context(runs))
+    assert final["status"] == "cancelling"
+    assert not service.admissions
+    errors = [r for r in caplog.records if r.levelname == "ERROR" and r.name == type(service).__module__]
+    assert len(errors) == 1
+    assert "OSError" in errors[0].message
