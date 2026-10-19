@@ -406,7 +406,7 @@ def _render_fact_markdown(fact: dict[str, Any]) -> bytes:
 
 def _parse_fact_markdown(path: Path) -> dict[str, Any]:
     try:
-        text = path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8-sig")
         if not text.startswith("---\n"):
             raise ValueError("missing YAML front matter")
         front, body = text[4:].split("\n---\n", 1)

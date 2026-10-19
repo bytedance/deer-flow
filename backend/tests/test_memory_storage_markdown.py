@@ -87,6 +87,22 @@ def test_memory_json_contains_only_global_summaries_and_agent_fact_is_markdown(s
     assert "# Project uses Python 3.12" in text
 
 
+def test_reload_accepts_utf8_bom_in_canonical_fact(storage: FileMemoryStorage) -> None:
+    assert storage.save(_memory_with_fact(), "agent-a", user_id="alice")
+    memory_path = storage._get_memory_file_path("agent-a", user_id="alice")
+    fact_path = fact_file_path(memory_path, "fact_01HZZZZZZZZZZZZZZZZZZZZZZZ", agent_name="agent-a")
+    fact_path.write_bytes(b"\xef\xbb\xbf" + fact_path.read_bytes())
+
+    reloaded = storage.reload("agent-a", user_id="alice")
+
+    assert len(reloaded["facts"]) == 1
+    fact = reloaded["facts"][0]
+    assert fact["id"] == "fact_01HZZZZZZZZZZZZZZZZZZZZZZZ"
+    assert fact["title"] == "Project uses Python 3.12"
+    assert fact["content"] == "Project uses Python 3.12"
+    assert fact["scope"] == {"userId": "alice", "agentName": "agent-a"}
+
+
 def test_load_keeps_frontend_shape_but_only_agent_load_returns_facts(storage: FileMemoryStorage) -> None:
     assert storage.save(_memory_with_fact(), "agent-a", user_id="alice")
 
