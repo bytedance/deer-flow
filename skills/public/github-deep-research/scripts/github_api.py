@@ -111,7 +111,7 @@ class GitHubAPI:
         whenever the repository kept a stale ``master`` around.
         """
         params = {"recursive": "1"} if recursive else {}
-        return self._get(f"/repos/{owner}/{repo}/git/trees/{branch}", params)
+        return self._get(f"/repos/{owner}/{repo}/git/trees/{quote(branch, safe='')}", params)
 
     def get_file_content(self, owner: str, repo: str, path: str) -> str:
         """Get content of a file using its raw repository-relative path."""

@@ -1515,6 +1515,8 @@ File reads accept raw repository-relative paths and preserve spaces, Unicode,
 `#`, `?`, and literal percent signs with either HTTP client.
 Directory listings ask for the repository's own default branch, so a repository that
 uses neither `main` nor `master` reports its current tree instead of a stale branch.
+Explicit tree references accept raw branch or tag names, preserving Unicode,
+`#`, and literal percent signs with either HTTP client.
 
 Users can explicitly activate an enabled skill for a single turn by starting the request with `/skill-name`, for example `/data-analysis analyze uploads/foo.csv`. DeerFlow loads that skill's `SKILL.md` as hidden current-turn context while leaving the base prompt limited to skill metadata. Slash activation respects disabled skills, custom-agent skill whitelists, and existing channel commands such as `/new` and `/help`.
 

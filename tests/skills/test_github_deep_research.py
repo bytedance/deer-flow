@@ -154,6 +154,31 @@ def test_tree_keeps_an_explicit_branch(file_content_client):
     assert url.query == ""
 
 
+@pytest.mark.parametrize("recursive", [True, False])
+@pytest.mark.parametrize(
+    ("branch", "encoded_branch"),
+    [
+        ("feature/C#", "feature%2FC%23"),
+        ("release/literal%23name", "release%2Fliteral%2523name"),
+        ("功能/模型", "%E5%8A%9F%E8%83%BD%2F%E6%A8%A1%E5%9E%8B"),
+        ("feature/c++", "feature%2Fc%2B%2B"),
+    ],
+)
+def test_tree_preserves_ref_in_request_target(
+    file_content_client, branch, encoded_branch, recursive
+):
+    client, captured = file_content_client
+
+    assert client.get_tree("owner", "repo", branch=branch, recursive=recursive) == {
+        "ok": True
+    }
+
+    url = urlsplit(captured["url"])
+    assert url.path == f"/repos/owner/repo/git/trees/{encoded_branch}"
+    assert url.fragment == ""
+    assert parse_qs(url.query) == ({"recursive": ["1"]} if recursive else {})
+
+
 def test_tree_does_not_guess_another_branch(monkeypatch, fallback_client):
     client, _ = fallback_client
     asked: list[str] = []
