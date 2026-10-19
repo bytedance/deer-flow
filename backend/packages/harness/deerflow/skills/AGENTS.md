@@ -6,6 +6,8 @@
 - **Diagnostic scope**: only `yaml.YAMLError` produces a management diagnostic. Missing frontmatter, non-mapping or invalid metadata, non-UTF-8 files and read errors (including permission denied) remain excluded; the UI and README state those limits. An empty diagnostic list is not a package-validity check. `tests/test_skill_load_diagnostics.py` pins these exclusions and permission-error redaction without changing runtime parsing.
 - **History JSONL**: split records on LF, not Unicode text separators; preserve U+0085/U+2028/U+2029 in saved fields. Keep malformed JSON rejected. Tests: `tests/test_skill_history_jsonl.py`.
 
+- **SkillScan usage counters**: the text assignment sweep recognizes unquoted nonnegative integers under the exact model-usage names `tokens`, `total_tokens`, `input_tokens`, `output_tokens`, `prompt_tokens`, `completion_tokens`, `cached_tokens`, and `reasoning_tokens`. Benchmark `tokens` also accepts a signed numeric delta or an object containing exactly four nonnegative finite numeric statistics (`mean`, `stddev`, `min`, `max`); JSON parsing is capped at 512 characters. Recover the complete key before applying the exception. Quoted unsigned counts, credential prefixes, arbitrary containers, and cloud-token detection remain active. Regressions live in `tests/test_skillscan_secret_assignment_formats.py`.
+
 - **SkillScan API tokens**: `secret-cloud-token` accepts `-` and `_` in the `sk-` family, matching the character class used by PII redaction. Legacy, OpenAI project/service-account/admin, and Anthropic keys must trigger `CRITICAL` even in a Bearer header without a secret assignment. Skip placeholder matches until a real credential is found, retaining at most one cloud-token finding per file. Keep evidence fully redacted and preserve the minimum length and word boundaries; synthetic regressions live in `tests/test_skillscan_native.py`. Keep the mirrored `sk-` pattern in `app/scheduler/notification_text.py` aligned so scheduled-run summaries scrub the same key formats before IM delivery.
 
 - **SkillScan shell pipes**: resolve `env` launchers through interpreter paths and `command`/`exec`/`sudo` wrappers, including value-taking sudo flags. Preserve direct-pipe coverage of common shell interpreter paths/names and real backslash-newline continuations; keep repeated regex alternatives disjoint so failed matches on literal backslash text cannot stall scanning. Tokenize only the current simple command, in place, under a shared per-file work budget; only its stdin redirections override the pipe. Keep quoted words distinct from operators. Parse GNU `env -S` escapes separately from shell syntax, with iterative expansion capped at 256 splits/65,536 characters. Unknown runtime expansions remain unresolved; never read the scanner environment. Limit exhaustion retains warnings and already collected critical findings. Tests: `test_skillscan_env_review_regressions.py`, `test_skillscan_env_launcher.py`, and the existing native/shell suites.
@@ -52,3 +54,28 @@ Lets a caller pass per-request, short-lived end-user credentials (e.g. an ERP to
 - Build archives from captured bytes and require the preview's revision. Preserve file contents, empty directories, and normalized executable flags; import must not restore privileged permission bits.
 - Keep traversal, YAML parsing, and archive construction bounded and cancellable. Reject unsupported filesystem operations rather than following links; report limits instead of truncating results. Preserve YAML preflight before object construction.
 - Export includes raw saved files and is not a secret audit. Return relative paths and generic errors without leaking source content. See the [export API contract](../../../../docs/API.md#export-a-custom-skill) for response fields and limits.
+
+### Evolution host checks and recovery
+
+`mutations/service.py` shares one shielded check per proposal. A cancelled waiter
+does not cancel the shared scan; a cancelled scan or timeout must propagate and
+drain token-fenced lease cleanup, leaving no cached verdict. Keep the scan attempt
+for hourly quota accounting. Cleanup must not erase a replacement worker's lease.
+Single-operation recovery propagates an unresolved owner barrier as `NEEDS_REPAIR`
+(HTTP 409); only the host-wide recovery sweep suppresses it to continue with other
+owners. Publication and derived-view status remain separate.
+`tests/blocking_io/test_skill_mutation_host.py` exercises the real host lifetime,
+evidence pages, scanner, publication, revert and admin routes under Blockbuster;
+only remote moderation is stubbed. Keep new async paths inside that gate.
+
+Standalone SDK/storage processes have no publication runtime. `mutations/enrollment.py` checks the configured application DB on each access and refuses enrolled owners with `MUTATION_RUNTIME_REQUIRED`; global toggles check all persisted owners. Never cache negative enrollment or infer it from the plugin list. Reads and writes must keep these guards, and the local storage factory must retain its AppConfig so the probe uses the same DB as the Gateway. `tests/test_skill_sdk_enrollment.py` exercises fresh real SDK processes without injected runtime state.
+
+- `get_enabled_skills_for_config` preserves user scope even when `app_config` is omitted; only calls without both config and user use the nonblocking global cache. Enrolled owners always bypass the local catalog LRU and pass the durable readiness guard.
+
+Owned custom-skill YAML diagnostics use the same managed-read guard as catalog
+reads: recover pending publications before scanning, and refuse standalone reads
+for enrolled owners without a mutation runtime. Keep the scan off the event loop.
+
+Projection readers and mutation writers share the reentrant owner lock. Both use
+`utils.file_lock.retry_until_locked` for contention-only OS lock retries; preserve
+deadlines, cancellation checks and the shared descriptor for nested reads.
