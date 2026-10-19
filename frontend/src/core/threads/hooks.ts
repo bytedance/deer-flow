@@ -21,7 +21,7 @@ import { getBackendBaseURL } from "../config";
 import { useI18n } from "../i18n/hooks";
 import { getMessageRunId } from "../messages/run-duration";
 import {
-  hasContent,
+  extractContentFromMessage,
   hasToolCalls,
   isHiddenFromUIMessage,
 } from "../messages/utils";
@@ -1072,7 +1072,7 @@ export function restoreReconnectedTurnMessageOrder(
     if (
       message.type === "ai" &&
       !isHiddenFromUIMessage(message) &&
-      hasContent(message) &&
+      extractContentFromMessage(message).length > 0 &&
       !hasToolCalls(message)
     ) {
       candidateStart = index + 1;
