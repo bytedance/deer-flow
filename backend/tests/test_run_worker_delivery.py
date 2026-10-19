@@ -614,6 +614,57 @@ async def test_delivery_is_durable_before_terminal_run_status():
 
 
 @pytest.mark.anyio
+async def test_deferred_error_stream_frames_follow_durable_terminal_status():
+    events = MemoryRunEventStore()
+    order: list[str] = []
+
+    class OrderingRunStore(MemoryRunStore):
+        async def update_status(self, run_id, status, *, error=None, stop_reason=None):
+            result = await super().update_status(
+                run_id,
+                status,
+                error=error,
+                stop_reason=stop_reason,
+            )
+            if status == "error":
+                order.append("durable-error")
+            return result
+
+    class OrderingBridge:
+        async def publish(self, _run_id, event, _data):
+            if event == "error":
+                order.append("stream-error")
+
+        async def publish_end(self, _run_id):
+            order.append("stream-end")
+
+        async def cleanup(self, _run_id, *, delay=0):
+            del delay
+
+    class FailingAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            del graph_input, config, stream_mode, subgraphs
+            raise RuntimeError("boom")
+            yield  # pragma: no cover - make this an async generator
+
+    run_store = OrderingRunStore()
+    run_manager = RunManager(store=run_store)
+    record = await run_manager.create("thread-1")
+
+    await run_agent(
+        OrderingBridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=events),
+        agent_factory=lambda *, config: FailingAgent(),
+        graph_input={},
+        config={},
+    )
+
+    assert order == ["durable-error", "stream-error", "stream-end"]
+
+
+@pytest.mark.anyio
 async def test_delivery_write_retries_before_persisting_success():
     class FlakyReceiptStore(MemoryRunEventStore):
         def __init__(self):
