@@ -1015,6 +1015,20 @@
 
 ### 修复
 
+- **渠道：** 同一条 IM 消息被投递两次不再被执行两次，两个 Gateway 实例也不再把一个新
+  会话拆到两个线程上。Discord 私信此前没有入站去重键（没有 guild id），而 Discord 线程
+  内的回复在不跟踪该线程的实例上会得到另一个键；由于每个实例的会话都会收到每条消息，
+  两个实例都会作答。Discord 消息现在按 guild（私信记为 `dm`）和消息所在频道生成去重键，
+  适配器在创建 Discord 线程之前先认领该键，因此只有一个实例会创建线程。超过 10 分钟
+  去重窗口、重启之后或共享去重存储不可用时，重投递此前会启动第二次运行（GitHub 的
+  “Redeliver”可能发出重复评论）。现在带去重键的消息发起的每个 IM 运行请求都携带由去重键
+  派生的 `Idempotency-Key`，人类消息 id 也由同一个键派生，因此 Gateway 会返回首次投递
+  时已接纳的运行：重投递会重放其事件流、从线程状态读取这条消息对应的轮次，或回复“该消息
+  仍在处理中”，而不会把这一轮再执行一遍——即使首次运行失败也是如此。两个实例为同一会话
+  的第一条消息各自创建线程时，绑定现在以“不存在才插入”的方式在 `channel_conversations` /
+  `channel_thread_bindings` 中认领：落败的实例改用胜出者的线程并删除自己创建的空线程，
+  `/new` 仍会重新绑定到新线程。 (issue #7103, [#7104])
+
 - **浏览器：** `browser_screenshot` 不再替换线程 outputs 目录中已存在的文件。此前以
   `report.png` 保存的截图会覆盖用户自己的 `report.png`、更早的截图，或同一秒内生成的
   另一张默认命名截图；现在会像 `web_capture` 一样改用下一个空闲名称（`report-1.png`、
@@ -9422,3 +9436,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6930]: https://github.com/bytedance/deer-flow/pull/6930
 [#6988]: https://github.com/bytedance/deer-flow/pull/6988
 [#6991]: https://github.com/bytedance/deer-flow/pull/6991
+[#7104]: https://github.com/bytedance/deer-flow/pull/7104

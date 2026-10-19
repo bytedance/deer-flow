@@ -725,6 +725,51 @@ async def test_start_run_rejects_reused_key_with_different_input(_stub_app_confi
     assert "different request" in str(excinfo.value.detail)
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize(("stable_message_id", "reused"), [(True, True), (False, False)], ids=["keyed-message-id", "random-message-id"])
+async def test_channel_redelivery_on_another_instance_reuses_the_admitted_run(_stub_app_config, stable_message_id, reused):
+    """The IM manager's keyed request, as a second Gateway instance sees it.
+
+    The human message id is part of the compared input, so only a message id
+    derived from the same key lets a redelivery reuse the admitted run; a
+    fresh uuid per delivery is a different request (409).
+    """
+    from app.channels.manager import ChannelManager, _human_input_message
+    from app.channels.message_bus import InboundMessage
+    from app.gateway.services import start_run
+
+    msg = InboundMessage(channel_name="slack", chat_id="C1", user_id="U1", text="hi", metadata={"event_id": "evt-1", "team_id": "T1"})
+    key = f"http-run:{ChannelManager._run_idempotency_key(msg)}"
+
+    def body() -> RunCreateRequest:
+        message_id = ChannelManager._human_message_id(msg) if stable_message_id else None
+        return RunCreateRequest(input={"messages": [_human_input_message("hi", message_id=message_id)]}, on_disconnect="continue")
+
+    async def fake_run_agent(*args, **kwargs):
+        del args, kwargs
+        await asyncio.Event().wait()
+
+    store = MemoryRunStore()
+    first_instance, second_instance = RunManager(store=store, worker_id="worker-a"), RunManager(store=store, worker_id="worker-b")
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+    ):
+        first = await start_run(body(), "thread-1", _make_start_run_request(first_instance), idempotency_key=key)
+        try:
+            if reused:
+                second = await start_run(body(), "thread-1", _make_start_run_request(second_instance), idempotency_key=key)
+                assert (second.run_id, second.idempotency_reused) == (first.run_id, True)
+            else:
+                with pytest.raises(HTTPException) as excinfo:
+                    await start_run(body(), "thread-1", _make_start_run_request(second_instance), idempotency_key=key)
+                assert excinfo.value.status_code == 409
+                assert "different request" in str(excinfo.value.detail)
+        finally:
+            first.task.cancel()
+            await asyncio.gather(first.task, return_exceptions=True)
+
+
 def test_resume_idempotency_fingerprint_is_typed_and_order_independent():
     from app.gateway.services import _run_idempotency_request
 

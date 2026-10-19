@@ -53,6 +53,10 @@ DISCORD_MAX_INBOUND_FILE_BYTES = 25 * 1024 * 1024
 DISCORD_CDN_HOST_SUFFIXES = frozenset({"discordapp.net", "discordapp.com", "discord.com"})
 
 
+class _NotClaimed(Exception):
+    """This delivery lost the message's dedupe claim: create no thread, publish nothing."""
+
+
 def _parse_discord_guild_id(entry: Any) -> int | None:
     """Return a Discord guild (snowflake) ID, or ``None`` if ``entry`` is not one."""
     if isinstance(entry, int) and not isinstance(entry, bool) and entry > 0:
@@ -651,6 +655,14 @@ class DiscordChannel(Channel):
         """Finish Discord routing while owning one bounded intake slot."""
         reservation_transferred = False
         files = files or []
+        # Every instance's session receives every MESSAGE_CREATE; the one that
+        # wins this message's dedupe claim is the only one to create a thread.
+        claim = self._make_inbound(
+            chat_id=str(message.channel.id),
+            user_id=str(message.author.id),
+            text="",
+            metadata={"guild_id": str(guild.id) if guild else None, "channel_id": str(message.channel.id), "message_id": str(message.id)},
+        )
         try:
             # --- Determine thread/channel routing and typing target ---
             thread_id = None
@@ -709,7 +721,7 @@ class DiscordChannel(Channel):
                     return
                 # mention_only + fresh @ → create new thread instead of routing to existing one
                 if self._mention_only and has_mention:
-                    thread_obj = await self._create_thread(message)
+                    thread_obj = await self._create_thread_once_claimed(message, claim)
                     if thread_obj is not None:
                         target_thread_id = str(thread_obj.id)
                         self._record_thread_mapping(channel_id, target_thread_id)
@@ -736,7 +748,7 @@ class DiscordChannel(Channel):
                 return
             elif self._mention_only and has_mention:
                 # First mention in this channel → create thread
-                thread_obj = await self._create_thread(message)
+                thread_obj = await self._create_thread_once_claimed(message, claim)
                 if thread_obj is not None:
                     target_thread_id = str(thread_obj.id)
                     self._record_thread_mapping(channel_id, target_thread_id)
@@ -753,7 +765,7 @@ class DiscordChannel(Channel):
                     typing_target = message.channel  # Type into the channel
             elif self._thread_mode:
                 # thread_mode but mention_only is False → create thread anyway for conversation grouping
-                thread_obj = await self._create_thread(message)
+                thread_obj = await self._create_thread_once_claimed(message, claim)
                 if thread_obj is None:
                     # Thread creation failed (disabled/permissions), fall back to channel replies
                     logger.info("[Discord] thread creation failed in channel %s, falling back to channel replies", channel_id)
@@ -787,15 +799,42 @@ class DiscordChannel(Channel):
                 },
             )
             inbound.topic_id = thread_id
+            inbound.dedupe_claimed = claim.dedupe_claimed
 
             handoff = self._publish_reserved(inbound, reservation, guild_id=str(guild.id) if guild else None)
             if handoff is None:
                 return
             reservation_transferred = True
             await self._acknowledge_after_handoff(message, handoff, typing_target=typing_target, chat_id=chat_id, thread_id=thread_id)
+        except _NotClaimed:
+            logger.info("[Discord] skipping message %s: another delivery claimed it, or the Gateway loop is stopping", message.id)
         finally:
             if not reservation_transferred:
                 reservation.release()
+                if claim.dedupe_claimed:
+                    self._submit_threadsafe_coroutine(self.bus.release_inbound_claim(claim), self._main_loop, name="release_inbound_claim", msg_id=claim.metadata.get("message_id"))
+
+    async def _create_thread_once_claimed(self, message, claim: InboundMessage):
+        """``_create_thread`` after winning *claim*; raises ``_NotClaimed`` on a duplicate."""
+        if not claim.dedupe_claimed and not await self._claim_inbound(claim):
+            raise _NotClaimed
+        return await self._create_thread(message)
+
+    async def _claim_inbound(self, claim: InboundMessage) -> bool:
+        """Run ``MessageBus.claim_inbound`` on the Gateway loop, where the dedupe store's engine lives."""
+        future = self._submit_threadsafe_coroutine_future(self.bus.claim_inbound(claim), self._main_loop, name="claim_inbound", msg_id=claim.metadata.get("message_id"))
+        if future is None:
+            return False  # the Gateway loop is gone; the hand-off would be refused as well
+        try:
+            return await asyncio.shield(asyncio.wrap_future(future))
+        except asyncio.CancelledError:
+            if not future.cancelled():
+                raise
+            return False  # drained by stop()
+        except Exception:
+            # Fail open like the dedupe store itself: the worker still dedupes.
+            logger.warning("[Discord] inbound dedupe claim failed for message %s; continuing", claim.metadata.get("message_id"), exc_info=True)
+            return True
 
     def _publish_reserved(self, inbound: InboundMessage, reservation: InboundReservation, *, guild_id: str | None) -> Future[bool] | None:
         """Transfer an already-reserved message to the Gateway loop.
@@ -876,9 +915,19 @@ class DiscordChannel(Channel):
         *,
         guild_id: str | None,
     ) -> bool:
-        """Attach connection identity and commit the reservation on the Gateway loop."""
-        inbound = await self._attach_connection_identity(inbound, guild_id=guild_id)
-        return self._commit_reserved_inbound(reservation, inbound)
+        """Attach connection identity and commit the reservation on the Gateway loop.
+
+        A message that was claimed against inbound dedupe but never committed
+        gives its claim back.
+        """
+        try:
+            committed = self._commit_reserved_inbound(reservation, await self._attach_connection_identity(inbound, guild_id=guild_id))
+        except Exception:
+            await self.bus.release_inbound_claim(inbound)
+            raise
+        if not committed:
+            await self.bus.release_inbound_claim(inbound)
+        return committed
 
     async def _attach_connection_identity(self, inbound: InboundMessage, guild_id: str | None = None) -> InboundMessage:
         return await attach_connection_identity(
