@@ -1,13 +1,18 @@
 """Every bundled web_search provider must screen result URLs through the shared owner.
 
 #6740 made `community/url_safety.py::safe_public_result_url` the single owner for
-result-URL screening; each case below feeds the provider a link-local metadata URL
-through its own (stubbed) client seam and asserts the model-visible JSON never
-carries it. The stubs replace only the HTTP/SDK boundary; the normalization code
-under test runs for real.
+result-URL screening and #7031 covered InfoQuest; each case below feeds one of the
+remaining providers a link-local metadata URL through its own (stubbed) client seam
+and asserts the model-visible JSON never carries it. The stubs replace only the
+HTTP/SDK boundary; the normalization code under test runs for real. Citation-style
+links (model reads them, this tool never fetches them) are screened too: the
+fetch-side SSRF guards live with web_fetch and the delegated backends, and the
+search output itself should never carry javascript:/file:/link-local URLs toward
+the model or the report.
 """
 
 import json
+import os
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -161,6 +166,71 @@ def test_searxng_screens_result_urls():
     ):
         result = _run(tools.web_search_tool.ainvoke({"query": "q"}))
     _assert_screened(result)
+
+
+def test_brave_screens_result_urls():
+    from deerflow.community.brave import tools
+
+    payload = {"web": {"results": [{"title": "t", "url": LEAK, "description": "d"}]}}
+    with (
+        patch.object(tools, "_brave_get", return_value=(payload, None)),
+        patch.object(tools, "_get_api_key", return_value="k"),
+        patch.object(tools, "get_app_config", return_value=_mock_app_config()),
+    ):
+        _assert_screened(tools.web_search_tool.invoke({"query": "q"}))
+
+
+def test_serper_screens_organic_result_urls():
+    from deerflow.community.serper import tools
+
+    payload = {"organic": [{"title": "t", "link": LEAK, "snippet": "s"}]}
+    with (
+        patch.object(tools, "_serper_post", return_value=(payload, None)),
+        patch.object(tools, "_get_api_key", return_value="k"),
+        patch.object(tools, "get_app_config", return_value=_mock_app_config()),
+    ):
+        _assert_screened(tools.web_search_tool.invoke({"query": "q"}))
+
+
+def test_webz_screens_result_urls():
+    from deerflow.community.webz import tools
+
+    payload = {
+        "results": [
+            {
+                "article": {"title": "t", "url": LEAK, "summary": "s"},
+                "chunk": {"text": "x"},
+                "metadata": {},
+            }
+        ]
+    }
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return payload
+
+    class _FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, *args, **kwargs):
+            return _FakeResponse()
+
+    with (
+        patch.dict(os.environ, {"WEBZ_API_KEY": "k"}),
+        patch("httpx.AsyncClient", _FakeClient),
+        patch.object(tools, "get_app_config", return_value=_mock_app_config()),
+    ):
+        _assert_screened(_run(tools.web_search_tool.ainvoke({"query": "q"})))
 
 
 def _mock_app_config():

@@ -11,6 +11,7 @@ import httpx
 from langchain.tools import tool
 
 from deerflow.community.search_time_range import SearchTimeRange
+from deerflow.community.url_safety import safe_public_result_url as _safe_public_url
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -45,7 +46,7 @@ def _normalize(payload: object, count: int) -> list[dict]:
                 raise ValueError("Invalid metadata")
             result = {
                 "title": article.get("title", ""),
-                "url": article.get("url", ""),
+                "url": _safe_public_url(article.get("url")),
                 "content": chunk.get("text") or article.get("summary") or "",
                 "published_at": article.get("published_at", ""),
             }
