@@ -105,6 +105,9 @@ class GitHubAPI:
     ) -> Dict:
         """Get repository directory tree.
 
+        Pass the reference raw, without pre-encoding it. It is URL-encoded as a
+        single path segment before the request is sent.
+
         ``HEAD`` is resolved by GitHub to the repository's default branch, so a
         repository that uses neither ``main`` nor ``master`` gets its current tree.
         Guessing those two names instead served the tree of an abandoned branch
