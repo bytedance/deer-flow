@@ -12,6 +12,8 @@ Result-reader tests cover SQLite and isolated TEST_POSTGRES_URI schemas:
 submission, completion, reopen and ToolNode continuation, without paid models.
 Clean up temporary schemas.
 
+**Execution teardown confirmation**: Only the isolated-loop `run_with_timeout()` wrapper's `finally` publishes `execution_teardown_event`, after child cleanup. Cancelling the cross-thread submission `Future` invokes its done callbacks before the actual task finishes; `forget_future` must not mark teardown complete. A renewal failure while that wait still owns the item stops further heartbeats but leaves the task mapped. `run_once` excludes mapped ids from `claim_items`, so lease expiry cannot consume another attempt until supervision ends. Keep regressions for blocked cleanup, pre-dispatch cancellation, and real-repository polling during that retained wait.
+
 **CSV headers**: `file:<path> csv-columns:["id","name"]` shares authorized file admission/bounded reads. Require UTF-8-encodable decoded names before access. Parse the first logical record: definite header syntax errors are checked negatives even with later rows; truncated quoting/exhausted budgets stay UNVERIFIED. Local read/parse share a cooperative 5s deadline; remote keeps transport timeouts and starts a separate 5s parse deadline after reading. Exact matching/dialect: README.
 
 **JSON**: See README. Authorize before local metadata and reads; inaccessible paths stay UNVERIFIED.

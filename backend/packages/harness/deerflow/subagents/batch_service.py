@@ -32,6 +32,11 @@ from deerflow.utils.assembly_io import run_assembly
 
 logger = logging.getLogger(__name__)
 
+# Bound the supervised teardown wait so a stuck child cannot renew forever
+# and wedge a ``max_running`` slot. After this budget the item is left on
+# the durable lease-expiry recovery path instead of the ordinary retry.
+_TEARDOWN_WAIT_LEASE_PERIODS = 3
+
 # Strong references to scheduled registry releases: an event loop keeps only
 # weak references to its tasks.
 _pending_releases: set[Future[None]] = set()
@@ -45,6 +50,31 @@ def _usage(records: list[dict[str, Any]] | None) -> dict[str, int] | None:
         "output_tokens": sum(int(row.get("output_tokens") or 0) for row in records),
         "total_tokens": sum(int(row.get("total_tokens") or 0) for row in records),
     }
+
+
+def _teardown_wait_budget_seconds(lease_seconds: float) -> float:
+    return max(float(lease_seconds), float(lease_seconds) * _TEARDOWN_WAIT_LEASE_PERIODS)
+
+
+def _execution_teardown_complete(result: Any) -> bool:
+    """True when a dispatched child is gone or isolated-loop teardown finished.
+
+    Terminal ``status`` / ``completed_at`` are not confirmation: ``_aexecute``
+    publishes CANCELLED/FAILED before its ``finally`` sandbox/holder release.
+    Only a vanished registry entry or the executor's
+    ``execution_teardown_event`` (set after ``run_with_timeout`` returns)
+    counts. A result without that signal cannot be confirmed.
+    """
+    if result is None:
+        return True
+    check = getattr(result, "is_execution_teardown_complete", None)
+    if callable(check):
+        return bool(check())
+    teardown_event = getattr(result, "execution_teardown_event", None)
+    is_set = getattr(teardown_event, "is_set", None)
+    if callable(is_set):
+        return bool(is_set())
+    return False
 
 
 async def _release_when_terminal(execution_id: str, *, poll_seconds: float, max_wait_seconds: float) -> None:
@@ -193,6 +223,9 @@ class SubagentBatchService:
         if available <= 0:
             return
         # A process identity is not a fence for a later claim by that process.
+        # Mapped ids include a child still in supervised teardown after a
+        # renewal failure. Excluding them keeps an expired lease from being
+        # recovered into an attempt this pass would then discard.
         claim_owner = f"{self._lease_owner[:80]}:{uuid.uuid4().hex}"
         items = await self._repository.claim_items(
             now=now,
@@ -437,6 +470,19 @@ class SubagentBatchService:
                 "Durable subagent batch item failed (item_id=%s)",
                 item_id,
             )
+            if execution_id is not None:
+                request_cancel_background_task(execution_id)
+                torn_down = await self._await_dispatched_execution_teardown(
+                    item_id,
+                    execution_id,
+                    lease,
+                )
+                if not torn_down:
+                    logger.error(
+                        "Refusing immediate retry; dispatched child teardown was not confirmed (item_id=%s)",
+                        item_id,
+                    )
+                    return
             await self._repository.finalize_item(
                 item_id,
                 lease_owner=lease.owner,
@@ -512,3 +558,75 @@ class SubagentBatchService:
             # The checklist's sandbox offload drains before releasing its
             # holder, even when shutdown or a lost lease cancels this task.
             await asyncio.gather(check, return_exceptions=True)
+
+    async def _await_dispatched_execution_teardown(
+        self,
+        item_id: str,
+        execution_id: str,
+        lease: BatchItemLease,
+    ) -> bool:
+        """Hold ownership until the dispatched child has torn down.
+
+        Renews the claim lease while waiting so a slow teardown cannot be
+        reclaimed as a concurrent retry. A renewal exception stops further
+        heartbeats but leaves this item task mapped. ``run_once`` excludes
+        mapped ids from ``claim_items``, so expiry cannot consume another
+        attempt until supervision ends. Returns ``False`` when teardown
+        cannot be confirmed, the wait budget expires, or the lease is
+        already lost — the item is then left for lease-expiry recovery
+        instead of the ordinary immediate-retry path. Process shutdown
+        raises ``CancelledError`` and also skips that retry path.
+        """
+        renew_every = max(1.0, self._config.lease_seconds / 3)
+        status_poll_every = min(self._config.poll_interval_seconds, renew_every)
+        loop = asyncio.get_running_loop()
+        next_renew_at = loop.time()
+        deadline = loop.time() + _teardown_wait_budget_seconds(self._config.lease_seconds)
+        lease_held = True
+        while True:
+            if _execution_teardown_complete(get_background_task_result(execution_id)):
+                return lease_held
+            now_monotonic = loop.time()
+            if now_monotonic >= deadline:
+                logger.error(
+                    "Dispatched child teardown was not confirmed before wait budget elapsed (item_id=%s)",
+                    item_id,
+                )
+                return False
+            if now_monotonic >= next_renew_at:
+                if not lease_held:
+                    next_renew_at = loop.time() + renew_every
+                else:
+                    try:
+                        renewed = await self._repository.renew_item_lease(
+                            item_id,
+                            lease_owner=lease.owner,
+                            lease_seconds=self._config.lease_seconds,
+                            now=datetime.now(UTC),
+                        )
+                        next_renew_at = loop.time() + renew_every
+                        if not renewed.get("valid") or renewed.get("cancel_requested"):
+                            logger.warning(
+                                "Lost durable lease while waiting for dispatched child teardown (item_id=%s)",
+                                item_id,
+                            )
+                            return False
+                    except Exception:
+                        logger.exception(
+                            "Lease renewal failed while waiting for dispatched child teardown (item_id=%s)",
+                            item_id,
+                        )
+                        lease_held = False
+                        await lease.stop_renewal()
+                        next_renew_at = loop.time() + renew_every
+            try:
+                until_renew = max(0.0, next_renew_at - loop.time())
+                until_deadline = max(0.0, deadline - loop.time())
+                await asyncio.wait_for(
+                    self._stop.wait(),
+                    timeout=min(status_poll_every, until_renew, until_deadline),
+                )
+                if self._stop.is_set():
+                    raise asyncio.CancelledError
+            except TimeoutError:
+                pass

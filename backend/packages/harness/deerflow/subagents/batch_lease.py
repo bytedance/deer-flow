@@ -34,6 +34,17 @@ class BatchItemLease:
                 logger.exception("Durable batch lease renewal failed (item_id=%s)", self.item_id)
             return self.valid
 
+    async def stop_renewal(self) -> None:
+        """Stop heartbeats after a renewal failure while supervision continues.
+
+        The item task may still be waiting for child teardown. Clearing
+        ``valid`` under the renew lock keeps a concurrent heartbeat from
+        extending the lease again; the caller keeps the task mapped so a
+        later claim cannot consume an attempt for this same item.
+        """
+        async with self._renew_lock:
+            self.valid = False
+
     async def _heartbeat(self) -> None:
         while not self._stop.is_set():
             try:
