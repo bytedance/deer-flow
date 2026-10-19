@@ -1025,6 +1025,12 @@
   创建竞争的一方不再在启动时崩溃：它收到的 `409 AlreadyExists` 现在视为命名空间已存在，
   与 Pod 和 Service 的创建一致。Helm 部署中 provisioner 运行在其管理的命名空间内，从不
   经过这条路径。 ([#7099])
+- **项目：** 向调用者无权写入的项目上传书架文档或从对话保存文件时，不再遗留目录，
+  也不再返回 `500`。这两个路由此前先把请求体暂存到
+  `users/{user_id}/projects/{project_id}/` 下才检查项目，因此不存在、属于他人或已归档
+  的 id 会留下一个回收站对账永远不会清理的空 `{project_id}/documents/` 目录，而超过单个
+  路径分量长度的 id 会因 `ENAMETOOLONG` 失败。现在会先确认项目归调用者所有且处于活跃
+  状态，不写任何内容即返回同样的 `404`；书架插入仍会在项目行锁下再次检查。 ([#7040])
 - **浏览器：** `browser_screenshot` 不再替换线程 outputs 目录中已存在的文件。此前以
   `report.png` 保存的截图会覆盖用户自己的 `report.png`、更早的截图，或同一秒内生成的
   另一张默认命名截图；现在会像 `web_capture` 一样改用下一个空闲名称（`report-1.png`、
@@ -1033,7 +1039,6 @@
   上传相同，outputs 目录需要支持硬链接；不支持时工具会报错，而不会覆盖已有文件。发布前
   被替换的暂存截图（例如换成指向宿主机文件的符号链接）绝不会被链接到 outputs，工具会
   报错。 ([#6913])
-
 - **llm：** 流式响应已返回 `200` 之后才在流内报告的 provider 错误，现在会像以 HTTP
   状态码返回的同一错误一样重试。为了用 SSE keepalive 维持慢请求而提前返回 `200` 的
   OpenAI 兼容网关，会把之后发生的 504 作为 SSE `error` 事件发出；openai SDK 将其抛出为
@@ -9432,4 +9437,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6930]: https://github.com/bytedance/deer-flow/pull/6930
 [#6988]: https://github.com/bytedance/deer-flow/pull/6988
 [#6991]: https://github.com/bytedance/deer-flow/pull/6991
+[#7040]: https://github.com/bytedance/deer-flow/pull/7040
 [#7099]: https://github.com/bytedance/deer-flow/pull/7099

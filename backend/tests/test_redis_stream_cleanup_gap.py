@@ -7,7 +7,13 @@ import anyio
 import pytest
 from test_stream_bridge import REDIS_TEST_URL, _DelayedBlockingReadRedis, _FakeRedis, requires_redis
 
-from deerflow.runtime import RunManager, RunStatus, StreamGap
+from deerflow.runtime import (
+    ORPHAN_RECOVERY_STOP_REASON,
+    RunManager,
+    RunStatus,
+    StreamEvent,
+    StreamGap,
+)
 from deerflow.runtime.stream_bridge.base import END_SENTINEL, HEARTBEAT_SENTINEL
 from deerflow.runtime.stream_bridge.redis import RedisStreamBridge
 
@@ -17,6 +23,79 @@ class _ConnectedRequest:
 
     async def is_disconnected(self):
         return False
+
+
+class _ProducerLeaseBridge:
+    """Retained stream with a controlled cross-process producer state."""
+
+    producer_lease_recovery_enabled = True
+
+    def __init__(self, state="expired"):
+        self.state = state
+        self.expired_producer_cleanup_calls: list[str] = []
+
+    async def stream_exists(self, run_id):
+        return True
+
+    async def producer_lease_state(self, run_id):
+        return self.state
+
+    async def cleanup_expired_producer(self, run_id):
+        self.expired_producer_cleanup_calls.append(run_id)
+        return self.state == "expired"
+
+    async def subscribe(self, run_id, *, last_event_id=None):
+        yield HEARTBEAT_SENTINEL
+        yield HEARTBEAT_SENTINEL
+        await asyncio.Event().wait()
+
+
+class _TailAfterExpiredHeartbeatBridge(_ProducerLeaseBridge):
+    def __init__(self):
+        super().__init__("expired")
+        self.tail_consumed = asyncio.Event()
+
+    async def subscribe(self, run_id, *, last_event_id=None):
+        yield HEARTBEAT_SENTINEL
+        yield StreamEvent(id="2-0", event="values", data={"tail": True})
+        self.tail_consumed.set()
+        yield END_SENTINEL
+
+
+class _ReactivatedProducerBridge(_ProducerLeaseBridge):
+    async def cleanup_expired_producer(self, run_id):
+        self.expired_producer_cleanup_calls.append(run_id)
+        self.state = "active"
+        return False
+
+
+class _FailingProducerCleanupBridge(_ProducerLeaseBridge):
+    async def cleanup_expired_producer(self, run_id):
+        self.expired_producer_cleanup_calls.append(run_id)
+        raise TimeoutError("producer cleanup unavailable")
+
+
+class _MissingActiveProducerBridge(_ProducerLeaseBridge):
+    def __init__(self):
+        super().__init__("active")
+
+    async def stream_exists(self, run_id):
+        return False
+
+
+class _MissingThenTailBridge(_TailAfterExpiredHeartbeatBridge):
+    def __init__(self):
+        super().__init__()
+        self.exists_calls = 0
+
+    async def stream_exists(self, run_id):
+        self.exists_calls += 1
+        return self.exists_calls > 1
+
+    async def subscribe(self, run_id, *, last_event_id=None):
+        yield StreamEvent(id="2-0", event="values", data={"tail": True})
+        self.tail_consumed.set()
+        yield END_SENTINEL
 
 
 @pytest.fixture
@@ -214,6 +293,321 @@ async def test_wait_survives_cleanup_with_real_bridge(cleanup_bridge, store_only
     finally:
         await bridge.cleanup(run_id)
         await manager.shutdown()
+
+
+@pytest.mark.anyio
+async def test_sse_terminalizes_retained_stream_after_producer_lease_expires():
+    from app.gateway.services import sse_consumer
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    store = MemoryRunStore()
+    await store.put("expired-producer", thread_id="cleanup-thread", status="success")
+    manager = RunManager(store=store)
+    record = await manager.get("expired-producer")
+    bridge = _ProducerLeaseBridge()
+    stream = sse_consumer(
+        bridge,
+        record,
+        _ConnectedRequest(),
+        manager,
+        apply_on_disconnect=False,
+    )
+    try:
+        with anyio.fail_after(0.5):
+            frames = [frame async for frame in stream]
+        assert frames[0] == ": heartbeat\n\n"
+        assert frames[1].startswith("event: end\n")
+        assert bridge.expired_producer_cleanup_calls == ["expired-producer"]
+    finally:
+        await stream.aclose()
+        await manager.shutdown()
+
+
+@pytest.mark.anyio
+async def test_wait_terminalizes_retained_stream_after_producer_lease_expires():
+    from app.gateway.services import wait_for_run_completion
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    store = MemoryRunStore()
+    await store.put("expired-producer", thread_id="cleanup-thread", status="success")
+    manager = RunManager(store=store)
+    record = await manager.get("expired-producer")
+    bridge = _ProducerLeaseBridge()
+    try:
+        with anyio.fail_after(0.5):
+            assert await wait_for_run_completion(
+                bridge,
+                record,
+                _ConnectedRequest(),
+                manager,
+            )
+        assert bridge.expired_producer_cleanup_calls == ["expired-producer"]
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.anyio
+async def test_sse_does_not_terminalize_when_producer_reactivates_before_cleanup():
+    from app.gateway.services import sse_consumer
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    store = MemoryRunStore()
+    await store.put("reactivated-producer", thread_id="cleanup-thread", status="success")
+    manager = RunManager(store=store)
+    record = await manager.get("reactivated-producer")
+    bridge = _ReactivatedProducerBridge()
+    stream = sse_consumer(
+        bridge,
+        record,
+        _ConnectedRequest(),
+        manager,
+        apply_on_disconnect=False,
+    )
+    try:
+        with anyio.fail_after(0.5):
+            assert await anext(stream) == ": heartbeat\n\n"
+            assert await anext(stream) == ": heartbeat\n\n"
+        assert bridge.expired_producer_cleanup_calls == ["reactivated-producer"]
+    finally:
+        await stream.aclose()
+        await manager.shutdown()
+
+
+@pytest.mark.anyio
+async def test_sse_does_not_terminalize_when_producer_cleanup_fails():
+    from app.gateway.services import sse_consumer
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    store = MemoryRunStore()
+    await store.put("cleanup-failed", thread_id="cleanup-thread", status="success")
+    manager = RunManager(store=store)
+    record = await manager.get("cleanup-failed")
+    bridge = _FailingProducerCleanupBridge()
+    stream = sse_consumer(
+        bridge,
+        record,
+        _ConnectedRequest(),
+        manager,
+        apply_on_disconnect=False,
+    )
+    try:
+        with anyio.fail_after(0.5):
+            assert await anext(stream) == ": heartbeat\n\n"
+            assert await anext(stream) == ": heartbeat\n\n"
+        assert bridge.expired_producer_cleanup_calls == ["cleanup-failed"]
+    finally:
+        await stream.aclose()
+        await manager.shutdown()
+
+
+@pytest.mark.anyio
+async def test_sse_orphan_recovery_waits_for_active_stream_producer():
+    from app.gateway.services import sse_consumer
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    store = MemoryRunStore()
+    await store.put(
+        "orphan-active-producer",
+        thread_id="cleanup-thread",
+        status="error",
+        stop_reason=ORPHAN_RECOVERY_STOP_REASON,
+    )
+    manager = RunManager(store=store)
+    record = await manager.get("orphan-active-producer")
+    bridge = _ProducerLeaseBridge("active")
+    stream = sse_consumer(
+        bridge,
+        record,
+        _ConnectedRequest(),
+        manager,
+        apply_on_disconnect=False,
+    )
+    try:
+        with anyio.fail_after(0.5):
+            assert await anext(stream) == ": heartbeat\n\n"
+    finally:
+        await stream.aclose()
+        await manager.shutdown()
+
+
+@pytest.mark.anyio
+async def test_sse_drains_tail_published_after_expired_heartbeat():
+    from app.gateway.services import sse_consumer
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    store = MemoryRunStore()
+    await store.put("expired-tail", thread_id="cleanup-thread", status="success")
+    manager = RunManager(store=store)
+    record = await manager.get("expired-tail")
+    bridge = _TailAfterExpiredHeartbeatBridge()
+    stream = sse_consumer(
+        bridge,
+        record,
+        _ConnectedRequest(),
+        manager,
+        apply_on_disconnect=False,
+    )
+    try:
+        with anyio.fail_after(0.5):
+            frames = [frame async for frame in stream]
+        assert frames[0] == ": heartbeat\n\n"
+        assert frames[1].startswith("event: values\n")
+        assert frames[2].startswith("event: end\n")
+        assert bridge.tail_consumed.is_set()
+    finally:
+        await stream.aclose()
+        await manager.shutdown()
+
+
+@pytest.mark.anyio
+async def test_wait_drains_tail_published_after_expired_heartbeat():
+    from app.gateway.services import wait_for_run_completion
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    store = MemoryRunStore()
+    await store.put("expired-tail", thread_id="cleanup-thread", status="success")
+    manager = RunManager(store=store)
+    record = await manager.get("expired-tail")
+    bridge = _TailAfterExpiredHeartbeatBridge()
+    try:
+        with anyio.fail_after(0.5):
+            assert await wait_for_run_completion(
+                bridge,
+                record,
+                _ConnectedRequest(),
+                manager,
+            )
+        assert bridge.tail_consumed.is_set()
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.anyio
+async def test_missing_stream_does_not_terminalize_an_active_producer():
+    from app.gateway.services import sse_consumer
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    store = MemoryRunStore()
+    await store.put("active-missing", thread_id="cleanup-thread", status="success")
+    manager = RunManager(store=store)
+    record = await manager.get("active-missing")
+    stream = sse_consumer(
+        _MissingActiveProducerBridge(),
+        record,
+        _ConnectedRequest(),
+        manager,
+        apply_on_disconnect=False,
+    )
+    try:
+        with anyio.fail_after(0.5):
+            assert await anext(stream) == ": heartbeat\n\n"
+    finally:
+        await stream.aclose()
+        await manager.shutdown()
+
+
+@pytest.mark.anyio
+async def test_missing_stream_rechecks_after_expiry_and_drains_new_tail():
+    from app.gateway.services import sse_consumer
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    store = MemoryRunStore()
+    await store.put("missing-then-tail", thread_id="cleanup-thread", status="success")
+    manager = RunManager(store=store)
+    record = await manager.get("missing-then-tail")
+    bridge = _MissingThenTailBridge()
+    stream = sse_consumer(
+        bridge,
+        record,
+        _ConnectedRequest(),
+        manager,
+        apply_on_disconnect=False,
+    )
+    try:
+        with anyio.fail_after(0.5):
+            frames = [frame async for frame in stream]
+        assert bridge.exists_calls == 2
+        assert frames[0].startswith("event: values\n")
+        assert frames[1].startswith("event: end\n")
+        assert bridge.tail_consumed.is_set()
+    finally:
+        await stream.aclose()
+        await manager.shutdown()
+
+
+@pytest.mark.anyio
+async def test_wait_rechecks_missing_stream_after_expiry_and_drains_new_tail():
+    from app.gateway.services import wait_for_run_completion
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    store = MemoryRunStore()
+    await store.put("missing-then-tail", thread_id="cleanup-thread", status="success")
+    manager = RunManager(store=store)
+    record = await manager.get("missing-then-tail")
+    bridge = _MissingThenTailBridge()
+    try:
+        with anyio.fail_after(0.5):
+            assert await wait_for_run_completion(
+                bridge,
+                record,
+                _ConnectedRequest(),
+                manager,
+            )
+        assert bridge.exists_calls == 2
+        assert bridge.tail_consumed.is_set()
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("producer_state", ["active", "untracked"])
+async def test_sse_keeps_waiting_for_nonexpired_terminal_producer(producer_state):
+    from app.gateway.services import sse_consumer
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    store = MemoryRunStore()
+    await store.put("live-producer", thread_id="cleanup-thread", status="success")
+    manager = RunManager(store=store)
+    record = await manager.get("live-producer")
+    stream = sse_consumer(
+        _ProducerLeaseBridge(producer_state),
+        record,
+        _ConnectedRequest(),
+        manager,
+        apply_on_disconnect=False,
+    )
+    try:
+        with anyio.fail_after(0.5):
+            assert await anext(stream) == ": heartbeat\n\n"
+    finally:
+        await stream.aclose()
+        await manager.shutdown()
+
+
+@pytest.mark.anyio
+async def test_sse_keeps_waiting_for_uncommitted_local_terminal_status():
+    from app.gateway.services import sse_consumer
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    record = await manager.create_or_reject("cleanup-thread")
+    await manager.try_start(record.run_id)
+    await manager.set_status(record.run_id, RunStatus.success, persist=False)
+    assert record.terminal_status_persisted is False
+    stream = sse_consumer(
+        _ProducerLeaseBridge(),
+        record,
+        _ConnectedRequest(),
+        manager,
+        apply_on_disconnect=False,
+    )
+    try:
+        with anyio.fail_after(0.5):
+            assert await anext(stream) == ": heartbeat\n\n"
+    finally:
+        await stream.aclose()
+        await manager.shutdown(timeout=0)
 
 
 @pytest.mark.anyio

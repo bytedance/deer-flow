@@ -29,6 +29,15 @@ Memory/Redis bridges keep startup-only `stream_bridge.heartbeat_interval_seconds
 
 Reconnect cursor parsing requires ASCII digits and must treat integer-conversion failures as malformed input. Redis cursors additionally require unsigned 64-bit components; use the same parser before sending a cursor to `XREAD` and when detecting replay gaps. Preserve malformed-cursor policy: memory replays retained events, Redis tails active streams and replays ended streams through `end`. `tests/test_stream_bridge.py` directly tests both parsers offline, including oversized sequences, Redis component overflow, non-ASCII digits, and valid uint64 boundaries; integration tests also exercise malformed cursors against real Redis.
 
+### Memory Stream Replay
+
+Memory keeps the exact last evicted event ID as bounded per-run metadata. A
+reconnect from that known predecessor replays all retained successors and END,
+matching a live subscriber at the same position. Older or unverifiable evicted
+cursors still emit `StreamGap`; Redis replay policy is unchanged. Coverage in
+`tests/test_memory_stream_reconnect_boundary.py` includes the Gateway SSE consumer
+with real ASGI requests and LangGraph SDK decoding.
+
 ### Checkpoint Channel Modes (`full` / `delta`)
 
 Checkpointer storage runs in one of two channel modes, selected by `checkpoint_channel_mode` in `config.yaml` (default `full`). `delta` mode adopts LangGraph 1.2's `DeltaChannel` for `messages`: checkpoints store a sentinel + per-step writes instead of the full message list, so storage/serde grows O(N) instead of O(N²) in turns. All checkpointer backends (memory/sqlite/postgres) serve both modes unchanged — the semantics live in the compiled graph's channel table, not in the saver.
@@ -102,9 +111,49 @@ answers for paginated history. See `docs/skill-usage-ui.md`.
 **Deferred terminal commit:** With an event store, the worker stages its terminal
 status locally and commits it only after finalization's receipt and duration
 writes. `RunRecord.terminal_commit_pending` keeps `_renew_leases()` renewing that
-still-active row until the commit is attempted; a renewal rejected by the worker's
-own commit is confirmed by re-reading the row, while a peer claim fences the run.
-Never select runs for renewal by local status alone. Shutdown's drain treats the
+still-active row until its own terminal write is acknowledged or ownership is
+lost. Manager-owned attempts register separate futures before Store I/O and
+publish an immutable outcome proof only on explicit successful commit results;
+matching row fields and legacy `None` results cannot confirm a commit. Atomic
+replacement registers attempts before admission I/O and acknowledges only the
+returned claimed rows, using their committed outcome fields. It does not repeat
+the interrupted update. An interrupted ACK is intermediate while a live Worker
+still owes rollback: keep a separate rollback barrier and explicitly renew that
+interrupted row under the same live-owner/lease predicates until the final error
+ACK. An active-only renewal that was already in flight across atomic rollback
+admission is retried once with `allow_interrupted=True` only after this Worker's
+interrupted ACK is available, and only while that same per-run decision remains
+inside its original deadline. An in-flight admission ACK is awaited; row state is
+never reread as attribution. Peer takeover, an expired lease, a changed/final
+outcome, or a second rejection still fences. Even without an event store, defer
+rollback's error write until restoration has finished. `tests/test_stale_active_renewal.py`
+covers the Manager transition (including an ACK still in flight), and
+`tests/test_atomic_admission_worker.py` covers the real Worker restoration/error
+tail with and without an event Store. A fenced Worker must not begin a rollback checkpoint restoration,
+including when fencing itself delivered cancellation. Admission compensation never retries an unowned write in heartbeat
+mode. A local deadline guard remains armed after fast renewal errors and after
+heartbeat stop; it rechecks the latest lease/proof and fences without waiting for
+the admission lock. Record removal and final ACK cancel its timer. Bounded orphan
+recovery drain requests cancellation, retains/observes unfinished I/O, and returns
+without joining a cancellation-resistant Store. Neither that return nor heartbeat
+stop authorizes closing still-in-use resources. A rejected
+CAS never falls back to another terminal writer. In heartbeat mode completion
+updates require that proof and an atomic matching terminal status/owner in Store;
+they only enrich metadata. Single-worker completion retains its recovery fallback.
+Never select runs for renewal by local status alone. Each run has a single-flight
+renewal check and supervised I/O, bounded by its last confirmed durable lease and
+a monotonic wait budget. Heartbeat ticks do not join slow checks; cancellation
+signals are delivered per run as results arrive. Timeout requests cancellation
+without joining cancellation-resistant I/O, whose late results are observed but
+cannot restore local authority. Shutdown drains within its shared budget and
+reports outstanding I/O rather than claiming it stopped. SQL/Memory reject expired
+renewals. `stop_heartbeat()` is not a Store-resource idle barrier: a driver that
+suppresses cancellation can retain its connection until the supervised I/O settles
+or the process exits; closing that resource cannot be claimed safe from this return.
+Owned terminal writes require a live owner lease (Postgres checks DB time
+after its row lock). These guards do not fence every RunStore mutation or provide
+a persistent attempt identity. Permanently missing ACKs may conservatively fence
+a committed run. Shutdown's drain treats the
 same state as active, and also awaits committed terminal workers still executing
 hooks, END or resource cleanup. The registered worker shields and drains one owned
 finalizer across repeated host cancellation, preserving the first interruption even

@@ -48,7 +48,7 @@ function mount(root, context) {
   const form = node('form');
   const submit = node('button',t('Launch workflow','启动工作流'),{type:'submit'});
   form.append(node('label',t('Inspectable JavaScript script','可检查的 JavaScript 脚本')),script,node('label',t('Arguments (JSON object)','参数（JSON 对象）')),args,submit);
-  panel.append(node('h2',t('Script workflows','脚本工作流')),node('p',t('Versioned workflows with live-process resume and authenticated output review. Restart ends resumability; no hard monetary budget. File approval covers a verified immutable snapshot; linked files require explicit capture.','版本化工作流支持同进程恢复和登录用户成果确认。重启后不能恢复；无金额硬上限。文件确认针对经过哈希验证的不可覆盖快照；链接文件需显式捕获。')),notice,library,form,navigation,detail);
+  panel.append(node('h2',t('Script workflows','脚本工作流')),node('p',t('Versioned workflows with authenticated output review. After restart, sign in and recover compatible runs. Single Gateway only; uncertain child effects require reconciliation; no hard monetary budget. File approval covers a verified immutable snapshot; linked files require explicit capture.','版本化工作流支持登录用户成果确认。重启后请登录并恢复兼容的工作流。仅支持单 Gateway；不确定的子任务效果需要核对；无金额硬上限。文件确认针对经过哈希验证的不可覆盖快照；链接文件需显式捕获。')),notice,library,form,navigation,detail);
   root.append(sheet,panel);
   const alive = version => !disposed && !context.signal?.aborted && version === generation;
   async function call(action,payload) {
@@ -75,7 +75,8 @@ function mount(root, context) {
     if(!alive(version)||id!==selected)return;
     releaseFiles();
     detail.replaceChildren(node('h3',`${run.run_id} · ${run.status}`));
-    if(['paused','waiting_approval'].includes(run.status))detail.append(button(t('Refresh checkpoint','刷新检查点'),()=>show()),node('p',t('Gateway restart ends this live checkpoint.','Gateway 重启后此检查点不能继续。')));
+    if(['paused','waiting_approval'].includes(run.status))detail.append(button(t('Refresh checkpoint','刷新检查点'),()=>show()),node('p',t('After restart, recover this workflow before continuing its checkpoint.','重启后请先恢复工作流，再继续此检查点。')));
+    if(run.status==='recoverable')detail.append(button(t('Recover workflow','恢复工作流'),async()=>{await call('recover',{run_id:id});await show();}),button(t('Cancel workflow','取消工作流'),async()=>{await call('cancel',{run_id:id});await show();}));
     if(run.error)detail.append(node('p',run.error));
     detail.append(node('h4',t('Script','脚本')),node('pre',run.script),node('h4',t('Arguments and execution limits','参数和执行上限')),node('pre',JSON.stringify({definition:run.definition,configuration_revision:run.configuration_revision,args:run.args,limits:run.limits,script_hash:run.script_hash,args_hash:run.args_hash},null,2)));
     for(const step of run.steps){
