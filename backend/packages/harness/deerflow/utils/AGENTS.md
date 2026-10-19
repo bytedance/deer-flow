@@ -6,6 +6,16 @@ capture/fetch publication. It writes and fsyncs a hidden exclusive sibling befor
 umask; replacements preserve existing permission bits before publication. Never
 read the process umask by changing it in this threaded runtime. Behavioral tests
 for both tool imports live in `tests/test_browser_outputs_atomic.py`.
+`cleanup_failed_atomic_write` shares failure cleanup between this publisher and
+`skills/projection.py`'s private manifest writer. Call it while handling the
+original `BaseException`; pass a raw descriptor only until `fdopen` succeeds.
+Callers retain their own serialization, permissions and publication policy.
+Failure cleanup must preserve the original publication exception, including
+interruptions. Descriptor close and sibling unlink are separate best-effort
+operations: a close failure must not prevent the unlink attempt.
+Attempt warning logs for cleanup `OSError`s with the temporary path and exception
+details. Guard logging-handler exceptions so diagnostics neither replace the
+publication exception (including interruptions) nor skip remaining cleanup.
 Both tools take collision names from `output_names.output_name_candidates`
 (name, `-1`..`-1000`, five timestamps); claim each atomically, never pre-check.
 

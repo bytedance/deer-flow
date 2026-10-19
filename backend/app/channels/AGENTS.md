@@ -1,9 +1,9 @@
 ### IM Channels System (`app/channels/`)
 
-IM channels reach DeerFlow through `langgraph-sdk` HTTP; Gateway owns thread lifecycle.
-
-WeChat `_read_outbound_bytes`: cap+1 off-loop; overflow returns `None` before encryption/upload; nonpositive caps are unlimited.
-Cursor writes drain before cancellation; token expiry drains cursor/auth clearing under `_auth_lock`.
+IM channels use `langgraph-sdk` HTTP; Gateway owns thread lifecycle.
+WeChat outbound: off-loop cap+1; overflow `None` before encryption/upload; <=0 unlimited.
+Cancel drains cursor writes; expiry drains cursor/auth reset under `_auth_lock`.
+Inbound: ingest/drop drains off-loop cleanup of owned dirs, never metadata paths.
 
 Telegram retries share bootstrap/Bot cleanup. Dead loops warn once; clear
 matching futures under `_shutdown_resources_lock` (closure unconfirmed).

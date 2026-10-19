@@ -24,7 +24,7 @@ def _stub_app_config():
     reset_app_config()
 
 
-def _make_start_run_request(run_manager, *, thread_store=None, auth_source=None, state_user=None, headers=None):
+def _make_start_run_request(run_manager, *, thread_store=None, auth_source=None, state_user=None, headers=None, stream_bridge=None):
     from langgraph.checkpoint.memory import InMemorySaver
     from langgraph.store.memory import InMemoryStore
 
@@ -39,7 +39,7 @@ def _make_start_run_request(run_manager, *, thread_store=None, auth_source=None,
         state=state,
         app=SimpleNamespace(
             state=SimpleNamespace(
-                stream_bridge=SimpleNamespace(),
+                stream_bridge=stream_bridge or SimpleNamespace(),
                 run_manager=run_manager,
                 checkpointer=InMemorySaver(),
                 store=store,
@@ -2042,6 +2042,111 @@ async def test_start_run_checkpoint_validation_failure_does_not_admit_run(_stub_
 
     assert await run_manager.list_by_thread(thread_id, user_id=None) == []
     assert await run_store.list_by_thread(thread_id, user_id=None) == []
+
+
+@pytest.mark.asyncio
+async def test_start_run_establishes_stream_producer_before_durable_admission(
+    _stub_app_config,
+):
+    from unittest.mock import patch
+
+    from app.gateway.services import start_run
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    run_store = MemoryRunStore()
+    run_manager = RunManager(store=run_store)
+    events = []
+    agent_started = asyncio.Event()
+    release = asyncio.Event()
+
+    class TrackingBridge:
+        supports_cross_process = True
+
+        async def start_producer_lease(self, run_id):
+            assert await run_store.get(run_id) is None
+            events.append(("start", run_id))
+            return True
+
+        def transfer_producer_lease(self, run_id, owner_task):
+            events.append(("transfer", run_id, owner_task))
+
+        async def finish_producer_lease(self, run_id):
+            events.append(("finish", run_id))
+
+    bridge = TrackingBridge()
+
+    async def fake_run_agent(_bridge, _manager, record, **_kwargs):
+        agent_started.set()
+        try:
+            await release.wait()
+        finally:
+            await _bridge.finish_producer_lease(record.run_id)
+
+    request = _make_start_run_request(
+        run_manager,
+        stream_bridge=bridge,
+    )
+    body = _run_create_request()
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+    ):
+        record = await start_run(body, "thread-stream-producer-order", request)
+        try:
+            await asyncio.wait_for(agent_started.wait(), timeout=1)
+            assert events[:2] == [
+                ("start", record.run_id),
+                ("transfer", record.run_id, record.task),
+            ]
+            assert (await run_store.get(record.run_id))["status"] == "pending"
+        finally:
+            release.set()
+            await asyncio.wait_for(record.task, timeout=1)
+    assert events[-1] == ("finish", record.run_id)
+
+
+@pytest.mark.asyncio
+async def test_start_run_releases_preallocated_producer_after_admission_conflict(
+    _stub_app_config,
+):
+    from unittest.mock import patch
+
+    from app.gateway.services import BusyThreadConflict, start_run
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    run_manager = RunManager(store=MemoryRunStore())
+    await run_manager.create_or_reject("thread-stream-producer-conflict")
+    events = []
+
+    class TrackingBridge:
+        supports_cross_process = True
+
+        async def start_producer_lease(self, run_id):
+            events.append(("start", run_id))
+            return True
+
+        async def abort_producer_lease(self, run_id):
+            events.append(("abort", run_id))
+
+    request = _make_start_run_request(
+        run_manager,
+        stream_bridge=TrackingBridge(),
+    )
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        pytest.raises(BusyThreadConflict),
+    ):
+        await start_run(
+            _run_create_request(),
+            "thread-stream-producer-conflict",
+            request,
+        )
+
+    assert len(events) == 2
+    assert events[0][0] == "start"
+    assert events[1] == ("abort", events[0][1])
 
 
 @pytest.mark.asyncio

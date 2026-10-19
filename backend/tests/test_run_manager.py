@@ -299,6 +299,20 @@ async def test_create_and_get(manager: RunManager):
 
 
 @pytest.mark.anyio
+async def test_create_or_reject_uses_preallocated_run_id():
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+
+    record = await manager.create_or_reject(
+        "thread-preallocated",
+        run_id="preallocated-run",
+    )
+
+    assert record.run_id == "preallocated-run"
+    assert (await store.get("preallocated-run"))["thread_id"] == "thread-preallocated"
+
+
+@pytest.mark.anyio
 async def test_status_transitions(manager: RunManager):
     """Status should transition pending -> running -> success."""
     record = await manager.create("thread-1")
@@ -1245,6 +1259,7 @@ async def test_create_or_reject_retries_replacement_when_cancel_status_cannot_pe
     assert stored_replacement is not None
     assert stored_replacement["status"] == RunStatus.interrupted.value
     assert replacement.status == RunStatus.interrupted
+    assert replacement.terminal_status_persisted is True
     assert not await manager.has_inflight("thread-1")
 
 
