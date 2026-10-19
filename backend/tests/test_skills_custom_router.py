@@ -832,18 +832,25 @@ def test_custom_skill_delete_rejects_invalid_name_before_mutation_tail(monkeypat
 
 
 @pytest.mark.parametrize(
+    "history_bytes",
+    [
+        pytest.param(b"{not json\n", id="malformed-json"),
+        pytest.param(b'{"action": "human_edit", "prev_content": "\xff"}\n', id="non-utf8"),
+    ],
+)
+@pytest.mark.parametrize(
     ("method", "path", "body", "detail"),
     [
         ("GET", "/api/skills/custom/demo-skill/history", None, "Failed to read history:"),
         ("POST", "/api/skills/custom/demo-skill/rollback", {"history_index": -1}, "Failed to roll back custom skill:"),
     ],
 )
-def test_custom_skill_corrupt_history_record_stays_server_error(monkeypatch, tmp_path, method, path, body, detail):
-    """Only the name maps to 400: a corrupt JSONL line (a ValueError too) is a server fault."""
+def test_custom_skill_corrupt_history_record_stays_server_error(monkeypatch, tmp_path, method, path, body, detail, history_bytes):
+    """Only the name maps to 400: a corrupt history file (JSONDecodeError and UnicodeDecodeError are ValueErrors too) is a server fault."""
     app = _make_demo_custom_skill_app(monkeypatch, tmp_path)
     history_file = _user_custom_dir(tmp_path, "default") / ".history" / "demo-skill.jsonl"
     history_file.parent.mkdir(parents=True, exist_ok=True)
-    history_file.write_text("{not json\n", encoding="utf-8")
+    history_file.write_bytes(history_bytes)
 
     with TestClient(app) as client:
         response = client.request(method, path, json=body)

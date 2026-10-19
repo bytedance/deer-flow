@@ -869,8 +869,9 @@ async def get_custom_skill_history(skill_name: str, request: Request, config: Ap
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
         # A malformed name is a client error (400, as delete and rollback
         # answer). Validate it here rather than with a handler-wide
-        # ``except ValueError``: a corrupt history line raises
-        # ``json.JSONDecodeError``, also a ValueError, and must stay a 500.
+        # ``except ValueError``: a corrupt history file raises
+        # ``json.JSONDecodeError`` or ``UnicodeDecodeError``, both ValueErrors,
+        # and must stay a 500.
         try:
             SkillStorage.validate_skill_name(skill_name)
         except ValueError as e:
@@ -984,9 +985,10 @@ async def rollback_custom_skill(skill_name: str, body: SkillRollbackRequest, req
         raise HTTPException(status_code=400, detail="history_index is out of range")
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    except json.JSONDecodeError as e:
-        # A corrupt history record is a server fault, not a bad request; it is
-        # a ValueError, so it must be caught before the 400 mapping below.
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        # A corrupt (malformed JSON or non-UTF-8) history file is a server
+        # fault, not a bad request; both are ValueErrors, so they must be
+        # caught before the 400 mapping below.
         logger.error("Failed to roll back custom skill %s: %s", skill_name, e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to roll back custom skill: {str(e)}")
     except ValueError as e:

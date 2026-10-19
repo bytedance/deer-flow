@@ -1268,11 +1268,11 @@ This release closes that milestone with **621 merged pull requests**.
 - **skills:** `GET /api/skills/custom/{skill_name}/history` now answers an
   invalid skill name (not hyphen-case, or longer than 64 characters) with `400`,
   as delete and rollback already do, instead of `500` with a logged traceback on
-  every request. Only the name check maps to `400`: a corrupt history record is
-  still a `500`, and `POST .../rollback`, which answered one with `400`, now
-  returns `500` too. Deleting a skill with an invalid name no longer logs a
-  mutation-tail error. ([#7123])
-  
+  every request. Only the name check maps to `400`: a corrupt history file
+  (malformed JSON or non-UTF-8) is still a `500`, and `POST .../rollback`, which
+  answered one with `400`, now returns `500` too. Deleting a skill with an
+  invalid name no longer logs a mutation-tail error. ([#7123])
+
 - **channels:** An IM message delivered twice no longer runs twice, and two
   Gateway instances no longer split a new conversation across two threads.
   Discord direct messages had no inbound dedupe key (no guild id), and a reply
@@ -1297,7 +1297,6 @@ This release closes that milestone with **621 merged pull requests**.
   `channel_conversations` / `channel_thread_bindings`: the instance that loses
   adopts the winner's thread and deletes its own empty one, and `/new` still
   rebinds. (issue #7103, [#7104])
-  
 - **skills:** A skill the agent creates, edits, patches or deletes with the
   `skill_manage` tool now reaches every Gateway process sharing the home
   volume, as a change made through the skills API already did. The tool
@@ -1309,14 +1308,12 @@ This release closes that milestone with **621 merged pull requests**.
   this or a peer process serving the stale list. When the marker cannot be
   written, the tool reports that the change was applied but other processes
   were not notified, instead of reading as a failed write. ([#7099])
-  
 - **provisioner:** When two provisioner replicas start together and
   `K8S_NAMESPACE` does not exist yet, the one that loses the create race no
   longer crashes at startup: its `409 AlreadyExists` now counts as the
   namespace existing, as the Pod and Service creates already did. Helm
   deployments, where the provisioner runs inside the namespace it manages,
   never took this path. ([#7099])
-  
 - **projects:** A shelf upload or save-from-thread into a project the caller
   cannot write no longer leaves a directory behind or answers `500`. Both
   routes staged the body under `users/{user_id}/projects/{project_id}/` before
@@ -1326,7 +1323,6 @@ This release closes that milestone with **621 merged pull requests**.
   now check for an owned, active project first and answer the same `404`
   without writing; the shelf insert still re-checks under the project row lock.
   ([#7040])
-  
 - **workflows:** A script workflow waiting on a long child Agent run no longer
   fails with `Worker turn limit` after about 209 seconds regardless of
   `timeout_seconds`. The supervisor re-sent an empty frame to the QuickJS worker
@@ -1336,7 +1332,6 @@ This release closes that milestone with **621 merged pull requests**.
   cancellation, faults and worker exits every 20 ms) without exchanging frames,
   so idle waits no longer consume turns and `timeout_seconds` is the only wall-clock bound;
   scripts that spin the job queue still hit the turn cap. (issue #7022)
-  
 - **browser:** `browser_screenshot` no longer replaces a file that already
   exists in the thread's outputs directory. A screenshot saved as
   `report.png` used to overwrite the user's own `report.png`, an earlier
