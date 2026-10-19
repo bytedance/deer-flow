@@ -739,6 +739,10 @@ with a dedupe key carries an `Idempotency-Key` derived from it, and the human
 message id is derived from the same key, so the Gateway returns the run it
 admitted for the first delivery instead of starting another one (on a
 `memory` database, only while that Gateway process still holds the run). The
+Gateway scopes these internal keys by owner rather than by thread, so a
+redelivery that arrives after `/new` rebound the conversation to a fresh thread
+gets a 409 for the admitted run, answered with the same note, instead of
+running again there. The
 redelivery then attaches to that run: a streaming channel replays its events,
 or, once they are gone, the manager reads this message's turn from the thread
 state; a `runs.wait` channel reads that turn as well, and a run that is still

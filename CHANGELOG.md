@@ -1281,8 +1281,11 @@ This release closes that milestone with **621 merged pull requests**.
   it admitted for the first delivery: the redelivery replays its stream, reads
   this message's turn from the thread state, or replies that the message is
   still being processed, and never runs the turn again, even when the first
-  run failed. When two instances create a thread for a conversation's first
-  message, the binding is now claimed insert-if-absent in
+  run failed or `/new` has since moved the conversation to a new thread: the
+  Gateway scopes `Idempotency-Key`s from trusted internal callers by owner
+  instead of owner and thread, and a key already used on another thread now
+  answers `409` instead of `500`. When two instances create a thread for a
+  conversation's first message, the binding is now claimed insert-if-absent in
   `channel_conversations` / `channel_thread_bindings`: the instance that loses
   adopts the winner's thread and deletes its own empty one, and `/new` still
   rebinds. (issue #7103, [#7104])

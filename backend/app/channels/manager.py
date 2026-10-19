@@ -120,7 +120,9 @@ CHANNEL_RUN_ON_DISCONNECT = "continue"
 # Run admission is idempotent on this key: a redelivery that outlived the
 # inbound dedupe window (or a restart, or a fail-open dedupe store) gets the
 # run the Gateway already admitted instead of a second one. The digest names
-# the inbound dedupe key; the Gateway scopes it further by owner and thread.
+# the inbound dedupe key. The Gateway scopes an internal caller's key by
+# owner only, so a redelivery requested on the thread ``/new`` bound later
+# still meets the admitted run (a 409) instead of starting another one.
 IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
 _RUN_IDEMPOTENCY_KEY_PREFIX = "channel-inbound:v1:"
 # The Gateway reuses a keyed run only for an identical input, so a keyed

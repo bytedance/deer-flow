@@ -418,6 +418,39 @@ async def test_followup_watcher_only_follows_a_live_run(status, watched):
     assert spawned == (["run-1"] if watched else [])
 
 
+async def test_redelivery_after_new_rebinds_the_conversation_meets_the_admitted_run(tmp_path):
+    """``/new`` points the conversation at a fresh thread, so a late redelivery
+    is requested there. It carries the same key, which the Gateway scopes by
+    owner only for this internal caller, and its 409 must not start a run or
+    read as a busy thread."""
+    engine = await _shared_sql_store(tmp_path)
+    try:
+        store = SqlChannelStore(async_sessionmaker(engine, expire_on_commit=False))
+        msg = _slack()
+        first = _manager(store=store)
+        first._client = first_client = _client("thread-old")
+        await first._handle_message(msg)
+        await first._create_thread(_client("thread-new"), _slack("evt-new-command"))  # /new
+
+        dedupe = MemoryInboundDedupeStore()  # the dedupe window expired
+        redelivery = _manager(dedupe=dedupe, store=store)
+        redelivery._client = client = _client("thread-unused")
+        request = httpx.Request("POST", "http://gateway/api/threads/thread-new/runs/wait")
+        detail = "Idempotency-Key already used with a different request"
+        client.runs.wait = AsyncMock(side_effect=ConflictError(detail, response=httpx.Response(409, request=request), body={"detail": detail}))
+        sent = _outbounds(redelivery)
+        assert await redelivery._is_duplicate_inbound(msg) is False
+
+        await redelivery._handle_message(msg)
+
+        assert client.runs.wait.call_args.args[0] == "thread-new"
+        assert _request_headers(client.runs.wait.call_args)["Idempotency-Key"] == _request_headers(first_client.runs.wait.call_args)["Idempotency-Key"]
+        assert [out.text for out in sent] == [ALREADY_ADMITTED_MESSAGE]
+        assert ChannelManager._inbound_dedupe_key(msg) in dedupe._store
+    finally:
+        await engine.dispose()
+
+
 # -- converging on one thread across replicas ----------------------------------
 
 
