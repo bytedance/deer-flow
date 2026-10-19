@@ -155,6 +155,7 @@ def _setup_executor_classes():
     original_tool_search = sys.modules.get("deerflow.tools.builtins.tool_search")
     original_sandbox_provider = sys.modules.get("deerflow.sandbox.sandbox_provider")
     original_sandbox_overwrite = sys.modules.get("deerflow.sandbox.overwrite")
+    original_sandbox_prewarm = sys.modules.get("deerflow.sandbox.prewarm")
 
     # Preload real executor dependencies before replacing their parent packages
     # with cycle-breaking test doubles. Keeping the concrete leaf modules in
@@ -164,6 +165,7 @@ def _setup_executor_classes():
     tool_search_module = importlib.import_module("deerflow.tools.builtins.tool_search")
     sandbox_provider_module = importlib.import_module("deerflow.sandbox.sandbox_provider")
     sandbox_overwrite_module = importlib.import_module("deerflow.sandbox.overwrite")
+    sandbox_prewarm_module = importlib.import_module("deerflow.sandbox.prewarm")
 
     # Remove mocked executor if exists (from conftest.py)
     if "deerflow.subagents.executor" in sys.modules:
@@ -182,6 +184,7 @@ def _setup_executor_classes():
     sys.modules["deerflow.tools.builtins.tool_search"] = tool_search_module
     sys.modules["deerflow.sandbox.sandbox_provider"] = sandbox_provider_module
     sys.modules["deerflow.sandbox.overwrite"] = sandbox_overwrite_module
+    sys.modules["deerflow.sandbox.prewarm"] = sandbox_prewarm_module
 
     # Import real classes inside fixture
     from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -246,6 +249,10 @@ def _setup_executor_classes():
         sys.modules["deerflow.sandbox.overwrite"] = original_sandbox_overwrite
     else:
         sys.modules.pop("deerflow.sandbox.overwrite", None)
+    if original_sandbox_prewarm is not None:
+        sys.modules["deerflow.sandbox.prewarm"] = original_sandbox_prewarm
+    else:
+        sys.modules.pop("deerflow.sandbox.prewarm", None)
 
 
 def _async_create_agent_double(agent):
@@ -6924,3 +6931,83 @@ async def test_subagent_model_failure_drains_unclaimed_prewarm(classes, base_con
         assert get_sandbox_lease_manager(provider).binding_for(captured[0]["sandbox_lease_owner_id"]) is None
     finally:
         discard_sandbox_lease_manager(provider)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("published_failure", [False, True])
+async def test_execute_async_cancellation_unwind_child_failure_leaves_terminal_result(classes, base_config, monkeypatch, published_failure):
+    from concurrent.futures import Future
+
+    executor_module = importlib.import_module("deerflow.subagents.executor")
+    executor = classes["SubagentExecutor"](config=base_config, tools=[], thread_id="thread-cancel-race")
+    started = asyncio.Event()
+    fail = asyncio.Event()
+    failed = asyncio.Event()
+    submitted = []
+    future = Future()
+
+    def submit(_context, factory):
+        submitted.append(asyncio.create_task(factory()))
+        return future
+
+    async def execute(_prompt, result):
+        result.status = classes["SubagentStatus"].RUNNING
+        started.set()
+        await fail.wait()
+        if published_failure:
+            result.try_set_terminal(classes["SubagentStatus"].FAILED, error="execution failed")
+        failed.set()
+        raise RuntimeError("execution unwind failed")
+
+    monkeypatch.setattr(executor_module, "_submit_to_isolated_loop_in_context", submit)
+    monkeypatch.setattr(executor, "_aexecute", execute)
+    execution_id = executor.execute_async("work")
+    wrapper = submitted[0]
+    try:
+        async with asyncio.timeout(1):
+            await started.wait()
+            fail.set()
+            # This waiter is queued before asyncio.wait's child-done callback,
+            # so cancel after the child fails but before the wrapper resumes.
+            await failed.wait()
+            wrapper.cancel()
+        result = await wrapper
+        expected = classes["SubagentStatus"].FAILED if published_failure else classes["SubagentStatus"].CANCELLED
+        assert result.status is expected
+        assert result.execution_done_event.is_set()
+        if published_failure:
+            assert result.error == "execution failed"
+        future.set_result(result)
+        executor_module.cleanup_background_task(execution_id)
+        assert executor_module.get_background_task_result(execution_id) is None
+    finally:
+        fail.set()
+        if not wrapper.done():
+            wrapper.cancel()
+        await asyncio.gather(wrapper, return_exceptions=True)
+        if not future.done():
+            future.set_result(None)
+        executor_module.force_cleanup_background_task(execution_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pinned", [False, True])
+async def test_deferred_cleanup_expiry_registers_removal_after_fence_opens(classes, monkeypatch, pinned):
+    executor_module = importlib.import_module("deerflow.subagents.executor")
+    tool_module = importlib.import_module("deerflow.tools.builtins.task_tool")
+    execution_id = "execution-expired-cleanup"
+    result = classes["SubagentResult"](task_id=execution_id, trace_id="trace", status=classes["SubagentStatus"].RUNNING)
+    result.try_set_terminal(classes["SubagentStatus"].TIMED_OUT, error="timeout")
+    monkeypatch.setitem(executor_module._background_tasks, execution_id, result)
+    monkeypatch.setattr(tool_module, "SubagentStatus", classes["SubagentStatus"])
+    monkeypatch.setattr(tool_module, "get_background_task_result", executor_module.get_background_task_result)
+    monkeypatch.setattr(tool_module, "cleanup_background_task", executor_module.cleanup_background_task)
+    try:
+        await tool_module._deferred_cleanup_subagent_task(None, execution_id, "trace", 0, terminal_result=result if pinned else None)
+        assert execution_id in executor_module._background_cleanup_requested
+        assert executor_module.get_background_task_result(execution_id) is result
+        assert not result.execution_done_event.is_set()
+        executor_module._mark_background_execution_done(execution_id, result)
+        assert executor_module.get_background_task_result(execution_id) is None
+    finally:
+        executor_module.force_cleanup_background_task(execution_id)

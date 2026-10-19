@@ -2252,7 +2252,9 @@ class SubagentExecutor:
                     execution_task.cancel()
                 try:
                     await execution_task
-                except asyncio.CancelledError:
+                except (asyncio.CancelledError, Exception):
+                    # The child can fail before cancellation reaches it. Keep
+                    # its terminal write, or publish cancellation below.
                     pass
                 result.try_set_terminal(
                     SubagentStatus.CANCELLED,

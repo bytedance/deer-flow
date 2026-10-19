@@ -432,6 +432,9 @@ async def _deferred_cleanup_subagent_task(
             execution_done = getattr(result, "execution_done_event", None)
             if isinstance(execution_done, threading.Event) and not execution_done.is_set():
                 if cleanup_poll_count >= max_polls:
+                    # Non-pinned callers have not requested registry removal
+                    # yet. The supervisor must reap it when the fence opens.
+                    cleanup_background_task(execution_id)
                     logger.warning(f"[trace={trace_id}] Deferred cleanup for terminal execution {execution_id} timed out after {cleanup_poll_count} polls")
                     return
                 await asyncio.sleep(_SUBAGENT_POLL_INTERVAL_SECONDS)
