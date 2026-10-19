@@ -141,6 +141,8 @@ fence so embedded backticks and later fenced notes stay lossless. Parser and
 storage regressions belong in `tests/test_memory_storage.py`; configure a data
 root directory, not the existing manifest file. Legacy v1 reads still migrate
 and advance the revision. Unparseable summary text is quarantined before rebuild.
+Summary and canonical fact reads strip a leading UTF-8 BOM; writes use UTF-8.
+Fact BOM regressions use public save/reload and preserve content and scope.
 
 `FileMemoryStorage` owns canonical storage and the retrieval adapter.
 Do not reach into its private adapter state from higher layers.
@@ -258,6 +260,7 @@ Extraction labels proposals with `scope`, `durability`, and `authority`.
 Automatic writes accept only user-scoped, durable, descriptive facts.
 Summary prose must be user-scoped and descriptive.
 Missing labels reject that item without stopping unrelated updates.
+An out-of-range `confidence` (including a model-emitted percentage) is rejected per item with a warning that names the raw value, and is never rescaled: a silent scale rewrite would change the confidence-threshold semantics. Storage's own `[0, 1]` validation must not fail the batch, because a failed batch keeps the extraction watermark and repeats the same paid call. A batch that also proposes `factsToRemove` still fails closed when any new fact is dropped, because removal `replacementFactIndex` values refer to newFacts positions.
 
 Contradiction removals include `id`, `scope`, `reason`, and optional `replacementFactIndex`.
 Task-scoped and project-scoped removals fail closed.
