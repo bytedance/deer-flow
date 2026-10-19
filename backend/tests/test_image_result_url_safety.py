@@ -7,6 +7,7 @@ from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 
@@ -130,6 +131,26 @@ def _stub_searxng(module, url):
     return [patch.object(module, "_get_searxng_client", return_value=client)], _async(module.web_search_tool)
 
 
+def _stub_brave(module, url):
+    data = {"web": {"results": [{"title": "t", "url": url, "description": "c"}]}}
+    return [patch.object(module, "_get_api_key", return_value="k"), patch.object(module, "_brave_get", return_value=(data, None))], _sync(module.web_search_tool)
+
+
+def _stub_serper(module, url):
+    data = {"organic": [{"title": "t", "link": url, "snippet": "c"}]}
+    return [patch.object(module, "_get_api_key", return_value="k"), patch.object(module, "_serper_post", return_value=(data, None))], _sync(module.web_search_tool)
+
+
+def _stub_webz(module, url):
+    data = {"results": [{"article": {"title": "t", "url": url, "summary": "c", "published_at": ""}}]}
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=data))
+    real_client = httpx.AsyncClient
+    return [
+        patch.object(module, "_options", return_value={"api_key": "k"}),
+        patch.object(module.httpx, "AsyncClient", lambda **kwargs: real_client(transport=transport, **kwargs)),
+    ], _async(module.web_search_tool)
+
+
 _TEXT_SEARCH_STUBS = {
     "tavily": _stub_tavily,
     "exa": _stub_exa,
@@ -142,6 +163,9 @@ _TEXT_SEARCH_STUBS = {
     "fastcrw": _stub_fastcrw,
     "firecrawl": _stub_firecrawl,
     "searxng": _stub_searxng,
+    "brave": _stub_brave,
+    "serper": _stub_serper,
+    "webz": _stub_webz,
 }
 
 
@@ -171,6 +195,8 @@ async def test_text_search_providers_screen_result_urls(provider, url, expected)
     rows = payload["results"] if isinstance(payload, dict) else payload
     assert [row["url"] for row in rows] == [expected]
     assert rows[0]["title"] == "t"
+    # The snippet key differs by provider ("content" or "snippet").
+    assert "c" in (rows[0].get("content"), rows[0].get("snippet"))
 
 
 @pytest.mark.parametrize(("url", "expected"), [(_METADATA_URL, ""), (_PUBLIC_URL, _PUBLIC_URL)])
