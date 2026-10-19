@@ -45,11 +45,12 @@ def resolve_variable[T](
     # ``:attr``, or no colon at all — is a typo, not a missing dependency, so
     # report format guidance rather than an import failure whose hint points at
     # the wrong layer (#7015).
+    format_guidance = f"{variable_path} doesn't look like a variable path. Example: parent_package_name.sub_package_name.module_name:variable_name"
     if variable_path.count(":") != 1:
-        raise ImportError(f"{variable_path} doesn't look like a variable path. Example: parent_package_name.sub_package_name.module_name:variable_name")
+        raise ImportError(format_guidance)
     module_path, variable_name = variable_path.split(":", 1)
-    if not module_path or not variable_name:
-        raise ImportError(f"{variable_path} doesn't look like a variable path. Example: parent_package_name.sub_package_name.module_name:variable_name")
+    if not module_path or not variable_name or any(character.isspace() for character in variable_path):
+        raise ImportError(format_guidance)
 
     try:
         module = import_module(module_path)

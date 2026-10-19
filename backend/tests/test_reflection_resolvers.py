@@ -77,3 +77,15 @@ def test_resolve_variable_empty_module_reports_format_guidance():
 
     message = str(exc_info.value)
     assert "doesn't look like a variable path" in message
+
+
+@pytest.mark.parametrize("variable_path", ["json :loads", "json:loads "])
+def test_resolve_variable_whitespace_reports_format_guidance(variable_path: str):
+    """Whitespace around path parts is a format error, not a missing dependency."""
+    with pytest.raises(ImportError) as exc_info:
+        resolve_variable(variable_path)
+
+    message = str(exc_info.value)
+    assert "doesn't look like a variable path" in message
+    assert "Missing dependency" not in message
+    assert "uv add" not in message
