@@ -863,6 +863,14 @@ async def get_custom_skill_history(skill_name: str, request: Request, config: Ap
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
+        # A malformed name is a client error (400, as delete and rollback
+        # answer). Validate it here rather than with a handler-wide
+        # ``except ValueError``: a corrupt history line raises
+        # ``json.JSONDecodeError``, also a ValueError, and must stay a 500.
+        try:
+            SkillStorage.validate_skill_name(skill_name)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
         def _read_history() -> list[dict] | None:
             # Worker thread: storage construction, the existence probes, and the
