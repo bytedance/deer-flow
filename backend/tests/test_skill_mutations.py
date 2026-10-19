@@ -2,6 +2,7 @@
 
 import asyncio
 import importlib.util
+import os
 from dataclasses import asdict, dataclass
 from types import SimpleNamespace
 
@@ -23,6 +24,17 @@ from deerflow.skills.mutations.guard import SkillMutationRuntime, configure_muta
 from deerflow.skills.mutations.repository import SkillMutationRepository
 from deerflow.skills.mutations.scanner import ScanVerdict
 from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
+
+# The host skill-mutation service is POSIX-only by construction:
+# HostSkillMutationService._authorize rejects every non-POSIX host with
+# UNSUPPORTED_TOPOLOGY, and capture_package relies on O_NOFOLLOW, dir_fd
+# stat/open and O_DIRECTORY. Running this suite on Windows exercises the
+# refusal path only, so skip it explicitly (the repo's Windows convention)
+# instead of reporting dozens of failures on a supported dev host.
+pytestmark = pytest.mark.skipif(
+    os.name != "posix",
+    reason="host skill-mutation service is POSIX-only (UNSUPPORTED_TOPOLOGY elsewhere)",
+)
 
 CONTENT = "---\nname: example\ndescription: Before\n---\nA\n"
 NEW = CONTENT.replace("\nA\n", "\nB\n")

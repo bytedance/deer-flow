@@ -1,11 +1,19 @@
 """Reproducible local capture measurements; not a model/provider benchmark."""
 
+import os
 import statistics
 import time
 
 import pytest
 
 from deerflow.skills.mutations.assets import capture_package
+
+# capture_package is POSIX-only (O_NOFOLLOW/dir_fd), so its cost measurements
+# can only run there; skip on Windows instead of failing on UNSUPPORTED_ASSET.
+pytestmark = pytest.mark.skipif(
+    os.name != "posix",
+    reason="capture_package is POSIX-only (O_NOFOLLOW/dir_fd)",
+)
 
 
 @pytest.mark.parametrize("files,size", [(4, 1024), (256, 65535)])

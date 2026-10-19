@@ -84,6 +84,7 @@ else:
     return json.loads(result.stdout.splitlines()[-1])
 
 
+@pytest.mark.skipif(os.name != "posix", reason="skill-mutation enrollment drives the POSIX-only capture_package")
 @pytest.mark.parametrize(
     "action",
     [
@@ -105,6 +106,7 @@ def test_fresh_sdk_refuses_enrolled_owner_without_gateway_runtime(sdk_home, acti
     assert after.mutation_seq == before.mutation_seq
 
 
+@pytest.mark.skipif(os.name != "posix", reason="skill-mutation enrollment drives the POSIX-only capture_package")
 def test_fresh_sdk_global_toggle_cannot_bypass_another_enrolled_owner(sdk_home):
     _, _, root, repository = sdk_home
     repository.observe("owner", "example", capture_package(root).digest, True, exists=True)
@@ -140,6 +142,7 @@ storage.set_skill_enabled_state("example", False)
     assert not (sdk_home[2].parent.parent / "_skill_states.json").exists()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="skill-mutation enrollment drives the POSIX-only capture_package")
 def test_sdk_does_not_create_a_missing_application_database(sdk_home):
     action = """
 from pathlib import Path
