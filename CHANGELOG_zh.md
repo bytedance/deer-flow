@@ -1015,6 +1015,12 @@
 
 ### 修复
 
+- **项目：** 向调用者无权写入的项目上传书架文档或从对话保存文件时，不再遗留目录，
+  也不再返回 `500`。这两个路由此前先把请求体暂存到
+  `users/{user_id}/projects/{project_id}/` 下才检查项目，因此不存在、属于他人或已归档
+  的 id 会留下一个回收站对账永远不会清理的空 `{project_id}/documents/` 目录，而超过单个
+  路径分量长度的 id 会因 `ENAMETOOLONG` 失败。现在会先确认项目归调用者所有且处于活跃
+  状态，不写任何内容即返回同样的 `404`；书架插入仍会在项目行锁下再次检查。 ([#7040])
 - **skills：** 在尚无 `extensions_config.json` 时切换技能开关，现在会在项目根目录
   （`DEER_FLOW_PROJECT_ROOT`，未设置时为工作目录）创建该文件，这与 MCP 编辑器已有的
   创建位置一致，也是配置解析最先查找的位置。此前技能开关使用工作目录的父目录：当
@@ -9430,4 +9436,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6930]: https://github.com/bytedance/deer-flow/pull/6930
 [#6988]: https://github.com/bytedance/deer-flow/pull/6988
 [#6991]: https://github.com/bytedance/deer-flow/pull/6991
+[#7040]: https://github.com/bytedance/deer-flow/pull/7040
 [#7048]: https://github.com/bytedance/deer-flow/pull/7048

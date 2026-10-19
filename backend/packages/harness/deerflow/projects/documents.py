@@ -156,7 +156,8 @@ async def stage_document_bytes(paths: Paths, *, user_id: str, project_id: str, c
     the shelf deliberately reuses it instead of growing a second knob with
     the same meaning (§6.4). Overflow raises :class:`ShelfUploadTooLargeError`
     (the route maps it to 413, mirroring the uploads router) and leaves no
-    staging file behind.
+    staging file behind. Staging creates the project's directory tree, so
+    callers reject a missing, foreign, or archived project first.
     """
     staging_path = _new_staging_path(paths, user_id=user_id, project_id=project_id)
     handle = await run_file_io(_open_staging, staging_path.parent, staging_path)
