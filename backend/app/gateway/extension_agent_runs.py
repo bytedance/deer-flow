@@ -25,6 +25,12 @@ from deerflow.utils.thread_id import ThreadId
 _THREAD_ID = TypeAdapter(ThreadId)
 
 
+def _configuration_json_default(value):
+    if isinstance(value, (set, frozenset)):
+        return sorted(value, key=lambda item: json.dumps(item, sort_keys=True, default=_configuration_json_default))
+    return str(value)
+
+
 def _json_object(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
     if value is None:
         return None
@@ -170,9 +176,12 @@ class _BoundAgentRuns:
                     if config is None:
                         agents[name] = None
                         continue
-                    agents[name] = [config.model_dump(mode="json"), load_agent_soul(name, user_id=self._user_id)]
-                value = [get_app_config().model_dump(mode="json"), get_extensions_config().model_dump(mode="json"), names, agents]
-                raw = json.dumps(value, sort_keys=True, ensure_ascii=True, default=str).encode()
+                    agents[name] = [config.model_dump(mode="python"), load_agent_soul(name, user_id=self._user_id)]
+                value = [get_app_config().model_dump(mode="python"), get_extensions_config().model_dump(mode="python"), names, agents]
+                # JSON-mode Pydantic dumps turn sets into arbitrarily ordered lists.
+                # Keep set identity until encoding so independent hash seeds agree,
+                # while ordered model/tool lists still detect precedence changes.
+                raw = json.dumps(value, sort_keys=True, ensure_ascii=True, default=_configuration_json_default).encode()
                 key = self._host.revision_key
                 if durable:
                     from app.gateway.auth.config import get_auth_config

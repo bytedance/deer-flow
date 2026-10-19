@@ -70,3 +70,10 @@ under the persisted host signing secret for restart comparison. Default revision
 remain process-local. Rotation invalidates comparisons; no raw config or secret is
 returned. Recovery callers must bind a fresh authenticated session capability;
 never serialize handles or reconstruct authority from a stored user ID alone.
+
+Deployed acceptance: `backend/tests/test_workflow_gateway_acceptance.py` opts in
+with DEERFLOW_WORKFLOW_ACCEPTANCE=1 and disposable Docker PostgreSQL/Redis/nginx.
+The support/workflow_gateway.py entrypoint is test-only: deterministic model and
+barriers around real operations, never a deployed auth/admission bypass. Use real
+SIGKILL/SIGSTOP, login/CSRF, host runs and persisted assertions. Preserve uncertain
+reservations; there is no supported reconciliation attestation/release API yet.

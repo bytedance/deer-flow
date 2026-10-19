@@ -513,3 +513,30 @@ async def test_host_forwards_fence_to_atomic_admission(runtime, monkeypatch, tmp
     finally:
         await state.run_manager.shutdown()
         await _cleanup()
+
+
+@pytest.mark.asyncio
+async def test_configuration_revision_canonicalizes_sets_but_preserves_list_order(host, monkeypatch):
+    class OrderedSet(set):
+        def __init__(self, values):
+            super().__init__(values)
+            self.values = values
+
+        def __iter__(self):
+            return iter(self.values)
+
+    control, request, _ = host
+    data = {"tools": ["first", "second"], "exempt_tools": OrderedSet(["task", "present_files"])}
+
+    # Pydantic JSON mode loses the distinction between sets and ordered lists.
+    def dump(**kwargs):
+        return {**data, "exempt_tools": list(data["exempt_tools"])} if kwargs.get("mode") == "json" else data
+
+    monkeypatch.setattr("deerflow.config.app_config.get_app_config", lambda: SimpleNamespace(model_dump=dump))
+    monkeypatch.setattr("deerflow.config.extensions_config.get_extensions_config", lambda: SimpleNamespace(model_dump=lambda **kw: {}))
+    runs = control.bind(request)
+    before = await runs.configuration_revision(assistant_ids=["lead_agent"], durable=True)
+    data["exempt_tools"] = OrderedSet(["present_files", "task"])
+    assert before == await runs.configuration_revision(assistant_ids=["lead_agent"], durable=True)
+    data["tools"].reverse()
+    assert before != await runs.configuration_revision(assistant_ids=["lead_agent"], durable=True)

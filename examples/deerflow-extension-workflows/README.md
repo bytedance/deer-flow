@@ -456,3 +456,47 @@ instance: `test_workflow_cluster.py` exercises independent services and process
 kill, while `test_extension_execution_fence.py` checks a real PostgreSQL lock-wait
 race at host admission. Agent responses are synthetic; tests make no guarantee
 about undoing arbitrary business side effects.
+
+### Deployed acceptance and delivery boundary
+
+Run the opt-in HTTP/fault suite from the repository root with the backend dev
+and PostgreSQL dependencies and this example's `quickjs` dependency installed:
+
+```sh
+DEERFLOW_WORKFLOW_ACCEPTANCE=1 backend/.venv/bin/python -m pytest \
+  backend/tests/test_workflow_gateway_acceptance.py -v --tb=short
+```
+
+Docker must be running (OrbStack works); set `DEERFLOW_TEST_DOCKER` when the CLI
+is not on PATH. The suite creates disposable PostgreSQL 17, Redis 7 and nginx
+containers, two real Gateway processes and a shared temporary home. It uses
+normal login cookies/CSRF, actual host AgentRuns/RunManager/checkpoints and a
+round-robin proxy without affinity. Only the model answers and fault barriers
+are test fixtures. No paid model is called. Logs remain in pytest's temporary
+directory; teardown kills only the suite's processes and removes only its named
+containers/volumes. This is an opt-in deployment test, not part of offline CI.
+
+Coverage includes concurrent duplicate launch/approval, peer controls, shared
+workflow/child limits, revoked sessions, changed configuration, SIGKILL around
+admission/result/approval persistence, SIGSTOP/lease takeover/stale dispatch and
+artifact writes, and immutable-file approval/consumption after source mutation
+and owner death. The rolling test runs two distinct runtime source trees, with
+a changed worker IPC limit, verifies live old-owner draining and rejects
+incompatible takeover. It is a compatibility-guard test, not certification of
+all historical releases or Kubernetes/network-partition topologies.
+
+**Delivered authority boundary:** lease expiry exposes recovery but never grants
+permission to execute as a user. Recovery requires a fresh valid browser-session
+capability and current permission/config/runtime checks. Automatic unattended
+takeover requires a separately designed durable authorization/delegation contract.
+
+**Manual reconciliation boundary:** the current product retains stable child
+identities, uncertain status and occupied child capacity. Operators must compare
+the recorded conversation/run and external system effects before deciding what
+happened. There is currently **no supported reconciliation API/UI to attest an
+outcome, audit that decision, and release the reservation atomically**. Do not
+treat direct database edits, deleting a workflow, or retrying it under a new ID
+as that missing closure. This follow-up remains open. Cancellation requests do
+not roll back effects; if the host consumes a cancellation after the extension's
+bounded observation window, the workflow may retain `needs_reconciliation` even
+when the child subsequently becomes interrupted.

@@ -458,6 +458,9 @@ idempotency isolation; request-resolved handles use `for_plugin` explicitly.
 `configuration_revision` (API 0.2.7) rechecks grants and returns a process-local
 HMAC of declarative app/extensions and Agent config/SOUL, not effective assembly,
 memory, referenced files or provider state. Never expose raw secret configuration.
+Durable revisions use the shared host signing secret. Preserve Python set identity
+until canonical encoding: unordered config sets must hash identically across
+process hash seeds, while ordered model/tool lists must retain their order.
 `configuration_evidence` reads persisted, run-bound actual assembly versions; the
 worker captures descriptors even without observers and persists before execution.
 `read_artifact` authorizes bounded output bytes off-loop; extensions retain immutable
