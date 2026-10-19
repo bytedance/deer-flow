@@ -138,5 +138,6 @@ async def test_user_profile_endpoints_do_not_block_event_loop(tmp_path: Path, mo
         # test-side check (resolution offloaded; not exercised on the loop)
         user_md = await asyncio.to_thread(get_paths().user_md_file, get_effective_user_id())
         assert await asyncio.to_thread(user_md.read_text, encoding="utf-8") == "I prefer terse answers.\n"
+        assert await asyncio.to_thread(user_md.read_bytes) == b"I prefer terse answers.\n"
     finally:
         load_agents_api_config_from_dict({})

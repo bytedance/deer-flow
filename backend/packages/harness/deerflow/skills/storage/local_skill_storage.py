@@ -266,7 +266,7 @@ class LocalSkillStorage(SkillStorage):
         payload = {"ts": datetime.now(UTC).isoformat(), **record}
         history_path = self.get_skill_history_file(name)
         history_path.parent.mkdir(parents=True, exist_ok=True)
-        with history_path.open("a", encoding="utf-8") as f:
+        with history_path.open("a", encoding="utf-8", newline="") as f:
             f.write(json.dumps(payload, ensure_ascii=False))
             f.write("\n")
 

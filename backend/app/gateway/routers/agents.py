@@ -747,7 +747,7 @@ async def update_user_profile(body: UserProfileUpdateRequest, request: Request) 
     def _write_profile() -> Path:
         user_md_path = get_paths().user_md_file(user_id)
         user_md_path.parent.mkdir(parents=True, exist_ok=True)
-        user_md_path.write_text(body.content, encoding="utf-8")
+        user_md_path.write_text(body.content, encoding="utf-8", newline="")
         return user_md_path
 
     try:

@@ -101,10 +101,16 @@ def test_worker_boundary_is_always_enforced():
 
 
 def test_file_store_uses_one_atomic_file_per_definition(file_store, tmp_path):
-    file_store.create(_definition("planner"))
+    planner = ManagedSubagentDefinition(
+        name="planner",
+        description="Researches a bounded topic",
+        system_prompt="Line one\nLine two",
+    )
+    file_store.create(planner)
     file_store.create(_definition("writer"))
     root = tmp_path / "managed-subagents"
     assert sorted(path.name for path in root.iterdir()) == ["planner.json", "writer.json"]
+    assert (root / "planner.json").read_bytes() == (planner.model_dump_json(indent=2) + "\n").encode("utf-8")
     assert not list(root.glob("*.tmp"))
 
 
