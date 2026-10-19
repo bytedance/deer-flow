@@ -1185,6 +1185,8 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 5. The bot supports inbound text, image, and file messages. Inbound attachment downloads are limited to 20 MB per attachment.
 6. _(Optional)_ Interactive clarification cards: set `card_interaction_enabled: true` under `channels.feishu` to let the agent's option-based clarifications render as clickable button cards, preserving any background context before the question. Then, in the developer console, open **Callback Configuration** (回调配置 — a separate tab from **Event Subscriptions**), subscribe to `card.action.trigger` in **Long Connection** mode, and publish a new app version. A click resolves the clarification exactly like typing the choice; only the user who triggered the clarification can operate its card. Button answers are saved in the conversation history, and subsequent clarifications continue in the same thread.
 
+If the SDK repeatedly logs `CERTIFICATE_VERIFY_FAILED`, see [Feishu / Lark TLS troubleshooting](backend/docs/IM_CHANNEL_CONNECTIONS.md#feishu--lark-tls-troubleshooting) to check the Gateway's CA trust configuration.
+
 Scheduled-task result and lifecycle notices can also be pushed to a bound Feishu/Lark user, without a new inbound message. They use the same notification outbox and localized summaries as WeCom. The app must be able to send to that user; see [Feishu scheduled-task notifications](backend/docs/IM_CHANNEL_CONNECTIONS.md#feishu-scheduled-task-notifications).
 
 **WeChat Setup**
@@ -1492,6 +1494,8 @@ Python's standard-library HTTP client. Its fallback preserves spaces, Unicode, a
 reserved characters in search queries and label filters.
 File reads accept raw repository-relative paths and preserve spaces, Unicode,
 `#`, `?`, and literal percent signs with either HTTP client.
+Directory listings ask for the repository's own default branch, so a repository that
+uses neither `main` nor `master` reports its current tree instead of a stale branch.
 
 Users can explicitly activate an enabled skill for a single turn by starting the request with `/skill-name`, for example `/data-analysis analyze uploads/foo.csv`. DeerFlow loads that skill's `SKILL.md` as hidden current-turn context while leaving the base prompt limited to skill metadata. Slash activation respects disabled skills, custom-agent skill whitelists, and existing channel commands such as `/new` and `/help`.
 
@@ -2846,6 +2850,10 @@ by sibling deletions or runtime failures (such as unavailable sources or policy 
 become available in the next batch, when rejected additions can be retried.
 
 ### Long-Term Memory
+
+Settings > Memory keeps successful clear, import, and fact edits visible even
+when an older background read finishes afterward. Later reads still refresh
+the view normally; failed actions preserve the existing cached memory.
 
 DeerMem debounces pending updates independently per conversation, user, and agent.
 `memory.backend_config.debounce_seconds` sets the quiet period (default 30 seconds),
