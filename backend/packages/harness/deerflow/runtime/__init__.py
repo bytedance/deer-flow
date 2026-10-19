@@ -22,7 +22,19 @@ from .runs import (
     UnsupportedStrategyError,
     run_agent,
 )
-from .serialization import serialize, serialize_channel_values, serialize_channel_values_for_api, serialize_lc_object, serialize_messages_tuple, strip_data_url_image_blocks
+from .serialization import (
+    WAIT_STATUS_AWAITING_APPROVAL,
+    interrupts_by_task,
+    project_snapshot_for_wait,
+    serialize,
+    serialize_channel_values,
+    serialize_channel_values_for_api,
+    serialize_interrupts,
+    serialize_lc_object,
+    serialize_messages_tuple,
+    serialize_tasks_for_api,
+    strip_data_url_image_blocks,
+)
 from .store import get_store, make_store, reset_store, store_context
 
 # NOTE: ``RedisStreamBridge`` is intentionally not re-exported — ``redis`` is an
@@ -54,9 +66,14 @@ __all__ = [
     "UnsupportedStrategyError",
     "run_agent",
     # serialization
+    "WAIT_STATUS_AWAITING_APPROVAL",
+    "interrupts_by_task",
+    "project_snapshot_for_wait",
     "serialize",
     "serialize_channel_values",
     "serialize_channel_values_for_api",
+    "serialize_interrupts",
+    "serialize_tasks_for_api",
     "serialize_lc_object",
     "serialize_messages_tuple",
     "strip_data_url_image_blocks",
