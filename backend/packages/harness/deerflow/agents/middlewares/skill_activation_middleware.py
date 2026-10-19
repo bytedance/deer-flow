@@ -279,6 +279,13 @@ class SkillActivationMiddleware(AgentMiddleware):
 
     @staticmethod
     def _read_skill_content(skill_file: Path, skills_root: Path, *, storage: SkillStorage | None = None) -> str:
+        from deerflow.skills.mutations.guard import managed_read
+
+        with managed_read(storage):
+            return SkillActivationMiddleware._read_skill_content_unlocked(skill_file, skills_root, storage=storage)
+
+    @staticmethod
+    def _read_skill_content_unlocked(skill_file: Path, skills_root: Path, *, storage: SkillStorage | None = None) -> str:
         if skill_file.name != SKILL_MD_FILE:
             raise ValueError(f"Expected {SKILL_MD_FILE}, got {skill_file.name}")
         # Use the storage's path validation if available — UserScopedSkillStorage
@@ -297,7 +304,14 @@ class SkillActivationMiddleware(AgentMiddleware):
                 raise ValueError("Resolved skill file must stay within the configured skills root.") from exc
         if not resolved_file.is_file():
             raise FileNotFoundError(resolved_file)
-        return resolved_file.read_text(encoding="utf-8")
+        # ``utf-8-sig`` drops a leading UTF-8 BOM (Windows Notepad / PowerShell
+        # 5.1). The frontmatter path tolerates one already, but not by reading
+        # ``utf-8-sig``: ``_FRONTMATTER_RE`` matches an optional ``\ufeff`` before
+        # the opening fence and consumes it, so that tolerance covers the front
+        # matter only. This read returns the whole file, so plain ``utf-8`` would
+        # hand the model a body starting with U+FEFF and fingerprint that BOM in
+        # ``content_hash``.
+        return resolved_file.read_text(encoding="utf-8-sig")
 
     def _resolve_activation(self, text: str, *, activation_decisions: ActivationDecisions | None = None) -> _ActivationResolution | None:
         reference = parse_slash_skill_reference(text)

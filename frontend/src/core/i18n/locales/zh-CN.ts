@@ -76,6 +76,11 @@ export const zhCN: Translations = {
         description:
           "使用固定示例文档演示只读检索与结构化工具结果，不连接外部知识库。",
       },
+      weknora: {
+        title: "WeKnora 知识检索",
+        description:
+          "检索 WeKnora 知识库和所选文档，并展示来源引用。需要管理员安装并配置访问权限。",
+      },
       knowledge: {
         title: "知识范围选择示例",
         description: "用示例文档演示知识库和文件范围选择、检索及来源引用。",
@@ -1316,8 +1321,9 @@ export const zhCN: Translations = {
       "你可以在右上角的菜单里随时保存这个智能体，就算目前还只是初稿也可以。",
     saveCommandMessage:
       "请现在根据我们目前已经讨论的全部内容保存这个自定义智能体。这就是我明确的保存确认。如果仍有少量细节缺失，请根据上下文做出合理假设，生成一份简洁的英文初始 SOUL.md，并直接调用 setup_agent，不要再向我索要额外确认。",
+    agentSaveFailed: "DeerFlow 未能保存这个智能体。请查看工具错误后重试。",
     agentCreatedPendingRefresh:
-      "智能体已创建，但 DeerFlow 暂时还无法读取到它。请稍后刷新当前页面。",
+      "DeerFlow 未能确认智能体已保存，请重新尝试保存。",
     more: "更多操作",
     agentCreated: "智能体已创建！",
     startChatting: "开始对话",

@@ -20,9 +20,11 @@ from deerflow_extension_api.state import ExtensionData
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from deerflow_extension_api.assembly import AgentAssemblyObserver
     from deerflow_extension_api.compaction import ContextCompactionObserver
+    from deerflow_extension_api.completed_run_evidence import CompletedRunEvidenceReader
     from deerflow_extension_api.model_invocation import ModelInvoker
     from deerflow_extension_api.placement import AgentBuildContext, MiddlewarePlacement
     from deerflow_extension_api.run_evidence import RunEvidenceReader
+    from deerflow_extension_api.skill_mutations import SkillMutationService
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -169,6 +171,8 @@ class ExtensionRuntimeDeps:
     session_factory: Any | None = None
     run_evidence_reader: RunEvidenceReader | None = None
     model_invoker: ModelInvoker | None = None
+    completed_run_evidence: CompletedRunEvidenceReader | None = None
+    skill_mutations: SkillMutationService | None = None
 
 
 class ExtensionService(Protocol):
