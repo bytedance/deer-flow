@@ -289,6 +289,7 @@ class TestSafeExtract:
             pytest.param(b"\n", b"\x7fELF", id="newline-elf"),
             pytest.param(b" ", b"MZ", id="space-pe"),
             pytest.param(b"\x00\x00\x00\n", b"\x7fELF", id="nul-run-elf"),
+            pytest.param(b"\xef\xbb\xbf", b"\x7fELF", id="utf8-bom-elf"),
         ],
     )
     def test_rejects_whitespace_prefixed_executable_binary(self, tmp_path, filler, magic):

@@ -456,8 +456,8 @@ def test_archive_preflight_reports_package_findings(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "magic",
-    [b"\xce\xfa\xed\xfe", b"\xbe\xba\xfe\xca", b"\xca\xfe\xba\xbf"],
-    ids=["mach-o-32-le", "mach-o-fat-le", "mach-o-fat64-be"],
+    [b"\xce\xfa\xed\xfe", b"\xbe\xba\xfe\xca", b"\xca\xfe\xba\xbf", b"\xbf\xba\xfe\xca"],
+    ids=["mach-o-32-le", "mach-o-fat-le", "mach-o-fat64-be", "mach-o-fat64-le"],
 )
 def test_executable_magic_matches_the_installer_extraction_guard(tmp_path: Path, magic: bytes) -> None:
     skill_dir = tmp_path / "demo-skill"
@@ -477,12 +477,13 @@ def test_executable_magic_matches_the_installer_extraction_guard(tmp_path: Path,
         pytest.param(b"   ", b"\x7fELF", "ELF", id="spaces-elf"),
         pytest.param(b" ", b"MZ", "PE", id="space-pe"),
         pytest.param(b"\r\n", b"\xca\xfe\xba\xbe", "Mach-O", id="crlf-macho-fat"),
+        pytest.param(b"\xef\xbb\xbf", b"\x7fELF", "ELF", id="utf8-bom-elf"),
+        pytest.param(b"\xef\xbb\xbf", b"\xbf\xba\xfe\xca", "Mach-O", id="utf8-bom-macho-fat64-le"),
+        pytest.param(b"\n", b"\xbf\xba\xfe\xca", "Mach-O", id="newline-macho-fat64-le"),
     ],
 )
 def test_whitespace_prefixed_executable_magic_is_critical(tmp_path: Path, filler: bytes, magic: bytes, evidence: str) -> None:
-    """A binary does not need its magic at byte 0 to stay loadable (ld.so and
-    the PE loader route through headers), so padding it with whitespace must
-    not demote the finding or let the archive through."""
+    """Filler before a full executable magic must not evade the offset-0 probe."""
     skill_dir = tmp_path / "demo-skill"
     _write_skill(skill_dir)
     tool = skill_dir / "assets" / "tool"
@@ -520,15 +521,19 @@ def test_archive_preflight_flags_whitespace_prefixed_executable(tmp_path: Path) 
 
 
 def test_heavy_whitespace_beyond_the_cap_is_not_an_executable(tmp_path: Path) -> None:
-    """Indented prose must not become a false positive: only a bounded run of
-    leading whitespace is treated as filler."""
+    """Indented prose must not become a false positive: a run of exactly the
+    64-byte limit is outside the filler run the sniff tolerates."""
     skill_dir = tmp_path / "demo-skill"
     _write_skill(skill_dir)
     notes = skill_dir / "assets" / "notes"
     notes.parent.mkdir(parents=True, exist_ok=True)
     notes.write_bytes(b" " * 64 + b"MZ, the magic number\n")
+    boundary = skill_dir / "assets" / "boundary"
+    boundary.write_bytes(b" " * 63 + b"MZ, the magic number\n")
 
-    assert not [finding for finding in scan_skill_dir(skill_dir)["findings"] if finding["rule_id"] == "package-executable-binary"]
+    findings = scan_skill_dir(skill_dir)["findings"]
+    assert not [finding for finding in findings if finding["rule_id"] == "package-executable-binary" and finding["file"] == "assets/notes"]
+    assert _finding_by_rule([finding for finding in findings if finding["file"] == "assets/boundary"], "package-executable-binary")["severity"] == "CRITICAL"
 
 
 def test_truncated_mach_o_magic_is_not_an_executable(tmp_path: Path) -> None:
