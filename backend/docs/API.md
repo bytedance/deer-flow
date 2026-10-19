@@ -266,7 +266,10 @@ resume value, assistant and conversation references. Resume values must be stric
 JSON with finite numbers, with or without an idempotency key; booleans, integers
 and floats remain distinct when comparing keyed retries. Generate a new key for every intentional user
 action; reuse a key only when retrying that same action after an uncertain HTTP
-result. Keys may be at most 255 characters. Stateless `/api/langgraph/runs/*`
+result. Keys may be at most 255 characters. Trusted internal callers (the IM
+channel manager) get keys scoped by user only: the same key sent for another
+thread returns 409 instead of starting a run, because a redelivered IM message
+may be requested on a new thread after `/new`. Stateless `/api/langgraph/runs/*`
 endpoints do not support this header because requests without an explicit thread
 create a new temporary conversation.
 

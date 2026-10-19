@@ -69,6 +69,7 @@ from deerflow.runtime import (
     ConflictError,
     DisconnectMode,
     RunContext,
+    RunIdempotencyKeyMismatch,
     RunIdempotencyUnsupported,
     RunManager,
     RunRecord,
@@ -2533,6 +2534,11 @@ async def start_run(
                     )
                 except RunIdempotencyUnsupported as exc:
                     raise HTTPException(status_code=503, detail=str(exc)) from exc
+                except RunIdempotencyKeyMismatch as exc:
+                    # A trusted internal key is scoped by owner, not thread: the
+                    # same message requested on another thread (IM ``/new``) is
+                    # a different request for the run already admitted.
+                    raise HTTPException(status_code=409, detail="Idempotency-Key already used with a different request") from exc
 
                 if record.idempotency_reused:
                     stored = record.kwargs or {}

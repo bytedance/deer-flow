@@ -826,6 +826,7 @@ Every IM channel except GitHub connects outbound to its platform (Telegram long 
 - The block is validated on every topology: an unknown key, a non-mapping value, `enabled` outside `auto | true | false`, `lease_seconds < 3` or `grace_seconds < 0` stop startup with the dotted path in the message.
 - Restart-required (`channels.leader_lease` in the reload-boundary registry): the gate evaluates it once and `ChannelService` captures it at construction. Change it on every instance and restart them together.
 - Known limits: a leader change loses the IM replies in flight on the old holder. The runs themselves continue on the Gateway executing them (channel runs are created with `on_disconnect: continue`) and their thread state is persisted, so the answer stays readable in the web UI, but the transport-local state that would deliver it (a Telegram placeholder message, a Feishu running card, a DingTalk replier) is gone with the old holder; a run executing on the instance that died is recovered as an error like any run of a dead worker.
+- A provider redelivery that reaches an instance after the 10-minute inbound dedupe window, or while the shared dedupe store is unavailable, does not run the turn again: IM run requests carry an `Idempotency-Key` derived from the message, so the Gateway returns the run it already admitted. First messages racing on two instances converge on one thread. See [Duplicate and late deliveries](IM_CHANNEL_CONNECTIONS.md#duplicate-and-late-deliveries).
 
 ### Credentials encryption key (`DEER_FLOW_CREDENTIALS_KEY`)
 
