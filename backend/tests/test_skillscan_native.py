@@ -483,7 +483,8 @@ def test_executable_magic_matches_the_installer_extraction_guard(tmp_path: Path,
     ],
 )
 def test_whitespace_prefixed_executable_magic_is_critical(tmp_path: Path, filler: bytes, magic: bytes, evidence: str) -> None:
-    """Filler before a full executable magic must not evade the offset-0 probe."""
+    """A bounded filler run before a full executable magic must still yield a
+    CRITICAL finding that blocks the package."""
     skill_dir = tmp_path / "demo-skill"
     _write_skill(skill_dir)
     tool = skill_dir / "assets" / "tool"
