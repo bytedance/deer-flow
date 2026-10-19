@@ -113,7 +113,7 @@ Community tools connect the agent to external services. They are configured in `
 
 ### Web search
 
-<Tabs items={["DuckDuckGo (default)", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "You.com"]}>
+<Tabs items={["DuckDuckGo (default)", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "You.com", "Keenable"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -218,6 +218,22 @@ single meta description. Without a key it uses the keyless endpoint (free tier, 
 limits. `max_results` is capped at 100.
 
 Optional API key from [You.com](https://you.com/platform).
+
+No extra dependency required.
+
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.keenable.tools:web_search_tool
+    # api_key: $KEENABLE_API_KEY # optional; omit to use the keyless endpoint
+```
+Results from Keenable's own index, each carrying an extracted snippet of the page text
+(capped at 1500 characters) rather than a single meta description. Without a key it uses
+the keyless endpoint (rate limited per IP, currently 10 requests/second and 1000/hour);
+set `KEENABLE_API_KEY` for higher limits. `max_results` is capped at 50.
+
+Optional API key from [Keenable](https://keenable.ai).
 
 No extra dependency required.
 
