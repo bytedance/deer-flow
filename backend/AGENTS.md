@@ -74,6 +74,10 @@ vars; `summarize` and pytest are offline. See its README for the protocol.
 Benchmarks in `scripts/benchmark/` must be standalone and reproducible. Import
 production functions; never duplicate them or introduce an alternative runtime.
 
+OpenSandbox benchmarks reuse the production lifecycle with scoped config overrides.
+Export only non-secret dimensions; final cleanup failures must fail both the runner
+and JSONL summary. See the sandbox benchmark README for supported options and tests.
+
 - Pin every external dataset by immutable revision and SHA-256. Callers provide
   the local dataset path; evaluation commands must not silently download data.
 - Never commit upstream dataset text, credentials, complete provider requests,
@@ -126,21 +130,10 @@ uv run pytest tests/test_bench_concurrency.py tests/test_bench_worker.py -q
 
 ## Commands
 
-**Root directory** (for full application):
-```bash
-make check      # Check system requirements
-make install    # Install all dependencies (frontend + backend)
-make extension-install SOURCE=...  # Install and enable a trusted Python extension
-make extension-upgrade SOURCE=...  # Replace an installed extension and keep its config
-make extension-list                # List configured Python extensions
-make extension-enable NAME=...     # Enable an installed extension
-make extension-disable NAME=...    # Disable an extension without uninstalling it
-make extension-remove NAME=...     # Remove a managed extension
-make detect-thread-boundaries  # Inventory backend executor/thread/event-loop boundaries
-make dev        # Start all services (Gateway + Frontend + Nginx), with config.yaml preflight
-make start      # Start production services locally
-make stop       # Stop all services
-```
+Root orchestration and extension commands live in the
+[root guide](../AGENTS.md#commands-root-vs-module); run them from the repo root.
+`make detect-thread-boundaries` inventories backend executor, thread and event-loop
+boundaries.
 
 **Backend directory** (for backend development only):
 ```bash

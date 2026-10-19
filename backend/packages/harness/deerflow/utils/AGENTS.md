@@ -6,6 +6,8 @@ capture/fetch publication. It writes and fsyncs a hidden exclusive sibling befor
 umask; replacements preserve existing permission bits before publication. Never
 read the process umask by changing it in this threaded runtime. Behavioral tests
 for both tool imports live in `tests/test_browser_outputs_atomic.py`.
+Both tools take collision names from `output_names.output_name_candidates`
+(name, `-1`..`-1000`, five timestamps); claim each atomically, never pre-check.
 
 ### Model Retry Hints
 

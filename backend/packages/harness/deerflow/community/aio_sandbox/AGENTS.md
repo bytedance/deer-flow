@@ -42,6 +42,8 @@ Local absence matching compares Docker's fixed error scaffolding
 case-insensitively — CLI v29 lowercases `Error: No such object:` to
 `error: no such object:` — while the resource name stays byte-exact and the
 whole message must match; Apple Container forms remain exact-match.
+Missing-network errors may end with Docker CLI v29's exact `exit status 1` line;
+other trailing diagnostics still fail closed.
 Remote proofs use `/api/sandboxes/{id}/presence`, which inspects the Pod directly;
 the ordinary status GET can return 404 merely because its Service is missing.
 This covers runtimes without a recoverable generation, including Apple Container.
@@ -73,6 +75,12 @@ under those same fences after confirmed absence, including a timed-out stop that
 actually removed the container.
 It also clears deterministic local proxy/network leftovers before recreation;
 unknown cleanup errors retain the quarantine record.
+Explicit stop failures use that same generation-bound quarantine before dropping
+tracking. Failed record writes retain metadata and fence cached lookups in memory.
+Warm-to-active promotion clears an obsolete in-memory fence under the metadata
+lock, only for the entry that passed reuse checks; a changed entry must retry.
+Partial shutdown raises and remains retryable; successful resources are not retried,
+and cleanup infrastructure closes only after every owned teardown completes.
 
 Broker capability failures are unknown, never confirmed negatives. Cache only
 successful observations per provisioner endpoint/auth identity; a failed refresh

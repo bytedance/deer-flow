@@ -89,12 +89,15 @@ def main():
     launch(request["script"], json.dumps(request["args"]))
     while True:
         # Bound each JS turn and require a parent round trip between batches.
+        idle = False
         for _ in range(64):
             if not ctx.execute_pending_job():
+                idle = True
                 break
         messages = json.loads(take())
         outcome = result()
-        write({"messages": messages, "outcome": json.loads(outcome) if outcome else None})
+        # idle: the job queue drained, so only a response can make further progress.
+        write({"messages": messages, "outcome": json.loads(outcome) if outcome else None, "idle": idle})
         if outcome:
             return
         response = read()

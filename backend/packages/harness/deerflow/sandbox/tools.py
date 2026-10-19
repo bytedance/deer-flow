@@ -41,6 +41,7 @@ from deerflow.sandbox.lease import (
 )
 from deerflow.sandbox.overwrite import unwrap_sandbox
 from deerflow.sandbox.path_patterns import build_output_mask_pattern, normalize_mask_tail, replace_output_path_matches
+from deerflow.sandbox.prewarm import claim_sandbox_prewarm
 from deerflow.sandbox.read_file_contract import (
     READ_FILE_EMPTY,
     READ_FILE_INVALID_END_LINE,
@@ -698,6 +699,12 @@ def _sanitize_error(error: Exception, runtime: Runtime | None = None) -> str:
     msg = f"{type(error).__name__}: {error}"
     if runtime is not None and is_local_sandbox(runtime):
         thread_data = get_thread_data(runtime)
+        # OSError renders filenames with repr(), escaping Windows backslashes.
+        if isinstance(error, OSError):
+            for filename in (error.filename, error.filename2):
+                if filename is not None:
+                    masked = mask_local_paths_in_output(os.fsdecode(filename), thread_data)
+                    msg = msg.replace(repr(filename), repr(masked))
         msg = mask_local_paths_in_output(msg, thread_data)
     return msg
 
@@ -1013,6 +1020,7 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
 
     Allowed virtual-path families:
       - ``/mnt/user-data/*``  — always allowed (read + write)
+      - ``/mnt/user-data``    — the bare root, allowed only when *read_only* is True
       - ``/mnt/skills/*``     — allowed only when *read_only* is True
       - ``/mnt/acp-workspace/*`` — allowed only when *read_only* is True
       - Custom mount paths (from config.yaml) — respects per-mount ``read_only`` flag
@@ -1047,8 +1055,10 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
             raise PermissionError(f"Write access to ACP workspace is not allowed: {path}")
         return
 
-    # User-data paths
-    if path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
+    # User-data paths. The bare root passes for reads because the local
+    # provider maps it for parity with AIO; the resolver still rejects it,
+    # and only ls lists it, one allowed directory at a time.
+    if path.startswith(f"{VIRTUAL_PATH_PREFIX}/") or (read_only and path == VIRTUAL_PATH_PREFIX):
         return
 
     # Custom mount paths — respect read_only config
@@ -1098,6 +1108,29 @@ def _resolve_and_validate_user_data_path(path: str, thread_data: ThreadDataState
     resolved = Path(resolved_str).resolve()
     _validate_resolved_user_data_path(resolved, thread_data)
     return str(resolved)
+
+
+def _user_data_root_dirs(path: str, thread_data: ThreadDataState) -> dict[str, str] | None:
+    """Map virtual to host workspace/uploads/outputs when *path* is the user-data root.
+
+    The local provider maps the root so ``ls`` matches AIO, but its host
+    directory can hold more than the three allowed directories. Callers list
+    each of them instead of walking the root. Any other path returns None.
+    """
+    mappings = _thread_virtual_to_actual_mappings(thread_data)
+    user_data_root = mappings.pop(VIRTUAL_PATH_PREFIX, None)
+    if user_data_root is None or Path(replace_virtual_path(path, thread_data)).resolve() != Path(user_data_root).resolve():
+        return None
+    return mappings
+
+
+def _list_user_data_root(sandbox: Sandbox, user_data_dirs: dict[str, str]) -> list[str]:
+    """List each allowed directory and one level below it, matching ls depth 2."""
+    entries: list[str] = []
+    for virtual_dir, actual_dir in user_data_dirs.items():
+        entries.append(f"{virtual_dir}/")
+        entries.extend(sandbox.list_dir(actual_dir, max_depth=1))
+    return entries
 
 
 def _is_non_file_url_token(token: str) -> bool:
@@ -1541,7 +1574,12 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
         # ``:`` (PATH-style concatenation) or ``,``, which the shell-oriented
         # class rejects — narrowing to it would stop translating paths that
         # translate today. ``$`` covers a command ending exactly at the root.
-        pattern = re.compile(rf"{re.escape(VIRTUAL_PATH_PREFIX)}(?=/|$|[^\w./-])(/[^\s\"';&|<>()]*)?")
+        #
+        # The tail ends at ``:`` (like ``path_patterns._PATH_TAIL``): the
+        # boundary above admits PATH-style concatenation, but a tail that ran
+        # through the ``:`` swallowed every later entry of the list, leaving
+        # those virtual paths unresolved in the command.
+        pattern = re.compile(rf"{re.escape(VIRTUAL_PATH_PREFIX)}(?=/|$|[^\w./-])(/[^\s\"';&|<>():]*)?")
 
         def replace_user_data_match(match: re.Match) -> str:
             return replace_virtual_path(match.group(0), thread_data).replace("\\", "/")
@@ -1897,14 +1935,16 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
     provider = get_sandbox_provider()
     user_id = resolve_runtime_user_id(runtime)
     owner_id = sandbox_lease_owner(runtime.context)
-    if owner_id is None:
-        sandbox_id = await provider.acquire_async(thread_id, user_id=user_id)
-    else:
-        sandbox_id = await get_sandbox_lease_manager(provider).acquire_async(
-            owner_id,
-            thread_id,
-            user_id=user_id,
-        )
+    sandbox_id = await claim_sandbox_prewarm(runtime, provider=provider)
+    if sandbox_id is None:
+        if owner_id is None:
+            sandbox_id = await provider.acquire_async(thread_id, user_id=user_id)
+        else:
+            sandbox_id = await get_sandbox_lease_manager(provider).acquire_async(
+                owner_id,
+                thread_id,
+                user_id=user_id,
+            )
 
     runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
 
@@ -2572,6 +2612,7 @@ def ls_tool(runtime: Runtime, path: str, description: str = "") -> str:
         ensure_thread_directories_exist(runtime)
         requested_path = path
         thread_data = None
+        user_data_dirs = None
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
             validate_local_tool_path(path, thread_data, read_only=True)
@@ -2583,9 +2624,11 @@ def ls_tool(runtime: Runtime, path: str, description: str = "") -> str:
                 # from the sandbox mapping's user_id).
                 pass
             elif not _is_custom_mount_path(path):
-                path = _resolve_and_validate_user_data_path(path, thread_data)
+                user_data_dirs = _user_data_root_dirs(path, thread_data)
+                if user_data_dirs is None:
+                    path = _resolve_and_validate_user_data_path(path, thread_data)
             # Custom mount paths and skills/ACP paths are resolved by LocalSandbox._resolve_path()
-        children = sandbox.list_dir(path)
+        children = _list_user_data_root(sandbox, user_data_dirs) if user_data_dirs is not None else sandbox.list_dir(path)
         if not children:
             return "(empty)"
         output = "\n".join(children)
@@ -2775,8 +2818,9 @@ def grep_tool(
         return f"Error: Path is not a directory: {requested_path}"
     except re.error as e:
         return f"Error: Invalid regex pattern: {e}"
-    except PermissionError:
-        return f"Error: Permission denied: {requested_path}"
+    except PermissionError as e:
+        detail = _sanitize_error(e, runtime) if e.filename is not None else requested_path
+        return f"Error: Permission denied: {detail}"
     except Exception as e:
         return f"Error: Unexpected error searching file contents: {_sanitize_error(e, runtime)}"
 
