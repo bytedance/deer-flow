@@ -153,8 +153,8 @@ def load_run_results(benchmark_dir: Path) -> dict:
                 timing = grading.get("timing", {})
                 result["time_seconds"] = timing.get("total_duration_seconds", 0.0)
                 timing_file = run_dir / "timing.json"
-                if timing_file.exists():
-                    try:
+                try:
+                    if timing_file.exists():
                         with open(timing_file, encoding="utf-8") as tf:
                             timing_data = json.load(tf)
                         if not isinstance(timing_data, dict):
@@ -164,8 +164,8 @@ def load_run_results(benchmark_dir: Path) -> dict:
                         if result["time_seconds"] == 0.0:
                             result["time_seconds"] = duration if duration is not None else 0.0
                         result["tokens"] = _read_timing_number(timing_data, "total_tokens", timing_file)
-                    except json.JSONDecodeError as e:
-                        print(f"Warning: Invalid JSON in {timing_file}: {e}")
+                except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
+                    print(f"Warning: Unable to read timing data in {timing_file}: {e}")
 
                 # Extract metrics if available
                 metrics = grading.get("execution_metrics", {})

@@ -1,5 +1,6 @@
 """Regressions for skill-creator benchmark measurements."""
 
+import builtins
 import json
 import runpy
 import subprocess
@@ -254,11 +255,14 @@ def test_missing_or_null_timing_fields_use_fallbacks_without_warning(
 
 
 @pytest.mark.parametrize("layout", ["workspace", "legacy"])
+@pytest.mark.parametrize("has_grading_duration", [False, True])
 @pytest.mark.parametrize(
-    "timing_text,expected_tokens,expected_duration",
+    "timing_content,expected_tokens,expected_duration",
     [
         ("null", 12450, 0.0),
         ("{invalid", 12450, 0.0),
+        (b"\xff\xfe{invalid", 12450, 0.0),
+        (None, 12450, 0.0),
         ('{"total_tokens": "84852", "total_duration_seconds": 25.0}', 12450, 25.0),
         ('{"total_tokens": 0, "total_duration_seconds": {"n": 1}}', 0, 0.0),
         ('{"total_tokens": false, "total_duration_seconds": true}', 12450, 0.0),
@@ -266,17 +270,32 @@ def test_missing_or_null_timing_fields_use_fallbacks_without_warning(
     ids=[
         "non-object",
         "invalid-json",
+        "invalid-utf8",
+        "directory",
         "invalid-tokens",
         "invalid-duration",
         "both-invalid",
     ],
 )
 def test_cli_warns_and_writes_reports_for_invalid_timing(
-    tmp_path, benchmark_script, layout, timing_text, expected_tokens, expected_duration
+    tmp_path,
+    benchmark_script,
+    layout,
+    has_grading_duration,
+    timing_content,
+    expected_tokens,
+    expected_duration,
 ):
     root = tmp_path / "runs" if layout == "legacy" else tmp_path
-    run_dir = write_run(root)
-    (run_dir / "timing.json").write_text(timing_text, encoding="utf-8")
+    grading_timing = {"total_duration_seconds": 23.3} if has_grading_duration else None
+    run_dir = write_run(root, grading_timing=grading_timing)
+    timing_file = run_dir / "timing.json"
+    if timing_content is None:
+        timing_file.mkdir()
+    elif isinstance(timing_content, bytes):
+        timing_file.write_bytes(timing_content)
+    else:
+        timing_file.write_text(timing_content, encoding="utf-8")
     write_run(
         root,
         timing={"total_tokens": 0, "total_duration_seconds": 25.0},
@@ -298,12 +317,78 @@ def test_cli_warns_and_writes_reports_for_invalid_timing(
     results = {run["configuration"]: run["result"] for run in benchmark["runs"]}
     assert set(results) == {"with_skill", "without_skill"}
     assert results["with_skill"]["tokens"] == expected_tokens
-    assert results["with_skill"]["time_seconds"] == expected_duration
+    assert results["with_skill"]["time_seconds"] == (
+        23.3 if has_grading_duration else expected_duration
+    )
     assert results["without_skill"]["tokens"] == 0
     assert results["without_skill"]["time_seconds"] == 25.0
     assert (tmp_path / "benchmark.md").read_text(encoding="utf-8") == benchmark_script[
         "generate_markdown"
     ](benchmark)
+
+
+@pytest.mark.parametrize("layout", ["workspace", "legacy"])
+@pytest.mark.parametrize("has_grading_duration", [False, True])
+@pytest.mark.parametrize("operation", ["open", "exists"])
+def test_unreadable_timing_warns_and_keeps_fallback_and_other_runs(
+    tmp_path,
+    benchmark_script,
+    layout,
+    has_grading_duration,
+    operation,
+    monkeypatch,
+    capsys,
+):
+    root = tmp_path / "runs" if layout == "legacy" else tmp_path
+    grading_timing = {"total_duration_seconds": 23.3} if has_grading_duration else None
+    run_dir = write_run(
+        root,
+        grading_timing=grading_timing,
+        timing={"total_tokens": 84852, "total_duration_seconds": 25.0},
+    )
+    timing_file = run_dir / "timing.json"
+    write_run(
+        root,
+        timing={"total_tokens": 0, "total_duration_seconds": 25.0},
+        config="without_skill",
+    )
+    # Inject access failures without relying on OS permissions or the test user's UID.
+    if operation == "open":
+        original_open = builtins.open
+
+        def denied_open(file, *args, **kwargs):
+            if file == timing_file:
+                raise PermissionError("timing access denied")
+            return original_open(file, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", denied_open)
+    else:
+        original_exists = Path.exists
+
+        def denied_exists(path, *args, **kwargs):
+            if path == timing_file:
+                raise PermissionError("timing access denied")
+            return original_exists(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "exists", denied_exists)
+
+    benchmark = benchmark_script["generate_benchmark"](tmp_path)
+
+    results = {run["configuration"]: run["result"] for run in benchmark["runs"]}
+    assert set(results) == {"with_skill", "without_skill"}
+    assert results["with_skill"]["tokens"] == 12450
+    assert results["with_skill"]["time_seconds"] == (
+        23.3 if has_grading_duration else 0.0
+    )
+    assert results["without_skill"]["tokens"] == 0
+    assert results["without_skill"]["time_seconds"] == 25.0
+    assert benchmark["run_summary"]["delta"]["tokens"] == "+12450"
+    assert "| Tokens |" in benchmark_script["generate_markdown"](benchmark)
+    json.dumps(benchmark, allow_nan=False)
+    output = capsys.readouterr().out
+    assert "Warning:" in output
+    assert str(timing_file) in output
+    assert "timing access denied" in output
 
 
 def test_recorded_tokens_propagate_to_summary_delta_and_markdown(
