@@ -6022,6 +6022,26 @@ This release closes that milestone with **621 merged pull requests**.
   names the same file as the equivalent relative path, unless the command
   rebinds `PWD` itself. Variables inside URLs are unaffected. The guard
   remains best-effort and is not an isolation boundary. ([#6930])
+- **sandbox:** With host bash enabled, the local path guard accepts awk
+  field arithmetic again, such as `awk '{print $NF/2}' data.txt`,
+  `awk '{print $sum/$n}' data.txt` and `($2+$3)/2`. Since [#6930] every
+  `$NAME/` was treated as a variable-prefixed host path unless both sides were
+  digits, and a `/` after `)` had always read as an absolute path. A `$` or
+  `/` inside the single-quoted inline program of `awk`, `gawk`, `mawk` or
+  `nawk` (after options such as `-F` and `-v`, found the way the shell finds
+  the command word: after an assignment prefix, with a path reduced to its
+  basename, inside `$(...)`) is now exempt, because bash expands nothing there
+  and awk reads it as a field reference or division; for the absolute-path
+  scan only a single-segment match such as `/2` or `/NR` is exempt, so a
+  `/a/b` shape stays rejected even inside awk code. Text inside awk string
+  literals, options such as `-v`, input operands, double-quoted programs and
+  text re-read by `sh -c` or `eval` are still scanned. No exemption is granted
+  to a command that could redefine `awk` or re-read quoted text (`alias`,
+  `function`, `name()`, `eval`, `source`, `.`, `hash`, `PATH=`, a heredoc), nor
+  to syntax the scanner does not model (a backslash-newline, backticks,
+  `$'...'`, an unmatched `)`), nor to a program whose `"` may sit in an awk
+  regex literal; `/` and `#` inside an awk string literal are plain text.
+  (issue #7021)
 - **sandbox:** On the local sandbox, `ls` now accepts the `/mnt/user-data`
   root itself and lists `workspace`, `uploads` and `outputs` as it does on
   AIO. The provider maps that root on purpose, but the tool layer allowed
