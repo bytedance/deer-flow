@@ -511,6 +511,15 @@ take precedence, and `max_recursion_limit` (default `1000`) caps both. Changes
 apply to the next run without restarting the Gateway. This top-level setting
 applies to Gateway API runs; IM channel and embedded `DeerFlowClient` runs
 retain their own defaults and per-call override paths.
+
+A custom frontend can add an optional `context.client` to a Gateway run request:
+a client name, capabilities such as `artifacts` or `charts`, and display
+preferences. DeerFlow sanitizes it and passes the values to the agent as
+untrusted, request-scoped hints, so skills can pick an output shape the client
+can show. It is never an authorization or identity signal. See
+[Create Run](backend/docs/API.md#create-run).
+Client hints are omitted from stored run configuration and must be sent again
+for each run; later runs, including server-started tasks, do not inherit them.
 The checkpoint storage settings `database.checkpoint_channel_mode` and
 `database.checkpoint_delta.snapshot_frequency` (default `10`) are exceptions:
 both are frozen when the process first builds an agent (including through
@@ -1486,6 +1495,8 @@ File reads accept raw repository-relative paths and preserve spaces, Unicode,
 
 Users can explicitly activate an enabled skill for a single turn by starting the request with `/skill-name`, for example `/data-analysis analyze uploads/foo.csv`. DeerFlow loads that skill's `SKILL.md` as hidden current-turn context while leaving the base prompt limited to skill metadata. Slash activation respects disabled skills, custom-agent skill whitelists, and existing channel commands such as `/new` and `/help`.
 
+The **data-analysis** skill preserves each CSV file or Excel sheet when names collide across inputs. [Prepare its Python environment](skills/public/data-analysis/SKILL.md#environment-setup) explicitly with DuckDB and openpyxl; missing packages report setup instructions instead of installing themselves during analysis. Use the SQL names printed by `inspect` (such as `report`, `report_1`) for queries and summaries. Its cache follows ordered input basenames and contents, so renaming or reordering inputs rebuilds their table map instead of silently selecting a different source. Quoted original names also resolve without rewriting query text; apostrophes in upload paths and double quotes in column names are preserved through loading, inspection, queries, and summaries.
+
 After an answer loads skills, its toolbar includes **Skills used**. Hover over or click the icon to see the skills and their sources; hovering a skill name underlines it. Select a skill to inspect its `SKILL.md` in the resizable side panel (a drawer on mobile). The view uses snapshots captured during successful configured read-tool loads or explicit slash activation, so later edits or removal of a skill do not rewrite its history. Repeated loads appear once per run, in first-load order. Range reads and bounded snapshots are labeled as partial; older conversations without captured evidence do not show this menu. Copy returns the captured Markdown, including YAML frontmatter. Package-relative links and images remain readable references rather than navigating away from the conversation. Skill loads performed through other tools, such as shell commands, are not inferred from answer text.
 
 An enabled skill's `allowed-tools` policy applies only after that skill is explicitly slash-activated or captured in the agent's active skill context after a `read_file` load. Merely enabling, advertising, or listing a skill in a custom agent or subagent `skills` allowlist does not reduce that agent's normal toolset; subagents use the same progressive discovery and activation policy as the lead agent. During a slash-activated run, that explicit skill's policy is authoritative: reading another `SKILL.md` may provide instructions but cannot widen the slash skill's tools. Without slash activation, policies from skills actually loaded into active context retain their union semantics. Once active, the policy filters both model-visible tool schemas and tool execution. Framework discovery tools (`tool_search` and `describe_skill`) remain available so an allowed deferred tool or installed skill can still be discovered, but discovery and promotion never grant permission to execute a business tool omitted from `allowed-tools`. `task` is not framework-exempt; a restrictive skill must list it explicitly to delegate to a subagent. Per-step policy decisions are internal runtime context and are removed from observable or persisted context copies. Registry failures and an active set with no remaining valid skill fail closed to framework-safe tools; individual stale paths are ignored only when another valid active skill remains. This is best-effort behavioral scoping, not a hard security boundary: loading skill instructions through another tool is not captured, and active-skill entries can be evicted from bounded context.
@@ -2235,6 +2246,12 @@ chat header, and welcome page use this label; URLs and API calls continue to use
 the stable English `name`. API callers can pass `display_name` to agent creation
 or update requests; an omitted update preserves it and `null` clears it. The
 same optional field is supported in the agent's `config.yaml`.
+
+The new-Agent page confirms creation only after the latest `setup_agent` call
+succeeds and the persisted Agent can be read back. A tool failure or an
+unconfirmed write keeps the draft visible and restores **Save agent** so the
+operation can be retried instead of reporting a false success. Read-back results
+from a superseded Save attempt cannot change a newer attempt or its feedback.
 
 Saving an unrelated Agent setting preserves its existing thinking and reasoning
 defaults, including while the model catalog is loading, unavailable, or missing
