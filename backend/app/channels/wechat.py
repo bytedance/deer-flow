@@ -14,6 +14,7 @@ import secrets
 import tempfile
 import time
 from collections.abc import Mapping
+from contextlib import suppress
 from enum import IntEnum
 from pathlib import Path
 from typing import Any
@@ -1737,11 +1738,22 @@ class WechatChannel(Channel):
                     fd.close()
                     Path(fd.name).replace(self._auth_path)
                 except BaseException:
-                    fd.close()
-                    Path(fd.name).unlink(missing_ok=True)
+                    # Cleanup is best-effort: a failing close or unlink must not take
+                    # the original persist error with it, and the unlink is still
+                    # attempted after a failed close.
+                    try:
+                        fd.close()
+                    except OSError:
+                        with suppress(Exception):
+                            logger.warning("Failed to close temporary WeChat auth state file %s", fd.name, exc_info=True)
+                    try:
+                        Path(fd.name).unlink(missing_ok=True)
+                    except OSError:
+                        with suppress(Exception):
+                            logger.warning("Failed to remove temporary WeChat auth state file %s", fd.name, exc_info=True)
                     raise
             except OSError:
-                logger.warning("[WeChat] failed to persist auth state to %s", self._auth_path)
+                logger.warning("[WeChat] failed to persist auth state to %s", self._auth_path, exc_info=True)
             else:
                 # Hardening only; the destination already inherits 0o600 from the
                 # temp file. A chmod failure on filesystems without POSIX perms

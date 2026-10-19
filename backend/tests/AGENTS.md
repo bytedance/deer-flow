@@ -173,6 +173,17 @@ tree left behind. Do not replace these behavioral checks with assertions about
 source formatting or duplicate the runtime publication control in
 `test_lark_cli_atomic_publish.py`.
 
+## Channel staging cleanup
+
+`test_channel_staging_cleanup.py` blocks the rename destination (a non-empty
+directory, because an empty one would just swallow the staged file) and fails
+`Path.unlink`, the descriptor `close()`, and the log handler in turn. Assert the
+save error is what propagates, that the unlink is still attempted after a failed
+close, and that a staged copy the cleanup could not remove is named in a warning.
+Keep these as injected-failure behavior checks: an assertion that the handler
+source merely contains `suppress` would pass while the close error still skipped
+the unlink.
+
 ## Lark CLI blocking-I/O fixtures
 
 `blocking_io/test_integrations_router.py` uses a real local CLI stub: a `.cmd`

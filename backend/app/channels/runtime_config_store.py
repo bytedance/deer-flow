@@ -31,7 +31,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -176,8 +176,19 @@ class ChannelRuntimeConfigStore:
             except OSError:
                 logger.debug("Unable to chmod channel runtime config store at %s", self._path, exc_info=True)
         except BaseException:
-            fd.close()
-            Path(fd.name).unlink(missing_ok=True)
+            # Cleanup is best-effort: a failing close or unlink must not take the
+            # original save error with it, and the unlink is still attempted after
+            # a failed close.
+            try:
+                fd.close()
+            except OSError:
+                with suppress(Exception):
+                    logger.warning("Failed to close temporary channel runtime config file %s", fd.name, exc_info=True)
+            try:
+                Path(fd.name).unlink(missing_ok=True)
+            except OSError:
+                with suppress(Exception):
+                    logger.warning("Failed to remove temporary channel runtime config file %s", fd.name, exc_info=True)
             raise
 
     def load_all(self) -> dict[str, dict[str, Any]]:
