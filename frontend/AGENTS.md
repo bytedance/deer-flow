@@ -156,8 +156,9 @@ previewing the proposed local name; the Gateway is authoritative for schema,
 name, model, and conflict validation. Export downloads must never synthesize
 runtime state from browser caches.
 
-New-Agent saves require the latest `setup_agent` success and API read-back.
-Failures or exhausted retries restore Save; never reuse an older result.
+New-Agent saves need the latest `setup_agent` success and API read-back.
+Failed/exhausted saves restore Save. Fence superseded or unmounted callbacks.
+DOM regression: `new-agent-save.dom.test.tsx`.
 
 - **Imports**: Enforced ordering (builtin → external → internal → parent → sibling), alphabetized, newlines between groups. Use inline type imports: `import { type Foo }`.
 - **Unused variables**: Prefix with `_`.

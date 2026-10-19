@@ -2234,7 +2234,8 @@ same optional field is supported in the agent's `config.yaml`.
 The new-Agent page confirms creation only after the latest `setup_agent` call
 succeeds and the persisted Agent can be read back. A tool failure or an
 unconfirmed write keeps the draft visible and restores **Save agent** so the
-operation can be retried instead of reporting a false success.
+operation can be retried instead of reporting a false success. Read-back results
+from a superseded Save attempt cannot change a newer attempt or its feedback.
 
 Saving an unrelated Agent setting preserves its existing thinking and reasoning
 defaults, including while the model catalog is loading, unavailable, or missing

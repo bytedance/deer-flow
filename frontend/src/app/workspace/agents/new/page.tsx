@@ -9,7 +9,7 @@ import {
   SaveIcon,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import {
@@ -90,6 +90,15 @@ export default function NewAgentPage() {
   const [setupAgentStatus, setSetupAgentStatus] =
     useState<SetupAgentStatus>("idle");
 
+  // Each Save or later setup result supersedes earlier read-back callbacks.
+  const saveAttempt = useRef(0);
+  useEffect(
+    () => () => {
+      saveAttempt.current += 1;
+    },
+    [],
+  );
+
   const threadId = useMemo(() => uuid(), []);
 
   const { thread, sendMessage } = useThreadStream({
@@ -102,6 +111,7 @@ export default function NewAgentPage() {
       if (agent || setupAgentStatus !== "requested") {
         return;
       }
+      const attempt = ++saveAttempt.current;
       const resultStatus = getToolResultStatus(state.messages, "setup_agent");
       if (!agentName || resultStatus === "pending") {
         setSetupAgentStatus("idle");
@@ -113,6 +123,9 @@ export default function NewAgentPage() {
         return;
       }
       void getAgentWithRetry(agentName).then((fetched) => {
+        if (saveAttempt.current !== attempt) {
+          return;
+        }
         if (fetched) {
           setSetupAgentStatus("completed");
           setAgent(fetched);
@@ -270,6 +283,7 @@ export default function NewAgentPage() {
       return;
     }
 
+    const attempt = ++saveAttempt.current;
     setSetupAgentStatus("requested");
     setShowSaveHint(false);
     try {
@@ -279,8 +293,14 @@ export default function NewAgentPage() {
         { agent_name: agentName },
         { additionalKwargs: { hide_from_ui: true } },
       );
-      toast.success(t.agents.saveRequested);
+      if (saveAttempt.current === attempt) {
+        toast.success(t.agents.saveRequested);
+      }
     } catch (error) {
+      if (saveAttempt.current !== attempt) {
+        return;
+      }
+      saveAttempt.current += 1;
       setSetupAgentStatus("idle");
       toast.error(error instanceof Error ? error.message : String(error));
     }
