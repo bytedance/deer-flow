@@ -1,4 +1,4 @@
-"""Immutable definitions and live-process checkpoints; never replay script effects."""
+"""Immutable definitions and exact-version live/recovered checkpoints."""
 
 import asyncio
 import copy
@@ -49,7 +49,10 @@ class Lifecycle:
         record = await asyncio.to_thread(self.store.get, self.owner(context), text(payload.get("run_id"), 64))
         row = next((s for s in record["steps"] if s["step_id"] == payload.get("step_id")), None)
         if row is None:
-            row = next((s for s in record.get("artifacts", []) if s["step_id"] == payload.get("step_id")), None)
+            row = next(
+                (s for s in record.get("artifacts", []) if s["step_id"] == payload.get("step_id")),
+                None,
+            )
         if not row or row["status"] != "completed":
             raise ValueError("Completed step unavailable")
         result = {k: copy.deepcopy(v) for k, v in row.items() if k != "input"}
@@ -60,7 +63,7 @@ class Lifecycle:
         record = entry["record"]
         revision = record.get("configuration_revision")
         async with asyncio.timeout(5):
-            current = await entry["runs"].configuration_revision(assistant_ids=sorted(self.config["agents"]))
+            current = await entry["runs"].configuration_revision(assistant_ids=sorted(self.config["agents"]), durable=True)
         if revision is None or revision != current:
             raise ValueError("Agent configuration changed or unavailable; start a new workflow")
         from .service import identity
@@ -80,9 +83,10 @@ class Lifecycle:
         step_id = text(payload["stepId"], 80)
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", step_id):
             raise ValueError("Invalid checkpoint stepId")
-        if any(s["step_id"] == step_id for s in record["steps"] + record["checkpoints"] + record.get("artifacts", [])):
+        existing = next((r for r in record["checkpoints"] if r["step_id"] == step_id), None) if entry.get("recover_frame") else None
+        if not existing and any(s["step_id"] == step_id for s in record["steps"] + record["checkpoints"] + record.get("artifacts", [])):
             raise ValueError("Step ID already used")
-        if len(record["checkpoints"]) >= self.config["max_calls"]:
+        if not existing and len(record["checkpoints"]) >= self.config["max_calls"]:
             raise ValueError("Checkpoint limit")
         await self.check_configuration(entry)
         row = {
@@ -104,15 +108,27 @@ class Lifecycle:
                 source_attempt=source["attempt"],
                 artifact_version=source["artifact_version"],
             )
+        if existing:
+            if any(existing.get(k) != v for k, v in row.items() if k != "status"):
+                raise ValueError("Recovery checkpoint version changed")
+            row = existing
+            if row["status"] in ("approved", "resumed"):
+                record.pop("pause_expires_at", None)
+                return {"id": message["id"], "value": {"status": row["status"]}}
+            if row["status"] != "pending":
+                raise ValueError("Checkpoint rejected")
+        else:
+            record["checkpoints"].append(row)
+            record["pause_expires_at"] = time.time() + self.config["pause_timeout_seconds"]
         entry["gate"] = asyncio.Event()
-        record["checkpoints"].append(row)
         record["status"] = "waiting_approval" if human else "paused"
-        record["pause_expires_at"] = time.time() + self.config["pause_timeout_seconds"]
+        record["remaining_seconds"] = max(0, deadline.when() - asyncio.get_running_loop().time())
+        record["budget_deadline"] = None
         await self.save(entry["owner"], record)
         # Keep the same isolated worker/JS heap alive. No code before the gate is
         # replayed; suspend only the remaining execution wall budget while waiting.
         remaining = max(0, deadline.when() - asyncio.get_running_loop().time())
-        deadline.reschedule(asyncio.get_running_loop().time() + self.config["pause_timeout_seconds"])
+        deadline.reschedule(asyncio.get_running_loop().time() + max(0, record["pause_expires_at"] - time.time()))
         signals = [
             asyncio.create_task(entry["gate"].wait()),
             asyncio.create_task(entry["cancel"].wait()),
@@ -127,6 +143,7 @@ class Lifecycle:
             raise ValueError("Human rejected output" if row["status"] == "rejected" else "Cancelled")
         await self.check_configuration(entry)
         deadline.reschedule(asyncio.get_running_loop().time() + remaining)
+        record["budget_deadline"] = time.time() + remaining
         record["status"] = "running"
         record.pop("pause_expires_at", None)
         await self.save(entry["owner"], record)
@@ -194,10 +211,10 @@ class Lifecycle:
                     return {"run_id": run_id, "status": "resumed"}
                 status = "resumed"
             if not entry or record["status"] != ("waiting_approval" if human else "paused") or entry["cancel"].is_set():
-                raise ValueError("Live checkpoint unavailable; restart does not permit resume")
+                raise ValueError("Live checkpoint unavailable; recover the workflow first after restart")
             # Revalidate both the retained capability and this caller's live grant.
             async with asyncio.timeout(5):
-                await context.agent_runs.configuration_revision(assistant_ids=sorted(self.config["agents"]))
+                await context.agent_runs.configuration_revision(assistant_ids=sorted(self.config["agents"]), durable=True)
             await self.check_configuration(entry)
             if entry["cancel"].is_set() or record["status"] not in (
                 "paused",
