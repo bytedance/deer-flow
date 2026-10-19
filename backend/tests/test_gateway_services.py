@@ -2247,6 +2247,121 @@ def test_null_subagent_total_limit_from_api_context_builds_with_configured_cap()
     assert limit.max_total == 7
 
 
+def test_merge_run_context_overrides_propagates_sanitized_client_context_to_runtime_only():
+    """``context.client`` should be available to runtime consumers, not legacy configurable readers."""
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-1", None, None)
+    merge_run_context_overrides(
+        config,
+        {
+            "client": {
+                "name": "custom-analytics-frontend",
+                "access_token": "must-not-propagate",
+                "capabilities": {
+                    "artifacts": True,
+                    "csv_download": True,
+                    "charts": False,
+                    "bad key": True,
+                    "coerced": "true",
+                },
+                "preferences": {
+                    "csv": "present",
+                    "chart": "skip",
+                    "nested": {"bad": "value"},
+                },
+            }
+        },
+    )
+
+    assert config["context"]["client"] == {
+        "name": "custom-analytics-frontend",
+        "capabilities": {
+            "artifacts": True,
+            "charts": False,
+            "csv_download": True,
+        },
+        "preferences": {
+            "chart": "skip",
+            "csv": "present",
+        },
+    }
+    assert "client" not in config["configurable"]
+
+
+def test_merge_run_context_overrides_preserves_explicit_config_context_client():
+    """Explicit ``config.context.client`` wins over top-level ``context.client``."""
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config(
+        "thread-1",
+        {"context": {"client": {"name": "config-client", "capabilities": {"artifacts": False}}}},
+        None,
+    )
+    merge_run_context_overrides(
+        config,
+        {"client": {"name": "body-client", "capabilities": {"artifacts": True}}},
+    )
+
+    assert config["context"]["client"] == {
+        "name": "config-client",
+        "capabilities": {"artifacts": False},
+    }
+
+
+def test_merge_run_context_overrides_sanitizes_config_context_client_without_body_context():
+    """``config.context.client`` is copied verbatim by ``build_run_config``, so it is sanitized even without ``body.context``."""
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-1", {"context": {"client": {"name": "config-client", "access_token": "secret"}}}, None)
+    merge_run_context_overrides(config, None)
+    assert config["context"]["client"] == {"name": "config-client"}
+
+    config = build_run_config("thread-1", {"context": {"client": {"access_token": "secret"}}}, None)
+    merge_run_context_overrides(config, None)
+    assert "client" not in config["context"]
+
+
+def test_merge_run_context_overrides_drops_configurable_client():
+    """``config.configurable`` is copied verbatim and checkpointed, so a ``client`` placed there never survives."""
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-1", {"configurable": {"client": {"name": "configurable-client", "token": "secret"}}}, None)
+    merge_run_context_overrides(config, None)
+    assert "client" not in config["configurable"]
+    assert "client" not in config.get("context", {})
+
+    config = build_run_config("thread-1", {"configurable": {"client": {"name": "configurable-client", "token": "secret"}}}, None)
+    merge_run_context_overrides(config, {"client": {"name": "body-client"}})
+    assert "client" not in config["configurable"]
+    assert config["context"]["client"] == {"name": "body-client"}
+
+
+def test_merge_run_context_overrides_logs_dropped_client_fields_without_values(caplog):
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    caplog.set_level(logging.DEBUG, logger="app.gateway.services")
+    config = build_run_config("thread-1", {"context": {"client": {"name": "config-secret-name", "token": "x"}}}, None)
+    merge_run_context_overrides(config, {"client": {"name": "body-secret-name", "capabilities": {"charts": "yes"}, "preferences": {"csv": "pref-secret-value", "bad key": 1}}})
+
+    messages = [record.getMessage() for record in caplog.records if "context.client" in record.getMessage()]
+    assert len(messages) == 2
+    assert all("kept_any=True" in message for message in messages)
+    assert not any(secret in caplog.text for secret in ("config-secret-name", "body-secret-name", "pref-secret-value", "charts", "bad key"))
+
+
+def test_merge_run_context_overrides_does_not_log_a_clean_client(caplog):
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    caplog.set_level(logging.DEBUG, logger="app.gateway.services")
+    config = build_run_config("thread-1", None, None)
+    merge_run_context_overrides(config, {"client": {"name": "custom-analytics-frontend", "capabilities": {"charts": True}}})
+
+    assert config["context"]["client"] == {"name": "custom-analytics-frontend", "capabilities": {"charts": True}}
+    assert "context.client" not in caplog.text
+    assert "custom-analytics-frontend" not in caplog.text
+
+
 def test_merge_run_context_overrides_noop_for_empty_context():
     from app.gateway.services import build_run_config, merge_run_context_overrides
 
@@ -3529,6 +3644,47 @@ def test_start_run_strips_project_context_message_marker_from_input(_stub_app_co
 
 
 @pytest.mark.asyncio
+async def test_self_update_removing_knowledge_allows_next_gateway_run(_stub_app_config, tmp_path, monkeypatch):
+    from unittest.mock import patch
+
+    from app.gateway.services import start_run
+    from deerflow.persistence.agents import get_agent_store
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+    from deerflow.runtime.user_context import get_effective_user_id
+    from deerflow.tools.builtins.update_agent_tool import update_agent
+
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    set_app_config(
+        AppConfig.model_validate(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "knowledge_base": {"enabled": True},
+                "tools": [{"name": "knowledge_search", "group": "knowledge", "use": "deerflow.community.ragflow.tools:knowledge_search_tool"}],
+            }
+        )
+    )
+    user_id = get_effective_user_id()
+    scope = {"version": 1, "mode": "selected", "dataset_ids": ["policies"]}
+    get_agent_store().create("researcher", {"tool_groups": ["web", "knowledge"], "knowledge_scope": scope}, "Soul", user_id=user_id)
+    runtime = SimpleNamespace(context={"agent_name": "researcher", "user_id": user_id}, tool_call_id="update-1")
+    assert update_agent.func(runtime=runtime, tool_groups=["web"]).update["messages"][0].status == "success"
+    request = _make_start_run_request(RunManager(store=MemoryRunStore()))
+    captured = {}
+
+    async def fake_run_agent(*_args, **kwargs):
+        captured.update(kwargs)
+
+    # Keep persistence, config reload and admission real; replace only execution.
+    with patch("app.gateway.services.resolve_agent_factory", return_value=object()), patch("app.gateway.services.run_agent", side_effect=fake_run_agent):
+        record = await start_run(_run_create_request("Hello", assistant_id="researcher"), "thread-after-self-update", request)
+        await record.task
+    assert captured["knowledge_scope"] is None
+    assert "knowledge_scope" not in captured["graph_input"]["messages"][0].additional_kwargs
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("run_store_backend", ["memory", "sql"])
 async def test_start_run_peer_idempotent_reuse_does_not_reject_later_runs_after_owner_completes(_stub_app_config, run_store_backend, tmp_path):
     """Two Gateway workers share one run store; a retry landing on the peer must not strand the thread.
@@ -3603,7 +3759,7 @@ def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_con
     async def _scenario():
         captured: dict[str, object] = {}
 
-        async def fake_start_run(body, thread_id, request, *, idempotency_key=None, scheduled_task_runtime=None):
+        async def fake_start_run(body, thread_id, request, *, idempotency_key=None, evidence_origin=None, scheduled_task_runtime=None):
             captured["body"] = body
             captured["thread_id"] = thread_id
             captured["context"] = body.context
@@ -3665,7 +3821,7 @@ def test_launch_scheduled_thread_run_uses_configured_recursion_limit(_stub_app_c
     async def _scenario():
         captured: dict[str, object] = {}
 
-        async def fake_start_run(body, thread_id, request, *, idempotency_key=None, scheduled_task_runtime=None):
+        async def fake_start_run(body, thread_id, request, *, idempotency_key=None, evidence_origin=None, scheduled_task_runtime=None):
             assert idempotency_key is None
             captured["config"] = body.config
             return SimpleNamespace(run_id="run-1", thread_id=thread_id)
@@ -3707,7 +3863,7 @@ def test_launch_scheduled_thread_run_recursion_limit_is_clamped_to_ceiling(_stub
     async def _scenario():
         captured: dict[str, object] = {}
 
-        async def fake_start_run(body, thread_id, request, *, idempotency_key=None, scheduled_task_runtime=None):
+        async def fake_start_run(body, thread_id, request, *, idempotency_key=None, evidence_origin=None, scheduled_task_runtime=None):
             assert idempotency_key is None
             captured["config"] = body.config
             return SimpleNamespace(run_id="run-1", thread_id=thread_id)
@@ -3740,7 +3896,7 @@ def test_launch_scheduled_thread_run_falls_back_when_config_unloadable(_stub_app
     async def _scenario():
         captured: dict[str, object] = {}
 
-        async def fake_start_run(body, thread_id, request, *, idempotency_key=None, scheduled_task_runtime=None):
+        async def fake_start_run(body, thread_id, request, *, idempotency_key=None, evidence_origin=None, scheduled_task_runtime=None):
             assert idempotency_key is None
             captured["config"] = body.config
             return SimpleNamespace(run_id="run-1", thread_id=thread_id)
@@ -4495,6 +4651,8 @@ class TestInjectAuthenticatedUserContextAuthz:
                 section: {
                     "sandbox_lease_owner_id": "forged-owner",
                     "sandbox_command_scope_id": "forged-scope",
+                    "__deerflow_sandbox_prewarm": "forged-prewarm",
+                    "__deerflow_sandbox_prewarm_cleanup": True,
                 }
             },
             request,
@@ -4502,6 +4660,8 @@ class TestInjectAuthenticatedUserContextAuthz:
 
         assert "sandbox_lease_owner_id" not in config[section]
         assert "sandbox_command_scope_id" not in config[section]
+        assert "__deerflow_sandbox_prewarm" not in config[section]
+        assert "__deerflow_sandbox_prewarm_cleanup" not in config[section]
 
     def test_session_body_context_cannot_inject_channel_user_id(self):
         request = _make_request_with_auth_source("session")
@@ -5372,7 +5532,7 @@ async def _capture_scheduled_launch(**kwargs):
 
     captured: dict[str, object] = {}
 
-    async def fake_start_run(body, thread_id, request, *, idempotency_key=None, scheduled_task_runtime=None):
+    async def fake_start_run(body, thread_id, request, *, idempotency_key=None, evidence_origin=None, scheduled_task_runtime=None):
         captured["body"] = body
         captured["idempotency_key"] = idempotency_key
         return SimpleNamespace(run_id="run-1", thread_id=thread_id)
@@ -5456,3 +5616,53 @@ async def test_client_timezone_reaches_only_the_schedule_capability(_stub_app_co
     config = captured["config"]
     assert "client_timezone" not in config.get("context", {})
     assert "client_timezone" not in config.get("configurable", {})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("carrier", ["context", "config.context", "config.configurable", "both-config-sections"])
+async def test_start_run_forwards_sanitized_client_context_to_runtime_context_only(_stub_app_config, carrier):
+    from copy import deepcopy
+    from unittest.mock import patch
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from app.gateway.services import start_run
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    client = {"name": "custom-analytics-frontend", "access_token": "secret", "capabilities": {"csv_download": True, "charts": "yes"}}
+    request_config = {"metadata": {"caller_key": "kept"}}
+    body_context = {"client": client} if carrier == "context" else None
+    if carrier in {"config.context", "both-config-sections"}:
+        request_config["context"] = {"client": client, "thinking_enabled": False}
+    if carrier in {"config.configurable", "both-config-sections"}:
+        request_config["configurable"] = {"client": client, "thinking_enabled": False}
+    original_config = deepcopy(request_config)
+    body = RunCreateRequest(input={"messages": [{"role": "user", "content": "Analyze this dataset"}]}, context=body_context, config=request_config)
+    run_store = MemoryRunStore()
+    request = _make_start_run_request(RunManager(store=run_store))
+    captured: dict[str, object] = {}
+
+    async def fake_run_agent(*_args, **kwargs):
+        captured["config"] = kwargs["config"]
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+    ):
+        record = await start_run(body, "thread-client-context", request)
+        await record.task
+
+    config = captured["config"]
+    if carrier == "config.configurable":
+        assert "client" not in config.get("context", {})
+    else:
+        assert config["context"]["client"] == {"name": "custom-analytics-frontend", "capabilities": {"csv_download": True}}
+    assert "client" not in config.get("configurable", {})
+    expected_stored_config = deepcopy(original_config)
+    for section in ("context", "configurable"):
+        if section in expected_stored_config:
+            expected_stored_config[section].pop("client")
+    stored = await run_store.get(record.run_id)
+    assert stored["kwargs"]["config"] == expected_stored_config
+    assert record.kwargs["config"] == expected_stored_config
+    assert body.config == original_config

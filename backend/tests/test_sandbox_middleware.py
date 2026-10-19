@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from types import SimpleNamespace
 from typing import get_type_hints
 
 import pytest
@@ -16,15 +17,18 @@ from langgraph.types import Command, Overwrite
 from deerflow.agents.thread_state import ThreadState
 from deerflow.sandbox.exceptions import SandboxAuthorizationError, SandboxRuntimeError
 from deerflow.sandbox.lease import (
+    ensure_sandbox_lease_owner,
     get_sandbox_lease_manager,
+    register_sandbox_prewarm_cleanup,
     release_sandbox_execution_lease,
     release_sandbox_execution_lease_async,
 )
 from deerflow.sandbox.middleware import SandboxMiddleware, SandboxMiddlewareState
+from deerflow.sandbox.prewarm import should_prewarm_sandbox
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider, reset_sandbox_provider, set_sandbox_provider
 from deerflow.sandbox.search import GrepMatch
-from deerflow.sandbox.tools import ensure_sandbox_initialized, ls_tool
+from deerflow.sandbox.tools import ensure_sandbox_initialized, ensure_sandbox_initialized_async, ls_tool
 
 
 class _SyncProvider(SandboxProvider):
@@ -170,6 +174,24 @@ class _AsyncOnlyProvider(SandboxProvider):
     def release(self, sandbox_id: str) -> None:
         self.released_ids.append(sandbox_id)
         return None
+
+
+class _DelayedAsyncProvider(_AsyncOnlyProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.allow_finish = asyncio.Event()
+
+    async def acquire_async(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
+        self.thread_ids.append(thread_id)
+        self.user_ids.append(user_id)
+        self.started.set()
+        await self.allow_finish.wait()
+        return "async-sandbox"
+
+
+def _aio_prewarm_config() -> SimpleNamespace:
+    return SimpleNamespace(sandbox=SimpleNamespace(prewarm=True, use="deerflow.community.aio_sandbox:AioSandboxProvider"))
 
 
 def test_sandbox_middleware_state_matches_thread_state_sandbox_field() -> None:
@@ -440,6 +462,102 @@ async def test_default_lazy_tool_acquisition_uses_async_provider() -> None:
     assert provider.user_ids == ["owner-lazy"]
     assert runtime.state["sandbox"] == {"sandbox_id": "async-sandbox"}
     assert runtime.context["sandbox_id"] == "async-sandbox"
+
+
+@pytest.mark.anyio
+async def test_prewarm_overlaps_model_call_and_is_claimed_by_first_tool(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = _DelayedAsyncProvider()
+    monkeypatch.setattr("deerflow.sandbox.prewarm.get_app_config", _aio_prewarm_config)
+    set_sandbox_provider(provider)
+    context = {"thread_id": "thread-prewarm", "user_id": "owner-prewarm"}
+    ensure_sandbox_lease_owner(context)
+    runtime = Runtime(context=context)
+    tool_runtime = ToolRuntime(
+        state={},
+        context=context,
+        config={"configurable": {}},
+        stream_writer=lambda _: None,
+        tools=[],
+        tool_call_id="call-prewarm",
+        store=None,
+    )
+    try:
+        middleware = SandboxMiddleware()
+        register_sandbox_prewarm_cleanup(context)
+        await middleware.abefore_model({"messages": [HumanMessage(content="```sh\ngit status\n```")]}, runtime)
+        await asyncio.wait_for(provider.started.wait(), timeout=5)
+        tool_task = asyncio.create_task(ensure_sandbox_initialized_async(tool_runtime))
+        await asyncio.sleep(0)
+        assert provider.thread_ids == ["thread-prewarm"]
+        provider.allow_finish.set()
+        sandbox = await tool_task
+    finally:
+        provider.allow_finish.set()
+        await release_sandbox_execution_lease_async(context)
+        reset_sandbox_provider()
+
+    assert sandbox.id == "async-sandbox"
+    assert tool_runtime.state["sandbox"] == {"sandbox_id": "async-sandbox"}
+    assert provider.thread_ids == ["thread-prewarm"]
+
+
+@pytest.mark.anyio
+async def test_unused_prewarm_is_released_after_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = _AsyncOnlyProvider()
+    monkeypatch.setattr("deerflow.sandbox.prewarm.get_app_config", _aio_prewarm_config)
+    set_sandbox_provider(provider)
+    runtime = Runtime(context={"thread_id": "thread-unused", "user_id": "owner-unused"})
+    ensure_sandbox_lease_owner(runtime.context)
+    try:
+        register_sandbox_prewarm_cleanup(runtime.context)
+        middleware = SandboxMiddleware()
+        await middleware.abefore_model({"messages": [HumanMessage(content="Traceback (most recent call last):")]}, runtime)
+        await runtime.context["__deerflow_sandbox_prewarm"].task
+        await middleware.aafter_agent({}, runtime)
+        assert provider.released_ids == ["async-sandbox"]
+    finally:
+        await release_sandbox_execution_lease_async(runtime.context)
+        reset_sandbox_provider()
+
+    assert provider.thread_ids == ["thread-unused"]
+    assert provider.released_ids == ["async-sandbox"]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "Please explain this concept.",
+        "The source file is interesting but no path or command is supplied.",
+    ],
+)
+@pytest.mark.anyio
+async def test_prewarm_skips_messages_without_structured_signal(monkeypatch: pytest.MonkeyPatch, content: str) -> None:
+    provider = _AsyncOnlyProvider()
+    monkeypatch.setattr("deerflow.sandbox.prewarm.get_app_config", _aio_prewarm_config)
+    set_sandbox_provider(provider)
+    runtime = Runtime(context={"thread_id": "thread-no-prewarm"})
+    ensure_sandbox_lease_owner(runtime.context)
+    try:
+        register_sandbox_prewarm_cleanup(runtime.context)
+        await SandboxMiddleware().abefore_model({"messages": [HumanMessage(content=content)]}, runtime)
+        await asyncio.sleep(0)
+    finally:
+        await release_sandbox_execution_lease_async(runtime.context)
+        reset_sandbox_provider()
+
+    assert provider.thread_ids == []
+
+
+def test_sandbox_config_prewarm_defaults_disabled_and_accepts_true() -> None:
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    assert SandboxConfig(use="test").prewarm is False
+    assert SandboxConfig(use="test", prewarm=True).prewarm is True
+
+
+@pytest.mark.parametrize("content", ["Review /mnt/user-data/workspace/app.py", r"Open C:\\work\\app.py"])
+def test_prewarm_recognizes_unambiguous_unix_and_windows_paths(content: str) -> None:
+    assert should_prewarm_sandbox({"messages": [HumanMessage(content=content)]}) is True
 
 
 @pytest.mark.anyio

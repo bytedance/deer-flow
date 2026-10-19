@@ -1,3 +1,10 @@
+### Checkpoint Cache Concurrency
+
+The memory history cache is shared by sync saver wrappers. Its threading lock
+serializes lookup/LRU promotion, population/eviction, thread purge, close, and
+statistics snapshots. Keep cache critical sections free of awaits and saver I/O;
+immutable histories do not make the mutable LRU registry thread-safe.
+
 ### Redis Checkpoint Cache Purge
 
 Thread purge escapes Redis glob metacharacters in the complete literal key stem
@@ -9,7 +16,18 @@ to sibling namespaces. Keep the cursor loop and outage/TTL fallback unchanged.
 
 Observed Redis streams removed during replay yield `StreamGap` with empty bounds; initially empty streams still wait. After this gap, `/wait` refreshes store-only status and completes only for a terminal run with no retained stream.
 
+Memory stream cleanup retires the captured stream generation, clears its retained
+payloads and wakes its Condition. Established readers emit one empty-bound
+`StreamGap` and stop if replay is unfinished, including on bridge close. Fully
+consumed terminal streams keep END, using the retired generation's tail offset;
+readers never attach to a recreated stream. An unpublished stream without explicit
+cleanup still heartbeats.
+New readers that capture a generation but acquire its Condition only after
+retirement always receive a gap, including cursor-less terminal reattachments.
+
 Memory/Redis bridges keep startup-only `stream_bridge.heartbeat_interval_seconds`; explicit `subscribe(..., heartbeat_interval=...)` overrides it. Provider contexts drain owned cache/bridge/checkpointer/Store teardown across cancellation. `close_agent_stream()` shields close to completion: preserve counts, defer host cancellation, balance repeats, keep active errors, log attached close failures at callers, map close cancellation to failure, never time out.
+
+Reconnect cursor parsing requires ASCII digits and must treat integer-conversion failures as malformed input. Redis cursors additionally require unsigned 64-bit components; use the same parser before sending a cursor to `XREAD` and when detecting replay gaps. Preserve malformed-cursor policy: memory replays retained events, Redis tails active streams and replays ended streams through `end`. `tests/test_stream_bridge.py` directly tests both parsers offline, including oversized sequences, Redis component overflow, non-ASCII digits, and valid uint64 boundaries; integration tests also exercise malformed cursors against real Redis.
 
 ### Memory Stream Replay
 
@@ -138,7 +156,7 @@ prompts, and derived hashes do not enter the event. Ordinary task-tool subagents
 recorder proxy, never the journal itself; durable batch runs have no parent
 journal and emit no such event. Recorder failures are fail-open.
 
-**RunJournal write ownership** (`runtime/journal.py`): a batch handed to `store.put_batch()` is owned by a journal task until its outcome settles, so a cancelled `flush()`/`close()` caller detaches the waiter and re-raises `CancelledError` only after the owned write is drained — never abandon or replay the in-flight batch. A generic `put_batch` exception is an ambiguous outcome: it is quarantined, blocks every successor write, and makes `flush()`/`close()` report non-success instead of replaying the batch. Only `RunEventStoreNotCommittedError` means the store proved none of the batch committed and may be deliberately retried; stores must raise it instead of a bare exception for that case. Explicit `flush()` and `close(flush=True)` share one per-journal operation lock, so a successor batch can never overtake an unsettled predecessor, every waiter observes the same settlement, and a normal close detaches only after the whole buffer has settled. `close(flush=False)` is a separate abort path that never queues on that lock: it revokes write ownership before its first await and makes any in-flight flush report non-success rather than a late success. A cancelled write waits a bounded time for the store call to end; `Task.cancelled()`/a clean return does not prove an uncooperative backend's I/O actually stopped, so this is a bound on waiting, not a termination guarantee. An inner store task that outlives that bound stays supervised until it settles, so its late result is retrieved and logged rather than dropped. Two adjacent limits are known and tracked separately, not fixed here: the bounded wait covers the store write, not a `progress_reporter` that ignores cancellation (a pre-existing hazard on the force-close path); and background-write warnings log the exception type and message, whose text is backend-controlled and may echo driver-level parameters, so log consumers must not treat it as payload-free.
+**RunJournal write ownership** (`runtime/journal.py`): a batch handed to `store.put_batch()` is owned by a journal task until its outcome settles, so a cancelled `flush()`/`close()` caller detaches the waiter and re-raises `CancelledError` only after the owned write is drained — never abandon or replay the in-flight batch. A generic `put_batch` exception is an ambiguous outcome: it is quarantined, blocks every successor write, and makes `flush()`/`close()` report non-success instead of replaying the batch. Only `RunEventStoreNotCommittedError` means the store proved none of the batch committed and may be deliberately retried; stores must raise it instead of a bare exception for that case. Explicit `flush()` and `close(flush=True)` share one per-journal operation lock, so a successor batch can never overtake an unsettled predecessor, every waiter observes the same settlement, and a normal close detaches only after the whole buffer has settled. `close(flush=False)` is a separate abort path that never queues on that lock: it revokes write ownership before its first await and makes any in-flight flush report non-success rather than a late success. A cancelled event write or pending progress snapshot waits a bounded time to settle; `Task.cancelled()`/a clean return does not prove an uncooperative backend's I/O actually stopped, so this is a bound on waiting, not a termination guarantee. A task that outlives that bound stays supervised until it settles, so its late result is retrieved and logged rather than dropped while lease-loss finalization continues. Background-write and progress-reporter warnings log the exception type and message, whose text is backend-controlled and may echo driver-level parameters, so log consumers must not treat it as payload-free.
 
 **JSONL record boundaries** (`runtime/events/store/jsonl.py`): thread reads,
 run reads, and sequence recovery split on physical newlines. Do not use
@@ -210,6 +228,11 @@ Check all owners and categories; surviving rows retain the allocation floor.
 
 **Terminal run cleanup:** Close streams, journals, and graph references even on cancellation. Details: `backend/docs/runtime-guidance-details.md`.
 
+Clear both the terminal worker's journal and message-sequence stamper references;
+the stamper's generation callback captures the journal. Diagnostic tracebacks may
+retain finalizer frames, so config/callback removal alone is insufficient. Keep
+the DEBUG checkpoint-inspection failure regression in `test_run_worker_rollback.py`.
+
 **`RunManager._runs` holds only records this worker admitted.** A cross-worker idempotent reuse returns the `store_only` row from `_record_from_store()` unregistered: the peer never finalizes or `cleanup()`s it, so a registered copy stays `pending`/`running`, 409s later same-thread admissions, hides the owner's orphan from reconciliation, and sends a peer `cancel()` down the local-owner path. Pinned by `test_peer_idempotent_reuse_*` and `test_peer_cancel_of_reused_run_*` (`tests/test_multi_worker_run_ownership.py`) plus `tests/test_gateway_services.py::test_start_run_peer_idempotent_reuse_*`.
 
 **A `RunRecord` owner matches its durable row.** HTTP admissions omit `user_id` and the SQL store stamps the ambient user, so `create()` and `_admit_thread_operation()` resolve an omitted owner from the contextvar, keeping `None` without one — never `get_effective_user_id()`'s `default` bucket. A `None` record made SQL keyed retries on a peer or after `cleanup()` return 500, hid HTTP runs from owner-scoped history, and skipped their MCP `background_tasks` projection. Pinned by `test_run_record_owner_matches_row_stamped_from_context`, `test_keyed_retry_without_explicit_user_*`, the `sql` case of `test_start_run_peer_idempotent_reuse_*`, `test_run_manager_*_admitted_without_explicit_user`, and `test_run_manager_keeps_omitted_owner_unset_without_user_context`.
@@ -226,6 +249,13 @@ Check all owners and categories; surviving rows retain the allocation floor.
 - Tests: `tests/test_checkpoint_mode.py` (freeze/detect/gate), `tests/test_checkpoint_state.py` (accessor/mutation graph), `tests/test_delta_channel_checkpointers.py` (saver parity), `tests/test_threads_checkpoint_mode.py`, `tests/test_gateway_checkpoint_mode.py` (dual-mode e2e parity), `tests/test_context_compaction.py` (mutation-graph write, no scheduling), `tests/test_run_worker_rollback.py`, `tests/test_cached_history_saver.py` + `tests/test_cached_history_saver_integration.py` (history cache)
 
 **Checkpoint benchmarks:** Paired full/delta cases and production-shaped runs are documented in `backend/docs/runtime-guidance-details.md`.
+
+# Client capability context
+
+Client capability hints are request-only. `redact_config_secrets` excludes
+`client` from both `context` and `configurable` in saved configs and historical
+run API responses, without mutating the input. The live run keeps its sanitized
+client; later or server-started runs do not inherit it from thread history.
 
 # Referenced conversation capability
 
@@ -309,3 +339,15 @@ the admitted group keeps its records on success or completes rollback on failure
 This is a store-local guarantee, not a change to RunJournal cancellation policy or
 JSONL's single-process deployment constraint. Regression coverage is in
 `tests/test_jsonl_event_store_cancellation.py`.
+
+## Completed-evidence provenance
+
+Gateway admission and RunManager validate host-owned evidence origin against the shared `EVIDENCE_ORIGINS` in `runtime/runs/schemas.py`. Preserve the string values and reject client metadata as provenance; only trusted Python entry points set the admission argument.
+
+Idempotent resume reuse preserves both the private request identity and the original evidence origin/agent across worker and store boundaries. A retry must not relabel existing evidence. Memory/SQLite parity is covered in `tests/test_completed_evidence_admission.py`.
+
+Completed-evidence finalization obeys the journal write-ownership contract:
+unknown or cancelled write outcomes cannot yield a receipt or be replayed. Only
+proven-not-committed batches may be retried. Normal close stops new evidence
+producers and drains already admitted cross-thread callbacks inside its operation
+lock before flushing and detaching; do not reacquire that lock through `flush()`.
