@@ -1635,14 +1635,27 @@ async def update_thread_state(thread_id: ThreadId, body: ThreadStateUpdateReques
     thread_store = get_thread_store(request)
     # Validate external roles before materializing a graph or reserving a write.
     values = strip_server_owned_state_metadata(dict(body.values or {}))
-    if body.checkpoint_id is not None:
-        if not body.checkpoint_id:
+    checkpoint_id = body.checkpoint_id
+    checkpoint_ns = ""
+    if body.checkpoint is not None:
+        checkpoint_thread_id = body.checkpoint.get("thread_id")
+        if checkpoint_thread_id is not None and str(checkpoint_thread_id) != thread_id:
+            raise HTTPException(status_code=400, detail="checkpoint thread_id does not match request thread_id")
+        raw_checkpoint_id = body.checkpoint.get("checkpoint_id")
+        if raw_checkpoint_id:
+            checkpoint_id = str(raw_checkpoint_id)
+        raw_checkpoint_ns = body.checkpoint.get("checkpoint_ns")
+        if raw_checkpoint_ns is not None:
+            checkpoint_ns = str(raw_checkpoint_ns)
+
+    if checkpoint_id is not None:
+        if not checkpoint_id:
             raise HTTPException(status_code=404, detail="Checkpoint not found")
         selected_config = {
             "configurable": {
                 "thread_id": thread_id,
-                "checkpoint_ns": "",
-                "checkpoint_id": body.checkpoint_id,
+                "checkpoint_ns": checkpoint_ns,
+                "checkpoint_id": checkpoint_id,
             }
         }
         try:
@@ -1651,7 +1664,7 @@ async def update_thread_state(thread_id: ThreadId, body: ThreadStateUpdateReques
             logger.exception("Failed to get state for thread %s", sanitize_log_param(thread_id))
             raise HTTPException(status_code=500, detail="Failed to get thread state")
         if checkpoint_tuple is None:
-            raise HTTPException(status_code=404, detail=f"Checkpoint {body.checkpoint_id} not found")
+            raise HTTPException(status_code=404, detail=f"Checkpoint {checkpoint_id} not found")
 
     mutation_node = body.as_node or "manual_state_update"
     # Resolve through the shared boundary (thread metadata -> assistant_id ->
@@ -1660,7 +1673,8 @@ async def update_thread_state(thread_id: ThreadId, body: ThreadStateUpdateReques
         request,
         thread_id=thread_id,
         as_node=mutation_node,
-        checkpoint_id=body.checkpoint_id,
+        checkpoint_id=checkpoint_id,
+        checkpoint_ns=checkpoint_ns,
     )
     writable_channels = graph_writable_channels(getattr(accessor, "graph", None))
     if writable_channels is not None:
