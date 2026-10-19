@@ -19,9 +19,10 @@ def output_name_candidates(name: str) -> Iterator[str]:
     Callers claim each candidate atomically and move on when it is taken; the
     generator never checks the filesystem, so naming cannot race the claim.
     The clock is sampled lazily, once, when the first fallback is reached; each
-    later fallback offsets that sample by one microsecond. Coarse host clocks
-    (Windows advances in sub-millisecond steps) therefore cannot repeat a stamp
-    inside one burst, and every fallback stays a distinct candidate.
+    later fallback offsets that sample by one microsecond. A host clock whose
+    tick is coarser than the microsecond stamp (for example Windows' ~15 ms
+    system-time tick) therefore cannot repeat a stamp inside one burst, and
+    every fallback stays a distinct candidate.
     """
     yield name
     stem, suffix = Path(name).stem, Path(name).suffix

@@ -50,9 +50,10 @@ class _FrozenClock(datetime):
 
 
 def test_timestamped_fallbacks_stay_distinct_on_a_coarse_clock(monkeypatch):
-    # Windows advances the system clock in sub-millisecond steps, so five stamps
-    # sampled back to back inside one burst can all be identical. The fallback
-    # bound must not depend on the host clock advancing between yields.
+    # A host clock whose tick is coarser than the microsecond stamp (Windows'
+    # system-time tick is ~15 ms) hands back one value for all five samples in a
+    # burst. The fallback bound must not depend on the clock advancing between
+    # yields.
     monkeypatch.setattr(output_names, "MAX_COLLISION_PROBES", 1)
     monkeypatch.setattr(output_names, "datetime", _FrozenClock)
 
