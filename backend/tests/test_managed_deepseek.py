@@ -212,6 +212,36 @@ async def test_saved_model_streaming_replays_reasoning_and_honors_token_limit(st
     assert model_config.supports_reasoning_effort is True
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "effort,expected",
+    [("minimal", "low"), ("low", "low"), ("medium", "medium"), ("high", "high"), ("max", "max"), ("xhigh", "xhigh")],
+)
+async def test_deepseek_effort_contract_maps_generic_effort_values(store, provider, effort, expected):
+    saved = store.save(ManagedModel(provider="deepseek", model="deepseek-flash", api_key=_KEY), expected_revision=None)
+    config = merge_managed_models(_base_config())
+    model_config = config.get_model_config(saved.name)
+
+    # The official endpoint rejects the generic "minimal" token (issue #4514),
+    # so the declared contract advertises the provider's real vocabulary and
+    # aliases "minimal" onto "low". Parametrized over every accepted value so
+    # a future rename/drop fails here, not at request time.
+    assert model_config.reasoning is not None
+    assert model_config.reasoning.effort is not None
+    assert model_config.reasoning.effort.values == ["low", "medium", "high", "max", "xhigh"]
+    assert model_config.reasoning.effort.default == "low"
+    assert model_config.reasoning.effort.aliases == {"minimal": "low"}
+    assert model_config.supports_reasoning_effort is True
+
+    model = create_chat_model(saved.name, thinking_enabled=False, reasoning_effort=effort, app_config=config, attach_tracing=False)
+    await _collect(model, [HumanMessage(content="Hello")])
+
+    assert len(provider.requests) == 1
+    body = provider.requests[0][1]
+    assert body["reasoning_effort"] == expected
+    assert body["thinking"] == {"type": "disabled"}
+
+
 @pytest.mark.parametrize(
     "base_url",
     [

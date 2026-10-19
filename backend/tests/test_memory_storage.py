@@ -117,6 +117,31 @@ class TestFileMemoryStorage:
         assert isinstance(memory, dict)
         assert memory["version"] == "1.0"
 
+    def test_summary_saved_with_utf8_bom_loads(self, tmp_path, monkeypatch):
+        """A summary hand-edited into "UTF-8 with BOM" (Windows Notepad /
+        PowerShell ``Set-Content -Encoding UTF8``) is valid JSON, not corruption:
+        the BOM is consumed instead of raising MemoryStorageCorruption."""
+        monkeypatch.setenv("DEERMEM_DATA_DIR", str(tmp_path))
+        memory_file = tmp_path / "memory.json"
+        manifest = create_empty_memory()
+        manifest["revision"] = 7
+        manifest["user"]["workContext"] = {"summary": "edited in Notepad"}
+        memory_file.write_bytes(b"\xef\xbb\xbf" + json.dumps(manifest, ensure_ascii=False).encode("utf-8"))
+        assert memory_file.read_bytes().startswith(b"\xef\xbb\xbf"), "fixture must carry a real BOM"
+        storage = FileMemoryStorage(DeerMemConfig())
+        loaded = storage.load()
+        assert loaded["user"]["workContext"]["summary"] == "edited in Notepad"
+
+    def test_summary_without_bom_is_unaffected(self, tmp_path, monkeypatch):
+        """The BOM-tolerant decoder must not alter plain UTF-8 summaries."""
+        monkeypatch.setenv("DEERMEM_DATA_DIR", str(tmp_path))
+        memory_file = tmp_path / "memory.json"
+        manifest = create_empty_memory()
+        manifest["user"]["workContext"] = {"summary": "plain"}
+        memory_file.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+        loaded = FileMemoryStorage(DeerMemConfig()).load()
+        assert loaded["user"]["workContext"]["summary"] == "plain"
+
     def test_save_writes_to_file(self, tmp_path, monkeypatch):
         monkeypatch.setenv("DEERMEM_DATA_DIR", str(tmp_path))
         memory_file = tmp_path / "memory.json"
@@ -322,6 +347,22 @@ class TestMarkdownMemoryStorage:
         assert loaded["version"] == "2.0"
         assert loaded["revision"] == expected_revision
         assert loaded["user"]["workContext"]["summary"] == "recovered"
+
+    def test_bom_prefixed_valid_json_is_not_quarantined(self, tmp_path):
+        """A BOM does not make the summary unreadable, so the tolerant loader
+        must parse it instead of quarantining recoverable state."""
+        memory_file = tmp_path / "memory.json"
+        manifest = create_empty_memory()
+        manifest["version"] = "2.0"
+        manifest.pop("facts")
+        manifest["revision"] = 7
+        manifest["user"]["workContext"] = {"summary": "kept"}
+        memory_file.write_bytes(b"\xef\xbb\xbf" + json.dumps(manifest, ensure_ascii=False).encode("utf-8"))
+        storage = self._markdown_storage_at(memory_file)
+        loaded = storage.load()
+        assert loaded["revision"] == 7
+        assert loaded["user"]["workContext"]["summary"] == "kept"
+        assert not list(tmp_path.glob("memory.json.corrupt-*")), "a readable summary must not be quarantined"
 
     def test_hand_edited_markdown_without_fence_is_quarantined(self, tmp_path):
         """Markdown without a fenced block cannot be mapped onto the manifest

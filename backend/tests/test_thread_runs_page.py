@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from _router_auth_helpers import make_authed_test_app
 from fastapi.testclient import TestClient
 
@@ -50,6 +51,36 @@ def test_list_runs_returns_bare_array():
     assert kwargs.get("limit", 100) == 100
     assert "before_created_at" not in kwargs
     assert "before_run_id" not in kwargs
+
+
+@pytest.mark.parametrize("endpoint", ["/runs", "/runs/page", "/runs/legacy-client-run"])
+def test_run_reads_omit_historical_client_context_without_mutating_record(endpoint):
+    client_context = {"name": "old-client", "preferences": {"note": "synthetic-private-value"}}
+    record = _record("legacy-client-run", "2026-01-01T00:00:00+00:00")
+    record.kwargs = {
+        "config": {
+            "context": {"client": client_context, "model_name": "kept"},
+            "configurable": {"client": client_context, "thinking_enabled": False},
+            "metadata": {"caller_key": "kept"},
+        }
+    }
+    app, run_manager = _make_app([record])
+    run_manager.get = AsyncMock(return_value=record)
+
+    with TestClient(app) as http:
+        response = http.get("/api/threads/thread-1" + endpoint)
+
+    assert response.status_code == 200
+    payload = response.json()
+    row = payload["data"][0] if endpoint == "/runs/page" else payload[0] if endpoint == "/runs" else payload
+    assert row["kwargs"]["config"] == {
+        "context": {"model_name": "kept"},
+        "configurable": {"thinking_enabled": False},
+        "metadata": {"caller_key": "kept"},
+    }
+    assert "synthetic-private-value" not in response.text
+    assert record.kwargs["config"]["context"]["client"] == client_context
+    assert record.kwargs["config"]["configurable"]["client"] == client_context
 
 
 def test_list_runs_ignores_langgraph_sdk_limit_query():
