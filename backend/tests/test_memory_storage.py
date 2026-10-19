@@ -430,3 +430,43 @@ class TestMarkdownMemoryStorage:
     )
     def test_invalid_or_non_object_fenced_summary_rejected(self, body):
         assert mf._parse_markdown_memory(body) is None
+
+
+class TestFactMarkdownBom:
+    """A canonical fact is front-matter Markdown, so it can arrive BOM-prefixed.
+
+    Facts live as ``.md`` files that an operator can inspect and edit by hand --
+    the same exposure the memory summary has. A summary saved by Windows
+    Notepad or PowerShell 5.1's ``Set-Content -Encoding UTF8`` gets a BOM, and
+    #7083 fixed exactly that for ``memory.json``. The fact parser checks
+    ``text.startswith("---\n")``, so a BOM makes a perfectly valid fact read as
+    "missing YAML front matter" and raises ``MemoryStorageCorruption``.
+    """
+
+    _BODY = "---\ntitle: Shared decision\n---\n\n# Shared decision\n\nUse Postgres.\n"
+
+    @staticmethod
+    def _write_fact(tmp_path, name: str, content: str):
+        path = tmp_path / name
+        path.write_text(content, encoding="utf-8")
+        return path
+
+    def test_fact_saved_with_utf8_bom_parses(self, tmp_path):
+        from deerflow.agents.memory.backends.deermem.deermem.core.storage import _parse_fact_markdown
+
+        path = self._write_fact(tmp_path, "fact-bom.md", "\ufeff" + self._BODY)
+
+        parsed = _parse_fact_markdown(path)
+
+        assert parsed["title"] == "Shared decision"
+        assert parsed["content"] == "Use Postgres."
+
+    def test_fact_without_bom_is_unaffected(self, tmp_path):
+        from deerflow.agents.memory.backends.deermem.deermem.core.storage import _parse_fact_markdown
+
+        path = self._write_fact(tmp_path, "fact.md", self._BODY)
+
+        parsed = _parse_fact_markdown(path)
+
+        assert parsed["title"] == "Shared decision"
+        assert parsed["content"] == "Use Postgres."
