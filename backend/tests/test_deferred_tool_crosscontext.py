@@ -117,7 +117,14 @@ def test_subagent_reentry_does_not_touch_lead_state():
     class _Req:
         def __init__(self):
             self.tools = [active_tool, mcp_secret]
-            self.state = {"promoted": {"catalog_hash": lead_setup.catalog_hash, "names": ["mcp_secret"]}}
+            self.state = {
+                "messages": [HumanMessage(content="use the secret tool", id="user-1")],
+                "promoted": {
+                    "catalog_hash": lead_setup.catalog_hash,
+                    "names": ["mcp_secret"],
+                    "turn_id": "user-1",
+                },
+            }
 
         def override(self, tools):
             self.tools = tools

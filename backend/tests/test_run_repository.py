@@ -1326,8 +1326,8 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
-    async def test_reconciliation_skips_run_renewed_after_scan(self, tmp_path):
-        """The SQL takeover CAS must reject a candidate renewed after its scan."""
+    async def test_reconciliation_claims_run_whose_expired_owner_attempted_renewal(self, tmp_path):
+        """An expired lease cannot be renewed to evade the SQL takeover CAS."""
         repo = await _make_repo(tmp_path)
         grace = 10
         run_id = "renewed-after-scan"
@@ -1350,7 +1350,7 @@ class TestRunRepository:
                     owner_worker_id=owner_worker_id,
                     lease_expires_at=(datetime.now(UTC) + timedelta(seconds=60)).isoformat(),
                 )
-                assert renewed is True
+                assert renewed is False
                 return rows
 
             repo.list_inflight_with_expired_lease = scan_then_renew
@@ -1359,10 +1359,10 @@ class TestRunRepository:
             recovered = await manager.reconcile_orphaned_inflight_runs(error="orphaned")
 
             row = await repo.get(run_id)
-            assert recovered == []
+            assert [r.run_id for r in recovered] == [run_id]
             assert row is not None
-            assert row["status"] == "running"
-            assert datetime.fromisoformat(row["lease_expires_at"]) > datetime.now(UTC)
+            assert row["status"] == "error"
+            assert datetime.fromisoformat(row["lease_expires_at"]) < datetime.now(UTC)
         finally:
             await _cleanup()
 

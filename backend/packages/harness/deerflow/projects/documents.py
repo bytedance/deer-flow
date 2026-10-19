@@ -156,7 +156,8 @@ async def stage_document_bytes(paths: Paths, *, user_id: str, project_id: str, c
     the shelf deliberately reuses it instead of growing a second knob with
     the same meaning (§6.4). Overflow raises :class:`ShelfUploadTooLargeError`
     (the route maps it to 413, mirroring the uploads router) and leaves no
-    staging file behind.
+    staging file behind. Staging creates the project's directory tree, so
+    callers reject a missing, foreign, or archived project first.
     """
     staging_path = _new_staging_path(paths, user_id=user_id, project_id=project_id)
     handle = await run_file_io(_open_staging, staging_path.parent, staging_path)
@@ -303,9 +304,9 @@ async def add_staged_document(
 def _convert_in_thread(original: Path, output_path: Path) -> Path | None:
     """Run the async conversion engine on a private loop inside the worker.
 
-    ``convert_file_to_markdown`` offloads its own heavy work (>1 MiB) but
-    stats and writes on its caller's loop; running the whole coroutine here
-    keeps every byte of the conversion path off the serving event loop.
+    Keep the shelf conversion lifecycle on its worker's private loop.
+    ``convert_file_to_markdown`` offloads parsing for every source size and
+    drains that work before this caller can clean up its staging files.
     """
     return asyncio.run(convert_file_to_markdown(original, output_path=output_path))
 

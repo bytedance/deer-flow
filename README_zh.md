@@ -179,6 +179,13 @@ YAML 同名模型优先，已有任务保留原配置快照。托管模型使用
        api_key: $OPPER_API_KEY
        base_url: https://api.opper.ai/v3/compat
 
+     - name: api-route-gpt-6.1-sol
+       display_name: GPT 6.1 Sol (API Route)
+       use: langchain_openai:ChatOpenAI
+       model: gpt-6.1-sol
+       api_key: $API_ROUTE_API_KEY
+       base_url: https://global.api-route.com/v1
+
      - name: gpt-5-responses
        display_name: GPT-5 (Responses API)
        use: langchain_openai:ChatOpenAI
@@ -201,6 +208,8 @@ YAML 同名模型优先，已有任务保留原配置快照。托管模型使用
    ```
 
    OpenRouter 以及类似的 OpenAI 兼容网关，建议通过 `langchain_openai:ChatOpenAI` 配合 `base_url` 来配置。如果你更想用 provider 自己的环境变量名，也可以直接把 `api_key` 指向对应变量，例如 `api_key: $OPENROUTER_API_KEY`。
+
+   Setup Wizard 也支持 [API Route](https://www.api-route.com)，会将密钥保存为 `API_ROUTE_API_KEY`，并使用上面的 Chat Completions 端点。可用模型取决于密钥所属组别和权限；修改 `config.yaml` 中的模型前，请先查询需要认证的 `GET https://global.api-route.com/v1/models` 模型目录，并原样使用返回的模型 ID，不要添加上游 provider 前缀。
 
    如果要让 OpenAI 模型走 `/v1/responses`，继续使用 `langchain_openai:ChatOpenAI`，并设置 `use_responses_api: true` 和 `output_version: responses/v1`。
 
@@ -563,6 +572,10 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 4. 复制 App ID 和 App Secret，在 `.env` 中设置 `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET`，并在 `config.yaml` 中启用该渠道。
 5. _（可选）_ 交互式澄清卡片：在 `channels.feishu` 下设置 `card_interaction_enabled: true`，让 agent 的选项式提问渲染为可点击的按钮卡片，并在问题前保留背景说明。随后在开发者后台打开 **回调配置**（与「事件订阅」是不同的标签页），订阅 `card.action.trigger` 并选择 **长连接**，最后发布新版本。点击按钮等同于输入该选项作答；只有触发该次提问的用户才能操作对应卡片。按钮答案会保存到对话历史中，后续澄清继续在同一会话内进行。
 
+如果 SDK 反复记录 `CERTIFICATE_VERIFY_FAILED`，参见 [Feishu / Lark TLS 故障排查](backend/docs/IM_CHANNEL_CONNECTIONS.md#feishu--lark-tls-troubleshooting)，检查 Gateway 的 CA 信任配置。
+
+定时任务的执行结果和生命周期通知也可以主动推送给已绑定的飞书/Lark 用户，无需用户先发送新消息。它们与企业微信共用通知发件箱和本地化摘要机制。应用必须具备向该用户发送消息的权限，参见[飞书定时任务通知](backend/docs/IM_CHANNEL_CONNECTIONS.md#feishu-scheduled-task-notifications)。
+
 **WeChat 配置**
 
 1. 在 `config.yaml` 中启用 `wechat` 渠道。
@@ -717,6 +730,11 @@ DeerFlow 可连接租户级 RAGFlow，并通过 `knowledge_search` 按 embedding
 `context.agent_name`，确保 Gateway 的范围校验与运行时加载的是同一个智能体；主智能体聊天使用 `lead_agent`，两者都只有在共享配置启用 RAGFlow provider 时才会提交知识范围。
 
 本版不在工作区侧边栏增加独立的“知识库”入口，也不提供 DeerFlow 知识库管理页面；知识库和文件的创建、上传、解析与删除仍直接在 RAGFlow 中完成。
+
+运维还可独立安装 [WeKnora 只读扩展](examples/deerflow-extension-weknora/README.md)，
+对接 WeKnora v0.8.3，使用知识库/文档范围选择器和共享检索引用。
+需显式配置 DeerFlow 用户到 WeKnora 工作空间的凭据绑定；资源授权仍由 WeKnora 执行。
+安装与配置步骤见扩展目录中的英文指南。
 
 Gateway 生成后续建议时，现在会先把普通字符串输出和 block/list 风格的富文本内容统一归一化，再去解析 JSON 数组响应，因此不同 provider 的内容包装方式不会再悄悄把建议吞掉。
 
