@@ -168,5 +168,5 @@ def test_tree_does_not_guess_another_branch(monkeypatch, fallback_client):
         client.get_tree("owner", "repo")
 
     # A stale `master` still resolves as a branch, so retrying names here silently
-    # returns the wrong repository's tree instead of failing.
+    # returns the stale branch's tree instead of failing.
     assert asked == ["/repos/owner/repo/git/trees/HEAD"]
