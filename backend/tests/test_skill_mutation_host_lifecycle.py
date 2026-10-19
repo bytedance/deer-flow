@@ -1,7 +1,6 @@
 """The host owns recovery even when every extension is disabled."""
 
 import asyncio
-import os
 import threading
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -11,6 +10,7 @@ import pytest_asyncio
 from sqlalchemy import create_engine
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Session
+from support.skill_export_platform import requires_posix_host
 
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.run_events_config import RunEventsConfig
@@ -22,14 +22,7 @@ from deerflow.persistence.skill_mutations.model import SkillOwnerRow, SkillPropo
 from deerflow.persistence.user.model import UserRow
 from deerflow.runtime.events.store.db import DbRunEventStore
 
-# PublicationTopology.acquire and HostSkillMutationService._authorize reject
-# every non-POSIX host with UNSUPPORTED_TOPOLOGY, so this host-lifecycle suite
-# is POSIX-only. Skip it explicitly on Windows (repo convention) instead of
-# reporting the refusal path as failures.
-pytestmark = pytest.mark.skipif(
-    os.name != "posix",
-    reason="host skill-mutation service is POSIX-only (UNSUPPORTED_TOPOLOGY elsewhere)",
-)
+pytestmark = requires_posix_host
 
 
 @pytest_asyncio.fixture

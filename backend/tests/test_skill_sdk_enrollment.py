@@ -142,7 +142,10 @@ storage.set_skill_enabled_state("example", False)
     assert not (sdk_home[2].parent.parent / "_skill_states.json").exists()
 
 
-@pytest.mark.skipif(os.name != "posix", reason="skill-mutation enrollment drives the POSIX-only capture_package")
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason=("the SDK child unlinks the sqlite database while its engine still holds the file open; Windows raises PermissionError [WinError 32] where POSIX allows unlinking open files"),
+)
 def test_sdk_does_not_create_a_missing_application_database(sdk_home):
     action = """
 from pathlib import Path

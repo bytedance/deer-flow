@@ -2,7 +2,6 @@
 
 import asyncio
 import importlib.util
-import os
 from dataclasses import asdict, dataclass
 from types import SimpleNamespace
 
@@ -12,6 +11,7 @@ from deerflow_extension_api.completed_run_evidence import CompletedRunSnapshot
 from deerflow_extension_api.host_capabilities import HostCapabilityError
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
+from support.skill_export_platform import requires_posix_host
 
 from deerflow.config.paths import Paths
 from deerflow.extensions.completed_run_evidence import HostCompletedRunEvidenceReader
@@ -25,16 +25,7 @@ from deerflow.skills.mutations.repository import SkillMutationRepository
 from deerflow.skills.mutations.scanner import ScanVerdict
 from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
 
-# The host skill-mutation service is POSIX-only by construction:
-# HostSkillMutationService._authorize rejects every non-POSIX host with
-# UNSUPPORTED_TOPOLOGY, and capture_package relies on O_NOFOLLOW, dir_fd
-# stat/open and O_DIRECTORY. Running this suite on Windows exercises the
-# refusal path only, so skip it explicitly (the repo's Windows convention)
-# instead of reporting dozens of failures on a supported dev host.
-pytestmark = pytest.mark.skipif(
-    os.name != "posix",
-    reason="host skill-mutation service is POSIX-only (UNSUPPORTED_TOPOLOGY elsewhere)",
-)
+pytestmark = requires_posix_host
 
 CONTENT = "---\nname: example\ndescription: Before\n---\nA\n"
 NEW = CONTENT.replace("\nA\n", "\nB\n")
