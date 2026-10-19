@@ -13,10 +13,8 @@ import pytest
 SKILL_ROOT = Path(__file__).resolve().parents[2] / "skills/public/skill-creator"
 
 
-@pytest.fixture
-def evaluator(monkeypatch):
-    monkeypatch.syspath_prepend(str(SKILL_ROOT))
-    spec = importlib.util.spec_from_file_location("skill_creator_run_eval", SKILL_ROOT / "scripts/run_eval.py")
+def _load_evaluator(skill_root):
+    spec = importlib.util.spec_from_file_location("skill_creator_run_eval", skill_root / "scripts/run_eval.py")
     module = importlib.util.module_from_spec(spec)
     previous = sys.dont_write_bytecode
     sys.dont_write_bytecode = True
@@ -25,6 +23,12 @@ def evaluator(monkeypatch):
     finally:
         sys.dont_write_bytecode = previous
     return module
+
+
+@pytest.fixture
+def evaluator(monkeypatch):
+    monkeypatch.syspath_prepend(str(SKILL_ROOT))
+    return _load_evaluator(SKILL_ROOT)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="The evaluator currently uses POSIX select on subprocess pipes")
@@ -63,10 +67,10 @@ def test_drains_completed_child_output(evaluator, monkeypatch, tmp_path, event_k
 def test_evaluator_import_preserves_bytecode_setting(monkeypatch, tmp_path):
     isolated = tmp_path / "skill"
     shutil.copytree(SKILL_ROOT, isolated, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-    monkeypatch.setattr(sys.modules[__name__], "SKILL_ROOT", isolated)
+    monkeypatch.syspath_prepend(str(isolated))
     monkeypatch.setattr(sys, "dont_write_bytecode", False)
     monkeypatch.delitem(sys.modules, "scripts.utils", raising=False)
     monkeypatch.delitem(sys.modules, "scripts", raising=False)
-    evaluator.__wrapped__(monkeypatch)
+    _load_evaluator(isolated)
     assert not list(isolated.rglob("*.pyc"))
     assert sys.dont_write_bytecode is False
