@@ -116,6 +116,8 @@ Tests: `html-assets.dom.test.ts`, `artifact-file-preview.dom.test.tsx`,
    prompt/error, never permission to overwrite the existing Agent.
    Import errors join FastAPI 422 validation messages into readable text while
    preserving string conflict details; unusable error bodies use a status fallback.
+   New-Agent saves require the latest `setup_agent` success and read-back.
+   ToolMessage/`deerflow_tool_meta.status` errors or exhausted retries restore Save.
 6. Components subscribe to thread state and render updates
 
 AI message grouping uses `extractContentFromMessage()` to identify visible answer content. A non-empty content array may contain only Anthropic thinking blocks; keep it in `assistant:processing` until answer content arrives. Cover both streamed snapshots in `tests/unit/core/messages/utils.test.ts`.

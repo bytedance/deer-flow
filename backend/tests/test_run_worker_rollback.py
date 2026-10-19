@@ -4182,7 +4182,7 @@ async def test_worker_finally_block_swallows_helper_exceptions(monkeypatch):
 
 @pytest.mark.anyio
 async def test_worker_skips_execution_and_finalization_after_ownership_loss():
-    """A fenced worker closes its stream without starting or finalizing work."""
+    """A fenced worker leaves terminal publication to durable recovery."""
     run_manager = RunManager()
     record = await run_manager.create("thread-lease-lost")
     record.ownership_lost = True
@@ -4219,7 +4219,7 @@ async def test_worker_skips_execution_and_finalization_after_ownership_loss():
     thread_store.update_display_name.assert_not_awaited()
     thread_store.update_status.assert_not_awaited()
     on_run_completed.assert_not_awaited()
-    bridge.publish_end.assert_awaited_once_with(record.run_id)
+    bridge.publish_end.assert_not_awaited()
 
 
 @pytest.mark.anyio

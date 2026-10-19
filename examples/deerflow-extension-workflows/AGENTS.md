@@ -29,8 +29,9 @@ Anchor results on the visible human input, including canonical __user rewrites;
 never use hidden system/memory IDs. Retain UI launch identity across refresh failures.
 Thread latest state is not immutable run output. Check message/run attribution,
 interrupts and pending human input before copying output. Agent success is never
-human approval. Live checkpoints retain the worker without replay; restart interrupts
-all waits. Bind human decisions to source output hash, step/attempt and authenticated
+human approval. Live checkpoints retain the worker. On restart, versioned bridge-journal replay
+requires an authenticated recovery action; reuse committed outputs and decisions.
+Legacy records are inspection-only. Never resubmit uncertain admissions. Bind human decisions to source output hash, step/attempt and authenticated
 session ActionContext, never ToolContext. Persist before waking; fence duplicate
 resume by checkpoint ID. Config revision is a declarative preflight guard. Store actual host assembly
 evidence per child run; never expose raw credentials. File checkpoints bind
@@ -40,3 +41,23 @@ that exact version. Never claim hard currency limits or freeze external state. D
 Tests live in backend/tests/test_workflow_plugin.py. Run the backend offline and
 blocking-I/O targets plus verify_browser.mjs. The browser fixture is loopback-only
 and synthetic; it must never become a deployed authentication bypass.
+
+Phase 3: recovery.py owns session reattachment, exact bridge replay and admission
+reconciliation classification. Store.put uses conditional revisions; drain SQLite
+writes through repeated cancellation before releasing the write lock. Service-own
+recovered-run cancellation through child cleanup and the terminal write, and drain
+it during shutdown even if its caller disconnects. Log failed service-owned actions
+at error level even after caller disconnection; omit raw exception payloads as for
+supervisor failures. Persist bridge intent
+before host effects and responses before worker delivery. Include worker/supervisor
+source and engine version in compatibility checks; Date/random are unavailable.
+Preserve original wait expiry and remaining execution budget. Read captured files
+by stored step/version after crashes, never overwrite them from mutable sources.
+Phase 4 leases/fenced dispatch remain unimplemented: retain the exclusive flock.
+Recovery tests: backend/tests/test_workflow_recovery.py, including real process kill.
+
+AgentRuns.configuration_revision(durable=True) uses a purpose-separated HMAC
+under the persisted host signing secret for restart comparison. Default revisions
+remain process-local. Rotation invalidates comparisons; no raw config or secret is
+returned. Recovery callers must bind a fresh authenticated session capability;
+never serialize handles or reconstruct authority from a stored user ID alone.
