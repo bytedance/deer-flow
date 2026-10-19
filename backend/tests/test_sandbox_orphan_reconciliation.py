@@ -2247,7 +2247,7 @@ def _active_sandbox(provider, sandbox_id, info, *, thread_key=("u", "t1")):
 
     provider._sandboxes[sandbox_id] = AioSandbox(id=sandbox_id, base_url=info.sandbox_url)
     provider._sandbox_infos[sandbox_id] = info
-    provider._last_activity[sandbox_id] = time.time()
+    provider._last_activity[sandbox_id] = time.monotonic()
     provider._thread_sandboxes[thread_key] = sandbox_id
     provider._backend.is_alive.return_value = True
 
@@ -2629,7 +2629,7 @@ def test_idle_destroy_skips_a_sandbox_re_acquired_after_the_idle_snapshot():
 
     def turn_lands_first(sandbox_id, **kwargs):
         # A turn arrives between the idle snapshot and the reservation.
-        provider._last_activity[sandbox_id] = time.time()
+        provider._last_activity[sandbox_id] = time.monotonic()
         return real_destroy_tracked(sandbox_id, **kwargs)
 
     provider._destroy_tracked = turn_lands_first
