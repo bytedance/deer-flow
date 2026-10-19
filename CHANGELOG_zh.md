@@ -1019,7 +1019,7 @@
   hyphen-case，或超过 64 个字符）时，现在与删除、回滚一样返回 `400`，不再返回 `500`
   并在每次请求时记录一次带堆栈的错误日志。只有名称校验映射为 `400`：损坏的历史记录
   仍返回 `500`，此前对其返回 `400` 的 `POST .../rollback` 现在也返回 `500`。用非法
-  名称删除技能时不再记录变更尾部（mutation tail）错误日志。
+  名称删除技能时不再记录变更尾部（mutation tail）错误日志。 ([#7123])
 
 - **项目：** 向调用者无权写入的项目上传书架文档或从对话保存文件时，不再遗留目录，
   也不再返回 `500`。这两个路由此前先把请求体暂存到
@@ -9436,3 +9436,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6988]: https://github.com/bytedance/deer-flow/pull/6988
 [#6991]: https://github.com/bytedance/deer-flow/pull/6991
 [#7040]: https://github.com/bytedance/deer-flow/pull/7040
+[#7123]: https://github.com/bytedance/deer-flow/pull/7123

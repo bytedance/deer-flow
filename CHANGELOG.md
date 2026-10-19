@@ -1271,7 +1271,7 @@ This release closes that milestone with **621 merged pull requests**.
   every request. Only the name check maps to `400`: a corrupt history record is
   still a `500`, and `POST .../rollback`, which answered one with `400`, now
   returns `500` too. Deleting a skill with an invalid name no longer logs a
-  mutation-tail error.
+  mutation-tail error. ([#7123])
 
 - **projects:** A shelf upload or save-from-thread into a project the caller
   cannot write no longer leaves a directory behind or answers `500`. Both
@@ -11868,3 +11868,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6988]: https://github.com/bytedance/deer-flow/pull/6988
 [#6991]: https://github.com/bytedance/deer-flow/pull/6991
 [#7040]: https://github.com/bytedance/deer-flow/pull/7040
+[#7123]: https://github.com/bytedance/deer-flow/pull/7123
