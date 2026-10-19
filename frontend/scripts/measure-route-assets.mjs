@@ -36,8 +36,13 @@ export function createBuildEnvironment(
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const frontendDir = path.resolve(scriptDir, "..");
-const nextBin = fileURLToPath(
-  new URL("../node_modules/next/dist/bin/next", import.meta.url),
+const nextBin = path.join(
+  frontendDir,
+  "node_modules",
+  "next",
+  "dist",
+  "bin",
+  "next",
 );
 
 /**
