@@ -2129,6 +2129,37 @@ async def test_local_owner_cancel_falls_back_when_durable_request_fails():
 
 
 @pytest.mark.anyio
+async def test_local_cancel_does_not_claim_unpersisted_terminal_status():
+    class FailingStatusStore(MemoryRunStore):
+        async def update_status(self, run_id, status, **kwargs):
+            if status == RunStatus.interrupted.value:
+                raise OSError("status store unavailable")
+            return await super().update_status(run_id, status, **kwargs)
+
+    store = FailingStatusStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-a",
+        run_ownership_config=_lease_config(heartbeat_enabled=True, lease_seconds=5),
+    )
+    record = await manager.create_or_reject("thread-1")
+    await manager.set_status(record.run_id, RunStatus.running)
+    record.task = asyncio.create_task(asyncio.sleep(3600))
+
+    try:
+        assert await manager.cancel(record.run_id) == CancelOutcome.cancelled
+        assert record.ownership_lost
+        assert record.status == RunStatus.error
+        assert record.terminal_commit_proof is None
+        assert record.terminal_status_persisted is False
+        assert (await store.get(record.run_id))["status"] == RunStatus.running.value
+    finally:
+        if not record.task.done():
+            record.task.cancel()
+        await asyncio.gather(record.task, return_exceptions=True)
+
+
+@pytest.mark.anyio
 async def test_owner_cancel_retry_on_peer_is_accepted():
     """A peer must treat the owner's interrupted status as an accepted cancel."""
     store = MemoryRunStore()
@@ -2537,6 +2568,7 @@ async def test_heartbeat_cancels_task_on_lease_loss():
     # doesn't await).
     await asyncio.sleep(0)
     assert record.ownership_lost is True
+    assert record.terminal_status_persisted is False
     assert record.abort_event.is_set() is True
     assert record.task.cancelled()
 
@@ -2635,6 +2667,41 @@ async def test_peer_reconciliation_fences_late_success_and_completion():
     assert record.status == RunStatus.error
     assert row["status"] == "error"
     assert row["error"] == "peer takeover"
+
+
+@pytest.mark.anyio
+async def test_peer_error_takeover_is_not_mistaken_for_local_error_commit():
+    store = MemoryRunStore()
+    config = _lease_config(heartbeat_enabled=True, grace_seconds=0)
+    owner = _make_manager(
+        store=store,
+        worker_id="worker-a",
+        run_ownership_config=config,
+    )
+    peer = _make_manager(
+        store=store,
+        worker_id="worker-b",
+        run_ownership_config=config,
+    )
+    record = await owner.create("thread-1")
+    await owner.set_status(record.run_id, RunStatus.running)
+    expired = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    record.lease_expires_at = expired
+    store._runs[record.run_id]["lease_expires_at"] = expired
+
+    recovered = await peer.reconcile_orphaned_inflight_runs(error="peer takeover")
+    assert [item.run_id for item in recovered] == [record.run_id]
+
+    await owner.set_status(
+        record.run_id,
+        RunStatus.error,
+        error="local failure",
+    )
+
+    row = await store.get(record.run_id)
+    assert row["error"] == "peer takeover"
+    assert record.ownership_lost is True
+    assert record.terminal_status_persisted is False
 
 
 @pytest.mark.anyio

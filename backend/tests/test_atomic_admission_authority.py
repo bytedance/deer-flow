@@ -385,3 +385,30 @@ async def test_delayed_atomic_interrupted_ack_cannot_restart_acknowledged_error(
         release_ack.set()
         await asyncio.gather(admission, return_exceptions=True)
         await manager.stop_heartbeat(timeout=0.1)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("action", ["interrupt", "rollback"])
+async def test_direct_cancel_keeps_terminal_confirmation_behind_rollback(store, action):
+    from deerflow.runtime.runs.manager import CancelOutcome
+
+    manager = manager_for(store)
+    record = await manager.create_or_reject("thread", user_id="review")
+    await manager.try_start(record.run_id)
+    record.task = asyncio.create_task(asyncio.Event().wait())
+    try:
+        assert await manager.cancel(record.run_id, action=action) == CancelOutcome.cancelled
+        assert (await store.get(record.run_id, user_id="review"))["status"] == "interrupted"
+        assert record.terminal_commit_proof.status == RunStatus.interrupted
+        assert record.rollback_finalization_pending is (action == "rollback")
+        assert record.terminal_status_persisted is (action == "interrupt")
+
+        if action == "rollback":
+            await manager.set_status(record.run_id, RunStatus.error, error="Rolled back by user")
+            assert record.terminal_status_persisted
+            assert not record.rollback_finalization_pending
+            assert record.terminal_commit_proof.status == RunStatus.error
+    finally:
+        record.task.cancel()
+        await asyncio.gather(record.task, return_exceptions=True)
+        await manager.stop_heartbeat(timeout=0.1)
