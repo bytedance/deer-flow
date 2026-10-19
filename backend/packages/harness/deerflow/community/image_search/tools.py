@@ -44,39 +44,33 @@ def _search_images(
     """
     try:
         from ddgs import DDGS
-        from ddgs.exceptions import DDGSException
     except ImportError as exc:
         raise RuntimeError("ddgs library not installed. Run: pip install ddgs") from exc
 
     ddgs = DDGS(timeout=30)
 
-    try:
-        kwargs = {
-            "region": region,
-            "safesearch": safesearch,
-            "max_results": max_results,
-        }
+    kwargs = {
+        "region": region,
+        "safesearch": safesearch,
+        "max_results": max_results,
+    }
 
-        if size:
-            kwargs["size"] = size
-        if color:
-            kwargs["color"] = color
-        if type_image:
-            kwargs["type_image"] = type_image
-        if layout:
-            kwargs["layout"] = layout
-        if license_image:
-            kwargs["license_image"] = license_image
+    if size:
+        kwargs["size"] = size
+    if color:
+        kwargs["color"] = color
+    if type_image:
+        kwargs["type_image"] = type_image
+    if layout:
+        kwargs["layout"] = layout
+    if license_image:
+        kwargs["license_image"] = license_image
 
-        results = ddgs.images(query, **kwargs)
-        return list(results) if results else []
-
-    except DDGSException as exc:
-        # DDGS uses this exact exception for a successful search with no hits.
-        # Timeouts, rate limits, and other failures must reach the tool caller.
-        if type(exc) is DDGSException and str(exc) == "No results found.":
-            return []
-        raise
+    # DDGS 9.14.1 can raise its "No results found." sentinel after a backend
+    # exceeds the dispatcher deadline. Only a returned empty collection proves
+    # an empty search; propagate every exception to the async error boundary.
+    results = ddgs.images(query, **kwargs)
+    return list(results) if results else []
 
 
 @tool("image_search", parse_docstring=True)

@@ -41,14 +41,10 @@ leave `config.json` with a dangling keychain reference. The transaction snapshot
 still supplies the previous OAuth data for logout and restores the complete old
 tree if any switch step fails.
 
-### DDG Image Search (`community/image_search/`)
+### DDG image search
 
-Keep configuration loading and DDGS execution inside the worker thread.
-Only an empty result set or DDGS's exact base `DDGSException("No results found.")`
-is an empty search. Other SDK, import, configuration, and result-iteration
-failures become JSON errors containing the original query at the async tool
-boundary. Regressions live in `tests/test_image_search_errors.py`; existing image
-search and blocking-I/O tests cover result fields, filters, and thread offload.
+Offload config/DDGS together. Only returned empties mean `No images found`;
+the SDK sentinel can hide timeouts. See `tests/test_image_search_errors.py`.
 
 ### Browser Progress Screenshots (`community/browser_automation/`)
 
