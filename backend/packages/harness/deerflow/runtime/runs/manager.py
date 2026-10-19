@@ -1693,6 +1693,17 @@ class RunManager:
                 record.task.cancel()
         logger.info("Run %s cancellation signalled locally (action=%s)", run_id, action)
 
+    async def request_fenced_cancel(self, run_id, *, execution_fence, user_id):
+        """Persist cancellation under the extension epoch; the run owner consumes it."""
+        import inspect
+
+        if not self.heartbeat_enabled or self._store is None or "execution_fence" not in inspect.signature(self._store.request_cancel).parameters:
+            raise RunIdempotencyUnsupported("The configured RunStore does not support fenced cancellation")
+        record = await self.get(run_id, user_id=user_id)
+        if record is None:
+            raise ConflictError("Run unavailable")
+        await self._store.request_cancel(run_id, action="interrupt", execution_fence=execution_fence, user_id=user_id)
+
     async def cancel(self, run_id: str, *, action: str = "interrupt") -> CancelOutcome:
         """Request cancellation of a run.
 
@@ -1914,6 +1925,7 @@ class RunManager:
         evidence_agent_id: str | None = None,
         idempotency_request: dict[str, Any] | None = None,
         run_id: str | None = None,
+        execution_fence=None,
     ) -> RunRecord:
         """Atomically admit a normal agent run for a thread."""
         return await self._admit_thread_operation(
@@ -1931,6 +1943,7 @@ class RunManager:
             evidence_agent_id=evidence_agent_id,
             idempotency_request=idempotency_request,
             run_id=run_id,
+            execution_fence=execution_fence,
         )
 
     async def _close_cancelled_admission(self, record: RunRecord) -> None:
@@ -2004,6 +2017,7 @@ class RunManager:
         evidence_agent_id: str | None = None,
         idempotency_request: dict[str, Any] | None = None,
         run_id: str | None = None,
+        execution_fence=None,
     ) -> RunRecord:
         """Atomically check for inflight runs and create a new one.
 
@@ -2034,6 +2048,9 @@ class RunManager:
         lease_expires_at = self._compute_lease_expires_at()
         grace_seconds = self._run_ownership_config.grace_seconds if self._run_ownership_config else 10
 
+        if execution_fence is not None and (self._store is None or not _store_accepts_idempotency_parameter(self._store, "execution_fence") or multitask_strategy != "reject"):
+            raise RunIdempotencyUnsupported("The configured RunStore does not support execution fencing")
+
         interrupted_records: list[RunRecord] = []
         record = RunRecord(
             run_id=run_id,
@@ -2058,7 +2075,7 @@ class RunManager:
         )
 
         async with self._lock:
-            if idempotency_key is not None:
+            if idempotency_key is not None and execution_fence is None:
                 for existing in self._runs.values():
                     if existing.idempotency_key != idempotency_key:
                         continue
@@ -2125,6 +2142,8 @@ class RunManager:
                         "created_at": now,
                         "grace_seconds": grace_seconds,
                     }
+                    if execution_fence is not None:
+                        create_kwargs["execution_fence"] = execution_fence
                     if idempotency_key is not None:
                         create_kwargs["idempotency_key"] = idempotency_key
                     if evidence_origin != "unknown":

@@ -924,7 +924,7 @@ extensions = []
 
 [[package]]
 name = "deerflow-extension-api"
-version = "0.2.8"
+version = "0.2.9"
 source = { editable = "packages/extension-api" }
 
 [[package]]

@@ -48,7 +48,7 @@ function mount(root, context) {
   const form = node('form');
   const submit = node('button',t('Launch workflow','启动工作流'),{type:'submit'});
   form.append(node('label',t('Inspectable JavaScript script','可检查的 JavaScript 脚本')),script,node('label',t('Arguments (JSON object)','参数（JSON 对象）')),args,submit);
-  panel.append(node('h2',t('Script workflows','脚本工作流')),node('p',t('Versioned workflows with authenticated output review. After restart, sign in and recover compatible runs. Single Gateway only; uncertain child effects require reconciliation; no hard monetary budget. File approval covers a verified immutable snapshot; linked files require explicit capture.','版本化工作流支持登录用户成果确认。重启后请登录并恢复兼容的工作流。仅支持单 Gateway；不确定的子任务效果需要核对；无金额硬上限。文件确认针对经过哈希验证的不可覆盖快照；链接文件需显式捕获。')),notice,library,form,navigation,detail);
+  panel.append(node('h2',t('Script workflows','脚本工作流')),node('p',t('Versioned workflows with authenticated output review. After restart, sign in and recover compatible runs. Multi-Gateway control requires the shared PostgreSQL mode; takeover requires sign-in; uncertain child effects require reconciliation; no hard monetary budget. File approval covers a verified immutable snapshot; linked files require explicit capture.','版本化工作流支持登录用户成果确认。重启后请登录并恢复兼容的工作流。多 Gateway 控制需启用共享 PostgreSQL 模式；接管需要登录；不确定的子任务效果需要核对；无金额硬上限。文件确认针对经过哈希验证的不可覆盖快照；链接文件需显式捕获。')),notice,library,form,navigation,detail);
   root.append(sheet,panel);
   const alive = version => !disposed && !context.signal?.aborted && version === generation;
   async function call(action,payload) {

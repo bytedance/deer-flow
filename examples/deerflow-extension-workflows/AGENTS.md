@@ -22,7 +22,7 @@ separately. Hash the Agent allowlist in canonical sorted order. Owner scope appl
 to every public read and mutation.
 Own persistence through supervisor publication even if the launching caller cancels.
 Serialize launch admission and shutdown. After artifact IO, validate call limits
-and step uniqueness together with await-free reservation. Hold the process lock across service life;
+and step uniqueness together with await-free reservation. In SQLite mode hold the process lock across service life;
 do not recover live records while another Gateway owns the file.
 
 Anchor results on the visible human input, including canonical __user rewrites;
@@ -53,7 +53,16 @@ before host effects and responses before worker delivery. Include worker/supervi
 source and engine version in compatibility checks; Date/random are unavailable.
 Preserve original wait expiry and remaining execution budget. Read captured files
 by stored step/version after crashes, never overwrite them from mutable sources.
-Phase 4 leases/fenced dispatch remain unimplemented: retain the exclusive flock.
+PostgreSQL mode uses postgres.py/cluster.py: the host and extension must share
+one database/schema. Database-clock leases use monotonically increasing epochs.
+Every supervisor write, file capture, child admission and child cancellation is
+fenced. Host admission/cancel lock the lease row in their transaction; never replace
+this with a preflight check. Durable controls are immutable and consumed by the
+owner. Lease loss kills only the local JS worker; never clean up successor children.
+Unknown child reservations retain cluster capacity. Takeover requires a fresh
+session and matching runtime/config; there is no unattended authority reattachment.
+Keep the SQLite flock default. Cluster tests use DEERFLOW_TEST_WORKFLOW_POSTGRES
+and disposable schemas, including real process kill and a host row-lock race.
 Recovery tests: backend/tests/test_workflow_recovery.py, including real process kill.
 
 AgentRuns.configuration_revision(durable=True) uses a purpose-separated HMAC

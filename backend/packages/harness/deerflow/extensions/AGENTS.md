@@ -473,3 +473,9 @@ plugin boundary, and the lifecycle hook would be a durable core contract with
 a single consumer. The generator sits behind the narrow `enqueue_summary`
 interface so a future document-lifecycle hook can lift generation into an
 extension without touching schema or rendering.
+
+Extension API 0.2.9 adds `ExecutionFence` to AgentRuns.start/cancel. Accept only the
+capability's plugin namespace and recheck the authenticated user as usual. Stamp
+fences on internal request state, never HTTP context/config. Forward admission to
+the RunStore transaction; require run heartbeats and a shared stream bridge. Fenced
+cancel uses the durable cancellation request, consumed by the existing child owner.

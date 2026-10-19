@@ -12,7 +12,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from typing import Any
 
-from deerflow_extension_api.agent_runs import AgentRun, AgentRunError
+from deerflow_extension_api.agent_runs import AgentRun, AgentRunError, ExecutionFence
 from fastapi import HTTPException, Request
 from pydantic import TypeAdapter, ValidationError
 
@@ -189,7 +189,7 @@ class _BoundAgentRuns:
             response = await create_thread(ThreadCreateRequest(assistant_id=assistant_id, thread_id=thread_id, metadata=_json_object(metadata) or {}), request)
             return response.thread_id
 
-    async def _start(self, *, thread_id, input=None, resume=None, context=None, idempotency_key=None):
+    async def _start(self, *, thread_id, input=None, resume=None, context=None, idempotency_key=None, execution_fence=None):
         from app.gateway.routers.thread_runs import create_run
         from app.gateway.run_models import RunCreateRequest
         from app.gateway.services import resolve_thread_assistant_id
@@ -203,13 +203,21 @@ class _BoundAgentRuns:
         if run_context is not None and any(key in run_context for key in ("agent_name", "is_bootstrap")):
             raise AgentRunError(422, "Agent identity is bound to the thread")
         async with self._request("runs:create", thread_id) as request:
+            if execution_fence is not None:
+                if not isinstance(execution_fence, ExecutionFence) or self._plugin_namespace is None or execution_fence.namespace != self._plugin_namespace:
+                    raise AgentRunError(422, "Execution fence must belong to this plugin")
+                from app.gateway.deps import get_run_manager, get_stream_bridge
+
+                if not get_run_manager(request).heartbeat_enabled or getattr(get_stream_bridge(request), "supports_cross_process", False) is not True:
+                    raise AgentRunError(503, "Fenced Agent admission requires run heartbeats and a cross-process stream bridge")
+                request.state.extension_execution_fence = execution_fence
             assistant_id = await resolve_thread_assistant_id(request, thread_id, fail_closed=True)
             body = RunCreateRequest(assistant_id=assistant_id, input=run_input, command=command, context=run_context, on_disconnect="continue")
             response = await create_run(thread_id, body, request, idempotency_key=f"extension:{self._plugin_namespace or ''}:{idempotency_key}" if idempotency_key is not None else None)
             return _view(response)
 
-    async def start(self, *, thread_id, input, context=None, idempotency_key=None) -> AgentRun:
-        return await self._start(thread_id=thread_id, input=input, context=context, idempotency_key=idempotency_key)
+    async def start(self, *, thread_id, input, context=None, idempotency_key=None, execution_fence=None) -> AgentRun:
+        return await self._start(thread_id=thread_id, input=input, context=context, idempotency_key=idempotency_key, execution_fence=execution_fence)
 
     async def resume(self, *, thread_id, resume, idempotency_key=None) -> AgentRun:
         if resume is None:
@@ -228,11 +236,26 @@ class _BoundAgentRuns:
         async with self._request("threads:read", thread_id) as request:
             return (await get_thread_state(thread_id, request)).model_dump(mode="json")
 
-    async def cancel(self, *, thread_id, run_id) -> None:
+    async def cancel(self, *, thread_id, run_id, execution_fence=None) -> None:
         from app.gateway.routers.thread_runs import cancel_run
 
         async with self._request("runs:cancel", thread_id) as request:
-            await cancel_run(thread_id, run_id, request, wait=False, action="interrupt")
+            if execution_fence is not None:
+                from app.gateway.deps import get_run_manager
+                from deerflow.runtime.runs.manager import ConflictError, RunIdempotencyUnsupported
+
+                if not isinstance(execution_fence, ExecutionFence) or self._plugin_namespace is None or execution_fence.namespace != self._plugin_namespace:
+                    raise AgentRunError(422, "Execution fence must belong to this plugin")
+                manager = get_run_manager(request)
+                run = await manager.get(run_id, user_id=self._user_id)
+                if run is None or run.thread_id != thread_id:
+                    raise AgentRunError(404, "Run unavailable")
+                try:
+                    await manager.request_fenced_cancel(run_id, execution_fence=execution_fence, user_id=self._user_id)
+                except (ConflictError, RunIdempotencyUnsupported) as exc:
+                    raise AgentRunError(409, str(exc)) from exc
+            else:
+                await cancel_run(thread_id, run_id, request, wait=False, action="interrupt")
 
     async def wait(self, *, thread_id, run_id, timeout=60) -> AgentRun:
         if not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or not 0 < timeout <= 3600:
