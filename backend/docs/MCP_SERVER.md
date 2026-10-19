@@ -416,7 +416,13 @@ This state is process-local and is never written back to `extensions_config.json
 or an environment variable. A restarted Gateway needs a valid configured
 refresh token, and separate Gateway workers do not coordinate token rotation.
 Personal MCP connections remain owner-scoped and do not use this deployment
-state, even if their runtime names match a deployment server.
+state, even if their runtime names match a deployment server. A personal
+server's runtime name is derived from its complete definition, so editing,
+disabling, or deleting it while a task is in flight leaves the persisted task
+handle unresolvable. That task fails permanently with the connection error
+instead of retrying forever; if the user had requested cancellation, it also
+ends as `failed` because the remote task can no longer be reached. Restoring
+the same definition does not revive an already terminal task.
 
 When `user_auth` is enabled on an HTTP/SSE server, background status and
 cancellation calls use the persisted task owner's configured credential,

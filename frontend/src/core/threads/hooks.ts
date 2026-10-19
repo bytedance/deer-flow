@@ -154,25 +154,58 @@ export type PendingPreparedReplayMask = {
   replacementHumanMessageId?: string;
 };
 
-export function hasToolResult(messages: Message[], toolName: string): boolean {
-  const matchingToolCallIds = new Set<string>();
+export type ToolResultStatus = "pending" | "success" | "error";
+
+function isErrorToolMessage(message: Message): boolean {
+  if (message.type !== "tool") {
+    return false;
+  }
+  if (message.status === "error") {
+    return true;
+  }
+  const metadata = message.additional_kwargs?.deerflow_tool_meta;
+  return (
+    typeof metadata === "object" &&
+    metadata !== null &&
+    "status" in metadata &&
+    metadata.status === "error"
+  );
+}
+
+export function getToolResultStatus(
+  messages: Message[],
+  toolName: string,
+): ToolResultStatus {
+  let latestToolCallId: string | undefined;
   for (const message of messages) {
     if (message.type !== "ai") {
       continue;
     }
     for (const toolCall of message.tool_calls ?? []) {
       if (toolCall.name === toolName && toolCall.id) {
-        matchingToolCallIds.add(toolCall.id);
+        latestToolCallId = toolCall.id;
       }
     }
   }
 
-  return messages.some(
-    (message) =>
-      message.type === "tool" &&
-      (message.name === toolName ||
-        matchingToolCallIds.has(message.tool_call_id)),
-  );
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.type !== "tool") {
+      continue;
+    }
+    const matches = latestToolCallId
+      ? message.tool_call_id === latestToolCallId
+      : message.name === toolName;
+    if (matches) {
+      return isErrorToolMessage(message) ? "error" : "success";
+    }
+  }
+
+  return "pending";
+}
+
+export function hasToolResult(messages: Message[], toolName: string): boolean {
+  return getToolResultStatus(messages, toolName) !== "pending";
 }
 
 /**
