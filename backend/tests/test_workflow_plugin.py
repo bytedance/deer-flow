@@ -608,7 +608,10 @@ async def test_cancel_while_agent_pending_stops_promptly(plugin):
 )
 async def test_spinning_script_still_hits_turn_limit(plugin, monkeypatch, script):
     service = plugin[2]
-    monkeypatch.setattr(sys.modules[type(service).__module__], "TURN_LIMIT", 50)
+    # Exercise the frame cap without racing 50 durable frame commits against
+    # the fixture's short wall deadline on loaded CI runners.
+    monkeypatch.setattr(sys.modules[type(service).__module__], "TURN_LIMIT", 3)
+    monkeypatch.setitem(service.config, "timeout_seconds", 30)
     result = await launch(plugin, script)
     final = await done(plugin, result["run_id"])
     assert final["status"] == "failed", final

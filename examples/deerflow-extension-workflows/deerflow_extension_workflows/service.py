@@ -177,7 +177,13 @@ class Workflows(Recovery, Lifecycle, Artifacts):
         try:
             await asyncio.shield(task)
         except asyncio.CancelledError:
-            await task
+            while not task.done():
+                try:
+                    await asyncio.wait({task})
+                except asyncio.CancelledError:
+                    continue
+            if not task.cancelled():
+                task.exception()
             raise
 
     async def save_drained(self, owner, record):
@@ -321,6 +327,12 @@ class Workflows(Recovery, Lifecycle, Artifacts):
         return {"runs": [project(r, False) for r in records], "limit": 20}
 
     async def cancel(self, payload, context):
+        task = asyncio.create_task(self.apply_cancel(payload, context))
+        self.admissions.add(task)
+        task.add_done_callback(self.admission_finished)
+        return await asyncio.shield(task)
+
+    async def apply_cancel(self, payload, context):
         # Serialize against recovery publication. A recovered record cannot be
         # published after a concurrent cancellation has committed.
         async with self.launch_lock:

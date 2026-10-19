@@ -301,3 +301,75 @@ async def test_recovered_interrupted_child_cannot_dispatch_even_when_script_catc
     final = await done(plugin, run_id)
     assert final["status"] == "needs_reconciliation", final
     assert len(runs.starts) == 1
+
+
+async def test_recovered_cancel_survives_caller_cancellation(plugin, monkeypatch):
+    _, actions, service, runs = plugin
+    run_id = (await launch(plugin, "return await agent({stepId:'a',agentRef:'lead_agent',task:1});"))["run_id"]
+    await done(plugin, run_id)
+    record = await asyncio.to_thread(service.store.get, "alice", run_id)
+    record["status"] = "running"
+    record["steps"][0]["status"] = "running"
+    await install_snapshot(plugin, record)
+    child_id = record["steps"][0]["run_id"]
+    runs.runs[child_id] = replace(runs.runs[child_id], status="running")
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = service.cancel_child
+
+    async def blocked_cancel(capability, row):
+        entered.set()
+        await release.wait()
+        await original(capability, row)
+
+    monkeypatch.setattr(service, "cancel_child", blocked_cancel)
+    caller = asyncio.create_task(actions["cancel"]({"run_id": run_id}, context(runs)))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        caller.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+        assert service.admissions, "Service must retain ownership of child cleanup"
+    finally:
+        release.set()
+        await asyncio.gather(caller, *list(service.admissions), return_exceptions=True)
+    final = await actions["get"]({"run_id": run_id}, context(runs))
+    assert final["status"] == "cancelled", final
+    assert final["steps"][0]["child_status"] == "interrupted"
+    assert (await actions["cancel"]({"run_id": run_id}, context(runs)))["status"] == "cancelled"
+
+
+async def test_save_drains_repeated_cancellation_before_unlocking(plugin, monkeypatch):
+    import threading
+
+    service = plugin[2]
+    run_id = (await launch(plugin, "return 1;"))["run_id"]
+    await done(plugin, run_id)
+    record = await asyncio.to_thread(service.store.get, "alice", run_id)
+    revision = record["revision"]
+    entered, release = asyncio.Event(), threading.Event()
+    loop = asyncio.get_running_loop()
+    original = service.store.put
+
+    def blocked_put(owner, snapshot):
+        loop.call_soon_threadsafe(entered.set)
+        assert release.wait(10), "Test did not release SQLite write"
+        return original(owner, snapshot)
+
+    monkeypatch.setattr(service.store, "put", blocked_put)
+    caller = asyncio.create_task(service.save("alice", record))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        for _ in range(2):
+            caller.cancel()
+            for _ in range(3):
+                await asyncio.sleep(0)
+        assert service.write_lock.locked(), "Do not unlock while SQLite is still committing"
+        assert not caller.done(), "Cancellation must wait for revision publication"
+    finally:
+        release.set()
+        await asyncio.gather(caller, return_exceptions=True)
+    assert caller.cancelled()
+    assert record["revision"] == revision + 1
+    assert (await asyncio.to_thread(service.store.get, "alice", run_id))["revision"] == record["revision"]
+    await service.save("alice", record)
+    assert record["revision"] == revision + 2

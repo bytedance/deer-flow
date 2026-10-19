@@ -288,6 +288,9 @@ Caller cancellation during launch does not abandon a committed record: the servi
 owns persistence through supervisor publication, including shutdown coordination.
 A matching retry returns that same supervised record rather than an unowned queued
 launch. This does not add execution replay or resume.
+Cancellation of a recoverable workflow is also service-owned: disconnecting the
+caller does not abandon child cleanup or its final status write. Shutdown drains
+that cleanup before releasing the store's process lock.
 
 Result collection anchors on the visible human input, including the host's canonical
 `__user` rewrite after dynamic context injection. Hidden system/memory reminders
