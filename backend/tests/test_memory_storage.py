@@ -430,3 +430,37 @@ class TestMarkdownMemoryStorage:
     )
     def test_invalid_or_non_object_fenced_summary_rejected(self, body):
         assert mf._parse_markdown_memory(body) is None
+
+
+class TestFactMarkdownBom:
+    """Hand-edited canonical facts must survive the complete storage read path."""
+
+    def test_fact_saved_with_utf8_bom_round_trips_through_storage(self, tmp_path):
+        storage = _storage_at(tmp_path / "memory.json")
+        memory = create_empty_memory()
+        memory["facts"] = [
+            {
+                "id": "fact_bom",
+                "title": "Shared decision",
+                "content": "Use Postgres. Preserve an interior \ufeff character.",
+                "category": "context",
+                "confidence": 0.9,
+                "createdAt": "2026-10-19T00:00:00Z",
+                "source": "manual",
+            }
+        ]
+        assert storage.save(memory, "agent-a", user_id="alice")
+        before = storage.load("agent-a", user_id="alice")
+        (fact_path,) = tmp_path.rglob("fact_bom.md")
+        original = fact_path.read_bytes()
+        assert not original.startswith(b"\xef\xbb\xbf")
+        fact_path.write_bytes(b"\xef\xbb\xbf" + original)
+
+        reloaded = storage.reload("agent-a", user_id="alice")
+
+        assert reloaded["facts"] == before["facts"]
+        (fact,) = reloaded["facts"]
+        assert fact["id"] == "fact_bom"
+        assert fact["title"] == "Shared decision"
+        assert fact["content"] == memory["facts"][0]["content"]
+        assert fact["scope"] == {"userId": "alice", "agentName": "agent-a"}
