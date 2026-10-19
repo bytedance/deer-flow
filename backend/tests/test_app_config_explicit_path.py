@@ -7,6 +7,8 @@ must keep following that file instead of ambient default resolution.
 
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -161,3 +163,117 @@ def test_explicit_pin_revalidates_edits_and_clears_on_reset(isolated_project: Pa
     set_app_config(injected)
     assert app_config_module._app_config_source is None
     assert get_app_config() is injected
+
+
+@pytest.mark.parametrize("entrypoint", ["reload", "client"])
+@pytest.mark.parametrize("has_decoy", [False, True])
+def test_relative_explicit_pin_survives_working_directory_changes(isolated_project: Path, monkeypatch: pytest.MonkeyPatch, entrypoint: str, has_decoy: bool) -> None:
+    custom = isolated_project / "custom" / "config.yaml"
+    custom.parent.mkdir()
+    _write_config(custom, model_name="original-model")
+    elsewhere = isolated_project / "elsewhere"
+    elsewhere.mkdir()
+    if has_decoy:
+        decoy = elsewhere / "custom" / "config.yaml"
+        decoy.parent.mkdir()
+        _write_config(decoy, model_name="decoy-model")
+    monkeypatch.chdir(isolated_project)
+    if entrypoint == "client":
+        DeerFlowClient(config_path="custom/config.yaml")
+    else:
+        reload_app_config("custom/config.yaml")
+
+    monkeypatch.chdir(elsewhere)
+
+    assert _model_names(get_app_config()) == ["original-model"]
+    assert app_config_module._app_config_source == str(custom)
+    _write_config(custom, model_name="edited-model")
+    assert _model_names(get_app_config()) == ["edited-model"]
+
+
+@pytest.mark.parametrize("operation", ["get", "explicit-reload", "ambient-reload", "reset", "set"])
+def test_explicit_reload_publishes_cache_and_pin_atomically(isolated_project: Path, monkeypatch: pytest.MonkeyPatch, operation: str) -> None:
+    ambient = isolated_project / "config.yaml"
+    first = isolated_project / "first.yaml"
+    second = isolated_project / "second.yaml"
+    third = isolated_project / "third.yaml"
+    for path, name in [(ambient, "ambient-model"), (first, "first-model"), (second, "second-model"), (third, "third-model")]:
+        _write_config(path, model_name=name)
+    injected = AppConfig.from_file(str(third))
+    reload_app_config(str(first))
+
+    published = threading.Event()
+    release = threading.Event()
+    contender_reached = threading.Event()
+    roles = threading.local()
+    original_load = app_config_module._load_and_cache_app_config
+    original_lock = getattr(app_config_module, "_app_config_lock", threading.RLock())
+
+    class ObservedLock:
+        def __enter__(self):
+            if getattr(roles, "value", None) == "contender":
+                contender_reached.set()
+            return original_lock.__enter__()
+
+        def __exit__(self, *args):
+            return original_lock.__exit__(*args)
+
+    def pause_after_cache_load(*args, **kwargs):
+        loaded = original_load(*args, **kwargs)
+        if getattr(roles, "value", None) == "writer":
+            published.set()
+            assert release.wait(10), "writer was not released"
+        return loaded
+
+    def writer():
+        roles.value = "writer"
+        return reload_app_config(str(second))
+
+    def contender():
+        roles.value = "contender"
+        try:
+            if operation == "get":
+                return get_app_config()
+            if operation == "explicit-reload":
+                return reload_app_config(str(third))
+            if operation == "ambient-reload":
+                return reload_app_config()
+            if operation == "reset":
+                return reset_app_config()
+            return set_app_config(injected)
+        finally:
+            # Unfixed operations complete without a critical section. Observe that
+            # boundary too, so the test reproduces the race without timing sleeps.
+            contender_reached.set()
+
+    monkeypatch.setattr(app_config_module, "_load_and_cache_app_config", pause_after_cache_load)
+    monkeypatch.setattr(app_config_module, "_app_config_lock", ObservedLock(), raising=False)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        pending_writer = pool.submit(writer)
+        try:
+            assert published.wait(10), "writer did not publish its cache"
+            pending_contender = pool.submit(contender)
+            assert contender_reached.wait(10), "contender did not reach the cache operation"
+        finally:
+            release.set()
+        assert _model_names(pending_writer.result(timeout=10)) == ["second-model"]
+        contender_result = pending_contender.result(timeout=10)
+
+    expected_source = {"get": str(second), "explicit-reload": str(third)}.get(operation)
+    assert app_config_module._app_config_source == expected_source
+    if operation == "get":
+        assert _model_names(contender_result) == ["second-model"]
+    if operation == "set":
+        assert get_app_config() is injected
+    if operation == "reset":
+        assert app_config_module._app_config is None
+    expected_model = {
+        "get": "second-model",
+        "explicit-reload": "third-model",
+        "ambient-reload": "ambient-model",
+        "reset": "ambient-model",
+        "set": "third-model",
+    }[operation]
+    if operation != "reset":
+        assert _model_names(app_config_module._app_config) == [expected_model]
+    assert _model_names(get_app_config()) == [expected_model]

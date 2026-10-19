@@ -3288,6 +3288,11 @@ editing the saved agent configuration to refresh the selection.
 
 DeerFlow can be used as an embedded Python library without running the full HTTP services. The `DeerFlowClient` provides direct in-process access to all agent and Gateway capabilities, returning the same response schemas as the HTTP Gateway API. The HTTP Gateway also exposes `DELETE /api/threads/{thread_id}` to remove DeerFlow-managed local thread data after the LangGraph thread itself has been deleted:
 
+An embedded `DeerFlowClient(config_path="custom/config.yaml")` keeps the process
+config singleton on that file, even after a working-directory change. Later edits
+to the file are still detected. Call `reload_app_config()` without a path to resume
+ambient config discovery, or `reset_app_config()` to clear the cached selection.
+
 For database-backed run events, deleting a run preserves its thread's sequence watermark. Thread deletion removes that watermark once no events remain, allowing a recreated thread to restart at sequence 1. Owner-scoped deletion preserves the watermark when another owner's events remain.
 
 Single-process JSONL event storage also retains the thread sequence watermark
