@@ -58,6 +58,14 @@ def test_explicit_selection_from_unrelated_cwd(tmp_path, entrypoint, relative):
     assert json.loads(result.stdout) == ["selected", None]
 
 
+def test_explicit_selection_accepts_a_leading_utf8_bom(tmp_path):
+    selected = tmp_path / "stage.env"
+    selected.write_text("\ufeffENV_FILE_TEST_VALUE=selected\n", encoding="utf-8")
+    result = run_startup(tmp_path, selector=selected)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == ["selected", None]
+
+
 @pytest.mark.parametrize("value", ["exported", ""])
 def test_process_environment_wins(tmp_path, value):
     selected = tmp_path / "stage.env"

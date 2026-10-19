@@ -43,6 +43,20 @@ def test_reuses_an_existing_value_without_generating(tmp_path: Path) -> None:
     assert path.read_text(encoding="utf-8") == "existing-value\n"
 
 
+def test_reads_a_bom_prefixed_valid_secret_without_regenerating(tmp_path: Path) -> None:
+    path = tmp_path / ".secret"
+    path.write_text("\ufeffexisting-value\n", encoding="utf-8")
+
+    def validate(value: str) -> None:
+        if value != "existing-value":
+            raise ValueError("invalid secret")
+
+    def generate() -> str:
+        raise AssertionError("a BOM must not make a valid secret look invalid")
+
+    assert read_or_create_secret_file(path, generate, validate=validate) == "existing-value"
+
+
 def test_a_peer_that_publishes_first_wins(tmp_path: Path) -> None:
     """Deterministic race: the peer creates the file between our existence check and our create.
 

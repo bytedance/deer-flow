@@ -96,7 +96,7 @@ def read_or_create_secret_file(
 
 def _read(path: Path) -> str | None:
     try:
-        return path.read_text(encoding="utf-8").strip()
+        return path.read_text(encoding="utf-8-sig").strip()
     except FileNotFoundError:
         return None
 

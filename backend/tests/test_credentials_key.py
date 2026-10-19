@@ -66,6 +66,15 @@ def test_parse_keeps_rotation_order_and_ignores_blank_entries() -> None:
     assert parse_credentials_keys(f" {KEY_NEW} , {KEY_OLD} ,") == [KEY_NEW, KEY_OLD]
 
 
+def test_credentials_key_file_accepts_a_leading_utf8_bom(tmp_path: Path) -> None:
+    key_file = tmp_path / CREDENTIALS_KEY_FILENAME
+    key_file.write_bytes(b"\xef\xbb\xbf" + KEY_NEW.encode("ascii"))
+
+    cipher = load_credentials_cipher(base_dir=tmp_path)
+
+    assert cipher.encrypt_text("value")
+
+
 @pytest.mark.parametrize(
     "raw",
     [
