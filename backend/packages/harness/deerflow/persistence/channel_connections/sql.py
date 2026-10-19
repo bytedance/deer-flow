@@ -12,6 +12,8 @@ from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import delete, func, select, text, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -600,6 +602,54 @@ class ChannelConnectionRepository:
                     last_error = exc
                     await session.rollback()
             raise last_error  # type: ignore[misc]  # loop runs at least once
+
+    async def claim_thread_id(
+        self,
+        *,
+        connection_id: str,
+        owner_user_id: str,
+        provider: str,
+        external_conversation_id: str,
+        thread_id: str,
+        external_topic_id: str | None = None,
+    ) -> str:
+        """Bind a conversation to ``thread_id`` unless it is bound already; return its thread.
+
+        The first binding of a conversation, unlike ``set_thread_id``'s
+        rebinding (``/new``): two Gateway instances that both created a thread
+        for one new conversation must converge on one of them. A single
+        ``INSERT ... ON CONFLICT DO NOTHING`` lets the first writer win, and
+        the SELECT in the same transaction returns whichever row won (Postgres
+        READ COMMITTED reads the peer's committed row; SQLite serializes
+        writers).
+        """
+        topic_id = external_topic_id or ""
+        async with self.session_factory() as session:
+            insert = pg_insert if session.get_bind().dialect.name == "postgresql" else sqlite_insert
+            await session.execute(
+                insert(ChannelConversationRow)
+                .values(
+                    id=self._new_id(),
+                    connection_id=connection_id,
+                    owner_user_id=owner_user_id,
+                    provider=provider,
+                    external_conversation_id=external_conversation_id,
+                    external_topic_id=topic_id,
+                    thread_id=thread_id,
+                )
+                .on_conflict_do_nothing(index_elements=["connection_id", "external_conversation_id", "external_topic_id"])
+            )
+            bound = (
+                await session.execute(
+                    select(ChannelConversationRow.thread_id).where(
+                        ChannelConversationRow.connection_id == connection_id,
+                        ChannelConversationRow.external_conversation_id == external_conversation_id,
+                        ChannelConversationRow.external_topic_id == topic_id,
+                    )
+                )
+            ).scalar_one()
+            await session.commit()
+            return bound
 
     async def get_thread_id(
         self,

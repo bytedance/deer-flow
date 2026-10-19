@@ -366,12 +366,14 @@ def _open_directory_chain(path, budget):
 
 
 def _capture(storage, name, snapshot, budget):
+    from deerflow.skills.mutations.guard import managed_read
+
     if not isinstance(name, str) or len(name) > 64 or not _NAME.fullmatch(name):
         raise SkillExportError(422, "skill_export_unsupported", "Invalid skill name.")
     root = storage.get_custom_skill_dir(name)
     budget.check()
     try:
-        with skill_projection_read_lock(storage, timeout=LOCK_TIMEOUT_SECONDS, check=budget.check):
+        with skill_projection_read_lock(storage, timeout=LOCK_TIMEOUT_SECONDS, check=budget.check), managed_read(storage):
             if not hasattr(os, "O_NOFOLLOW") or os.open not in os.supports_dir_fd or os.scandir not in os.supports_fd:
                 raise SkillExportError(422, "skill_export_unsupported", "This platform cannot safely capture skill files.")
             parent_fd = _open_directory_chain(root.parent, budget)

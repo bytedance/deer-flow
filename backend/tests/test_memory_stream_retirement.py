@@ -57,11 +57,13 @@ async def _attach_behind_retirement(bridge, run_id, stream, operation, monkeypat
 @pytest.mark.parametrize("operation", ["cleanup", "close"])
 @pytest.mark.parametrize("ended", [False, True])
 @pytest.mark.parametrize("with_cursor", [False, True])
-async def test_attachment_queued_behind_retirement_reports_gap(monkeypatch, operation, ended, with_cursor):
-    bridge = MemoryStreamBridge()
+@pytest.mark.parametrize("capacity", [1, 256])
+async def test_attachment_queued_behind_retirement_reports_gap(monkeypatch, operation, ended, with_cursor, capacity):
+    bridge = MemoryStreamBridge(queue_maxsize=capacity)
     await bridge.publish("attach-window", "messages", "earlier")
-    await bridge.publish("attach-window", "messages", "unread")
     cursor = bridge._streams["attach-window"].events[0].id if with_cursor else None
+    # With capacity one, this makes the cursor the exact last evicted event.
+    await bridge.publish("attach-window", "messages", "unread")
     if ended:
         await bridge.publish_end("attach-window")
     stream = bridge.subscribe("attach-window", last_event_id=cursor)

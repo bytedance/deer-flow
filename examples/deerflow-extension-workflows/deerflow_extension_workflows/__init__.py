@@ -15,7 +15,7 @@ from deerflow_extension_api import (
 from .service import NAMESPACE, Workflows
 
 
-@extension(api="0.2.7", name="workflows")
+@extension(api="0.2.8", name="workflows")
 def install(registry, config):
     enabled = config.get("enabled", False)
     if type(enabled) is not bool:
@@ -92,7 +92,10 @@ def install(registry, config):
                 namespace=NAMESPACE,
                 title="Script workflows / 脚本工作流",
                 enabled=enabled,
-                description="Bounded background script orchestration of full Agents. Versioned definitions, live-process resume and authenticated output checkpoints. No restart replay or hard monetary budget.",
+                description=(
+                    "Bounded background script orchestration of full Agents. Versioned definitions, authenticated output checkpoints and explicit single-Gateway recovery. "
+                    "Uncertain child effects require reconciliation. No hard monetary budget."
+                ),
                 frontend=BrowserAssets("workflows.v1", Path(__file__).parent),
                 backend=tuple(
                     BackendAction(name, getattr(workflows, name))
@@ -106,6 +109,7 @@ def install(registry, config):
                         "definitions",
                         "get_definition",
                         "resume",
+                        "recover",
                         "decide",
                         "get_step",
                         "get_artifact",
@@ -116,7 +120,16 @@ def install(registry, config):
                     ModelTool(
                         "read_workflow_artifact",
                         "Read exact approved immutable file bytes, base64 in 16 KiB chunks. Pass workflow run_id, version, offset. Verify sha256 after assembling chunks. Never read the mutable original path as a substitute.",
-                        {"type": "object", "properties": {"run_id": {"type": "string"}, "version": {"type": "string"}, "offset": {"type": "integer", "minimum": 0}}, "required": ["run_id", "version"], "additionalProperties": False},
+                        {
+                            "type": "object",
+                            "properties": {
+                                "run_id": {"type": "string"},
+                                "version": {"type": "string"},
+                                "offset": {"type": "integer", "minimum": 0},
+                            },
+                            "required": ["run_id", "version"],
+                            "additionalProperties": False,
+                        },
                         workflows.read_artifact,
                     ),
                     ModelTool(
@@ -148,7 +161,8 @@ def install(registry, config):
                         "Launch an inspectable JavaScript orchestration script in the background and return a workflow run ID. Use agent({stepId,agentRef,task}), parallel([()=>...]), log(text), pause({stepId}) and "
                         "humanCheckpoint({stepId,sourceStepId,artifactVersion}). Await checkpoints alone after all calls. agent resolves to "
                         "{output,threadId,runId,status,artifactVersion}; args contains JSON arguments. Use unique step IDs, explicit bounded loops and await every Agent call. Only operator-allowed agent references are admitted with "
-                        "this caller's permissions. Keep request_id stable on retries. Resume retains the live worker only; restart ends resumability. Human decisions are browser-only and cover retained step output. "
+                        "this caller's permissions. Keep request_id stable on retries. After restart, an authenticated browser session can explicitly recover a compatible workflow. "
+                        "Pass timestamps and randomness in args; Date and Math.random are unavailable. Human decisions are browser-only and cover retained step output. "
                         "Inspect results on request; do not poll in a loop or equate Agent "
                         "success with product approval. No hard monetary cost guarantee.",
                         launch_schema,
