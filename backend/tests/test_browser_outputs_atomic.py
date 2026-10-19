@@ -252,3 +252,68 @@ def test_both_cleanup_failures_are_logged_without_masking_interruption(tmp_path,
     assert [record.levelno for record in records] == [logging.WARNING, logging.WARNING]
     assert [record.exc_info[1].args for record in records] == [("close failed",), ("unlink failed",)]
     assert len(list(tmp_path.glob("*.tmp"))) == 1
+
+
+@pytest.mark.parametrize("publish_error_type", [OSError, KeyboardInterrupt], ids=["io-error", "interrupt"])
+@pytest.mark.parametrize("existing", [False, True], ids=["new", "existing"])
+@pytest.mark.parametrize("cleanup_failure", ["close", "unlink", "both"])
+def test_failing_log_handler_preserves_error_and_independent_cleanup(tmp_path, monkeypatch, publisher, caplog, publish_error_type, existing, cleanup_failure):
+    target = tmp_path / "shot.png"
+    if existing:
+        target.write_bytes(b"old")
+    publish_error = publish_error_type("publication failed")
+    close = os.close
+    unlink = Path.unlink
+    unlink_attempts = []
+    warning_attempts = []
+
+    def fail_publish(*args):
+        raise publish_error
+
+    def fail_close(fd):
+        close(fd)
+        raise OSError("close failed")
+
+    def cleanup(path, **kwargs):
+        unlink_attempts.append(path)
+        if cleanup_failure in {"unlink", "both"}:
+            raise PermissionError("unlink failed")
+        return unlink(path, **kwargs)
+
+    # A standard delayed FileHandler raises from emit when its directory is
+    # unavailable; this exercises logging itself rather than mocking warning().
+    handler = logging.FileHandler(tmp_path / "missing-log-directory" / "cleanup.log", delay=True)
+    emit = handler.emit
+
+    def record_warning(record):
+        warning_attempts.append(record)
+        emit(record)
+
+    log = logging.getLogger("deerflow.utils.atomic_write")
+    log.addHandler(handler)
+    try:
+        with monkeypatch.context() as patches:
+            patches.setattr(handler, "emit", record_warning)
+            patches.setattr(Path, "unlink", cleanup)
+            if cleanup_failure in {"close", "both"}:
+                patches.setattr(os, "fdopen", fail_publish)
+                patches.setattr(os, "close", fail_close)
+            else:
+                patches.setattr(os, "replace", fail_publish)
+            with caplog.at_level(logging.WARNING, logger=log.name), pytest.raises(publish_error_type) as caught:
+                publisher(target, b"new complete capture")
+    finally:
+        log.removeHandler(handler)
+        handler.close()
+
+    assert caught.value is publish_error
+    assert len(unlink_attempts) == 1
+    temporary = unlink_attempts[0]
+    assert temporary.parent == tmp_path
+    assert temporary.exists() == (cleanup_failure in {"unlink", "both"})
+    assert len(warning_attempts) == (2 if cleanup_failure == "both" else 1)
+    assert all(str(temporary) in record.getMessage() and record.exc_info is not None for record in warning_attempts)
+    if existing:
+        assert target.read_bytes() == b"old"
+    else:
+        assert not target.exists()

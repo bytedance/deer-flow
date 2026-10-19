@@ -9,9 +9,9 @@ for both tool imports live in `tests/test_browser_outputs_atomic.py`.
 Failure cleanup must preserve the original publication exception, including
 interruptions. Descriptor close and sibling unlink are separate best-effort
 operations: a close failure must not prevent the unlink attempt.
-Log each cleanup `OSError` at warning level with the temporary path and exception
-details so leaked siblings are observable; logging must not replace the primary
-publication exception or interruption.
+Attempt warning logs for cleanup `OSError`s with the temporary path and exception
+details. Guard logging-handler exceptions so diagnostics neither replace the
+publication exception (including interruptions) nor skip remaining cleanup.
 Both tools take collision names from `output_names.output_name_candidates`
 (name, `-1`..`-1000`, five timestamps); claim each atomically, never pre-check.
 

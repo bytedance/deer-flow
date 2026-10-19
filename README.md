@@ -2712,6 +2712,7 @@ when those permissions allow it.
 If saving fails, the original error is preserved even when temporary-file
 cleanup also fails; the previous output remains intact.
 Cleanup failures are logged with the temporary-file path for troubleshooting.
+Logging-handler errors cannot replace the save error or skip remaining cleanup.
 
 Browserless reserves capture names with empty placeholders to prevent concurrent
 captures from overwriting one another. Failed publication releases the placeholder;
