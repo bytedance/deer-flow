@@ -41,3 +41,38 @@ missing or strictly older leases remain recoverable.
 ## MCP task notifications
 
 `mcp_tasks/sql.py::claim_notification_work` never returns a row without a dispatch event. A pending snapshot whose condition resolved before delivery (tracking recovered, or an answered `input_required` prompt returned the task to `working`) is consumed at claim time: `notified_version` advances, the content fingerprint clears so an identical later event is recorded again, stale error/attempt/dispatch state clears, status returns to `none`, and the claim lease is released instead of launching an empty event. A legacy row left without a dispatch event is consumed only when nothing newer exists; a newer recorded event is rebuilt and claimed instead. Consumption is a conditional UPDATE fenced on the event version and phase the claim read, so a concurrent newer event (SQLite has no row locks) is never acknowledged and stays claimable. Coverage: `tests/test_mcp_task_repository.py` (resolved snapshot, legacy retry, expired-claim reclaim, identical-event recurrence, interleaved newer completion, legacy launching/dispatched with and without a newer completion).
+
+## Run terminal authority and lease expiry
+
+`RunRepository.update_status(..., owner_worker_id=...)` and
+`finalize_if_not_cancelled(..., owner_worker_id=...)` require that owner and a
+live lease. Increment the change clock before taking the run row lock to retain
+the existing clock/row lock order. PostgreSQL checks `clock_timestamp()` after
+`SELECT FOR UPDATE`, rather than transaction-start `now()`; SQLite evaluates its
+database clock in the conditional UPDATE after acquiring its writer lock.
+`renew_lease` and legacy `update_lease` also reject expired existing leases and
+already-expired target leases. `allow_interrupted=True` additionally permits
+interrupted rows for the owning Worker's unfinished rollback; Manager requires
+its own interrupted ACK and a rollback barrier before requesting it. Success/error
+remain ineligible, and owner/live-lease conditions are identical. Atomic admission
+returns immutable outcome snapshots of its committed claimed rows; a subsequent
+interrupted -> error write must not mutate an earlier ACK (including in Memory).
+Success returns only after transaction commit.
+`update_run_completion(require_terminal=True, owner_worker_id=...)` requires the
+exact terminal status/owner atomically and leaves outcome fields unchanged;
+it cannot transition an active row. Metadata may arrive after the terminal lease
+expires: it authorizes no execution or outcome transition, and Manager already
+requires its own matching ACK. The owner/status predicate protects against a
+changed row, but cannot distinguish deletion/recreation with the same run ID,
+owner and outcome without a persistent generation. Third-party heartbeat stores
+must implement these keyword contracts and atomic predicates, returning explicit
+commit results; accepting `**kwargs` alone does not establish that guarantee.
+For strict completion, explicitly declare both `require_terminal` and
+`owner_worker_id`, or set `supports_terminal_completion_kwargs=True` on the class
+defining `update_run_completion`. A flag-only child cannot opt in an inherited
+method, and an override must declare its own opt-in. Manager skips unsupported
+completion calls with a diagnostic before invoking the Store.
+Unsupported owned calls fail closed; single-worker legacy calls remain supported.
+These are scoped guards, not a generation
+protocol covering every mutation. Contract/lock-wait tests live in
+`tests/test_terminal_store_contract.py` (Postgres uses `TEST_POSTGRES_URI`).
