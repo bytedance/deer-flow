@@ -328,7 +328,7 @@ class TestMarkdownMemoryStorage:
         memory_file = tmp_path / "memory.json"
         manifest = create_empty_memory()
         manifest["user"]["workContext"]["summary"] = "edited on Windows"
-        memory_file.write_bytes(b"\\xef\\xbb\\xbf" + json.dumps(manifest).encode("utf-8"))
+        memory_file.write_bytes(b"\xef\xbb\xbf" + json.dumps(manifest).encode("utf-8"))
         loaded = storage_class(DeerMemConfig(storage_path=str(tmp_path))).load()
         assert loaded["user"]["workContext"]["summary"] == "edited on Windows"
         assert not list(tmp_path.glob("memory.json.corrupt-*"))
