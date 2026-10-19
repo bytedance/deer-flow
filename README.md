@@ -1527,6 +1527,8 @@ When you install `.skill` archives through the Gateway, DeerFlow accepts standar
 
 Disabling a skill also removes it from the sandbox filesystem view, so shell commands and structured file tools follow the same enabled state. Local, Docker/AIO, hostPath provisioner, and newly created E2B sandboxes source `/mnt/skills` from enabled-only projections that update when public, custom, legacy, or managed integration skills are toggled, edited, created, deleted, or installed. Structured `read_file` calls (including line ranges and read-before-write checks) use the sandbox provider's mount mapping, so the user identity captured when the sandbox was acquired remains authoritative. Managed integration packages remain shared, while their projected filesystem visibility follows each user's enabled state. Multi-worker Gateways re-read on-disk enable state while rebuilding user projections, so a toggle handled by one worker is honored by another worker's next sandbox acquire. Existing E2B sandboxes retain their creation-time snapshot until they are recreated. PVC-backed provisioner skills keep their configured PVC snapshot/layout for now; dynamic PVC materialization is tracked separately.
 
+Skill projection manifest saves preserve the original error or interruption even if temporary-file cleanup or its logging also fails. Manifest files retain their private filesystem permissions.
+
 ```
 # Paths inside the sandbox container
 /mnt/skills/public
@@ -2789,6 +2791,10 @@ Browser screenshots and Browserless captures publish complete content atomically
 New files use the host's normal creation permissions (typically `0644`), and
 replacements preserve existing permissions, so sandbox code can read captures
 when those permissions allow it.
+If saving fails, the original error is preserved even when temporary-file
+cleanup also fails; the previous output remains intact.
+Cleanup failures are logged with the temporary-file path for troubleshooting.
+Logging-handler errors cannot replace the save error or skip remaining cleanup.
 
 Browserless reserves capture names with empty placeholders to prevent concurrent
 captures from overwriting one another. Failed publication releases the placeholder;
