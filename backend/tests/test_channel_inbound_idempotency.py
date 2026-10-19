@@ -175,6 +175,43 @@ async def test_worker_runs_a_message_the_adapter_already_claimed_and_drops_its_r
     assert client.runs.wait.await_count == 1
 
 
+@pytest.mark.parametrize("cancelled", [False, True], ids=["grace-expired", "shutdown-cancelled"])
+async def test_shutdown_gives_back_the_claim_of_a_queued_message_it_discards(cancelled):
+    """An adapter-claimed message waiting in the queue owns a dedupe key no
+    worker recorded. Shutdown discards it unprocessed, so it must release the
+    key, or a peer drops the redelivery for the rest of the TTL."""
+    dedupe = MemoryInboundDedupeStore()
+    manager = _manager(dedupe=dedupe)
+    manager._client = client = _client()
+    busy = asyncio.Event()
+
+    async def run_forever(*_args, **_kwargs):
+        busy.set()
+        await asyncio.Event().wait()
+
+    client.runs.wait = AsyncMock(side_effect=run_forever)
+    await manager.start()
+    await manager.bus.publish_inbound(_slack("evt-busy"))
+    await asyncio.wait_for(busy.wait(), timeout=5)
+    queued = _discord(chat_id="chan-1", channel_id="chan-1", guild_id="guild-1")
+    assert await manager.bus.claim_inbound(queued) is True
+    await manager.bus.publish_inbound(queued)
+
+    if cancelled:
+        manager._shutdown_grace_period_seconds = 30
+        stopping = asyncio.create_task(manager.stop())
+        await asyncio.sleep(0)  # stop() is now waiting out the grace period
+        stopping.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await stopping
+    else:
+        await manager.stop()
+
+    assert ChannelManager._inbound_dedupe_key(queued) not in dedupe._store
+    if cancelled:
+        await manager.stop()
+
+
 # -- Idempotency-Key on IM run requests ----------------------------------------
 
 

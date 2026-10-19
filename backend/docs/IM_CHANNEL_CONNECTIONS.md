@@ -729,7 +729,9 @@ message, which used to get no key at all) and by the channel it was posted in,
 so two instances that route a reply in a thread differently still see one
 message. A Discord session on every instance receives every message, so the
 adapter claims that key before it creates a Discord thread for the message:
-only the instance that wins the claim creates one.
+only the instance that wins the claim creates one. A claimed message that is
+never processed (a failed or cancelled hand-off, a shutdown that discards it
+from the queue) gives the key back, so a peer can still take it.
 
 Past the dedupe window, after a restart, or while the dedupe store is down, a
 redelivery still reaches the run request. Every run request for a message

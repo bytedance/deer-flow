@@ -2391,7 +2391,12 @@ class ChannelManager:
         logger.info("ChannelManager stopped")
 
     async def _discard_pending_inbound(self) -> int:
-        """Release attachments belonging to messages shutdown never dispatched."""
+        """Release attachments, and adapter dedupe claims, of messages shutdown never dispatched.
+
+        An adapter-claimed message (``dedupe_claimed``) recorded its dedupe key
+        before it was queued; dropped unprocessed, it must give the key back so
+        a redelivery on a peer is not refused for the rest of the TTL.
+        """
         discarded = 0
         while True:
             try:
@@ -2400,6 +2405,11 @@ class ChannelManager:
                 return discarded
             try:
                 await cleanup_inbound_files(msg.files)
+                if msg.dedupe_claimed:
+                    try:
+                        await self._release_inbound_dedupe_key(msg)
+                    except Exception:
+                        logger.exception("[Manager] failed to release the dedupe claim of a discarded inbound message")
             finally:
                 self.bus.inbound_task_done()
             discarded += 1

@@ -1018,3 +1018,53 @@ class TestDiscordDedupeClaimBeforeThreadCreation:
 
         dedupe.try_record.assert_awaited_once_with(self._key())
         assert self._key() not in dedupe._store
+
+    @pytest.mark.asyncio
+    async def test_stop_during_identity_lookup_gives_the_claim_back(self, tmp_path) -> None:
+        """stop() cancels the hand-off while it resolves the connection identity:
+        the message was never committed, so a peer must be able to take it."""
+        _, channel, dedupe = self._wire(tmp_path)
+        lookup_started = asyncio.Event()
+
+        async def lookup_forever(inbound, guild_id=None):
+            lookup_started.set()
+            await asyncio.Event().wait()
+
+        channel._attach_connection_identity = lookup_forever
+        handling = asyncio.create_task(channel._on_message(_make_discord_message("hello")))
+        await asyncio.wait_for(lookup_started.wait(), timeout=5)
+        assert self._key() in dedupe._store
+
+        await channel.stop()
+        await asyncio.wait_for(handling, timeout=5)
+
+        assert self._key() not in dedupe._store
+        peer_bus, peer, _ = self._wire(tmp_path, dedupe=dedupe)
+        await peer._on_message(_make_discord_message("hello"))
+        await asyncio.wait_for(peer_bus.get_inbound(), timeout=5)
+
+    @pytest.mark.asyncio
+    async def test_claim_whose_release_is_refused_during_stop_is_given_back_by_stop(self, tmp_path) -> None:
+        """Thread creation still in flight when stop() closes cross-loop intake:
+        the release cannot be submitted then, so stop() releases it last."""
+        _, channel, dedupe = self._wire(tmp_path)
+        create_started = asyncio.Event()
+        fail_create = asyncio.Event()
+
+        async def create_then_fail(message):
+            create_started.set()
+            await fail_create.wait()
+            raise RuntimeError("thread create failed")
+
+        channel._create_thread = create_then_fail
+        handling = asyncio.create_task(channel._on_message(_make_discord_message("hello")))
+        await asyncio.wait_for(create_started.wait(), timeout=5)
+        await channel._close_and_drain_threadsafe_futures()  # stop() has begun
+        fail_create.set()
+        with pytest.raises(RuntimeError, match="thread create failed"):
+            await handling
+        assert self._key() in dedupe._store
+
+        await channel.stop()
+
+        assert self._key() not in dedupe._store
