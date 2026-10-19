@@ -1,8 +1,9 @@
 ### IM Channels System (`app/channels/`)
 
-WeChat `_read_outbound_bytes`: cap+1 off-loop; overflow: `None` before encryption/upload; <=0 unlimited.
-Drain cursor writes on cancel; expiry drains cursor/auth clearing under `_auth_lock`.
-Inbound: private `downloads/` dirs keep names/copies until ingestion; failures clean only owned dirs.
+IM channels use `langgraph-sdk` HTTP; Gateway owns thread lifecycle.
+WeChat outbound: off-loop cap+1; overflow `None` before encryption/upload; <=0 unlimited.
+Cancel drains cursor writes; expiry drains cursor/auth reset under `_auth_lock`.
+Inbound: ingest/drop drains off-loop cleanup of owned dirs, never metadata paths.
 
 Telegram retries share bootstrap/Bot cleanup. Dead loops warn once; clear
 matching futures under `_shutdown_resources_lock` (closure unconfirmed).

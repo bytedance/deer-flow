@@ -1379,6 +1379,7 @@ def test_handle_update_preserves_same_name_attachments(tmp_path: Path, monkeypat
         target = upload_paths.sandbox_uploads_dir("wechat-thread", user_id="owner-1")
         assert [(target / name).read_bytes() for name in saved_names] == payloads
         assert not upload_paths.sandbox_uploads_dir("wechat-thread").exists()
+        assert all(not path.parent.exists() for path in paths)
 
     _run(go())
 
@@ -1409,6 +1410,8 @@ def test_failed_download_staging_cleans_only_its_own_files(tmp_path: Path, monke
 
     def fail_write(path, content):
         real_write(path, content[:3])
+        (path.parent / "partial").mkdir()
+        real_write(path.parent / "partial" / "chunk", b"partial write")
         raise OSError("simulated disk failure")
 
     monkeypatch.setattr(Path, "write_bytes", fail_write)

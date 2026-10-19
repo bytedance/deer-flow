@@ -40,6 +40,7 @@ from app.channels.message_bus import (
     MessageBus,
     OutboundMessage,
     ResolvedAttachment,
+    cleanup_inbound_files,
 )
 from app.channels.run_policy import CHANNEL_RUN_POLICY, ChannelRunPolicy
 from app.channels.store import ChannelStore
@@ -63,6 +64,7 @@ from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.storage.skill_storage import SkillStorage
 from deerflow.trace_context import ensure_trace_context
 from deerflow.uploads.manager import apply_upload_sandbox_permits
+from deerflow.utils.file_io import await_drained
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 logger = logging.getLogger(__name__)
@@ -458,7 +460,7 @@ async def _read_wechat_inbound_file(file_info: dict[str, Any], client: httpx.Asy
     raw_path = file_info.get("path")
     if isinstance(raw_path, str) and raw_path.strip():
         try:
-            return await asyncio.to_thread(Path(raw_path).read_bytes)
+            return await await_drained(asyncio.to_thread(Path(raw_path).read_bytes))
         except OSError:
             logger.exception("[Manager] failed to read WeChat inbound file from local path: %s", raw_path)
             return None
@@ -1357,6 +1359,13 @@ def _make_inbound_file_sandbox_readable(file_path: Path) -> None:
 
 
 async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id: str | None = None) -> list[dict[str, Any]]:
+    try:
+        return await _ingest_inbound_files_impl(thread_id, msg, user_id=user_id)
+    finally:
+        await cleanup_inbound_files(msg.files)
+
+
+async def _ingest_inbound_files_impl(thread_id: str, msg: InboundMessage, *, user_id: str | None = None) -> list[dict[str, Any]]:
     if not msg.files:
         return []
 
@@ -2266,7 +2275,7 @@ class ChannelManager:
         except asyncio.CancelledError:
             for task in worker_tasks:
                 task.cancel()
-            discarded_messages = self.bus.discard_pending_inbound()
+            discarded_messages = await self._discard_pending_inbound()
             if not join_task.done():
                 join_task.cancel()
             if invalidated_reservations or discarded_messages:
@@ -2288,7 +2297,7 @@ class ChannelManager:
 
         # Anything still queued never started and must not keep Queue.join()
         # pending after its workers have been cancelled.
-        discarded_messages = self.bus.discard_pending_inbound()
+        discarded_messages = await self._discard_pending_inbound()
         if not join_task.done():
             join_task.cancel()
 
@@ -2311,6 +2320,20 @@ class ChannelManager:
             )
 
         logger.info("ChannelManager stopped")
+
+    async def _discard_pending_inbound(self) -> int:
+        """Release attachments belonging to messages shutdown never dispatched."""
+        discarded = 0
+        while True:
+            try:
+                msg = self.bus.get_inbound_nowait()
+            except asyncio.QueueEmpty:
+                return discarded
+            try:
+                await cleanup_inbound_files(msg.files)
+            finally:
+                self.bus.inbound_task_done()
+            discarded += 1
 
     # -- worker pool -------------------------------------------------------
 
@@ -2376,7 +2399,10 @@ class ChannelManager:
                             # worker pool by letting cleanup escape this loop.
                             logger.exception("[Manager] failed to release inbound dedupe key after worker error")
                 finally:
-                    self.bus.inbound_task_done()
+                    try:
+                        await cleanup_inbound_files(msg.files)
+                    finally:
+                        self.bus.inbound_task_done()
 
     @staticmethod
     def _inbound_dedupe_key(msg: InboundMessage) -> tuple[str, str, str, str] | None:
@@ -2486,8 +2512,11 @@ class ChannelManager:
             logger.error("[Manager] unhandled error in message task: %s", exc, exc_info=exc)
 
     async def _handle_message(self, msg: InboundMessage) -> None:
-        with _run_admission_scope():
-            await self._dispatch_message(msg)
+        try:
+            with _run_admission_scope():
+                await self._dispatch_message(msg)
+        finally:
+            await cleanup_inbound_files(msg.files)
 
     async def _dispatch_message(self, msg: InboundMessage) -> None:
         msg = _apply_effective_owner(msg)
