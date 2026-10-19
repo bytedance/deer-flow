@@ -49,6 +49,7 @@ def test_separate_uploads_preserve_existing_markdown(upload_case, tmp_path, in_l
         if not in_loop:
             return client.upload_files("companion-thread", [source])
 
+        # Run the synchronous upload inside an active event loop to exercise conversion_pool.
         async def run():
             return client.upload_files("companion-thread", [source])
 
