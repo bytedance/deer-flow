@@ -511,6 +511,15 @@ take precedence, and `max_recursion_limit` (default `1000`) caps both. Changes
 apply to the next run without restarting the Gateway. This top-level setting
 applies to Gateway API runs; IM channel and embedded `DeerFlowClient` runs
 retain their own defaults and per-call override paths.
+
+A custom frontend can add an optional `context.client` to a Gateway run request:
+a client name, capabilities such as `artifacts` or `charts`, and display
+preferences. DeerFlow sanitizes it and passes the values to the agent as
+untrusted, request-scoped hints, so skills can pick an output shape the client
+can show. It is never an authorization or identity signal. See
+[Create Run](backend/docs/API.md#create-run).
+Client hints are omitted from stored run configuration and must be sent again
+for each run; later runs, including server-started tasks, do not inherit them.
 The checkpoint storage settings `database.checkpoint_channel_mode` and
 `database.checkpoint_delta.snapshot_frequency` (default `10`) are exceptions:
 both are frozen when the process first builds an agent (including through
@@ -585,6 +594,22 @@ DeerFlow still uses `Forwarded` / `X-Forwarded-*` headers to recover the browser
 > The Gateway still owns active run tasks in process, so production defaults to a single Gateway worker (`GATEWAY_WORKERS=1`). Multi-worker deployments require Postgres, the Redis stream bridge (`stream_bridge.type: redis`), `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`; process-local memory/JSONL event stores cannot enforce singleton delivery receipts across workers. Kubernetes replicas run one worker per Pod, which the worker count cannot see: declare them with `deployment.multi_instance: true` (or `DEER_FLOW_MULTI_INSTANCE=1`, which deploy tooling such as a Helm chart can set from its replica count) so the startup gate enforces the same prerequisites instead of staying inert. Declared instances that store credentials (`channel_connections`) must also share one at-rest `DEER_FLOW_CREDENTIALS_KEY` (the Helm chart and `make up` generate it; back it up, see [backend/docs/CONFIGURATION.md](backend/docs/CONFIGURATION.md#credentials-encryption-key-deer_flow_credentials_key)). The bridge shares SSE delivery and bounded `Last-Event-ID` replay across workers. When a valid reconnect cursor has been trimmed, or a subscriber that already established an empty-stream wait falls behind before its first delivery, Memory and Redis emit a machine-readable SSE `gap` event instead of silently returning a partial replay; the Web UI reloads durable thread/event state and resumes from the retained tail. An already-observed Redis stream removed during replay also signals a gap, so slow subscribers reload durable state instead of heartbeating forever after cleanup. Lease reconciliation marks runs from dead workers as errors, persists their delivery receipts, publishes the terminal stream marker, schedules retained-stream cleanup, and updates the affected thread status. Redis also tracks terminal stream producers with a short lease: if a worker dies after committing a terminal run status but before publishing END, SSE and `/wait` finish after the lease expires instead of waiting for the retained stream's TTL. SSE, `/wait`, and internal stream consumers use `stream_bridge.heartbeat_interval_seconds` (default `15`) for idle liveness checks; changing it requires a Gateway restart. Malformed Redis reconnect IDs live-tail new events instead of replaying the retained buffer, and the rolling retained-buffer TTL (`stream_ttl_seconds`) remains a cleanup safety net rather than a run timeout. Failed-login counters and lockouts for `POST /api/v1/auth/login/local` (`auth.local.max_login_attempts` / `lockout_seconds`) are kept in the shared `login_throttle` table whenever the application database is SQLite or Postgres (`auth.local.throttle_storage: auto`, the default), so every replica enforces one lockout per client IP; `memory` keeps the historical per-process counter, which under N replicas hands an attacker N × `max_login_attempts` guesses and logs a startup warning. IM chat-to-thread bindings live in the shared `channel_thread_bindings` table whenever the application database is SQLite or Postgres (an existing `channels/store.json` is imported once at startup and renamed `store.json.migrated`); IM bot credentials entered in the web UI live in the shared `channel_runtime_configs` table, encrypted with `DEER_FLOW_CREDENTIALS_KEY` (an existing `channels/runtime-config.json` is imported once and then deleted), so a save on any instance reaches the provider's connection within one lease renewal; each provider's platform connection is held by one instance through the shared `channel_leases` table — `channels.leader_lease` (default `auto`, on wherever the multi-process signal is) hands it to another instance when the holder dies, and the startup gate refuses `enabled: false` while an IM channel other than GitHub is enabled (see [IM channel leader lease](backend/docs/CONFIGURATION.md#im-channel-leader-lease-channelsleader_lease)); follow-up buffers still need their own multi-worker coordination. To try this topology on one machine, `make dev-multi` starts two Gateways on shared Postgres, Redis and `DEER_FLOW_HOME`, and `make dev-multi-check` runs the cross-instance checks; see the local two-Gateway harness in [backend/docs/CONFIGURATION.md](backend/docs/CONFIGURATION.md#local-two-gateway-harness).
 >
 > The producer-lease recovery behavior above is gated by `stream_bridge.producer_lease_recovery_enabled`. Keep it disabled while old Gateway binaries or their runs remain; enable it on every instance only after the writer rollout and drain complete.
+>
+> With run ownership heartbeats enabled, terminal success requires acknowledgment
+> from that worker's own durable write. A matching database row alone cannot
+> confirm success, and completion metadata cannot retry a rejected terminal
+> transition. Each run renews independently, so a stalled store operation does
+> not delay other runs. If acknowledgment remains unavailable when the last
+> confirmed lease expires, the worker stops conservatively even if its commit
+> actually reached the database. Expired leases cannot be renewed.
+> Interrupt-and-replace admission acknowledges only the old runs actually claimed
+> by its atomic transaction. Rollback keeps renewing its acknowledged interrupted
+> row until restoration and the separate final error commit finish. An
+> active-only renewal that raced that admission gets one bounded retry after the
+> interrupted acknowledgment, without weakening the owner or live-lease checks.
+> A failed renewal leaves a local expiry guard armed. Shutdown bounds its wait for orphan
+> recovery, but cancellation-resistant storage may still be using its resources.
+
 >
 > The local two-Gateway harness disables IM providers under both `channels` and `channel_connections` by default. `DEERFLOW_MI_KEEP_CHANNELS=1` preserves them; `channels.leader_lease` stays as configured.
 >
@@ -1178,6 +1203,8 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 5. The bot supports inbound text, image, and file messages. Inbound attachment downloads are limited to 20 MB per attachment.
 6. _(Optional)_ Interactive clarification cards: set `card_interaction_enabled: true` under `channels.feishu` to let the agent's option-based clarifications render as clickable button cards, preserving any background context before the question. Then, in the developer console, open **Callback Configuration** (回调配置 — a separate tab from **Event Subscriptions**), subscribe to `card.action.trigger` in **Long Connection** mode, and publish a new app version. A click resolves the clarification exactly like typing the choice; only the user who triggered the clarification can operate its card. Button answers are saved in the conversation history, and subsequent clarifications continue in the same thread.
 
+If the SDK repeatedly logs `CERTIFICATE_VERIFY_FAILED`, see [Feishu / Lark TLS troubleshooting](backend/docs/IM_CHANNEL_CONNECTIONS.md#feishu--lark-tls-troubleshooting) to check the Gateway's CA trust configuration.
+
 Scheduled-task result and lifecycle notices can also be pushed to a bound Feishu/Lark user, without a new inbound message. They use the same notification outbox and localized summaries as WeCom. The app must be able to send to that user; see [Feishu scheduled-task notifications](backend/docs/IM_CHANNEL_CONNECTIONS.md#feishu-scheduled-task-notifications).
 
 **WeChat Setup**
@@ -1485,6 +1512,8 @@ Python's standard-library HTTP client. Its fallback preserves spaces, Unicode, a
 reserved characters in search queries and label filters.
 File reads accept raw repository-relative paths and preserve spaces, Unicode,
 `#`, `?`, and literal percent signs with either HTTP client.
+Directory listings ask for the repository's own default branch, so a repository that
+uses neither `main` nor `master` reports its current tree instead of a stale branch.
 
 Users can explicitly activate an enabled skill for a single turn by starting the request with `/skill-name`, for example `/data-analysis analyze uploads/foo.csv`. DeerFlow loads that skill's `SKILL.md` as hidden current-turn context while leaving the base prompt limited to skill metadata. Slash activation respects disabled skills, custom-agent skill whitelists, and existing channel commands such as `/new` and `/help`.
 
@@ -2240,6 +2269,12 @@ the stable English `name`. API callers can pass `display_name` to agent creation
 or update requests; an omitted update preserves it and `null` clears it. The
 same optional field is supported in the agent's `config.yaml`.
 
+The new-Agent page confirms creation only after the latest `setup_agent` call
+succeeds and the persisted Agent can be read back. A tool failure or an
+unconfirmed write keeps the draft visible and restores **Save agent** so the
+operation can be retried instead of reporting a false success. Read-back results
+from a superseded Save attempt cannot change a newer attempt or its feedback.
+
 Saving an unrelated Agent setting preserves its existing thinking and reasoning
 defaults, including while the model catalog is loading, unavailable, or missing
 the configured model. Explicit reasoning edits are saved independently; choosing
@@ -2833,6 +2868,10 @@ by sibling deletions or runtime failures (such as unavailable sources or policy 
 become available in the next batch, when rejected additions can be retried.
 
 ### Long-Term Memory
+
+Settings > Memory keeps successful clear, import, and fact edits visible even
+when an older background read finishes afterward. Later reads still refresh
+the view normally; failed actions preserve the existing cached memory.
 
 DeerMem debounces pending updates independently per conversation, user, and agent.
 `memory.backend_config.debounce_seconds` sets the quiet period (default 30 seconds),
