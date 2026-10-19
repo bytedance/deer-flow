@@ -13,8 +13,9 @@ from deerflow.mcp.session_pool import MCPSessionPool
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("thread_incarnation", [None, "incarnation-1"], ids=["legacy", "versioned"])
 @pytest.mark.parametrize("relative_script", [True, False], ids=["relative-entrypoint", "relative-tool-input"])
-async def test_stdio_cwd_from_config_reaches_discovery_and_tool_calls(tmp_path, monkeypatch, relative_script):
+async def test_stdio_cwd_from_config_reaches_discovery_and_tool_calls(tmp_path, monkeypatch, relative_script, thread_incarnation):
     server_dir = tmp_path / "mcp server"
     server_dir.mkdir()
     (server_dir / "marker.txt").write_text("configured-directory", encoding="utf-8")
@@ -54,7 +55,7 @@ mcp.run(transport="stdio")
     monkeypatch.setattr(mcp_tools, "get_paths", lambda: Paths(tmp_path / "deerflow"))
     pool = MCPSessionPool()
     monkeypatch.setattr(mcp_tools, "get_session_pool", lambda: pool)
-    runtime = SimpleNamespace(context={"thread_id": "thread", "user_id": "user"}, config={})
+    runtime = SimpleNamespace(context={"thread_id": "thread", "user_id": "user", "thread_incarnation": thread_incarnation}, config={})
 
     try:
         tools = await mcp_tools.get_mcp_tools()
@@ -66,12 +67,13 @@ mcp.run(transport="stdio")
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("thread_incarnation", [None, "incarnation-1"], ids=["legacy", "versioned"])
 @pytest.mark.parametrize(
     "cwd_config",
     [{}, {"cwd": None}, {"cwd": ""}, {"cwd": "$TEST_UNSET_MCP_CWD"}],
     ids=["omitted", "null", "empty", "unset-env"],
 )
-async def test_empty_stdio_cwd_preserves_default_working_directories(tmp_path, monkeypatch, cwd_config):
+async def test_empty_stdio_cwd_preserves_default_working_directories(tmp_path, monkeypatch, cwd_config, thread_incarnation):
     launch_dir = tmp_path / "gateway"
     launch_dir.mkdir()
     monkeypatch.chdir(launch_dir)
@@ -102,7 +104,7 @@ mcp.run(transport="stdio")
     monkeypatch.setattr(mcp_tools, "get_paths", lambda: paths)
     pool = MCPSessionPool()
     monkeypatch.setattr(mcp_tools, "get_session_pool", lambda: pool)
-    runtime = SimpleNamespace(context={"thread_id": "thread", "user_id": "user"}, config={})
+    runtime = SimpleNamespace(context={"thread_id": "thread", "user_id": "user", "thread_incarnation": thread_incarnation}, config={})
 
     try:
         tools = await mcp_tools.get_mcp_tools()

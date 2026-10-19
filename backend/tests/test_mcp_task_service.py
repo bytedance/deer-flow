@@ -19,9 +19,20 @@ from deerflow.mcp.tasks import (
     TaskSubmitRequest,
 )
 from deerflow.mcp.tasks.ordinary import McpTaskProtocolError
-from deerflow.persistence.mcp_tasks import DuplicateMcpRemoteTaskError
+from deerflow.persistence.mcp_tasks import (
+    DuplicateMcpRemoteTaskError,
+    McpTaskThreadMismatchError,
+)
 from deerflow.runtime.runs.manager import ConflictError
 from deerflow.runtime.runs.schemas import RunStatus
+
+
+class _MutableDateTime(datetime):
+    current = datetime(2000, 1, 1, tzinfo=UTC)
+
+    @classmethod
+    def now(cls, tz=None):
+        return cls.current
 
 
 class FakeRepository:
@@ -54,6 +65,9 @@ class FakeRepository:
         self.released.append((task_id, kwargs))
         return True
 
+    async def begin_notification_launch(self, *_args, **_kwargs):
+        return True
+
 
 class FailingApplyRepository(FakeRepository):
     async def apply_snapshot(self, task_id, **kwargs):
@@ -83,6 +97,12 @@ class DuplicateCreateRepository(FakeRepository):
     async def create(self, **kwargs):
         self.created.append(kwargs)
         raise DuplicateMcpRemoteTaskError("already tracked")
+
+
+class DriftedThreadCreateRepository(FakeRepository):
+    async def create(self, **kwargs):
+        self.created.append(kwargs)
+        raise McpTaskThreadMismatchError("thread incarnation changed")
 
 
 class FakeDriver:
@@ -202,6 +222,7 @@ async def test_submit_persists_remote_handle_before_returning():
     request = TaskSubmitRequest(
         user_id="user-1",
         thread_id="thread-1",
+        thread_incarnation="incarnation-1",
         run_id="run-1",
         tool_call_id="call-1",
         server_name="reports",
@@ -214,6 +235,7 @@ async def test_submit_persists_remote_handle_before_returning():
 
     assert created["remote_task_id"] == "remote-1"
     persisted = repo.created[0]
+    assert persisted["expected_thread_incarnation"] == "incarnation-1"
     assert persisted["next_poll_at"] == now + timedelta(seconds=9)
     assert persisted["driver_data"] == {"submit_tool": "submit", "status_tool": "status"}
     assert driver.submit_calls[0].local_task_id == created["id"]
@@ -241,6 +263,7 @@ async def test_submit_cancels_remote_task_when_persistence_fails():
     request = TaskSubmitRequest(
         user_id="user-1",
         thread_id="thread-1",
+        thread_incarnation="incarnation-1",
         run_id="run-1",
         tool_call_id="call-1",
         server_name="reports",
@@ -265,6 +288,47 @@ async def test_submit_cancels_remote_task_when_persistence_fails():
 
 
 @pytest.mark.asyncio
+async def test_submit_compensates_remote_task_when_thread_incarnation_drifted():
+    repo = DriftedThreadCreateRepository()
+    driver = FakeDriver(
+        submission=TaskSubmission(
+            remote_task_id="remote-1",
+            snapshot=TaskSnapshot(status=TaskStatus.SUBMITTED),
+            driver_data={"cancel_tool": "cancel"},
+        )
+    )
+    registry = McpTaskDriverRegistry()
+    registry.register("fake", driver)
+    service = McpTaskService(
+        repository=repo,
+        drivers=registry,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+
+    with pytest.raises(McpTaskThreadMismatchError, match="incarnation changed"):
+        await service.submit(
+            driver_name="fake",
+            request=TaskSubmitRequest(
+                user_id="user-1",
+                thread_id="thread-1",
+                thread_incarnation="captured-incarnation",
+                run_id="run-1",
+                tool_call_id="call-1",
+                server_name="reports",
+                task_name="Generate report",
+                arguments={},
+                local_task_id="task-1",
+            ),
+        )
+
+    assert repo.created[0]["expected_thread_incarnation"] == "captured-incarnation"
+    assert len(driver.cancel_calls) == 1
+    assert driver.cancel_calls[0].thread_incarnation == "captured-incarnation"
+
+
+@pytest.mark.asyncio
 async def test_submit_cancellation_during_persistence_cancels_remote_task():
     repo = BlockingCreateRepository()
     driver = FakeDriver(
@@ -286,6 +350,7 @@ async def test_submit_cancellation_during_persistence_cancels_remote_task():
     request = TaskSubmitRequest(
         user_id="user-1",
         thread_id="thread-1",
+        thread_incarnation="incarnation-1",
         run_id="run-1",
         tool_call_id="call-1",
         server_name="reports",
@@ -329,6 +394,7 @@ async def test_submit_repeated_cancellation_does_not_interrupt_compensation():
     request = TaskSubmitRequest(
         user_id="user-1",
         thread_id="thread-1",
+        thread_incarnation="incarnation-1",
         run_id="run-1",
         tool_call_id="call-1",
         server_name="reports",
@@ -376,6 +442,7 @@ async def test_submit_stops_waiting_for_hung_compensation_without_cancelling_it(
     request = TaskSubmitRequest(
         user_id="user-1",
         thread_id="thread-1",
+        thread_incarnation="incarnation-1",
         run_id="run-1",
         tool_call_id="call-1",
         server_name="reports",
@@ -426,6 +493,7 @@ async def test_submit_cancellation_preserves_cancelled_error_when_compensation_f
     request = TaskSubmitRequest(
         user_id="user-1",
         thread_id="thread-1",
+        thread_incarnation="incarnation-1",
         run_id="run-1",
         tool_call_id="call-1",
         server_name="reports",
@@ -472,6 +540,7 @@ async def test_submit_cancels_remote_task_when_its_id_exceeds_storage_limit():
             request=TaskSubmitRequest(
                 user_id="user-1",
                 thread_id="thread-1",
+                thread_incarnation="incarnation-1",
                 run_id="run-1",
                 tool_call_id="call-1",
                 server_name="reports",
@@ -512,6 +581,7 @@ async def test_duplicate_remote_handle_is_rejected_without_cancelling_existing_t
             request=TaskSubmitRequest(
                 user_id="user-1",
                 thread_id="thread-2",
+                thread_incarnation="incarnation-2",
                 run_id="run-2",
                 tool_call_id="call-2",
                 server_name="reports",
@@ -548,6 +618,7 @@ async def test_cancel_task_persists_request_without_calling_remote():
         task_id="task-1",
         thread_id="thread-1",
         user_id="user-1",
+        thread_incarnation="incarnation-1",
     )
 
     assert result == record
@@ -627,6 +698,7 @@ async def test_cancel_recovery_failures_are_isolated_and_later_phases_continue(c
 @pytest.mark.asyncio
 async def test_notification_delivery_waits_for_successful_agent_run():
     repo = SimpleNamespace(
+        begin_notification_launch=AsyncMock(return_value=True),
         mark_notification_dispatched=AsyncMock(return_value=True),
         finish_notification_run=AsyncMock(return_value=True),
         release_notification_claim=AsyncMock(return_value=True),
@@ -671,7 +743,7 @@ async def test_notification_delivery_waits_for_successful_agent_run():
 
 
 @pytest.mark.asyncio
-async def test_missing_dispatched_notification_run_retries_delivery():
+async def test_missing_dispatched_notification_run_retries_delivery(monkeypatch):
     repo = SimpleNamespace(
         finish_notification_run=AsyncMock(return_value=True),
         defer_dispatched_notification=AsyncMock(return_value=True),
@@ -686,6 +758,7 @@ async def test_missing_dispatched_notification_run_retries_delivery():
         get_run=AsyncMock(return_value=None),
     )
     now = datetime.now(UTC)
+    monkeypatch.setattr(service_module, "_notification_completion_time", lambda *, not_before: not_before)
 
     await service._notify_one_claimed(
         {
@@ -707,7 +780,7 @@ async def test_missing_dispatched_notification_run_retries_delivery():
 
 
 @pytest.mark.asyncio
-async def test_notification_failures_are_isolated_and_release_their_lease(caplog):
+async def test_notification_failures_are_isolated_and_release_their_lease(caplog, monkeypatch):
     records = [
         {
             **_claimed_row(),
@@ -746,6 +819,7 @@ async def test_notification_failures_are_isolated_and_release_their_lease(caplog
         get_run=get_run,
     )
     now = datetime.now(UTC)
+    monkeypatch.setattr(service_module, "_notification_completion_time", lambda *, not_before: not_before)
 
     with caplog.at_level(logging.ERROR):
         await service._run_notifications(now=now)
@@ -761,9 +835,73 @@ async def test_notification_failures_are_isolated_and_release_their_lease(caplog
 
 
 @pytest.mark.asyncio
-async def test_notification_busy_thread_replaces_claim_with_latest_event():
+async def test_notification_failure_releases_at_its_own_completion_without_waiting_for_sibling(monkeypatch):
+    sibling_gate = asyncio.Event()
+    failure_released = asyncio.Event()
+    scan_started_at = datetime(2000, 1, 1, tzinfo=UTC)
+    failure_completed_at = scan_started_at + timedelta(seconds=7)
+    records = [
+        {
+            **_claimed_row(),
+            "id": "task-broken",
+            "notification_status": "dispatched",
+            "notification_run_id": "run-broken",
+            "dispatch_version": 2,
+        },
+        {
+            **_claimed_row(),
+            "id": "task-blocked",
+            "notification_status": "dispatched",
+            "notification_run_id": "run-blocked",
+            "dispatch_version": 3,
+        },
+    ]
+
+    async def get_run(run_id, **_kwargs):
+        if run_id == "run-broken":
+            raise RuntimeError("run store unavailable")
+        await sibling_gate.wait()
+        return SimpleNamespace(status=RunStatus.success)
+
+    async def release_notification_lease(*_args, **_kwargs):
+        failure_released.set()
+        return True
+
     repo = SimpleNamespace(
+        claim_notification_work=AsyncMock(return_value=records),
+        finish_notification_run=AsyncMock(return_value=True),
+        defer_dispatched_notification=AsyncMock(return_value=True),
+        release_notification_lease=AsyncMock(side_effect=release_notification_lease),
+    )
+    service = McpTaskService(
+        repository=repo,
+        drivers=McpTaskDriverRegistry(),
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+        launch_notification=AsyncMock(),
+        get_run=get_run,
+    )
+    monkeypatch.setattr(service_module, "_notification_completion_time", lambda *, not_before: failure_completed_at)
+
+    task = asyncio.create_task(service._run_notifications(now=scan_started_at))
+    try:
+        await asyncio.wait_for(failure_released.wait(), timeout=1)
+        assert not task.done()
+        released = repo.release_notification_lease.await_args
+        assert released.args[0] == "task-broken"
+        assert released.kwargs["next_notification_at"] == failure_completed_at + timedelta(seconds=5)
+    finally:
+        sibling_gate.set()
+        await asyncio.wait_for(task, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_reserved_notification_busy_thread_preserves_snapshot(monkeypatch):
+    repo = SimpleNamespace(
+        begin_notification_launch=AsyncMock(return_value=True),
         release_notification_claim=AsyncMock(return_value=True),
+        release_notification_lease=AsyncMock(return_value=True),
     )
     service = McpTaskService(
         repository=repo,
@@ -775,6 +913,7 @@ async def test_notification_busy_thread_replaces_claim_with_latest_event():
         get_run=AsyncMock(return_value=SimpleNamespace(assistant_id="lead_agent")),
     )
     now = datetime.now(UTC)
+    monkeypatch.setattr(service_module, "_notification_completion_time", lambda *, not_before: not_before)
 
     await service._notify_one_claimed(
         {
@@ -787,15 +926,55 @@ async def test_notification_busy_thread_replaces_claim_with_latest_event():
         now=now,
     )
 
-    released = repo.release_notification_claim.await_args.kwargs
-    assert released["replace_with_latest"] is True
+    repo.release_notification_claim.assert_not_awaited()
+    released = repo.release_notification_lease.await_args.kwargs
+    assert released["count_failure"] is False
     assert released["next_notification_at"] == now + timedelta(seconds=5)
 
 
 @pytest.mark.asyncio
-async def test_notification_launch_failure_backs_off_and_replaces_with_latest_event():
+async def test_reclaimed_launching_busy_thread_preserves_reserved_snapshot(monkeypatch):
     repo = SimpleNamespace(
+        begin_notification_launch=AsyncMock(return_value=True),
         release_notification_claim=AsyncMock(return_value=True),
+        release_notification_lease=AsyncMock(return_value=True),
+    )
+    service = McpTaskService(
+        repository=repo,
+        drivers=McpTaskDriverRegistry(),
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+        launch_notification=AsyncMock(side_effect=ConflictError("thread busy")),
+        get_run=AsyncMock(return_value=SimpleNamespace(assistant_id="lead_agent")),
+    )
+    now = datetime.now(UTC)
+    monkeypatch.setattr(service_module, "_notification_completion_time", lambda *, not_before: not_before)
+
+    await service._notify_one_claimed(
+        {
+            **_claimed_row(),
+            "notification_status": "launching",
+            "dispatch_version": 2,
+            "dispatch_attempt": 0,
+            "notification_attempt_count": 5,
+            "dispatch_event": {"status": "input_required"},
+        },
+        now=now,
+    )
+
+    repo.release_notification_claim.assert_not_awaited()
+    released = repo.release_notification_lease.await_args.kwargs
+    assert released["count_failure"] is False
+    assert released["next_notification_at"] == now + timedelta(seconds=5)
+
+
+@pytest.mark.asyncio
+async def test_notification_launch_failure_backs_off_without_replacing_reserved_snapshot(monkeypatch):
+    repo = SimpleNamespace(
+        begin_notification_launch=AsyncMock(return_value=True),
+        release_notification_claim=AsyncMock(return_value=True),
+        release_notification_lease=AsyncMock(return_value=True),
     )
     service = McpTaskService(
         repository=repo,
@@ -808,6 +987,7 @@ async def test_notification_launch_failure_backs_off_and_replaces_with_latest_ev
         get_run=AsyncMock(return_value=SimpleNamespace(assistant_id="lead_agent")),
     )
     now = datetime.now(UTC)
+    monkeypatch.setattr(service_module, "_notification_completion_time", lambda *, not_before: not_before)
 
     await service._notify_one_claimed(
         {
@@ -821,15 +1001,16 @@ async def test_notification_launch_failure_backs_off_and_replaces_with_latest_ev
         now=now,
     )
 
-    released = repo.release_notification_claim.await_args.kwargs
-    assert released["replace_with_latest"] is True
-    assert released["count_failure"] is True
+    repo.release_notification_claim.assert_not_awaited()
+    released = repo.release_notification_lease.await_args.kwargs
+    assert released["count_failure"] is False
     assert released["next_notification_at"] == now + timedelta(seconds=40)
 
 
 @pytest.mark.asyncio
 async def test_permanently_rejected_notification_is_dead_lettered():
     repo = SimpleNamespace(
+        begin_notification_launch=AsyncMock(return_value=True),
         dead_letter_notification=AsyncMock(return_value=True),
         release_notification_claim=AsyncMock(return_value=True),
     )
@@ -861,6 +1042,224 @@ async def test_permanently_rejected_notification_is_dead_lettered():
     assert dead_lettered["dispatch_version"] == 2
     assert "not found" in dead_lettered["error"]
     assert dead_lettered["count_failure"] is True
+    repo.release_notification_claim.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_permanently_rejected_reclaimed_launching_notification_is_dead_lettered():
+    repo = SimpleNamespace(
+        begin_notification_launch=AsyncMock(return_value=True),
+        dead_letter_notification=AsyncMock(return_value=True),
+        release_notification_claim=AsyncMock(return_value=True),
+        release_notification_lease=AsyncMock(return_value=True),
+    )
+    service = McpTaskService(
+        repository=repo,
+        drivers=McpTaskDriverRegistry(),
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+        launch_notification=AsyncMock(side_effect=PermanentNotificationError("Thread thread-1 not found")),
+        get_run=AsyncMock(return_value=SimpleNamespace(assistant_id="lead_agent")),
+    )
+
+    await service._notify_one_claimed(
+        {
+            **_claimed_row(),
+            "notification_status": "launching",
+            "dispatch_version": 2,
+            "dispatch_attempt": 0,
+            "notification_attempt_count": 5,
+            "dispatch_event": {"status": "completed"},
+        },
+        now=datetime.now(UTC),
+    )
+
+    repo.dead_letter_notification.assert_awaited_once()
+    assert repo.dead_letter_notification.await_args.kwargs["count_failure"] is True
+    repo.release_notification_claim.assert_not_awaited()
+    repo.release_notification_lease.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reclaimed_launching_source_lookup_failure_releases_without_counting_failure():
+    record = {
+        **_claimed_row(),
+        "notification_status": "launching",
+        "dispatch_version": 2,
+        "dispatch_attempt": 0,
+        "notification_attempt_count": 5,
+        "dispatch_event": {"status": "completed"},
+    }
+    repo = SimpleNamespace(
+        claim_notification_work=AsyncMock(return_value=[record]),
+        release_notification_claim=AsyncMock(return_value=True),
+        release_notification_lease=AsyncMock(return_value=True),
+        dead_letter_notification=AsyncMock(return_value=True),
+    )
+    service = McpTaskService(
+        repository=repo,
+        drivers=McpTaskDriverRegistry(),
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+        launch_notification=AsyncMock(),
+        get_run=AsyncMock(side_effect=RuntimeError("run store unavailable")),
+    )
+
+    await service._run_notifications(now=datetime.now(UTC))
+
+    repo.dead_letter_notification.assert_not_awaited()
+    repo.release_notification_claim.assert_not_awaited()
+    repo.release_notification_lease.assert_awaited_once()
+    assert repo.release_notification_lease.await_args.kwargs["count_failure"] is False
+
+
+@pytest.mark.asyncio
+async def test_notification_dispatch_uses_launch_completion_time(monkeypatch):
+    scan_started_at = datetime(2000, 1, 1, tzinfo=UTC)
+    launch_completed_at = scan_started_at + timedelta(seconds=121)
+    _MutableDateTime.current = scan_started_at
+
+    async def launch_notification(**_kwargs):
+        _MutableDateTime.current = launch_completed_at
+        return {"run_id": "notify-run-1"}
+
+    monkeypatch.setattr(service_module, "datetime", _MutableDateTime)
+    repo = SimpleNamespace(
+        begin_notification_launch=AsyncMock(return_value=True),
+        mark_notification_dispatched=AsyncMock(return_value=False),
+    )
+    service = McpTaskService(
+        repository=repo,
+        drivers=McpTaskDriverRegistry(),
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+        launch_notification=launch_notification,
+        get_run=AsyncMock(return_value=SimpleNamespace(assistant_id="lead_agent")),
+    )
+
+    await service._notify_one_claimed(
+        {
+            **_claimed_row(),
+            "notification_status": "claimed",
+            "dispatch_version": 2,
+            "dispatch_attempt": 0,
+            "dispatch_event": {"status": "completed"},
+        },
+        now=scan_started_at,
+    )
+
+    assert repo.mark_notification_dispatched.await_args.kwargs["now"] == launch_completed_at
+
+
+@pytest.mark.asyncio
+async def test_notification_does_not_launch_when_preflight_fence_is_rejected():
+    launch_notification = AsyncMock(return_value={"run_id": "stale-notify-run"})
+    repo = SimpleNamespace(
+        begin_notification_launch=AsyncMock(return_value=False),
+        mark_notification_dispatched=AsyncMock(return_value=False),
+        release_notification_claim=AsyncMock(return_value=False),
+    )
+    service = McpTaskService(
+        repository=repo,
+        drivers=McpTaskDriverRegistry(),
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+        launch_notification=launch_notification,
+        get_run=AsyncMock(return_value=SimpleNamespace(assistant_id="lead_agent")),
+    )
+
+    await service._notify_one_claimed(
+        {
+            **_claimed_row(),
+            "notification_status": "claimed",
+            "dispatch_version": 2,
+            "dispatch_attempt": 0,
+            "dispatch_event": {"status": "completed"},
+        },
+        now=datetime.now(UTC),
+    )
+
+    repo.begin_notification_launch.assert_awaited_once()
+    repo.release_notification_claim.assert_awaited_once()
+    launch_notification.assert_not_awaited()
+    repo.mark_notification_dispatched.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reclaimed_launching_notification_preserves_snapshot_when_preflight_lease_expires():
+    launch_notification = AsyncMock(return_value={"run_id": "stale-notify-run"})
+    repo = SimpleNamespace(
+        begin_notification_launch=AsyncMock(return_value=False),
+        release_notification_claim=AsyncMock(return_value=False),
+        release_notification_lease=AsyncMock(return_value=True),
+    )
+    service = McpTaskService(
+        repository=repo,
+        drivers=McpTaskDriverRegistry(),
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+        launch_notification=launch_notification,
+        get_run=AsyncMock(return_value=SimpleNamespace(assistant_id="lead_agent")),
+    )
+
+    await service._notify_one_claimed(
+        {
+            **_claimed_row(),
+            "notification_status": "launching",
+            "dispatch_version": 2,
+            "dispatch_attempt": 0,
+            "dispatch_event": {"status": "completed"},
+        },
+        now=datetime.now(UTC),
+    )
+
+    repo.begin_notification_launch.assert_awaited_once()
+    repo.release_notification_lease.assert_awaited_once()
+    repo.release_notification_claim.assert_not_awaited()
+    launch_notification.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reclaimed_launching_notification_preserves_snapshot_on_uncertain_failure_at_retry_budget():
+    repo = SimpleNamespace(
+        begin_notification_launch=AsyncMock(return_value=True),
+        release_notification_claim=AsyncMock(return_value=True),
+        release_notification_lease=AsyncMock(return_value=True),
+        dead_letter_notification=AsyncMock(return_value=True),
+    )
+    launch_notification = AsyncMock(side_effect=RuntimeError("run result unavailable"))
+    service = McpTaskService(
+        repository=repo,
+        drivers=McpTaskDriverRegistry(),
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+        launch_notification=launch_notification,
+        get_run=AsyncMock(return_value=SimpleNamespace(assistant_id="lead_agent")),
+    )
+
+    await service._notify_one_claimed(
+        {
+            **_claimed_row(),
+            "notification_status": "launching",
+            "notification_error": "previous result unavailable",
+            "dispatch_version": 2,
+            "dispatch_attempt": 0,
+            "notification_attempt_count": 5,
+            "dispatch_event": {"status": "completed"},
+        },
+        now=datetime.now(UTC),
+    )
+
+    launch_notification.assert_awaited_once()
+    repo.dead_letter_notification.assert_not_awaited()
+    repo.release_notification_lease.assert_awaited_once()
+    assert repo.release_notification_lease.await_args.kwargs["count_failure"] is False
     repo.release_notification_claim.assert_not_awaited()
 
 
@@ -904,11 +1303,12 @@ async def test_notification_retry_budget_dead_letters_before_creating_another_ru
 
 
 @pytest.mark.asyncio
-async def test_dispatched_notification_retry_budget_dead_letters_before_hydrating_run():
+async def test_dispatched_notification_retry_budget_reconciles_run_before_dead_lettering():
     repo = SimpleNamespace(
         dead_letter_notification=AsyncMock(return_value=True),
+        finish_notification_run=AsyncMock(return_value=True),
     )
-    get_run = AsyncMock()
+    get_run = AsyncMock(return_value=SimpleNamespace(status=RunStatus.success))
     service = McpTaskService(
         repository=repo,
         drivers=McpTaskDriverRegistry(),
@@ -932,11 +1332,12 @@ async def test_dispatched_notification_retry_budget_dead_letters_before_hydratin
         now=now,
     )
 
-    get_run.assert_not_awaited()
-    dead_lettered = repo.dead_letter_notification.await_args.kwargs
-    assert dead_lettered["dispatch_version"] == 2
-    assert dead_lettered["count_failure"] is False
-    assert "5 failed attempts" in dead_lettered["error"]
+    get_run.assert_awaited_once_with("notify-run-1", user_id="user-1")
+    repo.dead_letter_notification.assert_not_awaited()
+    finished = repo.finish_notification_run.await_args.kwargs
+    assert finished["dispatch_version"] == 2
+    assert finished["delivered"] is True
+    assert finished["next_notification_at"] is None
 
 
 @pytest.mark.asyncio
@@ -961,6 +1362,7 @@ async def test_submit_preserves_persistence_error_when_compensation_cancel_fails
     request = TaskSubmitRequest(
         user_id="user-1",
         thread_id="thread-1",
+        thread_incarnation="incarnation-1",
         run_id="run-1",
         tool_call_id="call-1",
         server_name="reports",
@@ -1166,6 +1568,7 @@ async def test_persisted_snapshot_errors_are_bounded_on_submit_and_poll():
         request=TaskSubmitRequest(
             user_id="user-1",
             thread_id="thread-1",
+            thread_incarnation="incarnation-1",
             run_id="run-1",
             tool_call_id="call-1",
             server_name="reports",
@@ -1354,7 +1757,9 @@ async def test_run_once_releases_claim_when_driver_is_missing_or_fails():
     assert "No MCP task driver registered" in released["task-1"]["error"]
     assert released["task-2"]["error"] == "network down"
     assert released["task-1"]["next_poll_at"] == now + timedelta(seconds=5)
-    assert released["task-2"]["next_poll_at"] > now + timedelta(seconds=5)
+    # Windows datetime.now() can return the same tick for the whole run_once,
+    # so the retry timestamp may equal now + 5s exactly; only the backoff floor matters.
+    assert released["task-2"]["next_poll_at"] >= now + timedelta(seconds=5)
 
 
 @pytest.mark.asyncio
@@ -2067,6 +2472,9 @@ class NotificationPersistenceRepo:
             }
         ]
 
+    async def begin_notification_launch(self, *_args, **_kwargs):
+        return True
+
     async def mark_notification_dispatched(self, *_args, **_kwargs):
         self.mark_started.set()
         await asyncio.Event().wait()
@@ -2299,7 +2707,7 @@ async def test_cancelled_hung_claim_returns_then_releases_delayed_result(monkeyp
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["poll", "cancel", "notification"])
 async def test_single_flight_claim_releases_late_uncancelled_claim(phase, monkeypatch):
-    monkeypatch.setattr(service_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(service_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.05)
 
     class BlockingClaimRepository:
         def __init__(self):
@@ -2422,7 +2830,7 @@ async def test_single_flight_claim_skip_logs_unresolved_owner(caplog):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["poll", "cancel", "notification"])
 async def test_single_flight_claim_releases_owner_before_stuck_release(phase, monkeypatch):
-    monkeypatch.setattr(service_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(service_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.05)
 
     class BlockingClaimAndReleaseRepository:
         def __init__(self):
@@ -2848,6 +3256,10 @@ class SelfCancellingNotificationRepository(FakeRepository):
         self.notification_releases.append((task_id, kwargs))
         return True
 
+    async def release_notification_lease(self, task_id, **kwargs):
+        self.notification_releases.append((task_id, kwargs))
+        return True
+
 
 @pytest.mark.asyncio
 async def test_notification_child_self_cancellation_releases_once():
@@ -2879,6 +3291,10 @@ class BatchNotificationRepository(FakeRepository):
         return [dict(row) for row in self.rows]
 
     async def release_notification_claim(self, task_id, **kwargs):
+        self.notification_releases.append((task_id, kwargs))
+        return True
+
+    async def release_notification_lease(self, task_id, **kwargs):
         self.notification_releases.append((task_id, kwargs))
         return True
 
@@ -3218,6 +3634,9 @@ class OrdinaryReleaseBatchRepository:
     async def claim_notification_work(self, **_kwargs):
         return self._records("notification")
 
+    async def begin_notification_launch(self, *_args, **_kwargs):
+        return True
+
     async def _release(self, task_id, **_kwargs):
         self.release_calls.append(task_id)
         self.release_started.set()
@@ -3251,12 +3670,22 @@ class OrdinaryReleaseBatchRepository:
     async def release_notification_claim(self, task_id, **kwargs):
         return await self._release(task_id, **kwargs)
 
+    async def release_notification_lease(self, task_id, **kwargs):
+        return await self._release(task_id, **kwargs)
+
+    async def release_poll_claim_after_cancellation(self, task_id, **kwargs):
+        return await self._release(task_id, **kwargs)
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["poll", "cancel", "notification"])
 @pytest.mark.parametrize("outcome", ["success", "failure", "self_cancel"])
 async def test_ordinary_batch_release_is_handed_off_without_duplication(phase, outcome, monkeypatch, caplog):
-    monkeypatch.setattr(service_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01)
+    # 0.25 keeps the claim drain above Windows' coarse timer granularity
+    # (wait_for(shield(claim_task), 0.01) can fire before the claim's first
+    # scheduling slice on Windows/CPython 3.12, abandoning an instant claim to
+    # the background handoff) while staying far below the 1s compensation wait.
+    monkeypatch.setattr(service_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.25)
     repo = OrdinaryReleaseBatchRepository(phase=phase, outcome=outcome)
     drivers = McpTaskDriverRegistry()
     if phase == "poll":
@@ -3274,12 +3703,12 @@ async def test_ordinary_batch_release_is_handed_off_without_duplication(phase, o
         get_run=AsyncMock(return_value=None),
     )
     caller = asyncio.create_task(_run_batch_probe(service, phase))
-    await repo.release_started.wait()
+    await asyncio.wait_for(repo.release_started.wait(), timeout=2)
     caller.cancel("first cancellation")
 
     try:
         with caplog.at_level(logging.ERROR), pytest.raises(asyncio.CancelledError) as caught:
-            await asyncio.wait_for(caller, timeout=0.2)
+            await asyncio.wait_for(caller, timeout=0.5)
         assert caught.value.args == ("first cancellation",)
         assert repo.release_interrupted is False
         assert repo.release_calls == ["task-1"]
@@ -3309,7 +3738,7 @@ async def test_ordinary_batch_release_is_handed_off_without_duplication(phase, o
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["poll", "cancel", "notification"])
 async def test_ordinary_batch_release_timeout_has_service_owned_strong_root(phase, monkeypatch):
-    monkeypatch.setattr(service_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(service_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.25)
     repo = OrdinaryReleaseBatchRepository(phase=phase, outcome="success")
     drivers = McpTaskDriverRegistry()
     if phase == "poll":
@@ -3326,7 +3755,7 @@ async def test_ordinary_batch_release_timeout_has_service_owned_strong_root(phas
         get_run=AsyncMock(return_value=None),
     )
     caller = asyncio.create_task(_run_batch_probe(service, phase))
-    await repo.release_started.wait()
+    await asyncio.wait_for(repo.release_started.wait(), timeout=2)
     await caller
 
     assert len(service._compensation_tasks) == 1
@@ -3371,7 +3800,7 @@ async def test_ordinary_batch_release_completion_same_tick_is_terminal(monkeypat
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["poll", "cancel", "notification"])
 async def test_repeated_outer_cancellation_keeps_one_ordinary_release(phase, monkeypatch):
-    monkeypatch.setattr(service_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(service_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.05)
     repo = OrdinaryReleaseBatchRepository(phase=phase, outcome="success")
     drivers = McpTaskDriverRegistry()
     if phase == "poll":
@@ -3580,7 +4009,7 @@ async def test_same_tick_outer_claim_cancellation_wins_and_preserves_args():
 async def test_poll_retry_release_hang_does_not_block_run_once(monkeypatch):
     import app.mcp_tasks.service as service_module
 
-    monkeypatch.setattr(service_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01, raising=False)
+    monkeypatch.setattr(service_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.05, raising=False)
 
     class HangingReleaseRepo(FakeRepository):
         def __init__(self):
@@ -3618,7 +4047,7 @@ async def test_poll_retry_release_hang_does_not_block_run_once(monkeypatch):
 async def test_notification_failure_release_hang_does_not_block(monkeypatch):
     import app.mcp_tasks.service as service_module
 
-    monkeypatch.setattr(service_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01, raising=False)
+    monkeypatch.setattr(service_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.05, raising=False)
 
     class HangingNotificationReleaseRepo:
         def __init__(self, records):
@@ -4054,6 +4483,153 @@ async def test_notification_cancellation_during_source_run_lookup_releases_claim
         await task
 
     repo.release_notification_claim.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_notification_cancellation_during_launch_reservation_preserves_phase():
+    reservation_started = asyncio.Event()
+
+    async def begin_notification_launch(*_args, **_kwargs):
+        reservation_started.set()
+        await asyncio.Event().wait()
+
+    repo = SimpleNamespace(
+        begin_notification_launch=begin_notification_launch,
+        release_notification_claim=AsyncMock(return_value=True),
+        release_notification_lease=AsyncMock(return_value=True),
+    )
+    service = McpTaskService(
+        repository=repo,
+        drivers=McpTaskDriverRegistry(),
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+        launch_notification=AsyncMock(),
+        get_run=AsyncMock(return_value=SimpleNamespace(assistant_id="lead_agent")),
+    )
+    record = {
+        **_claimed_row(),
+        "notification_status": "claimed",
+        "dispatch_version": 2,
+        "dispatch_attempt": 0,
+        "dispatch_event": {"status": "completed"},
+    }
+    now = datetime.now(UTC)
+    task = asyncio.create_task(
+        service._run_claimed_batch(
+            [record],
+            operation=lambda item: service._notify_one_claimed(item, now=now),
+            release=service._release_notification_after_cancellation,
+            action="notification",
+        )
+    )
+    await reservation_started.wait()
+    assert record["notification_status"] == "launching"
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    repo.release_notification_lease.assert_awaited_once()
+    repo.release_notification_claim.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_notification_cancellation_after_launch_reservation_preserves_launching_phase():
+    launch_started = asyncio.Event()
+
+    async def launch_notification(**_kwargs):
+        launch_started.set()
+        await asyncio.Event().wait()
+
+    repo = SimpleNamespace(
+        begin_notification_launch=AsyncMock(return_value=True),
+        release_notification_claim=AsyncMock(return_value=True),
+        release_notification_lease=AsyncMock(return_value=True),
+    )
+    service = McpTaskService(
+        repository=repo,
+        drivers=McpTaskDriverRegistry(),
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+        launch_notification=launch_notification,
+        get_run=AsyncMock(return_value=SimpleNamespace(assistant_id="lead_agent")),
+    )
+    record = {
+        **_claimed_row(),
+        "notification_status": "claimed",
+        "dispatch_version": 2,
+        "dispatch_attempt": 0,
+        "dispatch_event": {"status": "completed"},
+    }
+    now = datetime.now(UTC)
+    task = asyncio.create_task(
+        service._run_claimed_batch(
+            [record],
+            operation=lambda item: service._notify_one_claimed(item, now=now),
+            release=service._release_notification_after_cancellation,
+            action="notification",
+        )
+    )
+    await launch_started.wait()
+    assert record["notification_status"] == "launching"
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    repo.release_notification_lease.assert_awaited_once()
+    repo.release_notification_claim.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reclaimed_launching_notification_cancellation_preserves_phase():
+    launch_started = asyncio.Event()
+
+    async def launch_notification(**_kwargs):
+        launch_started.set()
+        await asyncio.Event().wait()
+
+    repo = SimpleNamespace(
+        begin_notification_launch=AsyncMock(return_value=True),
+        release_notification_claim=AsyncMock(return_value=True),
+        release_notification_lease=AsyncMock(return_value=True),
+    )
+    service = McpTaskService(
+        repository=repo,
+        drivers=McpTaskDriverRegistry(),
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+        launch_notification=launch_notification,
+        get_run=AsyncMock(return_value=SimpleNamespace(assistant_id="lead_agent")),
+    )
+    record = {
+        **_claimed_row(),
+        "notification_status": "launching",
+        "dispatch_version": 2,
+        "dispatch_attempt": 0,
+        "dispatch_event": {"status": "completed"},
+    }
+    now = datetime.now(UTC)
+
+    task = asyncio.create_task(
+        service._run_claimed_batch(
+            [record],
+            operation=lambda r: service._notify_one_claimed(r, now=now),
+            release=service._release_notification_after_cancellation,
+            action="notification",
+        )
+    )
+    await launch_started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    repo.release_notification_lease.assert_awaited_once()
+    repo.release_notification_claim.assert_not_awaited()
 
 
 @pytest.mark.asyncio

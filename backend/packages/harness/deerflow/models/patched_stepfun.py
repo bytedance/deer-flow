@@ -21,6 +21,7 @@ from deerflow.models.assistant_payload_replay import (
     restore_assistant_payloads,
     restore_reasoning_content,
 )
+from deerflow.models.reasoning_capture import typed_choice_message, with_reasoning_content
 
 _MISSING = object()
 
@@ -52,25 +53,6 @@ def _extract_reasoning(value: Any) -> str | object:
                 return model_extra[field]
 
     return _MISSING
-
-
-def _with_reasoning_content(message: AIMessage | AIMessageChunk, reasoning: str) -> AIMessage | AIMessageChunk:
-    """Return a copy of *message* with reasoning_content stored in additional_kwargs."""
-    additional_kwargs = dict(message.additional_kwargs)
-    if additional_kwargs.get("reasoning_content") != reasoning:
-        additional_kwargs["reasoning_content"] = reasoning
-    return message.model_copy(update={"additional_kwargs": additional_kwargs})
-
-
-def _get_typed_choice_message(response: Any, index: int) -> Any:
-    """Extract the SDK-typed choice message at *index*, if available."""
-    choices = getattr(response, "choices", None)
-    if choices is None:
-        return None
-    try:
-        return choices[index].message
-    except (AttributeError, IndexError, TypeError):
-        return None
 
 
 class PatchedChatStepFun(ChatOpenAI):
@@ -133,7 +115,7 @@ class PatchedChatStepFun(ChatOpenAI):
             reasoning = _extract_reasoning(delta)
             if reasoning is not _MISSING and isinstance(generation_chunk.message, AIMessageChunk):
                 generation_chunk = ChatGenerationChunk(
-                    message=_with_reasoning_content(generation_chunk.message, reasoning),
+                    message=with_reasoning_content(generation_chunk.message, reasoning),
                     generation_info=generation_chunk.generation_info,
                 )
 
@@ -158,14 +140,14 @@ class PatchedChatStepFun(ChatOpenAI):
             reasoning = _extract_reasoning(choice_message)
 
             if reasoning is _MISSING and not isinstance(response, dict):
-                reasoning = _extract_reasoning(_get_typed_choice_message(response, index))
+                reasoning = _extract_reasoning(typed_choice_message(response, index))
 
             message = generation.message
             if reasoning is not _MISSING and isinstance(message, AIMessage):
                 if patched_generations is None:
                     patched_generations = list(result.generations)
                 patched_generations[index] = ChatGeneration(
-                    message=_with_reasoning_content(message, reasoning),
+                    message=with_reasoning_content(message, reasoning),
                     generation_info=generation.generation_info,
                 )
 

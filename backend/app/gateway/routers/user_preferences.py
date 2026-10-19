@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, StringConstraints, ValidationError
 
 from app.gateway.auth_disabled import AUTH_SOURCE_SESSION
 from app.gateway.deps import get_current_user_from_request
+from deerflow.config.channel_connections_config import NotificationLocale
 from deerflow.persistence.engine import get_session_factory
 from deerflow.persistence.user.preferences import UserPreferencesRepository
 
@@ -18,7 +19,15 @@ class Preferences(BaseModel):
     notification_enabled: bool | None = None
     model_name: Annotated[str, StringConstraints(max_length=200)] | None = None
     mode: Literal["flash", "thinking", "pro", "ultra"] | None = None
-    reasoning_effort: Literal["minimal", "low", "medium", "high"] | None = None
+    # Provider vocabularies differ (issue #5073): accept any effort token so a
+    # model-specific default such as ``max`` can be remembered. The UI checks
+    # remembered values against the selected model; the factory enforces
+    # declared contracts while preserving legacy direct-request behavior.
+    reasoning_effort: Annotated[str, StringConstraints(max_length=32, pattern=r"^[A-Za-z0-9_.-]+$")] | None = None
+    # The web app's UI language, synced on sign-in and on every language
+    # switch. Scheduled-task IM notices are written in it; without it they use
+    # ``channel_connections.notification_locale``.
+    locale: NotificationLocale | None = None
 
 
 async def _owner(request: Request, expected_user: str) -> str:

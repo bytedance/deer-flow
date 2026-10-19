@@ -1,0 +1,44 @@
+{
+  "version": 3,
+  "description": "Cross-language contract fixture for the host-written scheduled-task strings the tasks page and IM notices translate. The backend writes these values to scheduled_task_runs.error and scheduled_tasks.last_error during goal and stop finalization and host-side run bookkeeping; the frontend (core/scheduled-tasks/goal-outcome.ts) and the IM notice renderer map them to readable text, so neither shows the raw value. Version 3 adds the lifecycle vocabulary: lifecycle_events and their lifecycle_reasons (the rows the originating chat shows, GET /api/threads/{thread_id}/scheduled-task-events) and notification_events (the outbox event names).",
+  "agent_stop_last_error_prefix": "stopped by the agent in run ",
+  "auto_pause_last_error": "paused after 3 unmet scheduled goal runs",
+  "unmet_reason_codes": [
+    "blocked:missing_evidence",
+    "blocked:needs_user_input",
+    "blocked:run_failed",
+    "blocked:external_wait",
+    "blocked:goal_not_met_yet",
+    "max_continuations_reached",
+    "no_progress_detected",
+    "token_capped",
+    "evaluator_failed",
+    "no_durable_end_of_turn",
+    "thread_changed_after_evaluation",
+    "thread_changed_before_continuation",
+    "no_verdict"
+  ],
+  "check_failure_codes": [
+    "evaluator_failed",
+    "no_durable_end_of_turn",
+    "thread_changed_after_evaluation",
+    "thread_changed_before_continuation"
+  ],
+  "scheduled_origin_key": "deerflow_scheduled_origin",
+  "host_run_errors": {
+    "restarted": "interrupted: gateway restarted before the run reached a terminal state",
+    "lease_lost": "interrupted: the owning gateway stopped renewing its run lease",
+    "queue_timeout": "scheduled task queue wait timeout exceeded",
+    "paused_while_queued": "scheduled task was paused while queued",
+    "deleted_while_queued": "scheduled task was deleted while queued",
+    "end_reached": "schedule end condition reached",
+    "interrupted": "run was interrupted before completion"
+  },
+  "lifecycle_events": ["task_stopped", "task_paused", "task_finished"],
+  "lifecycle_reasons": {
+    "task_stopped": ["agent_stop"],
+    "task_paused": ["consecutive_unmet"],
+    "task_finished": ["max_runs", "end_at", "once_done", "once_failed"]
+  },
+  "notification_events": ["run_completed", "run_failed", "run_unmet", "task_paused", "task_stopped", "task_finished"]
+}

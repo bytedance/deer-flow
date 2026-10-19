@@ -1,0 +1,104 @@
+---
+title: 开发者与集成
+description: 直接使用 create_deerflow_agent 或 SubagentRuntime 时的注意事项、结构化契约、扩展系统能看到与介入的位置、安全边界，以及后台执行注册表的规则。
+---
+
+import { Callout } from "nextra/components";
+
+# 开发者与集成
+
+本章面向把 DeerFlow harness 嵌入自己程序、编写扩展或对接前端契约的开发者。
+
+## 直接集成 create_deerflow_agent
+
+`create_deerflow_agent` 是不经过 Gateway 的构图入口。与子 Agent 相关的要点：
+
+- 通过 `RuntimeFeatures` 打开 `subagent` 特性后，工厂会装上 `SubagentLimitMiddleware`（并发数与每 run 总量）并注册 `task` 工具。可以传入一个 `SubagentRuntime`，它必须与 `subagent` 特性同时使用，且不能与中间件完全接管模式并存。
+- `DurableContextMiddleware` 现在**始终**在工厂链上。委派账本由它写入，每 run 总量和"已委派勿重复"都依赖账本；摘要后的 `summary_text` 也由它回注。旧版本的工厂图缺少它，导致这些功能静默失效。
+- `RuntimeFeatures(token_budget=True)` 会构造一个启用的 `TokenBudgetConfig`。
+- 传入的 `SubagentRuntime` 带有自有的持久批处理服务时，`batch_task`、`batch_status`、`cancel_batch` 会绑定到它；传入的运行时不带批处理服务时，不注册批处理工具；只有完全没有传入 `SubagentRuntime` 时，才回退到进程全局的提交器。未启动的自有批处理 worker 会在构图时抛错。
+
+### run_id 为空的运行
+
+LangGraph Server、`langgraph dev` 或直接调用工厂时，运行时上下文里可能没有 `run_id`。运行时对此的处理：
+
+- token 预算和循环检测不再因为 `run_id` 为空而丢失信号：没有非空字符串 `run_id` 的调用按 `Runtime.control` 归类，截断原因仍然按上下文里给出的 `run_id`（包括 `None`）保存并被执行器读取。
+- 每 run 委派总量在没有 `run_id` 时会统计整个线程的账本，并记一条警告。
+- 扩展的任务生命周期通知在 `run_id` 为空时整体跳过，只记一条 debug 日志。
+
+LangGraph Server 的入口必须是模块级的具体函数，harness 提供 `make_lead_agent`。
+
+### SubagentRuntime
+
+`SubagentRuntime` 把进程级容量与可选的持久批处理服务打包在一起：
+
+- `SubagentRuntime.from_app_config(app_config, batch_repository=...)` 按配置构造；也可以直接传 `SubagentRuntimeConfig`。
+- `max_total_per_run` 在构造时做范围检查（1 到 50）。
+- `start()` 启动自有的批处理 worker；`stop()` 在生命周期锁下不设上限地排干正在运行的工作，并把调用方的取消传播出去。它把批处理服务的停止放在一个受保护的独立任务里，即使调用方反复取消也会跑完。
+- 支持 `async with`。
+
+公开导出：`deerflow.agents` 提供 `create_deerflow_agent`、`RuntimeFeatures`、`make_lead_agent`、`ThreadState` 等；`deerflow.subagents` 提供 `SubagentConfig`、`SubagentExecutor`、`SubagentResult`、`SubagentRuntime`、`get_available_subagent_names`、`get_subagent_config`、`list_subagents`。两者都是惰性导出。
+
+## 结构化契约
+
+### 状态契约
+
+`contracts/subagent_status_contract.json` 是前后端共享的固定文件（版本 2）：
+
+- 合法 `subagent_status`：`completed`、`failed`、`cancelled`、`timed_out`、`polling_timed_out`。
+- 合法 `subagent_stop_reason`：`token_capped`、`turn_capped`、`loop_capped`。
+- 工具结果正文只是展示内容，不属于契约。
+
+后端用 `make_subagent_additional_kwargs` 写元数据、`read_subagent_result_metadata` 读取；写入时非法状态值会抛 `ValueError`，读取时遇到未知状态返回 `None`，并把旧的 `max_turns_reached` 映射为 `turn_capped`。前端的 `parseSubtaskResult` 先读结构化字段，只有完全没有结构化元数据时才回退到文本前缀。附加字段（模型名、token 用量、回执、验收）是加法式的，新增字段不需要升级契约版本。
+
+### 事件契约
+
+`contracts/run_event_stream_contract.json` 定义了 `subagent.start` / `subagent.step` / `subagent.end` 的 schema 和 `subagent` 类别，也说明了持久批处理的 worker 不产生父 run 日志事件。
+
+### 后台执行的两个 id
+
+每次委派有两个 id，运行时刻意把它们分开：
+
+- **`tool_call_id`**：供应商生成的工具调用 id，用于 `ToolMessage`、SSE 事件、持久化和前端关联。它在不同 run 之间可能重复。
+- **执行 id**：服务端生成的 UUID，是后台注册表、轮询、取消、超时和清理的唯一键。
+
+扩展看到的 `ExtensionData.scope_id` 是 `tool_call_id`（缺失时才是执行 id）。
+
+## 扩展系统
+
+### 中间件贡献
+
+扩展可以向 Lead Agent 和子 Agent 链贡献中间件，按语义位置放置：`MODEL_LOGICAL`、`MODEL_PHYSICAL`、`TOOL_VISIBLE`、`TOOL_RAW`、`STANDARD`。子 Agent 链使用 `AgentScope.SUBAGENT`，与 Lead Agent 的锚点表相同，只有一处差异：`MODEL_PHYSICAL` 会优先锚到系统消息合并中间件的内侧。`STANDARD` 位置的贡献者之间不保证顺序。
+
+### 任务生命周期
+
+实现 `TaskLifecycleContributor` 的扩展会收到 `on_task_start(app_store, task_store, info)` 与 `on_task_stop(app_store, task_store, info, outcome)`。`TaskInfo` 包含 `task_id`、`run_id`、`thread_id`、`kind`（`lead` 或 `subagent`）、`parent_task_id`、`agent_name`、`resumed`。子 Agent 的 `parent_task_id` 就是父 run 的 id。通知有超时保护，扩展抛错不会影响子 Agent。
+
+### 装配观察
+
+注册了装配观察者时，执行器会在构图后发出一份装配描述符（`prompt_template_id` 为 `deerflow-subagent-v1`），其中 `effective_policies.subagents` 已按调用方的 `allowed_subagents` 过滤，不会向观察者泄漏完整目录。没有观察者时整段逻辑跳过。
+
+## 安全边界
+
+子 Agent 涉及多处不可信文本进入模型提示的位置，运行时在每一处都做了转义或隔离：
+
+- 自定义子 Agent 的 `description` 只取第一行并做 HTML 转义后才渲染进 `subagent_system` 块，无法闭合该块或伪造框架标签。
+- 技能名称、描述、工具列表、位置在技能索引里经过 HTML 转义；斜杠激活时属性转义、正文以 XML 转义方式嵌入。
+- 输入净化中间件维护一份禁用标签名单，子 Agent 链与 Lead Agent 共用，包括 `system-reminder`、`subagent_system`、`skill_system`、`durable_context_data`、`report_contract`、`acceptance_criteria`、`tool_restrictions`、`current_date` 等框架标签以及 `system`、`instruction`、`override`、`ignore` 等通用词。
+- 远端内容净化中间件对 `web_fetch`、`web_search`、`image_search`、`web_capture` 和所有 MCP 工具的结果做同样的标签中和；本地工具（bash、文件读取）的输出不处理。
+- 验收标准原文只进入任务消息，系统提示里只有不含值的说明。
+- 工具回执写在运行时拥有的键上并总是覆盖，工具无法伪造证据；循环检测事件的 `is_subagent` 与 `agent_id` 由服务端安装的记录器决定，调用方传入的同名键在 Gateway 与嵌入式 worker 边界都会被剥离。
+
+## 后台执行注册表
+
+`SubagentExecutor` 维护进程级的 `_background_tasks` 注册表，按执行 id 索引，配套一个 `Future` 表。约定：
+
+- 上下文复制发生在注册**之前**，复制失败不会留下 PENDING 条目；提交失败时条目被弹出。
+- `cleanup_background_task` 只清理终态条目；`force_cleanup_background_task` 无条件清理，仅作最后手段。
+- `Future.cancel()` 必须在注册表锁之外调用，因为完成回调会重新获取该锁。
+- 取消或安全超时后，运行时安排一个延迟清理任务轮询到终态再清理；该任务持有强引用，不会被垃圾回收吞掉。轮询协程意外退出（包括 `task_started` 事件发送失败）时同样会请求取消并安排清理。
+- 容量槽位的释放在独立任务里执行并屏蔽重复取消，保证 `_running` 计数不会永久泄漏。
+
+## 测试位置
+
+与子 Agent 相关的后端测试集中在 `backend/tests/` 下，文件名以 `test_subagent_`、`test_task_tool_`、`test_worker_subagent_`、`test_acceptance_` 等开头；前端的卡片与状态解析测试在 `frontend/tests/unit/core/tasks/`。修改契约时请同时更新 `contracts/` 下的 JSON 与两端的测试。

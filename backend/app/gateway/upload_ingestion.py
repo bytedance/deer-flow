@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import HTTPException
 
 from deerflow.config.app_config import AppConfig
+from deerflow.uploads.companions import register_companion, unregister_companion
 from deerflow.utils.file_io import await_drained, run_file_io
 
 if TYPE_CHECKING:
@@ -154,6 +155,7 @@ class ThreadUploadIngestionService:
         self._auto_convert = False
         self._seen_filenames: set[str] = set()
         self._written_paths: list[Path] = []
+        self._companion_pairs: list[tuple[Path, Path]] = []
         self._sync_targets: list[tuple[Path, str]] = []
         self._total_size = 0
 
@@ -198,7 +200,7 @@ class ThreadUploadIngestionService:
                 user_id=self._user_id,
                 app_config=self._config,
                 owner_prefix="gateway:upload",
-                release_on_last=False,
+                release_on_last=True,
             )
             self._sandbox = self._sandbox_lease.sandbox
             if not self._sandbox_lease.denied and self._sandbox is None:
@@ -249,6 +251,7 @@ class ThreadUploadIngestionService:
         file_size = 0
         upload_temp = None
         convert_source_fd: int | None = None
+        deferred_staged_path: Path | None = None
         try:
             upload_temp = await run_file_io(uploads._prepare_upload_destination, self._uploads_dir, safe_filename)
             async for chunk in chunks:
@@ -269,12 +272,26 @@ class ThreadUploadIngestionService:
             # Link-commit with collision retry: the FileExistsError arm
             # leaves the staged part in place for the retry under the next
             # suffix (the handle's second close is idempotent).
+            #
+            # The conversion descriptor above keeps the staged inode open, and
+            # Windows refuses to remove a file that still has an open handle.
+            # Publishing is therefore split from removing the staged name:
+            # this request keeps ownership of the staged path and removes it
+            # once the descriptor is released below.
             while True:
                 try:
-                    file_path = await run_file_io(uploads._commit_upload_temp_no_overwrite, upload_temp, self._uploads_dir, safe_filename)
+                    file_path = await run_file_io(
+                        uploads._commit_upload_temp_no_overwrite,
+                        upload_temp,
+                        self._uploads_dir,
+                        safe_filename,
+                        unlink_staged=convert_source_fd is None,
+                    )
                     break
                 except FileExistsError:
                     safe_filename = uploads.claim_unique_filename(safe_filename, self._seen_filenames)
+            if convert_source_fd is not None:
+                deferred_staged_path = upload_temp.temp_path
             upload_temp = None
         except uploads.UnsafeUploadPathError as exc:
             _close_fd(convert_source_fd)
@@ -343,6 +360,10 @@ class ThreadUploadIngestionService:
                 raise
             finally:
                 _close_fd(convert_source_fd)
+                if deferred_staged_path is not None:
+                    # The descriptor that pinned the staged inode is released
+                    # by now, so the deferred staged-name removal can land.
+                    await run_file_io(uploads._remove_staged_file, deferred_staged_path)
                 if private_dir is not None:
                     await run_file_io(shutil.rmtree, private_dir, True)
             if not md_staged:
@@ -359,6 +380,7 @@ class ThreadUploadIngestionService:
                 if self._sync_to_sandbox:
                     self._sync_targets.append((md_path, md_virtual_path))
                 file_info["markdown_file"] = md_path.name
+                self._companion_pairs.append((file_path, md_path))
                 file_info["markdown_path"] = str(self._uploads_dir / md_path.name)
                 file_info["markdown_virtual_path"] = md_virtual_path
                 file_info["markdown_artifact_url"] = uploads.upload_artifact_url(self._thread_id, md_path.name)
@@ -384,6 +406,10 @@ class ThreadUploadIngestionService:
         if self._sync_to_sandbox and self._sandbox is not None:
             for file_path, virtual_path in self._sync_targets:
                 await run_file_io(uploads._sync_upload_to_sandbox, self._sandbox, file_path, virtual_path)
+        # Record the final inode/version only after sandbox-readable chmod and
+        # any synchronization have completed; chmod changes st_ctime_ns.
+        for original, markdown in self._companion_pairs:
+            await run_file_io(register_companion, original, markdown)
 
     async def cleanup_written(self) -> None:
         """Remove every file this session wrote (ordinary rejected-request cleanup)."""
@@ -391,6 +417,9 @@ class ThreadUploadIngestionService:
             return
         uploads = _uploads()
         await run_file_io(uploads._cleanup_uploaded_paths, self._written_paths)
+        for original, _ in self._companion_pairs:
+            await run_file_io(unregister_companion, original)
+        self._companion_pairs = []
         self._written_paths = []
 
     async def aclose(self) -> None:

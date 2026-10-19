@@ -12,7 +12,10 @@ from typing import Any, cast
 from langchain_core.tools import StructuredTool
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
 
+from deerflow.community.provider_credentials import redact_secret, reject_url_userinfo, resolve_api_key
 from deerflow.config import get_app_config
+from deerflow.knowledge import format_result
+from deerflow.knowledge.sources import redact_strings
 from deerflow.knowledge_scope import (
     KNOWLEDGE_SCOPE_RUNTIME_KEY,
     canonicalize_knowledge_scope,
@@ -21,7 +24,7 @@ from deerflow.knowledge_scope import (
 from deerflow.tools.types import Runtime
 
 from .client import RAGFlowAPIError, RAGFlowClient, RAGFlowConnectionError, RAGFlowProtocolError
-from .formatting import format_retrieval_result, format_retrieval_sources
+from .formatting import CAPABILITIES, format_retrieval_result, format_retrieval_sources, normalize_retrieval_result
 
 logger = logging.getLogger(__name__)
 
@@ -84,30 +87,16 @@ class _RAGFlowRetrievalSettings(BaseModel):
     @field_validator("base_url")
     @classmethod
     def _reject_url_userinfo(cls, value: AnyHttpUrl) -> AnyHttpUrl:
-        if value.username is not None or value.password is not None:
-            raise ValueError("base_url must not contain username or password information")
-        return value
+        return reject_url_userinfo(value)
 
 
 def _api_key(settings: _RAGFlowRetrievalSettings) -> str | None:
-    value = settings.api_key
-    if isinstance(value, SecretStr):
-        value = value.get_secret_value()
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    return None
-
-
-def _redact_api_key(value: object, api_key: str | None) -> str:
-    text = str(value)
-    if api_key:
-        text = text.replace(api_key, "[REDACTED]")
-    return text
+    return resolve_api_key(settings.api_key)
 
 
 def _redact_error(value: object, api_key: str | None) -> str:
     """Redact provider credentials and opaque dataset IDs on error paths."""
-    return _RAGFLOW_UUID_PATTERN.sub("[DATASET_ID]", _redact_api_key(value, api_key))
+    return _RAGFLOW_UUID_PATTERN.sub("[DATASET_ID]", redact_secret(value, api_key))
 
 
 def _settings_from_extra(extra: Mapping[str, object]) -> _RAGFlowRetrievalSettings:
@@ -576,8 +565,11 @@ async def knowledge_search(
                 dataset_names_by_id=names_by_id,
                 max_chars_per_chunk=settings.max_chars_per_chunk,
                 max_total_chars=settings.max_total_chars,
-                redact=lambda value: _redact_api_key(value, _api_key(settings)),
+                redact=lambda value: redact_secret(value, _api_key(settings)),
             )
+            if artifact is None:
+                normalized = normalize_retrieval_result(redact_strings(result, _api_key(settings)), dataset_names_by_id=redact_strings(names_by_id, _api_key(settings)))
+                content, artifact = format_result(normalized, max_chars_per_chunk=settings.max_chars_per_chunk, max_total_chars=settings.max_total_chars)
             if artifact is not None:
                 _source_artifact.update(artifact)
             return content
@@ -589,7 +581,7 @@ async def knowledge_search(
         )
         # API-key redaction remains mandatory on success. UUID redaction is
         # deliberately error-only so valid checksums and trace IDs survive.
-        return _redact_api_key(formatted, _api_key(settings))
+        return redact_secret(formatted, _api_key(settings))
     except Exception as exc:
         return _tool_error(exc, settings)
 
@@ -610,7 +602,7 @@ async def list_knowledge_bases() -> str:
         lines = ["Available knowledge bases:"]
         for dataset in datasets:
             lines.append(f"- {dataset.name}")
-        return _redact_api_key("\n".join(lines), _api_key(settings))
+        return redact_secret("\n".join(lines), _api_key(settings))
     except Exception as exc:
         return _tool_error(exc, settings)
 
@@ -641,6 +633,7 @@ knowledge_search_tool = StructuredTool.from_function(
     response_format="content_and_artifact",
     description=_tool_description(),
     parse_docstring=True,
+    metadata={"knowledge_capabilities": CAPABILITIES.model_dump(mode="json")},
 )
 
 

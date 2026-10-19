@@ -245,8 +245,9 @@ def _analyze_skill_md(content: str, *, profile: ProfileName, findings: list[dict
             )
         )
 
+    required_secrets = metadata.get("required-secrets")
     try:
-        parse_required_secrets(metadata.get("required-secrets"), Path("SKILL.md"))
+        parse_required_secrets(required_secrets, Path("SKILL.md"))
     except ValueError as exc:
         findings.append(
             make_finding(
@@ -255,6 +256,17 @@ def _analyze_skill_md(content: str, *, profile: ProfileName, findings: list[dict
                 path="SKILL.md",
                 message=str(exc),
                 remediation="Declare required-secrets as a YAML list.",
+            )
+        )
+
+    if isinstance(required_secrets, list) and any(isinstance(item, dict) and not isinstance(item.get("optional", False), bool) for item in required_secrets):
+        findings.append(
+            make_finding(
+                "structure.invalid-required-secrets-optional",
+                severity="error",
+                path="SKILL.md",
+                message="required-secrets[].optional must be a boolean.",
+                remediation="Use true or false for each required-secrets entry's optional field.",
             )
         )
 

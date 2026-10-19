@@ -3,7 +3,7 @@
 import base64
 import hashlib
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import override
 from uuid import uuid4
@@ -14,14 +14,13 @@ from langchain.agents.middleware.types import ModelCallResult, ModelRequest, Mod
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
 
 from deerflow.agents.thread_state import ThreadState
+from deerflow.sandbox.download import MAX_IMAGE_BYTES as _MAX_IMAGE_BYTES
 from deerflow.sandbox.lease import run_sync_lifecycle_operation
 
 logger = logging.getLogger(__name__)
 
-# Mirror the tool-side size cap as a defense-in-depth check. The tool
-# enforces this at write time; the middleware re-checks at read time in
-# case the file grew between view and injection.
-_MAX_IMAGE_BYTES = 20 * 1024 * 1024
+_MAX_CONTEXT_IMAGES = 4
+_MAX_CONTEXT_BASE64_BYTES = 28 * 1024 * 1024
 _IMAGE_CONTEXT_MESSAGE_ID_PREFIX = "view-image-context:"
 _IMAGE_CONTEXT_MESSAGE_MARKER_KEY = "deerflow_view_image_context"
 
@@ -37,7 +36,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
     1. Wraps each LLM call
     2. Checks if the last assistant message contains view_image tool calls
     3. Verifies all tool calls in that message have been completed (have corresponding ToolMessages)
-    4. If conditions are met, appends a human message with all viewed image details (including base64 data)
+    4. If conditions are met, appends a human message with recent viewed image details (including base64 data)
     5. Hands the augmented request to the model so it can see and analyze the images
 
     This enables the LLM to automatically receive and analyze images that were loaded via view_image tool,
@@ -52,6 +51,30 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
     """
 
     state_schema = ViewImageMiddlewareState
+
+    def __init__(
+        self,
+        *,
+        max_injected_images: int = 4,
+        max_injected_total_chars: int = 32_000_000,
+    ) -> None:
+        """Bound the per-request image context injected after view_image rounds.
+
+        ``viewed_images`` only grows (#6825): every model call that follows a
+        ``view_image`` round re-encodes and re-sends every entry ever viewed,
+        so a long PDF-inspection thread pushes the request body past provider
+        limits (e.g. Anthropic's 32 MB) even though each single image is
+        capped. A request admits at most four images and 28 MiB of base64.
+        These knobs may further cap how many images and how much payload
+        (in data-url characters) may be injected per model call; admission
+        runs newest-first so the most recently viewed images survive, and
+        over-budget entries keep their text bullet with a placeholder, so
+        nothing silently disappears. The 32M-character default keeps a single
+        max-size image injectable (20 MiB source -> ~27 MB base64) while
+        bounding accumulation below typical provider request limits.
+        """
+        self._max_injected_images = max(1, int(max_injected_images))
+        self._max_injected_total_chars = max(1, int(max_injected_total_chars))
 
     @staticmethod
     def _is_image_context_message(message: object) -> bool:
@@ -143,11 +166,11 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
     ) -> str | None:
         """Read a validated host mirror and return a data URL, or None on failure.
 
-        ``actual_path`` is server-set by ``view_image_tool`` and held in
-        LangGraph-controlled state. The host path remains the compatibility path
-        for local execution and older checkpoints. Provenance-aware checkpoints
-        additionally verify the exact SHA-256 before a synchronized host copy can
-        stand in for bytes from an earlier sandbox generation.
+        Callers must first bind ``actual_path`` to the current run's user,
+        thread, and virtual image path. The host path remains the compatibility
+        path for local execution and older checkpoints. Provenance-aware
+        checkpoints additionally verify the exact SHA-256 before a synchronized
+        host copy can stand in for bytes from an earlier sandbox generation.
         """
         try:
             file_path = Path(actual_path)
@@ -168,6 +191,46 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
             return None
 
     @classmethod
+    def _read_blob_image_as_data_url(
+        cls,
+        blob_ref_data: Mapping[str, object] | None,
+        mime_type: str,
+        expected_size: int,
+        expected_sha256: str | None,
+    ) -> str | None:
+        """Resolve a trusted checkpoint blob ref, rejecting metadata drift."""
+        if blob_ref_data is None or expected_sha256 is None:
+            return None
+
+        from deerflow.storage import BlobRef, get_blob_store_if_enabled
+
+        try:
+            ref = BlobRef.model_validate(dict(blob_ref_data))
+        except (TypeError, ValueError):
+            return None
+        if ref.kind != "viewed-image" or ref.sha256 != expected_sha256 or ref.size != expected_size or ref.content_type != mime_type:
+            return None
+
+        try:
+            store = get_blob_store_if_enabled()
+            if store is None:
+                return None
+            image_bytes = store.get_bytes(ref)
+        except Exception:
+            logger.warning(
+                "Failed to resolve viewed image blob %s",
+                ref.sha256[:12],
+                exc_info=True,
+            )
+            return None
+        return cls._encode_image_bytes(
+            image_bytes,
+            mime_type,
+            expected_size,
+            expected_sha256,
+        )
+
+    @classmethod
     def _read_image_as_data_url(
         cls,
         state: ViewImageMiddlewareState,
@@ -177,6 +240,9 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         expected_size: int,
         expected_sha256: str | None,
         source_sandbox_id: str | None,
+        blob_ref_data: Mapping[str, object] | None = None,
+        *,
+        allow_host_copy: bool = False,
     ) -> str | None:
         """Read the exact image bytes represented by ``viewed_images`` metadata.
 
@@ -188,6 +254,15 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         fallback. When no live sandbox exists, the historical host compatibility
         path remains available (digest-checked when present).
         """
+        blob_data_url = cls._read_blob_image_as_data_url(
+            blob_ref_data,
+            mime_type,
+            expected_size,
+            expected_sha256,
+        )
+        if blob_data_url is not None:
+            return blob_data_url
+
         from deerflow.sandbox.overwrite import unwrap_sandbox
         from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 
@@ -204,7 +279,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
                 # image was originally read from the host). Reproduce the exact
                 # historical bytes rather than letting an unrelated same-path
                 # file in the replacement sandbox win.
-                if actual_path:
+                if actual_path and allow_host_copy:
                     host_data_url = cls._read_host_image_as_data_url(
                         actual_path,
                         mime_type,
@@ -214,7 +289,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
                     if host_data_url is not None:
                         return host_data_url
                 try:
-                    image_bytes = sandbox.download_file(image_path)
+                    image_bytes = sandbox.download_file(image_path, max_bytes=_MAX_IMAGE_BYTES)
                 except Exception:
                     logger.warning(
                         "Failed to recover viewed image %s from replacement sandbox %s",
@@ -237,7 +312,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
                 return None
 
             try:
-                image_bytes = sandbox.download_file(image_path)
+                image_bytes = sandbox.download_file(image_path, max_bytes=_MAX_IMAGE_BYTES)
             except Exception:
                 logger.warning("Failed to read viewed image %s from sandbox %s", image_path, sandbox_id, exc_info=True)
                 return None
@@ -248,7 +323,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
                 expected_sha256,
             )
 
-        if not actual_path:
+        if not actual_path or not allow_host_copy:
             return None
         return cls._read_host_image_as_data_url(
             actual_path,
@@ -257,14 +332,24 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
             expected_sha256,
         )
 
-    def _create_image_details_message(self, state: ViewImageMiddlewareState) -> list[str | dict]:
-        """Create a formatted message with all viewed image details.
+    def _create_image_details_message(
+        self,
+        state: ViewImageMiddlewareState,
+        *,
+        host_path_allowed: Callable[[str, str], bool] | None = None,
+    ) -> list[str | dict]:
+        """Create bounded image context, prioritizing the most recently viewed paths.
 
         Reads image files on-demand from the active sandbox when available and
         encodes them as base64 for the model. The base64 data is NOT persisted in
         state -- only lightweight metadata (path, mime_type, size, digest, and
         source sandbox id when applicable) is stored in ``viewed_images``,
         avoiding large duplicate payloads across every checkpoint (see #4138).
+
+        Content blocks are emitted oldest-first, but budget admission itself
+        runs newest-first (reversed insertion order) so the most recently
+        viewed images survive the caps (see #6825); an entry over budget keeps
+        its text bullet plus a placeholder instead of its base64 payload.
 
         Args:
             state: Current state containing viewed_images
@@ -277,18 +362,34 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
             # Return a properly formatted text block, not a plain string array
             return [{"type": "text", "text": "No images have been viewed."}]
 
-        # Build the message with image information
+        # Select newest first so older entries cannot consume the budget before
+        # the image that triggered this model call. Preserve chronological
+        # output and the upstream per-image omission placeholders.
         content_blocks: list[str | dict] = [{"type": "text", "text": "Here are the images you've viewed:"}]
-
-        for image_path, image_data in viewed_images.items():
+        selected: list[list[dict]] = []
+        encoded_bytes = 0
+        admitted_chars = 0
+        attempted_images = 0
+        omitted = 0
+        for image_path, image_data in reversed(list(viewed_images.items())):
             mime_type = image_data.get("mime_type", "unknown")
             actual_path = image_data.get("actual_path", "")
             expected_size = image_data.get("size", 0)
             expected_sha256 = image_data.get("sha256")
             source_sandbox_id = image_data.get("source_sandbox_id")
+            blob_ref = image_data.get("blob_ref")
 
-            # Add text description
-            content_blocks.append({"type": "text", "text": f"\n- **{image_path}** ({mime_type})"})
+            estimated_bytes = 4 * ((expected_size + 2) // 3) if isinstance(expected_size, int) and expected_size >= 0 else _MAX_CONTEXT_BASE64_BYTES + 1
+            estimated_chars = estimated_bytes + len(f"data:{mime_type};base64,")
+            blocks = [{"type": "text", "text": f"\n- **{image_path}** ({mime_type})"}]
+            # Failed reads also consume slots, bounding potentially remote read attempts.
+            if attempted_images >= min(_MAX_CONTEXT_IMAGES, self._max_injected_images) or encoded_bytes + estimated_bytes > _MAX_CONTEXT_BASE64_BYTES or admitted_chars + estimated_chars > self._max_injected_total_chars:
+                omitted += 1
+                blocks.append({"type": "text", "text": "  (omitted: image injection budget reached; call view_image again to re-view this image)"})
+                selected.append(blocks)
+                continue
+            attempted_images += 1
+            admitted_chars += estimated_chars
 
             # Read the image file on-demand and encode as base64 for the model
             data_url = self._read_image_as_data_url(
@@ -299,16 +400,25 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
                 expected_size,
                 expected_sha256 if isinstance(expected_sha256, str) else None,
                 source_sandbox_id if isinstance(source_sandbox_id, str) else None,
+                blob_ref if isinstance(blob_ref, Mapping) else None,
+                allow_host_copy=host_path_allowed(image_path, actual_path) if host_path_allowed is not None else False,
             )
             if data_url:
-                content_blocks.append(
+                encoded_bytes += estimated_bytes
+                blocks.append(
                     {
                         "type": "image_url",
                         "image_url": {"url": data_url},
                     }
                 )
             else:
-                content_blocks.append({"type": "text", "text": f"  (file unavailable or changed: {image_path})"})
+                blocks.append({"type": "text", "text": f"  (file unavailable or changed: {image_path})"})
+            selected.append(blocks)
+
+        if omitted:
+            content_blocks.append({"type": "text", "text": f"Omitted viewed images: {omitted}. Call view_image again to inspect a specific image."})
+        for blocks in reversed(selected):
+            content_blocks.extend(blocks)
 
         return content_blocks
 
@@ -365,11 +475,72 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
             },
         )
 
-    def _inject(self, request: ModelRequest) -> ModelRequest:
+    @staticmethod
+    def _authorization_context(request: ModelRequest) -> Mapping:
+        context = getattr(request.runtime, "context", None)
+        return context if isinstance(context, Mapping) else {}
+
+    @classmethod
+    def _host_path_matches_request(cls, request: ModelRequest, image_path: str, actual_path: str) -> bool:
+        """Bind a stored host copy to the authenticated run's user and thread."""
+        from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
+        from deerflow.runtime.user_context import resolve_runtime_user_id
+        from deerflow.sandbox.tools import resolve_and_validate_user_data_path, validate_local_tool_path
+        from deerflow.tools.builtins.view_image_tool import _is_allowed_image_virtual_path
+
+        if not isinstance(image_path, str) or not isinstance(actual_path, str) or not _is_allowed_image_virtual_path(image_path):
+            return False
+
+        from langgraph.config import get_config
+
+        context_thread_id = cls._authorization_context(request).get("thread_id")
+        try:
+            configurable = get_config().get("configurable")
+            configured_thread_id = configurable.get("thread_id") if isinstance(configurable, Mapping) else None
+        except RuntimeError:
+            configured_thread_id = None
+        if configured_thread_id and context_thread_id and configured_thread_id != context_thread_id:
+            return False
+        thread_id = configured_thread_id or context_thread_id
+        if not isinstance(thread_id, str) or not thread_id:
+            return False
+
+        try:
+            user_id = resolve_runtime_user_id(request.runtime)
+            thread_data = (request.state or {}).get("thread_data")
+            if isinstance(thread_data, Mapping):
+                # ThreadDataMiddleware may use a custom Paths base. Bind its
+                # selected root to this run before using it to resolve a host copy.
+                root_name = image_path.removeprefix(f"{VIRTUAL_PATH_PREFIX}/").split("/", 1)[0]
+                root_path = thread_data.get(f"{root_name}_path")
+                if not isinstance(root_path, str) or not root_path:
+                    return False
+                root = Path(root_path).resolve()
+                if root.parts[-6:] != ("users", user_id, "threads", thread_id, "user-data", root_name):
+                    return False
+                validate_local_tool_path(image_path, thread_data, read_only=True)
+                expected_path = Path(resolve_and_validate_user_data_path(image_path, thread_data))
+            else:
+                expected_path = get_paths().resolve_virtual_path(thread_id, image_path, user_id=user_id)
+            return Path(actual_path).resolve() == expected_path
+        except (OSError, PermissionError, TypeError, ValueError):
+            return False
+
+    def _image_injection_plan(self, request: ModelRequest) -> tuple[list[AnyMessage], bool, bool]:
+        """Share message cleanup and read eligibility across sync/async paths."""
+        messages = [message for message in request.messages if not self._is_image_context_message(message)]
+        should_inject = self._should_inject_image_message(messages)
+        needs_authorization = should_inject and bool((request.state or {}).get("viewed_images"))
+        return messages, should_inject, needs_authorization
+
+    def _inject(self, request: ModelRequest, *, authorization_checked: bool = False) -> ModelRequest:
         """Rebuild the request's image context from ``viewed_images``.
 
         Args:
             request: The pending model request
+            authorization_checked: True only after ``awrap_model_call`` has
+                enforced ``sandbox:execute`` for this exact request; skips the
+                synchronous recheck inside its worker thread.
 
         Returns:
             A request whose messages carry exactly the image context this call
@@ -384,18 +555,32 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         # request for the life of the thread. Matching requires both the reserved
         # ID prefix and the server-owned marker, and Gateway strips that marker
         # from client input, so this can never drop a user-authored message.
-        messages = [message for message in request.messages if not self._is_image_context_message(message)]
+        messages, should_inject, needs_authorization = self._image_injection_plan(request)
         dropped_stranded = len(messages) != len(request.messages)
         if dropped_stranded:
             logger.debug("Dropping %d stranded image context message(s) from the model request", len(request.messages) - len(messages))
 
-        if not self._should_inject_image_message(messages):
+        if not should_inject:
             return request.override(messages=messages) if dropped_stranded else request
+
+        if needs_authorization and not authorization_checked:
+            from deerflow.authz.sandbox_authz import authorize_sandbox_execution, safe_app_config
+            from deerflow.sandbox.exceptions import SandboxAuthorizationError
+
+            try:
+                authorize_sandbox_execution(context=self._authorization_context(request), app_config=safe_app_config())
+            except SandboxAuthorizationError:
+                # A restored view may predate a role/policy change. Never read
+                # its host mirror or remote sandbox for an unauthorized request.
+                return request.override(messages=messages) if dropped_stranded else request
 
         # Mixed content (text + images) for the model only, so hide it from the
         # chat UI and IM channels (matches the other middleware-injected context
         # messages) even though it never leaves this request.
-        image_content = self._create_image_details_message(request.state or {})
+        image_content = self._create_image_details_message(
+            request.state or {},
+            host_path_allowed=lambda image_path, actual_path: self._host_path_matches_request(request, image_path, actual_path),
+        )
         logger.debug("Injecting image details message with images into the model request")
 
         return request.override(messages=[*messages, self._create_image_context_message(image_content)])
@@ -421,5 +606,17 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         # blocking work without allowing cancellation to outlive a sandbox
         # client operation. The outer run lease may release the client as soon as
         # cancellation propagates.
-        injected_request = await run_sync_lifecycle_operation(self._inject, request)
+        messages, _, needs_authorization = self._image_injection_plan(request)
+        if needs_authorization:
+            from deerflow.authz.sandbox_authz import authorize_sandbox_execution_async, safe_app_config_async
+            from deerflow.sandbox.exceptions import SandboxAuthorizationError
+
+            try:
+                await authorize_sandbox_execution_async(context=self._authorization_context(request), app_config=await safe_app_config_async())
+            except SandboxAuthorizationError:
+                # Still sweep any old model-only image context before handing
+                # the request on; do not schedule a read in a worker.
+                return await handler(request.override(messages=messages))
+
+        injected_request = await run_sync_lifecycle_operation(self._inject, request, authorization_checked=True)
         return await handler(injected_request)

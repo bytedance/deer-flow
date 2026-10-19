@@ -1,0 +1,121 @@
+---
+title: 可观测性
+description: 任务卡片如何得到状态、SSE 事件与持久化运行事件的字段、token 用量的归属、Langfuse 与 trace id 的关联，以及批处理的查询接口。
+---
+
+import { Callout } from "nextra/components";
+
+# 可观测性
+
+## 任务卡片
+
+对话里每个 `task` 调用对应一张子任务卡片（`SubtaskCard`）。它的数据来自三个地方：
+
+| 信息             | 来源                                                                                                       |
+| ---------------- | ---------------------------------------------------------------------------------------------------------- |
+| 模型名、累计 token | 实时来自 `task_started` / `task_running` 事件；刷新后来自工具结果元数据的 `subagent_model_name` / `subagent_token_usage` |
+| 步骤时间线       | 实时来自 `task_running` 事件；展开卡片且本地没有步骤时，从运行事件接口按 `subagent.step` 回填              |
+| 终态             | 只来自工具结果元数据的 `subagent_status`，不从 `task_completed` 之类的事件推断                              |
+
+状态映射规则：`completed` 显示为完成；`failed`、`cancelled`、`timed_out`、`polling_timed_out` 都显示为失败。元数据里有结构化字段但没有状态时视为进行中。只有完全没有结构化元数据的旧消息才回退到解析正文前缀。
+
+没有工具结果时（例如用户中途停止），卡片在当前轮加载中保持进行中；一旦当前轮结束仍无结果，就标记为失败。刷新页面后，状态来自 checkpoint 里的工具消息元数据，步骤来自事件回填，两者都不会丢。
+
+token 标签受 `token_usage.enabled` 控制，前端通过 `GET /api/models` 的 `token_usage.enabled` 读取该开关。
+
+## SSE 自定义事件
+
+委派过程中 `task` 工具通过流写入器发出以下自定义事件。`task_id` 始终是供应商的 `tool_call_id`，与前端的卡片一一对应；服务端内部的执行 id 不对外暴露。
+
+| 事件             | 载荷字段                                                                   | 说明                                                       |
+| ---------------- | -------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| `task_started`   | `task_id`、`description`、`model_name`                                     | `description` 缺省时使用 `prompt`                          |
+| `task_running`   | `task_id`、`message`、`message_index`、`total_messages`、`usage`、`model_name` | 每条子 Agent 消息一次；`usage` 是累计快照，消费方应替换而非累加 |
+| `task_completed` | `task_id`、`result`、`usage`、`model_name`                                 |                                                            |
+| `task_failed`    | `task_id`、`error`、`usage`、`model_name`                                  | "任务从后台注册表消失"时只有 `task_id` 与 `error`          |
+| `task_cancelled` | `task_id`、`error`、`usage`、`model_name`                                  |                                                            |
+| `task_timed_out` | `task_id`、`error`（轮询超时时没有）、`usage`、`model_name`                | 轮询超时也发这个事件，但工具结果的状态是 `polling_timed_out`；没有单独的轮询超时事件 |
+
+## 持久化运行事件
+
+Run worker 把上述事件持久化到运行事件存储，类别为 `subagent`：
+
+| 事件             | 内容                                                                                                   |
+| ---------------- | ------------------------------------------------------------------------------------------------------ |
+| `subagent.start` | `task_id`、`description`                                                                               |
+| `subagent.step`  | `task_id`、`message_index`、`kind`（`ai` 或 `tool`）、`text`、`truncated`；助手步骤附 `tool_calls`，工具步骤附 `tool_name` |
+| `subagent.end`   | `task_id`、`status`（`completed` / `failed` / `cancelled` / `timed_out`）、`model_name`、`usage`、`result` 或 `error` 及其截断标记 |
+
+步骤文本最多 8,192 字符。事件按 25 条一批写入，`subagent.end` 立即刷盘；写入失败时重新缓冲等待下次重试，不会丢步骤。
+
+查询接口：
+
+```
+GET /api/threads/{thread_id}/runs/{run_id}/events?event_types=subagent.step&task_id=<tool_call_id>&limit=500&after_seq=<seq>
+```
+
+`event_types` 逗号分隔，`limit` 默认 500、最大 2,000，`after_seq` 用于分页。需要 `runs:read` 权限且必须是线程所有者。事件 schema 见仓库根目录的 `contracts/run_event_stream_contract.json`。
+
+## 工具结果元数据
+
+`task` 的终态 `ToolMessage` 在 `additional_kwargs` 里带以下键，是前端与其他消费者的正式契约：
+
+| 键                            | 说明                                                    |
+| ----------------------------- | ------------------------------------------------------- |
+| `subagent_status`             | 五个终态之一                                            |
+| `subagent_stop_reason`        | `token_capped` / `turn_capped` / `loop_capped`，可缺省  |
+| `subagent_error`              | 非 `completed` 时的错误文本，最多 2,000 字符            |
+| `subagent_result_brief`       | `completed` 时的结果摘要，最多 2,000 字符               |
+| `subagent_result_sha256`      | 完整结果的 SHA-256                                      |
+| `subagent_model_name`         | 实际使用的模型                                          |
+| `subagent_token_usage`        | `input_tokens` / `output_tokens` / `total_tokens`       |
+| `subagent_tool_receipts`      | 子 Agent 的回执快照                                     |
+| `subagent_receipt_verdict`    | 引用核对结论                                            |
+| `subagent_acceptance_verdict` | 验收清单结论                                            |
+
+跨语言契约固定在 `contracts/subagent_status_contract.json`（版本 2）：合法状态值、合法 `stop_reason` 值，以及"正文只是展示内容"的约定。模型名、token 用量、验收等附加字段是加法式扩展，旧消费者可忽略。
+
+## token 用量归属
+
+子 Agent 的每次模型调用由 `SubagentTokenCollector` 记录，调用方标记为 `subagent:<名称>`，字段包括来源 run id、模型名、输入 / 输出 / 总 token；命中提示缓存时额外记录 `cache_read_tokens`（只在大于 0 时出现）。子 Agent 结束后这些记录汇入父 run 的日志，按调用方分到 `subagent` 桶，按模型分到实际产生它们的模型名下。
+
+查询接口：
+
+```
+GET /api/threads/{thread_id}/token-usage?include_active=false
+```
+
+响应包含线程总量、输入 / 输出总量、run 数、`by_model`、`by_caller`（`lead_agent` / `subagent` / `middleware`）和上下文占用。`by_model` 从每个 run 的按模型明细汇总，所以使用不同模型的子 Agent 不会被记到 Lead Agent 的模型上；没有明细的旧 run 回退到 run 级模型名。成本核算按模型分别计算未命中输入、缓存命中输入和输出。
+
+## Langfuse
+
+子 Agent 的 span 归属到父线程：`session_id` 是父线程的 `thread_id`，`user_id` 是当前用户，trace 名称为 `subagent:<名称>`（名称小写、下划线转连字符），标签包含环境与模型。LangChain 层面的 tag 同样是 `subagent:<名称>`。在 Langfuse 的 Sessions 视图打开一个线程，就能看到它派出的全部子 Agent。请求级 `deerflow_trace_id` 也会写入 trace 元数据。
+
+## 请求 trace id
+
+每个 Gateway 请求都有一个 `X-Trace-Id`（可从请求头继承，否则生成）。这个 id 随 run 一起传给子 Agent、写进 run 记录、checkpoint 元数据和 Langfuse trace。日志里是否打印它由 `logging.enhance.enabled` 决定。子 Agent 的日志行还有一个 8 位的短 `trace_id`，形如 `[trace=1a2b3c4d]`，方便在 Gateway 日志里串起一次委派的全部输出。
+
+## 循环检测事件
+
+子 Agent 触发循环检测时，会通过父 run 的日志代理记录一条 `middleware:loop_detection` 事件（类别 `middleware`），内容含 `hook`、`action` 和 `changes`：`is_subagent`、`agent_id`（子 Agent 配置名）、`detection_layer`、`tool_names`、`count`、`threshold`。`is_subagent` 与 `agent_id` 由服务端判定，客户端传入的同名值会被丢弃。持久批处理的 worker 没有父 run 日志，不产生这类事件。用同一个 `/events` 接口、`event_types=middleware:loop_detection` 即可查询。
+
+## 批处理接口
+
+持久批处理没有 SSE，工作区界面以轮询方式刷新：有活跃批次时每 2 秒，否则每 15 秒。HTTP 路由前缀为 `/api/threads/{thread_id}/subagent-batches`，全部按所有者过滤：
+
+| 方法与路径                                | 说明                                                                  |
+| ----------------------------------------- | --------------------------------------------------------------------- |
+| `GET ""`                                  | 列出本线程的批次，`limit` 1 到 100，默认 20                           |
+| `GET /{batch_id}`                         | 批次详情与各状态条目计数                                              |
+| `GET /{batch_id}/items`                   | 条目分页，`offset`、`limit`（1 到 500，默认 100）、可选 `status` 过滤 |
+| `POST /{batch_id}/pause`                  | 暂停                                                                  |
+| `POST /{batch_id}/resume`                 | 恢复                                                                  |
+| `POST /{batch_id}/cancel`                 | 取消；worker 未运行时返回 503                                         |
+| `POST /{batch_id}/items/{item_id}/retry`  | 重试单个条目，只接受 `failed` 状态，否则 409                          |
+| `GET /{batch_id}/results.jsonl`           | 以 NDJSON 流式导出全部条目，含完整结果与验收结论                      |
+
+批次状态：`queued`、`running`、`paused` 为活跃，`completed`、`failed`、`cancelled` 为终态。条目状态：`pending` 为等待中，不计入活跃；`queued`、`leased`、`running` 为活跃，`succeeded`、`failed`、`cancelled` 为终态。批次结束时，若有失败条目且没有任何成功条目，批次记为 `failed`，否则为 `completed`。
+
+## 扩展观察点
+
+安装了任务生命周期观察者的扩展会在每个子 Agent 开始和结束时收到通知：`TaskInfo.kind` 为 `subagent`，`task_id` 是服务端执行 id，`parent_task_id` 是父 run 的 id，`agent_name` 是子 Agent 名称。结束时的 `TaskOutcome` 为 `completed`、`aborted`（取消）或 `failed`（其余情况）。没有 `run_id` 的运行（例如直接集成）不触发这些通知。

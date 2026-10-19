@@ -76,7 +76,8 @@ export function PluginGallery({ query }: { query: string }) {
   const copy = t.capabilities.directory;
   const labels = capabilityCopy(locale);
   const { user } = useAuth();
-  const canManage = user?.system_role === "admin" && !isStaticWebsiteOnly();
+  const canManage = !!user && !isStaticWebsiteOnly();
+  const canManagePlatform = canManage && user?.system_role === "admin";
   const directory = useCapabilityCatalog();
   const definitions = directory.data ?? [];
   const adapterNames = [
@@ -86,7 +87,11 @@ export function PluginGallery({ query }: { query: string }) {
         .filter((name) => name !== "guide"),
     ),
   ];
-  const states = useQueries({ queries: adapterNames.map(installationQuery) });
+  const states = useQueries({
+    queries: adapterNames.map((adapter) =>
+      installationQuery(adapter, user?.id),
+    ),
+  });
   const client = useQueryClient();
   const [filter, setFilter] = useState("all");
   const [category, setCategory] = useState<PluginCategory | "all">("all");
@@ -113,7 +118,9 @@ export function PluginGallery({ query }: { query: string }) {
         .map((item) => [item.id, item]),
     ).values(),
   ];
-  const catalog: PluginDirectoryEntry[] = definitions
+  const platformCatalog: PluginDirectoryEntry[] = [];
+  const personalCatalog: PluginDirectoryEntry[] = [];
+  definitions
     .filter(
       (plugin) =>
         canManage ||
@@ -121,12 +128,16 @@ export function PluginGallery({ query }: { query: string }) {
           (item) => item.adapter === "mcp" && item.plugin_id === plugin.id,
         ),
     )
-    .map((plugin) => {
+    .forEach((plugin) => {
+      const isPlatform = plugin.adapter === "guide";
       const status = installations.find(
-        (item) => item.plugin_id === plugin.id && item.installed,
+        (item) =>
+          item.plugin_id === plugin.id &&
+          item.installed &&
+          (isPlatform ? item.scope !== "user" : item.scope === "user"),
       );
       const unavailable = states[adapterNames.indexOf(plugin.adapter)]?.isError;
-      return {
+      (isPlatform ? platformCatalog : personalCatalog).push({
         id: plugin.id,
         category: plugin.category,
         installed: !!status,
@@ -163,50 +174,50 @@ export function PluginGallery({ query }: { query: string }) {
             </Button>
           </PluginRow>
         ),
-      };
-    });
-  // Non-admins see safe installation projections, not the administrator's raw config editor.
-  if (!canManage)
-    for (const item of installations.filter((item) => item.adapter === "mcp")) {
-      const manifest = definitions.find(
-        (plugin) => plugin.id === item.plugin_id,
-      );
-      catalog.push({
-        id: item.id,
-        category: manifest?.category ?? "custom",
-        search: `${item.name} ${item.description}`,
-        installed: true,
-        node: (
-          <PluginRow
-            name={item.name}
-            description={item.description}
-            icon={
-              <PluginIcon
-                name={item.name}
-                icon={item.icon}
-                asset={manifest?.icon}
-                capabilityId={manifest?.id}
-              />
-            }
-            label={
-              item.selectable === false
-                ? labels.unavailable
-                : item.enabled
-                  ? t.capabilities.enabled
-                  : t.capabilities.disabled
-            }
-          >
-            <span className="text-muted-foreground text-xs">
-              {item.auth_status === "required"
-                ? labels.required
-                : item.auth_status === "configured"
-                  ? labels.configured
-                  : labels.unknown}
-            </span>
-          </PluginRow>
-        ),
       });
-    }
+    });
+  // Non-admins receive only the sanitized deployment installation projection.
+  for (const item of installations.filter(
+    (item) =>
+      !canManagePlatform && item.adapter === "mcp" && item.scope !== "user",
+  )) {
+    const manifest = definitions.find((plugin) => plugin.id === item.plugin_id);
+    platformCatalog.push({
+      id: item.id,
+      category: manifest?.category ?? "custom",
+      search: `${item.name} ${item.description}`,
+      installed: true,
+      node: (
+        <PluginRow
+          name={item.name}
+          description={item.description}
+          icon={
+            <PluginIcon
+              name={item.name}
+              icon={item.icon}
+              asset={manifest?.icon}
+              capabilityId={manifest?.id}
+            />
+          }
+          label={
+            item.selectable === false
+              ? labels.unavailable
+              : item.enabled
+                ? t.capabilities.enabled
+                : t.capabilities.disabled
+          }
+        >
+          <span className="text-muted-foreground text-xs">
+            {item.auth_status === "required"
+              ? labels.required
+              : item.auth_status === "configured"
+                ? labels.configured
+                : labels.unknown}
+          </span>
+        </PluginRow>
+      ),
+    });
+  }
   const toolbar = (
     <Tabs value={filter} onValueChange={setFilter}>
       <TabsList>
@@ -250,26 +261,81 @@ export function PluginGallery({ query }: { query: string }) {
       </div>
       {directory.isError && <p role="alert">{labels.catalogError}</p>}
       {directory.isLoading && <p role="status">{t.common.loading}</p>}
-      {canManage ? (
-        <MCPPluginManager
-          query={query}
-          toolbar={toolbar}
-          category={category}
-          installedOnly={filter === "installed"}
-          catalog={catalog}
-          definitions={definitions}
-        />
-      ) : (
-        <>
-          {toolbar}
+      {toolbar}
+      <section aria-labelledby="platform-plugins-heading" className="space-y-5">
+        <div className="space-y-1">
+          <h2 id="platform-plugins-heading" className="text-xl font-semibold">
+            {labels.platformTitle}
+          </h2>
+          <p className="text-muted-foreground text-sm">{labels.platformHint}</p>
+        </div>
+        {canManagePlatform ? (
+          <MCPPluginManager
+            key={`deployment:${user?.id}`}
+            scope="deployment"
+            query={query}
+            category={category}
+            installedOnly={filter === "installed"}
+            catalog={platformCatalog}
+            definitions={definitions}
+          />
+        ) : (
           <PluginDirectory
             query={query}
             category={category}
             installedOnly={filter === "installed"}
-            entries={catalog}
+            entries={platformCatalog}
           />
-        </>
-      )}
+        )}
+      </section>
+      <section
+        aria-labelledby="personal-plugins-heading"
+        className="space-y-5 border-t pt-8"
+      >
+        {canManage ? (
+          <MCPPluginManager
+            key={user?.id}
+            query={query}
+            toolbar={
+              <div className="space-y-1">
+                <h2
+                  id="personal-plugins-heading"
+                  className="text-xl font-semibold"
+                >
+                  {labels.personalTitle}
+                </h2>
+                <p className="text-muted-foreground text-sm">
+                  {labels.personalHint}
+                </p>
+              </div>
+            }
+            category={category}
+            installedOnly={filter === "installed"}
+            catalog={personalCatalog}
+            definitions={definitions}
+          />
+        ) : (
+          <>
+            <div className="space-y-1">
+              <h2
+                id="personal-plugins-heading"
+                className="text-xl font-semibold"
+              >
+                {labels.personalTitle}
+              </h2>
+              <p className="text-muted-foreground text-sm">
+                {labels.personalHint}
+              </p>
+            </div>
+            <PluginDirectory
+              query={query}
+              category={category}
+              installedOnly={filter === "installed"}
+              entries={personalCatalog}
+            />
+          </>
+        )}
+      </section>
       <Dialog open={!!selected} onOpenChange={(value) => !value && close()}>
         <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
           {selected && (
@@ -287,10 +353,14 @@ export function PluginGallery({ query }: { query: string }) {
               </DialogHeader>
               {Settings ? (
                 <Settings
-                  key={selected.id}
+                  key={`${user?.id}:${selected.id}`}
                   plugin={selected}
                   onSaved={close}
-                  canManage={canManage}
+                  canManage={
+                    canManage &&
+                    (selected.adapter !== "lark" ||
+                      user?.system_role === "admin")
+                  }
                 />
               ) : (
                 <p className="text-muted-foreground text-sm leading-6">

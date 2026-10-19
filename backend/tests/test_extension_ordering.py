@@ -97,9 +97,21 @@ def test_core_constraints_are_declared():
     from deerflow.agents.middlewares.tool_promotion_audit_middleware import DeferredToolPromotionAuditMiddleware
     from deerflow.extensions.ordering import core_ordering_constraints
 
+    core_ordering_constraints.cache_clear()  # Prior wiring tests temporarily replace middleware modules.
     pairs = {(c.outer, c.inner) for c in core_ordering_constraints()}
     assert (ToolProgressMiddleware, ToolErrorHandlingMiddleware) in pairs
     assert (DeferredToolPromotionAuditMiddleware, SkillToolPolicyMiddleware) in pairs
+
+    from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
+    from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
+    from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
+    from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
+    from deerflow.guardrails.middleware import GuardrailMiddleware
+
+    for policy in (GuardrailMiddleware, SandboxAuditMiddleware, ReadBeforeWriteMiddleware, ToolProgressMiddleware):
+        assert (ArtifactResolutionMiddleware, policy) in pairs
+    assert (ToolReceiptMiddleware, ArtifactResolutionMiddleware) in pairs
+    core_ordering_constraints.cache_clear()
 
 
 def test_core_constraints_are_a_plain_tuple():

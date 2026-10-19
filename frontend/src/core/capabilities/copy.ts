@@ -1,4 +1,8 @@
 const en = {
+  platformTitle: "Platform provided",
+  platformHint: "Shared capabilities managed through deployment configuration.",
+  personalTitle: "My plugins",
+  personalHint: "Your connections and settings are only used by your account.",
   install: "Configure plugin",
   name: "Connection name",
   url: "Server URL",
@@ -8,7 +12,7 @@ const en = {
   webhook_key: "Robot webhook key (the key parameter in its URL)",
   save: "Save configuration",
   accountHint:
-    "These are deployment credentials managed by the administrator. Personal authorization, when supported, uses the integration's account flow.",
+    "This configuration is saved to your account and is only used by your runs.",
   saved: "Configuration saved",
   unknown: "Not checked",
   required: "Account required",
@@ -31,6 +35,10 @@ const en = {
   invalidUrl: "Enter an HTTP or HTTPS server URL.",
 };
 const zh: typeof en = {
+  platformTitle: "平台提供",
+  platformHint: "由平台统一配置，供所有用户使用。",
+  personalTitle: "我的插件",
+  personalHint: "连接和配置仅属于你的账号，其他用户无法使用。",
   install: "配置插件",
   name: "连接名称",
   url: "服务地址",
@@ -39,8 +47,7 @@ const zh: typeof en = {
   sign_secret: "机器人加签密钥",
   webhook_key: "机器人 Webhook 密钥（地址中的 key 参数）",
   save: "保存配置",
-  accountHint:
-    "这里配置的是由管理员管理的部署凭据。支持个人授权的集成，通过其账号流程连接。",
+  accountHint: "这里的配置仅保存到你的账号，其他用户无法查看或使用。",
   saved: "配置已保存",
   unknown: "未检测",
   required: "需要连接账号",

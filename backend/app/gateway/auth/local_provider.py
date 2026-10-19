@@ -40,6 +40,14 @@ class LocalAuthProvider(AuthProvider):
         if user is None:
             return None
 
+        # Operator-disabled account (#3462 gap 3): no password is even
+        # compared — the failure is indistinguishable from unknown-credentials
+        # to the caller, so nothing about the account state leaks through the
+        # login path (the distinct ACCOUNT_DISABLED code is surfaced only by
+        # the session dependency once a token exists).
+        if getattr(user, "disabled", False):
+            return None
+
         if user.password_hash is None:
             # OAuth user without local password
             return None
@@ -82,6 +90,23 @@ class LocalAuthProvider(AuthProvider):
             needs_setup=needs_setup,
         )
         return await self._repo.create_user(user)
+
+    async def create_first_admin(self, email: str, password: str) -> User | None:
+        """Create the first admin account, or return None if one already exists.
+
+        The check and the insert are one atomic claim in the repository, so
+        concurrent first-boot requests cannot both succeed.
+
+        Args:
+            email: Admin email address
+            password: Plain text password (will be hashed)
+
+        Returns:
+            Created admin User, or None if the system already has an admin
+        """
+        password_hash = await hash_password_async(password)
+        user = User(email=email, password_hash=password_hash, system_role="admin", needs_setup=False)
+        return await self._repo.create_first_admin(user)
 
     async def get_user_by_oauth(self, provider: str, oauth_id: str) -> User | None:
         """Get user by OAuth provider and ID."""

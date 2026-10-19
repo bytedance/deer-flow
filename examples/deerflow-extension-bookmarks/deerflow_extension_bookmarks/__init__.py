@@ -9,7 +9,7 @@ from pathlib import Path
 from deerflow_extension_api import extension
 from deerflow_extension_api.plugins import (
     BackendAction,
-    BrowserModule,
+    BrowserAssets,
     ModelTool,
     PluginContribution,
 )
@@ -136,7 +136,7 @@ class Bookmarks:
         return handle
 
 
-@extension(api="0.2.2", name="bookmarks")
+@extension(api="0.2.3", name="bookmarks")
 def install(registry, config):
     enabled = config.get("enabled", False)
     if type(enabled) is not bool or not isinstance(config.get("storage_path"), str):
@@ -152,9 +152,9 @@ def install(registry, config):
                 title="会话书签 / Bookmarks",
                 description="收藏有用的回答，在独立页面查找与整理。每位用户只访问自己的书签。",
                 enabled=enabled,
-                frontend=BrowserModule(
+                frontend=BrowserAssets(
                     "bookmarks.v1",
-                    Path(__file__).with_name("client.mjs").read_text(encoding="utf-8"),
+                    Path(__file__).parent,
                 ),
                 backend=tuple(
                     BackendAction(name, store.handler(name))

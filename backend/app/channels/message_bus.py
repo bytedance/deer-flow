@@ -17,6 +17,14 @@ logger = logging.getLogger(__name__)
 DEFAULT_INBOUND_QUEUE_MAXSIZE = 1000
 
 PENDING_CLARIFICATION_METADATA_KEY = "pending_clarification"
+# Full ``human_input`` payload (artifact of the ask_clarification tool message),
+# attached to the final outbound so channels can render richer affordances
+# (e.g. Feishu button cards) for option-based clarifications.
+HUMAN_INPUT_REQUEST_METADATA_KEY = "human_input_request"
+# A channel-synthesized human-input answer (e.g. a Feishu card button click),
+# carried on the inbound so the manager can attach it to the human message's
+# additional_kwargs for the Gateway's human_input protocol.
+HUMAN_INPUT_RESPONSE_METADATA_KEY = "human_input_response"
 RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY = "resolved_from_pending_clarification"
 # Adapter-owned bytes may use this transient key while crossing the channel
 # boundary. ChannelManager consumes and removes it before persisting metadata.
@@ -340,19 +348,27 @@ class MessageBus:
         self._outbound_listeners.append(callback)
 
     def unsubscribe_outbound(self, callback: OutboundCallback) -> None:
-        """Remove a previously registered outbound callback."""
+        """Remove a callback from subsequent outbound dispatches.
+
+        This does not cancel or wait for callbacks in an in-flight dispatch.
+        """
         self._outbound_listeners = [cb for cb in self._outbound_listeners if cb != callback]
 
     async def publish_outbound(self, msg: OutboundMessage) -> None:
-        """Dispatch an outbound message to all registered listeners."""
+        """Dispatch to listeners registered when dispatch begins.
+
+        Subscribing or unsubscribing during an in-flight dispatch affects
+        subsequent messages, not callbacks captured for the current message.
+        """
+        listeners = tuple(self._outbound_listeners)
         logger.info(
             "[Bus] outbound dispatching: channel=%s, chat_id=%s, listeners=%d, text_len=%d",
             msg.channel_name,
             msg.chat_id,
-            len(self._outbound_listeners),
+            len(listeners),
             len(msg.text),
         )
-        for callback in self._outbound_listeners:
+        for callback in listeners:
             try:
                 await callback(msg)
             except Exception:

@@ -137,11 +137,22 @@ providers:
     issuer: "https://provider.example.com"
     client_id: "..."
     client_secret: $SECRET
-    authorization_endpoint: "https://provider.example.com/oauth2/authorize"
+    authorization_endpoint: "https://provider.example.com/oauth2/authorize?prompt=login"
     token_endpoint: "https://provider.example.com/oauth2/token"
     userinfo_endpoint: "https://provider.example.com/oauth2/userinfo"
     jwks_uri: "https://provider.example.com/oauth2/jwks"
 ```
+
+Authorization endpoints may include provider query parameters, such as
+`prompt=login` in the example above. DeerFlow preserves existing encoded query
+values, blank values and repeated parameters when appending the login request
+parameters. This applies to both discovered endpoints and configured overrides.
+
+Do not include DeerFlow-generated parameters (`response_type`, `client_id`,
+`redirect_uri`, `scope`, `state`, `nonce`, `code_challenge` or
+`code_challenge_method`) in the endpoint query. Appending does not replace
+existing keys, and the identity provider decides how duplicate parameters are
+resolved.
 
 ## Local Keycloak Example
 

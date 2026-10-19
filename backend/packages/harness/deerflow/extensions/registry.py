@@ -11,7 +11,7 @@ import inspect
 import re
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from deerflow_extension_api import (
@@ -24,7 +24,9 @@ from deerflow_extension_api import (
     TaskLifecycleContributor,
 )
 from deerflow_extension_api import ExtensionRegistry as ExtensionRegistryContract
-from deerflow_extension_api.plugins import PluginContribution
+from deerflow_extension_api.plugins import BrowserAssets, BrowserModule, PluginContribution
+
+from deerflow.extensions.model_access import ModelInvocationScope, ModelInvocationService
 
 _Entry = tuple[str, Any]
 
@@ -54,6 +56,7 @@ class LoadedExtensions:
     services: tuple[tuple[str, ExtensionService], ...] = ()
     routers: tuple[tuple[str, Any], ...] = ()
     plugins: tuple[tuple[str, PluginContribution], ...] = ()
+    knowledge_providers: tuple[tuple[str, tuple[str, Any]], ...] = ()
 
     # Precomputed attributes, not methods: hook sites read one attribute to
     # short-circuit, so the zero-extension path constructs nothing.
@@ -82,17 +85,22 @@ class ExtensionRegistry(ExtensionRegistryContract):
         self._services: list[_Entry] = []
         self._routers: list[_Entry] = []
         self._plugins: list[_Entry] = []
+        self._knowledge_providers: list[_Entry] = []
         self._current_source: str | None = None
+        self._model_access: ModelInvocationScope | None = None
 
     @contextmanager
-    def attributed_to(self, source: str) -> Iterator[None]:
+    def attributed_to(self, source: str, *, model_access: ModelInvocationScope | None = None) -> Iterator[None]:
         """Attribute everything registered inside the block to ``source``."""
         previous = self._current_source
+        previous_access = self._model_access
         self._current_source = source
+        self._model_access = model_access
         try:
             yield
         finally:
             self._current_source = previous
+            self._model_access = previous_access
 
     def _source(self) -> str:
         if self._current_source is None:
@@ -108,6 +116,8 @@ class ExtensionRegistry(ExtensionRegistryContract):
 
         tool_names = set()
         for tool in contribution.tools:
+            if tool.response_format not in ("content", "content_and_artifact"):
+                raise ValueError("Unsupported plugin tool response format")
             if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", tool.name) or tool.name in tool_names or not tool.description or not inspect.iscoroutinefunction(tool.handler):
                 raise ValueError("Model tools require unique names, descriptions and async handlers")
             validate_schema(tool.input_schema, tool=True)
@@ -117,8 +127,15 @@ class ExtensionRegistry(ExtensionRegistryContract):
             if not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", action.name) or action.name in names or not inspect.iscoroutinefunction(action.handler):
                 raise ValueError("Backend actions require unique names and async handlers")
             names.add(action.name)
-        if contribution.frontend and (not contribution.frontend.code or len(contribution.frontend.code.encode()) > 512 * 1024):
-            raise ValueError("Browser code must be nonempty and at most 512 KiB")
+        if isinstance(contribution.frontend, BrowserAssets):
+            from deerflow.extensions.browser_assets import load_browser_assets
+
+            contribution = replace(contribution, frontend=load_browser_assets(contribution.frontend))
+        elif isinstance(contribution.frontend, BrowserModule):
+            if not contribution.frontend.code or len(contribution.frontend.code.encode()) > 512 * 1024:
+                raise ValueError("Browser code must be nonempty and at most 512 KiB")
+        elif contribution.frontend is not None:
+            raise ValueError("Unsupported browser transport")
         # Validate everything before writing the plugin bucket; loader rollback also
         # covers a later failure elsewhere in this package's install function.
         from deerflow.config.plugin_settings import validate_contribution
@@ -134,6 +151,17 @@ class ExtensionRegistry(ExtensionRegistryContract):
     def middlewares(self, contributor: MiddlewareContributor) -> None:
         self._middlewares.append((self._source(), contributor))
 
+    def knowledge_provider(self, name: str, provider: Any) -> bool:
+        from deerflow.knowledge.providers import validate_provider
+
+        if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", name) or name in {"ragflow", "lightrag"}:
+            raise ValueError("Invalid or reserved knowledge provider name")
+        validate_provider(provider)
+        if any(existing == name for _, (existing, _) in self._knowledge_providers):
+            raise ValueError("Duplicate knowledge provider name")
+        self._knowledge_providers.append((self._source(), (name, provider)))
+        return True
+
     def task_lifecycle(self, contributor: TaskLifecycleContributor) -> None:
         self._task_lifecycle.append((self._source(), contributor))
 
@@ -147,6 +175,8 @@ class ExtensionRegistry(ExtensionRegistryContract):
         self._context_compaction_observers.append((self._source(), observer))
 
     def service(self, service: ExtensionService) -> None:
+        if self._model_access is not None:
+            service = ModelInvocationService(service, self._model_access)
         self._services.append((self._source(), service))
 
     def routers(self, routers: Sequence[Any]) -> None:
@@ -175,6 +205,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
             self._services,
             self._routers,
             self._plugins,
+            self._knowledge_providers,
         ):
             bucket[:] = [entry for entry in bucket if entry[0] != source]
 
@@ -189,6 +220,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
             len(self._services),
             len(self._routers),
             len(self._plugins),
+            len(self._knowledge_providers),
         )
 
     def rollback_to(self, mark: tuple[int, ...]) -> None:
@@ -208,6 +240,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
                 self._services,
                 self._routers,
                 self._plugins,
+                self._knowledge_providers,
             ),
             mark,
             strict=True,
@@ -225,6 +258,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
             services=tuple(self._services),
             routers=tuple(self._routers),
             plugins=tuple(self._plugins),
+            knowledge_providers=tuple(self._knowledge_providers),
             has_middleware_contributors=bool(self._middlewares),
             has_task_lifecycle=bool(self._task_lifecycle),
             has_system_model_observers=bool(self._system_model_observers),

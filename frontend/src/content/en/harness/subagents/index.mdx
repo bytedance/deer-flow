@@ -1,0 +1,98 @@
+---
+title: Subagents
+description: A subagent is a self-contained worker the Lead Agent delegates a subtask to. This chapter covers the problem it solves, how a delegation flows, what a subagent inherits and what it does not, and how to read this manual.
+asIndexPage: true
+---
+
+import { Callout } from "nextra/components";
+
+# Subagents
+
+<Callout type="info" emoji="👥">
+  Subagents are focused workers that the Lead Agent delegates subtasks to. They
+  run with isolated context, keeping the main conversation clean while handling
+  parallel or specialized work.
+</Callout>
+
+When a task is too broad for a single reasoning thread, or when parts of it can be done in parallel, the Lead Agent delegates work to **subagents**. A subagent is a self-contained agent invocation: it receives a specific task, executes it, and returns the result to the Lead Agent as a tool result.
+
+## How to read this manual
+
+The manual is ordered from concepts to usage to configuration to diagnosis. Different readers need different parts:
+
+| Reader                          | Start with                                                                                                                                                                                                                                              |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Chat users                      | This page, [Quick Start](/docs/harness/subagents/quick-start), [Subagent Catalog](/docs/harness/subagents/catalog)                                                                                                                                       |
+| Prompt authors and orchestrators | [Delegating Work](/docs/harness/subagents/delegation), [Results and Acceptance](/docs/harness/subagents/results)                                                                                                                                         |
+| Operators and administrators    | [Limits, Budgets, and Capacity](/docs/harness/subagents/limits), [Sandbox and Isolation](/docs/harness/subagents/sandbox), [Observability](/docs/harness/subagents/observability), [Troubleshooting](/docs/harness/subagents/troubleshooting)           |
+| Integration developers          | [Developers and Integration](/docs/harness/subagents/developers), [Reference](/docs/harness/subagents/reference)                                                                                                                                         |
+
+## What subagents solve
+
+1. **Context isolation**: a subagent only sees the information it needs for its piece of the task, not the parent conversation. Each agent's working context stays focused and tractable.
+2. **Parallelism**: multiple subagents can run concurrently, so independent parts of a task (for example researching several topics) can progress at the same time.
+
+Isolation also means a subagent remembers nothing on the Lead Agent's behalf. It leaves exactly three things behind: the final report it returns, the files it writes into the shared workspace, and the execution evidence the runtime records.
+
+## Delegation flow
+
+The Lead Agent delegates through the built-in `task` tool:
+
+```
+task(
+  description="research competitors",
+  prompt="Research the top 5 competitors of Acme Corp and summarize their B2B SaaS pricing",
+  subagent_type="general-purpose"
+)
+```
+
+The runtime then:
+
+1. **Validates the delegation.** `subagent_type` must be in the catalog visible to the caller, `context_mode` must be `isolated` or `snapshot`, and the `bash` type additionally requires a sandbox that allows command execution. An invalid call returns a failed tool result without starting a subagent.
+2. **Assembles the subagent.** It reads the definition from the catalog and applies `config.yaml` overrides, filters tools by allow and deny lists, loads the user-scoped skill index, and builds the system prompt: role prompt, report contract, acceptance-criteria note, skill index, and the deferred MCP tool catalog.
+3. **Runs it.** The subagent runs on a dedicated persistent event loop, bounded by process-wide capacity, `max_turns`, `timeout_seconds`, and a middleware guard chain that mirrors the Lead Agent's.
+4. **Returns the result.** The final output becomes a `ToolMessage` for the Lead Agent. Structured status lives in the message metadata; the text body is display content only.
+
+How task cards, event streams, and the ledger surface this process is covered in [Observability](/docs/harness/subagents/observability).
+
+## What a subagent inherits and what it does not
+
+| Inherited                                                                     | Not inherited                                                                                                     |
+| ----------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| The same thread sandbox, with its own shell session and execution lease       | Parent conversation history. Isolated by default; `context_mode="snapshot"` passes an explicit snapshot            |
+| The user identity and the user-scoped skill catalog                           | User memory and the Lead Agent's dynamic context. A subagent receives one `current_date` reminder only             |
+| The model. `inherit` by default, overridable per agent                        | The parent run's checkpointer. Subgraphs compile with `checkpointer=False`: one-shot, not resumable                |
+| Guard configuration: `summarization`, `loop_detection`. The token budget comes from `subagents.token_budget` instead | Parent callbacks bound to the parent event loop. Token usage and audit events reach the parent through proxies     |
+| The request trace id and the IM `channel_user_id`                             | The `task` tool (no further delegation) and, by default, `ask_clarification` and `present_files` (no questions to the user) |
+| Discovery of historical uploads (ordinary `task` delegations)                 | Lead-only middlewares: memory, todo, title generation, clarification, delegation limits                            |
+
+Details are in [Sandbox and Isolation](/docs/harness/subagents/sandbox).
+
+## When the Lead Agent delegates
+
+The Lead Agent prompt treats delegation as **optional** and defaults to direct execution. Before every `task` call it runs a delegation check: it delegates only when real parallel latency savings, specialist capability, or context isolation clearly outweigh startup overhead, duplicate repository discovery, synthesis cost, state-conflict risk, and side-effect risk. When uncertain, it executes directly.
+
+The prompt also carries two hard limits: at most 3 `task` calls per response and at most 6 per run by default. Excess calls are discarded by middleware and their work is lost. How to configure these numbers and how they interact with process capacity is in [Limits, Budgets, and Capacity](/docs/harness/subagents/limits).
+
+## Three delegation modes
+
+| Mode                | Tool               | Characteristics                                                                                                                                                                        |
+| ------------------- | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Ordinary delegation | `task`             | The Lead Agent waits for the result, which lands directly in the conversation. Bounded by the per-response concurrency and per-run total                                               |
+| Durable batch       | `batch_task`       | For hundreds or thousands of independent items. Returns a batch id immediately, survives Gateway restarts, and does not consume the ordinary `task` per-run total. Requires a SQL database and `subagent_batches` enabled |
+| External ACP agent  | `invoke_acp_agent` | Calls an external agent running as a child process over the Agent Client Protocol, such as the ACP adapters for Claude Code or Codex                                                   |
+
+## Terminology
+
+- **Lead Agent**: the primary agent in a thread that reasons, calls tools, and delegates.
+- **Subagent**: the delegated worker. The Settings UI calls them "Subagents" as well.
+- **Delegation**: one `task` call and its result. The **delegation ledger** is a system-maintained record of delegations, stored in thread state and preserved across summarization.
+- **Receipt**: the execution record the runtime creates for each tool call, numbered like `[r3 write_file]`. A subagent cites it in its report to show that an action really happened.
+- **Acceptance criteria**: decidable conditions attached at delegation time, such as "this file exists and is non-empty". The parent checks them in code at zero model cost.
+- **stop_reason**: the marker set when a subagent is capped by the token budget, turn budget, or loop detection. A capped run can still be `completed`.
+- **Durable context**: summary text, the delegation ledger, and skill context that are stored explicitly in thread state and re-injected before every model call.
+
+<Cards num={2}>
+  <Cards.Card title="Quick Start" href="/docs/harness/subagents/quick-start" />
+  <Cards.Card title="Delegating Work" href="/docs/harness/subagents/delegation" />
+</Cards>

@@ -10,17 +10,20 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import uuid4
 
-from sqlalchemy import and_, case, delete, func, or_, select, update
+from sqlalchemy import and_, case, delete, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from deerflow.persistence.run.model import RunChangeClockRow, RunRow
+from deerflow.persistence.run.model import CompletedRunSnapshotRow, RunChangeClockRow, RunRow
+from deerflow.runtime.run_origin import origin_kind_of
 from deerflow.runtime.runs.store.base import (
     LeaseRenewal,
     RunIdempotencyConflict,
     RunStore,
     StatusFinalization,
+    canonical_run_created_at,
     normalize_run_created_at_iso,
 )
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
@@ -30,6 +33,15 @@ from deerflow.utils.time import coerce_iso
 def _lease_expired_or_null(lease_col, cutoff: datetime):
     """SQLAlchemy filter: True when the lease is NULL or has expired past *cutoff*."""
     return or_(lease_col.is_(None), lease_col < cutoff)
+
+
+def _origin_kind(operation_kind: str, metadata: Any) -> str | None:
+    """Denormalized ``runs.origin_kind``: the server-owned origin of an agent run.
+
+    Thread operations (checkpoint writes, deletes) never carry one, and a run
+    without a well-formed ``deerflow_origin`` stays NULL (interactive/legacy).
+    """
+    return origin_kind_of(metadata) if operation_kind == "run" else None
 
 
 class RunRepository(RunStore):
@@ -96,6 +108,7 @@ class RunRepository(RunStore):
         # Remap JSON columns to match RunStore interface
         d["metadata"] = d.pop("metadata_json", {})
         d["kwargs"] = d.pop("kwargs_json", {})
+        d["idempotency_request"] = d.pop("idempotency_request_json", None)
         # Convert datetime to ISO string for consistency with MemoryRunStore.
         # SQLite drops tzinfo on read despite ``DateTime(timezone=True)`` —
         # ``coerce_iso`` normalizes naive datetimes as UTC.
@@ -120,11 +133,15 @@ class RunRepository(RunStore):
         kwargs=None,
         error=None,
         stop_reason: str | None = None,
+        goal_verdict: dict[str, Any] | None = None,
         created_at=None,
         follow_up_to_run_id=None,
         owner_worker_id: str | None = None,
         lease_expires_at: str | None = None,
         idempotency_key: str | None = None,
+        evidence_origin: str = "unknown",
+        evidence_agent_id: str | None = None,
+        idempotency_request: dict[str, Any] | None = None,
     ):
         """Insert or update a run row.
 
@@ -138,6 +155,8 @@ class RunRepository(RunStore):
         lease_dt = datetime.fromisoformat(lease_expires_at) if lease_expires_at else None
         values = {
             "thread_id": thread_id,
+            "evidence_origin": evidence_origin,
+            "evidence_agent_id": evidence_agent_id,
             "assistant_id": assistant_id,
             "user_id": resolved_user_id,
             "model_name": self._normalize_model_name(model_name),
@@ -148,21 +167,65 @@ class RunRepository(RunStore):
             "kwargs_json": self._safe_json(kwargs) or {},
             "error": error,
             "stop_reason": stop_reason,
+            "goal_verdict": self._safe_json(goal_verdict),
             "follow_up_to_run_id": follow_up_to_run_id,
             "owner_worker_id": owner_worker_id,
             "lease_expires_at": lease_dt,
             "idempotency_key": idempotency_key,
+            "idempotency_request_json": self._safe_json(idempotency_request),
+            "origin_kind": _origin_kind(operation_kind, metadata),
             "updated_at": now,
         }
         async with self._sf() as session:
             values["change_seq"] = await self._next_change_seq(session)
             row = await session.get(RunRow, run_id)
             if row is None:
-                session.add(RunRow(run_id=run_id, created_at=created, **values))
+                session.add(RunRow(run_id=run_id, created_at=created, evidence_seal_state="pending", **values))
             else:
                 for key, value in values.items():
                     setattr(row, key, value)
             await session.commit()
+
+    async def seal_evidence(self, run_id: str, *, owner_worker_id: str, receipt) -> bool:
+        """Persist a completed drain and changed-run position in one fenced transaction."""
+        from deerflow.runtime.events.evidence import JournalSealReceipt
+
+        if not isinstance(receipt, JournalSealReceipt) or receipt.session_factory is not self._sf or receipt.run_id != run_id:
+            return False
+        async with self._sf() as session:
+            change_seq = await self._next_change_seq(session)
+            result = await session.execute(
+                update(RunRow)
+                .where(
+                    RunRow.run_id == run_id,
+                    RunRow.thread_id == receipt.thread_id,
+                    RunRow.owner_worker_id == owner_worker_id,
+                    or_(RunRow.lease_expires_at.is_(None), RunRow.lease_expires_at > datetime.now(UTC)),
+                    RunRow.evidence_retention_revision == receipt.retention_revision,
+                    RunRow.status.in_(("success", "error", "timeout", "interrupted")),
+                    RunRow.evidence_seal_state == "pending",
+                )
+                .values(evidence_seal_state="sealed", evidence_revision=uuid4().hex, evidence_upper_seq=receipt.upper_event_seq, evidence_event_count=receipt.event_count, change_seq=change_seq)
+            )
+            await session.commit()
+            return result.rowcount != 0
+
+    async def mark_evidence_partial(self, run_id: str, *, owner_worker_id: str, error: str) -> bool:
+        """Make a failed seal discoverable without changing business outcome."""
+        async with self._sf() as session:
+            change_seq = await self._next_change_seq(session)
+            result = await session.execute(
+                update(RunRow)
+                .where(
+                    RunRow.run_id == run_id,
+                    RunRow.owner_worker_id == owner_worker_id,
+                    or_(RunRow.lease_expires_at.is_(None), RunRow.lease_expires_at > datetime.now(UTC)),
+                    RunRow.evidence_seal_state == "pending",
+                )
+                .values(evidence_seal_state="partial", evidence_seal_error=error[:512], evidence_revision=uuid4().hex, change_seq=change_seq)
+            )
+            await session.commit()
+            return result.rowcount != 0
 
     async def get(
         self,
@@ -202,6 +265,17 @@ class RunRepository(RunStore):
             result = await session.execute(stmt)
             return [self._row_to_dict(row) for row in result.scalars()]
 
+    async def latest_change(self, *, user_id: str) -> tuple[int, str] | None:
+        """The caller's newest run-change position ``(change_seq, run_id)``, or ``None``.
+
+        Seeds the activity feed cursor: one backward seek on
+        ``ix_runs_user_change_seq``. ``user_id`` is always an explicit owner id.
+        """
+        stmt = select(RunRow.change_seq, RunRow.run_id).where(RunRow.user_id == user_id).order_by(RunRow.change_seq.desc(), RunRow.run_id.desc()).limit(1)
+        async with self._sf() as session:
+            row = (await session.execute(stmt)).first()
+        return (int(row.change_seq), str(row.run_id)) if row is not None else None
+
     async def list_by_thread(
         self,
         thread_id,
@@ -235,6 +309,12 @@ class RunRepository(RunStore):
         async with self._sf() as session:
             result = await session.execute(stmt)
             return [self._row_to_dict(r) for r in result.scalars()]
+
+    async def list_by_thread_created_at(self, thread_id, *, user_id, created_at):
+        timestamp = datetime.fromisoformat(canonical_run_created_at(created_at))
+        async with self._sf() as session:
+            result = await session.execute(select(RunRow).where(RunRow.thread_id == thread_id, RunRow.user_id == user_id, RunRow.created_at == timestamp))
+            return [self._row_to_dict(row) for row in result.scalars()]
 
     async def list_successful_regenerate_sources(
         self,
@@ -296,12 +376,14 @@ class RunRepository(RunStore):
             result = await session.execute(stmt)
             return {row.run_id: self._row_to_dict(row) for row in result.scalars()}
 
-    async def update_status(self, run_id, status, *, error=None, stop_reason=None) -> bool:
+    async def update_status(self, run_id, status, *, error=None, stop_reason=None, goal_verdict=None) -> bool:
         values: dict[str, Any] = {"status": status, "updated_at": datetime.now(UTC)}
         if error is not None:
             values["error"] = error
         if stop_reason is not None:
             values["stop_reason"] = stop_reason
+        if goal_verdict is not None:
+            values["goal_verdict"] = self._safe_json(goal_verdict)
         # Guard: only transition rows that are still active. ``interrupted`` is
         # included because the rollback path goes ``running → interrupted``
         # (cancel acknowledged) then ``interrupted → error`` (task finalize).
@@ -350,11 +432,14 @@ class RunRepository(RunStore):
     ):
         resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.delete")
         async with self._sf() as session:
-            row = await session.get(RunRow, run_id)
+            if session.bind.dialect.name == "sqlite":
+                await session.execute(text("BEGIN IMMEDIATE"))
+            row = await session.get(RunRow, run_id, with_for_update=True)
             if row is None:
                 return
             if resolved_user_id is not None and row.user_id != resolved_user_id:
                 return
+            await session.execute(delete(CompletedRunSnapshotRow).where(CompletedRunSnapshotRow.run_id == run_id))
             await session.delete(row)
             await session.commit()
 
@@ -390,6 +475,14 @@ class RunRepository(RunStore):
             conditions.append(RunRow.user_id == resolved_user_id)
 
         async with self._sf() as session:
+            if session.bind.dialect.name == "sqlite":
+                await session.execute(text("BEGIN IMMEDIATE"))
+            # The run-row lock serializes snapshot creation and cleanup on PG;
+            # SQLite's immediate transaction supplies the equivalent fence.
+            # Acquire locks in a separate statement: READ COMMITTED must take a
+            # fresh snapshot after waiting for an in-flight snapshot creator.
+            await session.execute(select(RunRow.run_id).where(*conditions).with_for_update())
+            await session.execute(delete(CompletedRunSnapshotRow).where(CompletedRunSnapshotRow.run_id.in_(select(RunRow.run_id).where(*conditions))))
             count = await session.scalar(select(func.count()).select_from(RunRow).where(*conditions)) or 0
             if count:
                 await session.execute(delete(RunRow).where(*conditions))
@@ -449,6 +542,7 @@ class RunRepository(RunStore):
         last_ai_message: str | None = None,
         first_human_message: str | None = None,
         error: str | None = None,
+        goal_verdict: dict[str, Any] | None = None,
     ) -> bool:
         """Update status + token usage + convenience fields on run completion.
 
@@ -474,6 +568,8 @@ class RunRepository(RunStore):
             values["first_human_message"] = first_human_message[:2000]
         if error is not None:
             values["error"] = error
+        if goal_verdict is not None:
+            values["goal_verdict"] = self._safe_json(goal_verdict)
         allowed_sources = ["pending", "running"]
         if status not in allowed_sources:
             allowed_sources.append(status)
@@ -704,6 +800,7 @@ class RunRepository(RunStore):
         status: str,
         error: str | None = None,
         stop_reason: str | None = None,
+        goal_verdict: dict[str, Any] | None = None,
     ) -> StatusFinalization:
         """Atomically let completion win only before cancellation."""
         values: dict[str, Any] = {
@@ -714,6 +811,8 @@ class RunRepository(RunStore):
             values["error"] = error
         if stop_reason is not None:
             values["stop_reason"] = stop_reason
+        if goal_verdict is not None:
+            values["goal_verdict"] = self._safe_json(goal_verdict)
 
         async with self._sf() as session:
             values["change_seq"] = await self._next_change_seq(session)
@@ -751,6 +850,8 @@ class RunRepository(RunStore):
         values: dict[str, Any] = {
             "status": "error",
             "error": error,
+            "evidence_seal_state": "partial",
+            "evidence_seal_error": "Worker lease expired without a completed journal seal.",
             "updated_at": datetime.now(UTC),
         }
         if stop_reason is not None:
@@ -768,6 +869,47 @@ class RunRepository(RunStore):
             )
             await session.commit()
             return result.rowcount != 0
+
+    async def recover_unsealed_evidence(
+        self,
+        *,
+        before: str | None = None,
+        grace_seconds: int = 10,
+        exclude_run_ids: tuple[str, ...] = (),
+    ) -> int:
+        """Publish crash-interrupted terminal seals without changing business status.
+
+        Clock-first locking matches other run mutations. The bounded scan and
+        conditional update run in one transaction, so a renewed lease wins.
+        """
+        before_dt = datetime.fromisoformat(before) if isinstance(before, str) else before or datetime.now(UTC)
+        cutoff = datetime.now(UTC) - timedelta(seconds=grace_seconds)
+        predicates = (
+            RunRow.operation_kind == "run",
+            RunRow.status.in_(("success", "error", "timeout", "interrupted")),
+            RunRow.evidence_seal_state == "pending",
+            RunRow.created_at <= before_dt,
+            _lease_expired_or_null(RunRow.lease_expires_at, cutoff),
+            RunRow.run_id.not_in(exclude_run_ids),
+        )
+        async with self._sf() as session:
+            change_seq = await self._next_change_seq(session)
+            candidates = tuple((await session.scalars(select(RunRow.run_id).where(*predicates).order_by(RunRow.created_at, RunRow.run_id).limit(200))).all())
+            if not candidates:
+                await session.rollback()
+                return 0
+            result = await session.execute(
+                update(RunRow)
+                .where(RunRow.run_id.in_(candidates), *predicates)
+                .values(
+                    evidence_seal_state="partial",
+                    evidence_seal_error="Worker lease expired without a completed journal seal.",
+                    evidence_revision=uuid4().hex,
+                    change_seq=change_seq,
+                )
+            )
+            await session.commit()
+            return result.rowcount
 
     async def list_inflight_with_expired_lease(
         self,
@@ -812,6 +954,9 @@ class RunRepository(RunStore):
         created_at: str | None = None,
         grace_seconds: int = 10,
         idempotency_key: str | None = None,
+        evidence_origin: str = "unknown",
+        evidence_agent_id: str | None = None,
+        idempotency_request: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Atomically create a run with cross-process thread-uniqueness.
 
@@ -836,6 +981,9 @@ class RunRepository(RunStore):
 
         values = {
             "thread_id": thread_id,
+            "evidence_origin": evidence_origin,
+            "evidence_agent_id": evidence_agent_id,
+            "evidence_seal_state": "pending",
             "assistant_id": assistant_id,
             "user_id": resolved_user_id,
             "model_name": self._normalize_model_name(model_name),
@@ -847,6 +995,8 @@ class RunRepository(RunStore):
             "owner_worker_id": owner_worker_id,
             "lease_expires_at": lease_dt,
             "idempotency_key": idempotency_key,
+            "idempotency_request_json": self._safe_json(idempotency_request),
+            "origin_kind": _origin_kind(operation_kind, metadata),
             "created_at": created,
             "updated_at": now,
         }
@@ -857,6 +1007,11 @@ class RunRepository(RunStore):
             # provides deterministic ordering within the position.
             change_seq = await self._next_change_seq(session)
             claimed: list[dict[str, Any]] = []
+
+            if idempotency_key is not None:
+                existing = (await session.execute(select(RunRow).where(RunRow.idempotency_key == idempotency_key).with_for_update())).scalar_one_or_none()
+                if existing is not None:
+                    raise RunIdempotencyConflict(self._row_to_dict(existing))
 
             if multitask_strategy in ("interrupt", "rollback"):
                 stmt = (

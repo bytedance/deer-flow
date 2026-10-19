@@ -101,6 +101,11 @@ _MAX_PENDING_WARNINGS_PER_RUN = 4
 # Stands in for ``read_file``'s omitted ``end_line`` in a call key: the read
 # runs to the last line, which is not the same window as any numbered bound.
 _OPEN_ENDED_READ = "end"
+# Sandbox tools on the generic key path whose ``description`` is only the UI
+# explanation of the call. Elsewhere ``description`` can be the operation's
+# payload (``update_agent``/``setup_agent`` persist it; MCP tools such as
+# ``create_issue`` send it), so it stays in the key.
+_UI_NARRATION_TOOLS = frozenset({"bash", "ls", "glob", "grep"})
 
 type _RunScopeKey = tuple[str, str | None]
 
@@ -135,7 +140,10 @@ def _coerce_line_number(value: object) -> int | None:
     """Parse one ``read_file`` line bound, or ``None`` when absent or unusable."""
     try:
         line = int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError: a model-emitted JSON number such as ``1e999`` parses to
+        # a float('inf') that ``int()`` rejects. Treat it like any other
+        # unusable bound so key derivation cannot crash the after_model hook.
         return None
     return max(line, 1)
 
@@ -170,7 +178,7 @@ def _normalized_read_range(args: dict) -> tuple[int, int | None]:
 
 
 def _stable_tool_key(name: str, args: dict, fallback_key: str | None) -> str:
-    """Derive a stable key from salient args without overfitting to noise."""
+    """Derive a stable key from the args that change what a call does."""
     if name == "read_file" and fallback_key is None:
         path = args.get("path") or ""
         start_line, end_line = _normalized_read_range(args)
@@ -184,14 +192,17 @@ def _stable_tool_key(name: str, args: dict, fallback_key: str | None) -> str:
             return fallback_key
         return json.dumps(args, sort_keys=True, default=str)
 
-    salient_fields = ("path", "url", "query", "command", "pattern", "glob", "cmd")
-    stable_args = {field: args[field] for field in salient_fields if args.get(field) is not None}
-    if stable_args:
-        return json.dumps(stable_args, sort_keys=True, default=str)
-
     if fallback_key is not None:
         return fallback_key
 
+    # Every other argument can change what the call does: keying only a salient
+    # field (``path``/``url``/``query``...) collapsed paging a URL or a search
+    # (``start_index``, ``page``, ``cursor``) and rewriting one skill file onto a
+    # single key, so the fifth *distinct* call hard-stopped the run. A sandbox
+    # tool's UI narration is dropped, so rewording it cannot make a repeated
+    # call look new (#1905).
+    if name in _UI_NARRATION_TOOLS:
+        args = {field: value for field, value in args.items() if field != "description"}
     return json.dumps(args, sort_keys=True, default=str)
 
 
@@ -216,11 +227,27 @@ def _hash_tool_calls(tool_calls: list[dict]) -> str:
     return hashlib.md5(blob.encode()).hexdigest()[:12]
 
 
-_WARNING_MSG = "[LOOP DETECTED] You are repeating the same tool calls. Stop calling tools and produce your final answer now. If you cannot complete the task, summarize what you accomplished so far."
-
-_TOOL_FREQ_WARNING_MSG = (
-    "[LOOP DETECTED] You have called {tool_name} {count} times without producing a final answer. Stop calling tools and produce your final answer now. If you cannot complete the task, summarize what you accomplished so far."
+# Warn-level messages ask the agent to wrap up, but must not make it drop work
+# it was asked to persist: a subagent whose task names an output file would
+# otherwise stop *all* tool calls, including the write that delivers its
+# result, and finish as "completed" with nothing on disk. So the wrap-up
+# allows a bounded save/read/retry before the final answer, without reusing
+# a looping writer or bypassing the read-before-write gate. The hard-stop
+# path below is unchanged (it strips tool calls).
+_WRAP_UP_INSTRUCTIONS = (
+    "If your task asks you to save results to a file, first write what you have collected so far to that file "
+    "with a file-writing tool (for example write_file, unless it is the looping tool). "
+    "If the writer is itself looping, use a different available file-writing tool. "
+    "If a save is blocked by a read-before-write check, read the target file and retry the save once. "
+    "Do not use a tool that this warning tells you to stop, or repeat a failed save loop. "
+    "If no permitted save path is available or the retry fails, include the collected results in your final answer "
+    "and state that the file was not saved. Then stop calling tools and produce your final answer. "
+    "If you cannot complete the task, summarize what you accomplished so far."
 )
+
+_WARNING_MSG = "[LOOP DETECTED] You are repeating the same tool calls. Stop repeating them and wrap up now. " + _WRAP_UP_INSTRUCTIONS
+
+_TOOL_FREQ_WARNING_MSG = "[LOOP DETECTED] You have called {tool_name} {count} times without producing a final answer. Stop calling {tool_name} and wrap up now. " + _WRAP_UP_INSTRUCTIONS
 
 _HARD_STOP_MSG = "[FORCED STOP] Repeated tool calls exceeded the safety limit. Producing final answer with results collected so far."
 

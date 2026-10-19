@@ -165,6 +165,32 @@ class TestSkillLoading:
         assert alice_skill.enabled is False
         assert bob_skill.enabled is True
 
+    @pytest.mark.parametrize("nested_name", ["fixture-example", "public-skill"])
+    def test_integration_skill_package_children_are_not_registered(self, user_storage: UserScopedSkillStorage, skills_root: Path, nested_name: str):
+        public_dir = skills_root / "public" / "public-skill"
+        public_dir.mkdir(parents=True)
+        (public_dir / "SKILL.md").write_text(_skill_content("public-skill", "Public version"), encoding="utf-8")
+
+        provider_dir = user_storage.get_integrations_root() / "lark-cli"
+        package_dir = provider_dir / "lark-doc"
+        fixture_dir = package_dir / "evals" / "fixtures" / "example"
+        fixture_dir.mkdir(parents=True)
+        (package_dir / "SKILL.md").write_text(_skill_content("lark-doc"), encoding="utf-8")
+        (fixture_dir / "SKILL.md").write_text(_skill_content(nested_name, "Support data"), encoding="utf-8")
+
+        sibling_dir = provider_dir / "tools" / "lark-sheet"
+        sibling_dir.mkdir(parents=True)
+        (sibling_dir / "SKILL.md").write_text(_skill_content("lark-sheet"), encoding="utf-8")
+
+        by_name = {skill.name: skill for skill in user_storage.load_skills(enabled_only=False)}
+
+        assert set(by_name) == {"public-skill", "lark-doc", "lark-sheet"}
+        assert by_name["public-skill"].category == SkillCategory.PUBLIC
+        assert by_name["public-skill"].description == "Public version"
+        assert by_name["lark-doc"].category == SkillCategory.INTEGRATION
+        assert by_name["lark-doc"].get_container_file_path() == "/mnt/skills/integrations/lark-cli/lark-doc/SKILL.md"
+        assert by_name["lark-sheet"].get_container_file_path() == "/mnt/skills/integrations/lark-cli/tools/lark-sheet/SKILL.md"
+
     def test_public_skill_package_children_are_not_registered(self, user_storage: UserScopedSkillStorage, skills_root: Path):
         public_dir = skills_root / "public" / "reviewer"
         fixture_dir = public_dir / "evals" / "fixtures" / "injection"
@@ -832,3 +858,40 @@ class TestInstallScanConfigParity:
 
         assert seen, "the LLM scan should have run for the installed SKILL.md"
         assert all(entry is config for entry in seen), "every LLM scan must receive the storage's own app_config"
+
+
+@pytest.mark.parametrize("explicit_config", [False, True])
+def test_prompt_skill_catalog_preserves_user_scope_with_optional_config(base_dir, skills_root, config, monkeypatch, explicit_config):
+    from collections import OrderedDict
+
+    from deerflow.agents.lead_agent import prompt
+    from deerflow.skills.mutations.guard import owner_is_managed
+
+    paths = Paths(base_dir=base_dir)
+    monkeypatch.setattr("deerflow.config.paths._paths", paths)
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr(prompt, "_enabled_skills_by_config_cache", OrderedDict())
+    for root, name in [(skills_root / "public", "shared"), (paths.user_custom_skills_dir("alice"), "alice-only"), (paths.user_custom_skills_dir("bob"), "bob-only")]:
+        folder = root / name
+        folder.mkdir(parents=True)
+        (folder / "SKILL.md").write_text(_skill_content(name), encoding="utf-8")
+    public = LocalSkillStorage(host_path=str(skills_root)).load_skills(enabled_only=True)
+    monkeypatch.setattr(prompt, "_enabled_skills_cache", public)
+
+    for owner in ("alice", "bob"):
+        assert not owner_is_managed(owner)
+        skills = prompt.get_enabled_skills_for_config(app_config=config if explicit_config else None, user_id=owner)
+        assert {skill.name for skill in skills} == {"shared", f"{owner}-only"}
+
+
+def test_prompt_without_config_or_user_keeps_nonblocking_global_cache(monkeypatch):
+    from deerflow.agents.lead_agent import prompt
+
+    cached = [SimpleNamespace(name="cached")]
+    monkeypatch.setattr(prompt, "_enabled_skills_cache", cached)
+
+    def unexpected_storage(**_kwargs):
+        pytest.fail("Global cached access must not synchronously load storage")
+
+    monkeypatch.setattr(prompt, "get_or_new_skill_storage", unexpected_storage)
+    assert prompt.get_enabled_skills_for_config() == cached

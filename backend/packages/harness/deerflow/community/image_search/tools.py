@@ -2,11 +2,14 @@
 Image Search Tool - Search images using DuckDuckGo for reference in image generation.
 """
 
+import asyncio
 import json
 import logging
 
 from langchain.tools import tool
 
+from deerflow.community.search_max_results import DEFAULT_MAX_RESULTS, coerce_max_results
+from deerflow.community.url_safety import safe_public_result_url
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -14,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 def _search_images(
     query: str,
-    max_results: int = 5,
+    max_results: int = DEFAULT_MAX_RESULTS,
     region: str = "wt-wt",
     safesearch: str = "moderate",
     size: str | None = None,
@@ -75,9 +78,9 @@ def _search_images(
 
 
 @tool("image_search", parse_docstring=True)
-def image_search_tool(
+async def image_search_tool(
     query: str,
-    max_results: int = 5,
+    max_results: int = DEFAULT_MAX_RESULTS,
     size: str | None = None,
     color: str | None = None,
     type_image: str | None = None,
@@ -106,33 +109,50 @@ def image_search_tool(
         license_image: License filter. Options: "any", "Public", "Share", "ShareCommercially", "Modify", "ModifyCommercially".
             Use this when the reference image will be redistributed, so the results are already license-cleared.
     """
-    config = get_app_config().get_tool_config("image_search")
 
-    # Override max_results from config if set
-    if config is not None and "max_results" in config.model_extra:
-        max_results = config.model_extra.get("max_results", max_results)
+    def search_with_config() -> list[dict]:
+        # Both config loading and DDGS perform blocking I/O. Keep the entire
+        # search setup in one worker so neither can stall the agent event loop.
+        config = get_app_config().get_tool_config("image_search")
+        resolved_max_results = max_results
+        if config is not None and "max_results" in config.model_extra:
+            resolved_max_results = config.model_extra.get("max_results", resolved_max_results)
 
-    results = _search_images(
-        query=query,
-        max_results=max_results,
-        size=size,
-        color=color,
-        type_image=type_image,
-        layout=layout,
-        license_image=license_image,
-    )
+        return _search_images(
+            query=query,
+            max_results=coerce_max_results(resolved_max_results, provider="DDG image search", logger=logger),
+            size=size,
+            color=color,
+            type_image=type_image,
+            layout=layout,
+            license_image=license_image,
+        )
+
+    results = await asyncio.to_thread(search_with_config)
 
     if not results:
         return json.dumps({"error": "No images found", "query": query}, ensure_ascii=False)
 
-    normalized_results = [
-        {
-            "title": r.get("title", ""),
-            "image_url": r.get("image", ""),
-            "thumbnail_url": r.get("thumbnail", ""),
-        }
-        for r in results
-    ]
+    normalized_results = []
+    for row in results:
+        if not isinstance(row, dict):
+            continue
+        image_url = safe_public_result_url(row.get("image"))
+        thumbnail_url = safe_public_result_url(row.get("thumbnail"))
+        if not image_url and not thumbnail_url:
+            continue
+        title = row.get("title")
+        normalized_results.append(
+            {
+                "title": title if isinstance(title, str) else "",
+                "image_url": image_url,
+                "thumbnail_url": thumbnail_url,
+                "source_url": safe_public_result_url(row.get("url")),
+            }
+        )
+
+    if not normalized_results:
+        return json.dumps({"error": "No safe image URLs found", "query": query}, ensure_ascii=False)
 
     output = {
         "query": query,

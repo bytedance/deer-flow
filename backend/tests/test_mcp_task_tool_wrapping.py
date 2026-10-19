@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -124,7 +125,8 @@ def test_configured_task_toolsets_fail_when_a_raw_tool_is_missing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_submit_wrapper_persists_before_returning_only_the_local_handle() -> None:
+@pytest.mark.parametrize("connection_scope", ["deployment", "personal"])
+async def test_submit_wrapper_persists_before_returning_only_the_local_handle(connection_scope: str) -> None:
     submitter = FakeSubmitter()
     set_mcp_task_submitter(submitter)
     try:
@@ -137,10 +139,11 @@ async def test_submit_wrapper_persists_before_returning_only_the_local_handle() 
             server_name="reports",
             server_config=_server_config(),
             tool_name_prefix=False,
+            connection_scope=connection_scope,
         )
         submit_tool = configured[0]
         runtime = SimpleNamespace(
-            context={"thread_id": "thread-1", "run_id": "run-1"},
+            context={"thread_id": "thread-1", "thread_incarnation": "incarnation-1", "run_id": "run-1"},
             config={},
             tool_call_id="call-1",
         )
@@ -165,6 +168,7 @@ async def test_submit_wrapper_persists_before_returning_only_the_local_handle() 
             "submit_tool": "submit_report",
             "status_tool": "get_report_status",
             "cancel_tool": "cancel_report",
+            "connection_scope": connection_scope,
         }
     finally:
         set_mcp_task_submitter(None)
@@ -201,3 +205,68 @@ async def test_tool_reload_rejects_task_server_runtime_config_drift() -> None:
             await get_mcp_tools()
     finally:
         set_mcp_task_config_snapshot(None)
+
+
+def _discovery_config(*, reports_init_timeout: float | None = None) -> ExtensionsConfig:
+    reports = {"type": "http", "url": "http://reports.invalid/mcp", "task_toolsets": _server_config().model_dump()["task_toolsets"]}
+    if reports_init_timeout is not None:
+        reports["session_init_timeout"] = reports_init_timeout
+    return ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "healthy": {"type": "http", "url": "http://healthy.invalid/mcp"},
+                "reports": reports,
+            }
+        }
+    )
+
+
+def _discovery_client(reports_discovery):
+    class FakeClient:
+        def __init__(self, connections, *, callbacks=None, tool_interceptors=None, tool_name_prefix=False) -> None:
+            self.callbacks = callbacks
+            self.tool_interceptors = tool_interceptors or []
+
+        async def get_tools(self, *, server_name=None):
+            if server_name == "reports":
+                return await reports_discovery()
+            return [_tool("healthy_search")]
+
+    return FakeClient
+
+
+async def _reports_unreachable():
+    raise ConnectionError("reports is down")
+
+
+async def _reports_hangs():
+    await asyncio.sleep(60)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reports_discovery", "reports_init_timeout"),
+    [(_reports_unreachable, None), (_reports_hangs, 0.05)],
+    ids=["discovery-error", "discovery-timeout"],
+)
+async def test_failed_task_server_discovery_keeps_healthy_server_tools(reports_discovery, reports_init_timeout) -> None:
+    # A task server that never answered has not shown its task_toolsets to be
+    # wrong; it is skipped like any other failed server instead of raising.
+    with patch("langchain_mcp_adapters.client.MultiServerMCPClient", _discovery_client(reports_discovery)):
+        tools = await asyncio.wait_for(get_mcp_tools(_discovery_config(reports_init_timeout=reports_init_timeout)), timeout=5)
+
+    assert [tool.name for tool in tools] == ["healthy_search"]
+
+
+@pytest.mark.asyncio
+async def test_task_server_answering_with_no_tools_still_fails() -> None:
+    # An empty answer is a successful discovery, so the missing raw tools are a
+    # configuration error rather than an outage.
+    async def reports_without_tools():
+        return []
+
+    with (
+        patch("langchain_mcp_adapters.client.MultiServerMCPClient", _discovery_client(reports_without_tools)),
+        pytest.raises(McpTaskConfigurationError, match="cancel_report, get_report_status, submit_report"),
+    ):
+        await get_mcp_tools(_discovery_config())

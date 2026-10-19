@@ -2,6 +2,8 @@ import asyncio
 import contextlib
 import sqlite3
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
@@ -9,11 +11,19 @@ from sqlalchemy import event
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.mcp_tasks.service import McpTaskService
 from deerflow.config.database_config import DatabaseConfig
+from deerflow.mcp.tasks import McpTaskDriverRegistry
 from deerflow.persistence.engine import close_engine, get_engine, get_session_factory, init_engine_from_config
-from deerflow.persistence.mcp_tasks import DuplicateMcpRemoteTaskError, McpTaskRepository
+from deerflow.persistence.mcp_tasks import (
+    DuplicateMcpRemoteTaskError,
+    McpTaskRepository,
+    McpTaskThreadMismatchError,
+)
 from deerflow.persistence.mcp_tasks.model import McpTaskRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.runtime.runs.manager import ConflictError
+from deerflow.runtime.runs.schemas import RunStatus
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -36,11 +46,26 @@ async def _create_working_task(
     now: datetime,
     user_id: str = "user-1",
     remote_task_id: str | None = None,
+    thread_incarnation: str | None = None,
 ) -> dict:
+    async with repo._sf() as session:
+        if await session.get(ThreadMetaRow, "thread-1") is None:
+            session.add(
+                ThreadMetaRow(
+                    thread_id="thread-1",
+                    incarnation=None,
+                    user_id=user_id,
+                    metadata_json={},
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            await session.commit()
     return await repo.create(
         task_id=task_id,
         user_id=user_id,
         thread_id="thread-1",
+        expected_thread_incarnation=thread_incarnation,
         run_id="run-1",
         tool_call_id="call-1",
         server_name="reports",
@@ -108,7 +133,7 @@ async def test_interleaved_reclaim_fences_inflight_poll_and_cancel_mutations(tmp
     await _create_working_task(repo, task_id=task_id, now=now)
     claim = repo.claim_due_tasks
     if operation == "apply_cancel_snapshot":
-        await repo.request_cancel(task_id, user_id="user-1", thread_id="thread-1", requested_at=now)
+        await repo.request_cancel(task_id, user_id="user-1", thread_id="thread-1", thread_incarnation=None, requested_at=now)
         claim = repo.claim_cancel_requests
     first = await claim(now=now, lease_owner="worker-1", lease_seconds=60, limit=1)
     kwargs = {"lease_owner": "worker-1", "lease_token": first[0]["lease_token"]}
@@ -135,14 +160,83 @@ async def test_interleaved_reclaim_fences_inflight_poll_and_cancel_mutations(tmp
         second = await asyncio.wait_for(claim(now=now + timedelta(seconds=61), lease_owner="worker-1", lease_seconds=60, limit=1), timeout=5)
         assert len(second) == 1
         assert second[0]["lease_token"] != first[0]["lease_token"]
-        before = await repo.get(task_id, user_id="user-1")
+        before = await repo.get(task_id, user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+        assert before is not None
         resume.set()
         applied = await asyncio.wait_for(pending, timeout=5)
 
     # Check the entire row, including scheduling, errors, results and event
     # versions, not just the new lease: stale work must have no side effects.
-    assert await repo.get(task_id, user_id="user-1") == before
+    assert await repo.get(task_id, user_id="user-1", thread_id="thread-1", thread_incarnation=None) == before
     assert applied is False
+
+
+@pytest.mark.asyncio
+async def test_cancel_request_between_poll_claim_select_and_write_is_not_re_leased(tmp_path, monkeypatch):
+    """A cancel that commits inside a poll claim keeps its cleared lease, so the cancel worker claims at once."""
+    repo = await _make_repo(tmp_path)
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    await _create_working_task(repo, task_id="task-cancelled", now=now)
+    await _create_working_task(repo, task_id="task-polled", now=now)
+
+    async with _pause_claim_mutation(monkeypatch, repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=120, limit=2)) as (pending, resume):
+        requested = await repo.request_cancel("task-cancelled", user_id="user-1", thread_id="thread-1", thread_incarnation=None, requested_at=now)
+        assert requested is not None
+        assert requested["lease_owner"] is None
+        resume.set()
+        claimed = await asyncio.wait_for(pending, timeout=5)
+
+    # The other candidate is still claimed; only the cancelled row is skipped.
+    assert [(row["id"], row["lease_owner"], row["poll_attempt_count"]) for row in claimed] == [("task-polled", "poller", 1)]
+    assert claimed[0]["lease_token"]
+    cancelled = await repo.get("task-cancelled", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+    assert cancelled is not None
+    assert cancelled["lease_owner"] is None
+    assert cancelled["poll_attempt_count"] == 0
+    cancel_claims = await repo.claim_cancel_requests(now=now + timedelta(seconds=1), lease_owner="canceller", lease_seconds=60, limit=1)
+    assert [row["id"] for row in cancel_claims] == ["task-cancelled"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interleaving", ["claimed_by_peer", "completed_by_previous_lease"])
+async def test_poll_claim_skips_a_row_that_stops_being_claimable_after_its_select(tmp_path, monkeypatch, interleaving):
+    """The claim write re-checks the lease, status and schedule its SELECT saw, not just the row id."""
+    repo = await _make_repo(tmp_path)
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    task_id = "claim-interleaved"
+    await _create_working_task(repo, task_id=task_id, now=now)
+    claim_at = now
+    if interleaving == "completed_by_previous_lease":
+        previous = await repo.claim_due_tasks(now=now, lease_owner="previous", lease_seconds=60, limit=1)
+        # The previous lease has expired for the new claim, but its holder
+        # still finishes the poll it started inside the lease.
+        claim_at = now + timedelta(seconds=61)
+
+    async with _pause_claim_mutation(monkeypatch, repo.claim_due_tasks(now=claim_at, lease_owner="poller", lease_seconds=120, limit=1)) as (pending, resume):
+        if interleaving == "claimed_by_peer":
+            peer = await repo.claim_due_tasks(now=claim_at, lease_owner="peer", lease_seconds=120, limit=1)
+            assert [row["id"] for row in peer] == [task_id]
+        else:
+            assert await repo.apply_snapshot(
+                task_id,
+                lease_owner="previous",
+                lease_token=previous[0]["lease_token"],
+                status="completed",
+                result={"done": True},
+                result_preview=None,
+                result_truncated=False,
+                result_artifact=None,
+                error=None,
+                input_required=None,
+                next_poll_at=None,
+                polled_at=now + timedelta(seconds=30),
+            )
+        before = await repo.get(task_id, user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+        resume.set()
+        claimed = await asyncio.wait_for(pending, timeout=5)
+
+    assert claimed == []
+    assert await repo.get(task_id, user_id="user-1", thread_id="thread-1", thread_incarnation=None) == before
 
 
 @pytest.mark.asyncio
@@ -192,11 +286,12 @@ async def test_interleaved_reclaim_fences_inflight_notification_completion(tmp_p
         second = await asyncio.wait_for(repo.claim_notification_work(now=now + timedelta(seconds=61), **claim_kwargs), timeout=5)
         assert len(second) == 1
         assert second[0]["notification_lease_token"] != first[0]["notification_lease_token"]
-        before = await repo.get(task_id, user_id="user-1")
+        before = await repo.get(task_id, user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+        assert before is not None
         resume.set()
         applied = await asyncio.wait_for(pending, timeout=5)
 
-    assert await repo.get(task_id, user_id="user-1") == before
+    assert await repo.get(task_id, user_id="user-1", thread_id="thread-1", thread_incarnation=None) == before
     assert applied is False
 
 
@@ -241,21 +336,19 @@ async def test_legacy_task_writer_leaves_thread_incarnation_null(tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("thread_owner", "expected_incarnation"),
+    "thread_owner",
     [
-        ("user-1", "matching-owner"),
-        (None, "shared-thread"),
-        ("user-2", None),
+        "user-1",
+        None,
     ],
 )
 async def test_create_atomically_copies_accessible_thread_incarnation(
     tmp_path,
     thread_owner,
-    expected_incarnation,
 ):
     repo = await _make_repo(tmp_path)
     now = datetime.now(UTC)
-    incarnation = expected_incarnation or "different-owner"
+    incarnation = "matching-incarnation"
     async with repo._sf() as session:
         session.add(
             ThreadMetaRow(
@@ -269,25 +362,49 @@ async def test_create_atomically_copies_accessible_thread_incarnation(
         )
         await session.commit()
 
-    task = await _create_working_task(repo, task_id="new-writer", now=now)
+    task = await _create_working_task(
+        repo,
+        task_id="new-writer",
+        now=now,
+        thread_incarnation=incarnation,
+    )
 
     assert "thread_incarnation" not in task
     async with repo._sf() as session:
         row = await session.get(McpTaskRow, "new-writer")
     assert row is not None
-    assert row.thread_incarnation == expected_incarnation
+    assert row.thread_incarnation == incarnation
 
 
 @pytest.mark.asyncio
-async def test_create_leaves_incarnation_null_without_matching_thread(tmp_path):
+async def test_create_rejects_missing_or_inaccessible_thread(tmp_path):
     repo = await _make_repo(tmp_path)
 
-    await _create_working_task(repo, task_id="missing-thread", now=datetime.now(UTC))
+    with pytest.raises(McpTaskThreadMismatchError):
+        await repo.create(
+            task_id="missing-thread",
+            user_id="user-1",
+            thread_id="missing-thread",
+            expected_thread_incarnation=None,
+            run_id="run-1",
+            tool_call_id="call-1",
+            server_name="reports",
+            driver_name="fake",
+            remote_task_id="remote-missing",
+            task_name="Generate report",
+            status="working",
+            result=None,
+            result_preview=None,
+            result_truncated=False,
+            result_artifact=None,
+            error=None,
+            input_required=None,
+            next_poll_at=None,
+        )
 
     async with repo._sf() as session:
         row = await session.get(McpTaskRow, "missing-thread")
-    assert row is not None
-    assert row.thread_incarnation is None
+    assert row is None
 
 
 @pytest.mark.asyncio
@@ -310,9 +427,9 @@ async def test_create_observes_delete_and_recreate_at_insert_boundary(tmp_path):
     engine = get_engine()
     assert engine is not None
     replaced = False
-    insert_statement = None
+    lock_statement = None
 
-    def replace_thread_before_task_insert(
+    def replace_thread_before_scope_lock(
         _conn,
         _cursor,
         statement,
@@ -320,11 +437,11 @@ async def test_create_observes_delete_and_recreate_at_insert_boundary(tmp_path):
         _context,
         _executemany,
     ):
-        nonlocal insert_statement, replaced
-        if replaced or not statement.lstrip().upper().startswith("INSERT INTO MCP_TASKS"):
+        nonlocal lock_statement, replaced
+        if replaced or "UPDATE THREADS_META" not in statement.upper():
             return
         replaced = True
-        insert_statement = statement
+        lock_statement = statement
         with contextlib.closing(sqlite3.connect(tmp_path / "deerflow.db")) as connection:
             with connection:
                 connection.execute("DELETE FROM threads_meta WHERE thread_id = ?", ("thread-1",))
@@ -346,21 +463,187 @@ async def test_create_observes_delete_and_recreate_at_insert_boundary(tmp_path):
                     ),
                 )
 
-    event.listen(engine.sync_engine, "before_cursor_execute", replace_thread_before_task_insert)
+    event.listen(engine.sync_engine, "before_cursor_execute", replace_thread_before_scope_lock)
     try:
-        await _create_working_task(repo, task_id="racing-task", now=now)
+        with pytest.raises(McpTaskThreadMismatchError):
+            await _create_working_task(
+                repo,
+                task_id="racing-task",
+                now=now,
+                thread_incarnation="old-incarnation",
+            )
     finally:
-        event.remove(engine.sync_engine, "before_cursor_execute", replace_thread_before_task_insert)
+        event.remove(engine.sync_engine, "before_cursor_execute", replace_thread_before_scope_lock)
 
     assert replaced is True
-    assert insert_statement is not None
-    normalized_insert = " ".join(insert_statement.upper().split())
-    assert "SELECT THREADS_META.INCARNATION" in normalized_insert
-    assert "INSERT INTO MCP_TASKS" in normalized_insert
+    assert lock_statement is not None
+    normalized_lock = " ".join(lock_statement.upper().split())
+    assert "UPDATE THREADS_META SET INCARNATION = INCARNATION" in normalized_lock
+    assert "INCARNATION IS ?" in normalized_lock
     async with repo._sf() as session:
         row = await session.get(McpTaskRow, "racing-task")
-    assert row is not None
-    assert row.thread_incarnation == "replacement-incarnation"
+    assert row is None
+
+
+@pytest.mark.asyncio
+async def test_request_cancel_rejects_delete_recreate_before_scope_lock(tmp_path):
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    async with repo._sf() as session:
+        session.add(
+            ThreadMetaRow(
+                thread_id="thread-1",
+                incarnation="old-incarnation",
+                user_id="user-1",
+                metadata_json={},
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await session.commit()
+    await _create_working_task(
+        repo,
+        task_id="old-task",
+        now=now,
+        thread_incarnation="old-incarnation",
+    )
+
+    engine = get_engine()
+    assert engine is not None
+    replaced = False
+
+    def replace_thread_before_scope_lock(
+        _conn,
+        _cursor,
+        statement,
+        _parameters,
+        _context,
+        _executemany,
+    ):
+        nonlocal replaced
+        if replaced or "UPDATE THREADS_META" not in statement.upper():
+            return
+        replaced = True
+        with contextlib.closing(sqlite3.connect(tmp_path / "deerflow.db")) as connection:
+            with connection:
+                connection.execute("DELETE FROM threads_meta WHERE thread_id = ?", ("thread-1",))
+                connection.execute(
+                    """
+                    INSERT INTO threads_meta (
+                        thread_id, incarnation, user_id, status, metadata_json,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "thread-1",
+                        "replacement-incarnation",
+                        "user-1",
+                        "idle",
+                        "{}",
+                        now.isoformat(),
+                        now.isoformat(),
+                    ),
+                )
+
+    event.listen(engine.sync_engine, "before_cursor_execute", replace_thread_before_scope_lock)
+    try:
+        result = await repo.request_cancel(
+            "old-task",
+            user_id="user-1",
+            thread_id="thread-1",
+            thread_incarnation="old-incarnation",
+            requested_at=now,
+        )
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", replace_thread_before_scope_lock)
+
+    assert replaced is True
+    assert result is None
+    async with repo._sf() as session:
+        task = await session.get(McpTaskRow, "old-task")
+    assert task is not None
+    assert task.cancel_requested_at is None
+
+
+@pytest.mark.asyncio
+async def test_user_access_is_limited_to_current_thread_incarnation(tmp_path):
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="old-task", now=now)
+
+    async with repo._sf() as session:
+        old_thread = await session.get(ThreadMetaRow, "thread-1")
+        assert old_thread is not None
+        await session.delete(old_thread)
+        await session.commit()
+        session.add(
+            ThreadMetaRow(
+                thread_id="thread-1",
+                incarnation="replacement-incarnation",
+                user_id="user-1",
+                metadata_json={},
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await session.commit()
+
+    assert await repo.list_by_thread("thread-1", user_id="user-1", thread_incarnation=None) == []
+    assert await repo.get("old-task", user_id="user-1", thread_id="thread-1", thread_incarnation=None) is None
+    assert (
+        await repo.request_cancel(
+            "old-task",
+            user_id="user-1",
+            thread_id="thread-1",
+            thread_incarnation=None,
+            requested_at=now,
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_pr1_does_not_change_worker_claim_eligibility(tmp_path):
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="old-task", now=now)
+
+    async with repo._sf() as session:
+        old_thread = await session.get(ThreadMetaRow, "thread-1")
+        assert old_thread is not None
+        await session.delete(old_thread)
+        await session.commit()
+        session.add(
+            ThreadMetaRow(
+                thread_id="thread-1",
+                incarnation="replacement-incarnation",
+                user_id="user-1",
+                metadata_json={},
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await session.commit()
+
+    claimed = await repo.claim_due_tasks(
+        now=now,
+        lease_owner="worker-1",
+        lease_seconds=60,
+        limit=10,
+    )
+
+    assert [task["id"] for task in claimed] == ["old-task"]
+    assert claimed[0]["_thread_incarnation"] is None
+
+
+@pytest.mark.asyncio
+async def test_user_access_treats_legacy_null_incarnations_as_equal(tmp_path):
+    repo = await _make_repo(tmp_path)
+    task = await _create_working_task(repo, task_id="legacy-task", now=datetime.now(UTC))
+
+    assert "thread_incarnation" not in task
+    assert "_thread_incarnation" not in task
+    assert await repo.get("legacy-task", user_id="user-1", thread_id="thread-1", thread_incarnation=None) is not None
 
 
 @pytest.mark.asyncio
@@ -381,6 +664,12 @@ async def test_remote_task_id_is_unique_per_user_and_server(tmp_path):
             now=now,
             remote_task_id="shared-remote-id",
         )
+
+    async with repo._sf() as session:
+        thread = await session.get(ThreadMetaRow, "thread-1")
+        assert thread is not None
+        thread.user_id = None
+        await session.commit()
 
     other_user = await _create_working_task(
         repo,
@@ -483,7 +772,7 @@ async def test_apply_snapshot_requires_current_lease_owner_and_terminalizes_task
     )
     assert applied is True
 
-    stored = await repo.get("task-2", user_id="user-1")
+    stored = await repo.get("task-2", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["status"] == "completed"
     assert stored["result"] == {"report": "ready"}
@@ -533,7 +822,7 @@ async def test_apply_snapshot_rejects_result_after_same_workers_lease_expires(tm
     )
 
     assert applied is False
-    stored = await repo.get("task-expired", user_id="user-1")
+    stored = await repo.get("task-expired", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["status"] == "working"
     assert stored["result"] is None
@@ -567,7 +856,7 @@ async def test_input_required_is_persisted_and_remains_scheduled_for_slow_pollin
     )
     assert applied is True
 
-    stored = await repo.get("task-3", user_id="user-1")
+    stored = await repo.get("task-3", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["input_required"] == {"prompt": "Approve deployment?"}
     assert stored["notification_status"] == "pending"
@@ -596,7 +885,7 @@ async def test_release_claim_retries_transient_poll_failure(tmp_path):
     )
     assert released is True
 
-    stored = await repo.get("task-4", user_id="user-1")
+    stored = await repo.get("task-4", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["status"] == "working"
     assert stored["last_poll_error"] == "temporary network failure"
@@ -630,7 +919,7 @@ async def test_release_claim_after_same_worker_reclaim_cannot_clear_new_claim(tm
     )
     assert released is False
 
-    stored = await repo.get("task-fence", user_id="user-1")
+    stored = await repo.get("task-fence", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["lease_owner"] == "worker-1"
     assert stored["lease_token"] == new_token
@@ -667,7 +956,7 @@ async def test_apply_snapshot_after_same_worker_reclaim_cannot_clear_new_claim(t
     )
     assert applied is False
 
-    stored = await repo.get("task-apply-fence", user_id="user-1")
+    stored = await repo.get("task-apply-fence", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["lease_owner"] == "worker-1"
     assert stored["lease_token"] == new_token
@@ -703,7 +992,7 @@ async def test_apply_cancel_snapshot_after_same_worker_reclaim_cannot_clear_new_
     )
     assert applied is False
 
-    stored = await repo.get("task-cancel-fence", user_id="user-1")
+    stored = await repo.get("task-cancel-fence", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["lease_owner"] == "worker-1"
     assert stored["lease_token"] == new_token
@@ -768,10 +1057,319 @@ async def test_finish_notification_run_after_reclaim_cannot_clear_new_claim(tmp_
     )
     assert finished is False
 
-    stored = await repo.get("task-notify-fence", user_id="user-1")
+    stored = await repo.get("task-notify-fence", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["notification_lease_owner"] == "notifier"
     assert stored["notification_lease_token"] == new_notify_token
+
+
+@pytest.mark.asyncio
+async def test_reclaimed_launching_notification_preserves_reserved_snapshot(tmp_path):
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="task-launching-compat", now=now)
+    poll_claim = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+    await repo.apply_snapshot(
+        "task-launching-compat",
+        lease_owner="poller",
+        lease_token=poll_claim[0]["lease_token"],
+        status="input_required",
+        result=None,
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required={"prompt": "Approve?"},
+        next_poll_at=now,
+        polled_at=now,
+    )
+    first = await repo.claim_notification_work(
+        now=now,
+        lease_owner="notifier-a",
+        lease_seconds=60,
+        limit=1,
+        tracking_degraded_after_errors=3,
+    )
+    first_version = first[0]["dispatch_version"]
+    first_event = first[0]["dispatch_event"]
+    assert await repo.begin_notification_launch(
+        "task-launching-compat",
+        lease_owner="notifier-a",
+        notification_lease_token=first[0]["notification_lease_token"],
+        dispatch_version=first_version,
+        lease_seconds=60,
+        now=now,
+    )
+
+    second_poll = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+    await repo.apply_snapshot(
+        "task-launching-compat",
+        lease_owner="poller",
+        lease_token=second_poll[0]["lease_token"],
+        status="completed",
+        result={"done": True},
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required=None,
+        next_poll_at=None,
+        polled_at=now,
+    )
+
+    reclaimed_at = now + timedelta(seconds=61)
+    reclaimed = await repo.claim_notification_work(
+        now=reclaimed_at,
+        lease_owner="notifier-b",
+        lease_seconds=60,
+        limit=1,
+        tracking_degraded_after_errors=3,
+    )
+
+    assert len(reclaimed) == 1
+    assert reclaimed[0]["notification_status"] == "launching"
+    assert reclaimed[0]["dispatch_version"] == first_version
+    assert reclaimed[0]["dispatch_event"] == first_event
+    assert reclaimed[0]["event_version"] > first_version
+    service = McpTaskService(
+        repository=repo,
+        drivers=McpTaskDriverRegistry(),
+        poll_interval_seconds=5,
+        lease_seconds=60,
+        max_concurrent_polls=1,
+        launch_notification=AsyncMock(side_effect=ConflictError("thread busy")),
+        get_run=AsyncMock(return_value=SimpleNamespace(assistant_id="lead_agent")),
+    )
+    service._lease_owner = "notifier-b"
+    await service._notify_one_claimed(reclaimed[0], now=reclaimed_at)
+
+    retry_at = reclaimed_at + timedelta(seconds=10)
+    after_conflict = await repo.claim_notification_work(
+        now=retry_at,
+        lease_owner="notifier-c",
+        lease_seconds=60,
+        limit=1,
+        tracking_degraded_after_errors=3,
+    )
+    assert len(after_conflict) == 1
+    assert after_conflict[0]["notification_status"] == "launching"
+    assert after_conflict[0]["dispatch_version"] == first_version
+    assert after_conflict[0]["dispatch_event"] == first_event
+    assert after_conflict[0]["notification_attempt_count"] == 0
+    assert await repo.mark_notification_dispatched(
+        "task-launching-compat",
+        lease_owner="notifier-c",
+        notification_lease_token=after_conflict[0]["notification_lease_token"],
+        dispatch_version=first_version,
+        run_id="notify-run-1",
+        now=retry_at,
+    )
+
+
+@pytest.mark.asyncio
+async def test_begin_notification_launch_rejects_unstarted_stale_snapshot(tmp_path):
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="task-notify-stale", now=now)
+    poll_claim = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+    await repo.apply_snapshot(
+        "task-notify-stale",
+        lease_owner="poller",
+        lease_token=poll_claim[0]["lease_token"],
+        status="input_required",
+        result=None,
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required={"prompt": "Approve?"},
+        next_poll_at=now,
+        polled_at=now,
+    )
+    first = await repo.claim_notification_work(
+        now=now,
+        lease_owner="notifier",
+        lease_seconds=60,
+        limit=1,
+        tracking_degraded_after_errors=3,
+    )
+    second_poll = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+    await repo.apply_snapshot(
+        "task-notify-stale",
+        lease_owner="poller",
+        lease_token=second_poll[0]["lease_token"],
+        status="completed",
+        result={"done": True},
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required=None,
+        next_poll_at=None,
+        polled_at=now,
+    )
+
+    reserved = await repo.begin_notification_launch(
+        "task-notify-stale",
+        lease_owner="notifier",
+        notification_lease_token=first[0]["notification_lease_token"],
+        dispatch_version=first[0]["dispatch_version"],
+        lease_seconds=120,
+        now=now,
+    )
+
+    assert reserved is False
+    stored = await repo.get("task-notify-stale", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+    assert stored is not None
+    assert stored["notification_status"] == "claimed"
+    assert stored["event_version"] > stored["dispatch_version"]
+
+
+@pytest.mark.asyncio
+async def test_begin_notification_launch_is_fenced_by_reclaimed_token(tmp_path, monkeypatch):
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="task-launch-token-fence", now=now)
+    poll_claim = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+    await repo.apply_snapshot(
+        "task-launch-token-fence",
+        lease_owner="poller",
+        lease_token=poll_claim[0]["lease_token"],
+        status="completed",
+        result={"done": True},
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required=None,
+        next_poll_at=None,
+        polled_at=now,
+    )
+    first = await repo.claim_notification_work(
+        now=now,
+        lease_owner="same-worker",
+        lease_seconds=60,
+        limit=1,
+        tracking_degraded_after_errors=3,
+    )
+    operation = repo.begin_notification_launch(
+        "task-launch-token-fence",
+        lease_owner="same-worker",
+        notification_lease_token=first[0]["notification_lease_token"],
+        dispatch_version=first[0]["dispatch_version"],
+        lease_seconds=120,
+        now=now,
+    )
+
+    async with _pause_claim_mutation(monkeypatch, operation) as (stale_launch, resume):
+        reclaimed = await repo.claim_notification_work(
+            now=now + timedelta(seconds=61),
+            lease_owner="same-worker",
+            lease_seconds=60,
+            limit=1,
+            tracking_degraded_after_errors=3,
+        )
+        assert len(reclaimed) == 1
+        new_token = reclaimed[0]["notification_lease_token"]
+        assert new_token != first[0]["notification_lease_token"]
+        resume.set()
+        assert await stale_launch is False
+
+    stored = await repo.get("task-launch-token-fence", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+    assert stored is not None
+    assert stored["notification_status"] == "claimed"
+    assert stored["notification_lease_owner"] == "same-worker"
+    assert stored["notification_lease_token"] == new_token
+
+
+@pytest.mark.asyncio
+async def test_recovered_launching_at_retry_budget_reconciles_successful_run(tmp_path):
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="task-launching-success", now=now)
+    poll_claim = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+    await repo.apply_snapshot(
+        "task-launching-success",
+        lease_owner="poller",
+        lease_token=poll_claim[0]["lease_token"],
+        status="completed",
+        result={"done": True},
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required=None,
+        next_poll_at=None,
+        polled_at=now,
+    )
+    claimed = await repo.claim_notification_work(
+        now=now,
+        lease_owner="notifier-a",
+        lease_seconds=60,
+        limit=1,
+        tracking_degraded_after_errors=3,
+    )
+    dispatch_version = claimed[0]["dispatch_version"]
+    async with repo._sf() as session:
+        row = await session.get(McpTaskRow, "task-launching-success")
+        assert row is not None
+        row.notification_status = "launching"
+        row.notification_attempt_count = 5
+        await session.commit()
+
+    launch = AsyncMock(return_value={"run_id": "notify-run-success"})
+    launching_service = McpTaskService(
+        repository=repo,
+        drivers=McpTaskDriverRegistry(),
+        poll_interval_seconds=5,
+        lease_seconds=60,
+        max_concurrent_polls=1,
+        launch_notification=launch,
+        get_run=AsyncMock(return_value=SimpleNamespace(assistant_id="lead_agent")),
+    )
+    launching_service._lease_owner = "notifier-a"
+    await launching_service._notify_one_claimed(
+        {
+            **claimed[0],
+            "notification_status": "launching",
+            "notification_attempt_count": 5,
+        },
+        now=now,
+    )
+
+    # Dispatch stores the completion time, which can be later than the scan time.
+    launched = await repo.get("task-launching-success", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+    assert launched is not None
+    reconcile_at = datetime.fromisoformat(launched["next_notification_at"])
+    dispatched = await repo.claim_notification_work(
+        now=reconcile_at,
+        lease_owner="notifier-b",
+        lease_seconds=60,
+        limit=1,
+        tracking_degraded_after_errors=3,
+    )
+    assert len(dispatched) == 1
+    assert dispatched[0]["notification_status"] == "dispatched"
+    assert dispatched[0]["notification_attempt_count"] == 5
+    get_run = AsyncMock(return_value=SimpleNamespace(status=RunStatus.success))
+    dispatched_service = McpTaskService(
+        repository=repo,
+        drivers=McpTaskDriverRegistry(),
+        poll_interval_seconds=5,
+        lease_seconds=60,
+        max_concurrent_polls=1,
+        launch_notification=AsyncMock(),
+        get_run=get_run,
+    )
+    dispatched_service._lease_owner = "notifier-b"
+    await dispatched_service._notify_one_claimed(dispatched[0], now=reconcile_at)
+
+    get_run.assert_awaited_once_with("notify-run-success", user_id="user-1")
+    stored = await repo.get("task-launching-success", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+    assert stored is not None
+    assert stored["notification_status"] == "delivered"
+    assert stored["notified_version"] == dispatch_version
+    assert stored["notification_attempt_count"] == 0
 
 
 @pytest.mark.asyncio
@@ -788,7 +1386,7 @@ async def test_release_poll_claim_after_cancellation_preserves_poll_failure_stat
         next_poll_at=retry_at,
         error="temporary network failure",
     )
-    before = await repo.get("task-cancelled-poll", user_id="user-1")
+    before = await repo.get("task-cancelled-poll", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert before is not None
 
     reclaimed = await repo.claim_due_tasks(now=retry_at, lease_owner="worker-2", lease_seconds=60, limit=10)
@@ -799,7 +1397,7 @@ async def test_release_poll_claim_after_cancellation_preserves_poll_failure_stat
     )
 
     assert released is True
-    stored = await repo.get("task-cancelled-poll", user_id="user-1")
+    stored = await repo.get("task-cancelled-poll", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["next_poll_at"] == before["next_poll_at"]
     assert stored["last_poll_error"] == before["last_poll_error"]
@@ -823,7 +1421,7 @@ async def test_release_poll_claim_after_cancellation_requires_current_owner(tmp_
     )
 
     assert released is False
-    stored = await repo.get("task-stale-cancel", user_id="user-1")
+    stored = await repo.get("task-stale-cancel", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["lease_owner"] == "worker-current"
     assert stored["lease_expires_at"] is not None
@@ -844,7 +1442,7 @@ async def test_consecutive_poll_error_count_increments_and_resets_on_success(tmp
             next_poll_at=now - timedelta(seconds=1),
             error="temporary network failure",
         )
-        stored = await repo.get("task-6", user_id="user-1")
+        stored = await repo.get("task-6", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
         assert stored is not None
         assert stored["consecutive_poll_error_count"] == expected_errors
 
@@ -865,7 +1463,7 @@ async def test_consecutive_poll_error_count_increments_and_resets_on_success(tmp
     )
     assert applied is True
 
-    stored = await repo.get("task-6", user_id="user-1")
+    stored = await repo.get("task-6", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["consecutive_poll_error_count"] == 0
 
@@ -916,7 +1514,7 @@ async def test_notification_snapshot_is_versioned_and_not_overwritten_in_flight(
         next_poll_at=None,
         polled_at=now,
     )
-    changed = await repo.get("task-notify", user_id="user-1")
+    changed = await repo.get("task-notify", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert changed is not None
     assert changed["event_version"] == 2
     assert changed["dispatch_version"] == 1
@@ -1011,7 +1609,7 @@ async def test_notification_retry_rebuilds_a_newer_event_and_resets_its_budget(t
         error="Agent run failed",
         now=now,
     )
-    failed = await repo.get("task-retry-latest", user_id="user-1")
+    failed = await repo.get("task-retry-latest", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert failed is not None
     assert failed["notification_status"] == "retry"
     assert failed["dispatch_attempt"] == 1
@@ -1044,6 +1642,395 @@ async def test_notification_retry_rebuilds_a_newer_event_and_resets_its_budget(t
     assert latest[0]["dispatch_event"]["status"] == "completed"
     assert latest[0]["dispatch_attempt"] == 0
     assert latest[0]["notification_attempt_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_resolved_notification_snapshot_is_consumed_instead_of_launched_empty(tmp_path):
+    """A degraded snapshot that recovers before delivery must not launch empty.
+
+    Three poll failures record the tracking-degraded snapshot; the next poll
+    succeeds before any notification worker claims it. The resolved snapshot
+    must be consumed (nothing to notify) instead of being rebuilt as an empty
+    event and launched.
+    """
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="task-recovered", now=now)
+
+    for _ in range(3):
+        claimed = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=10)
+        await repo.release_claim(
+            "task-recovered",
+            lease_owner="poller",
+            lease_token=claimed[0]["lease_token"],
+            next_poll_at=now - timedelta(seconds=1),
+            error="temporary network failure",
+        )
+    degraded = await repo.get("task-recovered", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+    assert degraded is not None
+    assert degraded["notification_status"] == "pending"
+    assert degraded["event_version"] == 1
+
+    claimed = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=10)
+    applied = await repo.apply_snapshot(
+        "task-recovered",
+        lease_owner="poller",
+        lease_token=claimed[0]["lease_token"],
+        status="working",
+        result=None,
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required=None,
+        next_poll_at=now + timedelta(seconds=5),
+        polled_at=now,
+    )
+    assert applied is True
+
+    notifications = await repo.claim_notification_work(
+        now=datetime.now(UTC),
+        lease_owner="notifier",
+        lease_seconds=60,
+        limit=10,
+        tracking_degraded_after_errors=3,
+    )
+    assert notifications == []
+
+    stored = await repo.get("task-recovered", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+    assert stored is not None
+    assert stored["notification_status"] == "none"
+    assert stored["notified_version"] == stored["event_version"]
+
+
+@pytest.mark.asyncio
+async def test_legacy_empty_notification_retry_is_consumed_on_claim(tmp_path):
+    """Rows left by pre-fix claims can carry no event; claiming must consume them.
+
+    A pre-fix worker could claim a stale snapshot, fail delivery, and release it
+    as ``retry`` while ``dispatch_event`` stayed ``None`` and ``dispatch_version``
+    already matched ``event_version``. Re-claiming would launch another empty
+    notification on every retry until dead-lettering, so the claim must consume
+    it instead.
+    """
+    from sqlalchemy import update as sql_update
+
+    from deerflow.persistence.mcp_tasks.model import McpTaskRow
+
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="task-legacy-empty", now=now)
+
+    async with repo._sf() as session:
+        await session.execute(
+            sql_update(McpTaskRow)
+            .where(McpTaskRow.id == "task-legacy-empty")
+            .values(
+                notification_status="retry",
+                event_version=1,
+                notified_version=0,
+                dispatch_version=1,
+                dispatch_event=None,
+                next_notification_at=now,
+            )
+        )
+        await session.commit()
+
+    notifications = await repo.claim_notification_work(
+        now=datetime.now(UTC),
+        lease_owner="notifier",
+        lease_seconds=60,
+        limit=10,
+        tracking_degraded_after_errors=3,
+    )
+    assert notifications == []
+
+    stored = await repo.get("task-legacy-empty", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+    assert stored is not None
+    assert stored["notification_status"] == "none"
+    assert stored["notified_version"] == stored["event_version"]
+
+
+@pytest.mark.asyncio
+async def test_expired_notification_claim_is_consumed_when_the_event_resolved(tmp_path):
+    """Reclaiming an expired claim whose event resolved must not launch it.
+
+    Claim a real attention event, let the notification lease expire, resolve the
+    condition with a successful poll, then reclaim: the rebuilt snapshot is
+    empty, so the reclaim must consume it instead of launching an empty event.
+    """
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="task-reclaim", now=now)
+
+    claimed_poll = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+    await repo.apply_snapshot(
+        "task-reclaim",
+        lease_owner="poller",
+        lease_token=claimed_poll[0]["lease_token"],
+        status="input_required",
+        result=None,
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required={"prompt": "Approve?"},
+        next_poll_at=now,
+        polled_at=now,
+    )
+    first = await repo.claim_notification_work(
+        now=now,
+        lease_owner="notifier",
+        lease_seconds=60,
+        limit=1,
+        tracking_degraded_after_errors=3,
+    )
+    assert first[0]["dispatch_event"]["status"] == "input_required"
+
+    claimed_poll = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+    await repo.apply_snapshot(
+        "task-reclaim",
+        lease_owner="poller",
+        lease_token=claimed_poll[0]["lease_token"],
+        status="working",
+        result=None,
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required=None,
+        next_poll_at=now,
+        polled_at=now,
+    )
+
+    reclaim = await repo.claim_notification_work(
+        now=now + timedelta(seconds=61),
+        lease_owner="notifier",
+        lease_seconds=60,
+        limit=1,
+        tracking_degraded_after_errors=3,
+    )
+    assert reclaim == []
+
+    stored = await repo.get("task-reclaim", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+    assert stored is not None
+    assert stored["notification_status"] == "none"
+    assert stored["notified_version"] == stored["event_version"]
+    assert stored["dispatch_version"] is None
+    assert stored["dispatch_event"] is None
+    assert stored["notification_lease_owner"] is None
+
+
+@pytest.mark.asyncio
+async def test_identical_attention_event_after_consumed_snapshot_is_recorded(tmp_path):
+    """Consuming a resolved snapshot must not suppress an identical later event.
+
+    The degraded snapshot's content fingerprint must not survive consumption: if
+    the server degrades again with the same error string while no notification
+    was ever delivered, the event must be recorded and claimed again.
+    """
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="task-repeat", now=now)
+
+    async def fail_three_times() -> None:
+        for _ in range(3):
+            claimed = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=10)
+            await repo.release_claim(
+                "task-repeat",
+                lease_owner="poller",
+                lease_token=claimed[0]["lease_token"],
+                next_poll_at=now - timedelta(seconds=1),
+                error="temporary network failure",
+            )
+
+    await fail_three_times()
+    degraded = await repo.get("task-repeat", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+    assert degraded is not None
+    assert degraded["notification_status"] == "pending"
+    assert degraded["event_version"] == 1
+
+    # The task recovers before the notification is claimed; the snapshot is consumed.
+    claimed = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=10)
+    await repo.apply_snapshot(
+        "task-repeat",
+        lease_owner="poller",
+        lease_token=claimed[0]["lease_token"],
+        status="working",
+        result=None,
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required=None,
+        next_poll_at=now - timedelta(seconds=1),
+        polled_at=now,
+    )
+    consumed = await repo.claim_notification_work(
+        now=datetime.now(UTC),
+        lease_owner="notifier",
+        lease_seconds=60,
+        limit=10,
+        tracking_degraded_after_errors=3,
+    )
+    assert consumed == []
+
+    # The identical failure recurs; the event must be recorded again, not
+    # suppressed by the consumed snapshot's fingerprint.
+    await fail_three_times()
+    again = await repo.get("task-repeat", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+    assert again is not None
+    assert again["notification_status"] == "pending"
+    assert again["event_version"] == 2
+
+    notifications = await repo.claim_notification_work(
+        now=datetime.now(UTC),
+        lease_owner="notifier",
+        lease_seconds=60,
+        limit=10,
+        tracking_degraded_after_errors=3,
+    )
+    assert len(notifications) == 1
+    assert notifications[0]["dispatch_event"]["tracking_degraded"] is True
+
+
+@pytest.mark.asyncio
+async def test_interleaved_consume_preserves_a_concurrently_recorded_completion(tmp_path, monkeypatch):
+    """A consume racing a newer event must not acknowledge that event (SQLite).
+
+    SQLite has no ``SELECT FOR UPDATE``, so a real completion recorded after the
+    claim's read but before its write must survive: the consume is fenced on the
+    event version it actually read, and the newer completion stays claimable.
+    """
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="interleaved-consume", now=now)
+
+    # Record the degraded snapshot, then let the task recover so the snapshot is
+    # resolved but still pending when the claim tries to consume it.
+    for _ in range(3):
+        claimed = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=10)
+        await repo.release_claim(
+            "interleaved-consume",
+            lease_owner="poller",
+            lease_token=claimed[0]["lease_token"],
+            next_poll_at=now - timedelta(seconds=1),
+            error="temporary network failure",
+        )
+    claimed = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=10)
+    await repo.apply_snapshot(
+        "interleaved-consume",
+        lease_owner="poller",
+        lease_token=claimed[0]["lease_token"],
+        status="working",
+        result=None,
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required=None,
+        next_poll_at=now,
+        polled_at=now,
+    )
+
+    claim_kwargs = {"lease_owner": "notifier", "lease_seconds": 60, "limit": 1, "tracking_degraded_after_errors": 3}
+    async with _pause_claim_mutation(monkeypatch, repo.claim_notification_work(now=datetime.now(UTC), **claim_kwargs)) as (pending, resume):
+        # Record a real completion while the consume is paused after its SELECT.
+        poll = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+        assert await repo.apply_snapshot(
+            "interleaved-consume",
+            lease_owner="poller",
+            lease_token=poll[0]["lease_token"],
+            status="completed",
+            result={"done": True},
+            result_preview=None,
+            result_truncated=False,
+            result_artifact=None,
+            error=None,
+            input_required=None,
+            next_poll_at=None,
+            polled_at=now,
+        )
+        resume.set()
+        consumed = await asyncio.wait_for(pending, timeout=5)
+
+    # The paused claim consumed nothing; the completion stays claimable.
+    assert consumed == []
+    stored = await repo.get("interleaved-consume", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+    assert stored is not None
+    assert stored["notification_status"] == "pending"
+    assert stored["event_version"] == 2
+    assert stored["notified_version"] == 0
+
+    notifications = await repo.claim_notification_work(now=datetime.now(UTC), **claim_kwargs)
+    assert len(notifications) == 1
+    assert notifications[0]["dispatch_event"]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_status", ["launching", "dispatched"])
+@pytest.mark.parametrize("newer_event", [True, False], ids=["newer-event", "no-newer-event"])
+async def test_legacy_empty_dispatch_respects_a_newer_event(tmp_path, legacy_status, newer_event):
+    """A legacy empty dispatch must not swallow a newer completion.
+
+    Pre-fix workers could leave a launching/dispatched row whose dispatch event
+    is gone. If a real completion was recorded afterwards, it must be claimed;
+    only an empty generation with nothing newer may be consumed.
+    """
+    from sqlalchemy import update as sql_update
+
+    from deerflow.persistence.mcp_tasks.model import McpTaskRow
+
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="legacy-newer", now=now)
+
+    async with repo._sf() as session:
+        await session.execute(
+            sql_update(McpTaskRow)
+            .where(McpTaskRow.id == "legacy-newer")
+            .values(
+                notification_status=legacy_status,
+                event_version=1,
+                notified_version=0,
+                dispatch_version=1,
+                dispatch_event=None,
+                notification_run_id="legacy-empty-run",
+                next_notification_at=now,
+            )
+        )
+        await session.commit()
+
+    if newer_event:
+        poll = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+        assert await repo.apply_snapshot(
+            "legacy-newer",
+            lease_owner="poller",
+            lease_token=poll[0]["lease_token"],
+            status="completed",
+            result={"done": True},
+            result_preview=None,
+            result_truncated=False,
+            result_artifact=None,
+            error=None,
+            input_required=None,
+            next_poll_at=None,
+            polled_at=now,
+        )
+
+    claim_kwargs = {"lease_owner": "notifier", "lease_seconds": 60, "limit": 1, "tracking_degraded_after_errors": 3}
+    notifications = await repo.claim_notification_work(now=datetime.now(UTC), **claim_kwargs)
+
+    stored = await repo.get("legacy-newer", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+    assert stored is not None
+    if newer_event:
+        assert len(notifications) == 1
+        assert notifications[0]["dispatch_event"]["status"] == "completed"
+        assert notifications[0]["dispatch_version"] == 2
+    else:
+        assert notifications == []
+        assert stored["notification_status"] == "none"
+        assert stored["notified_version"] == stored["event_version"]
 
 
 @pytest.mark.asyncio
@@ -1083,7 +2070,7 @@ async def test_unexpected_notification_failure_releases_lease_without_changing_p
         error="run store unavailable",
     )
 
-    stored = await repo.get("task-notify-release", user_id="user-1")
+    stored = await repo.get("task-notify-release", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["notification_status"] == "claimed"
     assert stored["notification_lease_owner"] is None
@@ -1130,7 +2117,7 @@ async def test_notification_launch_failure_counts_and_reclaims_latest_snapshot(t
         count_failure=True,
     )
 
-    stored = await repo.get("task-launch-retry", user_id="user-1")
+    stored = await repo.get("task-launch-retry", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["notification_status"] == "pending"
     assert stored["notification_attempt_count"] == 1
@@ -1148,7 +2135,8 @@ async def test_notification_launch_failure_counts_and_reclaims_latest_snapshot(t
 
 
 @pytest.mark.asyncio
-async def test_permanent_notification_failure_is_not_reclaimed(tmp_path):
+@pytest.mark.parametrize("notification_status", ["claimed", "launching"])
+async def test_permanent_notification_failure_is_not_reclaimed(tmp_path, notification_status):
     repo = await _make_repo(tmp_path)
     now = datetime.now(UTC)
     await _create_working_task(repo, task_id="task-dead-letter", now=now)
@@ -1174,6 +2162,12 @@ async def test_permanent_notification_failure_is_not_reclaimed(tmp_path):
         limit=1,
         tracking_degraded_after_errors=3,
     )
+    if notification_status == "launching":
+        async with repo._sf() as session:
+            row = await session.get(McpTaskRow, "task-dead-letter")
+            assert row is not None
+            row.notification_status = "launching"
+            await session.commit()
 
     assert await repo.dead_letter_notification(
         "task-dead-letter",
@@ -1185,7 +2179,7 @@ async def test_permanent_notification_failure_is_not_reclaimed(tmp_path):
         now=now,
     )
 
-    stored = await repo.get("task-dead-letter", user_id="user-1")
+    stored = await repo.get("task-dead-letter", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["notification_status"] == "dead_letter"
     assert stored["notification_attempt_count"] == 1
@@ -1257,7 +2251,7 @@ async def test_dispatched_notification_can_be_dead_lettered_after_retry_budget(t
         now=now,
     )
 
-    stored = await repo.get("task-dispatched-budget", user_id="user-1")
+    stored = await repo.get("task-dispatched-budget", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["notification_status"] == "dead_letter"
     assert stored["notification_run_id"] is None
@@ -1333,7 +2327,7 @@ async def test_dead_lettering_dispatched_snapshot_preserves_newer_event(tmp_path
         now=now,
     )
 
-    stored = await repo.get("task-dispatched-latest", user_id="user-1")
+    stored = await repo.get("task-dispatched-latest", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["notification_status"] == "pending"
     assert stored["notification_attempt_count"] == 0
@@ -1360,6 +2354,7 @@ async def test_cancel_request_stops_polling_and_rejects_stale_poll_result(tmp_pa
         "task-cancel",
         user_id="user-1",
         thread_id="thread-1",
+        thread_incarnation=None,
         requested_at=now,
     )
     assert requested is not None
@@ -1394,6 +2389,7 @@ async def test_cancel_request_stops_polling_and_rejects_stale_poll_result(tmp_pa
         "task-cancel",
         user_id="user-1",
         thread_id="thread-1",
+        thread_incarnation=None,
         requested_at=now + timedelta(seconds=1),
     )
     assert repeated is not None
@@ -1413,7 +2409,7 @@ async def test_cancel_request_stops_polling_and_rejects_stale_poll_result(tmp_pa
         input_required=None,
         completed_at=now,
     )
-    stored = await repo.get("task-cancel", user_id="user-1")
+    stored = await repo.get("task-cancel", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["status"] == "cancelled"
     assert stored["notification_status"] == "pending"
@@ -1451,7 +2447,7 @@ async def test_late_poll_release_after_same_worker_reclaim_is_fenced(tmp_path):
     )
     assert released is False
 
-    stored = await repo.get("task-late-poll", user_id="user-1")
+    stored = await repo.get("task-late-poll", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["lease_owner"] == "worker-same"
     assert stored["lease_token"] == reclaimed[0]["lease_token"]
@@ -1466,6 +2462,7 @@ async def test_late_cancel_release_after_same_worker_reclaim_is_fenced(tmp_path)
         "task-late-cancel",
         user_id="user-1",
         thread_id="thread-1",
+        thread_incarnation=None,
         requested_at=now,
     )
 
@@ -1497,7 +2494,7 @@ async def test_late_cancel_release_after_same_worker_reclaim_is_fenced(tmp_path)
     )
     assert released is False
 
-    stored = await repo.get("task-late-cancel", user_id="user-1")
+    stored = await repo.get("task-late-cancel", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["lease_owner"] == "worker-same"
     assert stored["lease_token"] == reclaimed[0]["lease_token"]
@@ -1554,7 +2551,7 @@ async def test_late_notification_release_after_same_worker_reclaim_is_fenced(tmp
     )
     assert released is False
 
-    stored = await repo.get("task-late-notify", user_id="user-1")
+    stored = await repo.get("task-late-notify", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["notification_lease_owner"] == "notifier-same"
     assert stored["notification_lease_token"] == reclaimed[0]["notification_lease_token"]
@@ -1598,7 +2595,7 @@ async def test_late_snapshot_apply_after_same_worker_reclaim_is_fenced(tmp_path)
     )
     assert applied is False
 
-    stored = await repo.get("task-late-apply", user_id="user-1")
+    stored = await repo.get("task-late-apply", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["lease_owner"] == "worker-same"
     assert stored["lease_token"] == reclaimed[0]["lease_token"]

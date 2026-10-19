@@ -25,6 +25,7 @@ from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime import ConflictError, ThreadOperationKind
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+from deerflow.utils.file_io import await_drained
 from deerflow.utils.text_detection import _is_active_content_mime_type, is_text_file_by_content
 from deerflow.utils.thread_id import ThreadId
 
@@ -87,7 +88,8 @@ def _load_editable_artifact(actual_path: Path, path: str, expected_sha256: str) 
     if file_stat.st_size > MAX_EDITABLE_ARTIFACT_BYTES:
         raise HTTPException(status_code=413, detail="Artifact is too large to edit")
 
-    current = actual_path.read_bytes()
+    with actual_path.open("rb") as handle:
+        current = handle.read(MAX_EDITABLE_ARTIFACT_BYTES + 1)
     if len(current) > MAX_EDITABLE_ARTIFACT_BYTES:
         raise HTTPException(status_code=413, detail="Artifact is too large to edit")
     if b"\x00" in current:
@@ -150,6 +152,34 @@ def _replace_artifact_atomically(actual_path: Path, content: bytes, file_stat: o
 
 def _sync_artifact_to_sandbox(sandbox, virtual_path: str, content: bytes) -> None:
     sandbox.update_file(virtual_path, content)
+
+
+async def _commit_artifact_update(
+    *,
+    sandbox,
+    virtual_path: str,
+    actual_path: Path,
+    current: bytes,
+    updated: bytes,
+    file_stat: os.stat_result,
+) -> None:
+    """Keep remote/local artifact mutation ownership until commit or rollback."""
+    try:
+        if sandbox is not None:
+            await asyncio.to_thread(_sync_artifact_to_sandbox, sandbox, virtual_path, updated)
+        await asyncio.to_thread(_replace_artifact_atomically, actual_path, updated, file_stat)
+    except Exception:
+        # Non-cancelled failures are logged again by the outer route handler.
+        # Keep this inner log because await_drained re-raises caller cancellation
+        # after consuming the drained task's exception, which would otherwise make
+        # a cancelled-then-failed commit silent.
+        logger.exception("Failed to commit artifact update before rollback: %s", virtual_path)
+        if sandbox is not None:
+            try:
+                await asyncio.to_thread(_sync_artifact_to_sandbox, sandbox, virtual_path, current)
+            except Exception:
+                logger.exception("Failed to roll back remote artifact after artifact update failure: %s", virtual_path)
+        raise
 
 
 def _build_content_disposition(disposition_type: str, filename: str) -> str:
@@ -312,22 +342,53 @@ def _sha256_of_file(path: Path) -> str:
     (e.g. http://<lan-ip>:<port>) and otherwise breaks artifact preview +
     inline editing (see issue #4864).
 
-    The digest is cached by (path, mtime_ns, size) so the many small ``Range``
+    The digest is cached by path and file identity/change metadata so small ``Range``
     requests a browser issues while scrubbing/paginating a preview do not each
     re-hash a potentially huge artifact from scratch (raised in PR review).
     """
     stat = path.stat()
-    return _sha256_of_file_cached(str(path), stat.st_mtime_ns, stat.st_size)
+    # Sandbox syncs and other writers can atomically replace a same-size file
+    # while preserving its mtime. Identity separates those generations; ctime
+    # also invalidates in-place writes where the filesystem exposes change time.
+    return _sha256_of_file_cached(
+        str(path),
+        stat.st_dev,
+        stat.st_ino,
+        stat.st_ctime_ns,
+        stat.st_mtime_ns,
+        stat.st_size,
+    )
 
 
 @functools.lru_cache(maxsize=256)
-def _sha256_of_file_cached(path: str, mtime_ns: int, size: int) -> str:
-    """Cached SHA-256 of *path*; the size/mtime args invalidate stale entries."""
+def _sha256_of_file_cached(path: str, device: int, inode: int, ctime_ns: int, mtime_ns: int, size: int) -> str:
+    """Cached SHA-256 of *path*; metadata arguments separate file generations."""
     digest = hashlib.sha256()
     with open(path, "rb") as handle:
         for chunk in iter(lambda: handle.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _artifact_etag(path: Path) -> str:
+    """Keep content revisions for editable files and metadata-only tags for large files."""
+    file_stat = path.stat()
+    if file_stat.st_size <= MAX_EDITABLE_ARTIFACT_BYTES:
+        return f'"{_sha256_of_file(path)}"'
+
+    # Do not read oversized artifacts just to validate a small byte range.
+    # The prefix keeps this opaque validator distinct from an editable SHA-256.
+    identity = f"{file_stat.st_dev}:{file_stat.st_ino}:{file_stat.st_ctime_ns}:{file_stat.st_mtime_ns}:{file_stat.st_size}"
+    return f'"stat-{hashlib.sha256(identity.encode("ascii")).hexdigest()}"'
+
+
+class _ArtifactFileResponse(FileResponse):
+    """Require an ETag to authorize conditional ranges of replaceable artifacts."""
+
+    def _should_use_range(self, http_if_range: str) -> bool:
+        # Sandbox syncs can preserve mtimes across replacements, so Last-Modified
+        # is not a strong validator. Date-form If-Range must return the full file.
+        return http_if_range == self.headers["etag"]
 
 
 @router.get(
@@ -441,15 +502,8 @@ async def get_artifact(thread_id: ThreadId, path: str, request: Request, downloa
         # Always force download for active content types to prevent script
         # execution in the application origin when users open generated artifacts.
         headers = {**_build_attachment_headers(actual_path.name)}
-        file_size = await asyncio.to_thread(lambda: actual_path.stat().st_size)
-        if file_size <= MAX_EDITABLE_ARTIFACT_BYTES:
-            # Real SHA-256 so the browser can skip crypto.subtle (unavailable
-            # on non-secure contexts) when previewing / editing artifacts (#4864).
-            # Skipped for oversized artifacts to avoid a full-file read on every
-            # GET / Range request (raised in review as a performance P1).
-            content_sha256 = await asyncio.to_thread(_sha256_of_file, actual_path)
-            headers["ETag"] = f'"{content_sha256}"'
-        return FileResponse(
+        headers["ETag"] = await asyncio.to_thread(_artifact_etag, actual_path)
+        return _ArtifactFileResponse(
             path=actual_path,
             filename=actual_path.name,
             media_type=mime_type,
@@ -459,15 +513,8 @@ async def get_artifact(thread_id: ThreadId, path: str, request: Request, downloa
     if kind == "inline_file":
         # FileResponse honors byte-Range requests for large text previews and
         headers = {"Content-Disposition": _build_content_disposition("inline", actual_path.name), "X-Content-Type-Options": "nosniff"}
-        file_size = await asyncio.to_thread(lambda: actual_path.stat().st_size)
-        if file_size <= MAX_EDITABLE_ARTIFACT_BYTES:
-            # Real SHA-256 so the browser can skip crypto.subtle (unavailable
-            # on non-secure contexts) when previewing / editing artifacts (#4864).
-            # Skipped for oversized artifacts to avoid a full-file read on every
-            # GET / Range request (raised in review as a performance P1).
-            content_sha256 = await asyncio.to_thread(_sha256_of_file, actual_path)
-            headers["ETag"] = f'"{content_sha256}"'
-        return FileResponse(
+        headers["ETag"] = await asyncio.to_thread(_artifact_etag, actual_path)
+        return _ArtifactFileResponse(
             path=actual_path,
             media_type=mime_type,
             headers=headers,
@@ -491,11 +538,11 @@ async def update_artifact(
 ) -> ArtifactUpdateResponse:
     """Update an existing text artifact while the thread has no active run.
 
-    The host-side artifact file is updated first; when the sandbox provider is
-    not thread-mounted, the new content is also synced into the thread's
-    sandbox. Under ``authorization.enabled``, a caller denied
-    ``sandbox:execute`` skips that sandbox sync (the host-side update still
-    completes).
+    For non-mounted providers, the sandbox copy is written before the host file
+    so a local replacement failure can restore the previous remote bytes. The
+    complete remote/local mutation is drained across caller cancellation before
+    either reservation is released. Under ``authorization.enabled``, a caller
+    denied ``sandbox:execute`` skips sandbox sync and updates only the host file.
     """
     virtual_path = _normalize_editable_artifact_path(path)
     raw_owner_user_id = get_trusted_internal_owner_user_id(request)
@@ -537,21 +584,20 @@ async def update_artifact(
                 if not sandbox_lease.denied and sandbox is None:
                     raise RuntimeError("Failed to acquire sandbox for artifact update")
 
-            try:
-                if sandbox is not None:
-                    await asyncio.to_thread(_sync_artifact_to_sandbox, sandbox, virtual_path, updated)
-                await asyncio.to_thread(_replace_artifact_atomically, actual_path, updated, file_stat)
-                # Invalidate any cached digest for this path so a subsequent GET
-                # serves the fresh SHA-256. The (path, mtime_ns, size) LRU key can
-                # collide on a same-size, sub-nanosecond re-write (review nit).
-                _sha256_of_file_cached.cache_clear()
-            except Exception:
-                if sandbox is not None:
-                    try:
-                        await asyncio.to_thread(_sync_artifact_to_sandbox, sandbox, virtual_path, current)
-                    except Exception:
-                        logger.exception("Failed to roll back remote artifact after artifact update failure: %s", virtual_path)
-                raise
+            # A cancelled request must not release the thread-operation reservation
+            # or sandbox request lease while either mutation is still running in a
+            # worker thread. Drain the complete remote/local transaction so it
+            # reaches a coherent commit or rollback before cancellation propagates.
+            await await_drained(
+                _commit_artifact_update(
+                    sandbox=sandbox,
+                    virtual_path=virtual_path,
+                    actual_path=actual_path,
+                    current=current,
+                    updated=updated,
+                    file_stat=file_stat,
+                )
+            )
     except ConflictError:
         raise HTTPException(status_code=409, detail="Thread has a run in flight. Save after the run finishes.") from None
     except HTTPException:

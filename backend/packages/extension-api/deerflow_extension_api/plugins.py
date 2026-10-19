@@ -7,9 +7,11 @@ and an authenticated principal for each admitted call; this is not a sandbox.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Literal
 
+from deerflow_extension_api.agent_runs import AgentRuns
 from deerflow_extension_api.auth import ExtensionPrincipal
 from deerflow_extension_api.settings import FrontendBinding, SettingsContribution, SettingsField, SettingValue
 
@@ -18,6 +20,9 @@ from deerflow_extension_api.settings import FrontendBinding, SettingsContributio
 class ActionContext:
     principal: ExtensionPrincipal
     settings: Mapping[str, SettingValue]
+    agent_runs: AgentRuns | None = field(default=None, kw_only=True)
+    # Host-stamped browser session; model tools and other callers default closed.
+    interaction: Literal["session", "other"] = field(default="other", kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -38,24 +43,46 @@ class ToolContext(ActionContext):
 
 
 @dataclass(frozen=True)
+class PluginToolResult:
+    """Model-visible text plus optional JSON artifact for an opted-in tool."""
+
+    content: str
+    artifact: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True)
 class ModelTool:
     name: str
     description: str
     input_schema: Mapping[str, Any]
     handler: Callable[[Mapping[str, Any], ToolContext], Awaitable[Any]]
     group: str = "extensions"
+    response_format: Literal["content", "content_and_artifact"] = field(default="content", kw_only=True)
 
 
 @dataclass(frozen=True)
 class BrowserModule:
-    """Experimental single-file browser transport, not the final asset package API.
-
-    A future versioned packaged-asset transport will coexist with this inline
-    form; see docs/full-stack-plugins.md for the compatibility direction.
-    """
+    """Self-contained browser module; use BrowserAssets for relative resources."""
 
     module: str
     code: str
+    public_fields: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "public_fields", tuple(self.public_fields))
+
+
+@dataclass(frozen=True)
+class BrowserAssets:
+    """Versioned manifest and static files inside a trusted installed package.
+
+    The host validates and snapshots the allowlisted files during registration.
+    Relative paths in the manifest are resolved against root, never a request.
+    """
+
+    module: str
+    root: str | Path
+    manifest: str = "ui_manifest.json"
     public_fields: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -67,7 +94,7 @@ class PluginContribution:
     """One identity, one enabled switch, optional settings and implementations.
 
     The host owns the boolean ``enabled`` field. Other fields are non-secret
-    settings, private to the backend unless explicitly projected by BrowserModule.
+    settings, private to the backend unless explicitly projected by its browser declaration.
     Supply at least one browser module, backend action, or model tool. Backend implementations
     are installed through the existing operator-controlled Python loader.
     """
@@ -77,7 +104,7 @@ class PluginContribution:
     description: str = ""
     enabled: bool = False
     fields: tuple[SettingsField, ...] = ()
-    frontend: BrowserModule | None = None
+    frontend: BrowserModule | BrowserAssets | None = None
     backend: tuple[BackendAction, ...] = ()
     api_version: int = 1
     tools: tuple[ModelTool, ...] = ()

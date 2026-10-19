@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
+from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import pytest
@@ -12,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.engine import close_engine, get_engine, get_session_factory, init_engine_from_config
-from deerflow.persistence.mcp_tasks import McpTaskRepository
+from deerflow.persistence.mcp_tasks import McpTaskRepository, McpTaskThreadMismatchError
 from deerflow.persistence.mcp_tasks.model import McpTaskRow
 from deerflow.persistence.thread_meta import ThreadMetaRepository
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
@@ -54,11 +55,17 @@ async def postgres_repositories():
         await close_engine()
 
 
-async def _create_task(repo: McpTaskRepository, task_id: str) -> None:
+async def _create_task(
+    repo: McpTaskRepository,
+    task_id: str,
+    *,
+    thread_incarnation: str,
+) -> None:
     await repo.create(
         task_id=task_id,
         user_id="user-1",
         thread_id="thread-1",
+        expected_thread_incarnation=thread_incarnation,
         run_id=None,
         tool_call_id=None,
         server_name="reports",
@@ -96,24 +103,30 @@ async def test_postgres_task_create_serializes_with_thread_mutation(postgres_rep
         # PostgreSQL grants the mutation's earlier queued row-lock request
         # before this later FOR SHARE request. The task therefore observes the
         # committed delete/owner change rather than the pre-mutation row.
-        create_task = asyncio.create_task(_create_task(task_repo, f"task-{mutation}"))
+        create_task = asyncio.create_task(
+            _create_task(
+                task_repo,
+                f"task-{mutation}",
+                thread_incarnation=created["incarnation"],
+            )
+        )
         await asyncio.sleep(0.1)
         assert not create_task.done()
         await blocker.commit()
 
     await asyncio.wait_for(mutation_task, timeout=5)
-    await asyncio.wait_for(create_task, timeout=5)
+    with pytest.raises(McpTaskThreadMismatchError):
+        await asyncio.wait_for(create_task, timeout=5)
 
     async with session_factory() as session:
         task = await session.get(McpTaskRow, f"task-{mutation}")
-    assert task is not None
-    assert task.thread_incarnation is None
+    assert task is None
 
 
 @pytest.mark.asyncio
 async def test_postgres_task_create_uses_share_lock(postgres_repositories) -> None:
     thread_repo, task_repo, _session_factory = postgres_repositories
-    await thread_repo.create("thread-1", user_id="user-1")
+    created = await thread_repo.create("thread-1", user_id="user-1")
     engine = get_engine()
     assert engine is not None
     statements: list[str] = []
@@ -123,7 +136,11 @@ async def test_postgres_task_create_uses_share_lock(postgres_repositories) -> No
 
     event.listen(engine.sync_engine, "before_cursor_execute", capture_statement)
     try:
-        await _create_task(task_repo, "task-share-lock")
+        await _create_task(
+            task_repo,
+            "task-share-lock",
+            thread_incarnation=created["incarnation"],
+        )
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", capture_statement)
 
@@ -173,7 +190,13 @@ async def test_postgres_repository_holds_share_lock_until_task_commit(postgres_r
             await legacy_writer.commit()
 
     event.listen(engine.sync_engine, "before_cursor_execute", observe_owner_update)
-    task_create = asyncio.create_task(_create_task(task_repo, "task-lock-lifetime"))
+    task_create = asyncio.create_task(
+        _create_task(
+            task_repo,
+            "task-lock-lifetime",
+            thread_incarnation=created["incarnation"],
+        )
+    )
     owner_update = None
     try:
         await asyncio.wait_for(task_commit_entered.wait(), timeout=5)
@@ -214,3 +237,83 @@ async def test_postgres_repository_holds_share_lock_until_task_commit(postgres_r
     assert thread.user_id == "user-2"
     assert task is not None
     assert task.thread_incarnation == created["incarnation"]
+
+
+@pytest.mark.asyncio
+async def test_postgres_cancel_request_waits_for_poll_claim_and_then_releases_it(postgres_repositories) -> None:
+    """On Postgres the poll claim's row lock orders a concurrent cancel after it.
+
+    The cancel then clears the fresh poll lease, so the cancel worker can claim
+    right away. This pins that the conditional claim UPDATE runs under the
+    ``FOR UPDATE SKIP LOCKED`` row lock rather than replacing it.
+    """
+    thread_repo, task_repo, _session_factory = postgres_repositories
+    created = await thread_repo.create("thread-1", user_id="user-1")
+    now = datetime.now(UTC)
+    await task_repo.create(
+        task_id="task-claim-vs-cancel",
+        user_id="user-1",
+        thread_id="thread-1",
+        expected_thread_incarnation=created["incarnation"],
+        run_id=None,
+        tool_call_id=None,
+        server_name="reports",
+        driver_name="fake",
+        remote_task_id="remote-task-claim-vs-cancel",
+        task_name="Generate report",
+        status="working",
+        result=None,
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required=None,
+        next_poll_at=now - timedelta(seconds=1),
+    )
+    engine = get_engine()
+    assert engine is not None
+    selected = asyncio.Event()
+    resume = asyncio.Event()
+
+    class PauseAfterClaimSelectSession(AsyncSession):
+        paused = False
+
+        async def execute(self, statement, *args, **kwargs):
+            result = await super().execute(statement, *args, **kwargs)
+            if not self.paused and getattr(statement, "is_select", False):
+                self.paused = True
+                selected.set()
+                await resume.wait()
+            return result
+
+    claim_repo = McpTaskRepository(async_sessionmaker(engine, expire_on_commit=False, class_=PauseAfterClaimSelectSession))
+    claim = asyncio.create_task(claim_repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=120, limit=1))
+    cancel = None
+    try:
+        await asyncio.wait_for(selected.wait(), timeout=5)
+        cancel = asyncio.create_task(
+            task_repo.request_cancel(
+                "task-claim-vs-cancel",
+                user_id="user-1",
+                thread_id="thread-1",
+                thread_incarnation=created["incarnation"],
+                requested_at=now,
+            )
+        )
+        await asyncio.sleep(0.2)
+        assert not cancel.done()
+        resume.set()
+        claimed = await asyncio.wait_for(claim, timeout=5)
+        requested = await asyncio.wait_for(cancel, timeout=5)
+    finally:
+        resume.set()
+        for pending in (claim, cancel):
+            if pending is not None and not pending.done():
+                pending.cancel()
+        await asyncio.gather(claim, *([cancel] if cancel is not None else []), return_exceptions=True)
+
+    assert [(row["id"], row["lease_owner"]) for row in claimed] == [("task-claim-vs-cancel", "poller")]
+    assert requested is not None
+    assert requested["lease_owner"] is None
+    cancel_claims = await task_repo.claim_cancel_requests(now=now + timedelta(seconds=1), lease_owner="canceller", lease_seconds=60, limit=1)
+    assert [row["id"] for row in cancel_claims] == ["task-claim-vs-cancel"]

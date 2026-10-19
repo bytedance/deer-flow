@@ -33,7 +33,8 @@ logger = logging.getLogger(__name__)
 
 _KIND_EVENT = "event"
 _KIND_END = "end"
-_REDIS_STREAM_ID_RE = re.compile(r"\d+(-\d+)?")
+_REDIS_STREAM_ID_RE = re.compile(r"[0-9]+(-[0-9]+)?")
+_MAX_STREAM_ID_COMPONENT = 2**64 - 1
 
 # Batch size for ``XREAD``. Reading more than one entry per round-trip collapses
 # a large ``Last-Event-ID`` replay into far fewer calls; live tailing still
@@ -150,7 +151,12 @@ class RedisStreamBridge(StreamBridge):
         if _REDIS_STREAM_ID_RE.fullmatch(event_id) is None:
             return None
         milliseconds, separator, sequence = event_id.partition("-")
-        return int(milliseconds), int(sequence) if separator else 0
+        try:
+            parts = int(milliseconds), int(sequence) if separator else 0
+        except ValueError:
+            return None
+        # Redis stream id components are unsigned 64-bit integers.
+        return parts if max(parts) <= _MAX_STREAM_ID_COMPONENT else None
 
     @classmethod
     def _stream_id_lt(cls, left: str, right: str) -> bool:
@@ -190,10 +196,24 @@ class RedisStreamBridge(StreamBridge):
         """Return whether Redis still has retained stream data for *run_id*."""
         return bool(await self._redis.exists(self._stream_key(run_id)))
 
+    async def ping(self) -> bool:
+        """Round-trip ``PING`` to the Redis backend for the readiness probe.
+
+        The client connects lazily, so until something publishes nothing has
+        verified that Redis is reachable; this is the only call that does.
+        Redis-side failures answer ``False`` so the probe gets a verdict rather
+        than a stack of client internals. Callers bound the wait themselves.
+        """
+        try:
+            return bool(await self._redis.ping())
+        except RedisError:
+            logger.warning("Redis stream bridge ping failed", exc_info=True)
+            return False
+
     async def _resolve_start_stream_id(self, key: str, last_event_id: str | None) -> str:
         if last_event_id is None:
             return "0-0"
-        if _REDIS_STREAM_ID_RE.fullmatch(last_event_id):
+        if self._parse_stream_id(last_event_id) is not None:
             return last_event_id
         entries = await self._redis.xrevrange(key, count=1)
         if not entries:
@@ -238,6 +258,7 @@ class RedisStreamBridge(StreamBridge):
         pending_initial_response: list[Any] | None = None
         block_ms = max(1, int(heartbeat_interval * 1000)) if heartbeat_interval > 0 else 1
         consecutive_errors = 0
+        stream_observed = False
 
         while True:
             snapshot_stream_id = stream_id
@@ -288,6 +309,19 @@ class RedisStreamBridge(StreamBridge):
                 if response:
                     consecutive_errors = 0
 
+            if earliest_entries:
+                stream_observed = True
+            elif stream_observed or pending_initial_response is not None:
+                # Cleanup/expiry can remove unread events and END while a slow
+                # subscriber drains its fetched batch. An absent observed stream
+                # is lost history, not an idle stream waiting for its producer.
+                yield StreamGap(
+                    requested_event_id=stream_id if pending_initial_response is None else None,
+                    earliest_available_event_id=None,
+                    latest_available_event_id=None,
+                )
+                return
+
             if earliest_entries and (gap_detection_enabled or pending_initial_tail_id is not None):
                 earliest_id = self._decode(earliest_entries[0][0])
                 if self._stream_id_lt(snapshot_stream_id, earliest_id):
@@ -299,6 +333,26 @@ class RedisStreamBridge(StreamBridge):
                     )
                     yield StreamGap(
                         requested_event_id=None if pending_initial_tail_id is not None else stream_id,
+                        earliest_available_event_id=earliest_id,
+                        latest_available_event_id=latest_id,
+                    )
+                    return
+
+            # A syntactically valid but future Last-Event-ID cannot replay from
+            # this retained stream. In particular, an already-ended run would
+            # otherwise heartbeat forever because XREAD never sees its end marker.
+            if latest_entries and gap_detection_enabled:
+                latest_id = self._decode(latest_entries[0][0])
+                if self._stream_id_lt(latest_id, stream_id):
+                    earliest_id = self._decode(earliest_entries[0][0])
+                    logger.warning(
+                        "subscriber for Redis stream %s requested future cursor %s (latest %s)",
+                        key,
+                        stream_id,
+                        latest_id,
+                    )
+                    yield StreamGap(
+                        requested_event_id=stream_id,
                         earliest_available_event_id=earliest_id,
                         latest_available_event_id=latest_id,
                     )

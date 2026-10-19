@@ -287,3 +287,60 @@ def test_deermem_create_and_restart_use_retrieval_adapter(tmp_path: Path) -> Non
 
     restarted = DeerMem(backend_config=config)
     assert any(fact["id"] == fact_id for fact in restarted.search("restart retrieval", user_id="alice"))
+
+
+def test_indexed_zero_confidence_keeps_its_retrieval_weight(tmp_path: Path) -> None:
+    adapter = FTS5RetrievalAdapter(tmp_path / "facts.sqlite3")
+    scope = {"userId": "alice", "agentName": "agent-a"}
+    try:
+        adapter.upsert({**_fact("zero", "confidence weight probe"), "confidence": 0.0}, scope=scope, path="")
+        adapter.upsert({**_fact("half", "confidence weight probe"), "confidence": 0.5}, scope=scope, path="")
+        unset_fact = _fact("unset", "confidence weight probe")
+        del unset_fact["confidence"]
+        adapter.upsert(unset_fact, scope=scope, path="")
+        scores = {item["fact"]["id"]: item["score"] for item in adapter.search("confidence", scopes=[scope], top_k=5, mode="fts5", filters=None)}
+
+        assert scores["zero"] < scores["half"]
+        # A missing confidence still falls back to the default, so only the explicit 0.0 is discounted.
+        assert scores["unset"] == pytest.approx(scores["half"])
+    finally:
+        adapter.close()
+
+
+def test_substring_fallback_keeps_zero_confidence_weight(tmp_path: Path) -> None:
+    storage = FileMemoryStorage(DeerMemConfig(storage_path=str(tmp_path)))
+    scope = {"userId": "alice", "agentName": "agent-a"}
+    try:
+        storage.upsert_fact({**_fact("zero", "substring confidence probe"), "confidence": 0.0}, user_id="alice", agent_name="agent-a")
+        storage.upsert_fact({**_fact("half", "substring confidence probe"), "confidence": 0.5}, user_id="alice", agent_name="agent-a")
+        scores = {item["fact"]["id"]: item["score"] for item in storage.search_facts("substring", scopes=[scope], top_k=5)}
+
+        assert scores == {"zero": 0.0, "half": 0.5}
+    finally:
+        storage.close()
+
+
+def test_substring_fallback_searches_every_fact_of_a_large_scope(tmp_path: Path) -> None:
+    """The fallback must read the whole scope, not the first page of 100 facts.
+
+    With 150 facts (max_facts allows up to 500) and no retrieval adapter, a
+    top_k of 200 returned only the first 100 matches: the fallback iterated
+    list_facts' default page instead of the complete scope, so facts past
+    the page silently vanished from search results.
+    """
+    storage = FileMemoryStorage(DeerMemConfig(storage_path=str(tmp_path), max_facts=200))
+    scope = {"userId": "alice", "agentName": "agent-a"}
+    try:
+        facts = [_fact(f"fact-{index:03d}", f"zeta common memory number {index:03d}") for index in range(1, 151)]
+        storage.apply_changes({"upserts": facts}, user_id="alice", agent_name="agent-a")
+
+        results = storage.search_facts("zeta", scopes=[scope], top_k=200)
+
+        assert len(results) == 150
+        returned_ids = {item["fact"]["id"] for item in results}
+        # fact-001..fact-100 sat inside the old first page too (``matched[0:100]``
+        # in insertion order), so fact-101 and fact-150 are the ids only a
+        # complete-scope read can return.
+        assert {"fact-101", "fact-150"} <= returned_ids
+    finally:
+        storage.close()

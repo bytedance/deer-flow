@@ -1,0 +1,121 @@
+---
+title: Observability
+description: How the task card derives its state, the fields of SSE and persisted run events, token usage attribution, Langfuse and trace id correlation, and the durable batch query API.
+---
+
+import { Callout } from "nextra/components";
+
+# Observability
+
+## The task card
+
+Every `task` call in a conversation has a subtask card (`SubtaskCard`). Its data comes from three places:
+
+| Information             | Source                                                                                                                                          |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| Model name, token total | Live from `task_started` / `task_running` events; after a reload from the tool result metadata `subagent_model_name` / `subagent_token_usage`    |
+| Step timeline           | Live from `task_running` events; when the card is expanded with no local steps, backfilled from the run-events endpoint as `subagent.step`        |
+| Terminal status         | Only from the tool result metadata `subagent_status`, never inferred from `task_completed` and similar events                                    |
+
+Status mapping: `completed` shows as completed; `failed`, `cancelled`, `timed_out`, and `polling_timed_out` all show as failed. Structured metadata without a status counts as in progress. Only legacy messages with no structured metadata at all fall back to parsing text prefixes.
+
+Without a tool result (for example after the user stops), the card stays in progress while the current turn is loading and becomes failed once the turn ends without a result. After a reload, status comes from the checkpointed tool message metadata and steps from the event backfill; neither is lost.
+
+Token labels are gated by `token_usage.enabled`, which the frontend reads from `GET /api/models` as `token_usage.enabled`.
+
+## SSE custom events
+
+During a delegation the `task` tool emits the following custom events through the stream writer. `task_id` is always the provider `tool_call_id`, matching the card one to one; the server-side execution id is never exposed.
+
+| Event            | Payload                                                                        | Notes                                                                                           |
+| ---------------- | ------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------- |
+| `task_started`   | `task_id`, `description`, `model_name`                                         | `description` falls back to `prompt`                                                            |
+| `task_running`   | `task_id`, `message`, `message_index`, `total_messages`, `usage`, `model_name` | Once per subagent message; `usage` is a cumulative snapshot, so consumers replace rather than add |
+| `task_completed` | `task_id`, `result`, `usage`, `model_name`                                     |                                                                                                 |
+| `task_failed`    | `task_id`, `error`, `usage`, `model_name`                                      | The "task disappeared from the registry" case carries only `task_id` and `error`                |
+| `task_cancelled` | `task_id`, `error`, `usage`, `model_name`                                      |                                                                                                 |
+| `task_timed_out` | `task_id`, `error` (absent for polling timeouts), `usage`, `model_name`        | Polling timeouts emit this event too, while the tool result status is `polling_timed_out`; there is no separate polling-timeout event |
+
+## Persisted run events
+
+The run worker persists those events to the run event store under the `subagent` category:
+
+| Event            | Content                                                                                                                                       |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `subagent.start` | `task_id`, `description`                                                                                                                      |
+| `subagent.step`  | `task_id`, `message_index`, `kind` (`ai` or `tool`), `text`, `truncated`; assistant steps add `tool_calls`, tool steps add `tool_name`         |
+| `subagent.end`   | `task_id`, `status` (`completed` / `failed` / `cancelled` / `timed_out`), `model_name`, `usage`, and `result` or `error` with truncation flags |
+
+Step text is capped at 8,192 characters. Events are written in batches of 25, `subagent.end` flushes immediately, and a failed write is re-buffered for the next attempt rather than dropped.
+
+Query endpoint:
+
+```
+GET /api/threads/{thread_id}/runs/{run_id}/events?event_types=subagent.step&task_id=<tool_call_id>&limit=500&after_seq=<seq>
+```
+
+`event_types` is comma-separated, `limit` defaults to 500 with a maximum of 2,000, and `after_seq` pages forward. It requires `runs:read` and thread ownership. The event schemas are in `contracts/run_event_stream_contract.json` at the repository root.
+
+## Tool result metadata
+
+The terminal `ToolMessage` of a `task` carries these keys in `additional_kwargs`; they are the formal contract for the frontend and other consumers:
+
+| Key                           | Meaning                                                    |
+| ----------------------------- | ---------------------------------------------------------- |
+| `subagent_status`             | One of the five terminal statuses                          |
+| `subagent_stop_reason`        | `token_capped` / `turn_capped` / `loop_capped`, optional   |
+| `subagent_error`              | Error text for non-`completed` results, up to 2,000 characters |
+| `subagent_result_brief`       | Result brief for `completed`, up to 2,000 characters       |
+| `subagent_result_sha256`      | SHA-256 of the full result                                 |
+| `subagent_model_name`         | The model actually used                                    |
+| `subagent_token_usage`        | `input_tokens` / `output_tokens` / `total_tokens`          |
+| `subagent_tool_receipts`      | The subagent's receipt snapshot                            |
+| `subagent_receipt_verdict`    | Citation verification verdict                              |
+| `subagent_acceptance_verdict` | Acceptance checklist verdict                               |
+
+The cross-language contract is pinned in `contracts/subagent_status_contract.json` (version 2): valid status values, valid `stop_reason` values, and the rule that the text body is display content. Model name, token usage, acceptance, and similar fields are additive extensions that older consumers may ignore.
+
+## Token usage attribution
+
+Every subagent model call is recorded by `SubagentTokenCollector` with the caller `subagent:<name>`, capturing the source run id, model name, and input / output / total tokens; a prompt-cache hit adds `cache_read_tokens` (present only when greater than 0). When the subagent finishes, these records flow into the parent run's journal, land in the `subagent` caller bucket, and are attributed to the model that actually produced them.
+
+Query endpoint:
+
+```
+GET /api/threads/{thread_id}/token-usage?include_active=false
+```
+
+The response contains thread totals, input / output totals, run count, `by_model`, `by_caller` (`lead_agent` / `subagent` / `middleware`), and context usage. `by_model` is reduced from each run's per-model breakdown, so a subagent on a different model is not charged to the Lead Agent's model; legacy runs without a breakdown fall back to the run-level model name. Cost accounting prices uncached input, cache-hit input, and output per model.
+
+## Langfuse
+
+Subagent spans are attributed to the parent thread: `session_id` is the parent `thread_id`, `user_id` is the current user, the trace name is `subagent:<name>` (lowercase, underscores replaced by hyphens), and tags carry the environment and model. The LangChain tag is likewise `subagent:<name>`. Opening a thread in the Langfuse Sessions view shows every subagent it dispatched. The request-level `deerflow_trace_id` is written into the trace metadata as well.
+
+## Request trace id
+
+Every Gateway request has an `X-Trace-Id` (inherited from the request header or generated). The id travels with the run into subagents, the run record, checkpoint metadata, and Langfuse traces. Whether logs print it depends on `logging.enhance.enabled`. Subagent log lines additionally carry an 8-character short `trace_id`, formatted as `[trace=1a2b3c4d]`, for stitching one delegation's output together in the Gateway log.
+
+## Loop detection events
+
+When a subagent trips loop detection, a `middleware:loop_detection` event (category `middleware`) is recorded through the parent run's journal proxy, with `hook`, `action`, and `changes`: `is_subagent`, `agent_id` (the subagent config name), `detection_layer`, `tool_names`, `count`, and `threshold`. `is_subagent` and `agent_id` are decided server-side; client-supplied values are dropped. Durable batch workers have no parent run journal and emit none. Query them through the same `/events` endpoint with `event_types=middleware:loop_detection`.
+
+## Durable batch API
+
+Durable batches have no SSE; the workspace UI polls, every 2 seconds while a batch is active and every 15 seconds otherwise. The HTTP routes live under `/api/threads/{thread_id}/subagent-batches` and are owner-scoped:
+
+| Method and path                            | Purpose                                                                          |
+| ------------------------------------------ | -------------------------------------------------------------------------------- |
+| `GET ""`                                   | List the thread's batches, `limit` 1 to 100, default 20                          |
+| `GET /{batch_id}`                          | Batch detail with per-status item counts                                         |
+| `GET /{batch_id}/items`                    | Paged items: `offset`, `limit` (1 to 500, default 100), optional `status` filter |
+| `POST /{batch_id}/pause`                   | Pause                                                                            |
+| `POST /{batch_id}/resume`                  | Resume                                                                           |
+| `POST /{batch_id}/cancel`                  | Cancel; 503 when the worker is not running                                       |
+| `POST /{batch_id}/items/{item_id}/retry`   | Retry one item; only `failed` items, otherwise 409                               |
+| `GET /{batch_id}/results.jsonl`            | Stream every item as NDJSON, including full results and acceptance verdicts      |
+
+Batch statuses: `queued`, `running`, `paused` are active; `completed`, `failed`, `cancelled` are terminal. Item statuses: `pending` is waiting and not counted as active; `queued`, `leased`, `running` are active; `succeeded`, `failed`, `cancelled` are terminal. When a batch ends with failed items and no succeeded items it is `failed`, otherwise `completed`.
+
+## Extension observers
+
+Extensions with a task-lifecycle observer are notified when each subagent starts and stops: `TaskInfo.kind` is `subagent`, `task_id` is the server-side execution id, `parent_task_id` is the parent run id, and `agent_name` is the subagent name. The `TaskOutcome` at stop is `completed`, `aborted` (cancelled), or `failed` (everything else). Runs without a `run_id`, such as direct integrations, trigger no notifications.

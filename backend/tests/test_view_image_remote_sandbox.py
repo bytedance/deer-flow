@@ -31,7 +31,7 @@ class _RemoteSandbox:
         self.downloads: list[str] = []
         self.released_scopes: list[str] = []
 
-    def download_file(self, path: str) -> bytes:
+    def download_file(self, path: str, *, max_bytes: int | None = None) -> bytes:
         self.downloads.append(path)
         return self.image_bytes
 
@@ -40,13 +40,13 @@ class _RemoteSandbox:
 
 
 class _FailingRemoteSandbox(_RemoteSandbox):
-    def download_file(self, path: str) -> bytes:
+    def download_file(self, path: str, *, max_bytes: int | None = None) -> bytes:
         self.downloads.append(path)
         raise OSError("remote download failed")
 
 
 class _MissingRemoteSandbox(_RemoteSandbox):
-    def download_file(self, path: str) -> bytes:
+    def download_file(self, path: str, *, max_bytes: int | None = None) -> bytes:
         self.downloads.append(path)
         try:
             raise _E2BFileNotFound("not found")
@@ -60,7 +60,7 @@ class _BlockingRemoteSandbox(_RemoteSandbox):
         self.download_started = threading.Event()
         self.allow_download = threading.Event()
 
-    def download_file(self, path: str) -> bytes:
+    def download_file(self, path: str, *, max_bytes: int | None = None) -> bytes:
         self.downloads.append(path)
         self.download_started.set()
         assert self.allow_download.wait(timeout=5)
@@ -486,7 +486,7 @@ def test_middleware_falls_back_to_host_when_saved_sandbox_has_no_live_client(tmp
         },
     }
 
-    blocks = ViewImageMiddleware()._create_image_details_message(state)
+    blocks = ViewImageMiddleware()._create_image_details_message(state, host_path_allowed=lambda _, actual: Path(actual).is_relative_to(tmp_path))
 
     assert _image_bytes_from_blocks(blocks) == PNG_BYTES
     assert provider.acquire_calls == []
@@ -512,7 +512,7 @@ def test_middleware_uses_verified_host_copy_after_sandbox_replacement(tmp_path, 
         },
     }
 
-    blocks = ViewImageMiddleware()._create_image_details_message(state)
+    blocks = ViewImageMiddleware()._create_image_details_message(state, host_path_allowed=lambda _, actual: Path(actual).is_relative_to(tmp_path))
 
     assert _image_bytes_from_blocks(blocks) == PNG_BYTES
     assert sandbox.downloads == []

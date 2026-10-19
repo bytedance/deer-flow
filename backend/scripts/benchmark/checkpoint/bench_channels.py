@@ -629,6 +629,23 @@ async def _run_postgres_case(case: BenchmarkCase, messages: list[BaseMessage], u
                 await _delete_postgres_benchmark_thread(uri, thread_id)
 
 
+def _configure_windows_postgres_loop_policy() -> None:
+    """Keep psycopg's async connector usable on Windows for postgres cases.
+
+    psycopg rejects ProactorEventLoop before connecting on Windows, so the
+    postgres cases need the selector loop. Scoped to this entrypoint:
+    process-wide, the selector loop cannot spawn asyncio subprocesses, which
+    the rest of the backend requires.
+    """
+    if sys.platform != "win32":
+        return
+    selector_policy = getattr(asyncio, "WindowsSelectorEventLoopPolicy", None)
+    if selector_policy is None:
+        return
+    if not isinstance(asyncio.get_event_loop_policy(), selector_policy):
+        asyncio.set_event_loop_policy(selector_policy())
+
+
 def _run_case(case: BenchmarkCase, *, work_dir: Path) -> dict[str, Any]:
     row = _base_row(case)
     messages = [_message_for_update(index, case.payload_bytes) for index in range(case.update_count)]
@@ -641,6 +658,7 @@ def _run_case(case: BenchmarkCase, *, work_dir: Path) -> dict[str, Any]:
             uri = os.environ.get("TEST_POSTGRES_URI")
             if not uri:
                 raise RuntimeError("postgres benchmark requires TEST_POSTGRES_URI")
+            _configure_windows_postgres_loop_policy()
             measured = asyncio.run(_run_postgres_case(case, messages, uri))
 
         reducer_writes = [[message] for message in messages]

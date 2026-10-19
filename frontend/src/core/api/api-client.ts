@@ -1,6 +1,9 @@
 "use client";
 
-import { Client as LangGraphClient } from "@langchain/langgraph-sdk/client";
+import {
+  Client as LangGraphClient,
+  RunsClient,
+} from "@langchain/langgraph-sdk/client";
 
 import { getLangGraphBaseURL } from "../config";
 import { isStaticWebsiteOnly } from "../static-mode";
@@ -108,10 +111,12 @@ function streamOptionSignal(options: unknown): AbortSignal | undefined {
  * Recover the submitted input before replaying an active run. The incremental
  * chat stream intentionally omits `values`, so a page reload can otherwise
  * receive the run's AI/tool chunks before its human message has reached the
- * durable history feed. `runs.get` retains the original graph input in
- * `kwargs.input`; merge it into the latest durable values for one synthetic
- * snapshot. Any read failure is deliberately ignored so reconnect semantics
- * remain unchanged for deployments without run metadata.
+ * durable history feed. Initial streams supply the sanitized `submittedInput`
+ * directly, avoiding a run-metadata read. Otherwise, use `kwargs.input` from
+ * the supplied run record, falling back to `runs.get` when needed. Merge the
+ * input into the latest durable values for one synthetic snapshot. Any read
+ * failure is deliberately ignored so reconnect semantics remain unchanged for
+ * deployments without run metadata.
  */
 async function loadReconnectInputSnapshot(
   client: LangGraphClient,
@@ -120,15 +125,19 @@ async function loadReconnectInputSnapshot(
   run?: Awaited<ReturnType<LangGraphClient["runs"]["get"]>>,
   durableValues?: unknown,
   signal?: AbortSignal,
+  submittedInput?: unknown,
 ): Promise<ReconnectInputSnapshot | undefined> {
   try {
-    const resolvedRun =
-      run ?? (await client.runs.get(threadId, runId, { signal }));
-    const runKwargs = Reflect.get(resolvedRun, "kwargs");
-    const input =
-      typeof runKwargs === "object" && runKwargs !== null
-        ? Reflect.get(runKwargs, "input")
-        : undefined;
+    let input = submittedInput;
+    if (input === undefined) {
+      const resolvedRun =
+        run ?? (await client.runs.get(threadId, runId, { signal }));
+      const runKwargs = Reflect.get(resolvedRun, "kwargs");
+      input =
+        typeof runKwargs === "object" && runKwargs !== null
+          ? Reflect.get(runKwargs, "input")
+          : undefined;
+    }
     const inputMessages =
       typeof input === "object" && input !== null
         ? Reflect.get(input, "messages")
@@ -325,7 +334,12 @@ function rememberReconnectRun(
   if (typeof window === "undefined" || !threadId) return;
 
   try {
-    window.sessionStorage.setItem(`lg:stream:${threadId}`, runId);
+    const storage = window.sessionStorage;
+    const key = `lg:stream:${threadId}`;
+    const rememberedRunId = storage.getItem(key);
+    // Another run may claim the pointer while durable state is loading.
+    if (rememberedRunId !== null && rememberedRunId !== runId) return;
+    storage.setItem(key, runId);
   } catch {
     // Ignore storage access failures so gap recovery remains usable.
   }
@@ -339,6 +353,7 @@ async function* recoverStreamReplayGaps({
   resume,
   signal,
   reconnectRun,
+  submittedInput,
 }: {
   client: LangGraphClient;
   threadId: string | null | undefined;
@@ -347,6 +362,7 @@ async function* recoverStreamReplayGaps({
   resume: (runId: string, lastEventId?: string) => AsyncIterable<StreamPart>;
   signal?: AbortSignal;
   reconnectRun?: Awaited<ReturnType<LangGraphClient["runs"]["get"]>>;
+  submittedInput?: unknown;
 }): AsyncGenerator<StreamPart> {
   let stream = initialStream;
   let recoveryAttempts = 0;
@@ -396,18 +412,20 @@ async function* recoverStreamReplayGaps({
       });
     if (durableState.values != null) {
       // A gap can arrive after the initial hydration frame but before the
-      // input reaches the checkpoint. Rebuild the snapshot from run metadata
-      // so this recovery path cannot overwrite the rescued human message.
-      const recoveredSnapshot = reconnectRun
-        ? await loadReconnectInputSnapshot(
-            client,
-            threadId,
-            runId,
-            reconnectRun,
-            durableState.values,
-            signal,
-          )
-        : undefined;
+      // input reaches the checkpoint. Rebuild the snapshot from submitted or
+      // saved run input so recovery cannot overwrite the human message.
+      const recoveredSnapshot =
+        reconnectRun || submittedInput !== undefined
+          ? await loadReconnectInputSnapshot(
+              client,
+              threadId,
+              runId,
+              reconnectRun,
+              durableState.values,
+              signal,
+              submittedInput,
+            )
+          : undefined;
       yield {
         event: "values",
         data: recoveredSnapshot ?? durableState.values,
@@ -440,6 +458,14 @@ async function* handleInactiveRunStream({
   }
 }
 
+// Reuse the SDK's retry budget, backoff and HTTP error handling for recovery
+// requests that have already been prepared by the run-creation client.
+class StreamRecoveryClient extends RunsClient {
+  fetchWithRetries(...args: Parameters<typeof fetch>): Promise<Response> {
+    return this.asyncCaller.fetch(...args);
+  }
+}
+
 function createCompatibleClient(isMock?: boolean): LangGraphClient {
   if (isStaticWebsiteOnly() && !isMock) {
     return createStaticClient();
@@ -451,7 +477,23 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
     onRequest: injectCsrfHeader,
   });
 
-  const originalRunStream = client.runs.stream.bind(client.runs);
+  // Creating a run is not idempotent. Retrying an ambiguous gateway failure
+  // can create the same run more than once after the backend accepted the
+  // original request. The SDK also uses this client's transport for recovery
+  // GETs, which must retain normal HTTP retries (including transient 5xx).
+  const streamRecoveryClient = new StreamRecoveryClient({ apiUrl });
+  const runCreationClient = new RunsClient({
+    apiUrl,
+    callerOptions: {
+      maxRetries: 0,
+      fetch: (...args: Parameters<typeof fetch>) =>
+        args[1]?.method === "GET"
+          ? streamRecoveryClient.fetchWithRetries(...args)
+          : fetch(...args),
+    },
+    onRequest: injectCsrfHeader,
+  });
+  const originalRunStream = runCreationClient.stream.bind(runCreationClient);
   const originalJoinStream = client.runs.joinStream.bind(client.runs);
   // Preserve the SDK's lazy AsyncIterable contract. Its StreamManager consumes
   // this return value with `for await`, so run creation still starts on first
@@ -475,6 +517,7 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
       initialStream,
       signal: streamOptionSignal(sanitizedPayload),
       reconnectRun: undefined,
+      submittedInput: sanitizedPayload?.input,
       resume: (resolvedRunId, lastEventId) => {
         // Keep the recovery run id available to the shared inactive-stream
         // handler even if the SDK omitted its onRunCreated callback.

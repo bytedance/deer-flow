@@ -21,16 +21,39 @@ test("administrator adds, tests, edits and disables a shared model", async ({
       },
     });
   });
+  await page.route("**/api/managed-models/providers", (route) =>
+    route.fulfill({
+      json: {
+        providers: [
+          {
+            id: "openai",
+            display_name: "OpenAI",
+            requires_api_key: true,
+            custom_endpoint: false,
+          },
+          {
+            id: "openai-compatible",
+            display_name: "Custom OpenAI-compatible",
+            requires_api_key: false,
+            custom_endpoint: true,
+          },
+        ],
+      },
+    }),
+  );
   await page.route("**/api/managed-models", async (route) => {
     if (route.request().method() === "GET")
       return route.fulfill({ json: { models } });
     const body = route.request().postDataJSON() as SaveModelRequest;
     saves.push(body);
     const { api_key, ...config } = body.config;
+    const name = config.name || `${config.provider}-${config.model}`;
     models = [
       {
         ...config,
+        name,
         source: "managed",
+        display_name: config.display_name || `${config.provider} model`,
         has_api_key:
           api_key === undefined ? (models[0]?.has_api_key ?? false) : !!api_key,
         revision: String(saves.length),
@@ -44,11 +67,10 @@ test("administrator adds, tests, edits and disables a shared model", async ({
   });
   await page.goto(`/workspace/chats/${MOCK_THREAD_ID}?settings=models`);
   await page.getByRole("button", { name: "Add model", exact: true }).click();
-  await page.getByLabel("Unique name").fill("demo-model");
-  await page.getByLabel("Display name").fill("Demo model");
-  await page.getByLabel("Base URL").fill("https://example.com/v1");
   await page.getByLabel("Model ID").fill("demo");
   await page.getByLabel("API Key", { exact: true }).fill("demo-key");
+  await page.getByText("Advanced settings", { exact: true }).click();
+  await page.getByLabel("Display name").fill("Demo model");
   await page
     .getByRole("button", { name: "Test connection", exact: true })
     .click();
@@ -68,6 +90,7 @@ test("administrator adds, tests, edits and disables a shared model", async ({
   await expect.poll(() => catalogReads).toBeGreaterThan(readsBeforeSave);
   await page.getByRole("button", { name: "Edit model", exact: true }).click();
   await expect(page.getByLabel("API Key", { exact: true })).toHaveValue("");
+  await page.getByText("Advanced settings", { exact: true }).click();
   await page.getByLabel("Display name").fill("Updated model");
   await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect(

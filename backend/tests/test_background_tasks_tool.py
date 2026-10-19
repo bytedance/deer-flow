@@ -18,7 +18,11 @@ def _clear_submitter():
 
 def _runtime():
     return SimpleNamespace(
-        context={"thread_id": "thread-1", "user_id": "user-1"},
+        context={
+            "thread_id": "thread-1",
+            "user_id": "user-1",
+            "thread_incarnation": "incarnation-1",
+        },
         state={},
         config={},
     )
@@ -53,6 +57,7 @@ async def test_list_background_tasks_returns_only_safe_local_fields():
     manager.list_tasks.assert_awaited_once_with(
         thread_id="thread-1",
         user_id="user-1",
+        thread_incarnation="incarnation-1",
         limit=20,
         active_only=False,
     )
@@ -83,5 +88,19 @@ async def test_cancel_background_task_uses_current_user_and_thread():
     manager.cancel_matching_task.assert_awaited_once_with(
         thread_id="thread-1",
         user_id="user-1",
+        thread_incarnation="incarnation-1",
         task="report",
     )
+
+
+@pytest.mark.asyncio
+async def test_background_task_tools_fail_closed_without_server_owned_incarnation():
+    manager = SimpleNamespace(list_tasks=AsyncMock())
+    set_mcp_task_submitter(manager)
+    runtime = _runtime()
+    runtime.context.pop("thread_incarnation")
+
+    with pytest.raises(RuntimeError, match="server-owned thread incarnation"):
+        await _list_background_tasks_impl(runtime)
+
+    manager.list_tasks.assert_not_awaited()

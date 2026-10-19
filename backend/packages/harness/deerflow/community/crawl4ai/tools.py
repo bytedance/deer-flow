@@ -1,8 +1,9 @@
+import asyncio
 import logging
 
 from langchain.tools import tool
 
-from deerflow.community.url_safety import validate_public_http_url
+from deerflow.community.url_safety import validate_delegated_backend_url, validate_public_http_url
 from deerflow.config import get_app_config
 
 from .crawl4ai_client import Crawl4AiClient
@@ -86,6 +87,25 @@ def _build_client(cfg: dict | None) -> Crawl4AiClient:
     return Crawl4AiClient(base_url=base_url, token=token, timeout_s=timeout_s)
 
 
+def _validate_backend_base_url(cfg: dict | None) -> str | None:
+    """Refuse delegation to a self-hosted backend unless its egress is isolated.
+
+    Crawl4AI resolves the target URL, follows redirects, and loads subresources
+    in the Crawl4AI service's own network namespace, so the target-URL screen
+    cannot be enforced end-to-end. Delegation is only safe when the backend's
+    outbound network is isolated from private and metadata networks, which the
+    operator confirms via ``network_isolation_confirmed``. Blocking; call via
+    ``asyncio.to_thread``.
+    """
+    cfg = cfg or {}
+    base_url = cfg.get("base_url", DEFAULT_BASE_URL)
+    network_isolation_confirmed = _coerce_bool(cfg.get("network_isolation_confirmed"), False)
+    return validate_delegated_backend_url(
+        base_url,
+        network_isolation_confirmed=network_isolation_confirmed,
+    )
+
+
 @tool("web_fetch", parse_docstring=True)
 async def web_fetch_tool(url: str) -> str:
     """Fetch the contents of a web page at a given URL.
@@ -100,9 +120,12 @@ async def web_fetch_tool(url: str) -> str:
     try:
         cfg = _get_tool_config("web_fetch")  # read config once; pass the values down
         allow_private_addresses = _coerce_bool(cfg.get("allow_private_addresses") if cfg is not None else None, False)
-        url_error = validate_public_http_url(url, allow_private_addresses=allow_private_addresses)
+        url_error = await asyncio.to_thread(validate_public_http_url, url, allow_private_addresses=allow_private_addresses)
         if url_error:
             return url_error
+        backend_error = await asyncio.to_thread(_validate_backend_base_url, cfg)
+        if backend_error:
+            return backend_error
         filter_mode = _coerce_filter(cfg.get("filter") if cfg is not None else None)
         client = _build_client(cfg)
         markdown = await client.fetch_markdown(url, filter_mode=filter_mode)

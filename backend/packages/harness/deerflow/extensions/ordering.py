@@ -76,6 +76,7 @@ def core_ordering_constraints() -> tuple[OrderingConstraint, ...]:
     reported an empty sequence while iteration yielded the real constraints.
     Deferring the call instead of faking the value keeps one answer.
     """
+    from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
     from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
     from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
     from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
@@ -108,10 +109,19 @@ def core_ordering_constraints() -> tuple[OrderingConstraint, ...]:
                 reason=(f"{short_circuiter.__name__} can return or rebuild a ToolMessage without invoking its handler; ToolReceiptMiddleware must wrap it or those results never get a receipt and the ledger silently gaps"),
             )
             for short_circuiter in (
+                ArtifactResolutionMiddleware,
                 GuardrailMiddleware,
                 SandboxAuditMiddleware,
                 ReadBeforeWriteMiddleware,
                 ToolProgressMiddleware,
             )
+        ),
+        *(
+            OrderingConstraint(
+                outer=ArtifactResolutionMiddleware,
+                inner=policy,
+                reason="Artifact handles must resolve before argument-sensitive authorization, audit, write and progress policies inspect the call",
+            )
+            for policy in (GuardrailMiddleware, SandboxAuditMiddleware, ReadBeforeWriteMiddleware, ToolProgressMiddleware)
         ),
     )

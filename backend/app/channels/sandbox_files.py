@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import logging
+
 from deerflow.sandbox.lease import acquire_sandbox_client_lease
+
+logger = logging.getLogger(__name__)
 
 
 async def sync_file_to_thread_sandbox(
@@ -13,14 +17,16 @@ async def sync_file_to_thread_sandbox(
     virtual_path: str,
     content: bytes,
     owner_prefix: str,
+    release_on_last: bool = False,
 ) -> bool:
-    """Copy one attachment while holding a non-releasing sandbox client lease.
+    """Copy one attachment while holding a sandbox client lease.
 
     Thread-data mount providers already see the persisted upload. Other
     providers need a unique holder so a parallel run cannot close their client
     during ``update_file``. The blocking transport worker is drained even when
     the channel handler is repeatedly cancelled, and only then is the holder
-    released.
+    released. ``release_on_last=True`` also parks a standalone temporary
+    sandbox once all execution holders have finished.
     """
     if getattr(sandbox_provider, "uses_thread_data_mounts", False):
         return True
@@ -30,7 +36,7 @@ async def sync_file_to_thread_sandbox(
         thread_id,
         user_id=user_id,
         owner_prefix=owner_prefix,
-        release_on_last=False,
+        release_on_last=release_on_last,
     )
     try:
         if lease.sandbox_id == "local" or lease.sandbox_id.startswith("local:"):
@@ -40,4 +46,7 @@ async def sync_file_to_thread_sandbox(
         await lease.run_sync(lease.sandbox.update_file, virtual_path, content)
         return True
     finally:
-        await lease.release()
+        try:
+            await lease.release()
+        except Exception:
+            logger.warning("Failed to release sandbox %s after file sync", lease.sandbox_id, exc_info=True)

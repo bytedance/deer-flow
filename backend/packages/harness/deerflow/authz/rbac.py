@@ -30,6 +30,15 @@ _RESOURCE_POLICY_KEYS: dict[str, str] = {
     "sandbox": "sandbox",
     "mcp_server": "mcp_servers",
     "route": "routes",
+    # Plugin resources. The left side is the request ``resource`` and the right
+    # side is the ``config.yaml`` key. ``plugin_management`` is genuinely
+    # self-mapped (like ``sandbox``), so a config key of the same name is legal;
+    # ``plugin_action`` is not, and using it as a config key is rejected at
+    # construction. A resource with no policy key is unrestricted, which is the
+    # documented non-breaking path for deployments that enable authorization
+    # without listing these keys.
+    "plugin_action": "plugin_actions",
+    "plugin_management": "plugin_management",
 }
 
 _ALL = object()  # sentinel meaning "allow all candidates"
@@ -120,6 +129,16 @@ class RbacAuthorizationProvider:
 
                 compiled = self._compile_resource_policy(role_name, resource_key, resource_policy)
                 self._policies[(role_name, resource_key)] = compiled
+
+    @property
+    def known_roles(self) -> frozenset[str]:
+        """Role names declared in the ``roles`` configuration.
+
+        Management surfaces (e.g. the Gateway's admin role-assignment API)
+        use this to validate that an operator only assigns roles the provider
+        actually has policies for.
+        """
+        return self._known_roles
 
     def validate_role(self, role: str, *, field: str = "role") -> None:
         """Fail fast when an operator-configured role is not defined."""

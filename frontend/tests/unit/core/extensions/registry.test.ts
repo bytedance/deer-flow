@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, rs, test } from "@rstest/core";
 
+import { fetchFrontendExtensions } from "@/core/extensions/api";
 import { loadFrontendExtensions } from "@/core/extensions/registry";
 
 const config = rs.hoisted(() => ({ backend: "" }));
@@ -103,3 +104,187 @@ test("disabled, backend-only and invalid entries never fetch or import", async (
   expect(request).not.toHaveBeenCalled();
   expect(importer).not.toHaveBeenCalled();
 });
+
+for (const backend of ["", "https://backend.example/prefix", "/gateway"]) {
+  test(`packaged entries preserve resource URLs with base ${backend}`, async () => {
+    config.backend = backend;
+    const assets = {
+      ...entry,
+      transport: "assets-v1" as const,
+      entry: `/api/plugins/${entry.namespace}/assets/${"b".repeat(64)}/static/dist/index.mjs`,
+    };
+    const importer = rs.fn();
+    const assetImporter = rs.fn(async () => ({ default: extension }));
+    const result = await loadFrontendExtensions(
+      [assets],
+      importer,
+      assetImporter,
+    );
+    expect(result[0]?.extension).toEqual(extension);
+    expect(assetImporter).toHaveBeenCalledWith(backend + assets.entry);
+    expect(importer).not.toHaveBeenCalled();
+    assetImporter.mockClear();
+    for (const path of [
+      "../index.mjs",
+      "%2e%2e/index.mjs",
+      "index.mjs?x",
+      "index.css",
+    ]) {
+      const invalid = {
+        ...assets,
+        entry: `/api/plugins/${entry.namespace}/assets/${"b".repeat(64)}/${path}`,
+      };
+      expect(
+        (await loadFrontendExtensions([invalid], importer, assetImporter))[0]
+          ?.error,
+      ).toBeTruthy();
+    }
+    expect(assetImporter).not.toHaveBeenCalled();
+  });
+}
+
+test("unknown transports and failing packaged plugins are isolated", async () => {
+  const importer = rs.fn();
+  const assetImporter = rs
+    .fn()
+    .mockRejectedValueOnce(new Error("missing chunk"))
+    .mockResolvedValueOnce({ default: extension });
+  const assets = {
+    ...entry,
+    transport: "assets-v1" as const,
+    entry: `/api/plugins/${entry.namespace}/assets/${"b".repeat(64)}/index.mjs`,
+  };
+  const unknown = { ...entry, transport: "future-v9" as "assets-v1" };
+  const result = await loadFrontendExtensions(
+    [unknown, assets, assets],
+    importer,
+    assetImporter,
+  );
+  expect(result.map((item) => !!item.extension)).toEqual([false, false, true]);
+  expect(importer).not.toHaveBeenCalled();
+  expect(assetImporter).toHaveBeenCalledTimes(2);
+});
+
+test("discovery preserves transport negotiation through parsing and isolates newer transports", async () => {
+  const assets = {
+    ...entry,
+    transport: "assets-v1",
+    entry: `/api/plugins/${entry.namespace}/assets/${"b".repeat(64)}/index.mjs`,
+  };
+  rs.spyOn(globalThis, "fetch").mockResolvedValue(
+    new Response(
+      JSON.stringify([assets, { ...assets, transport: "future-v9" }]),
+    ),
+  );
+  const discovered = await fetchFrontendExtensions();
+  expect(discovered.map((item) => item.transport)).toEqual([
+    "assets-v1",
+    "future-v9",
+  ]);
+  const assetImporter = rs.fn(async () => ({ default: extension }));
+  const loaded = await loadFrontendExtensions(
+    discovered,
+    rs.fn(),
+    assetImporter,
+  );
+  expect(loaded[0]?.extension).toEqual(extension);
+  expect(loaded[1]?.error).toBeTruthy();
+  expect(assetImporter).toHaveBeenCalledTimes(1);
+});
+
+test("validates optional mention providers independently for each installed module", async () => {
+  const assets = {
+    ...entry,
+    transport: "assets-v1",
+    entry: `/api/plugins/${entry.namespace}/assets/${"b".repeat(64)}/index.mjs`,
+  };
+  const provider = { id: "people", label: "People", search: async () => [] };
+  for (const mentionProviders of [
+    null,
+    [provider, provider],
+    [{ ...provider, search: null }],
+    [{ ...provider, id: "../bad" }],
+    Array(9).fill(provider),
+  ]) {
+    const importer = rs
+      .fn()
+      .mockResolvedValueOnce({ default: { ...extension, mentionProviders } })
+      .mockResolvedValueOnce({
+        default: { ...extension, mentionProviders: [provider] },
+      });
+    const loaded = await loadFrontendExtensions(
+      [assets, assets],
+      rs.fn(),
+      importer,
+    );
+    expect(loaded[0]?.error).toBeTruthy();
+    expect(loaded[1]?.extension?.mentionProviders).toEqual([provider]);
+  }
+});
+
+for (const field of ["mentionProviders", "surfaces"] as const) {
+  for (const [name, id] of [
+    ["omitted", undefined],
+    ["null", null],
+    ["boolean", true],
+    ["array", ["people"]],
+    ["object", { toString: () => "people" }],
+  ] as const) {
+    test(`rejects ${name} ${field} identifiers without coercing them`, async () => {
+      const assets = {
+        ...entry,
+        transport: "assets-v1" as const,
+        entry: `/api/plugins/${entry.namespace}/assets/${"b".repeat(64)}/index.mjs`,
+      };
+      const declaration =
+        field === "mentionProviders"
+          ? { label: "People", search: async () => [] }
+          : { slot: "page", title: "People", mount: () => undefined };
+      const invalid = { ...declaration, ...(id === undefined ? {} : { id }) };
+      const importer = rs
+        .fn()
+        .mockResolvedValueOnce({
+          default: { ...extension, [field]: [invalid] },
+        })
+        .mockResolvedValueOnce({
+          default: {
+            ...extension,
+            [field]: [{ ...declaration, id: "people" }],
+          },
+        });
+      const loaded = await loadFrontendExtensions(
+        [assets, assets],
+        rs.fn(),
+        importer,
+      );
+      expect(loaded[0]?.error).toBeTruthy();
+      expect(loaded[0]?.extension).toBeUndefined();
+      expect(loaded[1]?.extension?.[field]?.[0]?.id).toBe("people");
+    });
+  }
+
+  test(`accepts literal null and undefined slug strings for ${field}`, async () => {
+    const assets = {
+      ...entry,
+      transport: "assets-v1" as const,
+      entry: `/api/plugins/${entry.namespace}/assets/${"b".repeat(64)}/index.mjs`,
+    };
+    const declarations = ["null", "undefined"].map((id) =>
+      field === "mentionProviders"
+        ? { id, label: "People", search: async () => [] }
+        : { id, slot: "page", title: "People", mount: () => undefined },
+    );
+    const loaded = await loadFrontendExtensions(
+      [assets],
+      rs.fn(),
+      async () => ({
+        default: { ...extension, [field]: declarations },
+      }),
+    );
+    expect(loaded[0]?.error).toBeUndefined();
+    expect(loaded[0]?.extension?.[field]?.map((value) => value.id)).toEqual([
+      "null",
+      "undefined",
+    ]);
+  });
+}

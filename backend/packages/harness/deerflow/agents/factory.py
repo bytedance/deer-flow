@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
 
     from deerflow.config.memory_config import MemoryConfig
+    from deerflow.config.pii_redaction_config import PiiRedactionConfig
     from deerflow.subagents.runtime import SubagentRuntime
 
 logger = logging.getLogger(__name__)
@@ -78,6 +79,7 @@ def create_deerflow_agent(
     checkpointer: BaseCheckpointSaver | None = None,
     name: str = "default",
     subagent_runtime: SubagentRuntime | None = None,
+    pii_redaction_config: PiiRedactionConfig | None = None,
 ) -> CompiledStateGraph:
     """Create a DeerFlow agent from plain Python arguments.
 
@@ -124,6 +126,11 @@ def create_deerflow_agent(
         only when the caller needs non-default native-subagent capacity or a
         caller-managed durable batch worker without Gateway/DeerFlowClient
         startup. Requires ``features.subagent`` to be enabled.
+    pii_redaction_config:
+        Optional PII redaction policy (#3190). ``None`` leaves redaction off;
+        when enabled, memory-queue and durable-context redaction apply to the
+        assembled middlewares. A ``middleware=`` takeover bypasses the
+        assembly that would apply it.
 
     Raises
     ------
@@ -164,6 +171,7 @@ def create_deerflow_agent(
             plan_mode=plan_mode,
             extra_middleware=extra_middleware or [],
             subagent_runtime=subagent_runtime,
+            pii_redaction_config=pii_redaction_config,
         )
         # Deduplicate by tool name — user-provided tools take priority.
         existing_names = {t.name for t in effective_tools}
@@ -201,10 +209,11 @@ def _assemble_from_features(
     plan_mode: bool = False,
     extra_middleware: list[AgentMiddleware] | None = None,
     subagent_runtime: SubagentRuntime | None = None,
+    pii_redaction_config: PiiRedactionConfig | None = None,
 ) -> tuple[list[AgentMiddleware], list[BaseTool]]:
     """Build an ordered middleware chain + extra tools from *feat*.
 
-    Middleware order matches ``make_lead_agent`` (14 middlewares):
+    Middleware order matches ``make_lead_agent`` (18 middlewares):
 
       0-2. Sandbox infrastructure (ThreadData → Uploads → Sandbox)
       3.   DanglingToolCallMiddleware (always)
@@ -219,7 +228,9 @@ def _assemble_from_features(
       10.  ViewImageMiddleware (vision feature)
       11.  SubagentLimitMiddleware (subagent feature)
       12.  LoopDetectionMiddleware (loop_detection feature)
-      13.  ClarificationMiddleware (always last)
+      13.  TokenBudgetMiddleware (token_budget feature)
+      13a. ModelContentCompatibilityMiddleware (always)
+      14.  ClarificationMiddleware (always last)
 
     Two-phase ordering:
       1. Built-in chain — fixed sequential append.
@@ -269,7 +280,12 @@ def _assemble_from_features(
     from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
     from deerflow.agents.middlewares.system_message_coalescing_middleware import SystemMessageCoalescingMiddleware
 
-    chain.append(DurableContextMiddleware())
+    if pii_redaction_config is not None and pii_redaction_config.enabled:
+        from deerflow.agents.middlewares.pii_redaction_middleware import PiiRedactionMiddleware
+
+        chain.append(PiiRedactionMiddleware(pii_redaction_config))
+
+    chain.append(DurableContextMiddleware(pii_redaction_config=pii_redaction_config))
     # DurableContext adds its authority contract as a second SystemMessage; strict backends
     # (vLLM, SGLang, Qwen, Anthropic) reject that, so merge them into one leading message.
     chain.append(SystemMessageCoalescingMiddleware())
@@ -318,13 +334,25 @@ def _assemble_from_features(
                 if backend_requires_passive_writes_in_tool_mode(memory_cfg.manager_class):
                     from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
 
-                    chain.append(MemoryMiddleware(agent_name=name, memory_config=memory_cfg))
+                    chain.append(
+                        MemoryMiddleware(
+                            agent_name=name,
+                            memory_config=memory_cfg,
+                            pii_redaction_config=pii_redaction_config,
+                        )
+                    )
             else:
                 if memory_cfg.mode == "tool" and not memory_cfg.enabled:
                     logger.warning("memory.mode is 'tool' but memory.enabled is false; memory tools will not be registered.")
                 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
 
-                chain.append(MemoryMiddleware(agent_name=name, memory_config=memory_cfg))
+                chain.append(
+                    MemoryMiddleware(
+                        agent_name=name,
+                        memory_config=memory_cfg,
+                        pii_redaction_config=pii_redaction_config,
+                    )
+                )
 
     # --- [10] Vision ---
     if feat.vision is not False:
@@ -384,9 +412,9 @@ def _assemble_from_features(
             from deerflow.subagents.batch_runtime import is_subagent_batch_runtime_available
 
             if is_subagent_batch_runtime_available():
-                from deerflow.tools.builtins import batch_status, batch_task, cancel_batch
+                from deerflow.tools.builtins import batch_status, batch_task, cancel_batch, read_batch_result
 
-                extra_tools.extend((batch_task, batch_status, cancel_batch))
+                extra_tools.extend((batch_task, batch_status, cancel_batch, read_batch_result))
 
     # --- [12] LoopDetection ---
     if feat.loop_detection is not False:
@@ -408,6 +436,19 @@ def _assemble_from_features(
 
             # ``enabled`` defaults to False for config.yaml; ``token_budget=True`` is the opt-in.
             chain.append(TokenBudgetMiddleware.from_config(TokenBudgetConfig(enabled=True)))
+
+    # --- [13a] ModelContentCompatibility (always) ---
+    # Read-time sanitizer: rewrites URL-sourced file/image blocks in list-form
+    # message content into text placeholders in the request view only, so
+    # threads poisoned before the conversion-layer fix heal on the next model
+    # call. Placement contract: after every built-in content transform so it
+    # sees the near-final request, and before the custom/extension injection
+    # point (_insert_extra) and the terminal tail — in the lead chain it is
+    # followed by configured extensions, terminal-response and finish-reason
+    # middlewares, and the always-last ClarificationMiddleware.
+    from deerflow.agents.middlewares.model_content_compatibility_middleware import ModelContentCompatibilityMiddleware
+
+    chain.append(ModelContentCompatibilityMiddleware())
 
     # --- [14] Clarification (always last among built-ins) ---
     chain.append(ClarificationMiddleware())

@@ -21,9 +21,11 @@ function splitPathSuffix(src: string) {
 }
 
 function encodeArtifactPath(filepath: string) {
+  // This is a filesystem path, not a URL: a literal "%20" must stay part
+  // of the filename after the server decodes the request path once.
   return filepath
     .split("/")
-    .map((segment) => encodeURIComponent(decodePathSegment(segment)))
+    .map((segment) => encodeURIComponent(segment))
     .join("/");
 }
 
@@ -98,7 +100,57 @@ export function resolveArtifactURL(absolutePath: string, threadId: string) {
 
 export function resolveMarkdownArtifactURL(src: string, threadId: string) {
   const { path, suffix } = splitPathSuffix(src);
-  return `${resolveArtifactURL(path, threadId)}${suffix}`;
+  // Markdown destinations already carry URL escapes; decode only at this
+  // boundary before handing the raw path to the artifact URL builder.
+  return `${resolveArtifactURL(decodeRelativeArtifactPath(path), threadId)}${suffix}`;
+}
+
+export interface ArtifactImageContext {
+  filepath: string;
+  threadId: string;
+  isMock?: boolean;
+}
+
+export function resolveArtifactImageURL(
+  src: string,
+  { filepath, threadId, isMock }: ArtifactImageContext,
+) {
+  const { path, suffix } = splitPathSuffix(src);
+  if (
+    !path ||
+    !filepath.startsWith("/mnt/") ||
+    (path.startsWith("/") && !path.startsWith("/mnt/")) ||
+    /^[a-z][a-z\d+.-]*:/i.test(path)
+  ) {
+    return src;
+  }
+
+  try {
+    const decodedPath = decodeRelativeArtifactPath(path);
+    if (decodedPath.includes("\\")) return src;
+    // Skill previews read SKILL.md inside the archive, as loadArtifactContent does.
+    const documentPath = filepath.endsWith(".skill")
+      ? `${filepath}/SKILL.md`
+      : filepath;
+    const base = new URL(
+      encodeArtifactPath(documentPath),
+      "https://artifact.invalid",
+    );
+    const resolved = new URL(encodeArtifactPath(decodedPath), base);
+    if (
+      resolved.origin !== base.origin ||
+      !resolved.pathname.startsWith("/mnt/")
+    ) {
+      return src;
+    }
+    return `${urlOfArtifact({
+      filepath: decodeRelativeArtifactPath(resolved.pathname),
+      threadId,
+      isMock,
+    })}${suffix}`;
+  } catch {
+    return src;
+  }
 }
 
 export function resolveMessageImageURL(

@@ -48,8 +48,12 @@ _URL_REDACT_RE = re.compile(r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?P<userinfo
 # ``METHOD target HTTP/x.x`` line — rewritten to scheme + host with the
 # target collapsed to ``/<redacted>``. The method class is case-tolerant:
 # HTTP methods are case-sensitive tokens, and callers may pass lowercase
-# custom methods through to urllib3.
-_URLLIB3_REQUEST_LINE_RE = re.compile(r'(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?P<userinfo>[^/?#\s"@]*@)?(?P<host>[^/?#\s"]+) "(?P<method>[A-Za-z]+) (?P<target>/[^"\s]*) (?P<version>HTTP/[0-9.]+)"')
+# custom methods through to urllib3. The target may contain spaces for the
+# same reason ``Redirecting``'s slots may: on the recursive redirect frame it
+# is the raw ``Location`` field value, whose grammar admits interior spaces,
+# and a whitespace-strict target class let the signed path survive. Its scan
+# still stops at the closing quote, so the pass stays linear-time.
+_URLLIB3_REQUEST_LINE_RE = re.compile(r'(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?P<userinfo>[^/?#\s"@]*@)?(?P<host>[^/?#\s"]+) "(?P<method>[A-Za-z]+) (?P<target>/[^"]*) (?P<version>HTTP/[0-9.]+)"')
 
 # urllib3's retry sites log the request target with NO scheme and NO request-
 # line scaffolding, so neither pattern above can see it (installed 2.7.0):
@@ -67,16 +71,26 @@ _URLLIB3_REQUEST_LINE_RE = re.compile(r'(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?
 #   connectionpool.py:869, **WARNING**, so it passes the Gateway's INFO root
 #   without DEBUG being enabled; the greedy prefix groups pin the split to
 #   the final ``': `` so an error repr containing quotes cannot shift it.
-_URLLIB3_RETRY_TARGET_RE = re.compile(r"^Retry: (?P<target>/\S+)$")
+# Both trailing-target shapes take a target that runs to the end of the
+# message rather than to the first space, because ``url`` is the caller's raw
+# request target and, on the recursive redirect frame, the raw ``Location``
+# field value (connectionpool.py:923-925) — whose grammar admits interior
+# spaces, exactly as ``Redirecting``'s slots do (round 13). A whitespace-strict
+# target left ``Retry: /download a file.pdf?sig=...`` and the same signed
+# target on the WARNING line unredacted, while the two sibling passes that
+# already take a loose tail redacted it. The target still has to start with
+# ``/``, so prose that merely begins with ``Retry: `` keeps passing through.
+_URLLIB3_RETRY_TARGET_RE = re.compile(r"^Retry: (?P<target>/\S.*)$")
 _URLLIB3_INCREMENT_RETRY_RE = re.compile(r"Incremented Retry for \(url='(?P<url>(?:[^']|'(?!\)))*)'\)")
-_URLLIB3_RETRYING_RE = re.compile(r"^(?P<head>Retrying \(.*\) after connection broken by .*'): (?P<target>/\S+)$")
+_URLLIB3_RETRYING_RE = re.compile(r"^(?P<head>Retrying \(.*\) after connection broken by .*'): (?P<target>/\S.*)$")
 
 # urllib3's ``Redirecting %s -> %s`` (poolmanager.py:500 at INFO,
 # connectionpool.py:922 at DEBUG) can carry an origin-form target in either
 # slot: connectionpool passes the origin-form request target, and the Location
 # header may itself be a relative reference (RFC 9110 allows it). The generic
 # absolute-URL pass only sees scheme-bearing halves, so origin-form slots
-# collapse to ``/<redacted>`` here; absolute slots are left for that pass.
+# collapse to ``/<redacted>`` here; a slot is left for that pass only when
+# the pass consumes it whole (see _url_pass_consumes_slot).
 # The pattern keeps the ``^Redirecting `` prefix anchor — the urllib3-owned
 # literal — because an ``-> /path`` arrow is not urllib3-owned shape:
 # non-URL logs render it too (sandbox mount mappings log
@@ -86,17 +100,106 @@ _URLLIB3_RETRYING_RE = re.compile(r"^(?P<head>Retrying \(.*\) after connection b
 # header string, and interior spaces are legal field syntax a misbehaving
 # server can emit — a whitespace-strict tail would void the pass entirely
 # and leak the origin-form request target in the first slot (round 13). A
-# space-carrying second slot collapses whole when it starts with ``/``. The
+# space-carrying slot collapses whole whether or not it starts with ``/``:
+# the generic pass stops its ``rest`` at whitespace, so an absolute
+# space-carrying slot kept its signed tail (round 16). The
 # first slot gets the same grammar treatment: the recursive urlopen frame
 # passes the previous raw Location as its url, so t1 can carry interior
 # spaces too — it is lazy, splitting at the FIRST `` -> `` the way the
 # line was constructed left to right.
 _URLLIB3_REDIRECTING_ORIGIN_RE = re.compile(r"^Redirecting (?P<t1>\S.*?) -> (?P<t2>\S.*)$")
 
-# A Redirecting slot is kept only when it starts with an absolute
-# hierarchical URL; everything else (every RFC 3986 relative-reference
-# form, and non-hierarchical schemes) collapses — see _redact_redirecting_origin.
-_SLOT_ABSOLUTE_URL_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://")
+
+# A Redirecting slot is kept only when the generic absolute-URL pass consumes
+# it WHOLE, so the rule is asked of that pass itself rather than of an
+# approximation that can drift from it. The pass leaves a tail in the clear
+# whenever its match stops early: ``rest`` halts at whitespace and at a quote
+# that reads as a closing mark (``https://h/a')b?sig=…`` keeps ``')b?sig=…``),
+# and an empty host before the first ``/?#`` (``https:///path?sig=…``) matches
+# nothing at all because ``host`` needs one character. Both are legal absolute
+# URLs, so a hand-written "is it absolute and whitespace-free" test cannot see
+# them. Everything the pass does not consume whole collapses.
+def _url_pass_consumes_slot(slot: str) -> bool:
+    match = _URL_REDACT_RE.match(slot)
+    return match is not None and match.end() == len(slot)
+
+
+# urllib3's header-parse warning (connection.py:575-581, WARNING, so it clears
+# the Gateway's INFO root) renders "Failed to parse headers (url=%s): %s". In
+# the pinned 2.7.0 the second argument stringifies as ``<defects>, unparsed
+# data: <payload!r>`` (exceptions.py:324) — there is no ``headers_received``.
+# The raw header block arrives through ``unparsed_data``: assert_header_parsing
+# sets it to ``headers.get_payload()``, and the email parser routes everything
+# after the FIRST malformed line into that payload, so the credential fields
+# that leak are the ones trailing the break — repr-escaped onto ONE physical
+# line whose logical breaks are the four characters ``\r\n``, not real newlines.
+# A pattern that ignores that shape cannot hold: with a ``[^\r\n]*`` value class
+# the first anchorable field swallowed the rest of the message, so exactly one
+# field ever collapsed while a signed ``Location`` ahead of it stayed whole (its
+# ``\b`` never fired at all, since the escape's literal ``n`` leaves no word
+# boundary before ``Location``). So this pass splits the dump on its logical
+# breaks and anchors one field per segment: every credential-bearing name
+# collapses, the names stay for operator legibility, a non-sensitive field keeps
+# its value, and a header-looking line in any other log is untouched, because
+# the pass runs only on text carrying urllib3's own literals. ``location`` is in
+# the list because that field value is the same origin-form signed target the
+# Redirecting and retry passes collapse. The anchor is applied past a segment's
+# obs-fold marker (see _OBS_FOLD_RE) rather than written into the pattern,
+# because a folded value is one header value under RFC 7230 unfolding: a bearer
+# token folded under a field this list does not name is still a bearer token.
+_CREDENTIAL_FIELD_RE = re.compile(r"(?i)(?P<name>set-cookie2?|cookie|authorization|proxy-authorization|www-authenticate|proxy-authenticate|authentication-info|proxy-authentication-info|location)[ \t]*:[ \t]*(?P<value>.*)$")
+# The payload's line breaks as they appear in the log: escaped inside a repr,
+# and real if a future format ever stops quoting the block. The repr's opening
+# quote is a break too — the dump's first field follows ``unparsed data: `` and
+# its ``b?`` bytes form on the same segment as the warning's own scaffolding, so
+# without it that first field would never start a segment and never be anchored.
+# Every break spelling needs both forms. A bare CR is a separator to
+# ``parse_headers`` even though RFC 9112 only defines CRLF, so a payload can be
+# split on ``\r`` alone; in the repr that is the two characters ``\\r``, which
+# ``\\r\\n`` and ``\\n`` never match. Missing it leaves the whole dump in one
+# segment, so the leading field name is not at a segment start, no anchor fires,
+# and every credential in the block is logged verbatim. ``\\r\\n`` must stay
+# ahead of ``\\r``: alternation is leftmost-first, so leading with ``\\r`` splits
+# every CRLF escape into two breaks, and the empty segment between them ends an
+# obs-fold walk early — a credential folded under a ``\r\n`` break plus a
+# ``\t`` continuation then leaks whole.
+_DUMP_LOGICAL_BREAK_RE = re.compile(r"(\\r\\n|\\r|\\n|\r\n|\r|\n|unparsed data: b?['\"])")
+_HEADER_DUMP_PREFIX = "Failed to parse headers (url="
+# An RFC 5322 obs-fold continuation keeps the field's value on the next line and
+# is marked by a leading SP/HTAB. This warning exists to dump malformed upstream
+# bytes, so a folded credential cannot be assumed absent: the rest of a collapsed
+# field's value — or the whole of it, when the field's first segment is empty —
+# lives in the segments that follow its break. The marker has two spellings in
+# the logged copy, because the payload reaches the record through ``!r``: a real
+# tab is the two characters backslash-t, while a space is never escaped.
+_OBS_FOLD_RE = re.compile(r"^(?:[ \t]|\\t)+")
+# HeaderParsingError's own message, so a record's exception text — which repeats
+# the dump verbatim — is recognised as the same shape rather than as free text.
+_HEADER_DUMP_MARKER = "unparsed data: "
+
+
+def _redact_credential_headers(message: str) -> str:
+    parts = _DUMP_LOGICAL_BREAK_RE.split(message)
+    # A capturing split returns [text, break, text, break, ...]; only the
+    # even-indexed segments are header lines.
+    for index in range(0, len(parts), 2):
+        segment = parts[index]
+        fold = _OBS_FOLD_RE.match(segment)
+        lead = fold.group(0) if fold else ""
+        match = _CREDENTIAL_FIELD_RE.match(segment, len(lead))
+        if match is None:
+            continue
+        # An empty value hides nothing on its own line, and rewriting it would
+        # claim a redaction that never happened — but the field is still the one
+        # its continuation belongs to, so the walk below runs either way.
+        if match.group("value"):
+            parts[index] = lead + match.group("name") + ": <redacted>"
+        walk = index + 2
+        while walk < len(parts) and _OBS_FOLD_RE.match(parts[walk]):
+            parts[walk] = "<redacted>"
+            walk += 2
+    return "".join(parts)
+
 
 # The two scheme-bearing patterns start with a character class, so re.sub
 # retries the match at every position of a long token — a letter run with no
@@ -166,12 +269,16 @@ class UrlRedactionFilter(logging.Filter):
     per-request ``scheme://host:port "METHOD target HTTP/x.x"`` line, the
     retry lines that log a bare origin-form target (``Retry: <target>``,
     ``Incremented Retry for (url='<target>')``, ``Retrying (…) after
-    connection broken by '…': <target>``), and every non-absolute slot of
-    ``Redirecting <target> -> <target>`` (kept whole only when a scheme
-    starts the slot, for the generic pass to rewrite). The record is rewritten in place
+    connection broken by '…': <target>``), and every ``Redirecting <target>
+    -> <target>`` slot the generic pass would not consume whole
+    (see _url_pass_consumes_slot). The record is rewritten in place
     (``msg`` set to the redacted formatted message, ``args`` cleared) so
     every downstream handler and formatter — text or JSON — sees the same
     redacted line, while the method/status/error observability is preserved.
+    Where a record's exception repeats a secret the message pass collapsed
+    (urllib3's header-parse warning logs with ``exc_info=True``), ``exc_text``
+    is produced through the same passes, because a formatter appends that text
+    to the output whatever the format string says.
     The scheme-bearing patterns are attempted only at ``://``-anchored
     scheme starts, so filtering a record costs linear time in its message
     length. A URL is rewritten only when it carries something to hide
@@ -179,9 +286,7 @@ class UrlRedactionFilter(logging.Filter):
     records without any URL pass through untouched.
     """
 
-    def filter(self, record: logging.LogRecord) -> bool:
-        message = record.getMessage()
-
+    def _redact_message(self, message: str) -> str:
         def _redact(match: re.Match[str]) -> str:
             if not (match.group("userinfo") or match.group("rest")):
                 return match.group(0)  # bare origin: nothing to redact
@@ -207,18 +312,22 @@ class UrlRedactionFilter(logging.Filter):
             return match.group("head") + ": /<redacted>"
 
         def _redact_redirecting_origin(match: re.Match[str]) -> str:
-            # A slot stays verbatim ONLY when it is an absolute URL (a
-            # scheme at position 0), so the generic absolute-URL pass —
-            # which runs after this one — rewrites it. Everything else
-            # collapses: the Location field-value grammar (RFC 3986
-            # relative-part) also admits slash-less relative references
-            # (``download?sign=…``, ``?sign=…``, ``#frag``), network-path
-            # references (``//host/x``, whose userinfo collapses with it),
-            # and non-hierarchical schemes (``data:…``) — none of which
-            # either pass could otherwise see, and the slash-less forms
-            # kept their signed queries verbatim (round 15).
+            # A slot stays verbatim ONLY when the generic absolute-URL pass
+            # — which runs after this one — consumes it whole; that pass is
+            # asked directly (see _url_pass_consumes_slot).
+            # Everything else collapses: the Location field-value grammar
+            # (RFC 3986 relative-part) also admits slash-less relative
+            # references (``download?sign=…``, ``?sign=…``, ``#frag``),
+            # network-path references (``//host/x``, whose userinfo
+            # collapses with it), and non-hierarchical schemes
+            # (``data:…``) — none of which either pass could otherwise see,
+            # and the slash-less forms kept their signed queries verbatim
+            # (round 15). A space-carrying slot is legal Location syntax
+            # too, and the generic pass stops its ``rest`` at whitespace,
+            # so the signed tail after the first space survived the same
+            # way (round 16).
             def _slot(target: str) -> str:
-                return target if _SLOT_ABSOLUTE_URL_RE.match(target) else "/<redacted>"
+                return target if _url_pass_consumes_slot(target) else "/<redacted>"
 
             return "Redirecting " + _slot(match.group("t1")) + " -> " + _slot(match.group("t2"))
 
@@ -230,15 +339,43 @@ class UrlRedactionFilter(logging.Filter):
         # two scheme-bearing passes scan from ``://`` occurrences (see
         # _scheme_starts) instead of re.sub, so long letter runs in any
         # record — URL paths or URL-free error bodies — stay linear-time.
-        redacted = _redact_scheme_bearing(_URLLIB3_REQUEST_LINE_RE, _redact_request_line, message)
+        redacted = message
+        # Runs before the URL passes: the absolute-URL rewrite consumes the
+        # ``): `` closer and the repr scaffolding that separate the url
+        # argument from the header dump, which would blur the two together and
+        # leave a value whose only boundary was the consumed closer behind.
+        if message.startswith(_HEADER_DUMP_PREFIX) or _HEADER_DUMP_MARKER in message:
+            # The record's own second argument, not a URL line: the response
+            # header block that urllib3 echoes when it could not parse it. The
+            # marker branch covers the exception text, whose last line repeats
+            # that block outside the warning's prefix.
+            redacted = _redact_credential_headers(redacted)
+        redacted = _redact_scheme_bearing(_URLLIB3_REQUEST_LINE_RE, _redact_request_line, redacted)
         redacted = _URLLIB3_INCREMENT_RETRY_RE.sub(_redact_increment, redacted)
         redacted = _URLLIB3_RETRY_TARGET_RE.sub(_redact_retry_target, redacted)
         redacted = _URLLIB3_RETRYING_RE.sub(_redact_retrying, redacted)
         redacted = _URLLIB3_REDIRECTING_ORIGIN_RE.sub(_redact_redirecting_origin, redacted)
         redacted = _redact_scheme_bearing(_URL_REDACT_RE, _redact, redacted)
+        return redacted
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        redacted = self._redact_message(message)
         if redacted != message:
             record.msg = redacted
             record.args = None
+        if record.exc_info and _HEADER_DUMP_MARKER in message:
+            # urllib3 emits the header-parse warning with exc_info=True, and
+            # Formatter.format appends formatException() to any record carrying
+            # one — independently of the format string — so the traceback's last
+            # line is a second whole copy of the dump the message pass just
+            # collapsed. Pre-populating exc_text is what wins, because the
+            # Formatter recomputes it only when unset. The gate reads the
+            # already-formatted message rather than the exception: that warning
+            # interpolates the exception into it, so the marker is the same
+            # signal, and no other error record pays for formatting a traceback
+            # this filter would leave untouched anyway.
+            record.exc_text = self._redact_message(logging.Formatter().formatException(record.exc_info))
         return True
 
 
@@ -259,8 +396,9 @@ class UrlRedactionFilter(logging.Filter):
 # The enumeration of urllib3's URL-bearing lines is closed against the
 # installed source (2.7.0): every other emitter logs host:port only
 # (connection establishment/reset) or an absolute URL in one piece
-# (``connection.py``'s header-parse warning), which the generic absolute-URL
-# pass rewrites without a dedicated shape. The closure is version-anchored:
+# (``connection.py``'s header-parse warning, whose second argument is a raw
+# response header block rather than a URL, and goes through
+# _redact_credential_headers). The closure is version-anchored:
 # a urllib3 upgrade can change these format strings and silently reopen it —
 # re-run the emitter enumeration when bumping the dependency.
 _REDACTED_LOGGER_NAMES = ("httpx",)
@@ -317,7 +455,13 @@ class JsonTraceFormatter(logging.Formatter):
             "message": record.getMessage(),
         }
         if record.exc_info:
-            payload["exc_info"] = self.formatException(record.exc_info)
+            # Follow logging.Formatter in caching and reusing exc_text: a filter
+            # that already redacted it (UrlRedactionFilter, for urllib3's
+            # header-parse warning) would otherwise be recomputed here and its
+            # result discarded, re-emitting the exception's own text in full.
+            if not record.exc_text:
+                record.exc_text = self.formatException(record.exc_info)
+            payload["exc_info"] = record.exc_text
         if record.stack_info:
             payload["stack_info"] = self.formatStack(record.stack_info)
         return json.dumps(payload, ensure_ascii=False)

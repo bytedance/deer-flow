@@ -19,8 +19,9 @@ def get_gateway_config() -> GatewayConfig:
     global _gateway_config
     if _gateway_config is None:
         _gateway_config = GatewayConfig(
-            host=os.getenv("GATEWAY_HOST", "0.0.0.0"),
-            port=int(os.getenv("GATEWAY_PORT", "8001")),
+            # A blank means "unset" (`-e GATEWAY_PORT=`, or `${PORT}` with PORT unset); int("") would abort the create_app() import
+            host=os.getenv("GATEWAY_HOST") or "0.0.0.0",
+            port=int(os.getenv("GATEWAY_PORT") or "8001"),
             enable_docs=os.getenv("GATEWAY_ENABLE_DOCS", "true").lower() == "true",
         )
     return _gateway_config

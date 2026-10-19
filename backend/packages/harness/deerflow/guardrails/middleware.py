@@ -74,6 +74,17 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
         return context if isinstance(context, dict) else {}
 
     def _build_request(self, request: ToolCallRequest, context: dict) -> GuardrailRequest:
+        # The concrete bound tool object (or None for an unregistered/dynamic
+        # name): provenance is forwarded as provider context, and the object
+        # identity backs the authorization adapter's infrastructure exemption
+        # so a same-named foreign tool can never inherit it.
+        # Local import: a module-level import of deerflow.tools.tool_provenance
+        # pulls in the deerflow.tools package __init__ (builtins → task_tool →
+        # subagents), which is circular while the subagent executor is itself
+        # being imported. At tool-call time the chain is fully initialized.
+        from deerflow.tools.tool_provenance import tool_provenance_context
+
+        tool = getattr(request, "tool", None)
         return GuardrailRequest(
             tool_name=str(request.tool_call.get("name", "")),
             tool_input=request.tool_call.get("args", {}),
@@ -90,6 +101,8 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
             channel_user_id=context.get("channel_user_id"),
             is_internal=context.get("is_internal") is True,
             authz_attributes=normalize_authz_attributes(context.get("authz_attributes")),
+            tool_provenance=tool_provenance_context(tool),
+            tool_identity=tool,
         )
 
     def _build_denied_message(self, request: ToolCallRequest, decision: GuardrailDecision) -> ToolMessage:

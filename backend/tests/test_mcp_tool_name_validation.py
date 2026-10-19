@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
+from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.mcp.tools import get_mcp_tools
 
 
@@ -37,12 +38,20 @@ def _load(server_tools: list[StructuredTool]) -> tuple[list, MagicMock]:
     mock_client = MagicMock()
     mock_client.get_tools = AsyncMock(return_value=server_tools)
 
-    ext = MagicMock(model_extra={})
-    ext.mcp_servers.get = MagicMock(return_value=None)  # no per-tool routing config
+    extensions_config = ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "srv": {
+                    "type": "sse",
+                    "url": "https://example.test/mcp",
+                }
+            }
+        }
+    )
 
     with (
         patch("langchain_mcp_adapters.client.MultiServerMCPClient", return_value=mock_client),
-        patch("deerflow.config.extensions_config.ExtensionsConfig.from_file", return_value=ext),
+        patch("deerflow.config.extensions_config.ExtensionsConfig.from_file", return_value=extensions_config),
         patch("deerflow.mcp.tools.build_servers_config", return_value={"srv": {"transport": "sse"}}),
         patch("deerflow.mcp.tools.get_initial_oauth_headers", new_callable=AsyncMock, return_value={}),
         patch("deerflow.mcp.tools.build_oauth_tool_interceptor", return_value=None),

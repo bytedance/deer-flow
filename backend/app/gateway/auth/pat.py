@@ -39,6 +39,14 @@ PAT_ALLOWED_SCOPES: frozenset[str] = frozenset(
     }
 )
 
+# Deliberately NOT in PAT_ALLOWED_SCOPES: the route permissions "memory:read",
+# "memory:write", "agents:read", and "agents:write" exist in authz
+# (they guard the memory/agent routers), but PATs stay on the thread/run
+# lifecycle only — _PAT_ROUTE_RULES default-denies the memory/agent routes
+# for PAT callers regardless of scopes, so admitting these scopes would not
+# even reach those routes. Opening them to PATs is a product decision that
+# must change all three of: this set, _PAT_ROUTE_RULES, and the API docs.
+
 PAT_MAX_NAME_LENGTH = 128
 
 # Default-deny route boundary for PAT callers (#5041 review P1-1): scope
@@ -217,6 +225,11 @@ async def authenticate_pat(app: Any, authorization: str | None) -> tuple[Any, fr
         # The owning user was deleted or became unresolvable; the token is
         # dead even though its row survives (deleting a user revokes their
         # PATs, without needing a FK cascade).
+        raise HTTPException(status_code=401, detail="Invalid token")
+    if getattr(user, "disabled", False):
+        # Operator-disabled account (#3462 gap 3): the token stays valid on
+        # disk but resolves nothing while the account is suspended; the same
+        # generic 401 keeps the verdict from serving as an oracle.
         raise HTTPException(status_code=401, detail="Invalid token")
     await pat_repo.touch_last_used(str(record["id"]))
     return user, frozenset(record.get("scopes") or ())

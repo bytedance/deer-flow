@@ -56,8 +56,8 @@ def placeholder_env(monkeypatch):
     monkeypatch.delenv("DEERFLOW_TEST_UNSET_VAR", raising=False)
 
 
-def _write_json(path: Path, data: object) -> None:
-    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+def _write_json(path: Path, data: object, encoding: str = "utf-8") -> None:
+    path.write_text(json.dumps(data, indent=2), encoding=encoding)
 
 
 # ---------------------------------------------------------------------------
@@ -65,19 +65,35 @@ def _write_json(path: Path, data: object) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_read_raw_keeps_placeholders(tmp_path: Path, placeholder_env) -> None:
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig"])
+def test_read_raw_keeps_placeholders(tmp_path: Path, placeholder_env, encoding: str) -> None:
     config_path = tmp_path / "extensions_config.json"
-    _write_json(config_path, _raw_config_with_placeholders())
+    _write_json(config_path, _raw_config_with_placeholders(), encoding)
 
     assert read_raw_extensions_config(config_path) == _raw_config_with_placeholders()
 
 
-def test_read_raw_rejects_invalid_json(tmp_path: Path) -> None:
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig"])
+def test_from_file_resolves_placeholders(tmp_path: Path, placeholder_env, encoding: str) -> None:
     config_path = tmp_path / "extensions_config.json"
-    config_path.write_text("{not json", encoding="utf-8")
+    _write_json(config_path, _raw_config_with_placeholders(), encoding)
+
+    config = ExtensionsConfig.from_file(str(config_path))
+
+    assert config.mcp_servers["github"].env == {"GITHUB_TOKEN": SECRET, "OPTIONAL": ""}
+    assert config.mcp_servers["remote"].headers == {"Authorization": SECRET}
+    assert config.skills["existing-skill"].enabled is True
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig"])
+def test_read_raw_rejects_invalid_json(tmp_path: Path, encoding: str) -> None:
+    config_path = tmp_path / "extensions_config.json"
+    config_path.write_text("{not json", encoding=encoding)
 
     with pytest.raises(ValueError, match="not valid JSON"):
         read_raw_extensions_config(config_path)
+    with pytest.raises(ValueError, match="not valid JSON"):
+        ExtensionsConfig.from_file(str(config_path))
 
 
 def test_read_raw_rejects_non_object(tmp_path: Path) -> None:
@@ -134,9 +150,10 @@ def _patch_gateway_writer(monkeypatch, config_path: Path, cached: ExtensionsConf
     monkeypatch.setattr(skills_router, "get_extensions_config", lambda: cached or ExtensionsConfig())
 
 
-def test_gateway_skill_toggle_preserves_placeholders(tmp_path: Path, monkeypatch, placeholder_env) -> None:
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig"])
+def test_gateway_skill_toggle_preserves_placeholders(tmp_path: Path, monkeypatch, placeholder_env, encoding: str) -> None:
     config_path = tmp_path / "extensions_config.json"
-    _write_json(config_path, _raw_config_with_placeholders())
+    _write_json(config_path, _raw_config_with_placeholders(), encoding)
     _patch_gateway_writer(monkeypatch, config_path)
 
     skills_router._write_extensions_skill_state(None, "demo-skill", False, rebuild_public_projection=False)

@@ -2,8 +2,10 @@
 
 import logging
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
+from deerflow.config._boolean_guards import reject_boolean
+from deerflow.config.prompt_overlay import PromptOverlay
 from deerflow.config.token_budget_config import TokenBudgetConfig
 
 logger = logging.getLogger(__name__)
@@ -41,6 +43,19 @@ def clamp_total_subagents_per_run(value: int) -> int:
     return max(MIN_TOTAL_SUBAGENTS_PER_RUN, min(MAX_TOTAL_SUBAGENTS_PER_RUN, value))
 
 
+def effective_total_subagents_per_run(value: int | None, app_config: object) -> int:
+    """Resolve one per-run delegation cap for prompt, middleware, and policy.
+
+    ``None`` means the run did not choose a cap, so the configured
+    ``subagents.max_total_per_run`` applies. That includes an explicit
+    ``null`` from API callers, which ``dict.get(key, default)`` would pass
+    through unchanged.
+    """
+    subagents = getattr(app_config, "subagents", None)
+    requested = getattr(subagents, "max_total_per_run", DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN) if value is None else value
+    return clamp_total_subagents_per_run(int(requested))
+
+
 def default_subagent_token_budget(*, summarization_enabled: bool = False) -> TokenBudgetConfig:
     """Default per-run token budget for subagents (#3875 Phase 2 → Phase 3 coupling).
 
@@ -74,6 +89,8 @@ def default_subagent_token_budget(*, summarization_enabled: bool = False) -> Tok
 class SubagentOverrideConfig(BaseModel):
     """Per-agent configuration overrides."""
 
+    prompt_overlay: PromptOverlay = Field(default_factory=PromptOverlay, description="Operator-owned literal extensions around this subagent's system prompt")
+
     timeout_seconds: int | None = Field(
         default=None,
         ge=1,
@@ -97,6 +114,11 @@ class SubagentOverrideConfig(BaseModel):
         default=None,
         description="Per-run token budget override for this subagent (None = use the global subagents.token_budget default). Symmetric with timeout_seconds/max_turns.",
     )
+
+    @field_validator("timeout_seconds", "max_turns", mode="before")
+    @classmethod
+    def _reject_boolean_override_backstops(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="an integer")
 
 
 class CustomSubagentConfig(BaseModel):
@@ -135,6 +157,11 @@ class CustomSubagentConfig(BaseModel):
         description="Maximum execution time in seconds",
     )
 
+    @field_validator("timeout_seconds", "max_turns", mode="before")
+    @classmethod
+    def _reject_boolean_custom_backstops(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="an integer")
+
 
 class SubagentsAppConfig(BaseModel):
     """Configuration for the subagent system."""
@@ -155,6 +182,12 @@ class SubagentsAppConfig(BaseModel):
         le=MAX_TOTAL_SUBAGENTS_PER_RUN,
         description="Default total number of subagent delegations allowed in one lead-agent run. This is a deterministic backstop against repeated legal-sized task batches. Valid range: 1-50.",
     )
+
+    @field_validator("timeout_seconds", "max_turns", "max_total_per_run", mode="before")
+    @classmethod
+    def _reject_boolean_global_backstops(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="an integer")
+
     token_budget: TokenBudgetConfig = Field(
         default_factory=default_subagent_token_budget,
         description="Default per-run token budget for subagents — a cost-ceiling backstop that engages by default (#3875 Phase 2). Set enabled: false to disable, or override per agent via agents.<name>.token_budget.",

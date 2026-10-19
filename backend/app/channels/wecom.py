@@ -5,10 +5,10 @@ import base64
 import hashlib
 import inspect
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, cast
 
-from app.channels.base import Channel
+from app.channels.base import Channel, ChannelUnavailable
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import (
@@ -18,8 +18,26 @@ from app.channels.message_bus import (
     OutboundMessage,
     ResolvedAttachment,
 )
+from app.channels.notification_groups import notification_group_display_name, wecom_notification_group_chat_id
 
 logger = logging.getLogger(__name__)
+
+# Exceptions that mean the transport failed, not the message. ``websockets``
+# is the SDK's socket layer and forwards its close exception unchanged
+# through ``send_message``; it is not an OSError subclass.
+_TRANSPORT_EXCEPTIONS: tuple[type[BaseException], ...] = (ConnectionError, TimeoutError, OSError)
+try:
+    from websockets.exceptions import ConnectionClosed as _WsConnectionClosed
+except Exception:  # pragma: no cover - absent only when the SDK itself is missing
+    pass
+else:
+    _TRANSPORT_EXCEPTIONS = (*_TRANSPORT_EXCEPTIONS, _WsConnectionClosed)
+
+# The SDK surfaces a platform rejection of a sent frame (non-zero ``errcode``
+# in the ACK) as ``RuntimeError`` with this prefix, from the same call that
+# raises ``RuntimeError`` for a closed socket. The prefix is what tells a
+# verdict about the message apart from a transport failure.
+_WECOM_ACK_REJECTION_PREFIX = "Reply ack error"
 
 
 def _file_md5(path: str) -> str:
@@ -102,6 +120,11 @@ class WeComChannel(Channel):
         self._lifecycle_lock = asyncio.Lock()
         self._ws_frames: dict[str, dict[str, Any]] = {}
         self._ws_stream_ids: dict[str, str] = {}
+        # Optimistic until the SDK reports a disconnect: start() hands us a
+        # live client that is connecting/reconnecting. Cleared on disconnect
+        # and restored after a successful send so proactive push can park
+        # without burning the outbox retry budget during a transport outage.
+        self._ws_transport_up = False
         self._ws_send_locks: dict[str, asyncio.Lock] = {}
         self._ws_send_lock_users: dict[str, int] = {}
         self._ws_send_locks_guard = asyncio.Lock()
@@ -191,6 +214,7 @@ class WeComChannel(Channel):
                 self._ws_task = asyncio.create_task(self._ws_client.connect())
                 self._ws_task.add_done_callback(self._on_ws_task_done)
 
+                self._ws_transport_up = True
                 self._running = True
                 self.bus.subscribe_outbound(self._on_outbound)
             logger.info("WeCom channel started")
@@ -210,6 +234,7 @@ class WeComChannel(Channel):
         logger.error("WeCom WebSocket error: %s", error)
 
     def _on_ws_disconnected(self, *args: Any) -> None:
+        self._ws_transport_up = False
         detail = f" ({args[0]})" if args else ""
         logger.warning("WeCom WebSocket disconnected%s; SDK will attempt to reconnect", detail)
 
@@ -246,6 +271,7 @@ class WeComChannel(Channel):
     async def stop(self) -> None:
         async with self._lifecycle_lock:
             self._running = False
+            self._ws_transport_up = False
             self.bus.unsubscribe_outbound(self._on_outbound)
             ws_client = self._ws_client
             ws_task = self._ws_task
@@ -282,6 +308,108 @@ class WeComChannel(Channel):
             await self._send_ws(msg, _max_retries=_max_retries)
             return
         logger.warning("[WeCom] send called but WebSocket client is not available")
+
+    async def send_notification(self, *, target: str, text_markdown: str) -> None:
+        """Proactively push markdown to a bound WeCom identity (issue #4254).
+
+        Goes through ``WSClient.send_message`` (no inbound frame required)
+        and waits for the platform ACK, so an ACK-less call is never treated
+        as success.
+
+        Transport / not-connected failures raise :class:`ChannelUnavailable`
+        so the outbox parks without consuming retries. Platform rejections
+        count against the budget: the SDK reports a non-zero ``errcode`` as
+        ``RuntimeError("Reply ack error: ...")`` from ``send_message`` itself,
+        so they are told apart from its transport ``RuntimeError`` by that
+        prefix. The ``errcode`` check on a returned ACK dict below is kept as
+        a guard for an SDK that returns the frame instead of raising.
+        """
+        if not self._running or not self._ws_client:
+            raise ChannelUnavailable("WeCom channel is not connected")
+        # Ask the SDK first when it already knows the socket is closed: that
+        # fails fast and skips the retry/sleep storm. The except branch below
+        # still parks a closed socket the SDK only discovers during the send.
+        if getattr(self._ws_client, "is_connected", True) is False:
+            self._ws_transport_up = False
+            raise ChannelUnavailable("WeCom websocket is not connected")
+        body = {"msgtype": "markdown", "markdown": {"content": text_markdown}}
+
+        async def _send_once() -> Any:
+            return await self._ws_client.send_message(target, body)
+
+        try:
+            if self._ws_transport_up:
+                ack = await self._send_with_retry(
+                    _send_once,
+                    max_retries=3,
+                    log_prefix="[WeCom]",
+                    operation_name="notification send",
+                )
+            else:
+                # Known disconnect: one probe so a silent SDK reconnect can
+                # recover, without the 3× retry/sleep storm burning shutdown
+                # and poll time while the socket is still down.
+                ack = await _send_once()
+        except ChannelUnavailable:
+            raise
+        except RuntimeError as exc:
+            if str(exc).startswith(_WECOM_ACK_REJECTION_PREFIX):
+                # The platform answered and said no (bad chatid, user out of
+                # range, ...). The frame went out and the ACK came back on
+                # this socket, so the transport is up; the rejection itself
+                # counts like any other deterministic failure.
+                self._ws_transport_up = True
+                raise
+            # Everything else the SDK raises as RuntimeError is transport-side:
+            # a socket that is not open, a connection dropped while an ACK was
+            # pending. Park the outbox row until the SDK reconnects instead of
+            # charging the delivery a counted attempt per poll for a fault
+            # that is not its own.
+            self._ws_transport_up = False
+            raise ChannelUnavailable(f"WeCom transport unavailable: {exc}") from exc
+        except _TRANSPORT_EXCEPTIONS as exc:
+            # Dead/flapping transport, including the socket layer's own close
+            # exception, which the SDK forwards unchanged. Same treatment.
+            self._ws_transport_up = False
+            raise ChannelUnavailable(f"WeCom transport unavailable: {exc}") from exc
+        errcode = None
+        if isinstance(ack, dict):
+            errcode = ack.get("errcode")
+            ack_body = ack.get("body")
+            if errcode is None and isinstance(ack_body, dict):
+                errcode = ack_body.get("errcode")
+        if errcode not in (None, 0):
+            raise RuntimeError(f"WeCom send_message rejected with errcode={errcode}")
+        self._ws_transport_up = True
+
+    async def send_group_notification_for_owner(self, *, owner_user_id: str | None, target: str, text_markdown: str) -> None:
+        """Deliver to an explicit WeCom group connection owned by ``owner_user_id``."""
+        if not owner_user_id or self._connection_repo is None:
+            raise ChannelUnavailable("WeCom notification binding lookup is unavailable")
+        target_id = target.strip() if isinstance(target, str) else ""
+        if not target_id or target_id != target:
+            raise RuntimeError("WeCom group notification target is empty")
+        try:
+            connections = await self._connection_repo.list_connections(owner_user_id)
+        except Exception as exc:
+            raise ChannelUnavailable("WeCom notification binding lookup is unavailable") from exc
+        if not isinstance(connections, (list, tuple)):
+            raise ChannelUnavailable("WeCom notification binding lookup is unavailable")
+        bot_id = self._bot_id or (str(self.config.get("bot_id") or "").strip() or None)
+        for connection in connections:
+            if connection.get("id") != target_id or connection.get("owner_user_id") != owner_user_id:
+                continue
+            chatid = wecom_notification_group_chat_id(
+                provider=connection.get("provider"),
+                status=connection.get("status"),
+                workspace_id=connection.get("workspace_id"),
+                metadata=connection.get("metadata"),
+                bot_id=bot_id,
+            )
+            if chatid is not None:
+                await self.send_notification(target=chatid, text_markdown=text_markdown)
+                return
+        raise RuntimeError("WeCom group notification destination is no longer connected")
 
     async def _on_outbound(self, msg: OutboundMessage) -> None:
         if msg.channel_name != self.name:
@@ -455,6 +583,13 @@ class WeComChannel(Channel):
                 return
 
         inbound_type = InboundMessageType.COMMAND if is_known_channel_command(text) else InboundMessageType.CHAT
+        inbound_metadata: dict[str, Any] = {
+            "aibotid": body.get("aibotid"),
+            "chattype": body.get("chattype"),
+            "message_id": msg_id,
+        }
+        if body.get("chatid") is not None:
+            inbound_metadata["chatid"] = body.get("chatid")
         inbound = self._make_inbound(
             chat_id=user_id,  # keep user's conversation in memory
             user_id=user_id,
@@ -462,11 +597,7 @@ class WeComChannel(Channel):
             msg_type=inbound_type,
             thread_ts=msg_id,
             files=files or [],
-            metadata={
-                "aibotid": body.get("aibotid"),
-                "chattype": body.get("chattype"),
-                "message_id": msg_id,
-            },
+            metadata=inbound_metadata,
         )
         inbound.topic_id = user_id  # keep the same thread
 
@@ -491,11 +622,31 @@ class WeComChannel(Channel):
             reservation.release()
 
     async def _attach_connection_identity(self, inbound: InboundMessage) -> InboundMessage:
+        aibotid = str(inbound.metadata.get("aibotid") or "").strip() or None
+        chattype = inbound.metadata.get("chattype")
+        chatid = str(inbound.metadata.get("chatid") or "").strip() or None
+        if chattype == "group":
+            if not chatid or self._connection_repo is None:
+                return inbound
+            workspace_id = f"{aibotid}:group:{chatid}" if aibotid else f"group:{chatid}"
+            inbound = await attach_connection_identity(inbound, repo=self._connection_repo, provider="wecom", workspace_id=workspace_id, fallback_without_workspace=False)
+            if inbound.connection_id:
+                return inbound
+            # Pre-group-target versions stored group bindings under the bot ID,
+            # without chatid. Preserve that existing chat identity, but never
+            # let a new private binding authorize an unbound group.
+            legacy = await self._connection_repo.find_connection_by_external_identity(provider="wecom", external_account_id=inbound.user_id, workspace_id=aibotid)
+            metadata = legacy.get("metadata") if isinstance(legacy, Mapping) else None
+            if isinstance(metadata, Mapping) and metadata.get("chattype") == "group" and "chatid" not in metadata and metadata.get("aibotid") == aibotid:
+                inbound.connection_id = legacy["id"]
+                inbound.owner_user_id = legacy["owner_user_id"]
+                inbound.workspace_id = legacy.get("workspace_id")
+            return inbound
         return await attach_connection_identity(
             inbound,
             repo=self._connection_repo,
             provider="wecom",
-            workspace_id=str(inbound.metadata.get("aibotid") or "") or None,
+            workspace_id=aibotid,
             fallback_without_workspace=True,
         )
 
@@ -513,16 +664,35 @@ class WeComChannel(Channel):
             return True
 
         body = frame.get("body", {}) or {}
-        workspace_id = str(body.get("aibotid") or "") or None
+        aibotid = str(body.get("aibotid") or "").strip() or None
+        chattype = body.get("chattype")
+        workspace_name: str | None = None
+        if chattype == "group":
+            chatid = str(body.get("chatid") or "").strip()
+            if not chatid:
+                await self._send_connection_reply(frame, "WeCom connection could not be completed from this message.")
+                return True
+            workspace_id = f"{aibotid}:group:{chatid}" if aibotid else f"group:{chatid}"
+            raw_group_name = str(body.get("chatname") or body.get("group_name") or "").strip()
+            workspace_name = notification_group_display_name(state.get("metadata")) or raw_group_name[:256] or None
+            metadata: dict[str, Any] = {
+                "aibotid": aibotid,
+                "chattype": "group",
+                "chatid": chatid,
+            }
+        else:
+            workspace_id = aibotid
+            metadata = {
+                "aibotid": workspace_id,
+                "chattype": chattype,
+            }
         await self._connection_repo.upsert_connection(
             owner_user_id=state["owner_user_id"],
             provider="wecom",
             external_account_id=user_id,
             workspace_id=workspace_id,
-            metadata={
-                "aibotid": workspace_id,
-                "chattype": body.get("chattype"),
-            },
+            workspace_name=workspace_name,
+            metadata=metadata,
             status="connected",
         )
         await self._send_connection_reply(frame, "WeCom connected to DeerFlow.")

@@ -34,6 +34,8 @@ export type FrontendContribution = {
   namespace: string;
   module: string | null;
   entry: string | null;
+  /** Known transports: inline-v1 and assets-v1; unknown values fail per plugin. */
+  transport?: string | null;
   title: string;
   description: string;
   settings: ExtensionSettings;
@@ -70,12 +72,32 @@ export type ConversationActionGroup = {
   actions: ConversationAction[];
 };
 
+export type ExtensionMention = {
+  namespace: string;
+  provider: string;
+  id: string;
+  label: string;
+};
+export type MentionContext = Pick<
+  SurfaceContext,
+  "namespace" | "locale" | "settings" | "threadId" | "signal" | "callBackend"
+>;
+export type MentionProvider = {
+  id: string;
+  label: string;
+  search: (
+    query: string,
+    context: MentionContext,
+  ) => Promise<readonly { id: string; label: string; description?: string }[]>;
+};
+
 /** Browser package API v1. Modules are installed by trusted deployment operators. */
 export interface FrontendExtension {
   apiVersion: 1;
   module: string;
   icon?: string;
   surfaces?: PluginSurface[];
+  mentionProviders?: MentionProvider[];
   conversationActions?: (
     t: Translations,
     locale?: string,

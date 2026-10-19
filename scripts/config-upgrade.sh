@@ -11,16 +11,53 @@ set -e
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXAMPLE="$REPO_ROOT/config.example.yaml"
 
-# Resolve config.yaml location: env var > backend/ > repo root
-if [ -n "$DEER_FLOW_CONFIG_PATH" ] && [ -f "$DEER_FLOW_CONFIG_PATH" ]; then
-    CONFIG="$DEER_FLOW_CONFIG_PATH"
-elif [ -f "$REPO_ROOT/backend/config.yaml" ]; then
-    CONFIG="$REPO_ROOT/backend/config.yaml"
-elif [ -f "$REPO_ROOT/config.yaml" ]; then
-    CONFIG="$REPO_ROOT/config.yaml"
+if command -v cygpath >/dev/null 2>&1; then
+    REPO_ROOT_WIN="$(cygpath -w "$REPO_ROOT")"
 else
-    CONFIG=""
+    REPO_ROOT_WIN="$REPO_ROOT"
 fi
+
+# Upgrade the config.yaml the Gateway loads. Ask the harness resolver rather
+# than copying its order: with both <checkout>/config.yaml and
+# backend/config.yaml present, `make dev` reads the checkout copy. The import
+# loads .env as the Gateway does; DEER_FLOW_PROJECT_ROOT then defaults to the
+# checkout, as in serve.sh. Prints nothing when no config exists yet.
+# Pass the payload on stdin instead of `python -c`: on Windows setups where
+# python/uv resolve through pyenv-win shim layers, arguments cross a cmd.exe
+# reparse boundary that mangles multi-line argv (observed as a bogus
+# "IndentationError: unexpected indent" on '|| goto :error'). stdin is safe.
+CONFIG="$(cd "$REPO_ROOT/backend" && REPO_ROOT_WIN_PATH="$REPO_ROOT_WIN" uv run python - <<'DEERFLOW_UPGRADE_PY'
+import os
+import sys
+
+from deerflow.env import load_selected_env_file
+
+# Honor an explicit DEER_FLOW_ENV_FILE selection first: values loaded here
+# keep precedence over anything app_config's import-time load discovers,
+# matching the Gateway. Only with no selector do we load the checkout .env
+# explicitly, so the probe does not depend on dotenv's frame-based discovery
+# anchoring inside the harness package. Bonus: loading before the import
+# below lets DEER_FLOW_PROJECT_ROOT in the checkout .env win over the
+# setdefault, as it does for the Gateway.
+if not load_selected_env_file():
+    from dotenv import load_dotenv
+
+    load_dotenv(os.path.join(os.environ['REPO_ROOT_WIN_PATH'], '.env'))
+
+from deerflow.config.app_config import AppConfig
+
+os.environ.setdefault('DEER_FLOW_PROJECT_ROOT', os.environ['REPO_ROOT_WIN_PATH'])
+try:
+    sys.stdout.write(str(AppConfig.resolve_config_path()))
+except FileNotFoundError as exc:
+    # An explicit DEER_FLOW_CONFIG_PATH that does not exist stops the Gateway
+    # too; never upgrade a fallback file in its place.
+    if os.environ.get('DEER_FLOW_CONFIG_PATH'):
+        sys.exit(f'ERROR {exc}')
+except ValueError as exc:
+    sys.exit(f'ERROR {exc}')
+DEERFLOW_UPGRADE_PY
+)"
 
 if [ ! -f "$EXAMPLE" ]; then
     echo "✗ config.example.yaml not found at $EXAMPLE"
@@ -43,9 +80,9 @@ else
     EXAMPLE_WIN="$EXAMPLE"
 fi
 
-cd "$REPO_ROOT/backend" && CONFIG_WIN_PATH="$CONFIG_WIN" EXAMPLE_WIN_PATH="$EXAMPLE_WIN" uv run python -c "
+cd "$REPO_ROOT/backend" && CONFIG_WIN_PATH="$CONFIG_WIN" EXAMPLE_WIN_PATH="$EXAMPLE_WIN" uv run python - <<'DEERFLOW_UPGRADE_PY'
 import os
-import sys, shutil, copy, re
+import sys, shutil, copy, re, secrets
 from pathlib import Path
 
 import yaml
@@ -156,6 +193,30 @@ MIGRATIONS = {
     },
 }
 
+
+def migrate_pii_token_secret(data):
+    # token_secret became mandatory whenever pii_redaction is enabled (v47).
+    # A v46 deployment that enabled redaction without a secret would fail
+    # startup after the upgrade, so generate a random deployment-scoped
+    # secret and persist it here; the .bak backup taken below covers the
+    # original file.
+    pii = data.get('pii_redaction')
+    changes = []
+    if not isinstance(pii, dict) or not pii.get('enabled'):
+        return changes
+    secret = pii.get('token_secret')
+    if isinstance(secret, str) and secret.strip():
+        return changes
+    pii['token_secret'] = secrets.token_urlsafe(32)
+    changes.append('pii_redaction.token_secret generated (required for enabled redaction; a random value was persisted to config.yaml)')
+    return changes
+
+
+MIGRATIONS[47] = {
+    'description': 'Generate a token_secret for deployments with pii_redaction enabled (now mandatory)',
+    'data_transform': migrate_pii_token_secret,
+}
+
 # Apply migrations in order for versions (user_version, example_version]
 migrated = []
 for version in range(user_version + 1, example_version + 1):
@@ -189,7 +250,7 @@ if migrated:
 added = []
 
 def merge(target, source, path=''):
-    \"\"\"Recursively merge source into target, adding missing keys only.\"\"\"
+    """Recursively merge source into target, adding missing keys only."""
     for key, value in source.items():
         key_path = f'{path}.{key}' if path else key
         if key not in target:
@@ -223,4 +284,4 @@ if not migrated and not added:
 print()
 print(f'OK config.yaml upgraded to version {example_version}.')
 print('  Please review the changes and set any new required values.')
-"
+DEERFLOW_UPGRADE_PY

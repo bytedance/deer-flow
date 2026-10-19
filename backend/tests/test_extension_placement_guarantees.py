@@ -260,3 +260,38 @@ def test_middleware_implements_detects_overrides():
 
     assert middleware_implements(_Wraps(), "wrap_tool_call") is True
     assert middleware_implements(_Plain(), "wrap_tool_call") is False
+
+
+def test_declaring_extension_middleware_keeps_ordering_through_narrowing():
+    """A contributor declaring tools composes cleanly, and Layer-1 narrowing —
+    a build-local copy at the same position — cannot break placement
+    guarantees or the wrapper's provenance identity."""
+    from langchain_core.tools import StructuredTool
+
+    from deerflow.agents.middlewares.tool_declarations import apply_declared_tool_view
+    from deerflow.extensions.ordering import assert_ordering
+
+    def _tool(name):
+        return StructuredTool.from_function(lambda: name, name=name, description=name)
+
+    class _DeclaringProbe(_Probe):
+        def __init__(self, tag: str) -> None:
+            super().__init__(tag)
+            self.tools = [_tool("decl_kept"), _tool("decl_denied")]
+
+    stack = _stack_with(MiddlewarePlacement(_DeclaringProbe("declaring"), Placement.MODEL_PHYSICAL))
+    index = _index_of_probe(stack, "declaring")
+    wrapper = stack[index]
+
+    view = apply_declared_tool_view(stack, authorized_names=frozenset({"decl_kept"}))
+
+    narrowed = view[index]
+    assert narrowed is not wrapper
+    assert [tool.name for tool in narrowed.tools] == ["decl_kept"]
+    assert _index_of_probe(view, "declaring") == index  # position preserved
+    assert narrowed.name == wrapper.name  # graph identity preserved
+    assert narrowed.source == wrapper.source  # provenance identity preserved
+    assert_ordering(view, {})  # the invariants still hold on the narrowed view
+    # The caller-owned wrapper and the contributor's inner are untouched.
+    assert [tool.name for tool in wrapper.tools] == ["decl_kept", "decl_denied"]
+    assert [tool.name for tool in wrapper.inner.tools] == ["decl_kept", "decl_denied"]

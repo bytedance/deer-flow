@@ -20,7 +20,7 @@ defense-in-depth; connection-argument helpers only assemble driver payloads.
 from __future__ import annotations
 
 import re
-from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 from deerflow.utils.file_io import await_drained
 
@@ -178,9 +178,11 @@ def dsn_with_search_path(dsn: str, schema: str) -> str:
     does NOT treat ``+`` as a space (that is an HTML-form convention). So
     the space MUST be encoded as ``%20`` rather than ``+``, otherwise libpq
     sees a single broken token ``-c+search_path=...`` and the search_path is
-    never applied. Existing query parameters are preserved. Empty *schema*
-    returns *dsn* unchanged.
+    never applied. Existing query parameters are preserved. The DSN first goes
+    through :func:`normalize_libpq_dsn`, so a SQLAlchemy ``+driver`` suffix is
+    dropped even when *schema* is empty. Empty *schema* adds no option.
     """
+    dsn = normalize_libpq_dsn(dsn)
     if not schema:
         return dsn
     parts = urlsplit(dsn)
@@ -192,27 +194,27 @@ def dsn_with_search_path(dsn: str, schema: str) -> str:
         params["options"] = _merge_search_path_option(params.get("options", ""), schema)
         return make_conninfo(**params)
 
-    # DatabaseConfig.postgres_url may carry a SQLAlchemy driver suffix such as
-    # ``postgresql+asyncpg://``. psycopg's libpq only understands the bare
-    # ``postgres``/``postgresql`` scheme, so accept the compound form but emit
-    # a psycopg-consumable DSN by dropping the ``+driver`` part.
-    scheme_base = parts.scheme.split("+", 1)[0]
-    if scheme_base not in {"postgres", "postgresql"}:
-        raise ValueError(f"Unsupported PostgreSQL DSN scheme for schema injection: {parts.scheme!r}")
-
+    # Rebuild the query by hand rather than with parse_qsl/urlencode: parse_qsl
+    # decodes '+' as a space (an HTML-form rule libpq does not apply), so
+    # round-tripping an existing parameter would rewrite a literal plus as '%20'
+    # and change the value the server sees. Everything but ``options`` is carried
+    # over exactly as written.
     options_values: list[str] = []
-    query_pairs = []
-    for key, value in parse_qsl(parts.query, keep_blank_values=True):
-        if key == "options":
-            options_values.append(value)
+    preserved: list[str] = []
+    for pair in parts.query.split("&"):
+        if not pair:
+            continue
+        raw_key, _, raw_value = pair.partition("=")
+        if unquote(raw_key) == "options":
+            options_values.append(unquote(raw_value))
         else:
-            query_pairs.append((key, value))
+            preserved.append(pair)
 
     options = _merge_search_path_option(" ".join(options_values), schema)
-    query_pairs.append(("options", options))
-    # quote_via=quote encodes space as %20 (libpq-safe), not + (form-style).
-    query = urlencode(query_pairs, quote_via=quote)
-    return urlunsplit((scheme_base, parts.netloc, parts.path, query, parts.fragment))
+    # quote() encodes space as %20 (libpq-safe) and a literal '+' as %2B, so the
+    # merged value keeps both distinctions.
+    query = "&".join([*preserved, f"options={quote(options, safe='')}"])
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
 
 
 def ensure_postgres_schema(conn_string: str, schema: str, *, install_hint: str) -> None:

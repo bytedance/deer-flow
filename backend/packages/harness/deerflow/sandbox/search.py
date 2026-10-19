@@ -1,6 +1,9 @@
+import errno
 import fnmatch
 import os
 import re
+import stat
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -59,6 +62,7 @@ IGNORE_PATTERNS = [
 
 DEFAULT_MAX_FILE_SIZE_BYTES = 1_000_000
 DEFAULT_LINE_SUMMARY_LENGTH = 200
+_GREP_RACE_ERRNOS = {errno.ENOENT, errno.ENOTDIR, errno.ELOOP, errno.EISDIR, getattr(errno, "ESTALE", errno.ENOENT)}
 
 
 @dataclass(frozen=True)
@@ -90,13 +94,57 @@ def should_ignore_path(path: str) -> bool:
     return any(should_ignore_name(segment) for segment in path.replace("\\", "/").split("/") if segment)
 
 
+def _match_segments(pattern_parts: tuple[str, ...], path_parts: tuple[str, ...]) -> bool:
+    # Positions in ``path_parts`` reachable after consuming each pattern part;
+    # ``**`` spans zero or more whole segments, any other part exactly one.
+    reachable = {0}
+    for part in pattern_parts:
+        if part == "**":
+            reachable = set(range(min(reachable), len(path_parts) + 1))
+        else:
+            reachable = {i + 1 for i in reachable if i < len(path_parts) and fnmatch.fnmatchcase(path_parts[i], part)}
+        if not reachable:
+            return False
+    return len(path_parts) in reachable
+
+
+def should_ignore_path_under_root(path: str, root: str) -> bool:
+    """Apply :func:`should_ignore_path` to ``path`` as seen from ``root``.
+
+    Ignore patterns are scoped to the search root, the way ``list_dir`` already
+    applies them: an ignored name hides its own descendants, so searching
+    ``build`` -- or any path below an ignored ancestor -- still returns its
+    contents. Testing the absolute path instead silently hides every result as
+    soon as the search root, or one of its ancestors, is itself an ignored
+    name, so ``glob``/``grep`` reported "no matches" for a directory the local
+    walk lists without any trouble.
+    """
+    root_clean = root.rstrip("/")
+    if not root_clean:
+        root_clean = "/"
+    if path == root_clean:
+        # The caller asked for this exact path. There is nothing relative to
+        # test, and an ignored name must not hide what was explicitly
+        # requested (a single-file ``grep`` hits this on every match).
+        return False
+    prefix = "/" if root_clean == "/" else f"{root_clean}/"
+    if path.startswith(prefix):
+        return should_ignore_path(path[len(prefix) :])
+    return should_ignore_path(path)
+
+
 def path_matches(pattern: str, rel_path: str) -> bool:
-    path = PurePosixPath(rel_path)
-    if path.match(pattern):
-        return True
-    if pattern.startswith("**/"):
-        return path.match(pattern[3:])
-    return False
+    """Match ``rel_path`` (relative to the search root) against a glob pattern.
+
+    A pattern without ``/`` matches the basename at any depth (``*.py``). Any
+    other pattern is anchored at the search root, and ``**`` matches zero or
+    more directories (``src/**/*.py`` includes ``src/top.py``).
+    ``PurePosixPath.match`` is not used for these: it matches from the right
+    and treats ``**`` as a single-segment ``*``.
+    """
+    if "/" not in pattern:
+        return PurePosixPath(rel_path).match(pattern)
+    return _match_segments(PurePosixPath(pattern).parts, PurePosixPath(rel_path).parts)
 
 
 def truncate_line(line: str, max_chars: int = DEFAULT_LINE_SUMMARY_LENGTH) -> str:
@@ -107,11 +155,8 @@ def truncate_line(line: str, max_chars: int = DEFAULT_LINE_SUMMARY_LENGTH) -> st
 
 
 def is_binary_file(path: Path, sample_size: int = 8192) -> bool:
-    try:
-        with path.open("rb") as handle:
-            return b"\0" in handle.read(sample_size)
-    except OSError:
-        return True
+    with path.open("rb") as handle:
+        return b"\0" in handle.read(sample_size)
 
 
 def find_glob_matches(root: Path, pattern: str, *, include_dirs: bool = False, max_results: int = 200) -> tuple[list[str], bool]:
@@ -152,6 +197,40 @@ def find_glob_matches(root: Path, pattern: str, *, include_dirs: bool = False, m
     return matches, truncated
 
 
+def _make_literal_matcher(pattern: str, *, case_sensitive: bool) -> Callable[[str], bool]:
+    if case_sensitive:
+        return lambda line: pattern in line
+    if not pattern:
+        return lambda _line: True
+
+    # KMP bounds comparisons by pattern + text length. Matching one character
+    # at a time retains re.IGNORECASE's Unicode equivalences without rescanning
+    # a long escaped prefix. Full-string casefold would change cases such as ß.
+    by_character = {character: re.compile(re.escape(character), re.IGNORECASE).fullmatch for character in set(pattern)}
+    character_matches = [by_character[character] for character in pattern]
+    failure = [0] * len(pattern)
+    prefix_length = 0
+    for index in range(1, len(pattern)):
+        while prefix_length and not character_matches[prefix_length](pattern[index]):
+            prefix_length = failure[prefix_length - 1]
+        if character_matches[prefix_length](pattern[index]):
+            prefix_length += 1
+        failure[index] = prefix_length
+
+    def matches_line(line: str) -> bool:
+        matched = 0
+        for character in line:
+            while matched and not character_matches[matched](character):
+                matched = failure[matched - 1]
+            if character_matches[matched](character):
+                matched += 1
+                if matched == len(pattern):
+                    return True
+        return False
+
+    return matches_line
+
+
 def find_grep_matches(
     root: Path,
     pattern: str,
@@ -173,19 +252,27 @@ def find_grep_matches(
     if not root_is_file and not root.is_dir():
         raise NotADirectoryError(root)
 
-    regex_source = re.escape(pattern) if literal else pattern
-    flags = 0 if case_sensitive else re.IGNORECASE
-    regex = re.compile(regex_source, flags)
+    if literal:
+        matches_line = _make_literal_matcher(pattern, case_sensitive=case_sensitive)
+    else:
+        regex = re.compile(pattern, 0 if case_sensitive else re.IGNORECASE)
+        matches_line = regex.search
 
-    # Skip lines longer than this to prevent ReDoS on minified / no-newline files.
+    # Only regex searches need the long-line work guard. Literal matching
+    # avoids repeated-prefix rescans, including case-insensitive searches.
     _max_line_chars = line_summary_length * 10
+
+    def handle_search_error(error: OSError) -> None:
+        # Entries may disappear or change type during enumeration or reading.
+        if error.errno not in _GREP_RACE_ERRNOS:
+            raise error
 
     def candidate_files():
         if root_is_file:
             yield root, root.name
             return
 
-        for current_root, dirs, files in os.walk(root):
+        for current_root, dirs, files in os.walk(root, onerror=handle_search_error):
             dirs[:] = [name for name in dirs if not should_ignore_name(name)]
             rel_dir = Path(current_root).relative_to(root)
             for name in files:
@@ -203,13 +290,22 @@ def find_grep_matches(
             file_path = candidate_path.resolve()
             if not root_is_file and not file_path.is_relative_to(root):
                 continue
-            if file_path.stat().st_size > max_file_size or is_binary_file(file_path):
+            file_stat = file_path.stat()
+            if not stat.S_ISREG(file_stat.st_mode):
                 continue
-            with file_path.open(encoding="utf-8", errors="replace") as handle:
+            if file_stat.st_size > max_file_size or is_binary_file(file_path):
+                continue
+            # newline="\n" ends lines where LocalSandbox.read_file does, so a
+            # hit's line_number is the start_line that reads it back; a bare
+            # "\r" stays content. A CRLF terminator still reads as "\n", so $
+            # anchors match as before.
+            with file_path.open(encoding="utf-8", errors="replace", newline="\n") as handle:
                 for line_number, line in enumerate(handle, start=1):
-                    if len(line) > _max_line_chars:
+                    if line.endswith("\r\n"):
+                        line = line[:-2] + "\n"
+                    if not literal and len(line) > _max_line_chars:
                         continue
-                    if regex.search(line):
+                    if matches_line(line):
                         matches.append(
                             GrepMatch(
                                 path=str(file_path),
@@ -220,7 +316,7 @@ def find_grep_matches(
                         if len(matches) >= max_results:
                             truncated = True
                             return matches, truncated
-        except OSError:
-            continue
+        except OSError as exc:
+            handle_search_error(exc)
 
     return matches, truncated

@@ -2,11 +2,12 @@ name: E2E Tests
 
 on:
   push:
-    branches: [ 'main', '2.0.x-dev' ]
+    branches: [ 'main', '*-dev' ]
     paths:
       - 'frontend/**'
       - 'backend/app/gateway/routers/plugins.py'
       - 'backend/extension_test_fixtures/bookmark_plugin_gateway.py'
+      - 'backend/extension_test_fixtures/browser_asset_gateway.py'
       - 'backend/packages/extension-api/**'
       - 'backend/packages/harness/deerflow/extensions/**'
       - 'backend/packages/harness/deerflow/config/plugin_settings.py'
@@ -20,6 +21,7 @@ on:
       - 'frontend/**'
       - 'backend/app/gateway/routers/plugins.py'
       - 'backend/extension_test_fixtures/bookmark_plugin_gateway.py'
+      - 'backend/extension_test_fixtures/browser_asset_gateway.py'
       - 'backend/packages/extension-api/**'
       - 'backend/packages/harness/deerflow/extensions/**'
       - 'backend/packages/harness/deerflow/config/plugin_settings.py'

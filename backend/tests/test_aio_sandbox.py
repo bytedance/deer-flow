@@ -1,5 +1,10 @@
 """Tests for AioSandbox concurrent command serialization (#1433)."""
 
+import logging
+import os
+import shlex
+import subprocess
+import sys
 import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -105,6 +110,27 @@ def sandbox():
         return sb
 
 
+def test_lark_cli_broker_defaults_to_unverified(sandbox):
+    """The constructor default must stay None (unverified).
+
+    False would mean "attested non-broker" and authorize the plaintext
+    credential-mount overlay, so a construction site that forgets to thread
+    the attested value must fail closed instead (#6436 review).
+    """
+    assert sandbox.lark_cli_broker is None
+
+
+def test_sandbox_info_from_dict_keeps_missing_broker_attestation_unverified():
+    """A legacy record without the field must rehydrate as unverified (None),
+    never as attested non-broker — otherwise a future persistence path would
+    silently undo the fail-closed contract (#6436 review)."""
+    from deerflow.community.aio_sandbox.sandbox_info import SandboxInfo
+
+    info = SandboxInfo.from_dict({"sandbox_id": "s", "sandbox_url": "http://x"})
+    assert info.lark_cli_broker is None
+    assert SandboxInfo.from_dict({"sandbox_id": "s", "sandbox_url": "http://x", "lark_cli_broker": False}).lark_cli_broker is False
+
+
 def test_exec_command_appends_exit_marker_when_failure_has_output(sandbox):
     """The legacy exec path must propagate the structured exit_code into the
     output text (LocalSandbox parity) instead of discarding it."""
@@ -118,6 +144,204 @@ def test_bash_exec_appends_exit_marker_when_failure_has_output(sandbox):
     sandbox._client.bash.exec = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(stdout="5 passed, 1 error\n", stderr="", exit_code=1)))
 
     assert sandbox.execute_command("make test", env={"A": "1"}) == "5 passed, 1 error\n\nExit Code: 1"
+
+
+def _execute_with_open_session_stdin(command, env=None, *, shell="/bin/sh", terminal=False, **_kwargs):
+    terminal_fds = None
+    if terminal:
+        import pty
+
+        terminal_fds = pty.openpty()
+    proc = subprocess.Popen(
+        [shell, "-c", command],
+        stdin=terminal_fds[1] if terminal_fds else subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={**os.environ, **(env or {})},
+    )
+    try:
+        # communicate() would close the inherited session stdin and mask the bug.
+        proc.wait(timeout=5)
+        stdout = proc.stdout.read().decode()
+        return SimpleNamespace(data=SimpleNamespace(output=stdout, stdout=stdout, stderr=proc.stderr.read().decode(), exit_code=proc.returncode))
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.communicate()
+        if terminal_fds:
+            for fd in terminal_fds:
+                os.close(fd)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="executes the POSIX sandbox shell transport")
+@pytest.mark.parametrize("input_kind", ["session", "pipeline", "heredoc", "file"])
+@pytest.mark.parametrize("execution_path", ["shell", "scope", "env"])
+def test_command_preserves_transport_stdin_and_explicit_input(sandbox, tmp_path, input_kind, execution_path):
+    """Model the actual AIO transports: shell PTY versus bash.exec's open pipe."""
+    from deerflow.integrations.lark_broker import LARK_BROKER_URL_ENV
+
+    # The shim ignores terminal input, while explicit input is drained to EOF.
+    reader = f"{shlex.quote(sys.executable)} -c 'import sys; print(\"tty\" if sys.stdin.isatty() else repr(sys.stdin.read()))'"
+    expected = "''\n" if execution_path == "env" else "tty\n"
+    if input_kind == "pipeline":
+        command = f"printf 'pipeline input' | {reader}"
+        expected = "'pipeline input'\n"
+    elif input_kind == "heredoc":
+        command = f"{reader} <<'INPUT'\nheredoc input\nINPUT"
+        expected = "'heredoc input\\n'\n"
+    elif input_kind == "file":
+        input_file = tmp_path / "input with spaces.txt"
+        input_file.write_text("file input", encoding="utf-8")
+        command = f"{reader} < {shlex.quote(str(input_file))}"
+        expected = "'file input'\n"
+    else:
+        command = reader
+
+    sandbox._client.bash.exec = _execute_with_open_session_stdin
+
+    def execute_on_terminal(command, **kwargs):
+        return _execute_with_open_session_stdin(command, terminal=True, **kwargs)
+
+    sandbox._client.shell.exec_command = execute_on_terminal
+    if execution_path == "env":
+        result = sandbox.execute_command(command, env={LARK_BROKER_URL_ENV: "http://127.0.0.1:8788"})
+        sandbox._client.bash.close_session.assert_called_once()
+    elif execution_path == "scope":
+        result = sandbox.execute_command_in_scope(command, scope_id="subagent")
+    else:
+        result = sandbox.execute_command(command)
+    assert result == expected
+
+
+@pytest.mark.skipif(os.name == "nt", reason="executes the Bash sandbox shell transport")
+@pytest.mark.parametrize("shell", ["/bin/sh", "/bin/bash"])
+@pytest.mark.parametrize("execution_path", ["shell", "scope", "env"])
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        pytest.param("printf '%s' " + "\\" * 2, "\\", id="literal_backslash"),
+        pytest.param("echo a \\\nb", "a b\n", id="internal_continuation"),
+        pytest.param("printf '%s' '中文 \"quoted\" $HOME $(echo literal)'", '中文 "quoted" $HOME $(echo literal)', id="quoted_shell_characters"),
+    ],
+)
+def test_command_preserves_line_continuations(sandbox, shell, execution_path, command, expected):
+    """The transport delimiter must not become part of the original command."""
+
+    def execute_in_shell(command, **kwargs):
+        return _execute_with_open_session_stdin(command, shell=shell, **kwargs)
+
+    sandbox._client.bash.exec = execute_in_shell
+    sandbox._client.shell.exec_command = execute_in_shell
+    if execution_path == "env":
+        result = sandbox.execute_command(command, env={"REQUEST_VALUE": "present"})
+    elif execution_path == "scope":
+        result = sandbox.execute_command_in_scope(command, scope_id="subagent")
+    else:
+        result = sandbox.execute_command(command)
+    assert result == expected
+
+
+@pytest.mark.parametrize("execution_path", ["shell", "scope", "env"])
+@pytest.mark.parametrize("command", ["echo a " + "\\", "printf '%s' " + "\\" * 3])
+def test_command_delivers_trailing_backslash_unmodified(sandbox, execution_path, command):
+    """A lone backslash at EOF is unspecified (bash drops it, dash keeps it),
+    so assert the transport property instead: the command arrives byte-for-byte
+    and nothing follows it that the backslash could consume."""
+    delivered = []
+
+    def capture(command, **kwargs):
+        delivered.append(command)
+        return SimpleNamespace(data=SimpleNamespace(output="ok", exit_code=0))
+
+    sandbox._client.bash.exec = capture
+    sandbox._client.shell.exec_command = capture
+    if execution_path == "env":
+        sandbox.execute_command(command, env={"REQUEST_VALUE": "present"})
+        assert delivered == [f"exec < /dev/null\n{command}"]
+    elif execution_path == "scope":
+        sandbox.execute_command_in_scope(command, scope_id="subagent")
+        assert delivered == [command]
+    else:
+        sandbox.execute_command(command)
+        assert delivered == [command]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="executes the Bash sandbox shell transport")
+@pytest.mark.parametrize("execution_path", ["shell", "scope", "env"])
+@pytest.mark.parametrize(
+    ("command", "expected", "exit_code"),
+    [
+        pytest.param("shopt -s extglob\ncase test.py in *.@(py|sh)) printf extglob-ok;; esac", "extglob-ok", 0, id="enable_extglob"),
+        pytest.param("shopt -s expand_aliases\nalias project_status='printf alias-ok'\nproject_status", "alias-ok", 0, id="define_alias"),
+        pytest.param("false | true\nprintf '%s' \"${PIPESTATUS[*]}\"", "1 0", 0, id="pipeline_status"),
+        pytest.param("trap 'printf error-trap' ERR\nfalse", "error-trap", 1, id="error_trap"),
+    ],
+)
+def test_command_preserves_bash_parsing_and_status(sandbox, execution_path, command, expected, exit_code):
+    def execute_in_bash(command, **kwargs):
+        return _execute_with_open_session_stdin(command, shell="/bin/bash", terminal=execution_path != "env", **kwargs)
+
+    sandbox._client.bash.exec = execute_in_bash
+    sandbox._client.shell.exec_command = execute_in_bash
+    if execution_path == "env":
+        result = sandbox.execute_command(command, env={"REQUEST_VALUE": "present"})
+    elif execution_path == "scope":
+        result = sandbox.execute_command_in_scope(command, scope_id="subagent")
+    else:
+        result = sandbox.execute_command(command)
+    assert result == expected + (f"\nExit Code: {exit_code}" if exit_code else "")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="executes the POSIX sandbox shell transport")
+def test_persistent_shell_preserves_session_state(sandbox, tmp_path):
+    """PTY commands must not be rewritten or permanently close session fd0."""
+    commands = []
+
+    def record_command(command, **_kwargs):
+        commands.append(command)
+        return SimpleNamespace(data=SimpleNamespace(output="ok", exit_code=0))
+
+    sandbox._client.shell.exec_command = record_command
+    sandbox.execute_command(f"cd {shlex.quote(str(tmp_path))}; export SESSION_VALUE=preserved")
+    sandbox.execute_command('printf "%s\\n" "$PWD" "$SESSION_VALUE"; exit 7')
+    # Run the commands in one shell, as the persistent AIO session does.
+    completed = subprocess.run(["/bin/sh", "-c", "\n".join(commands)], input=b"", capture_output=True, timeout=5)
+    assert completed.returncode == 7
+    assert completed.stdout.decode().splitlines() == [str(tmp_path), "preserved"]
+
+    commands.clear()
+    sandbox.execute_command("false")
+    sandbox.execute_command('printf "%s" "$?"')
+    completed = subprocess.run(["/bin/sh", "-c", "\n".join(commands)], input=b"", capture_output=True, timeout=5)
+    assert completed.returncode == 0
+    assert completed.stdout == b"1"
+
+    commands.clear()
+    sandbox.execute_command("false | true")
+    sandbox.execute_command('printf "%s" "${PIPESTATUS[*]}"')
+    completed = subprocess.run(["/bin/bash", "-c", "\n".join(commands)], input=b"", capture_output=True, timeout=5)
+    assert completed.returncode == 0
+    assert completed.stdout == b"1 0"
+
+    commands.clear()
+    sandbox.execute_command("trap 'printf error-trap' ERR")
+    sandbox.execute_command("false")
+    completed = subprocess.run(["/bin/bash", "-c", "\n".join(commands)], input=b"", capture_output=True, timeout=5)
+    assert completed.returncode == 1
+    assert completed.stdout == b"error-trap"
+
+    commands.clear()
+    sandbox.execute_command("true")
+    completed = subprocess.run(["/bin/sh", "-c", commands[0] + '\nread session_input; printf "%s" "$session_input"'], input=b"session still open\n", capture_output=True, timeout=5)
+    assert completed.returncode == 0
+    assert completed.stdout == b"session still open"
+
+
+@pytest.mark.parametrize("command", ["", " \t\n", "# comment\n \t# another comment"])
+def test_empty_or_comment_only_command_keeps_session_status(sandbox, command):
+    sandbox._client.shell.exec_command = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(output="ok", exit_code=0)))
+    sandbox.execute_command(command)
+    assert sandbox._client.shell.exec_command.call_args.kwargs["command"] == command
 
 
 class TestExecuteCommandSerialization:
@@ -746,18 +970,17 @@ class TestShellSessionCreationOwnership:
         self,
         sandbox,
     ):
-        sandbox._default_shell_corrupted = True
         create_session = MagicMock(side_effect=httpx.ConnectError("connection refused"))
         cleanup_session = MagicMock()
 
         sandbox._client.shell.create_session = create_session
         sandbox._client.shell.cleanup_session = cleanup_session
 
-        assert sandbox.execute_command("first").startswith("Error:")
+        assert sandbox.execute_command_in_scope("first", scope_id="create-failure").startswith("Error:")
         assert sandbox.requires_container_recycle is False
         cleanup_session.assert_not_called()
 
-        sandbox.execute_command("second")
+        sandbox.execute_command_in_scope("second", scope_id="create-failure")
         assert create_session.call_count == 2
 
     def test_shell_client_error_is_definite_and_does_not_quarantine(
@@ -766,7 +989,6 @@ class TestShellSessionCreationOwnership:
     ):
         from agent_sandbox.core.api_error import ApiError
 
-        sandbox._default_shell_corrupted = True
         sandbox._client.shell.create_session = MagicMock(
             side_effect=ApiError(
                 status_code=400,
@@ -775,7 +997,7 @@ class TestShellSessionCreationOwnership:
         )
         sandbox._client.shell.cleanup_session = MagicMock()
 
-        assert sandbox.execute_command("bad").startswith("Error:")
+        assert sandbox.execute_command_in_scope("bad", scope_id="create-failure").startswith("Error:")
         assert sandbox.requires_container_recycle is False
         sandbox._client.shell.cleanup_session.assert_not_called()
 
@@ -893,6 +1115,40 @@ class TestShellSessionCreationOwnership:
         assert "earlier ambiguous create outcome" in blocked
         assert create_calls == before
 
+    def test_in_flight_shell_create_does_not_fence_the_container(self, sandbox):
+        """A pending create is transient, not an uncertain outcome.
+
+        While the create is in flight the container is healthy, so a
+        concurrent acquire must not read `requires_container_recycle` as a
+        recycle reason and destroy a live run's runtime (#6436 review P1).
+        Only the unresolved (ambiguous) outcome fences the container.
+        """
+        entered = threading.Event()
+        release = threading.Event()
+        results: list[str] = []
+
+        def stalled_create(id, **kwargs):
+            entered.set()
+            assert release.wait(timeout=2)
+            raise httpx.ReadTimeout("create stalled")
+
+        sandbox._client.shell.create_session = stalled_create
+        sandbox._client.shell.cleanup_session = MagicMock()
+
+        thread = threading.Thread(target=lambda: results.append(sandbox.execute_command_in_scope("first", scope_id="scope-a")))
+        thread.start()
+        try:
+            assert entered.wait(timeout=2)
+            assert sandbox.has_pending_session_creates is True
+            assert sandbox.requires_container_recycle is False
+        finally:
+            release.set()
+            thread.join(timeout=2)
+        assert not thread.is_alive()
+        assert "session creation outcome is unknown" in results[0]
+        assert sandbox.has_pending_session_creates is False
+        assert sandbox.requires_container_recycle is True
+
 
 class TestBashSessionCreationOwnership:
     """Bash env-session creation follows the same bounded ownership contract."""
@@ -983,6 +1239,43 @@ class TestBashSessionCreationOwnership:
 
         assert "earlier ambiguous create outcome" in second
         create_session.assert_not_called()
+
+    def test_in_flight_bash_create_does_not_fence_the_container(self, sandbox):
+        """The bash plane follows the same transient-pending contract."""
+        entered = threading.Event()
+        release = threading.Event()
+        results: list[str] = []
+
+        def stalled_create(session_id, **kwargs):
+            entered.set()
+            assert release.wait(timeout=2)
+            raise httpx.ReadTimeout("create stalled")
+
+        sandbox._client.bash.create_session = stalled_create
+        sandbox._client.bash.close_session = MagicMock()
+        sandbox._client.bash.exec = MagicMock()
+
+        thread = threading.Thread(
+            target=lambda: results.append(
+                sandbox.execute_command(
+                    "echo $TOKEN",
+                    env={"TOKEN": "secret"},
+                )
+            )
+        )
+        thread.start()
+        try:
+            assert entered.wait(timeout=2)
+            assert sandbox.has_pending_session_creates is True
+            assert sandbox.requires_container_recycle is False
+            sandbox._client.bash.exec.assert_not_called()
+        finally:
+            release.set()
+            thread.join(timeout=2)
+        assert not thread.is_alive()
+        assert "session creation outcome is unknown" in results[0]
+        assert sandbox.has_pending_session_creates is False
+        assert sandbox.requires_container_recycle is True
 
     def test_shell_creation_quarantine_does_not_block_bash_plane(
         self,
@@ -2609,6 +2902,77 @@ class TestDownloadFile:
 class TestClose:
     """Verify AioSandbox.close() tears down the host-side HTTP client (#2872)."""
 
+    def test_close_waits_for_download_stream_cleanup(self, sandbox):
+        reading = threading.Event()
+        allow_read = threading.Event()
+        closing = threading.Event()
+        stream_closed = threading.Event()
+        close_observed_cleanup = []
+        outcomes = []
+
+        class ObservedLock:
+            def __init__(self):
+                self.lock = threading.Lock()
+                self.waited_for_reader = False
+
+            def __enter__(self):
+                if threading.current_thread().name == "download-close":
+                    if self.lock.acquire(blocking=False):
+                        closing.set()
+                        return
+                    self.waited_for_reader = True
+                    closing.set()
+                self.lock.acquire()
+
+            def __exit__(self, *args):
+                self.lock.release()
+
+        def stream():
+            try:
+                reading.set()
+                assert allow_read.wait(timeout=5)
+                yield b"data"
+            finally:
+                stream_closed.set()
+
+        def close_client():
+            close_observed_cleanup.append(stream_closed.is_set())
+
+        http_client = MagicMock(spec=["close"])
+        http_client.close.side_effect = close_client
+        sandbox._client._client_wrapper = SimpleNamespace(httpx_client=SimpleNamespace(httpx_client=http_client))
+        sandbox._client.file.download_file.return_value = stream()
+        sandbox._lock = ObservedLock()
+
+        def download():
+            try:
+                outcomes.append(sandbox.download_file("/mnt/user-data/outputs/image.png", max_bytes=4))
+            except BaseException as error:
+                outcomes.append(error)
+
+        reader = threading.Thread(target=download)
+        closer = threading.Thread(target=sandbox.close, name="download-close")
+        reader.start()
+        try:
+            assert reading.wait(timeout=5)
+            closer.start()
+            assert closing.wait(timeout=5)
+            assert sandbox._lock.waited_for_reader
+            http_client.close.assert_not_called()
+            assert not stream_closed.is_set()
+        finally:
+            allow_read.set()
+            reader.join(timeout=5)
+            if closer.ident is not None:
+                closer.join(timeout=5)
+        assert not reader.is_alive()
+        assert not closer.is_alive()
+        assert outcomes == [b"data"]
+        assert stream_closed.is_set()
+        assert close_observed_cleanup == [True]
+        http_client.close.assert_called_once_with()
+        assert sandbox._client is None
+
     def test_close_calls_real_nested_httpx_client(self, sandbox):
         """close() must close the real httpx.Client at the bottom of the chain.
 
@@ -2717,3 +3081,67 @@ def test_list_dir_preserves_trailing_space_in_filename(sandbox):
     sandbox._client.shell.exec_command = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(output="/test/notes.txt \n/test/sub\n\n__DF_FIND_STATUS__:0\n", exit_code=0)))
 
     assert sandbox.list_dir("/test") == ["/test/notes.txt ", "/test/sub"]
+
+
+def _sdk_file_read_validation_error() -> Exception:
+    """The exact exception the SDK raises for a server failure envelope.
+
+    The AIO server reports read failures (e.g. ENOENT) as
+    ``{"success": false, "message": ..., "data": {}}``; the empty ``data``
+    cannot satisfy the required fields of the SDK's ``FileReadResult`` model,
+    so parsing raises a ``ValidationError`` with two "Field required" errors.
+    Building it from the real SDK models keeps the test faithful to what
+    production raises.
+    """
+    from agent_sandbox.file.client import ResponseFileReadResult
+    from pydantic import ValidationError
+
+    try:
+        ResponseFileReadResult.model_validate({"success": False, "message": "file not found", "data": {}})
+    except ValidationError as e:
+        return e
+    raise AssertionError("model_validate should fail on data: {}")
+
+
+def test_read_file_missing_file_returns_actionable_error(sandbox, caplog):
+    """A server failure envelope must not leak the SDK's pydantic
+    validation-error text to the model. The result must state the file is
+    missing/unreadable so the agent can act on it (create it, pick another
+    path) instead of retrying the same read or "fixing" a nonexistent file."""
+    sandbox._client.file.read_file.side_effect = _sdk_file_read_validation_error()
+
+    with caplog.at_level(logging.DEBUG, logger="deerflow.community.aio_sandbox.aio_sandbox"):
+        result = sandbox.read_file("/workspace/new_file.py")
+
+    assert result == "Error: file not found or unreadable: /workspace/new_file.py"
+    assert "validation errors" not in result
+
+
+def test_read_file_missing_file_does_not_log_error_noise(sandbox, caplog):
+    """Missing files are an expected outcome — ReadBeforeWriteMiddleware
+    probes every new-file write — so the validation failure must stay out of
+    the error-level gateway log."""
+    sandbox._client.file.read_file.side_effect = _sdk_file_read_validation_error()
+
+    with caplog.at_level(logging.DEBUG, logger="deerflow.community.aio_sandbox.aio_sandbox"):
+        sandbox.read_file("/workspace/new_file.py")
+
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
+
+
+def test_read_file_success_returns_content(sandbox):
+    sandbox._client.file.read_file.return_value = SimpleNamespace(data=SimpleNamespace(content="hello\n", file="/workspace/a.txt"))
+    assert sandbox.read_file("/workspace/a.txt") == "hello\n"
+    sandbox._client.file.read_file.assert_called_once_with(file="/workspace/a.txt")
+
+
+def test_read_file_unexpected_error_still_logged(sandbox, caplog):
+    """Non-validation failures keep the error log and the generic error
+    string; only the server failure envelope is downgraded to debug."""
+    sandbox._client.file.read_file.side_effect = RuntimeError("connection reset")
+
+    with caplog.at_level(logging.ERROR, logger="deerflow.community.aio_sandbox.aio_sandbox"):
+        result = sandbox.read_file("/workspace/a.txt")
+
+    assert result == "Error: connection reset"
+    assert any(record.levelno >= logging.ERROR for record in caplog.records)

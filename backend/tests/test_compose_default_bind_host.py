@@ -17,10 +17,15 @@ intentionally expose the stack behind their own TLS/auth front door.
 
 from __future__ import annotations
 
+import json
+import os
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
 import yaml
+from support.compose import DOCKER, requires_docker_compose
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_PATHS = {
@@ -120,14 +125,89 @@ def _bind_address(mapping: str) -> str | None:
     return segments[0] if len(segments) >= 3 else None
 
 
-def test_dev_compose_env_files_are_optional():
-    """Missing .env files must not fail `docker compose -f docker/docker-compose-dev.yaml`."""
-    compose = yaml.safe_load(COMPOSE_PATHS["dev"].read_text(encoding="utf-8"))
-    expected = {
-        "provisioner": "../.env",
-        "frontend": "../frontend/.env",
-        "gateway": "../.env",
-    }
-    for service_name, path in expected.items():
+EXPECTED_ENV_FILES = {
+    "provisioner": "../.env",
+    "frontend": "../frontend/.env",
+    "gateway": "../.env",
+}
+
+
+@pytest.mark.parametrize("variant", sorted(COMPOSE_PATHS))
+def test_compose_env_files_are_optional(variant: str):
+    """Missing .env files must not fail either compose file.
+
+    Both are gitignored, so a fresh checkout has neither. ``make up`` seeds
+    config.yaml but not these, and the short ``- ../.env`` form makes Compose
+    abort with ``env file ... not found`` before building anything.
+    """
+    compose = yaml.safe_load(COMPOSE_PATHS[variant].read_text(encoding="utf-8"))
+    for service_name, path in EXPECTED_ENV_FILES.items():
         entries = compose["services"][service_name]["env_file"]
-        assert entries == [{"path": path, "required": False}], f"{service_name} env_file must be optional; got: {entries!r}"
+        assert entries == [{"path": path, "required": False}], f"{variant} {service_name} env_file must be optional; got: {entries!r}"
+
+
+# ── Against the real Compose client, when installed ─────────────────────────
+
+
+def _render(tmp_path: Path, variant: str) -> subprocess.CompletedProcess[str]:
+    """Render a checkout copy of the compose file the way the wrappers invoke it."""
+    docker_dir = tmp_path / "docker"
+    shutil.copytree(REPO_ROOT / "docker", docker_dir)
+    (tmp_path / "frontend").mkdir(exist_ok=True)
+    env = {key: value for key, value in os.environ.items() if not key.startswith(("DEER_FLOW_", "COMPOSE_"))}
+    # Values deploy.sh / docker.sh export before calling Compose; without them
+    # the bind-mount specs render empty and Compose fails for another reason.
+    env.update(
+        DEER_FLOW_ROOT=str(tmp_path),
+        DEER_FLOW_HOME=str(tmp_path / "home"),
+        DEER_FLOW_REPO_ROOT=str(tmp_path),
+        DEER_FLOW_CONFIG_PATH=str(tmp_path / "config.yaml"),
+        DEER_FLOW_EXTENSIONS_CONFIG_PATH=str(tmp_path / "extensions_config.json"),
+        BETTER_AUTH_SECRET="test-secret",
+        DEER_FLOW_INTERNAL_AUTH_TOKEN="test-token",
+    )
+    return subprocess.run(
+        [DOCKER, "compose", "-p", "deer-flow-env-file-test", "-f", str(docker_dir / COMPOSE_PATHS[variant].name), "config", "--format", "json"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+
+@requires_docker_compose
+@pytest.mark.parametrize("variant", sorted(COMPOSE_PATHS))
+def test_real_compose_renders_a_checkout_without_env_files(tmp_path, variant: str):
+    result = _render(tmp_path, variant)
+
+    assert result.returncode == 0, f"{variant} compose must render without .env files:\n{result.stderr}"
+
+
+@requires_docker_compose
+@pytest.mark.parametrize("variant", sorted(COMPOSE_PATHS))
+def test_real_compose_still_loads_env_files_that_exist(tmp_path, variant: str):
+    """Optional must not mean ignored: a present .env still reaches each service."""
+    (tmp_path / "frontend").mkdir()
+    (tmp_path / ".env").write_text("ROOT_ENV_PROBE=from-root-env\n", encoding="utf-8")
+    (tmp_path / "frontend" / ".env").write_text("FRONTEND_ENV_PROBE=from-frontend-env\n", encoding="utf-8")
+
+    result = _render(tmp_path, variant)
+
+    assert result.returncode == 0, result.stderr
+    services = json.loads(result.stdout)["services"]
+    for service_name, path in EXPECTED_ENV_FILES.items():
+        key, value = ("FRONTEND_ENV_PROBE", "from-frontend-env") if path.startswith("../frontend/") else ("ROOT_ENV_PROBE", "from-root-env")
+        assert services[service_name]["environment"].get(key) == value, f"{variant} {service_name} must still load {path}"
+
+
+@requires_docker_compose
+@pytest.mark.parametrize("variant", sorted(COMPOSE_PATHS))
+def test_real_compose_still_rejects_an_env_file_it_cannot_read(tmp_path, variant: str):
+    """`required: false` skips only a missing file; a broken one must stay loud."""
+    (tmp_path / ".env").mkdir()
+
+    result = _render(tmp_path, variant)
+
+    assert result.returncode != 0
+    assert ".env" in result.stderr

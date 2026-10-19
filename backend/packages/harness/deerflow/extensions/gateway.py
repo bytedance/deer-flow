@@ -22,6 +22,7 @@ from typing import Any
 from deerflow_extension_api import ExtensionRuntimeDeps
 
 from deerflow.extensions.loader import Diagnostic
+from deerflow.extensions.model_access import ModelInvocationService
 from deerflow.extensions.policy import project_host_policy
 from deerflow.extensions.registry import LoadedExtensions
 
@@ -578,6 +579,7 @@ async def start_services(
     session_factory: Any | None,
     *,
     run_evidence_reader: Any | None = None,
+    host_capabilities: dict[str, tuple[Any | None, Any | None]] | None = None,
     attempted_services: list[tuple[str, Any]] | None = None,
 ) -> list[Diagnostic]:
     """Start extension services in registration order, failing open per item."""
@@ -585,21 +587,34 @@ async def start_services(
     if not extensions.services:
         return diagnostics
 
-    deps = ExtensionRuntimeDeps(
+    base_deps = ExtensionRuntimeDeps(
         app_store=extensions.app_store,
         policy=project_host_policy(app_config),
         session_factory=session_factory,
         run_evidence_reader=run_evidence_reader,
     )
+    source_deps = {}
     for entry in extensions.services:
         source, service = entry
+        evidence, mutations = (host_capabilities or {}).get(source, (None, None))
+        if evidence is None and mutations is None:
+            deps = base_deps  # Preserve the legacy shared-dependency identity.
+        else:
+            from dataclasses import replace
+
+            if source not in source_deps:
+                source_deps[source] = replace(base_deps, completed_run_evidence=evidence, skill_mutations=mutations)
+            deps = source_deps[source]
         if attempted_services is not None:
             # Record before awaiting start(): a service may acquire resources
             # and then fail or be cancelled, so it still owns stop().
             attempted_services.append(entry)
         cancellation_count = _cancellation_count()
         try:
-            await service.start(deps)
+            if isinstance(service, ModelInvocationService):
+                await service.start_with_host(deps, app_config)
+            else:
+                await service.start(deps)
         except asyncio.CancelledError:
             if _cancellation_count() > cancellation_count:
                 raise

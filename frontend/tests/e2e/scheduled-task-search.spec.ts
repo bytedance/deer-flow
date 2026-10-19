@@ -56,9 +56,7 @@ test("searches titles and prompts, clears results, and hides stale detail action
   });
   mockLangGraphAPI(page, { threads: [], scheduledTasks: tasks });
   await page.goto("/workspace/scheduled-tasks");
-  const search = page.getByRole("searchbox", {
-    name: "Search task titles or prompts",
-  });
+  const search = page.getByRole("searchbox", { name: "Search tasks" });
   const list = page.getByTestId("scheduled-task-list");
   const detail = page.getByTestId("scheduled-task-detail");
   await expect(list.getByRole("button")).toHaveCount(3);
@@ -82,7 +80,7 @@ test("searches titles and prompts, clears results, and hides stale detail action
   expect(writes).toEqual([]);
 });
 
-test("search composes with status, type and thread scope", async ({ page }) => {
+test("search composes with status tabs and thread scope", async ({ page }) => {
   mockLangGraphAPI(page, {
     threads: [],
     scheduledTasks: [
@@ -98,18 +96,25 @@ test("search composes with status, type and thread scope", async ({ page }) => {
   await page.goto("/workspace/scheduled-tasks?thread_id=scope-thread");
   const list = page.getByTestId("scheduled-task-list");
   await expect(list.getByRole("button")).toHaveCount(3);
-  await page
-    .getByRole("searchbox", { name: "Search task titles or prompts" })
-    .fill("report");
+  await page.getByRole("searchbox", { name: "Search tasks" }).fill("report");
   await expect(list.getByRole("button")).toHaveCount(2);
-  await page.getByRole("button", { name: "Paused", exact: true }).click();
+  const tabs = page.getByRole("group", { name: "Filter by status" });
+  await tabs.getByRole("radio", { name: "Paused" }).click();
+  await expect(tabs.getByRole("radio", { name: "Paused" })).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
   await expect(list.getByRole("button")).toHaveCount(1);
-  await page.getByRole("button", { name: "Cron", exact: true }).click();
+  await expect(page.getByTestId("scheduled-task-item-archive")).toBeVisible();
+  await tabs.getByRole("radio", { name: "Finished" }).click();
   await expect(list.getByRole("button")).toHaveCount(0);
+  await expect(page.getByTestId("scheduled-task-search-empty")).toBeVisible();
+  await tabs.getByRole("radio", { name: "Active" }).click();
+  await expect(list.getByRole("button")).toHaveCount(1);
+  await expect(page.getByTestId("scheduled-task-item-report")).toBeVisible();
   await page.getByRole("button", { name: "Clear search", exact: true }).click();
-  await expect(list.getByRole("button")).toHaveCount(0);
-  await page.getByRole("button", { name: "All types", exact: true }).click();
-  await expect(list.getByRole("button")).toHaveCount(2);
+  await tabs.getByRole("radio", { name: "All" }).click();
+  await expect(list.getByRole("button")).toHaveCount(3);
   await expect(page.getByTestId("scheduled-task-item-outside")).toHaveCount(0);
 });
 
@@ -122,9 +127,11 @@ test("search controls and no-match feedback are localized", async ({
     document.cookie = "locale=zh-CN; path=/";
   });
   await page.reload();
-  await page
-    .getByRole("searchbox", { name: "搜索任务标题或提示词" })
-    .fill("不存在的任务");
+  const tabs = page.getByRole("group", { name: "按状态筛选" });
+  for (const name of ["全部", "已启用", "已暂停", "已结束"]) {
+    await expect(tabs.getByRole("radio", { name })).toBeVisible();
+  }
+  await page.getByRole("searchbox", { name: "搜索任务" }).fill("不存在的任务");
   await expect(page.getByTestId("scheduled-task-search-empty")).toHaveText(
     "没有符合搜索内容和筛选条件的任务。",
   );

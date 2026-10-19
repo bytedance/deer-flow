@@ -8,8 +8,9 @@ PDF conversion strategy (auto mode):
      total when page count is unavailable), treat as image-based and fall back to MarkItDown.
   3. If pymupdf4llm is not installed, use MarkItDown directly (existing behaviour).
 
-Large files (> ASYNC_THRESHOLD_BYTES) are converted in a thread pool via
-asyncio.to_thread() to avoid blocking the event loop (fixes #1569).
+All document parsing runs in a thread pool via asyncio.to_thread() so compressed
+Office files and small PDFs cannot block the serving event loop. Source byte
+size does not bound parsing time.
 
 No FastAPI or HTTP dependencies — pure utility functions.
 """
@@ -19,6 +20,7 @@ import logging
 from pathlib import Path
 
 from deerflow.config.app_config import get_app_config
+from deerflow.utils.file_io import await_drained, run_file_io
 
 # Backward-compat re-exports — outline extraction moved to file_outline.py.
 from deerflow.utils.file_outline import (  # noqa: F401
@@ -38,11 +40,6 @@ CONVERTIBLE_EXTENSIONS = {
     ".doc",
     ".docx",
 }
-
-# Files larger than this threshold are converted in a background thread.
-# Small files complete in < 1s synchronously; spawning a thread adds unnecessary
-# scheduling overhead for them.
-_ASYNC_THRESHOLD_BYTES = 1 * 1024 * 1024  # 1 MB
 
 # If pymupdf4llm produces fewer characters *per page* than this threshold,
 # the PDF is likely image-based or encrypted — fall back to MarkItDown.
@@ -108,7 +105,7 @@ def _convert_with_markitdown(file_path: Path) -> str:
 
 
 def _do_convert(file_path: Path, pdf_converter: str) -> str:
-    """Synchronous conversion — called directly or via asyncio.to_thread.
+    """Synchronous conversion — run outside the calling event loop.
 
     Args:
         file_path: Path to the file.
@@ -144,8 +141,8 @@ async def convert_file_to_markdown(file_path: Path, output_path: Path | None = N
     """Convert a supported document file to Markdown.
 
     PDF files are handled with a two-converter strategy (see module docstring).
-    Large files (> 1 MB) are offloaded to a thread pool to avoid blocking the
-    event loop.
+    Parsing is offloaded for every source size: a small compressed document
+    can still require seconds of synchronous work.
 
     Args:
         file_path: Path to the file to convert.
@@ -159,15 +156,29 @@ async def convert_file_to_markdown(file_path: Path, output_path: Path | None = N
     """
     try:
         pdf_converter = _get_pdf_converter()
-        file_size = file_path.stat().st_size
-
-        if file_size > _ASYNC_THRESHOLD_BYTES:
-            text = await asyncio.to_thread(_do_convert, file_path, pdf_converter)
-        else:
-            text = _do_convert(file_path, pdf_converter)
+        # Compressed size cannot predict parsing cost (e.g. a small XLSX can
+        # contain many cells). Always offload, and drain across cancellation so
+        # the caller retains its source until the converter finishes reading.
+        text = await await_drained(asyncio.to_thread(_do_convert, file_path, pdf_converter))
 
         md_path = output_path if output_path is not None else file_path.with_suffix(".md")
-        md_path.write_text(text, encoding="utf-8")
+        # Drain the write-back across caller cancellation: run_file_io awaits
+        # run_in_executor, so a plain await would unwind while the worker is
+        # still writing and leave the partial output behind for the caller's
+        # scope to trip over. await_drained delivers the cancellation only
+        # after the worker finished, so the cleanup below sees a settled file.
+        try:
+            await await_drained(run_file_io(md_path.write_text, text, encoding="utf-8"))
+        except asyncio.CancelledError:
+            try:
+                await await_drained(run_file_io(md_path.unlink, missing_ok=True))
+            except Exception:
+                # Cleanup must not shadow the cancellation: an unlink failure
+                # escaping this handler used to be swallowed by the broad
+                # handler below as an ordinary conversion failure, leaving
+                # both the caller's cancellation and the staging file behind.
+                logger.exception("Failed to remove partial conversion output %s after cancellation", md_path)
+            raise
 
         logger.info("Converted %s to markdown: %s (%d chars)", file_path.name, md_path.name, len(text))
         return md_path

@@ -343,6 +343,54 @@ class TestSymlinkEscapes:
         with pytest.raises(FileNotFoundError):
             sandbox.list_dir("/mnt/data/missing")
 
+    def test_list_dir_raises_when_only_nested_virtual_mount_exists(self, tmp_path):
+        nested_mount = tmp_path / "nested"
+        nested_mount.mkdir()
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(
+                    container_path="/mnt/virtual/deep/child",
+                    local_path=str(nested_mount),
+                    read_only=True,
+                ),
+            ],
+        )
+
+        with pytest.raises(FileNotFoundError):
+            sandbox.list_dir("/mnt/virtual")
+
+    def test_list_dir_raises_when_direct_virtual_mount_is_missing(self, tmp_path):
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(
+                    container_path="/mnt/virtual/child",
+                    local_path=str(tmp_path / "missing"),
+                    read_only=True,
+                ),
+            ],
+        )
+
+        with pytest.raises(FileNotFoundError):
+            sandbox.list_dir("/mnt/virtual")
+
+    def test_list_dir_raises_when_parent_mount_is_a_file(self, tmp_path):
+        parent_file = tmp_path / "parent-file"
+        parent_file.write_text("not a directory", encoding="utf-8")
+        child_mount = tmp_path / "child"
+        child_mount.mkdir()
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/virtual", local_path=str(parent_file), read_only=True),
+                PathMapping(container_path="/mnt/virtual/child", local_path=str(child_mount), read_only=True),
+            ],
+        )
+
+        with pytest.raises(FileNotFoundError):
+            sandbox.list_dir("/mnt/virtual")
+
     def test_list_dir_empty_directory_returns_empty(self, tmp_path):
         mount_dir = tmp_path / "mount"
         mount_dir.mkdir()
@@ -534,25 +582,30 @@ class TestMultipleMounts:
             ],
         )
 
-        # Mock subprocess to capture the resolved command. The POSIX path runs
-        # commands via subprocess.Popen, so wrap that and still execute the real
-        # command.
+        # Capture the resolved command at the runner seam. POSIX and Windows
+        # hosts dispatch through different runners (the Windows MSYS branch
+        # spawns the shell directly, so a delegating Popen mock would try to
+        # execute a POSIX shell path that does not exist), and the contract
+        # under test is the rewritten command, not the execution.
         captured = {}
-        original_popen = __import__("subprocess").Popen
 
-        def mock_popen(*args, **kwargs):
-            if len(args) > 0:
-                captured["command"] = args[0]
-            return original_popen(*args, **kwargs)
+        def capture_posix(args, timeout, env=None):
+            captured["command"] = args
+            return ("hello\n", "", 0, False)
 
-        monkeypatch.setattr("deerflow.sandbox.local.local_sandbox.subprocess.Popen", mock_popen)
+        def capture_windows(*args, **kwargs):
+            captured["command"] = args[0] if args else []
+            return ("hello\n", "", 0, False)
+
         monkeypatch.setattr("deerflow.sandbox.local.local_sandbox.LocalSandbox._get_shell", lambda self: "/bin/sh")
+        monkeypatch.setattr("deerflow.sandbox.local.local_sandbox.LocalSandbox._run_posix_command", staticmethod(capture_posix))
+        monkeypatch.setattr("deerflow.sandbox.local.local_sandbox.LocalSandbox._run_windows_command", staticmethod(capture_windows))
 
         sandbox.execute_command("cat /mnt/data/test.txt")
-        # Verify the command received the resolved local path
-        command = captured.get("command", [])
-        assert isinstance(command, list) and len(command) >= 3
-        assert str(data_dir) in command[2]
+        # Verify the command received the resolved local path. Both runners
+        # receive the argv list, so join it before asserting.
+        text = " ".join(captured.get("command", []))
+        assert str(data_dir.as_posix()) in text
 
     def test_reverse_resolve_path_does_not_match_partial_prefix(self, tmp_path):
         foo_dir = tmp_path / "foo"

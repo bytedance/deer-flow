@@ -2,7 +2,7 @@ name: Lint Check
 
 on:
   push:
-    branches: [ 'main', '2.0.x-dev' ]
+    branches: [ 'main', '*-dev' ]
   pull_request:
     branches: [ '*' ]
 

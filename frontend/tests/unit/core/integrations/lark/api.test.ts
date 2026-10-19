@@ -55,6 +55,7 @@ describe("lark integration api", () => {
         cli: { available: false, path: null, version: null, error: "missing" },
         auth: { status: "unavailable", message: "missing", user: null },
         sandbox_runtime_mode: "init-container",
+        sandbox_runtime_probed: true,
         sandbox_runtime_ready: false,
         sandbox_runtime_detail: "init image not configured",
       }),
@@ -66,6 +67,7 @@ describe("lark integration api", () => {
       installed: false,
       version: "v1.0.65",
       sandbox_runtime_mode: "init-container",
+      sandbox_runtime_probed: true,
       sandbox_runtime_ready: false,
     });
     expect(mockedFetch).toHaveBeenCalledWith(
@@ -383,5 +385,30 @@ describe("lark integration api", () => {
         }),
       },
     );
+  });
+
+  test("status load defaults sandbox_runtime_probed to false when the backend omits it", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, { installed: false, version: "v1.0.65" }),
+    );
+
+    const result = await loadLarkIntegrationStatus();
+
+    expect(result.sandbox_runtime_probed).toBe(false);
+  });
+
+  test("mutation responses default sandbox_runtime_probed to false when the backend omits it", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, {
+        success: true,
+        installed_skills: ["lark-doc"],
+        message: "Installed 1 Lark/Feishu skills.",
+        status: { installed: true, version: "v1.0.65" },
+      }),
+    );
+
+    const result = await installLarkIntegration();
+
+    expect(result.status.sandbox_runtime_probed).toBe(false);
   });
 });

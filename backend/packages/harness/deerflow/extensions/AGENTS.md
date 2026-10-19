@@ -1,5 +1,16 @@
 ### Python Extension System (Runtime and Distribution)
 
+`registry.knowledge_provider(name, provider)` (extension-api 0.2.7) adds an
+operator-installed read-only `deerflow.knowledge.RetrievalProvider`. The host
+validates advertised async operations, attributes entries and rolls them back
+positionally with every other contribution. Provider configuration, API calls
+and response mapping stay in extensions; core owns capabilities, Scope
+admission and source validation. Catalog and execution resolve the same loaded
+snapshot, with run-bound snapshots taking precedence over the singleton.
+See [the contract](../../../../docs/KNOWLEDGE.md) and the packaged
+`examples/deerflow-extension-knowledge` sample. Older registry implementations
+return False; never silently ignore unsupported registration.
+
 Third-party Python packages can expose an `install(registry, config)` function and be
 loaded, in deterministic order, from the startup-only top-level `plugins:` list in
 `config.yaml`. Keep this list out of `extensions_config.json`: the latter is writable
@@ -43,6 +54,10 @@ case rather than reviving a record whose package declaration may already be gone
 cancellation skips the recovery sync entirely — the declarations are already restored and
 the next locked startup sync reconciles the environment, whereas blocking an interrupt on a
 full dependency resolve invites a second interrupt that escapes the handler mid-transaction.
+File snapshots capture the original permission bits alongside the bytes; rollback applies
+that mode to a temporary file before atomically replacing the destination, including when
+restoring `config.yaml` after a failed removal. A failed write, chmod, or replace leaves the
+current destination untouched and removes the temporary file.
 Package mutation is deferred from environment mutation: after `uv add/remove`
 updates the declaration and lock, one `uv sync --locked --all-packages` preserves the same
 config-/environment-detected optional extras as normal startup. All three uv calls pin the
@@ -141,9 +156,10 @@ entry, the manager owns the controlled locked sync.
 
 The public package is `packages/extension-api/` and must never import `deerflow` or carry
 framework dependencies. Extensions declare any FastAPI, LangChain, or LangGraph imports
-themselves. Its registry contract exposes seven contribution kinds: middleware
+themselves. Its registry contract exposes eight contribution kinds: middleware
 contributors, task-lifecycle contributors, system-model-call observers, agent-assembly
-observers, context-compaction observers, Gateway-lifetime services, and eager routers. Middleware contributions declare lead/subagent scope, stable
+observers, context-compaction observers, Gateway-lifetime services, eager routers, and
+experimental full-stack plugins (`registry.plugin()`, see `docs/full-stack-plugins.md`). Middleware contributions declare lead/subagent scope, stable
 order, and a semantic placement (`MODEL_LOGICAL`, `MODEL_PHYSICAL`, `TOOL_VISIBLE`,
 `TOOL_RAW`, or `STANDARD`) rather than a fragile list index. `extensions/stack.py` is the
 single final composition point; do not inject inside
@@ -276,9 +292,34 @@ detached task store, the same fallback `notify_system_model_call` uses when its 
 supplies none.
 
 Gateway services start in registration order after the persistence engine and session
-factory are ready. Each receives the same `ExtensionRuntimeDeps` snapshot containing the
+factory are ready. Ungranted services share an `ExtensionRuntimeDeps` snapshot containing the
 app store, projected host policy, session factory, and optional read-only
-`RunEvidenceReader`. The Gateway constructs the configured run and event stores before
+`RunEvidenceReader`. `plugins[].host_access.model_invocation` optionally binds a model invoker
+to each service via the host-only `ModelInvocationService` adapter. The loader captures
+one `ModelInvocationScope` per installation, not per `use` string, so duplicate sources
+cannot inherit one another's roles. Its semaphore is shared by that installation's
+services; its admission ceiling is twice the concurrency limit, checked before
+payload processing. Provider work is shielded from caller cancellation and retains
+both budgets until actual completion, including synchronous LangChain executor calls
+and offloaded construction. Abandoned construction cannot dispatch a model request.
+Provider-task cancellation is a normalized failure; only a new cancellation of
+the invoking task propagates. Compare cancellation counts against invocation entry
+so previously handled caller cancellations do not mask provider failures.
+Failed-install positional rollback also removes its adapters. The adapter
+receives startup config through `start_with_host`, while extensions receive only the
+neutral invoker in a replaced deps snapshot. No-grant services preserve their old path.
+Failed start and stop revoke the service's handle and cancel queued/in-flight
+callers; they do not release slots owned by still-running provider work. Structured
+schema checks and output validation run in terminable isolated Python children,
+with pipe I/O on admission-bounded dedicated threads (Windows selector-loop compatible,
+independent of a potentially saturated provider executor). Cancellation kills and
+reaps those children before releasing admission.
+Grants and model profiles are startup snapshots; changing them requires restarting the
+Gateway. Calls use the normal model factory and attributed tracing, return plain text,
+usage counts and optionally locally validated JSON objects, and never return raw model
+objects or provider exception chains. See `backend/docs/extension-model-invocation.md`.
+
+The Gateway constructs the configured run and event stores before
 services so the reader is usable from `start()`. Changed-run discovery uses an opaque,
 scope-bound cursor over `(change_seq, run_id)`; a run that changes after it was returned may
 be replayed, but an unreturned run cannot be skipped. Legacy rows start at `change_seq=0`
@@ -287,15 +328,23 @@ covers creations and changes to retained rows only; synchronization consumers mu
 `get_run_status()` for known runs and treat `None` as absent when deletion reconciliation
 is required. A DB run store preserves positions across restarts, while memory only provides
 process-lifetime ordering. Per-run events retain the event store's thread-scoped
-`after_seq` semantics; metadata is secret-redacted, but event content is returned unchanged,
-and status comes from the authoritative run store. The reader passes its fixed scope to
+`after_seq` semantics; metadata has only the legacy `auth_token` key removed (there is no
+other redaction), event content is returned unchanged, and status comes from the
+authoritative run store. The reader passes its fixed scope to
 event reads explicitly, including global `None`, so ambient request identity cannot
 change its visibility. Content and redacted metadata are deep-copied snapshots: DTO
 fields are frozen, but nested containers remain locally mutable without touching host
 storage. The production Gateway injects one
 app-scoped reader with `user_id=None`, deliberately granting trusted operator extensions
-global cross-user visibility because services have no request principal. A host embedding
-the harness may instead bind a reader to one user. This is not a sandbox boundary: services
+global cross-user visibility because services have no request principal. User-facing contributed
+routes must use `resolve_run_evidence_reader(request)` or `require_run_evidence_reader(request)`;
+the Gateway binds that reader to the authenticated principal rather than a caller-supplied user ID.
+The factory rejects empty or whitespace-padded IDs instead of normalizing authorization identities.
+The resolver requires the request's effective `runs:read` permission and never widens admin
+or internal callers to global visibility. Unsupported hosts resolve to `None` (the required
+helper raises `NotImplementedError`); denied access raises `PermissionError`. Extensions map
+these to 503/403 at their HTTP boundary. The public API remains framework-independent.
+A host embedding the harness may instead bind a reader to one user. This is not a sandbox boundary: services
 already retain `session_factory` and execute with Gateway privileges. Empty pages mean
 caught up or not visible, never unsupported -- absence is represented
 by `ExtensionRuntimeDeps.run_evidence_reader is None`, and protocol defaults raise
@@ -380,11 +429,47 @@ Tests for hook behavior must create and invoke their own hook fixtures.
 
 ## Full-stack contributions
 
-`registry.plugin(PluginContribution(...))` registers optional browser code, backend actions
-and model tools under one deployment-owned namespace. The public method defaults to False
-for older hosts; accepted contributions share source attribution and positional rollback.
-`plugins.py` in Gateway serves descriptors, hashed JS assets and authenticated action calls.
-No online settings write API is added. `plugin_tools.py` joins normal tool assembly with
-the run's extension snapshot; task delegation passes that snapshot explicitly. Browser
-public-field projection is an allowlist. Package code is trusted, not sandboxed. See
-`docs/full-stack-plugins.md` and the independently packaged bookmark example.
+`registry.plugin(PluginContribution(...))` adds browser/backend/tools under one
+namespace; old hosts return False. Preserve source attribution and positional rollback.
+Gateway `plugins.py`: descriptors, hashed JS, authenticated actions; no online
+settings write API. `plugin_tools.py` uses the run snapshot, passed explicitly
+to delegation. Browser fields are allowlisted. Code is trusted, not sandboxed.
+
+`ModelTool` defaults to JSON content. Opt-in `content_and_artifact` requires
+`PluginToolResult`. Require string artifact keys throughout; validate JSON jointly
+within 64 KiB and snapshot artifacts. Keep identity, policy/deadline and citation
+gates. Test ToolNode and checkpoint replay. See `docs/full-stack-plugins.md`.
+
+Evolution host grants (`host_access.evidence` / `skill_mutations`) compose with
+`host_access.model_invocation` through `HostAccess`. Evolution grants require a
+unique stable name and entry point; model-only grants retain their per-install
+identity and permit repeated entry points. Keep all granted dependencies when
+wrapping services with `ModelInvocationService`. The additive evolution contracts
+ship in extension API 0.2.7, after 0.2.6's PluginToolResult contract.
+Full Agent run control is an optional `deerflow_extension_api.AgentRuns` handle
+on action/tool contexts and the request resolver. Gateway owns principal binding,
+revocation and ordinary route admission in `app/gateway/extension_agent_runs.py`.
+Never replace this with `ModelInvoker`, raw global RunManager access, or a
+caller-supplied user ID. Service-held handles are process-local, permission-capped
+and revoked before host shutdown; PAT/internal grants remain unsupported.
+Unstamped internal launches receive no handle and must still start normally.
+Action/tool dispatch scopes handles to each registered plugin namespace for
+idempotency isolation; request-resolved handles use `for_plugin` explicitly.
+`configuration_revision` (API 0.2.7) rechecks grants and returns a process-local
+HMAC of declarative app/extensions and Agent config/SOUL, not effective assembly,
+memory, referenced files or provider state. Never expose raw secret configuration.
+`configuration_evidence` reads persisted, run-bound actual assembly versions; the
+worker captures descriptors even without observers and persists before execution.
+`read_artifact` authorizes bounded output bytes off-loop; extensions retain immutable
+versions themselves. Workflow preview/approval/consumption must share those bytes.
+
+**Recorded extension-first exception.** The project-shelf summary pipeline
+(`projects/summaries.py`) ships in core: its consumer-visible surface (the
+`project_documents.summary` column, the `<documents>` index rendering, and
+the shelf tool JSON) is core-owned, and the split design (host hook +
+extension-owned generation) was rejected — the write interface would have to
+enforce the sanitization and `updated_at`-preservation invariants across a
+plugin boundary, and the lifecycle hook would be a durable core contract with
+a single consumer. The generator sits behind the narrow `enqueue_summary`
+interface so a future document-lifecycle hook can lift generation into an
+extension without touching schema or rendering.
