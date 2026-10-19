@@ -81,11 +81,15 @@ class TypeSafeConnection:
     deadline_seconds: float
     max_attempts: int
     retry_backoff: float
+    #: Which request path the endpoint serves. It belongs to the *dialect*, not the operator:
+    #: a connection whose base URL points at another service must not report a System One URL, so
+    #: every consumer resolves it through the backend it is about to call.
+    endpoint_path: str = ENDPOINT_PATH
 
     @property
     def url(self) -> str:
-        """The System One endpoint this connection posts to."""
-        return f"{self.base_url.rstrip('/')}{ENDPOINT_PATH}"
+        """The endpoint this connection posts to."""
+        return f"{self.base_url.rstrip('/')}{self.endpoint_path}"
 
     def credential_fingerprint(self) -> str:
         """A short digest of the credential, to compare consumers without recording either key."""
@@ -108,6 +112,7 @@ def resolve_connection(
     settings: Mapping[str, object] | None = None,
     defaults: Mapping[str, object] | None = None,
     configuration_source: str,
+    endpoint_path: str = ENDPOINT_PATH,
 ) -> TypeSafeConnection:
     """Resolve the effective connection for one consumer.
 
@@ -122,7 +127,12 @@ def resolve_connection(
     ``configuration_source`` names the consumer's settings location (for example
     ``guardrails.provider.config``); it reaches the missing-credential message so
     an operator knows which block to edit. It never carries the credential.
+
+    ``endpoint_path`` is what the calling backend serves, not something a consumer
+    configures; it is validated here so a malformed value cannot become a per-request URL error.
     """
+    if not isinstance(endpoint_path, str) or not endpoint_path.startswith("/"):
+        raise ValueError("endpoint_path must be an absolute request path such as '/v1/systemone'")
     override = _configured(settings)
     fallback = _configured(defaults)
 
@@ -153,6 +163,7 @@ def resolve_connection(
         deadline_seconds=finite_float("deadline_seconds", _first(override, fallback, "deadline_seconds", DEFAULT_DEADLINE_SECONDS), minimum=0.0, exclusive=True),
         max_attempts=whole_number("max_attempts", _first(override, fallback, "max_attempts", DEFAULT_MAX_ATTEMPTS), minimum=1),
         retry_backoff=finite_float("retry_backoff", _first(override, fallback, "retry_backoff", DEFAULT_RETRY_BACKOFF), minimum=0.0),
+        endpoint_path=endpoint_path,
     )
 
 
@@ -162,6 +173,7 @@ def resolve_connection_for_mode(
     settings: Mapping[str, object] | None = None,
     defaults: Mapping[str, object] | None = None,
     configuration_source: str,
+    endpoint_path: str = ENDPOINT_PATH,
 ) -> TypeSafeConnection | None:
     """Resolve a mode-bearing consumer's connection, or ``None`` when it is off.
 
@@ -175,7 +187,7 @@ def resolve_connection_for_mode(
     """
     if mode == MODE_OFF:
         return None
-    return resolve_connection(settings=settings, defaults=defaults, configuration_source=configuration_source)
+    return resolve_connection(settings=settings, defaults=defaults, configuration_source=configuration_source, endpoint_path=endpoint_path)
 
 
 def _configured(settings: Mapping[str, object] | None) -> dict[str, object]:
