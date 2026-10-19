@@ -7,9 +7,9 @@ extension-owned. Host run admission locks the same lease row in its transaction.
 import json
 from contextlib import closing
 
+from .constants import NAMESPACE
 from .store import TERMINAL, Store
 
-NAMESPACE = "community.workflows"
 LOCK = 723461108
 
 

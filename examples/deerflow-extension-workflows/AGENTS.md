@@ -77,3 +77,6 @@ The support/workflow_gateway.py entrypoint is test-only: deterministic model and
 barriers around real operations, never a deployed auth/admission bypass. Use real
 SIGKILL/SIGSTOP, login/CSRF, host runs and persisted assertions. Preserve uncertain
 reservations; there is no supported reconciliation attestation/release API yet.
+
+Keep the plugin registration and execution-lease namespace in constants.py as a
+single declaration. Include that module in the recovery runtime signature.

@@ -6,12 +6,14 @@ from contextlib import asynccontextmanager
 
 from deerflow_extension_api import ExecutionFence
 
+from .constants import NAMESPACE
+
 
 class Cluster:
     def dispatch_fence(self, record):
         if not self.clustered:
             return {}
-        return {"execution_fence": ExecutionFence("community.workflows", record["id"], self.holder_id, record["execution_epoch"])}
+        return {"execution_fence": ExecutionFence(NAMESPACE, record["id"], self.holder_id, record["execution_epoch"])}
 
     @asynccontextmanager
     async def cluster_slot(self, entry, row):

@@ -17,12 +17,12 @@ from deerflow_extension_api import AgentRunError
 
 from .artifacts import Artifacts
 from .cluster import Cluster
+from .constants import NAMESPACE as NAMESPACE
 from .lifecycle import Lifecycle
 from .postgres import LeaseLost
 from .recovery import RECOVERY_VERSION, Recovery
 from .store import TERMINAL, Store
 
-NAMESPACE = "community.workflows"
 FRAME = 48 * 1024
 TURN_LIMIT = 10000
 logger = logging.getLogger(__name__)
@@ -137,6 +137,7 @@ class Workflows(Cluster, Recovery, Lifecycle, Artifacts):
 
                 signature = hashlib.sha256()
                 for name in (
+                    "constants.py",
                     "worker.py",
                     "service.py",
                     "recovery.py",

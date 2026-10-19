@@ -12,7 +12,8 @@ from deerflow_extension_api import (
     extension,
 )
 
-from .service import NAMESPACE, Workflows
+from .constants import NAMESPACE
+from .service import Workflows
 
 
 @extension(api="0.2.9", name="workflows")
