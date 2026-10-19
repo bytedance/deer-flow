@@ -6,6 +6,7 @@ import os
 import posixpath
 import re
 import shlex
+import string
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
@@ -1156,13 +1157,42 @@ _AWK_COMMAND_NAMES = frozenset({"awk", "gawk", "mawk", "nawk"})
 # other option (gawk's ``--assign``, ``-e``, ...) may also consume the next
 # word, so it forfeits the exemption.
 _AWK_OPTIONS_WITH_VALUE = frozenset({"-F", "-v"})
-# Constructs that make bash re-read single-quoted awk text: an unquoted heredoc
-# expands ``$NAME`` in its body, and an ``awk`` function or alias can hand its
-# argument to another shell.
-_AWK_EXEMPTION_BLOCKER_PATTERN = re.compile(r"<<|\balias\b|\bfunction\s+[gmn]?awk\b|\b[gmn]?awk\s*\(\s*\)")
-# awk keywords after which ``/`` opens a regex literal (``print /re/``).
+# Command words that can make a later ``awk`` word run something other than
+# awk, or re-read quoted text: definitions (``alias``, ``function``, ``name()``
+# handled in the walk), ``eval``, sourcing, ``hash -p`` and a ``PATH`` rebind.
+# Any of them anywhere in the command forfeits the exemption for the whole
+# command; the words are compared after basename reduction.
+_AWK_EXEMPTION_BLOCKING_COMMANDS = frozenset({".", "alias", "autoload", "eval", "function", "hash", "source"})
+# ``name[...]=`` at a command start is never an environment prefix for awk, but
+# zsh's ``functions[awk]=...`` / ``aliases[awk]=...`` define a function or alias.
+_SHELL_ARRAY_ASSIGNMENT_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\[")
+# awk keywords after which ``/`` opens a regex literal (``print /re/``), and the
+# keywords whose closing ``)`` is followed by a pattern (``if (x) /re/``) rather
+# than a divisor (``($2+$3)/2``).
 _AWK_REGEX_KEYWORDS = frozenset({"case", "delete", "do", "else", "exit", "getline", "in", "print", "printf", "return"})
-_AWK_TRAILING_WORD_PATTERN = re.compile(r"[A-Za-z0-9_]+\Z")
+_AWK_CONDITION_KEYWORDS = frozenset({"for", "if", "while"})
+_AWK_WORD_CHARS = frozenset(string.ascii_letters + string.digits + "_")
+_SHELL_WORD_OPERATOR_CHARS = frozenset(";&|()<>\n\r")
+
+
+def _awk_word_before(program: str, position: int) -> str | None:
+    """The identifier, number or ``]`` that ends just before *position*, or None.
+
+    Scans backward over spaces and tabs only, so the token must sit on the same
+    line. Returns ``"]"`` for a closing bracket, the word for an identifier or
+    number, and None for anything else (operators, punctuation, start of line).
+    """
+    end = position
+    while end > 0 and program[end - 1] in " \t":
+        end -= 1
+    if end == 0:
+        return None
+    if program[end - 1] == "]":
+        return "]"
+    start = end
+    while start > 0 and program[start - 1] in _AWK_WORD_CHARS:
+        start -= 1
+    return program[start:end] or None
 
 
 def _awk_program_code_spans(program: str, offset: int) -> list[tuple[int, int]] | None:
@@ -1175,14 +1205,17 @@ def _awk_program_code_spans(program: str, offset: int) -> list[tuple[int, int]] 
     ``#`` outside one starts a comment that runs to the end of the line, and
     inside a literal ``/`` and ``#`` are plain text (``split($0, p, "/")``).
     A ``/`` outside a literal must be division, which in awk follows an
-    identifier, number or ``]`` on the same line that is not a keyword; any
-    other ``/`` (``gsub(/"/, ...)``, ``if (x) /re/``, a ``/`` at the start of
-    a line) opens a regex literal whose ``"`` would desynchronise the
-    tracker, so return None and the caller grants no exemption.
+    identifier, number, ``]`` or a ``)`` that does not close an ``if``,
+    ``while`` or ``for`` condition, all on the same line. Any other ``/``
+    (``gsub(/"/, ...)``, ``if (x) /re/``, a ``/`` at the start of a line)
+    opens a regex literal whose ``"`` would desynchronise the tracker, so
+    return None and the caller grants no exemption.
     """
     spans: list[tuple[int, int]] = []
     in_string = False
     segment_start = 0
+    open_parens: list[int] = []
+    last_closed_opener: int | None = None
     position = 0
     while position < len(program):
         char = program[position]
@@ -1199,11 +1232,18 @@ def _awk_program_code_spans(program: str, offset: int) -> list[tuple[int, int]] 
             newline = program.find("\n", position)
             position = len(program) if newline == -1 else newline
             continue
+        elif char == "(":
+            open_parens.append(position)
+        elif char == ")":
+            last_closed_opener = open_parens.pop() if open_parens else None
         elif char == "/":
             before = program[:position].rstrip(" \t")
-            if not before.endswith("]"):
-                word = _AWK_TRAILING_WORD_PATTERN.search(before)
-                if word is None or word.group() in _AWK_REGEX_KEYWORDS:
+            if before.endswith(")"):
+                if last_closed_opener is None or _awk_word_before(program, last_closed_opener) in _AWK_CONDITION_KEYWORDS:
+                    return None
+            else:
+                word = _awk_word_before(program, position)
+                if word is None or word in _AWK_REGEX_KEYWORDS:
                     return None
         position += 1
     if not in_string:
@@ -1211,90 +1251,167 @@ def _awk_program_code_spans(program: str, offset: int) -> list[tuple[int, int]] 
     return spans
 
 
-def _scan_shell_words(command: str) -> list[tuple[str, str, list[tuple[int, int]]]] | None:
-    """Split *command* into ``(kind, text, single_quoted_spans)`` items.
+class _ShellWord:
+    """One word of a scanned shell command.
 
-    ``kind`` is ``"word"``, ``"sep"`` (command separator) or ``"redir"``.
-    Spans are offsets of single-quoted content in *command*. Returns None on
-    unbalanced quotes so callers fall back to the strict path.
+    ``text`` is the word with quotes removed; ``single_quoted`` is the span of
+    the word's content in the original command when the whole word is exactly
+    one single-quoted string, else None. ``kind`` is ``"word"``, ``"op"`` (a
+    command separator, including ``(`` and ``)``) or ``"redir"``.
     """
-    items: list[tuple[str, str, list[tuple[int, int]]]] = []
-    text: list[str] = []
-    spans: list[tuple[int, int]] = []
-    in_word = False
 
-    def flush() -> None:
-        nonlocal text, spans, in_word
-        if in_word:
-            items.append(("word", "".join(text), spans))
-        text, spans, in_word = [], [], False
+    __slots__ = ("kind", "single_quoted", "text")
 
-    i, n = 0, len(command)
-    while i < n:
-        char = command[i]
-        if char in " \t":
-            flush()
-            i += 1
-        elif char in "\r\n;&|()<>":
-            flush()
-            j = i + 1
-            group = "&|" if char in "&|" else "<>&" if char in "<>" else ""
-            while j < n and command[j] in group:
-                j += 1
-            items.append(("redir" if char in "<>" else "sep", command[i:j], []))
-            i = j
-        elif char == "'":
-            end = command.find("'", i + 1)
-            if end == -1:
+    def __init__(self, kind: str, text: str, single_quoted: tuple[int, int] | None = None) -> None:
+        self.kind = kind
+        self.text = text
+        self.single_quoted = single_quoted
+
+
+def _scan_shell_words(command: str) -> list[list[_ShellWord]] | None:
+    """Split *command* into word lists, one per command context, bash-style.
+
+    The first list is the top-level command; every ``$(...)`` substitution adds
+    its own list, since quoting starts afresh inside it and its first word is
+    a command. Single quotes, double quotes with ``\\`` escapes, ``\\x``
+    escapes, ``#`` comments at the start of a word, ``2>``-style redirections
+    and the ``;``, ``&&``, ``||``, ``|``, ``|&``, ``&``, ``(``, ``)`` and
+    newline separators follow bash. Returns None, so that no exemption is
+    granted, for anything it does not model: a backslash-newline (bash splices
+    the lines before parsing, which can spell ``awk`` across lines), backticks,
+    ``$'...'`` strings, a heredoc, an unmatched ``)`` and unbalanced quotes.
+    """
+    if "\\\n" in command or "\\\r" in command:
+        return None
+    contexts: list[list[_ShellWord]] = []
+
+    def scan(position: int, nested: bool) -> int | None:
+        items: list[_ShellWord] = []
+        contexts.append(items)
+        text: list[str] = []
+        quoted_spans: list[tuple[int, int]] = []
+        in_word = False
+        plain_so_far = True  # no quotes or substitutions seen in this word yet
+        depth = 0
+        n = len(command)
+
+        def flush() -> None:
+            nonlocal text, quoted_spans, in_word, plain_so_far
+            if in_word:
+                joined = "".join(text)
+                span = quoted_spans[0] if len(quoted_spans) == 1 and quoted_spans[0][1] - quoted_spans[0][0] == len(joined) else None
+                items.append(_ShellWord("word", joined, span))
+            text, quoted_spans, in_word, plain_so_far = [], [], False, True
+
+        while position < n:
+            char = command[position]
+            if char in " \t":
+                flush()
+                position += 1
+            elif char == "#" and not in_word:
+                newline = command.find("\n", position)
+                position = n if newline == -1 else newline
+            elif char in _SHELL_WORD_OPERATOR_CHARS:
+                if char in "<>" and in_word and plain_so_far and "".join(text).isdigit():
+                    text, in_word = [], False  # ``2>``: the digits belong to the operator
+                flush()
+                if char == ")":
+                    if depth == 0:
+                        return position + 1 if nested else None
+                    depth -= 1
+                    items.append(_ShellWord("op", ")"))
+                    position += 1
+                    continue
+                if char == "(":
+                    depth += 1
+                end = position + 1
+                group = "&|" if char in "&|" else "<>&|" if char in "<>" else ""
+                while end < n and command[end] in group:
+                    end += 1
+                operator = command[position:end]
+                if operator.startswith("<<") and not operator.startswith("<<<"):
+                    return None  # heredoc bodies are re-read by the shell
+                items.append(_ShellWord("redir" if char in "<>" else "op", operator))
+                position = end
+            elif char == "`":
                 return None
-            spans.append((i + 1, end))
-            text.append(command[i + 1 : end])
-            in_word = True
-            i = end + 1
-        elif char == '"':
-            end = i + 1
-            while end < n and command[end] != '"':
-                end += 2 if command[end] == "\\" else 1
-            if end >= n:
+            elif char == "'":
+                end = command.find("'", position + 1)
+                if end == -1:
+                    return None
+                quoted_spans.append((position + 1, end))
+                text.append(command[position + 1 : end])
+                in_word, plain_so_far = True, False
+                position = end + 1
+            elif char == '"':
+                position += 1
+                while position < n and command[position] != '"':
+                    if command[position] == "\\":
+                        position += 2
+                    elif command[position] == "`":
+                        return None
+                    elif command.startswith("$(", position):
+                        after = scan(position + 2, True)
+                        if after is None:
+                            return None
+                        position = after
+                    else:
+                        position += 1
+                if position >= n:
+                    return None
+                text.append("\x00")  # opaque: content is never a bare awk program
+                in_word, plain_so_far = True, False
+                position += 1
+            elif command.startswith("$'", position):
                 return None
-            text.append(command[i + 1 : end])
-            in_word = True
-            i = end + 1
-        elif char == "\\":
-            text.append(command[i + 1 : i + 2])
-            in_word = True
-            i += 2
-        else:
-            text.append(char)
-            in_word = True
-            i += 1
-    flush()
-    return items
+            elif command.startswith("$(", position):
+                after = scan(position + 2, True)
+                if after is None:
+                    return None
+                text.append("\x00")
+                in_word, plain_so_far = True, False
+                position = after
+            elif char == "\\":
+                if position + 1 >= n:
+                    return None
+                text.append(command[position + 1])
+                in_word, plain_so_far = True, False
+                position += 2
+            else:
+                text.append(char)
+                in_word = True
+                position += 1
+        flush()
+        if nested or depth:
+            return None
+        return position
+
+    if scan(0, False) is None:
+        return None
+    return contexts
 
 
-def _awk_inline_program_span(items: list[tuple[str, str, list[tuple[int, int]]]], index: int) -> tuple[tuple[int, int] | None, int]:
+def _awk_inline_program_span(items: list[_ShellWord], index: int) -> tuple[tuple[int, int] | None, int]:
     """Return the span of a wholly single-quoted awk program and the next index."""
     while index < len(items):
-        kind, text, _ = items[index]
-        if kind == "sep":
+        item = items[index]
+        if item.kind == "op":
             break
-        if kind == "redir" or text in _AWK_OPTIONS_WITH_VALUE:
+        if item.kind == "redir" or item.text in _AWK_OPTIONS_WITH_VALUE:
             index += 2
             continue
-        if text == "--file" or text.startswith(("-f", "--file=")):
+        if item.text == "--file" or item.text.startswith(("-f", "--file=")):
             return None, index + 1
-        if text == "--":
+        if item.text == "--":
             index += 1
             break
-        if not text.startswith("-") or text == "-":
+        if not item.text.startswith("-") or item.text == "-":
             break
-        if not text.startswith(("-F", "-v")):
+        if not item.text.startswith(("-F", "-v")):
             return None, index + 1
         index += 1
-    if index < len(items) and items[index][0] == "word":
-        _, text, spans = items[index]
-        if len(spans) == 1 and spans[0][1] - spans[0][0] == len(text):
-            return spans[0], index + 1
+    if index < len(items) and items[index].kind == "word" and items[index].single_quoted is not None:
+        return items[index].single_quoted, index + 1
     return None, index + 1
 
 
@@ -1303,45 +1420,62 @@ def _awk_program_field_spans(command: str) -> list[tuple[int, int]]:
 
     Only the single-quoted inline program of an awk-family command qualifies:
     bash performs no expansion inside single quotes and awk reads ``$`` as its
-    field operator. Text re-interpreted by another shell (``sh -c '...'``,
-    ``eval``, double-quoted programs) never qualifies, because the command
-    word there is not awk. Inside the program, awk string literals are left
-    out: ``system("cat $HOME/x")`` hands that text to a shell. A program
-    whose ``"`` may sit in a regex literal gets no exemption.
+    field operator. The command word is found the way
+    ``_validate_local_bash_shell_tokens`` finds it (after separators,
+    assignments, prefix keywords and ``command``/``builtin``, reduced to its
+    basename), at the top level and inside every ``$(...)``. Text
+    re-interpreted by another shell (``sh -c '...'``, ``eval``, double-quoted
+    programs) never qualifies, because the command word there is not awk. The
+    exemption assumes the word ``awk`` runs the real awk, so a command that
+    defines or could redefine commands (``alias``, ``function``, ``name()``,
+    ``autoload``, zsh's ``functions[...]=`` / ``aliases[...]=`` arrays,
+    ``eval``, ``source``, ``hash``, ``PATH=``) gets no exemption at all. That
+    list is best-effort, like the rest of this guard. Inside the program, awk string
+    literals are left out: ``system("cat $HOME/x")`` hands that text to a
+    shell. A program whose ``"`` may sit in a regex literal gets no exemption.
     """
-    if _AWK_EXEMPTION_BLOCKER_PATTERN.search(command):
-        return []
-    items = _scan_shell_words(command)
-    if items is None:
+    contexts = _scan_shell_words(command)
+    if contexts is None:
         return []
 
     field_spans: list[tuple[int, int]] = []
-    at_command_start = True
-    index = 0
-    while index < len(items):
-        kind, text, _ = items[index]
-        if kind == "sep":
-            at_command_start = True
-            index += 1
-            continue
-        if not at_command_start:
-            index += 1
-            continue
-        if kind == "redir":
-            index += 2
-            continue
-        if text in _LOCAL_BASH_COMMAND_PREFIX_KEYWORDS or text in _LOCAL_BASH_COMMAND_WRAPPERS:
-            index += 1
-            continue
-        at_command_start = False
-        if text not in _AWK_COMMAND_NAMES:
-            index += 1
-            continue
-        program, index = _awk_inline_program_span(items, index + 1)
-        if program is None:
-            continue
-        start, end = program
-        field_spans.extend(_awk_program_code_spans(command[start:end], start) or [])
+    for items in contexts:
+        at_command_start = True
+        index = 0
+        while index < len(items):
+            item = items[index]
+            if item.text.startswith("PATH=") or (index + 1 < len(items) and items[index + 1].kind == "op" and items[index + 1].text.startswith("(")):
+                return []  # PATH rebind or ``name ()`` function definition
+            if at_command_start and item.kind == "word" and _SHELL_ARRAY_ASSIGNMENT_PATTERN.match(item.text):
+                return []  # zsh ``functions[awk]=...`` / ``aliases[awk]=...``
+            if item.kind == "op":
+                at_command_start = True
+                index += 1
+                continue
+            if item.kind == "redir":
+                index += 1 if item.text.endswith("&") and item.text not in ("&>", "&>>") else 2
+                continue
+            if not at_command_start:
+                index += 1
+                continue
+            if _is_shell_assignment(item.text):
+                index += 1
+                continue
+            name = item.text.rsplit("/", 1)[-1]
+            if name in _LOCAL_BASH_COMMAND_PREFIX_KEYWORDS or name in _LOCAL_BASH_COMMAND_END_KEYWORDS or name in _LOCAL_BASH_COMMAND_WRAPPERS:
+                index += 1
+                continue
+            if name in _AWK_EXEMPTION_BLOCKING_COMMANDS:
+                return []
+            at_command_start = False
+            if name not in _AWK_COMMAND_NAMES:
+                index += 1
+                continue
+            program, index = _awk_inline_program_span(items, index + 1)
+            if program is None:
+                continue
+            start, end = program
+            field_spans.extend(_awk_program_code_spans(command[start:end], start) or [])
     return field_spans
 
 
@@ -1639,7 +1773,9 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
     home (``~root/...``) is rejected like ``${HOME}/...`` and ``~/...``, since its
     runtime value is unknown here, except inside the single-quoted inline
     program of awk/gawk/mawk/nawk (outside awk string literals), where bash
-    expands nothing and ``$NF/2`` is field arithmetic;
+    expands nothing and ``$NF/2`` or ``($2+$3)/2`` is field arithmetic; that
+    exemption is withheld from any command that could redefine ``awk`` or
+    re-read quoted text (see ``_awk_program_field_spans``);
     ``$PWD/...`` is checked like the relative path it is equivalent to.
     A windows-incompatible segment still rejects a path that is not already
     stored on the host; an existing host file may be read or renamed.
@@ -1659,8 +1795,16 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
     path_token_occurrences = _absolute_path_token_occurrences(command, tokens)
     url_spans = _non_file_url_spans(command)
 
+    # Inside the single-quoted program of an awk command a ``/`` is division
+    # or a regex delimiter (``($2+$3)/2``, ``/re/``); only awk string
+    # literals, which the spans leave out, can carry text to a shell.
+    awk_field_spans: list[tuple[int, int]] | None = None
     for match in _ABSOLUTE_PATH_PATTERN.finditer(command):
         if _is_in_spans(match.start(), url_spans):
+            continue
+        if awk_field_spans is None:
+            awk_field_spans = _awk_program_field_spans(command)
+        if _is_in_spans(match.start(), awk_field_spans):
             continue
         absolute_path = match.group()
         if _is_non_path_literal_fragment(absolute_path):
@@ -1680,9 +1824,12 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
     # The prose exemption used above does not apply: ``$HOME/文档`` is a real
     # host directory.
     pwd_is_workspace = not _PWD_REBIND_PATTERN.search(command)
-    awk_field_spans = _awk_program_field_spans(command)
     for match in _SHELL_VARIABLE_PATH_PATTERN.finditer(command):
-        if _is_in_spans(match.start(), url_spans) or _is_in_spans(match.start(), awk_field_spans):
+        if _is_in_spans(match.start(), url_spans):
+            continue
+        if awk_field_spans is None:
+            awk_field_spans = _awk_program_field_spans(command)
+        if _is_in_spans(match.start(), awk_field_spans):
             continue
         name, remainder = match.group(1), match.group(2)
         if name == "PWD" and pwd_is_workspace:

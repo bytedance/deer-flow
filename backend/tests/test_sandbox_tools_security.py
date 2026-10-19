@@ -1072,6 +1072,35 @@ def test_validate_local_bash_command_paths_blocks_brace_expansion_host_paths(com
         ('awk "{print $HOME/.ssh/id_rsa}"', "$HOME/.ssh/id_rsa"),
         ("bash <<EOF\nawk '{print $HOME/.ssh/id_rsa}'\nEOF", "$HOME/.ssh/id_rsa"),
         ("awk() { bash -c \"$1\"; }; awk 'cat $HOME/.ssh/id_rsa'", "$HOME/.ssh/id_rsa"),
+        # bash splices a backslash-newline before parsing, so these define an
+        # ``awk`` function or alias too; a continuation anywhere forfeits the exemption.
+        ('aw\\\nk() { eval "$1"; }; awk \'printf "%s" $HOME/.ssh/id_rsa\'', "$HOME/.ssh/id_rsa"),
+        ('function aw\\\nk() { eval "$1"; }; awk \'printf "%s" $HOME/.ssh/id_rsa\'', "$HOME/.ssh/id_rsa"),
+        ("alia\\\ns awk=eval; shopt -s expand_aliases; awk 'printf \"%s\" $HOME/.ssh/id_rsa'", "$HOME/.ssh/id_rsa"),
+        # Commands that can redefine what ``awk`` runs forfeit the exemption.
+        ("awk () { eval \"$1\"; }; awk 'cat $HOME/.ssh/id_rsa'", "$HOME/.ssh/id_rsa"),
+        ("function awk { eval \"$1\"; }; awk 'cat $HOME/.ssh/id_rsa'", "$HOME/.ssh/id_rsa"),
+        ("hash -p /mnt/user-data/workspace/evil awk; awk 'cat $HOME/.ssh/id_rsa'", "$HOME/.ssh/id_rsa"),
+        ("PATH=/mnt/user-data/workspace:$PATH awk 'cat $HOME/.ssh/id_rsa'", "$HOME/.ssh/id_rsa"),
+        ("export PATH=/mnt/user-data/workspace:$PATH; awk 'cat $HOME/.ssh/id_rsa'", "$HOME/.ssh/id_rsa"),
+        ("source /mnt/user-data/workspace/defs.sh; awk 'cat $HOME/.ssh/id_rsa'", "$HOME/.ssh/id_rsa"),
+        (". /mnt/user-data/workspace/defs.sh; awk 'cat $HOME/.ssh/id_rsa'", "$HOME/.ssh/id_rsa"),
+        ("eval \"$(cat /mnt/user-data/workspace/defs.sh)\"; awk 'cat $HOME/.ssh/id_rsa'", "$HOME/.ssh/id_rsa"),
+        # zsh defines functions and aliases through special arrays.
+        ("functions[awk]='eval \"$1\"'; awk 'cat $HOME/.ssh/id_rsa'", "$HOME/.ssh/id_rsa"),
+        ("functions[awk]='eval \"$1\"'; awk 'cat /etc/passwd'", "/etc/passwd"),
+        ("aliases[awk]=eval; awk 'cat $HOME/.ssh/id_rsa'", "$HOME/.ssh/id_rsa"),
+        ("autoload -Uz awk; awk 'cat $HOME/.ssh/id_rsa'", "$HOME/.ssh/id_rsa"),
+        # An ``awk`` word that is an argument of another command is not a command.
+        ("echo $(true) awk '{print $NF/2}'", "$NF/2"),
+        ("echo >| awk '{print $NF/2}'", "$NF/2"),
+        ("echo x) awk '{print $NF/2}'", "$NF/2"),
+        ("eval $(true) awk '{print $HOME/.ssh/id_rsa}'", "$HOME/.ssh/id_rsa"),
+        ("echo `true` awk '{print $HOME/.ssh/id_rsa}'", "$HOME/.ssh/id_rsa"),
+        ('echo "$(echo "x") awk \'{print $HOME/.ssh/id_rsa}\'"', "$HOME/.ssh/id_rsa"),
+        # Quoting the scanner does not model fails closed.
+        ("awk $'{print $HOME/.ssh/id_rsa}'", "$HOME/.ssh/id_rsa"),
+        ("awk '{print $NF/2}' $'/mnt/user-data/workspace/data.txt' 'x' $HOME/.ssh/id_rsa", "$HOME/.ssh/id_rsa"),
     ],
 )
 def test_validate_local_bash_command_paths_blocks_variable_prefixed_host_paths(command: str, rejected: str) -> None:
@@ -1117,6 +1146,22 @@ def test_validate_local_bash_command_paths_blocks_variable_prefixed_host_paths(c
         "awk '{n=split($0,p,\"/\"); print $1/p[n]}' /mnt/user-data/workspace/data.csv",
         "awk '{split($0, a, \"/\"); print $1/a[1]}' /mnt/user-data/workspace/data.csv",
         "awk -F'#' '{print \"#\" $NF/2}' /mnt/user-data/workspace/data.txt",
+        # ``/`` after ``)`` is division unless the ``)`` closes an if/while/for
+        # condition; the absolute-path scan is exempt inside awk code too.
+        "awk '{avg=($2+$3)/2; print $NF/avg}' /mnt/user-data/workspace/data.txt",
+        "awk '{print ($NF+1)/2, $NF/2}' /mnt/user-data/workspace/data.txt",
+        "awk '{print length($0)/2}' /mnt/user-data/workspace/data.txt",
+        "awk '{a[$1]/=2; print a[$1]/2}' /mnt/user-data/workspace/data.txt",
+        # The command word is found like the shell does: basename, after an
+        # assignment prefix, inside ``$(...)``, before a comment.
+        "/usr/bin/awk '{print $NF/2}' /mnt/user-data/workspace/data.txt",
+        "LC_ALL=C awk '{print $NF/2}' /mnt/user-data/workspace/data.txt",
+        "echo \"$(awk '{print $NF/2}' /mnt/user-data/workspace/data.txt)\"",
+        "x=$(awk '{print $NF/2}' /mnt/user-data/workspace/data.txt); echo \"$x\"",
+        "awk '{print $NF/2}' /mnt/user-data/workspace/data.txt # don't worry",
+        "awk '{print \"<<\", $NF/2}' /mnt/user-data/workspace/data.txt",
+        "(awk '{print $NF/2}' /mnt/user-data/workspace/data.txt)",
+        "awk '{print $NF/2}' /mnt/user-data/workspace/data.txt 2>/dev/null",
     ],
 )
 def test_validate_local_bash_command_paths_allows_non_path_variable_uses(command: str) -> None:
