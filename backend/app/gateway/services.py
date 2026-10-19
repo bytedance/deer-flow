@@ -86,7 +86,6 @@ from deerflow.runtime.checkpoint_mode import (
     inject_checkpoint_mode,
 )
 from deerflow.runtime.checkpoint_state import graph_state_schema
-from deerflow.runtime.client_context import sanitize_client_context
 from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
 from deerflow.runtime.events.message_identity import MESSAGE_SEQ_KEY
 from deerflow.runtime.goal import goal_thread_lock
@@ -835,18 +834,6 @@ def strip_internal_context_keys(config: dict[str, Any]) -> None:
                 value.pop(key, None)
 
 
-def _sanitize_request_client_context(raw: Any) -> dict[str, Any] | None:
-    """Sanitize a caller's ``context.client``, logging when fields are dropped.
-
-    The log line carries no values: ``client.name`` and preference values are
-    caller-controlled text.
-    """
-    client = sanitize_client_context(raw)
-    if client != raw:
-        logger.debug("Dropped or normalized context.client fields from the run request (kept_any=%s)", client is not None)
-    return client
-
-
 def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, Any] | None, *, internal: bool = False) -> None:
     """Merge whitelisted keys from ``body.context`` into both ``config['configurable']``
     and ``config['context']`` so they are visible to legacy configurable readers and
@@ -869,26 +856,9 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
     secrets / runtime flags read by tools and middlewares from ``runtime.context``;
     keeping them out of ``configurable`` avoids persisting a short-lived token in the
     checkpoint store.
-
-    Client capability context is runtime-only: it is sanitized and copied into
-    ``config['context']['client']`` but never into ``configurable``.
     """
-    existing_configurable = config.get("configurable")
-    if isinstance(existing_configurable, dict):
-        # ``build_run_config`` copies ``body.config['configurable']`` verbatim,
-        # and ``configurable`` is persisted in checkpoints.
-        existing_configurable.pop("client", None)
-    existing_runtime_context = config.get("context")
-    if isinstance(existing_runtime_context, dict) and "client" in existing_runtime_context:
-        existing_client_context = _sanitize_request_client_context(existing_runtime_context.get("client"))
-        if existing_client_context is None:
-            existing_runtime_context.pop("client", None)
-        else:
-            existing_runtime_context["client"] = existing_client_context
-
     if not context:
         return
-
     configurable = config.setdefault("configurable", {})
     runtime_context = config.setdefault("context", {})
     keys = _CONTEXT_CONFIGURABLE_KEYS | _CONTEXT_INTERNAL_CALLER_KEYS if internal else _CONTEXT_CONFIGURABLE_KEYS
@@ -907,11 +877,6 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
                 runtime_context.setdefault(key, context[key])
     if "user_id" in context and isinstance(runtime_context, dict):
         runtime_context.setdefault("user_id", context["user_id"])
-
-    if "client" in context:
-        client_context = _sanitize_request_client_context(context["client"])
-        if client_context is not None and isinstance(runtime_context, dict):
-            runtime_context.setdefault("client", client_context)
 
 
 async def resolve_trusted_internal_owner_for_attribution(request: Request, owner_user_id: str | None) -> Any | None:
@@ -1259,6 +1224,7 @@ def build_checkpoint_state_mutation_accessor(
     thread_id: str,
     as_node: str,
     checkpoint_id: str | None = None,
+    checkpoint_ns: str = "",
     state_schema: Any | None = None,
 ) -> tuple[CheckpointStateAccessor, dict[str, Any]]:
     """Build a state-only graph whose writer node finishes immediately.
@@ -1272,7 +1238,7 @@ def build_checkpoint_state_mutation_accessor(
     config: dict[str, Any] = {
         "configurable": {
             "thread_id": thread_id,
-            "checkpoint_ns": "",
+            "checkpoint_ns": checkpoint_ns,
         }
     }
     if checkpoint_id is not None:
@@ -1449,12 +1415,13 @@ def build_checkpoint_state_accessor(
     thread_id: str,
     assistant_id: str | None = None,
     checkpoint_id: str | None = None,
+    checkpoint_ns: str = "",
 ) -> tuple[CheckpointStateAccessor, dict[str, Any]]:
     """Build the mode-selected lead graph used for materialized checkpoint state."""
     ctx = get_run_context(request)
     config = build_run_config(thread_id, None, None, assistant_id=assistant_id)
     configurable = config.setdefault("configurable", {})
-    configurable["checkpoint_ns"] = ""
+    configurable["checkpoint_ns"] = checkpoint_ns
     if checkpoint_id is not None:
         configurable["checkpoint_id"] = checkpoint_id
 
@@ -1500,6 +1467,7 @@ async def abuild_checkpoint_state_accessor(
     thread_id: str,
     assistant_id: str | None = None,
     checkpoint_id: str | None = None,
+    checkpoint_ns: str = "",
 ) -> tuple[CheckpointStateAccessor, dict[str, Any]]:
     """Async variant of :func:`build_checkpoint_state_accessor`.
 
@@ -1513,13 +1481,14 @@ async def abuild_checkpoint_state_accessor(
     identity changed while it waited rebuilds instead of reusing the
     winner's graph.
     """
-    return await run_assembly(
-        build_checkpoint_state_accessor,
-        request,
-        thread_id=thread_id,
-        assistant_id=assistant_id,
-        checkpoint_id=checkpoint_id,
-    )
+    kwargs: dict[str, Any] = {
+        "thread_id": thread_id,
+        "assistant_id": assistant_id,
+        "checkpoint_id": checkpoint_id,
+    }
+    if checkpoint_ns:
+        kwargs["checkpoint_ns"] = checkpoint_ns
+    return await run_assembly(build_checkpoint_state_accessor, request, **kwargs)
 
 
 async def resolve_thread_assistant_id(
@@ -1552,6 +1521,7 @@ async def build_thread_checkpoint_state_accessor(
     *,
     thread_id: str,
     checkpoint_id: str | None = None,
+    checkpoint_ns: str = "",
     fail_closed: bool = False,
 ) -> tuple[CheckpointStateAccessor, dict[str, Any]]:
     """Single resolution boundary for state endpoints.
@@ -1561,12 +1531,14 @@ async def build_thread_checkpoint_state_accessor(
     ``AgentMiddleware.state_schema`` from the response.
     """
     assistant_id = await resolve_thread_assistant_id(request, thread_id, fail_closed=fail_closed)
-    return await abuild_checkpoint_state_accessor(
-        request,
-        thread_id=thread_id,
-        assistant_id=assistant_id,
-        checkpoint_id=checkpoint_id,
-    )
+    kwargs: dict[str, Any] = {
+        "thread_id": thread_id,
+        "assistant_id": assistant_id,
+        "checkpoint_id": checkpoint_id,
+    }
+    if checkpoint_ns:
+        kwargs["checkpoint_ns"] = checkpoint_ns
+    return await abuild_checkpoint_state_accessor(request, **kwargs)
 
 
 async def build_thread_checkpoint_state_mutation_accessor(
@@ -1575,6 +1547,7 @@ async def build_thread_checkpoint_state_mutation_accessor(
     thread_id: str,
     as_node: str,
     checkpoint_id: str | None = None,
+    checkpoint_ns: str = "",
 ) -> tuple[CheckpointStateAccessor, dict[str, Any]]:
     """Mutation accessor compiled with the thread's effective state schema.
 
@@ -1582,20 +1555,24 @@ async def build_thread_checkpoint_state_mutation_accessor(
     so writes carrying materialized state do not silently discard
     extension-owned channels.
     """
-    read_accessor, _read_config = await build_thread_checkpoint_state_accessor(
-        request,
-        thread_id=thread_id,
-        checkpoint_id=checkpoint_id,
-        fail_closed=True,
-    )
+    read_kwargs: dict[str, Any] = {
+        "thread_id": thread_id,
+        "checkpoint_id": checkpoint_id,
+        "fail_closed": True,
+    }
+    if checkpoint_ns:
+        read_kwargs["checkpoint_ns"] = checkpoint_ns
+    read_accessor, _read_config = await build_thread_checkpoint_state_accessor(request, **read_kwargs)
     state_schema = graph_state_schema(getattr(read_accessor, "graph", None))
-    return build_checkpoint_state_mutation_accessor(
-        request,
-        thread_id=thread_id,
-        as_node=as_node,
-        checkpoint_id=checkpoint_id,
-        state_schema=state_schema,
-    )
+    mutation_kwargs: dict[str, Any] = {
+        "thread_id": thread_id,
+        "as_node": as_node,
+        "checkpoint_id": checkpoint_id,
+        "state_schema": state_schema,
+    }
+    if checkpoint_ns:
+        mutation_kwargs["checkpoint_ns"] = checkpoint_ns
+    return build_checkpoint_state_mutation_accessor(request, **mutation_kwargs)
 
 
 async def apply_checkpoint_to_run_config(
@@ -2384,10 +2361,10 @@ async def start_run(
                         body.assistant_id,
                         on_disconnect=disconnect,
                         metadata=run_metadata,
-                        # Persist a redacted copy of the config: the run record is
+                        # Persist a secret-redacted copy of the config: the run record is
                         # written to runs.kwargs_json and echoed by the run API, so a
-                        # request-scoped secret (#3861) or client hint must not ride along.
-                        # The live config built above keeps them for the actual run.
+                        # request-scoped secret (#3861) must not ride along. The live
+                        # config built above keeps the secrets for the actual run.
                         kwargs={
                             "input": run_record_input,
                             **({"knowledge_default_request_hash": knowledge_default_request_hash} if accepts_knowledge_default else {}),

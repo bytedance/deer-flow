@@ -4396,6 +4396,98 @@ def test_update_thread_state_real_mutation_graph_finishes_without_scheduling(mon
     assert body["next"] == []
 
 
+def test_update_thread_state_forks_from_checkpoint_object(monkeypatch) -> None:
+    app, _store, _checkpointer = _build_thread_app()
+    thread_id = "state-checkpoint-object"
+    real_mutation_builder = gateway_services.build_checkpoint_state_mutation_accessor
+
+    async def mutation_boundary(
+        request,
+        *,
+        thread_id,
+        as_node,
+        checkpoint_id=None,
+        checkpoint_ns="",
+    ):
+        return real_mutation_builder(
+            request,
+            thread_id=thread_id,
+            as_node=as_node,
+            checkpoint_id=checkpoint_id,
+            checkpoint_ns=checkpoint_ns,
+        )
+
+    monkeypatch.setattr(
+        threads,
+        "build_thread_checkpoint_state_mutation_accessor",
+        mutation_boundary,
+    )
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/threads",
+            json={"thread_id": thread_id, "metadata": {}},
+        )
+        assert created.status_code == 200, created.text
+
+        first = client.post(
+            f"/api/threads/{thread_id}/state",
+            json={"values": {"title": "First"}},
+        )
+        assert first.status_code == 200, first.text
+        first_checkpoint_id = first.json()["checkpoint_id"]
+
+        second = client.post(
+            f"/api/threads/{thread_id}/state",
+            json={"values": {"title": "Second"}},
+        )
+        assert second.status_code == 200, second.text
+        second_checkpoint_id = second.json()["checkpoint_id"]
+
+        forked = client.post(
+            f"/api/threads/{thread_id}/state",
+            json={
+                "checkpoint_id": second_checkpoint_id,
+                "checkpoint": {
+                    "thread_id": thread_id,
+                    "checkpoint_ns": "",
+                    "checkpoint_id": first_checkpoint_id,
+                },
+                "values": {"title": "Forked from first"},
+            },
+        )
+
+    assert forked.status_code == 200, forked.text
+    assert forked.json()["parent_checkpoint_id"] == first_checkpoint_id
+    assert forked.json()["values"]["title"] == "Forked from first"
+
+
+def test_update_thread_state_rejects_checkpoint_object_for_another_thread() -> None:
+    app, _store, _checkpointer = _build_thread_app()
+    thread_id = "state-checkpoint-thread-mismatch"
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/threads",
+            json={"thread_id": thread_id, "metadata": {}},
+        )
+        assert created.status_code == 200, created.text
+        response = client.post(
+            f"/api/threads/{thread_id}/state",
+            json={
+                "checkpoint": {
+                    "thread_id": "another-thread",
+                    "checkpoint_ns": "",
+                    "checkpoint_id": "not-used",
+                },
+                "values": {"title": "Must not be written"},
+            },
+        )
+
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"] == "checkpoint thread_id does not match request thread_id"
+
+
 @pytest.mark.parametrize("missing_checkpoint_id", ["does-not-exist", ""])
 def test_update_thread_state_rejects_missing_explicit_checkpoint_without_writing(
     missing_checkpoint_id: str,
