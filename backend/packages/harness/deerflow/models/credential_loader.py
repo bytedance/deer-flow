@@ -213,13 +213,18 @@ def load_claude_code_credential() -> ClaudeCodeCredential | None:
     # A present-but-blank token (an unset CI secret rendered as " ", or a stray
     # newline) is not a credential. Returning ``None`` from here would end the
     # lookup before the descriptor and file sources, while an empty string already
-    # falls through because it is falsy. Only a usable token ends the search.
-    direct_token = os.getenv("CLAUDE_CODE_OAUTH_TOKEN") or os.getenv("ANTHROPIC_AUTH_TOKEN")
-    if direct_token:
-        cred = _credential_from_direct_token(direct_token, "claude-cli-env")
+    # falls through because it is falsy. Only a usable token ends the search, and a
+    # blank first variable must not hide a usable second one: test each source
+    # instead of letting ``or`` pick the first truthy value.
+    for env_var in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN"):
+        env_token = os.getenv(env_var)
+        if env_token is None:
+            continue
+        cred = _credential_from_direct_token(env_token, "claude-cli-env")
         if cred:
             logger.info("Loaded Claude Code OAuth credential from environment")
             return cred
+        logger.debug(f"Ignoring blank {env_var}; trying the next credential source")
 
     fd_token = _read_secret_from_file_descriptor("CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR")
     if fd_token:

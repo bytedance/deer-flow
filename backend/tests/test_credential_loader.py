@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import threading
 import time
@@ -390,6 +391,40 @@ def test_blank_env_token_falls_through_to_the_credentials_file(tmp_path, monkeyp
     assert cred is not None
     assert cred.access_token == "sk-ant-oat01-fallback"
     assert cred.source == "claude-cli-file"
+
+
+@pytest.mark.parametrize("access_token", ["   ", "\t\n", " " * 12])
+def test_blank_first_env_token_does_not_hide_the_second_env_var(monkeypatch, access_token):
+    """A blank ``CLAUDE_CODE_OAUTH_TOKEN`` must not hide a usable ``ANTHROPIC_AUTH_TOKEN``.
+
+    ``or`` only moves on when the first operand is falsy, so a whitespace-only first
+    variable won the lookup, produced no credential, and skipped the second variable
+    on the way to the descriptor and file sources.
+    """
+    _clear_claude_code_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", access_token)
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "sk-ant-oat01-second")
+
+    cred = load_claude_code_credential()
+
+    assert cred is not None
+    assert cred.access_token == "sk-ant-oat01-second"
+    assert cred.source == "claude-cli-env"
+
+
+def test_blank_env_token_is_logged_at_debug(monkeypatch, caplog):
+    """A rejected env token must be observable by its source name, never its value."""
+    _clear_claude_code_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "   ")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "sk-ant-oat01-second")
+
+    with caplog.at_level(logging.DEBUG, logger="deerflow.models.credential_loader"):
+        load_claude_code_credential()
+
+    assert any(
+        record.levelno == logging.DEBUG and "CLAUDE_CODE_OAUTH_TOKEN" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 @pytest.mark.parametrize("access_token", [b"   ", b"\t\n"])
