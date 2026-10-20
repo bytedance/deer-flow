@@ -1870,7 +1870,7 @@ def _make_provider_with_active_sandbox(tmp_path, sandbox_id: str):
         sandbox_id: aio_mod.SandboxInfo(sandbox_id=sandbox_id, sandbox_url="http://sandbox-host"),
     }
     provider._thread_sandboxes = {}
-    provider._last_activity = {sandbox_id: 0.0}
+    provider._last_activity = {sandbox_id: time.monotonic()}
     provider._local_teardown = set()
     provider._acquire_epoch = {}
     provider._acquire_epoch_counter = 0
@@ -3414,7 +3414,7 @@ def test_warm_reclaim_keeps_failed_stop_fence_for_unsafe_generation(failure_reco
     with pytest.raises(RuntimeError, match="stop failed"):
         provider.destroy(old.sandbox_id)
     candidate = type(old)(old.sandbox_id, old.sandbox_url, container_id=generation)
-    provider._warm_pool[old.sandbox_id] = (candidate, time.time())
+    provider._warm_pool[old.sandbox_id] = (candidate, time.monotonic())
     provider._warm_pool_identity[old.sandbox_id] = None
     provider_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
 
@@ -3444,7 +3444,7 @@ def test_warm_reclaim_does_not_clear_fence_if_entry_changes(failure_recovery_lif
     def swap_during_publish(sandbox_id):
         publish(sandbox_id)
         with provider._lock:
-            provider._warm_pool[sandbox_id] = (unvalidated, time.time())
+            provider._warm_pool[sandbox_id] = (unvalidated, time.monotonic())
 
     monkeypatch.setattr(provider, "_publish_ownership", swap_during_publish)
     assert provider._reclaim_warm_pool_sandbox("thread-failure-recovery", old.sandbox_id, user_id="alice") is None
@@ -3779,7 +3779,7 @@ def test_cleanup_idle_sandboxes_keeps_active_cleanup_and_delegates_warm_expiry(t
         "active-old": aio_mod.SandboxInfo(sandbox_id="active-old", sandbox_url="http://active-old"),
     }
     provider._thread_sandboxes = {("default", "thread-old"): "active-old"}
-    provider._last_activity = {"active-old": 0.0}
+    provider._last_activity = {"active-old": time.monotonic() - 10_000}
     provider._warm_pool = {
         "warm-old": (
             aio_mod.SandboxInfo(sandbox_id="warm-old", sandbox_url="http://warm-old"),
