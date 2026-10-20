@@ -62,6 +62,7 @@ class MarkdownMemoryStorage(FileMemoryStorage):
             # Same contract as the decode/fence path below: quarantine the
             # unreadable file (best-effort) so the next save cannot silently
             # overwrite the user's memory with a fresh manifest.
+            # UnicodeError is content-level (the bytes are wrong); OSError is environment-level (the file may be fine), so a healthy summary can land in ``.corrupt-*`` on a transient error.
             self._quarantine_unreadable(path)
             return None
 

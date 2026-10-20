@@ -2,6 +2,7 @@
 
 import json
 import threading
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -409,6 +410,43 @@ class TestMarkdownMemoryStorage:
         assert quarantined[0].read_bytes() == original
         # The unreadable file was moved aside, so another load of the rebuilt
         # manifest must not mint a second quarantine copy.
+        again = storage.load()
+        assert isinstance(again, dict)
+        still = list(tmp_path.glob("memory.json.corrupt-*"))
+        assert still == quarantined
+        assert still[0].read_bytes() == original
+
+    def test_permission_error_summary_is_quarantined_before_rebuild(self, tmp_path, monkeypatch):
+        """``PermissionError`` (an ``OSError``) takes the same quarantine path
+        as a decode failure: the original bytes stay in one ``.corrupt-*``
+        copy, and a later load of the rebuilt manifest does not mint another.
+
+        ``Path.read_text`` is patched because ``chmod 0o000`` is not reliable
+        on Windows. The first read fails; later reads use the real method so
+        the rebuilt file can be loaded.
+        """
+        memory_file = tmp_path / "memory.json"
+        original = json.dumps(create_empty_memory(), ensure_ascii=False).encode("utf-8")
+        memory_file.write_bytes(original)
+        real_read_text = Path.read_text
+        raised = False
+
+        def read_text(self, *args, **kwargs):
+            nonlocal raised
+            if not raised:
+                raised = True
+                raise PermissionError(13, "Permission denied")
+            return real_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", read_text)
+        storage = self._markdown_storage_at(memory_file)
+        loaded = storage.load()
+        assert raised, "the summary read must hit the patched PermissionError"
+        assert isinstance(loaded, dict)
+        assert storage.save(create_empty_memory()) is True
+        quarantined = list(tmp_path.glob("memory.json.corrupt-*"))
+        assert len(quarantined) == 1, "an unreadable summary must be quarantined, not silently rebuilt over"
+        assert quarantined[0].read_bytes() == original
         again = storage.load()
         assert isinstance(again, dict)
         still = list(tmp_path.glob("memory.json.corrupt-*"))
