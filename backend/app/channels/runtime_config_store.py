@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from app.channels.credential_staging import cleanup_stale_credential_staging, credential_staging_prefix
+from deerflow.utils.file_lock import retry_until_locked
 
 if TYPE_CHECKING:
     from deerflow.config.credentials_key import CredentialsCipher
@@ -51,9 +52,8 @@ logger = logging.getLogger(__name__)
 
 RUNTIME_CHANNEL_DISABLED_FLAG = "_runtime_disabled"
 
-# Matches the extensions manager's retry cadence for the same Windows
-# limitation of the blocking lock mode.
-_LOCK_RETRY_INTERVAL_SECONDS = 0.2
+# About ten seconds at the shared helper's 0.2-second retry cadence.
+_LOCK_WAIT_WARNING_ATTEMPTS = 50
 
 
 class ChannelRuntimeConfigEncryptionUnavailable(RuntimeError):
@@ -100,18 +100,24 @@ def _runtime_config_file_lock(path: Path) -> Iterator[None]:
             if lock_file.tell() == 0:
                 lock_file.write(b"\0")
                 lock_file.flush()
-            # Windows' blocking mode (``msvcrt.LK_LOCK``) gives up after roughly
-            # ten seconds and surfaces contention as Permission denied, while
-            # this lock exists to serialize concurrent Gateway workers'
-            # read-modify-write cycles. Retry the non-blocking acquisition until
-            # the region frees, mirroring the extensions manager's lock.
+            # LK_LOCK gives up after roughly ten seconds. Share the
+            # contention-only retry policy, retaining an indefinite wait.
             lock_file.seek(0)
-            while True:
-                try:
-                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
-                    break
-                except OSError:
-                    time.sleep(_LOCK_RETRY_INTERVAL_SECONDS)
+            retries = 0
+
+            def wait_for_lock(delay: float) -> None:
+                nonlocal retries
+                retries += 1
+                if retries == _LOCK_WAIT_WARNING_ATTEMPTS:
+                    # Diagnostics must not abort acquisition or flood the log.
+                    with suppress(Exception):
+                        logger.warning("Still waiting for channel runtime config lock %s after %d contention retries", lock_path, retries)
+                time.sleep(delay)
+
+            retry_until_locked(
+                lambda: msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1),
+                sleep=wait_for_lock,
+            )
 
         try:
             yield

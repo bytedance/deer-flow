@@ -10,10 +10,13 @@ manager's lock.
 
 from __future__ import annotations
 
+import errno
+import logging
 import os
 import sys
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -34,8 +37,9 @@ class _ContendedFakeMsvcrt:
     LK_LOCK = 1
     LK_NBLCK = 2
 
-    def __init__(self, fail_times: int) -> None:
+    def __init__(self, fail_times: int, error_number: int = errno.EDEADLK) -> None:
         self.fail_times = fail_times
+        self.error_number = error_number
         self.attempts: list[int] = []
         self.unlocked = 0
 
@@ -46,7 +50,7 @@ class _ContendedFakeMsvcrt:
             return None
         blocking_attempts = len(self.attempts) - self.unlocked
         if blocking_attempts <= self.fail_times:
-            raise OSError(36, "Resource deadlock avoided")
+            raise OSError(self.error_number, "Lock contended")
         return None
 
 
@@ -72,17 +76,18 @@ class _BlockingModeFakeMsvcrt:
             self.unlocked += 1
             return None
         if mode == self.LK_LOCK:
-            raise OSError(36, "Resource deadlock avoided")
+            raise OSError(errno.EDEADLK, "Resource deadlock avoided")
         return None
 
 
-def test_file_lock_retries_until_contention_clears(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("error_number", [errno.EACCES, errno.EAGAIN, errno.EDEADLK])
+def test_file_lock_retries_until_contention_clears(tmp_path, monkeypatch, caplog, error_number) -> None:
     """Contention is retried on the Windows fallback instead of failing."""
-    fake = _ContendedFakeMsvcrt(fail_times=3)
+    fake = _ContendedFakeMsvcrt(fail_times=3, error_number=error_number)
     monkeypatch.setattr(runtime_config_store, "fcntl", None, raising=False)
     monkeypatch.setattr(runtime_config_store, "msvcrt", fake, raising=False)
     sleeps: list[float] = []
-    monkeypatch.setattr(time, "sleep", sleeps.append)
+    monkeypatch.setattr(runtime_config_store, "time", SimpleNamespace(sleep=sleeps.append))
 
     entered = False
     with _runtime_config_file_lock(tmp_path / "runtime-config.json"):
@@ -92,6 +97,75 @@ def test_file_lock_retries_until_contention_clears(tmp_path, monkeypatch) -> Non
     assert fake.attempts == [fake.LK_NBLCK] * 4 + [fake.LK_UNLCK]
     assert fake.unlocked == 1
     assert sleeps == [0.2] * 3
+    assert not caplog.records
+
+
+@pytest.mark.parametrize("error_number", [errno.EBADF, errno.EINVAL, errno.EIO, errno.EPERM, errno.ENOSYS, None])
+def test_file_lock_propagates_permanent_errors_without_waiting_or_unlocking(tmp_path, monkeypatch, error_number) -> None:
+    primary = OSError(error_number, "Lock unavailable")
+    calls = []
+    sleeps = []
+
+    def locking(fd, mode, size):
+        calls.append(mode)
+        if len(calls) > 1:
+            pytest.fail("A failed acquisition must not be retried or unlocked")
+        raise primary
+
+    monkeypatch.setattr(runtime_config_store, "fcntl", None)
+    monkeypatch.setattr(runtime_config_store, "msvcrt", SimpleNamespace(LK_NBLCK=2, LK_UNLCK=0, locking=locking), raising=False)
+    monkeypatch.setattr(runtime_config_store, "time", SimpleNamespace(sleep=sleeps.append))
+
+    with pytest.raises(OSError) as caught:
+        with _runtime_config_file_lock(tmp_path / "runtime-config.json"):
+            pytest.fail("A failed acquisition must not enter the protected section")
+
+    assert caught.value is primary
+    assert calls == [2]
+    assert sleeps == []
+
+
+@pytest.mark.parametrize("fail_times", [49, 50, 100])
+def test_file_lock_warns_once_for_prolonged_contention(tmp_path, monkeypatch, caplog, fail_times) -> None:
+    fake = _ContendedFakeMsvcrt(fail_times=fail_times)
+    sleeps = []
+    monkeypatch.setattr(runtime_config_store, "fcntl", None)
+    monkeypatch.setattr(runtime_config_store, "msvcrt", fake, raising=False)
+    monkeypatch.setattr(runtime_config_store, "time", SimpleNamespace(sleep=sleeps.append))
+
+    with caplog.at_level(logging.WARNING, logger=runtime_config_store.__name__):
+        with _runtime_config_file_lock(tmp_path / "runtime-config.json"):
+            pass
+
+    warnings = [record for record in caplog.records if record.name == runtime_config_store.__name__]
+    assert len(warnings) == (1 if fail_times >= 50 else 0)
+    if warnings:
+        assert str(tmp_path / ".runtime-config.json.lock") in warnings[0].getMessage()
+        assert "50" in warnings[0].getMessage()
+    assert sleeps == [0.2] * fail_times
+    assert fake.unlocked == 1
+
+
+def test_file_lock_diagnostic_failure_does_not_abort_the_wait(tmp_path, monkeypatch) -> None:
+    fake = _ContendedFakeMsvcrt(fail_times=51)
+    warnings = []
+    sleeps = []
+
+    def failing_warning(*args, **kwargs):
+        warnings.append(args)
+        raise RuntimeError("Log handler failed")
+
+    monkeypatch.setattr(runtime_config_store, "fcntl", None)
+    monkeypatch.setattr(runtime_config_store, "msvcrt", fake, raising=False)
+    monkeypatch.setattr(runtime_config_store, "time", SimpleNamespace(sleep=sleeps.append))
+    monkeypatch.setattr(runtime_config_store.logger, "warning", failing_warning)
+
+    with _runtime_config_file_lock(tmp_path / "runtime-config.json"):
+        pass
+
+    assert len(warnings) == 1
+    assert sleeps == [0.2] * 51
+    assert fake.unlocked == 1
 
 
 def test_file_lock_creates_the_sidecar_byte_on_the_windows_fallback(tmp_path, monkeypatch) -> None:
