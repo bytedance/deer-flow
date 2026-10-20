@@ -13,6 +13,24 @@ This release closes that milestone with **621 merged pull requests**.
 
 ### Added
 
+- **channels:** IM bot credentials entered in the web UI now live in the shared
+  `channel_runtime_configs` table (migration `0044_channel_runtime_configs`)
+  instead of each host's plaintext `channels/runtime-config.json`. Each
+  provider's config is encrypted with `DEER_FLOW_CREDENTIALS_KEY`, a disconnect
+  is a plaintext tombstone that still overrides `config.yaml`, and every save
+  bumps a per-provider `version`. Every Gateway instance re-reads the table on
+  each request (the router no longer caches the merged config on `app.state`),
+  and under `channels.leader_lease` the holder compares the versions on every
+  renewal tick, so credentials saved or a disconnect made on any instance reach
+  the platform connection within one renewal interval instead of on the
+  holder's next restart; an instance taking a lease over reads a disconnect
+  instead of reviving cached credentials. The first start imports an existing
+  `runtime-config.json` (providers already in the table keep their row) and
+  deletes the plaintext file, so a downgrade must re-enter UI-configured bots.
+  Without a usable key, saving credentials answers `503` instead of storing
+  plaintext, and rows the key cannot decrypt read as not configured.
+  `database.backend: memory` keeps the JSON file. ([#6988])
+
 - **channels:** Option-based clarifications on the Feishu channel render as an
   interactive button card instead of plain text: each option becomes a button
   (up to 4 — beyond that the plain-text path reads better), a click resolves
@@ -1246,6 +1264,86 @@ This release closes that milestone with **621 merged pull requests**.
   because a run is still going keeps the draft and says so. ([#6556])
 
 ### Fixed
+
+- **skills:** `GET /api/skills/custom/{skill_name}/history` now answers an
+  invalid skill name (not hyphen-case, or longer than 64 characters) with `400`,
+  as delete and rollback already do, instead of `500` with a logged traceback on
+  every request. Only the name check maps to `400`: a corrupt history file
+  (malformed JSON or non-UTF-8) is still a `500`, and `POST .../rollback`, which
+  answered one with `400`, now returns `500` too. Deleting a skill with an
+  invalid name no longer logs a mutation-tail error. ([#7123])
+
+- **channels:** An IM message delivered twice no longer runs twice, and two
+  Gateway instances no longer split a new conversation across two threads.
+  Discord direct messages had no inbound dedupe key (no guild id), and a reply
+  in a Discord thread got a different key on an instance that does not track
+  that thread, so with every instance's session receiving every message both
+  answered. Discord messages are now keyed by guild (`dm` for a direct message)
+  and by the channel they were posted in, and the adapter claims that key
+  before it creates a Discord thread, so only one instance creates one. Past
+  the 10-minute dedupe window, after a restart, or while the shared dedupe
+  store is unavailable, a redelivery used to start a second run (a GitHub
+  "Redeliver" could post a duplicate comment). Every IM run request for a keyed
+  message now carries an `Idempotency-Key` derived from the dedupe key, with a
+  human message id derived from the same key, so the Gateway returns the run
+  it admitted for the first delivery: the redelivery replays its stream, reads
+  this message's turn from the thread state, or replies that the message is
+  still being processed, and never runs the turn again, even when the first
+  run failed or `/new` has since moved the conversation to a new thread: the
+  Gateway scopes `Idempotency-Key`s from trusted internal callers by owner
+  instead of owner and thread, and a key already used on another thread now
+  answers `409` instead of `500`. When two instances create a thread for a
+  conversation's first message, the binding is now claimed insert-if-absent in
+  `channel_conversations` / `channel_thread_bindings`: the instance that loses
+  adopts the winner's thread and deletes its own empty one, and `/new` still
+  rebinds. (issue #7103, [#7104])
+- **skills:** A skill the agent creates, edits, patches or deletes with the
+  `skill_manage` tool now reaches every Gateway process sharing the home
+  volume, as a change made through the skills API already did. The tool
+  refreshed only its own process's skills prompt cache, so a peer replica kept
+  rendering the previous skill list for that user; it now publishes the same
+  user-scoped shared cache reset marker after the local refresh, off the event
+  loop. The write, its history record, the refresh and the marker settle as
+  one unit, so a run cancelled while the write is in flight no longer leaves
+  this or a peer process serving the stale list. When the marker cannot be
+  written, the tool reports that the change was applied but other processes
+  were not notified, instead of reading as a failed write. ([#7099])
+- **provisioner:** When two provisioner replicas start together and
+  `K8S_NAMESPACE` does not exist yet, the one that loses the create race no
+  longer crashes at startup: its `409 AlreadyExists` now counts as the
+  namespace existing, as the Pod and Service creates already did. Helm
+  deployments, where the provisioner runs inside the namespace it manages,
+  never took this path. ([#7099])
+- **projects:** A shelf upload or save-from-thread into a project the caller
+  cannot write no longer leaves a directory behind or answers `500`. Both
+  routes staged the body under `users/{user_id}/projects/{project_id}/` before
+  checking the project, so a missing, foreign, or archived id kept an empty
+  `{project_id}/documents/` directory that the retention sweep never removes,
+  and an id longer than one path component failed with `ENAMETOOLONG`. They
+  now check for an owned, active project first and answer the same `404`
+  without writing; the shelf insert still re-checks under the project row lock.
+  ([#7040])
+- **workflows:** A script workflow waiting on a long child Agent run no longer
+  fails with `Worker turn limit` after about 209 seconds regardless of
+  `timeout_seconds`. The supervisor re-sent an empty frame to the QuickJS worker
+  every 20 ms poll while a step was pending, and each round trip counted toward
+  the 10,000-turn cap. The worker now reports when its job queue has drained,
+  and the supervisor then waits on the pending calls locally (still checking
+  cancellation, faults and worker exits every 20 ms) without exchanging frames,
+  so idle waits no longer consume turns and `timeout_seconds` is the only wall-clock bound;
+  scripts that spin the job queue still hit the turn cap. (issue #7022)
+- **browser:** `browser_screenshot` no longer replaces a file that already
+  exists in the thread's outputs directory. A screenshot saved as
+  `report.png` used to overwrite the user's own `report.png`, an earlier
+  capture, or another default-named capture taken in the same second; it now
+  takes the next free name (`report-1.png`, `report-2.png`, ...) like
+  `web_capture`, and the tool result reports the name actually used. The
+  complete capture is hard-linked onto the name, so a name taken concurrently
+  is skipped rather than replaced and the final name never shows a partial
+  file. Like Gateway uploads, the outputs directory needs hard-link support;
+  without it the tool reports an error instead of overwriting. A staged
+  capture swapped before publication, for example for a symlink to a host
+  file, is never linked into outputs; the tool reports an error. ([#6913])
 
 - **llm:** A provider error that arrives inside a streaming response that has
   already returned `200` is now retried like the same error sent as an HTTP
@@ -5982,6 +6080,34 @@ This release closes that milestone with **621 merged pull requests**.
   names the same file as the equivalent relative path, unless the command
   rebinds `PWD` itself. Variables inside URLs are unaffected. The guard
   remains best-effort and is not an isolation boundary. ([#6930])
+- **sandbox:** With host bash enabled, the local path guard accepts awk
+  field arithmetic again, such as `awk '{print $NF/2}' data.txt`,
+  `awk '{print $sum/$n}' data.txt` and `($2+$3)/2`. Since [#6930] every
+  `$NAME/` was treated as a variable-prefixed host path unless both sides were
+  digits, and a `/` after `)` had always read as an absolute path. A `$` or
+  `/` inside the single-quoted inline program of `awk`, `gawk`, `mawk` or
+  `nawk` (after options such as `-F` and `-v`, found the way the shell finds
+  the command word: after an assignment prefix, with a path reduced to its
+  basename, inside `$(...)`) is now exempt, because bash expands nothing there
+  and awk reads it as a field reference or division; for the absolute-path
+  scan only a single-segment match such as `/2` or `/NR` is exempt, so a
+  `/a/b` shape stays rejected even inside awk code. Text inside awk string
+  literals, options such as `-v`, input operands, double-quoted programs and
+  text re-read by `sh -c` or `eval` are still scanned. No exemption is granted
+  to a command that could redefine `awk` or re-read quoted text (`alias`,
+  `function`, `name()`, `eval`, `source`, `.`, `hash`, `PATH=`, a heredoc), nor
+  to syntax the scanner does not model (a backslash-newline, backticks,
+  `$'...'`, an unmatched `)`), nor to a program whose `"` may sit in an awk
+  regex literal; `/` and `#` inside an awk string literal are plain text.
+  (issue #7021)
+- **sandbox:** On the local sandbox, `ls` now accepts the `/mnt/user-data`
+  root itself and lists `workspace`, `uploads` and `outputs` as it does on
+  AIO. The provider maps that root on purpose, but the tool layer allowed
+  only paths below it and answered `Permission denied` (with a trailing
+  slash, from an internal "path traversal detected" check). The listing
+  covers only those three directories, so anything else stored directly
+  under the root stays hidden. `glob`, `grep`, `read_file` and writes still
+  reject the root, because a search would read every file below it. ([#6991])
 
 ### Security
 
@@ -11777,4 +11903,11 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6876]: https://github.com/bytedance/deer-flow/pull/6876
 [#6897]: https://github.com/bytedance/deer-flow/pull/6897
 [#6909]: https://github.com/bytedance/deer-flow/pull/6909
+[#6913]: https://github.com/bytedance/deer-flow/pull/6913
 [#6930]: https://github.com/bytedance/deer-flow/pull/6930
+[#6988]: https://github.com/bytedance/deer-flow/pull/6988
+[#6991]: https://github.com/bytedance/deer-flow/pull/6991
+[#7040]: https://github.com/bytedance/deer-flow/pull/7040
+[#7099]: https://github.com/bytedance/deer-flow/pull/7099
+[#7104]: https://github.com/bytedance/deer-flow/pull/7104
+[#7123]: https://github.com/bytedance/deer-flow/pull/7123

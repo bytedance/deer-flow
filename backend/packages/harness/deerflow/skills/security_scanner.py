@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 class ScanResult:
     decision: str
     reason: str
+    available: bool = True
 
 
 def _resolve_fail_closed(app_config: AppConfig | None) -> bool:
@@ -101,6 +102,7 @@ async def scan_skill_content(
     app_config: AppConfig | None = None,
     static_findings: list[dict[str, Any]] | None = None,
     attach_tracing: bool = True,
+    redact_diagnostics: bool = False,
 ) -> ScanResult:
     """Screen skill content before it is written to disk.
 
@@ -162,15 +164,18 @@ async def scan_skill_content(
             decision = str(parsed.get("decision", "")).lower()
             if decision in {"allow", "warn", "block"}:
                 return ScanResult(decision, str(parsed.get("reason") or "No reason provided."))
-        logger.warning("Security scan produced unparseable output: %s", raw[:200])
+        if redact_diagnostics:
+            logger.warning("Security scan produced unparseable output")
+        else:
+            logger.warning("Security scan produced unparseable output: %s", raw[:200])
     except Exception:
-        logger.warning("Skill security scan model call failed; applying configured fail-closed/fail-open policy", exc_info=True)
+        logger.warning("Skill security scan model call failed; applying configured fail-closed/fail-open policy", exc_info=not redact_diagnostics)
 
     if model_responded:
-        return ScanResult("block", "Security scan produced unparseable output; manual review required.")
+        return ScanResult("block", "Security scan produced unparseable output; manual review required.", available=False)
     if executable:
-        return ScanResult("block", "Security scan unavailable for executable content; manual review required.")
+        return ScanResult("block", "Security scan unavailable for executable content; manual review required.", available=False)
     if _resolve_fail_closed(app_config):
-        return ScanResult("block", "Security scan unavailable for skill content; manual review required.")
+        return ScanResult("block", "Security scan unavailable for skill content; manual review required.", available=False)
     logger.warning("Security scan unavailable; failing open for non-executable skill content at %s (manual review recommended)", location)
-    return ScanResult("warn", "Security scan unavailable for non-executable skill content; manual review recommended.")
+    return ScanResult("warn", "Security scan unavailable for non-executable skill content; manual review recommended.", available=False)

@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useContext, useEffect, useRef } from "react";
 
 import { useAuth } from "@/core/auth/AuthProvider";
+import { AuthQueryScopeContext } from "@/core/auth/query-scope";
 import { userSchema, type User } from "@/core/auth/types";
 import { useI18n } from "@/core/i18n/hooks";
 
@@ -27,6 +28,7 @@ export function GatewayOfflineBanner({
 }: GatewayOfflineBannerProps) {
   const { t } = useI18n();
   const { user, applyUser, refreshUser, logout } = useAuth();
+  const authScope = useContext(AuthQueryScopeContext);
   // Guard against piling up probe calls while the gateway is still slow.
   const inFlightRef = useRef(false);
   // Count consecutive 401s so we can distinguish "transient warm-up 401"
@@ -35,11 +37,14 @@ export function GatewayOfflineBanner({
 
   useEffect(() => {
     if (!gatewayUnavailable) return;
+    // Logout from unknown auth keeps user=null, but changes this scope.
+    if (authScope === null) return;
     // Once AuthProvider has a user again the banner has served its
     // purpose; tear down the polling so we don't keep probing every 10s
     // for the entire lifetime of the page (gatewayUnavailable is a
     // server-rendered prop and stays true until a full reload).
     if (user !== null) return;
+    let disposed = false;
 
     const probe = async () => {
       if (inFlightRef.current) return;
@@ -71,8 +76,9 @@ export function GatewayOfflineBanner({
         console.warn("[gateway-offline-banner] probe failed:", err);
         errored = true;
       } finally {
-        inFlightRef.current = false;
+        if (!disposed) inFlightRef.current = false;
       }
+      if (disposed) return;
 
       const action = decideProbeAction(
         authFailuresRef.current,
@@ -98,9 +104,11 @@ export function GatewayOfflineBanner({
       void probe();
     }, OFFLINE_BANNER_RETRY_INTERVAL_MS);
     return () => {
+      disposed = true;
+      inFlightRef.current = false;
       window.clearInterval(handle);
     };
-  }, [gatewayUnavailable, user, applyUser, refreshUser]);
+  }, [gatewayUnavailable, user, authScope, applyUser, refreshUser]);
 
   if (!shouldShowOfflineBanner(user, gatewayUnavailable)) {
     return null;

@@ -35,6 +35,7 @@ export interface Translations {
       | "screening"
       | "retrieval"
       | "knowledge"
+      | "weknora"
       | "example",
       { title: string; description: string }
     >;
@@ -431,6 +432,7 @@ export interface Translations {
         autoOff: string;
         noProgress: string;
         tokenCapped: string;
+        loopCapped: string;
         missingEvidence: string;
         runFailed: string;
         needsInputCard: string;
@@ -1007,6 +1009,7 @@ export interface Translations {
         maxContinuations: string;
         noProgress: string;
         tokenCapped: string;
+        loopCapped: string;
         evaluatorFailed: string;
         noDurableEndOfTurn: string;
         threadChanged: string;
@@ -1158,6 +1161,7 @@ export interface Translations {
     saveRequested: string;
     saveHint: string;
     saveCommandMessage: string;
+    agentSaveFailed: string;
     agentCreatedPendingRefresh: string;
     more: string;
     agentCreated: string;

@@ -1,6 +1,6 @@
 # AGENTS.md
 
-This is the source of truth for DeerFlow frontend coding agents; the sibling `CLAUDE.md` imports it via `@AGENTS.md`.
+DeerFlow frontend guidance source of truth; `CLAUDE.md` imports `@AGENTS.md`.
 
 ## Project Overview
 
@@ -108,16 +108,15 @@ Users create **threads** (conversations), send messages, set thread-scoped `/goa
 
 ### Source Layout (`src/`)
 
-- `app/` — Next.js routes: chat/workspace, agents, auth, showcase, artifact views,
-  localized docs/blog, and API handlers.
-- `components/` — generated `ui/` and `ai-elements/`; application components under
-  `workspace/`, `landing/`, and `docs/`.
-- `core/` — domain logic, API clients, state/hooks, i18n, and Markdown renderers.
-- `hooks/`, `lib/`, `typings/` — shared hooks, utilities, and ambient types.
-- `content/`, `styles/` — MDX content and Tailwind styles.
-- `env.js`, `mdx-components.ts` — environment validation and MDX component map.
+`AuthProvider` publishes the query owner (user ID, confirmed logout, or unknown
+auth). `QueryClientProvider` owns a mount-local client and remounts its consumers
+when that owner changes, clearing the old cache and cancelling old queries.
+Confirmed logout unmounts query consumers immediately; public and unknown-auth
+routes still render with an independent client. Keep auth outside the query
+provider. Superseded auth refreshes cannot restore an earlier owner.
 
-Read [src/AGENTS.md](src/AGENTS.md) for component and domain ownership.
+See [project structure](README.md#project-structure) for the directory map and
+[src/AGENTS.md](src/AGENTS.md) for component and domain ownership.
 
 ## Code Style
 
@@ -155,6 +154,10 @@ document through `core/agents/api.ts`. Keep file parsing client-side only for
 previewing the proposed local name; the Gateway is authoritative for schema,
 name, model, and conflict validation. Export downloads must never synthesize
 runtime state from browser caches.
+
+New-Agent saves need the latest `setup_agent` success and API read-back.
+Failed/exhausted saves restore Save. Fence superseded or unmounted callbacks.
+DOM regression: `new-agent-save.dom.test.tsx`.
 
 - **Imports**: Enforced ordering (builtin → external → internal → parent → sibling), alphabetized, newlines between groups. Use inline type imports: `import { type Foo }`.
 - **Unused variables**: Prefix with `_`.

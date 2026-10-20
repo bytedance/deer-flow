@@ -126,20 +126,27 @@ async def test_list_content_missing_check_dispatches_off_the_loop(tmp_path, monk
         await close_engine()
 
 
-async def test_dedup_hit_staging_cleanup_dispatches_off_the_loop(tmp_path, monkeypatch) -> None:
-    """The dedup-hit branch removes the staged duplicate via the offload."""
+@pytest.mark.parametrize("outcome", ["dedup", "archived"])
+async def test_staging_discard_dispatches_off_the_loop(tmp_path, monkeypatch, outcome) -> None:
+    """Both discarded-staging branches perform best-effort cleanup off-loop."""
     calls = _spy_offload(monkeypatch)
     env = await _make_env(tmp_path, monkeypatch)
     try:
-        first = await stage_document_bytes(env.paths, user_id=_USER, project_id=env.project_id, chunks=[b"same"], max_bytes=1 << 20)
-        await add_staged_document(env.docs, env.paths, user_id=_USER, project_id=env.project_id, name="first.txt", staged=first)
+        if outcome == "dedup":
+            first = await stage_document_bytes(env.paths, user_id=_USER, project_id=env.project_id, chunks=[b"same"], max_bytes=1 << 20)
+            await add_staged_document(env.docs, env.paths, user_id=_USER, project_id=env.project_id, name="first.txt", staged=first)
+        else:
+            await ProjectRepository(get_session_factory()).set_status(env.project_id, "archived", user_id=_USER)
         calls.clear()
-        duplicate = await stage_document_bytes(env.paths, user_id=_USER, project_id=env.project_id, chunks=[b"same"], max_bytes=1 << 20)
-        result = await add_staged_document(env.docs, env.paths, user_id=_USER, project_id=env.project_id, name="second.txt", staged=duplicate)
-        assert result is not None and result[1] is False
-        assert not duplicate.staging_path.exists()
-        assert "_remove_staging" in calls
-        # No placement happened for the discarded duplicate.
+        staged = await stage_document_bytes(env.paths, user_id=_USER, project_id=env.project_id, chunks=[b"same"], max_bytes=1 << 20)
+        result = await add_staged_document(env.docs, env.paths, user_id=_USER, project_id=env.project_id, name="second.txt", staged=staged)
+        if outcome == "dedup":
+            assert result is not None and result[1] is False
+        else:
+            assert result is None
+        assert not staged.staging_path.exists()
+        assert "cleanup_failed_atomic_write" in calls
+        # No placement happened for either discarded upload.
         assert "_place_staging" not in calls
     finally:
         await close_engine()

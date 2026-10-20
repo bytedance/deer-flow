@@ -127,6 +127,12 @@ class RunStore(abc.ABC):
     # Inheriting the opted-in method unchanged preserves its capability.
     supports_idempotency_request_kwargs = False
 
+    # Strict completion requires explicit require_terminal and owner_worker_id
+    # keywords, or this opt-in on the class defining update_run_completion.
+    # Inheriting that method preserves support; overriding it must opt in again.
+    # Accepting **kwargs alone never promises the atomic terminal/owner guards.
+    supports_terminal_completion_kwargs = False
+
     async def list_changed(
         self,
         *,
@@ -159,6 +165,8 @@ class RunStore(abc.ABC):
         owner_worker_id: str | None = None,
         lease_expires_at: str | None = None,
         idempotency_key: str | None = None,
+        evidence_origin: str = "unknown",
+        evidence_agent_id: str | None = None,
         idempotency_request: dict[str, Any] | None = None,
     ) -> None:
         pass
@@ -233,11 +241,13 @@ class RunStore(abc.ABC):
         error: str | None = None,
         stop_reason: str | None = None,
         goal_verdict: dict[str, Any] | None = None,
+        owner_worker_id: str | None = None,
     ) -> bool | None:
         """Update a run status.
 
-        Returns ``False`` when the store can prove no row was updated. Older or
-        lightweight stores may return ``None`` when they cannot report rowcount.
+        With ``owner_worker_id``, atomically require that owner and an unexpired
+        lease. Return True only after this operation commits. False means no
+        update; None from legacy stores is unconfirmed in heartbeat mode.
         """
         pass
 
@@ -277,6 +287,8 @@ class RunStore(abc.ABC):
         run_id: str,
         *,
         status: str,
+        require_terminal: bool = False,
+        owner_worker_id: str | None = None,
         total_input_tokens: int = 0,
         total_output_tokens: int = 0,
         total_tokens: int = 0,
@@ -295,7 +307,9 @@ class RunStore(abc.ABC):
 
         Implementations must not replace a different terminal status. Returns
         ``False`` when the row is missing or already has a conflicting terminal
-        outcome.
+        outcome. With ``require_terminal``, require the exact requested terminal
+        status and owner atomically: metadata must not transition active rows or
+        change error/goal_verdict. Unsupported strict calls must fail closed.
         """
         pass
 
@@ -344,8 +358,14 @@ class RunStore(abc.ABC):
         *,
         owner_worker_id: str,
         lease_expires_at: str,
+        allow_interrupted: bool = False,
     ) -> bool:
-        """Renew the lease on an active run. Returns ``False`` when no row matched."""
+        """Renew only an active, owned, unexpired lease to a future deadline.
+
+        The explicit allow_interrupted option also permits an interrupted row
+        while its owning Worker finishes rollback. Never renew success/error.
+        Return False when no row satisfies these atomic conditions.
+        """
         pass
 
     async def renew_lease(
@@ -354,6 +374,7 @@ class RunStore(abc.ABC):
         *,
         owner_worker_id: str,
         lease_expires_at: str,
+        allow_interrupted: bool = False,
     ) -> LeaseRenewal:
         """Renew ownership and return any durable cancellation request.
 
@@ -361,12 +382,15 @@ class RunStore(abc.ABC):
         cancellation action, so third-party stores remain source-compatible
         without adding a background read. Stores that support multi-process
         cancellation must override this method to renew and observe the
-        request atomically.
+        request atomically, retaining the live-lease/owner conditions. The
+        allow_interrupted option must retain those predicates; unsupported
+        implementations fail closed rather than silently relaxing status guards.
         """
         renewed = await self.update_lease(
             run_id,
             owner_worker_id=owner_worker_id,
             lease_expires_at=lease_expires_at,
+            **({"allow_interrupted": True} if allow_interrupted else {}),
         )
         return LeaseRenewal(renewed=renewed)
 
@@ -386,12 +410,17 @@ class RunStore(abc.ABC):
         error: str | None = None,
         stop_reason: str | None = None,
         goal_verdict: dict[str, Any] | None = None,
+        owner_worker_id: str | None = None,
     ) -> StatusFinalization:
         """Atomically finalize an active run unless cancellation won.
 
-        The compatibility default is safe for stores that do not implement
-        durable cancellation.
+        With an owner, atomically require a live owner lease and return an
+        explicit commit acknowledgment. Rejection without cancel_action is final,
+        not permission to retry a weaker write. Exceptions/cancellation are unknown.
+        The legacy default cannot enforce this and rejects owned calls.
         """
+        if owner_worker_id is not None:
+            raise NotImplementedError("Store must implement owner/lease-fenced finalization")
         updated = await self.update_status(
             run_id,
             status,
@@ -399,7 +428,7 @@ class RunStore(abc.ABC):
             stop_reason=stop_reason,
             **({"goal_verdict": goal_verdict} if goal_verdict is not None else {}),
         )
-        return StatusFinalization(finalized=updated is not False)
+        return StatusFinalization(finalized=updated is True)
 
     @abc.abstractmethod
     async def claim_for_takeover(
@@ -452,6 +481,8 @@ class RunStore(abc.ABC):
         created_at: str | None = None,
         grace_seconds: int = 10,
         idempotency_key: str | None = None,
+        evidence_origin: str = "unknown",
+        evidence_agent_id: str | None = None,
         idempotency_request: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Atomically create an active thread operation with cross-process uniqueness.

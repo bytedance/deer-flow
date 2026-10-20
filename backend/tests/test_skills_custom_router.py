@@ -778,6 +778,87 @@ def test_custom_skill_delete_preserves_history_and_allows_restore(monkeypatch, t
         assert refresh_calls == [("refresh", "default"), ("refresh", "default")]
 
 
+def _make_demo_custom_skill_app(monkeypatch, tmp_path: Path) -> FastAPI:
+    from deerflow.config.paths import Paths
+
+    custom_dir = _user_custom_dir(tmp_path, "default") / "demo-skill"
+    custom_dir.mkdir(parents=True, exist_ok=True)
+    (custom_dir / "SKILL.md").write_text(_skill_content("demo-skill"), encoding="utf-8")
+
+    config = SimpleNamespace(
+        skills=SimpleNamespace(get_skills_path=lambda: tmp_path / "skills", container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
+        skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+    )
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    monkeypatch.setattr("app.gateway.routers.skills.get_effective_user_id", lambda: "default")
+    return _make_test_app(config)
+
+
+@pytest.mark.parametrize(
+    ("skill_name", "detail"),
+    [
+        ("Bad_Name", "hyphen-case"),
+        ("a" * 65, "64 characters or fewer"),
+    ],
+)
+def test_custom_skill_history_rejects_invalid_name(monkeypatch, tmp_path, caplog, skill_name, detail):
+    """An invalid name is a 400 like delete and rollback, not a logged 500."""
+    import logging
+
+    app = _make_demo_custom_skill_app(monkeypatch, tmp_path)
+
+    with TestClient(app) as client, caplog.at_level(logging.ERROR, logger=skills_router.__name__):
+        response = client.get(f"/api/skills/custom/{skill_name}/history")
+
+    assert response.status_code == 400
+    assert detail in response.json()["detail"]
+    assert "Failed to read history" not in caplog.text
+
+
+def test_custom_skill_delete_rejects_invalid_name_before_mutation_tail(monkeypatch, tmp_path, caplog):
+    """A malformed name is a 400 the drained delete tail never sees, so nothing is logged."""
+    import logging
+
+    app = _make_demo_custom_skill_app(monkeypatch, tmp_path)
+
+    with TestClient(app) as client, caplog.at_level(logging.ERROR, logger=skills_router.__name__):
+        response = client.delete("/api/skills/custom/Bad_Name")
+
+    assert response.status_code == 400
+    assert "hyphen-case" in response.json()["detail"]
+    assert caplog.records == []
+
+
+@pytest.mark.parametrize(
+    "history_bytes",
+    [
+        pytest.param(b"{not json\n", id="malformed-json"),
+        pytest.param(b'{"action": "human_edit", "prev_content": "\xff"}\n', id="non-utf8"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("method", "path", "body", "detail"),
+    [
+        ("GET", "/api/skills/custom/demo-skill/history", None, "Failed to read history:"),
+        ("POST", "/api/skills/custom/demo-skill/rollback", {"history_index": -1}, "Failed to roll back custom skill:"),
+    ],
+)
+def test_custom_skill_corrupt_history_record_stays_server_error(monkeypatch, tmp_path, method, path, body, detail, history_bytes):
+    """Only the name maps to 400: a corrupt history file (JSONDecodeError and UnicodeDecodeError are ValueErrors too) is a server fault."""
+    app = _make_demo_custom_skill_app(monkeypatch, tmp_path)
+    history_file = _user_custom_dir(tmp_path, "default") / ".history" / "demo-skill.jsonl"
+    history_file.parent.mkdir(parents=True, exist_ok=True)
+    history_file.write_bytes(history_bytes)
+
+    with TestClient(app) as client:
+        response = client.request(method, path, json=body)
+
+    assert response.status_code == 500
+    assert response.json()["detail"].startswith(detail)
+
+
 def test_custom_skill_delete_continues_when_history_write_is_readonly(monkeypatch, tmp_path):
     skills_root = tmp_path / "skills"
     from deerflow.config.paths import Paths

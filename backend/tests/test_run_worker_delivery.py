@@ -19,6 +19,7 @@ from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 from deerflow.runtime.runs.worker import RunContext, _delivery_content_with_outputs, run_agent
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.workspace_changes.api import get_workspace_changes_response
 
 
 def _make_bridge():
@@ -50,6 +51,64 @@ def test_delivery_verification_treats_presented_directory_as_covering_produced_f
         "/mnt/user-data/outputs/site/assets/style.css",
     ]
     assert delivery["satisfied"] is True
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("disappear_during", ["before-run", "after-run"])
+async def test_vanished_scratch_file_does_not_discard_run_file_changes(tmp_path, monkeypatch, disappear_during):
+    import deerflow.workspace_changes.scanner as scanner
+
+    paths = Paths(base_dir=tmp_path)
+    monkeypatch.setattr("deerflow.workspace_changes.recorder.get_paths", lambda: paths)
+    user_id = get_effective_user_id()
+    workspace = paths.sandbox_work_dir("thread-1", user_id=user_id)
+    outputs = paths.sandbox_outputs_dir("thread-1", user_id=user_id)
+    workspace.mkdir(parents=True)
+    outputs.mkdir(parents=True)
+    scratch = workspace / "scratch.txt"
+    if disappear_during == "before-run":
+        scratch.write_text("temporary\n", encoding="utf-8")
+    removed = []
+    real_hash = scanner._sha256_file
+
+    def remove_before_hash(path):
+        if path == scratch:
+            path.unlink()
+            removed.append(path)
+        return real_hash(path)
+
+    monkeypatch.setattr(scanner, "_sha256_file", remove_before_hash)
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    store = MemoryRunEventStore()
+
+    class ProducingAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            if disappear_during == "after-run":
+                scratch.write_text("temporary\n", encoding="utf-8")
+            (outputs / "report.md").write_text("Report ready\n", encoding="utf-8")
+            yield {"messages": [AIMessage(content="Created report.md.")]}
+
+    await run_agent(
+        _make_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=store),
+        agent_factory=lambda *, config: ProducingAgent(),
+        graph_input={},
+        config={},
+    )
+
+    assert removed == [scratch]
+    changes = await get_workspace_changes_response(store, "thread-1", record.run_id)
+    assert changes["available"] is True
+    assert [(change["path"], change["status"]) for change in changes["files"]] == [("/mnt/user-data/outputs/report.md", "created")]
+    assert "+Report ready" in changes["files"][0]["diff"]
+    delivery = await _delivery_events(store, "thread-1", record.run_id)
+    assert delivery[0]["content"]["produced_paths"] == ["/mnt/user-data/outputs/report.md"]
+    assert delivery[0]["content"]["satisfied"] is False
+    assert record.status == RunStatus.error
+    assert record.error == "Artifact delivery incomplete: no produced output artifact was presented"
 
 
 @pytest.mark.anyio
@@ -552,6 +611,57 @@ async def test_delivery_is_durable_before_terminal_run_status():
     )
 
     assert (await run_store.get(record.run_id))["status"] == "success"
+
+
+@pytest.mark.anyio
+async def test_deferred_error_stream_frames_follow_durable_terminal_status():
+    events = MemoryRunEventStore()
+    order: list[str] = []
+
+    class OrderingRunStore(MemoryRunStore):
+        async def update_status(self, run_id, status, *, error=None, stop_reason=None):
+            result = await super().update_status(
+                run_id,
+                status,
+                error=error,
+                stop_reason=stop_reason,
+            )
+            if status == "error":
+                order.append("durable-error")
+            return result
+
+    class OrderingBridge:
+        async def publish(self, _run_id, event, _data):
+            if event == "error":
+                order.append("stream-error")
+
+        async def publish_end(self, _run_id):
+            order.append("stream-end")
+
+        async def cleanup(self, _run_id, *, delay=0):
+            del delay
+
+    class FailingAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            del graph_input, config, stream_mode, subgraphs
+            raise RuntimeError("boom")
+            yield  # pragma: no cover - make this an async generator
+
+    run_store = OrderingRunStore()
+    run_manager = RunManager(store=run_store)
+    record = await run_manager.create("thread-1")
+
+    await run_agent(
+        OrderingBridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=events),
+        agent_factory=lambda *, config: FailingAgent(),
+        graph_input={},
+        config={},
+    )
+
+    assert order == ["durable-error", "stream-error", "stream-end"]
 
 
 @pytest.mark.anyio

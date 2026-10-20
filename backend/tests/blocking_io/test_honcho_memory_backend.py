@@ -36,7 +36,7 @@ class _BlockingFakeClient:
         self._block()
         return "rep"
 
-    def search(self, ws: str, query: str, *, limit: int = 5) -> list[Any]:
+    def search(self, ws: str, query: str, *, limit: int = 5, filters: dict[str, Any] | None = None) -> list[Any]:
         self._block()
         return []
 
