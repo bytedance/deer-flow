@@ -392,31 +392,6 @@ proven-not-committed batches may be retried. Normal close stops new evidence
 producers and drains already admitted cross-thread callbacks inside its operation
 lock before flushing and detaching; do not reacquire that lock through `flush()`.
 
-## Agent tracing snapshots
-
-Gateway admission resolves the effective Agent and owner before selecting an
-immutable tracing snapshot. Run and scheduled-queue inserts validate the snapshot
-against the shared profile authority under the same database transaction; a
-concurrent profile or binding edit rejects stale admission. Only trusted resume
-and already queued occurrences may set `deerflow_tracing_pinned` to keep an older
-snapshot. Scrub this marker and all tracing reference keys from external inputs.
-
-Persist only `deerflow_tracing_snapshot_id`, `deerflow_tracing_agent_name`, and the
-`deerflow_tracing_managed` lineage marker. Credentials remain in the encrypted
-snapshot store and execution scope. A managed checkpoint missing references must
-fail closed. State updates, branches, compaction, delta-resume linearization and
-rollback preserve these fields with `checkpoint_agent_binding_metadata`.
-Durable batch specs also retain server-captured `tracing_parent_contexts`, limited
-to provider trace/span IDs and flags, so restarted work can link to its parent.
-
-The worker binds the snapshot through graph construction, invocation, goal
-evaluation and finalization. Callback instances belong to each invocation;
-`__deerflow_root_tracing_bound` prevents lead construction from adding a second
-set. `DeerFlowClient.stream` holds one exporter lease while activating ContextVars
-only around each iterator step and cleanup. Ordinary and durable batch subagents
-retain the parent's snapshot, and replace inherited scoped callbacks with their
-own handlers. Manual compaction restores and binds the source checkpoint's
-snapshot before summary or memory LLM calls. Use metadata `deerflow_run_id` for
-attribution: LangGraph reserves metadata `run_id` for reconnect detection.
-The summary factory's `attach_tracing` defaults to false inside graphs; manual
-compaction sets it true because its summary models have no graph-root callback.
+Tracing: preserve trusted snapshot refs and restore scopes across resume,
+delegation and compaction. See `tracing_snapshot.py` and `../tracing/AGENTS.md`;
+never persist credentials in runtime config.
