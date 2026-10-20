@@ -310,4 +310,6 @@ def test_snapshot_delete_branch_cleanup_failure_does_not_skip_later_restores(tmp
         assert "Failed to remove temporary output file" in caplog.text
         assert str(created) in caplog.text
         assert "temporary unlink failed" in caplog.text
+    if failure == "logging":
+        assert str(raised.value) == "install failed"
         assert "log handler failed" not in str(raised.value)
