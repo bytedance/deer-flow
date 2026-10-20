@@ -292,7 +292,7 @@ for (const chatPage of CHAT_PAGES) {
     for (const scenario of STOOD_DOWN) {
       test(`explains ${scenario.name}, also after a reload`, async ({
         page,
-      }, testInfo) => {
+      }) => {
         mockLangGraphAPI(page, {
           ...chatPage.options,
           threads: [chatThread(scenario)],
@@ -315,14 +315,6 @@ for (const chatPage of CHAT_PAGES) {
           await expectNoRawIdentifiers(bar);
         }
 
-        if (
-          scenario.goal.last_evaluation?.stand_down_reason === "loop_capped"
-        ) {
-          await page.screenshot({
-            path: testInfo.outputPath("loop-hard-stop.png"),
-            fullPage: true,
-          });
-        }
         await bar.getByRole("button", { name: "Details" }).click();
         const details = bar.getByTestId("goal-status-details");
         await expect(details).toContainText(scenario.objective);
