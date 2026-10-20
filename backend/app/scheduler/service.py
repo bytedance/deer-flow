@@ -11,7 +11,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
-from fastapi import HTTPException
 from sqlalchemy import select
 
 from app.channels.capabilities import supports_proactive_group_notifications, supports_proactive_notifications
@@ -473,7 +472,13 @@ class ScheduledTaskService:
     def _is_overlap_conflict(exc: Exception) -> bool:
         if isinstance(exc, ConflictError):
             return True
-        return isinstance(exc, HTTPException) and exc.status_code == 409
+        # ``start_run`` converts a run-manager admission conflict into this
+        # typed HTTP 409. Other 409s (idempotency-key mismatch, thread or
+        # assistant drift) are permanent launch failures; retrying them would
+        # keep the occurrence queued until the queue timeout.
+        from app.gateway.services import BusyThreadConflict
+
+        return isinstance(exc, BusyThreadConflict)
 
     @staticmethod
     def _task_status_for_failure(task: dict[str, Any], *, trigger: str) -> str:
