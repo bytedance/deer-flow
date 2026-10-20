@@ -202,6 +202,24 @@ the production PATH lookup, including a directory containing spaces. Seed fake
 app credentials so auth completion reaches the CLI instead of returning early,
 and keep fixture filesystem work behind `asyncio.to_thread`.
 
+## Lark device-login single-flight
+
+`test_lark_auth_singleflight.py` pins the `(user_id, generation)` single-flight
+contract: wait timeouts never kill or respawn the shared login process, polls
+attach to one run, supersession terminates the orphan, and finished outcomes
+stay idempotently attachable. Cross-worker ownership rides per-generation
+marker/result files under the credential root (first writer wins); termination
+kills the login's whole process group so wrapper children cannot hold the
+pipes open. Drive the `_spawn_lark_login_process` seam with Popen-shaped fakes
+held open by `threading.Event` (no sleep-based timing), and always
+release/kill blocked fakes so the daemon worker threads exit; the autouse
+fixture calls `_clear_lark_login_runs_for_tests()` on both sides to keep the
+process-global registry from leaking between tests. The
+`GATEWAY_WORKERS > 1` regression forks two real workers over one credential
+root with a FIFO-gated CLI stub; assert retry attachment (no second spawn),
+non-owner switch fencing (owner CLI killed, no post-switch token write) and
+cross-worker success attachment through the published result file.
+
 ## Remote read fixtures
 
 Remote ranged-read fixtures pass POSIX sandbox paths to adapters and map those

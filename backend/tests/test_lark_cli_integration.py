@@ -215,6 +215,30 @@ def _advance_lark_flow(user_id: str = "alice") -> str:
         return lark_cli._advance_lark_flow_generation_locked(user_id)
 
 
+class _InstantLoginProcess:
+    """Popen-shaped double whose device-login CLI exits immediately."""
+
+    pid = None  # Markers treat a missing CLI pid as owned by this process.
+
+    def __init__(self, *, stdout: str = "{}", stderr: str = "", returncode: int = 0) -> None:
+        self._result = (stdout, stderr)
+        self._returncode = returncode
+        self.killed = False
+
+    def communicate(self, timeout=None):
+        return self._result
+
+    @property
+    def returncode(self) -> int:
+        return self._returncode
+
+    def kill(self) -> None:
+        self.killed = True
+
+    def poll(self):
+        return self._returncode
+
+
 def test_sandbox_lark_cli_env_prepends_managed_linux_runtime() -> None:
     overlay = lark_cli.lark_cli_env_overlay("alice", sandbox_paths=True)
 
@@ -1537,7 +1561,7 @@ def test_start_lark_auth_returns_browser_url(monkeypatch, tmp_path):
     assert result.verification_url == "https://open.feishu.cn/auth/mock"
     assert result.device_code == "device-code"
     assert result.generation
-    assert json.loads(lark_cli._lark_flow_state_path("alice").read_text(encoding="utf-8")) == {"generation": result.generation}
+    assert json.loads(lark_cli._lark_flow_state_path("alice").read_text(encoding="utf-8")) == {"generation": result.generation, "device_code_digest": lark_cli._lark_login_code_digest("device-code")}
     assert captured["args"] == [
         "/usr/bin/lark-cli",
         "auth",
@@ -1597,7 +1621,7 @@ def test_start_lark_auth_reuses_parent_flow_generation(monkeypatch, tmp_path):
     result = lark_cli.start_lark_auth("alice", generation=generation)
 
     assert result.generation == generation
-    assert json.loads(lark_cli._lark_flow_state_path("alice").read_text(encoding="utf-8")) == {"generation": generation}
+    assert json.loads(lark_cli._lark_flow_state_path("alice").read_text(encoding="utf-8")) == {"generation": generation, "device_code_digest": lark_cli._lark_login_code_digest("device-code")}
 
 
 def test_lark_cli_env_from_runtime_exposes_settings_auth_to_lark_commands(monkeypatch, tmp_path):
@@ -2559,13 +2583,13 @@ def test_complete_lark_auth_polls_device_code_and_returns_status(monkeypatch, tm
     config = _config(skills_root)
     captured: dict[str, object] = {}
 
-    def _run_lark_cli_json(args, **kwargs):
+    def _spawn_lark_login_process(args, *, user_id):
         captured["args"] = args
-        captured["kwargs"] = kwargs
-        return {}
+        captured["user_id"] = user_id
+        return _InstantLoginProcess()
 
     monkeypatch.setattr(lark_cli, "_resolve_lark_cli_path", lambda: "/usr/bin/lark-cli")
-    monkeypatch.setattr(lark_cli, "_run_lark_cli_json", _run_lark_cli_json)
+    monkeypatch.setattr(lark_cli, "_spawn_lark_login_process", _spawn_lark_login_process)
     monkeypatch.setattr(
         lark_cli,
         "get_lark_integration_status",
@@ -2600,14 +2624,11 @@ def test_complete_lark_auth_polls_device_code_and_returns_status(monkeypatch, tm
         "device-code",
         "--json",
     ]
-    assert captured["kwargs"] == {
-        "user_id": "alice",
-        "timeout": 45,
-        "allow_empty_success": True,
-    }
+    assert captured["user_id"] == "alice"
 
 
 def test_complete_lark_auth_captures_status_under_lock_and_probes_runtime_after(monkeypatch, tmp_path) -> None:
+    _patch_paths(monkeypatch, tmp_path / "home")
     config = _config(tmp_path / "skills")
     lock_state = {"active": False}
     credential_state = {
@@ -2616,6 +2637,9 @@ def test_complete_lark_auth_captures_status_under_lock_and_probes_runtime_after(
     }
     snapshot_lock_states: list[bool] = []
     status_lock_states: list[bool] = []
+    spawn_lock_states: list[bool] = []
+    first_unlock = threading.Event()
+    lock_exits = {"count": 0}
 
     class _CredentialLock:
         def __enter__(self):
@@ -2624,20 +2648,45 @@ def test_complete_lark_auth_captures_status_under_lock_and_probes_runtime_after(
 
         def __exit__(self, *_args):
             lock_state["active"] = False
-            # Model another tab switching credentials as soon as this operation unlocks.
-            credential_state["app_id"] = "next-app"
-            credential_state["auth"] = lark_cli.LarkAuthProbe(status="not_authorized", user=None)
+            lock_exits["count"] += 1
+            first_unlock.set()
+            if lock_exits["count"] == 2:
+                # Model another tab switching credentials as soon as the
+                # post-completion snapshot lock is released.
+                credential_state["app_id"] = "next-app"
+                credential_state["auth"] = lark_cli.LarkAuthProbe(status="not_authorized", user=None)
+
+    class _LoginProcess:
+        pid = None  # Markers treat a missing CLI pid as owned by this process.
+
+        def communicate(self, timeout=None):
+            # The login runs outside the credential lock: it starts once the
+            # spawn lock is released, and its credential write lands before the
+            # completion snapshot re-acquires the lock.
+            assert first_unlock.wait(timeout=5)
+            credential_state["app_id"] = "completed-app"
+            credential_state["auth"] = lark_cli.LarkAuthProbe(status="authenticated", user="Alice", verified=True)
+            return "{}", ""
+
+        @property
+        def returncode(self) -> int:
+            return 0
+
+        def kill(self) -> None:
+            raise AssertionError("the shared login run must never be killed")
+
+        def poll(self):
+            return 0
+
+    def _spawn_lark_login_process(_args, *, user_id):
+        spawn_lock_states.append(lock_state["active"])
+        return _LoginProcess()
 
     monkeypatch.setattr(lark_cli, "_lark_credential_lock", lambda _user_id: _CredentialLock())
     monkeypatch.setattr(lark_cli, "_require_lark_flow_generation_locked", lambda _user_id, generation: generation)
     monkeypatch.setattr(lark_cli, "_require_lark_cli_path", lambda: "/usr/bin/lark-cli")
-
-    def _complete_login(*_args, **_kwargs):
-        assert lock_state["active"] is True
-        credential_state["app_id"] = "completed-app"
-        credential_state["auth"] = lark_cli.LarkAuthProbe(status="authenticated", user="Alice", verified=True)
-
-    monkeypatch.setattr(lark_cli, "_run_lark_cli_json", _complete_login)
+    monkeypatch.setattr(lark_cli, "_spawn_lark_login_process", _spawn_lark_login_process)
+    monkeypatch.setattr(lark_cli, "ensure_lark_cli_credential_tree", lambda *_args, **_kwargs: None)
 
     def _credential_snapshot(_user_id, *, verify_auth):
         snapshot_lock_states.append(lock_state["active"])
@@ -2687,6 +2736,7 @@ def test_complete_lark_auth_captures_status_under_lock_and_probes_runtime_after(
     assert result.status.app_id == "completed-app"
     assert result.status.auth.status == "authenticated"
     assert result.status.sandbox_runtime_ready is True
+    assert spawn_lock_states == [True]
     assert snapshot_lock_states == [True]
     assert status_lock_states == [False]
 
@@ -2709,7 +2759,7 @@ def test_complete_lark_auth_status_ignores_credential_changes_during_runtime_pro
     monkeypatch.setattr(lark_cli, "probe_lark_auth", lambda _user_id, *, verify=False: credential_state["auth"])
     monkeypatch.setattr(lark_cli, "probe_lark_cli", lambda: lark_cli.LarkCliProbe(available=True, version="1.0.65"))
     monkeypatch.setattr(lark_cli, "_require_lark_cli_path", lambda: "/usr/bin/lark-cli")
-    monkeypatch.setattr(lark_cli, "_run_lark_cli_json", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(lark_cli, "_spawn_lark_login_process", lambda _args, *, user_id: _InstantLoginProcess())
 
     runtime_probes: list[bool] = []
 
@@ -2904,14 +2954,16 @@ def test_complete_lark_auth_accepts_short_automatic_poll_timeout(monkeypatch, tm
     assert "wait_timeout_seconds" in inspect.signature(lark_cli.complete_lark_auth).parameters
     _patch_paths(monkeypatch, tmp_path / "home")
     config = _config(tmp_path / "skills")
-    captured: dict[str, object] = {}
+
+    spawned: list[_InstantLoginProcess] = []
+
+    def _spawn_lark_login_process(_args, *, user_id):
+        process = _InstantLoginProcess()
+        spawned.append(process)
+        return process
 
     monkeypatch.setattr(lark_cli, "_require_lark_cli_path", lambda: "/usr/bin/lark-cli")
-    monkeypatch.setattr(
-        lark_cli,
-        "_run_lark_cli_json",
-        lambda _args, **kwargs: captured.update(kwargs) or {},
-    )
+    monkeypatch.setattr(lark_cli, "_spawn_lark_login_process", _spawn_lark_login_process)
     monkeypatch.setattr(
         lark_cli,
         "get_lark_integration_status",
@@ -2944,7 +2996,10 @@ def test_complete_lark_auth_accepts_short_automatic_poll_timeout(monkeypatch, tm
     )
 
     assert result.success is True
-    assert captured["timeout"] == 8
+    # The short poll budget only bounds the caller's wait: the shared login
+    # process is spawned once and is never terminated by the wait.
+    assert len(spawned) == 1
+    assert spawned[0].killed is False
 
 
 def test_complete_lark_auth_rejects_superseded_generation_before_token_write(monkeypatch, tmp_path) -> None:
@@ -2954,7 +3009,7 @@ def test_complete_lark_auth_rejects_superseded_generation_before_token_write(mon
     current_generation = _advance_lark_flow()
     monkeypatch.setattr(
         lark_cli,
-        "_run_lark_cli_json",
+        "_spawn_lark_login_process",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("stale auth must not write tokens")),
     )
 

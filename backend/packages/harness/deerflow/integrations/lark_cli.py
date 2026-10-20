@@ -53,6 +53,7 @@ import os
 import posixpath
 import re
 import shutil
+import signal
 import stat
 import struct
 import subprocess
@@ -65,7 +66,7 @@ import urllib.request
 import zipfile
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from ctypes import wintypes
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -1422,23 +1423,39 @@ def _lark_flow_state_path(user_id: str) -> Path:
     return _lark_cli_credential_root(user_id) / LARK_CLI_FLOW_STATE_FILE
 
 
-def _write_lark_flow_generation_locked(user_id: str, generation: str) -> None:
-    ensure_lark_cli_credential_tree(user_id)
-    path = _lark_flow_state_path(user_id)
-    fd, temp_name = tempfile.mkstemp(prefix=f".{LARK_CLI_FLOW_STATE_FILE}.", dir=str(path.parent))
+def _write_json_file_atomic(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
     os.close(fd)
     temp_path = Path(temp_name)
     try:
-        temp_path.write_text(json.dumps({"generation": generation}) + "\n", encoding="utf-8")
+        temp_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
         temp_path.chmod(0o600)
         os.replace(temp_path, path)
     finally:
         temp_path.unlink(missing_ok=True)
 
 
+_LARK_FLOW_DEVICE_CODE_UNSET: Any = object()
+
+
+def _write_lark_flow_generation_locked(user_id: str, generation: str, *, device_code: Any = _LARK_FLOW_DEVICE_CODE_UNSET) -> None:
+    ensure_lark_cli_credential_tree(user_id)
+    state: dict[str, Any] = {"generation": generation}
+    if device_code is not _LARK_FLOW_DEVICE_CODE_UNSET:
+        # Only the digest is persisted; the single-use bearer code itself
+        # stays in memory.
+        state["device_code_digest"] = _lark_login_code_digest(device_code)
+    _write_json_file_atomic(_lark_flow_state_path(user_id), state)
+
+
 def _advance_lark_flow_generation_locked(user_id: str) -> str:
     generation = uuid4().hex
     _write_lark_flow_generation_locked(user_id, generation)
+    # A new flow supersedes every in-flight login run for this user: the
+    # orphaned process would otherwise keep polling a device code the caller
+    # can no longer complete.
+    _abandon_lark_login_runs(user_id)
     return generation
 
 
@@ -1448,6 +1465,20 @@ def _require_lark_flow_generation_locked(user_id: str, generation: str) -> str:
     if not expected or state is None or state.get("generation") != expected:
         raise LarkFlowSupersededError("This Lark integration flow was superseded by a newer action.")
     return expected
+
+
+def _require_current_lark_device_code_locked(user_id: str, device_code: str) -> None:
+    """Reject a poll for a device code the flow has already replaced (caller holds the credential lock).
+
+    ``start_lark_auth`` records the digest of the issued code in the flow state
+    on mint success, so a delayed poll for a stale code fails here instead of
+    claiming the flow's single login slot and blocking polls for the current
+    code. A failed reissue mint leaves the previous code's digest in place —
+    the previous flow stays attachable, matching the pre-fence behavior.
+    """
+    state = _read_json_object_file(_lark_flow_state_path(user_id))
+    if state is not None and "device_code_digest" in state and state["device_code_digest"] != _lark_login_code_digest(device_code):
+        raise ValueError("This device_code is no longer the current Lark authorization code. Restart the authorization flow.")
 
 
 def _ensure_managed_sandbox_lark_cli(version: str) -> Path:
@@ -2250,6 +2281,482 @@ def set_lark_app_credentials(
     )
 
 
+# Single-flight device-login runs.
+#
+# ``lark-cli auth login --device-code`` performs a non-atomic transaction:
+# poll the IdP, redeem the device code, fetch user info, then persist the
+# credentials. Redeeming is externally visible and irreversible (the code is
+# single-use), so killing the process mid-transaction strands the flow: the
+# code is consumed but nothing was saved, and a retry with the same code fails
+# with ``device_code is invalid``. The process lifecycle is therefore owned by
+# the flow generation — one shared background run per ``(user_id,
+# generation)`` that polls attach to — and never by an HTTP request's wait
+# budget.
+#
+# ``GATEWAY_WORKERS > 1`` has no request affinity, so the same single-flight is
+# mirrored onto the filesystem: the owner records its CLI in a per-generation
+# marker file and publishes the outcome in a result file (first writer wins)
+# before removing the marker. Polls landing on a non-owner worker wait on
+# those files instead of spawning a second CLI, and supersession terminates
+# the marker's CLI, so a login owned by one worker cannot keep writing
+# credentials after another worker replaced the flow.
+
+# A login attempt is only terminated by the flow lifecycle (superseding
+# generation, device-code reissue, or test teardown) or by this reaper bound,
+# which comfortably covers the device code's server-side lifetime.
+_LARK_LOGIN_ATTEMPT_MAX_SECONDS = 600
+
+# A finished run's outcome stays attachable briefly so late/duplicate polls
+# return the same result instead of re-consuming an already-redeemed code.
+_LARK_LOGIN_RUN_RETENTION_SECONDS = 120.0
+
+_LARK_LOGIN_WAIT_TIMEOUT_MESSAGE = "Timed out waiting for Lark/Feishu authorization. Complete authorization in the browser, then try again."
+
+# Poll cadence for waiters attached to a login run owned by another worker.
+_LARK_LOGIN_FOREIGN_POLL_SECONDS = 0.2
+
+_LARK_LOGIN_OUTCOME_PENDING = object()
+
+_LARK_LOGIN_RUNS: dict[tuple[str, str], _LarkLoginRun] = {}
+_LARK_LOGIN_RUNS_LOCK = threading.Lock()
+
+
+class _LarkLoginRun:
+    """One device-login CLI execution owned by its flow generation."""
+
+    def __init__(self, user_id: str, generation: str, device_code: str) -> None:
+        self.user_id = user_id
+        self.generation = generation
+        self.device_code = device_code
+        self.done = threading.Event()
+        # Serializes outcome publication: supersession takes the lock and wins
+        # deterministically once it has fired, even over a completed outcome.
+        self.outcome_lock = threading.Lock()
+        self.outcome: dict[str, Any] | BaseException | object = _LARK_LOGIN_OUTCOME_PENDING
+        self.process: subprocess.Popen[str] | None = None
+        self.thread: threading.Thread | None = None
+        self.finished_at: float | None = None
+
+
+class _ForeignLarkLoginRun:
+    """A login run owned by another Gateway worker, tracked via its marker file."""
+
+    def __init__(self, user_id: str, generation: str, device_code: str) -> None:
+        self.user_id = user_id
+        self.generation = generation
+        self.device_code = device_code
+
+
+def _lark_login_code_digest(device_code: str) -> str:
+    """Stable non-secret fingerprint of a device code for markers and the fence."""
+    return hashlib.sha256(device_code.encode("utf-8")).hexdigest()[:16]
+
+
+def _lark_login_marker_path(user_id: str, generation: str, device_code_digest: str) -> Path:
+    return _lark_cli_credential_root(user_id) / f".login-run-{generation}-{device_code_digest}.json"
+
+
+def _lark_login_result_path(user_id: str, generation: str, device_code_digest: str) -> Path:
+    return _lark_cli_credential_root(user_id) / f".login-result-{generation}-{device_code_digest}.json"
+
+
+def _pid_alive(pid: int | None) -> bool:
+    if pid is None:
+        return False
+    if os.name == "nt":  # pragma: no cover - Windows fallback
+        kernel32 = ctypes.windll.kernel32
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle(handle)
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _terminate_pid(pid: int | None) -> None:
+    if pid is None:
+        return
+    if os.name == "nt":  # pragma: no cover - Windows fallback
+        with suppress(OSError):
+            kernel32 = ctypes.windll.kernel32
+            kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            handle = kernel32.OpenProcess(0x0001, False, pid)  # PROCESS_TERMINATE
+            if handle:
+                kernel32.TerminateProcess(handle, 1)
+                kernel32.CloseHandle(handle)
+        return
+    # POSIX: the login CLI is its own session/group leader, so kill the whole
+    # group — but only while the pid still matches that shape. Between the
+    # owner reaping the CLI and the marker sweep, the pid can be recycled; a
+    # recycled pid that landed in this worker's own group (any plain
+    # subprocess child) must never be group-killed.
+    with suppress(OSError):
+        if _pid_alive(pid) and os.getpgid(pid) == pid:
+            os.killpg(pid, signal.SIGKILL)
+
+
+def _write_lark_login_marker_locked(user_id: str, run: _LarkLoginRun) -> None:
+    cli_pid = run.process.pid if run.process is not None else None
+    payload = {
+        "generation": run.generation,
+        "device_code_digest": _lark_login_code_digest(run.device_code),
+        "cli_pid": cli_pid if isinstance(cli_pid, int) else None,
+        "owner_pid": os.getpid(),
+        "created_at": time.time(),
+    }
+    _write_json_file_atomic(_lark_login_marker_path(run.user_id, run.generation, payload["device_code_digest"]), payload)
+
+
+def _read_live_lark_login_marker_locked(user_id: str, generation: str, device_code: str) -> dict[str, Any] | None:
+    """Return the live cross-worker login marker, sweeping a stale one (caller holds the credential lock).
+
+    CLI exit alone does not end ownership: the owner still has to re-harden the
+    credential tree and publish the result before the marker may be swept. A
+    marker whose CLI is dead but whose owner is alive with no result published
+    is still live, so a foreign poll in that exit-to-publication window waits
+    instead of spawning a second login for the same device code.
+    """
+    digest = _lark_login_code_digest(device_code)
+    path = _lark_login_marker_path(user_id, generation, digest)
+    marker = _read_json_object_file(path)
+    if marker is None:
+        return None
+    cli_pid = marker.get("cli_pid")
+    owner_pid = marker.get("owner_pid")
+    cli_alive = _pid_alive(cli_pid) if isinstance(cli_pid, int) else False
+    owner_alive = _pid_alive(owner_pid) if isinstance(owner_pid, int) else False
+    created_at = marker.get("created_at")
+    fresh = isinstance(created_at, (int, float)) and time.time() - created_at <= _LARK_LOGIN_ATTEMPT_MAX_SECONDS
+    result_published = _lark_login_result_path(user_id, generation, digest).is_file()
+    if fresh and (cli_alive or (owner_alive and not result_published)):
+        return marker
+    path.unlink(missing_ok=True)
+    return None
+
+
+def _write_lark_login_result_once(user_id: str, generation: str, device_code_digest: str, payload: dict[str, Any]) -> bool:
+    """Publish the run outcome atomically; the first writer wins."""
+    ensure_lark_cli_credential_tree(user_id)
+    path = _lark_login_result_path(user_id, generation, device_code_digest)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    os.close(fd)
+    temp_path = Path(temp_name)
+    try:
+        temp_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+        temp_path.chmod(0o600)
+        try:
+            os.link(temp_path, path)
+            return True
+        except FileExistsError:
+            return False
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def _lark_login_result_payload(outcome: dict[str, Any] | BaseException) -> dict[str, Any]:
+    if isinstance(outcome, dict):
+        return {"ok": True}
+    if isinstance(outcome, LarkFlowSupersededError):
+        return {"ok": False, "kind": "superseded", "error": str(outcome)}
+    if isinstance(outcome, TimeoutError):
+        return {"ok": False, "kind": "timeout", "error": str(outcome)}
+    return {"ok": False, "kind": "value", "error": str(outcome)}
+
+
+def _lark_login_outcome_from_payload(payload: dict[str, Any], *, fallback: dict[str, Any] | BaseException) -> dict[str, Any] | BaseException:
+    if payload.get("ok"):
+        return fallback if isinstance(fallback, dict) else {}
+    kind = payload.get("kind")
+    message = str(payload.get("error") or "Lark authorization failed.")
+    if kind == "superseded":
+        return LarkFlowSupersededError(message)
+    if kind == "timeout":
+        return TimeoutError(message)
+    return ValueError(message)
+
+
+def _await_lark_login_result(user_id: str, generation: str, device_code: str, wait_timeout_seconds: int) -> dict[str, Any]:
+    """Wait for a login run owned by another worker to publish its outcome."""
+    deadline = time.monotonic() + wait_timeout_seconds
+    marker_path = _lark_login_marker_path(user_id, generation, _lark_login_code_digest(device_code))
+    result_path = _lark_login_result_path(user_id, generation, _lark_login_code_digest(device_code))
+    while True:
+        payload = _read_json_object_file(result_path)
+        if payload is not None:
+            return payload
+        if not marker_path.is_file():
+            return {"ok": False, "kind": "value", "error": "The Lark authorization attempt ended without a result. Start the flow again."}
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(_LARK_LOGIN_WAIT_TIMEOUT_MESSAGE)
+        time.sleep(min(_LARK_LOGIN_FOREIGN_POLL_SECONDS, remaining))
+
+
+def _reraise_lark_login_outcome(outcome: BaseException) -> None:
+    """Re-raise a run outcome as a fresh instance for this waiter.
+
+    Raising the shared instance would append every waiter's raise site to one
+    ``__traceback__`` (the frontend polls several times within the retention
+    window, from different threads) and let one handler's mutation of the
+    exception leak into the others. The shared instance stays as ``__cause__``.
+    """
+    try:
+        fresh = type(outcome)(str(outcome))
+    except Exception:
+        fresh = ValueError(str(outcome))
+    raise fresh from outcome
+
+
+def _spawn_lark_login_process(args: list[str], *, user_id: str) -> subprocess.Popen[str]:
+    """Process factory for the backgrounded device-login CLI (test seam).
+
+    The CLI runs in its own process group/session so lifecycle termination
+    (supersession, reaper) fences wrapper children as well, not only the
+    direct process.
+    """
+    group_kwargs: dict[str, Any] = {}
+    if os.name == "nt":  # pragma: no cover - Windows fallback
+        group_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        group_kwargs["start_new_session"] = True
+    return subprocess.Popen(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding=LARK_CLI_SUBPROCESS_ENCODING,
+        errors="replace",
+        env=lark_cli_env(user_id),
+        **group_kwargs,
+    )
+
+
+def _lark_login_run_worker(run: _LarkLoginRun) -> None:
+    process = run.process
+    assert process is not None
+    outcome: dict[str, Any] | BaseException
+    try:
+        try:
+            stdout, stderr = process.communicate(timeout=_LARK_LOGIN_ATTEMPT_MAX_SECONDS)
+        except subprocess.TimeoutExpired:
+            pid = process.pid if isinstance(process.pid, int) else None
+            if pid is not None:
+                _terminate_pid(pid)
+            else:
+                with suppress(OSError):
+                    process.kill()
+            process.communicate()
+            outcome = TimeoutError(_LARK_LOGIN_WAIT_TIMEOUT_MESSAGE)
+        else:
+            try:
+                outcome = _lark_cli_json_result(process.returncode, stdout, stderr, allow_empty_success=True)
+            except BaseException as exc:
+                outcome = exc
+    except BaseException as exc:
+        outcome = exc
+    try:
+        # Mirror ``_run_lark_cli_json``: re-harden any plaintext token files
+        # the CLI wrote before the run is observable as finished.
+        try:
+            ensure_lark_cli_credential_tree(run.user_id)
+        except Exception as hardening_exc:
+            logger.exception("Failed to re-harden the Lark credential tree after a device login attempt.")
+            if isinstance(outcome, dict):
+                outcome = hardening_exc
+        # Publish before clearing the marker; a cross-worker abandon may
+        # already have published "superseded" (first writer wins).
+        _write_lark_login_result_once(run.user_id, run.generation, _lark_login_code_digest(run.device_code), _lark_login_result_payload(outcome))
+        published = _read_json_object_file(_lark_login_result_path(run.user_id, run.generation, _lark_login_code_digest(run.device_code)))
+        if published is not None:
+            outcome = _lark_login_outcome_from_payload(published, fallback=outcome)
+        marker_path = _lark_login_marker_path(run.user_id, run.generation, _lark_login_code_digest(run.device_code))
+        marker = _read_json_object_file(marker_path)
+        if marker is not None and marker.get("device_code_digest") == _lark_login_code_digest(run.device_code):
+            marker_path.unlink(missing_ok=True)
+    finally:
+        with run.outcome_lock:
+            if run.outcome is _LARK_LOGIN_OUTCOME_PENDING:
+                run.outcome = outcome
+            run.finished_at = time.monotonic()
+            run.done.set()
+
+
+def _prune_lark_login_runs_locked() -> None:
+    now = time.monotonic()
+    for key, run in list(_LARK_LOGIN_RUNS.items()):
+        if run.done.is_set() and run.finished_at is not None and now - run.finished_at > _LARK_LOGIN_RUN_RETENTION_SECONDS:
+            _LARK_LOGIN_RUNS.pop(key, None)
+
+
+def _prune_lark_login_files_locked(user_id: str) -> None:
+    """Drop expired cross-worker result files (caller holds the credential lock)."""
+    root = _lark_cli_credential_root(user_id)
+    now = time.time()
+    for path in root.glob(".login-result-*.json"):
+        with suppress(OSError):
+            if now - path.stat().st_mtime > _LARK_LOGIN_RUN_RETENTION_SECONDS:
+                path.unlink()
+
+
+def _require_matching_device_code(run: _LarkLoginRun, device_code: str) -> None:
+    if run.device_code != device_code:
+        raise ValueError("The provided device_code does not match the in-flight Lark authorization flow.")
+
+
+def _lark_login_run_is_stale(run: _LarkLoginRun) -> bool:
+    """Whether the flow's shared state has moved past this run's device code.
+
+    The registry is process-local, but ``start_lark_auth`` may be served by a
+    different worker: a reissue updates the shared code digest and sweeps the
+    marker without touching this worker's registry. A cached entry must be
+    revalidated against the shared state before it can reject or satisfy a
+    poll. Reads are safe without the credential lock — state writes are atomic.
+    """
+    state = _read_json_object_file(_lark_flow_state_path(run.user_id))
+    digest = state.get("device_code_digest") if state else None
+    return isinstance(digest, str) and digest != _lark_login_code_digest(run.device_code)
+
+
+def _evict_stale_lark_login_run_locked(run: _LarkLoginRun) -> None:
+    """Drop a stale registry entry: fence its files, terminate its run, wake waiters as superseded."""
+    _LARK_LOGIN_RUNS.pop((run.user_id, run.generation), None)
+    # Publish + sweep idempotently: the cross-worker abandon normally did this
+    # already, and first-writer-wins keeps a raced worker publication intact.
+    digest = _lark_login_code_digest(run.device_code)
+    _write_lark_login_result_once(run.user_id, run.generation, digest, {"ok": False, "kind": "superseded", "error": "This Lark integration flow was superseded by a newer action."})
+    _lark_login_marker_path(run.user_id, run.generation, digest).unlink(missing_ok=True)
+    process = run.process
+    if process is not None and process.poll() is None:
+        pid = getattr(process, "pid", None)
+        if isinstance(pid, int):
+            _terminate_pid(pid)
+        else:
+            with suppress(OSError):
+                process.kill()
+    with run.outcome_lock:
+        run.outcome = LarkFlowSupersededError("This Lark integration flow was superseded by a newer action.")
+        if run.finished_at is None:
+            run.finished_at = time.monotonic()
+        run.done.set()
+
+
+def _get_or_start_lark_login_run(user_id: str, *, generation: str, device_code: str) -> _LarkLoginRun | _ForeignLarkLoginRun:
+    """Return the single login run for this flow, spawning it on first poll.
+
+    Every later poll for the same ``(user_id, generation)`` attaches to the
+    shared run — in-process through the registry, cross-worker through the
+    marker/result files. Spawning holds the credential lock so the generation
+    and device-code checks, the CLI launch, the marker write and the registry
+    insert stay atomic with respect to flow supersession (which takes the same
+    lock before abandoning runs).
+    """
+    key = (user_id, generation)
+    with _LARK_LOGIN_RUNS_LOCK:
+        _prune_lark_login_runs_locked()
+        existing = _LARK_LOGIN_RUNS.get(key)
+        if existing is not None:
+            if _lark_login_run_is_stale(existing):
+                _evict_stale_lark_login_run_locked(existing)
+            else:
+                _require_matching_device_code(existing, device_code)
+                return existing
+
+    with _lark_credential_lock(user_id):
+        _require_lark_flow_generation_locked(user_id, generation)
+        _require_current_lark_device_code_locked(user_id, device_code)
+        path = _require_lark_cli_path()
+        with _LARK_LOGIN_RUNS_LOCK:
+            existing = _LARK_LOGIN_RUNS.get(key)
+            if existing is not None:
+                if _lark_login_run_is_stale(existing):
+                    _evict_stale_lark_login_run_locked(existing)
+                else:
+                    _require_matching_device_code(existing, device_code)
+                    return existing
+        _prune_lark_login_files_locked(user_id)
+        if _read_live_lark_login_marker_locked(user_id, generation, device_code) is not None or _lark_login_result_path(user_id, generation, _lark_login_code_digest(device_code)).is_file():
+            # Another Gateway worker owns (or just finished) this run.
+            return _ForeignLarkLoginRun(user_id, generation, device_code)
+        run = _LarkLoginRun(user_id, generation, device_code)
+        args = [path, "auth", "login", "--device-code", device_code, "--json"]
+        run.process = _spawn_lark_login_process(args, user_id=user_id)
+        run.thread = threading.Thread(target=_lark_login_run_worker, args=(run,), name=f"lark-login-{generation[:8]}", daemon=True)
+        with _LARK_LOGIN_RUNS_LOCK:
+            _LARK_LOGIN_RUNS[key] = run
+        _write_lark_login_marker_locked(user_id, run)
+        run.thread.start()
+        return run
+
+
+def _abandon_lark_login_runs(user_id: str) -> None:
+    """Terminate every login run for ``user_id`` and wake its waiters as superseded.
+
+    Covers both this process's registry and CLI runs owned by other Gateway
+    workers (via their marker files), so a flow switch on any worker fences
+    credential writes for the lifetime of every login.
+    """
+    with _LARK_LOGIN_RUNS_LOCK:
+        victims = [run for run in _LARK_LOGIN_RUNS.values() if run.user_id == user_id]
+        for run in victims:
+            _LARK_LOGIN_RUNS.pop((run.user_id, run.generation), None)
+    # Publish "superseded" before killing so the owner's worker keeps it over
+    # the killed CLI's exit error (first writer wins).
+    root = _lark_cli_credential_root(user_id)
+    for marker_path in root.glob(".login-run-*.json"):
+        marker = _read_json_object_file(marker_path)
+        if marker is None:
+            marker_path.unlink(missing_ok=True)
+            continue
+        generation = str(marker.get("generation") or "")
+        device_code_digest = str(marker.get("device_code_digest") or "")
+        if generation and device_code_digest:
+            _write_lark_login_result_once(user_id, generation, device_code_digest, {"ok": False, "kind": "superseded", "error": "This Lark integration flow was superseded by a newer action."})
+        cli_pid = marker.get("cli_pid")
+        _terminate_pid(cli_pid if isinstance(cli_pid, int) else None)
+        marker_path.unlink(missing_ok=True)
+    for run in victims:
+        process = run.process
+        if process is not None and process.poll() is None:
+            pid = getattr(process, "pid", None)
+            if isinstance(pid, int):
+                _terminate_pid(pid)
+            else:
+                with suppress(OSError):
+                    process.kill()
+        with run.outcome_lock:
+            # Supersession wins deterministically once fired — even over a
+            # completed outcome the worker published first.
+            run.outcome = LarkFlowSupersededError("This Lark integration flow was superseded by a newer action.")
+            if run.finished_at is None:
+                run.finished_at = time.monotonic()
+            run.done.set()
+
+
+def _clear_lark_login_runs_for_tests() -> None:
+    """Kill and reap every tracked login run; used by test teardown only."""
+    with _LARK_LOGIN_RUNS_LOCK:
+        runs = list(_LARK_LOGIN_RUNS.values())
+        _LARK_LOGIN_RUNS.clear()
+    for run in runs:
+        process = run.process
+        if process is not None and process.poll() is None:
+            with suppress(OSError):
+                process.kill()
+        run.done.set()
+        if run.thread is not None:
+            run.thread.join(timeout=10)
+
+
 def start_lark_auth(
     user_id: str,
     *,
@@ -2284,6 +2791,13 @@ def start_lark_auth(
         device_code = str(data.get("device_code") or "").strip()
         if not verification_url or not device_code:
             raise ValueError("lark-cli did not return a verification_url and device_code.")
+        # Fence the flow to the freshly issued code only on mint success: a
+        # failed reissue leaves the previous code attachable (base behavior),
+        # while a delayed poll for a replaced code can never claim the slot.
+        _write_lark_flow_generation_locked(user_id, generation, device_code=device_code)
+        # A freshly issued device code replaces any in-flight login run that
+        # is still polling a previous code for this flow.
+        _abandon_lark_login_runs(user_id)
 
     return LarkAuthStartResult(
         verification_url=verification_url,
@@ -2303,22 +2817,36 @@ def complete_lark_auth(
     generation: str,
     wait_timeout_seconds: int = LARK_AUTH_COMPLETE_DEFAULT_WAIT_SECONDS,
 ) -> LarkAuthCompleteResult:
-    """Complete a Lark device authorization flow after the user approves it."""
+    """Complete a Lark device authorization flow after the user approves it.
+
+    The first poll spawns the device-login CLI once per flow; every later
+    poll attaches to that shared run. ``wait_timeout_seconds`` only bounds
+    how long this call waits for the run — it never terminates the CLI, so a
+    timed-out poll cannot strand a half-completed login (device code redeemed
+    at the IdP but credentials not yet persisted).
+    """
     device_code = device_code.strip()
     if not device_code:
         raise ValueError("device_code is required.")
     if not LARK_AUTH_COMPLETE_MIN_WAIT_SECONDS <= wait_timeout_seconds <= LARK_AUTH_COMPLETE_MAX_WAIT_SECONDS:
         raise ValueError(f"wait_timeout_seconds must be between {LARK_AUTH_COMPLETE_MIN_WAIT_SECONDS} and {LARK_AUTH_COMPLETE_MAX_WAIT_SECONDS}.")
 
+    run = _get_or_start_lark_login_run(user_id, generation=generation, device_code=device_code)
+    if isinstance(run, _ForeignLarkLoginRun):
+        payload = _await_lark_login_result(user_id, generation, device_code, wait_timeout_seconds)
+        if not payload.get("ok"):
+            raise _lark_login_outcome_from_payload(payload, fallback={})
+    else:
+        if not run.done.wait(timeout=wait_timeout_seconds):
+            raise TimeoutError(_LARK_LOGIN_WAIT_TIMEOUT_MESSAGE)
+        outcome = run.outcome
+        if outcome is _LARK_LOGIN_OUTCOME_PENDING:
+            raise TimeoutError(_LARK_LOGIN_WAIT_TIMEOUT_MESSAGE)
+        if isinstance(outcome, BaseException):
+            _reraise_lark_login_outcome(outcome)
+
     with _lark_credential_lock(user_id):
         _require_lark_flow_generation_locked(user_id, generation)
-        path = _require_lark_cli_path()
-        _run_lark_cli_json(
-            [path, "auth", "login", "--device-code", device_code, "--json"],
-            user_id=user_id,
-            timeout=wait_timeout_seconds,
-            allow_empty_success=True,
-        )
         credential_snapshot = _read_lark_credential_snapshot(user_id, verify_auth=True)
     status = _get_lark_mutation_status(user_id, config, verify_auth=True, credential_snapshot=credential_snapshot)
     return LarkAuthCompleteResult(
@@ -2686,14 +3214,18 @@ def _run_lark_cli_json(
         # timeout or CLI failure before returning control to the Gateway.
         ensure_lark_cli_credential_tree(user_id)
 
-    stdout = (result.stdout or "").strip()
-    stderr = (result.stderr or "").strip()
+    return _lark_cli_json_result(result.returncode, result.stdout, result.stderr, allow_empty_success=allow_empty_success)
+
+
+def _lark_cli_json_result(returncode: int, stdout: str | None, stderr: str | None, *, allow_empty_success: bool) -> dict[str, Any]:
+    stdout = (stdout or "").strip()
+    stderr = (stderr or "").strip()
     raw = stdout or stderr
     parsed = _parse_json_object(raw)
 
-    if result.returncode != 0:
+    if returncode != 0:
         message = _auth_error_message(parsed) if parsed else raw
-        raise ValueError(message or f"lark-cli exited with code {result.returncode}")
+        raise ValueError(message or f"lark-cli exited with code {returncode}")
 
     if not raw and allow_empty_success:
         return {}
