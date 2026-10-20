@@ -14,6 +14,18 @@ from deerflow.skills.security_static_scanner import StaticScannerError
 skill_manage_module = importlib.import_module("deerflow.tools.skill_manage_tool")
 
 
+@pytest.fixture(autouse=True)
+def _record_skills_cache_reset_publications(monkeypatch):
+    """Keep the cross-replica marker out of whatever extensions config this checkout resolves.
+
+    Every mutation publishes it; tests/test_skills_cache_shared_reset.py covers
+    the real publication against a temporary shared config.
+    """
+    published: list[str | None] = []
+    monkeypatch.setattr(skill_manage_module, "publish_skills_cache_reset", lambda *, user_id=None: published.append(user_id))
+    return published
+
+
 def _skill_content(name: str, description: str = "Demo skill") -> str:
     return f"---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n"
 

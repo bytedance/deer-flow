@@ -266,7 +266,10 @@ resume value, assistant and conversation references. Resume values must be stric
 JSON with finite numbers, with or without an idempotency key; booleans, integers
 and floats remain distinct when comparing keyed retries. Generate a new key for every intentional user
 action; reuse a key only when retrying that same action after an uncertain HTTP
-result. Keys may be at most 255 characters. Stateless `/api/langgraph/runs/*`
+result. Keys may be at most 255 characters. Trusted internal callers (the IM
+channel manager) get keys scoped by user only: the same key sent for another
+thread returns 409 instead of starting a run, because a redelivered IM message
+may be requested on a new thread after `/new`. Stateless `/api/langgraph/runs/*`
 endpoints do not support this header because requests without an explicit thread
 create a new temporary conversation.
 
@@ -1186,6 +1189,9 @@ GET /api/skills/custom/{skill_name}/history
 }
 ```
 
+An invalid skill name returns `400`; a skill with neither a `SKILL.md` nor
+recorded history returns `404`.
+
 #### Rollback Custom Skill
 
 Restore a custom skill's `SKILL.md` from a history entry. The restored content is
@@ -1956,7 +1962,13 @@ bounded by `stream_bridge.queue_maxsize` (default `256`) and, for Redis, by the
 rolling `stream_ttl_seconds`. A retained cursor resumes after that event with no
 additional control frame.
 
-When a syntactically valid cursor is older than the retained watermark, the
+The Memory bridge also remembers its exact last evicted event ID. Reconnecting
+from that known predecessor replays every retained successor without a `gap`,
+because none of the events after the cursor has been lost. This uses one ID per
+run and does not increase the retained event count. Redis keeps its conservative
+trimmed-cursor policy.
+
+For other syntactically valid cursors older than the retained watermark, the
 server sends exactly one `gap` event before any retained data and closes that
 subscription without an `end` event:
 

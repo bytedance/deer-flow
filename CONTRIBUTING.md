@@ -51,11 +51,14 @@ Docker provides a consistent, isolated environment with all dependencies pre-con
    version, creates the missing `.env` files, and exports `DEER_FLOW_ROOT`.
 
    If you do run Compose directly, run it **from the repository root** and set
-   `DEER_FLOW_ROOT` to the absolute path of your checkout. Compose interpolates
-   that variable into host-side paths (`DEER_FLOW_HOST_BASE_DIR`,
-   `THREADS_HOST_PATH`) that the AIO and provisioner sandbox modes bind-mount;
-   leaving it unset renders them as `/backend/.deer-flow`, so those mounts
-   silently miss your checkout instead of failing:
+   `DEER_FLOW_ROOT` to the absolute path of your checkout. The default command
+   starts the local/AIO development stack without Kubernetes; add
+   `--profile provisioner` only when you need provisioner/Kubernetes sandbox
+   mode. Compose interpolates `DEER_FLOW_ROOT` into host-side paths
+   (`DEER_FLOW_HOST_BASE_DIR`, `THREADS_HOST_PATH`) that the AIO and provisioner
+   sandbox modes bind-mount; leaving it unset renders them as
+   `/backend/.deer-flow`, so those mounts silently miss your checkout instead of
+   failing:
 
    ```bash
    # macOS / Linux

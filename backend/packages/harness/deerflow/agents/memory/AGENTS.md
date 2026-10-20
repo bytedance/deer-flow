@@ -94,10 +94,21 @@ under continuous updates. One timer wakes for the earliest deadline and one
 consumer processes eligible items serially. Other conversations cannot reset
 that deadline. Consumer backlog and LLM latency can still delay completion.
 Early wakeups rearm with a 50 ms minimum; arrivals during extraction wait for
-the finishing worker to rearm. Emergency snapshots are immediately eligible;
+the finishing worker to rearm. Emergency snapshots are immediately eligible
+and remain separate in arrival order, including within the same conversation
+key: successive compactions can remove disjoint message partitions. Only normal
+cumulative updates coalesce; neither kind replaces the other.
+Emergency snapshots bypass `queue_max_depth`. Warn at 32 pending snapshots for
+one `(thread_id, user_id, agent_name)` key and each doubling, without logging
+message contents. Count only pending emergency items; drain, cancellation, and
+clear reset the threshold naturally. Retention remains unbounded and process-local.
+Regression coverage: `tests/test_memory_emergency_backlog.py`.
 `flush`, `flush_nowait`, and `flush_sync` make all pending items eligible.
 Tests in `tests/test_memory_queue_deadlines.py` use a fake monotonic clock and
 timer to exercise scheduling without timing-sensitive sleeps.
+`tests/test_memory_emergency_snapshots.py` covers overlapping compactions through
+the real memory hook, updater, and canonical storage, plus scoped cancellation
+and drain behavior.
 
 DeerMem and mem0 exclude assistant tool-call intent in every representation:
 `tool_calls`, `invalid_tool_calls`, and provider-raw `tool_calls`/`function_call`.
@@ -141,6 +152,8 @@ fence so embedded backticks and later fenced notes stay lossless. Parser and
 storage regressions belong in `tests/test_memory_storage.py`; configure a data
 root directory, not the existing manifest file. Legacy v1 reads still migrate
 and advance the revision. Unparseable summary text is quarantined before rebuild.
+Summary and canonical fact reads strip a leading UTF-8 BOM; writes use UTF-8.
+Fact BOM regressions use public save/reload and preserve content and scope.
 
 `FileMemoryStorage` owns canonical storage and the retrieval adapter.
 Do not reach into its private adapter state from higher layers.

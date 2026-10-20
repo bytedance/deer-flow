@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import logging
 import math
@@ -68,12 +69,14 @@ from deerflow.runtime import (
     ConflictError,
     DisconnectMode,
     RunContext,
+    RunIdempotencyKeyMismatch,
     RunIdempotencyUnsupported,
     RunManager,
     RunRecord,
     RunStatus,
     StreamBridge,
     StreamGap,
+    StreamProducerLeaseState,
     ThreadOperationKind,
     UnsupportedStrategyError,
     build_state_mutation_graph,
@@ -115,6 +118,16 @@ from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
 
+_MISSING_BRIDGE_METHOD = object()
+
+
+def _declared_bridge_method(bridge: Any, name: str) -> Any | None:
+    """Return a real bridge method without triggering dynamic mock attributes."""
+    if inspect.getattr_static(bridge, name, _MISSING_BRIDGE_METHOD) is _MISSING_BRIDGE_METHOD:
+        return None
+    method = getattr(bridge, name, None)
+    return method if callable(method) else None
+
 
 class BusyThreadConflict(HTTPException):
     """A retryable run-manager admission conflict exposed as HTTP 409."""
@@ -147,6 +160,8 @@ _TERMINAL_RUN_STATUSES = {
     RunStatus.timeout,
     RunStatus.interrupted,
 }
+_TERMINAL_STREAM_RECOVERED = "recovered"
+_TERMINAL_STREAM_PRODUCER_EXPIRED = "producer_expired"
 
 _THREAD_METADATA_SETUP_TIMEOUT_SECONDS = 5.0
 
@@ -282,15 +297,59 @@ async def _ensure_thread_metadata(
     return existing
 
 
+async def _stream_producer_lease_state(
+    bridge: StreamBridge,
+    run_id: str,
+) -> StreamProducerLeaseState | None:
+    producer_lease_state = getattr(bridge, "producer_lease_state", None)
+    if producer_lease_state is None:
+        return StreamProducerLeaseState.untracked
+    try:
+        state = await producer_lease_state(run_id)
+        return StreamProducerLeaseState(state)
+    except (TypeError, ValueError):
+        return StreamProducerLeaseState.untracked
+    except Exception:
+        logger.debug(
+            "Failed to inspect stream producer lease for run %s",
+            sanitize_log_param(run_id),
+            exc_info=True,
+        )
+        return None
+
+
+async def _cleanup_expired_stream_producer(
+    bridge: StreamBridge,
+    run_id: str,
+) -> bool:
+    cleanup = _declared_bridge_method(
+        bridge,
+        "cleanup_expired_producer",
+    )
+    if cleanup is None:
+        return True
+    try:
+        return bool(await cleanup(run_id))
+    except Exception:
+        logger.warning(
+            "Failed to clean expired stream producer marker for run %s",
+            sanitize_log_param(run_id),
+            exc_info=True,
+        )
+        return False
+
+
 async def _terminal_record_stream_missing(bridge: StreamBridge, record: RunRecord) -> bool:
     """True when a terminal run has no retained stream on bridges that can tell."""
     if not _run_is_terminal(record):
+        return False
+    if not getattr(record, "terminal_status_persisted", True):
         return False
     stream_exists = getattr(bridge, "stream_exists", None)
     if stream_exists is None:
         return False
     try:
-        return not bool(await stream_exists(record.run_id))
+        missing = not bool(await stream_exists(record.run_id))
     except Exception:
         logger.debug(
             "Failed to probe stream existence for terminal run %s",
@@ -298,25 +357,81 @@ async def _terminal_record_stream_missing(bridge: StreamBridge, record: RunRecor
             exc_info=True,
         )
         return False
+    if not missing:
+        return False
+    if getattr(bridge, "producer_lease_recovery_enabled", False) is not True:
+        return True
+    state = await _stream_producer_lease_state(bridge, record.run_id)
+    if state == StreamProducerLeaseState.untracked:
+        return True
+    if state != StreamProducerLeaseState.expired:
+        return False
+    try:
+        # The producer may have appended its tail and released the lease after
+        # the first EXISTS. Recheck after observing expiry before synthesizing.
+        still_missing = not bool(await stream_exists(record.run_id))
+    except Exception:
+        logger.debug(
+            "Failed to recheck stream existence for terminal run %s",
+            sanitize_log_param(record.run_id),
+            exc_info=True,
+        )
+        return False
+    if not still_missing:
+        return False
+    return await _cleanup_expired_stream_producer(
+        bridge,
+        record.run_id,
+    )
 
 
 async def _orphan_recovery_observed_after_heartbeat(
     record: RunRecord,
     run_mgr: RunManager,
-) -> bool:
-    """Return whether durable orphan recovery is the consumer's liveness edge.
+    bridge: StreamBridge,
+) -> str | None:
+    """Return why durable state proves that the stream producer is gone.
 
     A normal terminal status is not sufficient: the producer persists status
     before publishing its final error/data frames and END. Orphan recovery is
     different because the producer is known to be gone and the durable
     ``stop_reason`` is written atomically with the terminal status by run or
-    scheduled-task reconciliation. Only those explicit recovery signals may
-    synthesize END after a heartbeat.
+    scheduled-task reconciliation.
+
+    Redis producers additionally hold a short cross-process lease from before
+    durable admission until END publication. A durable terminal row
+    plus an explicitly expired producer lease closes the crash window where the
+    row committed but the process died before publishing END. Untracked streams
+    retain the historical conservative behavior.
     """
-    if not record.store_only:
-        return False
     refreshed = await run_mgr.get(record.run_id, user_id=record.user_id)
-    return refreshed is not None and _run_is_terminal(refreshed) and refreshed.stop_reason in (ORPHAN_RECOVERY_STOP_REASON, "scheduled_task_orphan_recovered")
+    if refreshed is None or not _run_is_terminal(refreshed):
+        return None
+    if refreshed.stop_reason in (
+        ORPHAN_RECOVERY_STOP_REASON,
+        "scheduled_task_orphan_recovered",
+    ):
+        if getattr(bridge, "producer_lease_recovery_enabled", False) is True:
+            state = await _stream_producer_lease_state(
+                bridge,
+                record.run_id,
+            )
+            if state in (
+                None,
+                StreamProducerLeaseState.active,
+            ):
+                return None
+            if state == StreamProducerLeaseState.expired:
+                return _TERMINAL_STREAM_PRODUCER_EXPIRED
+        return _TERMINAL_STREAM_RECOVERED
+    if not getattr(refreshed, "terminal_status_persisted", True):
+        return None
+    if getattr(bridge, "producer_lease_recovery_enabled", False) is not True:
+        return None
+    state = await _stream_producer_lease_state(bridge, record.run_id)
+    if state == StreamProducerLeaseState.expired:
+        return _TERMINAL_STREAM_PRODUCER_EXPIRED
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1948,6 +2063,9 @@ async def start_run(
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
     run_ctx = get_run_context(request)
+    admission_run_id: str | None = None
+    producer_lease_started = False
+    producer_lease_handed_off = False
 
     disconnect = DisconnectMode.cancel if body.on_disconnect == "cancel" else DisconnectMode.continue_
 
@@ -2378,6 +2496,15 @@ async def start_run(
                 # cannot both succeed across Gateway workers.
                 if require_existing_thread and not await thread_access_allowed():
                     raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+                admission_run_id = str(uuid.uuid4())
+                start_producer_lease = _declared_bridge_method(
+                    bridge,
+                    "start_producer_lease",
+                )
+                if start_producer_lease is not None:
+                    producer_lease_started = await start_producer_lease(admission_run_id)
+                if getattr(bridge, "supports_cross_process", False) is True and not producer_lease_started:
+                    raise RuntimeError("Cross-process stream producer tracking is unavailable")
                 try:
                     record = await run_mgr.create_or_reject(
                         thread_id,
@@ -2403,9 +2530,15 @@ async def start_run(
                         # Canonical agent keys, not routing aliases or display names.
                         # Bootstrap and unresolved legacy identities stay read-only.
                         evidence_agent_id=(None if scope_runtime_config.get("is_bootstrap") else (_DEFAULT_ASSISTANT_ID if scope_assistant_id == _DEFAULT_ASSISTANT_ID else getattr(agent_config, "name", None))),
+                        run_id=admission_run_id,
                     )
                 except RunIdempotencyUnsupported as exc:
                     raise HTTPException(status_code=503, detail=str(exc)) from exc
+                except RunIdempotencyKeyMismatch as exc:
+                    # A trusted internal key is scoped by owner, not thread: the
+                    # same message requested on another thread (IM ``/new``) is
+                    # a different request for the run already admitted.
+                    raise HTTPException(status_code=409, detail="Idempotency-Key already used with a different request") from exc
 
                 if record.idempotency_reused:
                     stored = record.kwargs or {}
@@ -2437,12 +2570,21 @@ async def start_run(
 
                 worker = run_after_metadata(record)
                 try:
-                    # No await is allowed between durable admission and task
-                    # attachment. Metadata setup runs inside the attached
-                    # worker so a pending cancellation can bypass stalled
-                    # thread-store IO and still reach run_agent's startup
-                    # barrier / stream finalization.
+                    # The stream lease was established before durable admission.
+                    # Keep the admission-to-task-attachment window await-free so
+                    # cancellation cannot strand a pending row.
                     record.task = asyncio.create_task(worker)
+                    if producer_lease_started:
+                        transfer_producer_lease = _declared_bridge_method(
+                            bridge,
+                            "transfer_producer_lease",
+                        )
+                        if transfer_producer_lease is not None:
+                            transfer_producer_lease(
+                                record.run_id,
+                                record.task,
+                            )
+                        producer_lease_handed_off = True
                 except Exception as exc:
                     worker.close()
                     await run_mgr.fail_start_if_pending(
@@ -2461,8 +2603,19 @@ async def start_run(
 
         return record
     finally:
-        if owner_context_token is not None:
-            reset_current_user(owner_context_token)
+        try:
+            if producer_lease_started and not producer_lease_handed_off and admission_run_id is not None:
+                try:
+                    await await_drained(bridge.abort_producer_lease(admission_run_id))
+                except Exception:
+                    logger.warning(
+                        "Failed to release unused stream producer lease for run %s",
+                        sanitize_log_param(admission_run_id),
+                        exc_info=True,
+                    )
+        finally:
+            if owner_context_token is not None:
+                reset_current_user(owner_context_token)
 
 
 async def launch_scheduled_thread_run(
@@ -2702,6 +2855,7 @@ async def sse_consumer(
     gap_emitted = False
     terminal_emitted = False
     disconnect_observed = False
+    expired_heartbeat_seen = False
     try:
         async for entry in bridge.subscribe(record.run_id, last_event_id=last_event_id):
             if await request.is_disconnected():
@@ -2724,13 +2878,27 @@ async def sse_consumer(
                 return
 
             if entry is HEARTBEAT_SENTINEL:
-                if await _orphan_recovery_observed_after_heartbeat(record, run_mgr):
+                completion_reason = await _orphan_recovery_observed_after_heartbeat(
+                    record,
+                    run_mgr,
+                    bridge,
+                )
+                if completion_reason == _TERMINAL_STREAM_RECOVERED or (completion_reason == _TERMINAL_STREAM_PRODUCER_EXPIRED and expired_heartbeat_seen):
+                    if completion_reason == _TERMINAL_STREAM_PRODUCER_EXPIRED and not await _cleanup_expired_stream_producer(
+                        bridge,
+                        record.run_id,
+                    ):
+                        expired_heartbeat_seen = False
+                        yield ": heartbeat\n\n"
+                        continue
                     terminal_emitted = True
                     yield format_sse("end", None)
                     return
+                expired_heartbeat_seen = completion_reason == _TERMINAL_STREAM_PRODUCER_EXPIRED
                 yield ": heartbeat\n\n"
                 continue
 
+            expired_heartbeat_seen = False
             if entry is END_SENTINEL:
                 terminal_emitted = True
                 yield format_sse("end", None, event_id=entry.id or None)
@@ -2810,6 +2978,7 @@ async def wait_for_run_completion(
         return True
 
     resume_from_event_id: str | None = None
+    expired_heartbeat_seen = False
     try:
         while True:
             gap_seen = False
@@ -2832,9 +3001,24 @@ async def wait_for_run_completion(
                     resume_from_event_id = entry.latest_available_event_id
                     gap_seen = True
                     break
-                if entry is HEARTBEAT_SENTINEL and await _orphan_recovery_observed_after_heartbeat(record, run_mgr):
-                    completed = True
-                    return True
+                if entry is HEARTBEAT_SENTINEL:
+                    completion_reason = await _orphan_recovery_observed_after_heartbeat(
+                        record,
+                        run_mgr,
+                        bridge,
+                    )
+                    if completion_reason == _TERMINAL_STREAM_RECOVERED or (completion_reason == _TERMINAL_STREAM_PRODUCER_EXPIRED and expired_heartbeat_seen):
+                        if completion_reason == _TERMINAL_STREAM_PRODUCER_EXPIRED and not await _cleanup_expired_stream_producer(
+                            bridge,
+                            record.run_id,
+                        ):
+                            expired_heartbeat_seen = False
+                            continue
+                        completed = True
+                        return True
+                    expired_heartbeat_seen = completion_reason == _TERMINAL_STREAM_PRODUCER_EXPIRED
+                else:
+                    expired_heartbeat_seen = False
                 if await request.is_disconnected():
                     disconnect_observed = True
                     return False
