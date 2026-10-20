@@ -165,6 +165,14 @@ DOM regression: `new-agent-save.dom.test.tsx`.
 - **Path alias**: `@/*` maps to `src/*`.
 - **Components**: `ui/` and `ai-elements/` are generated from registries (Shadcn, MagicUI, React Bits, Vercel AI SDK) — don't manually edit these.
 
+Workspace sidebar customization belongs in `components/workspace/workspace-sidebar-frame.tsx`,
+outside the generated UI components. A mobile icon rail and its drawer mount only
+one content tree at a time. Header, channel, menu, and history visibility follow
+`useWorkspaceSidebarExpanded`; mobile drawer state must not overwrite the saved
+desktop `SidebarProvider.open` preference. Keep the activity poll and shared
+delete-dialog provider outside the switching content. Regression coverage lives
+in the frame DOM tests and `tests/e2e/sidebar.spec.ts`.
+
 Scheduled-task list search filters the current authorized query result by title or
 prompt, composing with status/type filters and thread scope. Selection must derive
 from the filtered list so hidden tasks cannot remain actionable. Keep literal

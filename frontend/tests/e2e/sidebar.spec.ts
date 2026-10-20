@@ -1,8 +1,92 @@
 import { expect, test } from "@playwright/test";
 
-import { mockLangGraphAPI } from "./utils/mock-api";
+import { MOCK_THREAD_ID, mockLangGraphAPI } from "./utils/mock-api";
 
 test.describe("Sidebar navigation", () => {
+  test.describe("collapsed mobile navigation", () => {
+    test.use({ hasTouch: true });
+    for (const width of [390, 767]) {
+      test(`collapsed sidebar remains usable at ${width}px`, async ({
+        page,
+        context,
+        baseURL,
+      }) => {
+        await context.addCookies([
+          { name: "sidebar_state", value: "false", url: baseURL! },
+        ]);
+        await page.setViewportSize({ width, height: 812 });
+        mockLangGraphAPI(page, {
+          threads: [
+            { thread_id: MOCK_THREAD_ID, title: "Existing conversation" },
+          ],
+        });
+        await page.goto("/workspace/chats/new");
+        await expect(page.getByRole("textbox").first()).toBeVisible();
+
+        const screenshot = test
+          .info()
+          .outputPath("collapsed-mobile-sidebar.png");
+        await page.screenshot({ path: screenshot });
+        await test.info().attach("collapsed-mobile-sidebar", {
+          path: screenshot,
+          contentType: "image/png",
+        });
+        const sidebar = page.locator("[data-sidebar='sidebar']:visible");
+        await expect(
+          sidebar.locator("a[href='/workspace/chats']"),
+        ).toBeVisible();
+        await expect(
+          sidebar.locator("a[href='/workspace/agents']"),
+        ).toBeVisible();
+        const trigger = sidebar.locator("[data-sidebar='trigger']");
+        await expect(trigger).toBeVisible();
+        await trigger.tap();
+
+        const drawer = page.locator(
+          "[data-mobile='true'][data-sidebar='sidebar']",
+        );
+        await expect(drawer).toBeVisible();
+        await expect(
+          drawer.getByText("Existing conversation", { exact: true }),
+        ).toBeVisible();
+        await expect(
+          drawer.getByTestId("projects-display-mode-toggle"),
+        ).toBeVisible();
+        await expect(
+          drawer.getByText("Settings and more", { exact: true }),
+        ).toBeVisible();
+        await expect(
+          page.locator("a[href='/workspace/agents']:visible"),
+        ).toHaveCount(1);
+        await page.keyboard.press("Escape");
+
+        await expect(drawer).toBeHidden();
+        await expect(
+          sidebar.locator("a[href='/workspace/agents']"),
+        ).toBeVisible();
+        await expect(sidebar.locator("[data-sidebar='trigger']")).toBeFocused();
+        await expect
+          .poll(() => page.evaluate(() => document.documentElement.scrollWidth))
+          .toBeLessThanOrEqual(width);
+        expect(
+          (await context.cookies()).find(
+            (cookie) => cookie.name === "sidebar_state",
+          )?.value,
+        ).toBe("false");
+
+        await sidebar.locator("a[href='/workspace/agents']").tap();
+        await expect(page).toHaveURL(/\/workspace\/agents$/);
+        await page.setViewportSize({ width: 768, height: 812 });
+        await expect(
+          page.locator("[data-slot='sidebar'][data-state='collapsed']"),
+        ).toBeVisible();
+        await expect(
+          page.locator("[data-mobile='true'][data-sidebar='sidebar']"),
+        ).toBeHidden();
+      });
+    }
+  });
+
   test("sidebar contains Chats and Agents nav links", async ({ page }) => {
     mockLangGraphAPI(page);
 

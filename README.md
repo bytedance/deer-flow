@@ -1437,6 +1437,10 @@ Use it as-is. Or tear it apart and make it yours.
 
 ## Core Features
 
+The workspace keeps a collapsed icon sidebar visible on narrow screens. Its
+toggle opens the full navigation drawer; closing the drawer returns to the icon
+bar without changing your saved desktop sidebar preference.
+
 ### Skills & Tools
 
 Open **Capability Center** from the workspace sidebar to manage **Plugins**
