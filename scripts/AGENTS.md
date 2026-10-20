@@ -51,6 +51,8 @@ decimal integers within Bash's integer range, including zero and leading zeros;
 omitted/empty values retain the 60-second default. Invalid values must exit 1
 rather than leave a failed integer comparison in the polling loop. Offline
 probe-stub coverage lives in `backend/tests/test_wait_for_port_script.py`.
+The port range check must also reject digit-only values beyond Bash's integer
+range before probing; valid ports are decimal 1–65535, including leading zeros.
 
 Both launchers call `sandbox-mode.sh` via Bash; keep it Bash/awk-only.
 Dev passes `$PROJECT_ROOT/config.yaml`; prod passes `$DEER_FLOW_CONFIG_PATH`.

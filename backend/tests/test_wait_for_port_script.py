@@ -11,7 +11,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "wait-for-port.sh"
 
 
-def run_wait(tmp_path: Path, timeout: str, *, listening: bool, stop_on_sleep: bool = False) -> subprocess.CompletedProcess[str]:
+def run_wait(tmp_path: Path, timeout: str, *, listening: bool, stop_on_sleep: bool = False, port: str = "3000") -> subprocess.CompletedProcess[str]:
     bash = require_script_bash()
     # Isolate the probe tools from host listeners, PowerShell, and networking.
     bin_dir = tmp_path / "bin"
@@ -25,7 +25,7 @@ def run_wait(tmp_path: Path, timeout: str, *, listening: bool, stop_on_sleep: bo
         command.write_text(f"#!{bash}\n{body}", encoding="utf-8", newline="\n")
         command.chmod(0o755)
     env = {**os.environ, "PATH": str(bin_dir), "PROBE_MARKER": str(probe_marker)}
-    command = [bash, str(SCRIPT), "3000", timeout, "Test service"]
+    command = [bash, str(SCRIPT), port, timeout, "Test service"]
     if stop_on_sleep:
         # Exit the shell if invalid input reaches polling, without hanging the
         # regression test against the unfixed script or leaving child processes.
@@ -39,6 +39,27 @@ def run_wait(tmp_path: Path, timeout: str, *, listening: bool, stop_on_sleep: bo
         timeout=5,
         check=False,
     )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="isolated executable probe stubs require POSIX")
+@pytest.mark.parametrize("port", ["0", "65536", "999999999999999999999999999999999"])
+@pytest.mark.parametrize("listening", [False, True])
+def test_out_of_range_port_is_rejected_before_probing(tmp_path: Path, port: str, listening: bool):
+    result = run_wait(tmp_path, "0", listening=listening, stop_on_sleep=True, port=port)
+
+    assert result.returncode == 1
+    assert result.stderr == f"Port must be between 1 and 65535: {port}\n"
+    assert not (tmp_path / "probed").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="isolated executable probe stubs require POSIX")
+@pytest.mark.parametrize("port", ["1", "65535", "03000"])
+def test_valid_port_boundaries_and_leading_zeros(tmp_path: Path, port: str):
+    result = run_wait(tmp_path, "0", listening=True, port=port)
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert (tmp_path / "probed").read_text() == "x"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="isolated executable probe stubs require POSIX")

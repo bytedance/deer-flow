@@ -745,6 +745,8 @@ For direct use of `bash scripts/wait-for-port.sh <port> [timeout_seconds]`,
 the timeout must be a non-negative integer within Bash's integer range
 (default: 60 seconds). Zero checks once without waiting; invalid timeouts
 exit with status 1 before checking the port.
+The port must be a decimal integer from 1 to 65535; out-of-range values,
+including integers too large for Bash, also exit 1 before probing.
 
 #### Startup Modes
 

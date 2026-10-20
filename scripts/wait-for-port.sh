@@ -24,7 +24,7 @@ case "$PORT" in
         ;;
 esac
 
-if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+if ! [ "$PORT" -ge 1 ] 2>/dev/null || ! [ "$PORT" -le 65535 ] 2>/dev/null; then
     echo "Port must be between 1 and 65535: $PORT" >&2
     exit 1
 fi
