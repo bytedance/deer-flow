@@ -258,3 +258,39 @@ def test_shared_skill_parser_accepts_bom_prefixed_frontmatter(tmp_path: Path) ->
 
     assert name == "demo-skill"
     assert description == "Handles BOM-prefixed files."
+
+
+@pytest.mark.parametrize(
+    ("allowed_tools", "message"),
+    [
+        ("[Read, 42]", "allowed-tools must contain only strings"),
+        ('["Read", ""]', "allowed-tools cannot contain empty tool names"),
+        ('"Bash(grep))"', "allowed-tools contains an unmatched closing parenthesis"),
+        ('"Bash(\'grep)"', "allowed-tools contains an unclosed quote"),
+        ("42", "allowed-tools must be a space-separated string or list of strings"),
+    ],
+)
+def test_validate_skill_rejects_malformed_allowed_tools(tmp_path: Path, allowed_tools: str, message: str) -> None:
+    validator = _load_validator()
+    content = f"---\nname: demo-skill\ndescription: Handles tools.\nallowed-tools: {allowed_tools}\n---\n\n# Demo\n"
+
+    assert validator.validate_skill(_write_skill(tmp_path, content)) == (False, message)
+
+
+@pytest.mark.parametrize(
+    "allowed_tools",
+    ['"Read Bash(grep)"', '["Read", "Bash(grep)"]', '"Bash(grep"'],
+)
+def test_validate_skill_accepts_well_formed_allowed_tools(tmp_path: Path, allowed_tools: str) -> None:
+    validator = _load_validator()
+    content = f"---\nname: demo-skill\ndescription: Handles tools.\nallowed-tools: {allowed_tools}\n---\n\n# Demo\n"
+
+    assert validator.validate_skill(_write_skill(tmp_path, content)) == (True, "Skill is valid!")
+
+
+@pytest.mark.parametrize("compatibility", ["123", '"' + "x" * 501 + '"'])
+def test_validate_skill_accepts_compatibility_the_runtime_accepts(tmp_path: Path, compatibility: str) -> None:
+    validator = _load_validator()
+    content = f"---\nname: demo-skill\ndescription: Handles compatibility.\ncompatibility: {compatibility}\n---\n\n# Demo\n"
+
+    assert validator.validate_skill(_write_skill(tmp_path, content)) == (True, "Skill is valid!")

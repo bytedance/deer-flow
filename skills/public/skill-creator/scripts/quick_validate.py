@@ -98,13 +98,47 @@ def validate_skill(skill_path):
     if len(description) > 1024:
         return False, f"Description is too long ({len(description)} characters). Maximum is 1024 characters."
 
-    # Validate compatibility field if present (optional)
-    compatibility = frontmatter.get('compatibility', '')
-    if compatibility:
-        if not isinstance(compatibility, str):
-            return False, f"Compatibility must be a string, got {type(compatibility).__name__}"
-        if len(compatibility) > 500:
-            return False, f"Compatibility is too long ({len(compatibility)} characters). Maximum is 500 characters."
+    # The runtime validator does not inspect `compatibility` (export.py only
+    # coerces it), so this script must not reject values the runtime accepts.
+
+    # Validate allowed-tools with the same shape rules as the runtime parser
+    # (backend/packages/harness/deerflow/skills/parser.py).
+    allowed_tools = frontmatter.get('allowed-tools')
+    if allowed_tools is not None:
+        if isinstance(allowed_tools, str):
+            depth = 0
+            quote = None
+            escaped = False
+            for char in allowed_tools:
+                if escaped:
+                    escaped = False
+                    continue
+                if char == '\\':
+                    escaped = True
+                    continue
+                if quote is not None:
+                    if char == quote:
+                        quote = None
+                    continue
+                if char in {'"', "'"}:
+                    quote = char
+                    continue
+                if char == '(':
+                    depth += 1
+                elif char == ')':
+                    if depth == 0:
+                        return False, "allowed-tools contains an unmatched closing parenthesis"
+                    depth -= 1
+            if quote is not None:
+                return False, "allowed-tools contains an unclosed quote"
+        elif isinstance(allowed_tools, list):
+            for item in allowed_tools:
+                if not isinstance(item, str):
+                    return False, "allowed-tools must contain only strings"
+                if not item.strip():
+                    return False, "allowed-tools cannot contain empty tool names"
+        else:
+            return False, "allowed-tools must be a space-separated string or list of strings"
 
     # Validate the DeerFlow-specific declarations with the same shapes the
     # runtime validator enforces, so a malformed skill fails before packaging.
