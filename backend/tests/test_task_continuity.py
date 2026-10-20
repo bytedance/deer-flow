@@ -91,6 +91,31 @@ def test_old_checkpoint_cannot_see_future_batch(scoped):
     assert archive.lookup(old, scoped, query="Citrine")["results"]
 
 
+def test_active_search_results_participate_in_archive_result_limit(scoped):
+    archived = [HumanMessage(content=f"needle archived {i}", id=f"archived-{i}") for i in range(8)]
+    history = archive.capture({}, scoped, archived, TaskContinuityConfig(enabled=True))
+    active = HumanMessage(content="needle current", id="current")
+
+    result = archive.lookup({"task_history": history, "messages": [active]}, scoped, query="needle")
+
+    assert len(result["results"]) == 8
+    assert any(row["message_id"] == "current" for row in result["results"])
+    assert sum(row["role"] == "human" for row in result["results"]) == 8
+
+
+def test_active_search_results_deduplicate_against_archived_matches(scoped):
+    archived = [HumanMessage(content=f"needle archived {i}", id=f"archived-{i}") for i in range(8)]
+    history = archive.capture({}, scoped, archived, TaskContinuityConfig(enabled=True))
+    active = [archived[0], HumanMessage(content="needle current", id="current")]
+
+    result = archive.lookup({"task_history": history, "messages": active}, scoped, query="needle")
+
+    assert len(result["results"]) == 8
+    message_ids = [row["message_id"] for row in result["results"]]
+    assert message_ids.count("archived-0") == 1
+    assert "current" in message_ids
+
+
 def test_retention_is_explicit_and_duplicate_capture_is_idempotent(scoped):
     config = TaskContinuityConfig(enabled=True, max_batches=1)
     old = {"task_history": archive.capture({}, scoped, conversation(), config)}
