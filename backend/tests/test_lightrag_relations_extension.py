@@ -95,3 +95,43 @@ async def test_graph_upstream_failure_never_retries(graph, status):
         await provider.relations_search("Cedar", context=KnowledgeRequestContext("alice"))
     assert len(requests) == 1
     assert "synthetic-key" not in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_shared_chunk_is_emitted_once_with_each_edge_attributed_within_budget(graph):
+    provider, _, state = graph
+    state["chunks"][0]["content"] = "Shared evidence. " * 60
+    state["relationships"] = [{"src_id": f"Node{i}", "tgt_id": "Forest", "description": "grows in", "source_id": "chunk-1<SEP>chunk-1"} for i in range(20)]
+    result = await provider.relations_search("forest", context=KnowledgeRequestContext("alice"))
+    assert len([hit for hit in result.hits if hit.source]) == 1
+    content, artifact = format_result(result)
+    for i in range(20):
+        assert f"Node{i} — Forest" in content
+    assert content.count("Evidence: result [1].") == 20
+    assert len(artifact["knowledge_sources"]) == 1
+    assert len(content) <= 8000
+    short, short_artifact = format_result(result, max_total_chars=1100)
+    if "Evidence: result [1]." in short:
+        assert short_artifact["knowledge_sources"]
+
+
+@pytest.mark.asyncio
+async def test_edges_reference_only_their_own_chunks_and_reuse_shared_positions(graph):
+    provider, _, state = graph
+    state["chunks"].append({"chunk_id": "chunk-2", "file_path": "second.md", "content": "Second evidence."})
+    state["relationships"] = [
+        {"src_id": "A", "tgt_id": "B", "source_id": "chunk-1"},
+        {"src_id": "B", "tgt_id": "C", "source_id": "chunk-2<SEP>chunk-1"},
+        {"src_id": "C", "tgt_id": "D", "source_id": "missing"},
+    ]
+    result = await provider.relations_search("q", context=KnowledgeRequestContext("alice"))
+    assert result.hits[1].content.startswith("Evidence: result [1].")
+    assert result.hits[3].content.startswith("Evidence: result [3], result [1].")
+    assert "No retrieved document evidence" in result.hits[4].content
+    assert len([hit for hit in result.hits if hit.source]) == 2
+    for budget in [0, 50, 200, 500, 8000]:
+        content, _ = format_result(result, max_total_chars=budget)
+        import re
+
+        for ref in re.findall(r"result \[(\d+)\]", content):
+            assert f"[{ref}] [citation:" in content

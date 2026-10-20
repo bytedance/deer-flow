@@ -56,6 +56,7 @@ def normalize_relations(data: dict) -> RetrievalResult:
             chunks[chunk_id] = chunk
     references = _rows(data, "references")
     hits = []
+    evidence_positions = {}
     for relation in _rows(data, "relationships"):
         source, target = _text(relation.get("src_id")), _text(relation.get("tgt_id"))
         if not source or not target:
@@ -63,11 +64,24 @@ def normalize_relations(data: dict) -> RetrievalResult:
         description = _text(relation.get("description"))
         path = f"Upstream relation (one edge): {source} — {target}\n{description}"
         ids = relation.get("source_id")
-        evidence = [chunks[key] for key in dict.fromkeys(ids.split("<SEP>")) if key in chunks] if isinstance(ids, str) else []
-        normalized = normalize_retrieval_result({"chunks": evidence, "references": references})
-        if normalized.hits:
-            hits.append(RetrievalHit(content=path + "\nThe following chunks are the returned evidence for this edge."))
-            hits.extend(normalized.hits)
+        evidence_ids = [key for key in dict.fromkeys(ids.split("<SEP>")) if key in chunks] if isinstance(ids, str) else []
+        positions = []
+        for key in evidence_ids:
+            if key not in evidence_positions:
+                normalized = normalize_retrieval_result({"chunks": [chunks[key]], "references": references})
+                if not normalized.hits:
+                    continue
+                # Reserve one hit for the edge and one for the bounded-view note.
+                if len(hits) >= 98:
+                    break
+                hits.append(normalized.hits[0])
+                evidence_positions[key] = len(hits)
+            positions.append(evidence_positions[key])
+        if positions:
+            # Evidence precedes its users, so prefix budgeting cannot leave an
+            # emitted edge referring to a chunk omitted by the shared formatter.
+            evidence_refs = ", ".join(f"result [{position}]" for position in positions)
+            hits.append(RetrievalHit(content=f"Evidence: {evidence_refs}.\n{path}"))
         else:
             hits.append(RetrievalHit(content=path + "\nNo retrieved document evidence for this edge."))
         if len(hits) >= 99:

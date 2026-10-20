@@ -11,3 +11,7 @@ three-tool suite. Their responses are synthetic. Separate opt-in checks in
 backend/tests/test_knowledge_phase1_live.py require existing indexed fixtures;
 the GLM loop requires KNOWLEDGE_RUN_MODEL_TEST=1. See VALIDATION.md for live
 results and limits. Never let live tests upload data or silently enable API usage.
+
+Shared graph evidence chunks are emitted once per returned chunk ID, before the
+first referencing edge. Every edge names its evidence result positions; prefix
+truncation therefore cannot leave a retained edge pointing to omitted evidence.

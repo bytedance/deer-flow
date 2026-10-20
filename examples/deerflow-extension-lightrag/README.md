@@ -79,3 +79,7 @@ A real OrbStack deployment with bge-m3 and GLM-5.3 also passed provider and
 three-tool agent checks; see the [validation record](VALIDATION.md) for versions,
 reproduction steps and limits. Offline passes alone are not live acceptance.
 Deployment verification must inspect both relation facts and original evidence.
+
+Shared graph evidence chunks are emitted once per returned chunk ID, before the
+first referencing edge. Every edge names its evidence result positions; prefix
+truncation therefore cannot leave a retained edge pointing to omitted evidence.

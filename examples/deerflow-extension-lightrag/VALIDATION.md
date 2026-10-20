@@ -191,3 +191,20 @@ Relation evidence consists of upstream one-edge paths. Multi-hop discovery,
 graph completeness, WeKnora entity-graph HTTP access, graph visualization and
 management pipelines remain outside this delivery. Upstream extraction during
 fixture preparation does not implement DeerFlow's planned Phase 2 pipeline.
+
+## Shared-evidence budget review follow-up
+
+The adapter now emits each referenced chunk ID once, before its first edge,
+and labels every edge with the corresponding result positions. A regression
+with 20 edges sharing a long chunk preserves all 20 edges under the shared
+8,000-character budget with one source record. A second regression covers
+partially shared chunks, missing IDs and prefix truncation without dangling
+references. Graph descriptions remain unattributed; only original chunk text
+receives a source citation.
+
+Validation after this change: relation adapter tests **10 passed**; real
+WeKnora/LightRAG/GLM checks **3 passed in 22.80 seconds** after restarting the
+local provider services; blocking-I/O **266 passed, 1 skipped**. Extension
+catalog E2E **10 passed**, including English/Chinese LightRAG descriptions and
+catalog discovery with the runtime API unavailable. The old E2E expectation
+of 10 bundled extensions was updated to 11.
