@@ -769,12 +769,17 @@ class ScheduledTaskService:
             }
         except Exception as exc:
             if not launch_succeeded and self._is_overlap_conflict(exc):
-                await self._task_run_repo.requeue_claimed_run(
+                requeued = await self._task_run_repo.requeue_claimed_run(
                     task_run_id,
                     lease_owner=self._lease_owner,
                     error=str(exc),
                     expected_attempt_count=claim_attempt,
                 )
+                if not requeued:
+                    logger.warning(
+                        "Scheduled task-run %s lost its launch claim before requeue bookkeeping; leaving recovery-owned state unchanged",
+                        task_run_id,
+                    )
                 return self._queued_result(task_run_id, execution_thread_id, error=str(exc))
 
             next_at = self._next_run_at_after_launch(task, trigger=trigger, now=now)
