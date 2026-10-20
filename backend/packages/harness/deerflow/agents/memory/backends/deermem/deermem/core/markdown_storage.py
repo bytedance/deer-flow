@@ -55,7 +55,9 @@ class MarkdownMemoryStorage(FileMemoryStorage):
         if not path.exists():
             return None
         try:
-            raw = path.read_text(encoding="utf-8")
+            # utf-8-sig, matching the base loader: a BOM does not make the
+            # summary unreadable, so it must not trigger the quarantine path.
+            raw = path.read_text(encoding="utf-8-sig")
         except UnicodeError as exc:
             logger.warning("Cannot decode memory summary %s as UTF-8: %s", path, exc)
             # Invalid text has the same quarantine contract as an unparseable

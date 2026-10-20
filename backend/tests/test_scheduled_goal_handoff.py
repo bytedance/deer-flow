@@ -11,11 +11,13 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from deerflow.agents.thread_state import get_thread_state_schema
 from deerflow.config.run_ownership_config import RunOwnershipConfig
 from deerflow.persistence.base import Base
+from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.run.sql import RunRepository
 from deerflow.runtime import goal
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
@@ -397,7 +399,12 @@ async def test_expired_lease_fences_cleanup_until_recovery_reuses_the_thread(inf
 
     async def evaluate(*args, **kwargs):
         expiry = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
-        assert await store.update_lease(record.run_id, owner_worker_id="expired", lease_expires_at=expiry)
+        if isinstance(store, MemoryRunStore):
+            store._runs[record.run_id]["lease_expires_at"] = expiry
+        else:
+            async with store._sf() as session:
+                await session.execute(update(RunRow).where(RunRow.run_id == record.run_id).values(lease_expires_at=datetime.fromisoformat(expiry)))
+                await session.commit()
         record.lease_expires_at = expiry
         return {"satisfied": True, "blocker": "none", "reason": "Verified", "relied_on_assumption": False}
 

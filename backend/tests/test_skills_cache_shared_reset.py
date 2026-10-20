@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -36,10 +37,11 @@ from deerflow.config.authorization_config import AuthorizationConfig
 from deerflow.config.extensions_config import ExtensionsConfig, reset_extensions_config
 from deerflow.config.file_signature import get_config_signature
 from deerflow.config.paths import Paths
-from deerflow.config.shared_reset_marker import SharedResetMarkerTracker
+from deerflow.config.shared_reset_marker import SharedResetChange, SharedResetMarkerTracker
 from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
 from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
 from deerflow.skills.types import Skill
+from deerflow.tools import skill_manage_tool as skill_manage_module
 
 _PROCESS_MESSAGE = "Skill caches invalidated; subsequent runs in this Gateway process will rescan the latest skills."
 
@@ -702,3 +704,178 @@ def test_publish_skills_cache_reset_wraps_filesystem_errors(shared_config, monke
     assert not isinstance(excinfo.value, OSError)
     assert isinstance(excinfo.value.__cause__, FileNotFoundError)
     assert missing not in str(excinfo.value)
+
+
+# --------------------------------------------------------------------------- #
+# Agent tool: skill_manage publishes the same marker as the routes
+# --------------------------------------------------------------------------- #
+
+_AGENT_USER = "alice"
+_AGENT_SKILL = "agent-skill"
+
+
+@pytest.fixture()
+def agent_skill_tool(shared_config, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """The agent's ``skill_manage`` tool on per-user storage under ``tmp_path``.
+
+    Only the LLM scan is stubbed: the local refresh and the marker write are
+    the real ones, wrapped so ``events`` records their order and
+    ``publish_threads`` the thread each marker write ran on.
+    """
+    skills_root = tmp_path / "skills"
+    skill_dir = _user_custom_dir(tmp_path, _AGENT_USER) / _AGENT_SKILL
+    config = SimpleNamespace(
+        skills=SimpleNamespace(get_skills_path=lambda: skills_root, container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
+        skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+    )
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.skills.security_scanner.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    monkeypatch.setattr(skill_manage_module, "scan_skill_content", _allow_scan)
+    events: list[tuple[str, str | None]] = []
+    publish_threads: list[int] = []
+    real_refresh = skill_manage_module.refresh_user_skills_system_prompt_cache_async
+    real_publish = shared_config.marker.publish
+
+    async def _refresh(user_id: str) -> None:
+        events.append(("refresh", user_id))
+        await real_refresh(user_id)
+
+    def _publish(config_path, *, user_id=None):
+        events.append(("publish", user_id))
+        publish_threads.append(threading.get_ident())
+        return real_publish(config_path, user_id=user_id)
+
+    monkeypatch.setattr(skill_manage_module, "refresh_user_skills_system_prompt_cache_async", _refresh)
+    monkeypatch.setattr(shared_config.marker, "publish", _publish)
+
+    def _install() -> None:
+        """Put an editable skill with one support file on disk, bypassing the tool."""
+        (skill_dir / "references").mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(_skill_content(_AGENT_SKILL), encoding="utf-8")
+        (skill_dir / "references" / "guide.md").write_text("guide", encoding="utf-8")
+
+    def _call(**kwargs):
+        runtime = SimpleNamespace(
+            context={"thread_id": "thread-1", "user_id": _AGENT_USER},
+            config={"configurable": {"thread_id": "thread-1", "user_id": _AGENT_USER}},
+        )
+        return skill_manage_module.skill_manage_tool.coroutine(runtime=runtime, name=_AGENT_SKILL, **kwargs)
+
+    return SimpleNamespace(call=_call, install=_install, events=events, publish_threads=publish_threads, skill_file=skill_dir / "SKILL.md")
+
+
+_AGENT_MUTATIONS = [
+    pytest.param({"action": "create", "content": _skill_content(_AGENT_SKILL)}, False, id="create"),
+    pytest.param({"action": "edit", "content": _skill_content(_AGENT_SKILL, "Edited skill")}, True, id="edit"),
+    pytest.param({"action": "patch", "find": "Demo skill", "replace": "Patched skill"}, True, id="patch"),
+    pytest.param({"action": "write_file", "path": "references/guide.md", "content": "new guide"}, True, id="write_file"),
+    pytest.param({"action": "remove_file", "path": "references/guide.md"}, True, id="remove_file"),
+    pytest.param({"action": "delete"}, True, id="delete"),
+]
+
+
+@pytest.mark.parametrize("arguments, existing", _AGENT_MUTATIONS)
+def test_skill_manage_tool_mutation_publishes_user_scoped_marker_after_local_refresh(shared_config, agent_skill_tool, arguments, existing) -> None:
+    """An agent-driven skill change reaches peers the way a route-driven one does.
+
+    The tool used to refresh only its own process, so a replica sharing the
+    home volume kept rendering the previous skill list for that user.
+    """
+    if existing:
+        agent_skill_tool.install()
+    peer_clock = _Clock()
+    peer = SharedResetMarkerTracker(shared_config.marker, clock=peer_clock)
+    assert peer.poll() is None
+
+    result = asyncio.run(agent_skill_tool.call(**arguments))
+
+    assert _AGENT_SKILL in result
+    assert agent_skill_tool.events == [("refresh", _AGENT_USER), ("publish", _AGENT_USER)]
+    assert agent_skill_tool.publish_threads and threading.get_ident() not in agent_skill_tool.publish_threads, "the marker write is filesystem IO and must run off the event loop"
+    peer_clock.advance(1.0)
+    assert peer.poll() == SharedResetChange(user_ids=frozenset({_AGENT_USER}), generation=_marker_payload(shared_config)["generation"])
+
+
+def test_skill_manage_tool_rejected_mutation_publishes_nothing(shared_config, agent_skill_tool) -> None:
+    agent_skill_tool.install()
+
+    with pytest.raises(ValueError, match="already exists"):
+        asyncio.run(agent_skill_tool.call(action="create", content=_skill_content(_AGENT_SKILL)))
+
+    assert agent_skill_tool.events == []
+    assert not _marker_path(shared_config).exists()
+
+
+def test_skill_manage_tool_marker_publication_failure_reports_the_applied_change(shared_config, agent_skill_tool, monkeypatch, caplog) -> None:
+    """The skill is on disk; the model must learn that only peer notification failed.
+
+    The error stays a ``SkillCacheResetPublishError``, never an ``OSError`` or
+    ``ValueError`` (which the tool raises for rejected input that changed
+    nothing), and names no server path. It is also logged inside the drained
+    tail, where a cancelled run cannot lose it.
+    """
+    missing = _marker_write_raises_file_not_found(monkeypatch, shared_config)
+
+    with caplog.at_level("ERROR", logger=skill_manage_module.logger.name), pytest.raises(prompt_module.SkillCacheResetPublishError) as excinfo:
+        asyncio.run(agent_skill_tool.call(action="create", content=_skill_content(_AGENT_SKILL)))
+
+    assert not isinstance(excinfo.value, (OSError, ValueError))
+    assert isinstance(excinfo.value.__cause__, prompt_module.SkillCacheResetPublishError)
+    message = str(excinfo.value)
+    assert f"'{_AGENT_SKILL}'" in message and "was applied" in message
+    assert missing not in message
+    assert agent_skill_tool.skill_file.read_text(encoding="utf-8") == _skill_content(_AGENT_SKILL)
+    assert agent_skill_tool.events == [("refresh", _AGENT_USER)]
+    assert [record.message for record in caplog.records if record.name == skill_manage_module.logger.name] == [f"Custom skill '{_AGENT_SKILL}' changed, but the shared skills cache reset could not be published"]
+
+
+@pytest.mark.asyncio
+async def test_skill_manage_tool_drains_write_refresh_and_publish_across_cancellation(shared_config, agent_skill_tool, monkeypatch) -> None:
+    """A run cancelled while the skill write is in flight must not skip the marker.
+
+    Cancelling ``asyncio.to_thread`` abandons the await, not the worker, so the
+    write lands anyway; unwinding before the refresh and the publication would
+    leave this process and every peer serving the previous skill list. Mirrors
+    the drained mutation tails of the skill routes.
+    """
+    await asyncio.to_thread(agent_skill_tool.install)
+    entered = threading.Event()
+    release = threading.Event()
+    to_thread = skill_manage_module._to_thread
+
+    async def _parking_to_thread(func, /, *args, **kwargs):
+        if getattr(func, "__name__", None) != "write_custom_skill":
+            return await to_thread(func, *args, **kwargs)
+
+        def _parked():
+            entered.set()
+            assert release.wait(5), "test never released the parked write"
+            return func(*args, **kwargs)
+
+        return await to_thread(_parked)
+
+    monkeypatch.setattr(skill_manage_module, "_to_thread", _parking_to_thread)
+    edited = _skill_content(_AGENT_SKILL, "Edited skill")
+    task = asyncio.create_task(agent_skill_tool.call(action="edit", content=edited))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not task.done(), "the drained tail must keep running until it settles"
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    assert agent_skill_tool.events == [("refresh", _AGENT_USER), ("publish", _AGENT_USER)]
+    assert _marker_payload(shared_config)["user_id"] == _AGENT_USER
+    assert await asyncio.to_thread(agent_skill_tool.skill_file.read_text, encoding="utf-8") == edited

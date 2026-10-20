@@ -33,7 +33,7 @@ from pathlib import Path
 
 import pytest
 
-from app.channels.message_bus import MessageBus
+from app.channels.message_bus import MessageBus, cleanup_inbound_files
 from app.channels.wechat import WechatChannel, _encrypt_aes_128_ecb
 
 pytestmark = pytest.mark.asyncio
@@ -96,6 +96,8 @@ async def test_wechat_inbound_file_staging_does_not_block_event_loop(tmp_path: P
     staged = Path(published[0].files[0]["path"])
     staged_exists = await asyncio.to_thread(staged.exists)
     assert staged_exists, "inbound image should be staged under the tmp state dir"
+    await cleanup_inbound_files(published[0].files)
+    assert not await asyncio.to_thread(staged.parent.exists), "staging cleanup must also stay off-loop"
 
 
 async def test_wechat_auth_state_load_does_not_block_event_loop(tmp_path: Path) -> None:

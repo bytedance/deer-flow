@@ -228,6 +228,11 @@ def redact_config_secrets(config: Any) -> Any:
     server-issued and ignored as an input, so echoing a caller-supplied one
     back would only manufacture disagreement with the ``X-Trace-Id`` header,
     the logs, and the run record's own stamped metadata.
+
+    ``client`` is also omitted from both context carriers. These advisory
+    hints belong only to the current run, including when a caller supplies
+    them through ``config.context``. Read-side callers apply the same rule
+    to older records without modifying their stored contents.
     """
     if not isinstance(config, dict):
         return config
@@ -237,7 +242,12 @@ def redact_config_secrets(config: Any) -> Any:
     if isinstance(context, dict):
         scrubbed_context = redact_secret_context_keys(context)
         scrubbed_context.pop(DEERFLOW_TRACE_METADATA_KEY, None)
+        scrubbed_context.pop("client", None)
         redacted["context"] = scrubbed_context
+
+    configurable = config.get("configurable")
+    if isinstance(configurable, dict) and "client" in configurable:
+        redacted["configurable"] = {key: value for key, value in configurable.items() if key != "client"}
 
     metadata = config.get("metadata")
     if isinstance(metadata, dict):

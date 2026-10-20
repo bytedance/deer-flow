@@ -145,7 +145,15 @@ export async function uploadFiles(
     throw new Error(await readErrorDetail(response, "Upload failed"));
   }
 
-  return response.json();
+  const result = (await response.json()) as UploadResponse;
+  if (result.success === false) {
+    const message = result.message.trim();
+    throw new Error(
+      message ? `Upload incomplete: ${message}` : "Upload failed",
+    );
+  }
+
+  return result;
 }
 
 /**

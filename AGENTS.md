@@ -83,7 +83,8 @@ generic hook to the extension contract plus an extension that uses it — do not
 hard-code business logic into core. Working examples:
 `examples/deerflow-extension-{example,bookmarks,agent-teams}`.
 [Workflow guide](examples/deerflow-extension-workflows/AGENTS.md): public
-AgentRuns; POSIX, one process/store; live resume/approval; no restart replay or hard currency budget.
+AgentRuns; POSIX, one process/store; approval and session-authorized recovery; uncertain admissions need reconciliation;
+no multi-Gateway failover or hard currency budget.
 
 Root runtime configs: copy `config.example.yaml` → `config.yaml` and
 `extensions_config.example.json` → `extensions_config.json` (MCP/skills).

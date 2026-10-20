@@ -96,7 +96,11 @@ def read_or_create_secret_file(
 
 def _read(path: Path) -> str | None:
     try:
-        return path.read_text(encoding="utf-8").strip()
+        # utf-8-sig: a secret restored or edited on Windows may carry a BOM.
+        # It is not whitespace, so the strip below keeps it, validation then
+        # rejects the value, and a credentials key file bricks every stored
+        # secret. A BOM is never part of a legitimate secret.
+        return path.read_text(encoding="utf-8-sig").strip()
     except FileNotFoundError:
         return None
 
