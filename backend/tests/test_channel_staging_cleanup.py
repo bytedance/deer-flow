@@ -155,3 +155,117 @@ def test_a_raising_log_handler_does_not_replace_the_save_error(tmp_path, cleanup
         assert raised.value.errno == 21
     finally:
         store_module.logger.removeHandler(handler)
+
+
+@pytest.mark.parametrize("failed_step", ["write", "close", "replace"])
+@pytest.mark.parametrize("broken_handler", [False, True])
+def test_buzz_failed_save_keeps_retryable_events_when_cleanup_and_logging_fail(tmp_path, monkeypatch, caplog, failed_step, broken_handler):
+    from app.channels import buzz_seen_events as buzz_module
+
+    path = tmp_path / "seen.json"
+    store = buzz_module.BuzzSeenEventStore(path)
+    store.record("chat", "existing")
+    original_bytes = path.read_bytes()
+    failure = OSError(5, f"primary {failed_step} failure")
+    real_replace = Path.replace
+    staged = tmp_path / "staged.tmp"
+    attempted = []
+
+    class CloseFails(_CloseFails):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            self.close()
+
+        def close(self):
+            self._path.write_text("".join(self._written), encoding="utf-8")
+            raise failure
+
+    def fail_write(*args, **kwargs):
+        raise failure
+
+    def fail_replace(source, destination):
+        if destination == path:
+            raise failure
+        return real_replace(source, destination)
+
+    def fail_unlink(source, *args, **kwargs):
+        attempted.append(source)
+        raise PermissionError("temporary file is locked")
+
+    handler = logging.FileHandler(tmp_path / "missing-log-directory" / "output.log", delay=True) if broken_handler else None
+    if handler is not None:
+        buzz_module.logger.addHandler(handler)
+    try:
+        with monkeypatch.context() as patch, caplog.at_level(logging.WARNING):
+            if failed_step == "write":
+                patch.setattr(buzz_module.json, "dump", fail_write)
+            elif failed_step == "close":
+                patch.setattr(buzz_module.tempfile, "NamedTemporaryFile", lambda *args, **kwargs: CloseFails(staged))
+            else:
+                patch.setattr(Path, "replace", fail_replace)
+            patch.setattr(Path, "unlink", fail_unlink)
+            store.record("chat", "pending")
+    finally:
+        if handler is not None:
+            buzz_module.logger.removeHandler(handler)
+            handler.close()
+
+    assert attempted, "unlink must still run after a failing close or diagnostic"
+    assert path.read_bytes() == original_bytes
+    assert store.seen("chat", "pending")
+    if not broken_handler:
+        records = [record for record in caplog.records if "failed to persist seen-event store" in record.getMessage()]
+        assert len(records) == 1
+        assert records[0].exc_info[1] is failure
+        assert any("temporary Buzz seen-event" in record.getMessage() for record in caplog.records)
+    # The failed snapshot must remain dirty, including the event recorded before
+    # the failure. A later flush retries without requiring a new incoming event.
+    store.flush()
+    assert buzz_module.BuzzSeenEventStore(path).seen("chat", "existing")
+    assert buzz_module.BuzzSeenEventStore(path).seen("chat", "pending")
+
+
+def test_buzz_write_and_close_failures_keep_the_original_persist_diagnostic(tmp_path, monkeypatch, caplog):
+    from app.channels import buzz_seen_events as buzz_module
+
+    primary = OSError("primary dump failure")
+    staged = tmp_path / "staged.tmp"
+
+    class CloseFails(_CloseFails):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            self.close()
+
+    def fail_dump(*args, **kwargs):
+        raise primary
+
+    with monkeypatch.context() as patch, caplog.at_level(logging.WARNING):
+        patch.setattr(buzz_module.tempfile, "NamedTemporaryFile", lambda *args, **kwargs: CloseFails(staged))
+        patch.setattr(buzz_module.json, "dump", fail_dump)
+        assert buzz_module.BuzzSeenEventStore(tmp_path / "seen.json")._write_snapshot({"chat": ["pending"]}) is False
+
+    records = [record for record in caplog.records if "failed to persist seen-event store" in record.getMessage()]
+    assert len(records) == 1
+    assert records[0].exc_info[1] is primary
+    assert not staged.exists()
+
+
+@pytest.mark.parametrize("interruption", [KeyboardInterrupt, SystemExit])
+def test_buzz_interruption_cleans_staging_and_still_propagates(tmp_path, monkeypatch, interruption):
+    from app.channels import buzz_seen_events as buzz_module
+
+    primary = interruption("interrupted write")
+
+    def interrupt(*args, **kwargs):
+        raise primary
+
+    with monkeypatch.context() as patch, pytest.raises(interruption) as raised:
+        patch.setattr(buzz_module.json, "dump", interrupt)
+        buzz_module.BuzzSeenEventStore(tmp_path / "seen.json")._write_snapshot({"chat": ["pending"]})
+
+    assert raised.value is primary
+    assert list(tmp_path.iterdir()) == []

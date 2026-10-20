@@ -28,6 +28,7 @@ from app.channels.allowed_users import parse_allowed_users
 from app.channels.base import Channel, ChannelUnavailable
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
+from app.channels.credential_staging import cleanup_stale_credential_staging, credential_staging_prefix
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 from deerflow.utils.file_io import await_drained
 
@@ -1673,7 +1674,10 @@ class WechatChannel(Channel):
             logger.warning("[WeChat] failed to persist cursor state to %s", self._cursor_path)
 
     def _load_auth_state(self) -> None:
-        if not self._auth_path or not self._auth_path.exists():
+        if not self._auth_path:
+            return
+        cleanup_stale_credential_staging(self._auth_path)
+        if not self._auth_path.exists():
             return
         try:
             data = json.loads(self._auth_path.read_text(encoding="utf-8"))
@@ -1732,7 +1736,7 @@ class WechatChannel(Channel):
                 # iLink bot_token is never briefly readable at umask defaults
                 # (mirrors ChannelRuntimeConfigStore._save). NamedTemporaryFile
                 # uses mkstemp, which creates the file at 0o600 from the start.
-                fd = tempfile.NamedTemporaryFile(mode="w", dir=self._auth_path.parent, suffix=".tmp", delete=False, encoding="utf-8")
+                fd = tempfile.NamedTemporaryFile(mode="w", dir=self._auth_path.parent, prefix=credential_staging_prefix(self._auth_path), suffix=".tmp", delete=False, encoding="utf-8")
                 try:
                     json.dump(data, fd, ensure_ascii=False, indent=2)
                     fd.close()

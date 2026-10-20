@@ -35,6 +35,8 @@ from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
+from app.channels.credential_staging import cleanup_stale_credential_staging, credential_staging_prefix
+
 if TYPE_CHECKING:
     from deerflow.config.credentials_key import CredentialsCipher
     from deerflow.persistence.channel_runtime_configs import SqlChannelRuntimeConfigRepository, StoredChannelRuntimeConfig
@@ -120,6 +122,7 @@ class ChannelRuntimeConfigStore:
     def __init__(self, path: str | Path | None = None) -> None:
         self._path = Path(path) if path is not None else default_runtime_config_path()
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        cleanup_stale_credential_staging(self._path)
         self._data: dict[str, dict[str, Any]] = self._load()
         self._lock = threading.Lock()
 
@@ -160,6 +163,7 @@ class ChannelRuntimeConfigStore:
             mode="w",
             encoding="utf-8",
             dir=self._path.parent,
+            prefix=credential_staging_prefix(self._path),
             suffix=".tmp",
             delete=False,
         )
@@ -357,6 +361,9 @@ class SqlChannelRuntimeConfigStore:
 
 def _read_legacy_file(path: Path) -> dict[str, Any] | None:
     """Parse ``runtime-config.json``; ``None`` when it is missing, unreadable or not an object (kept in place)."""
+    # Also runs after migration removed the legacy file: a crash-orphaned
+    # credential copy must not survive merely because the store now uses SQL.
+    cleanup_stale_credential_staging(path)
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
