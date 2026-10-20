@@ -500,3 +500,14 @@ as that missing closure. This follow-up remains open. Cancellation requests do
 not roll back effects; if the host consumes a cancellation after the extension's
 bounded observation window, the workflow may retain `needs_reconciliation` even
 when the child subsequently becomes interrupted.
+
+An expired owner in the middle of cancellation is exposed as recoverable for
+**Cancel workflow** cleanup. Recovery rejects a persisted cancellation even if no
+control-inbox row remains. Cancellation takeover bypasses workflow admission caps,
+but retains lease fencing and permission/config checks; uncertain child effects
+still retain reservations. A completed cancellation can be deleted normally.
+
+PostgreSQL workflow inspection/listing uses read-only transactions without the
+cluster budget lock; listing reads records and lease visibility in one query.
+Mutations still take the conservative global advisory lock, and connections are
+not pooled. Those remain throughput limits of this bounded deployment mode.

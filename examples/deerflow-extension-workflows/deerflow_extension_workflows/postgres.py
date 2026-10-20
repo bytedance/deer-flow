@@ -63,16 +63,19 @@ class PostgresStore(Store):
                 raise ValueError("Workflow cluster limits differ; coordinate the operator configuration before startup")
             db.execute("CREATE TABLE IF NOT EXISTS workflow_slots (workflow TEXT NOT NULL, step TEXT NOT NULL, PRIMARY KEY(workflow,step))")
 
-    def connect(self):
+    def connect(self, *, readonly=False):
         import psycopg
 
         raw = psycopg.connect(self.dsn, connect_timeout=5, client_encoding="utf8")
         try:
+            if readonly:
+                raw.execute("SET TRANSACTION READ ONLY")
             raw.execute("SET LOCAL lock_timeout = '5s'")
             raw.execute("SET LOCAL statement_timeout = '10s'")
             # Serializes budget counts and mutations across all replicas. No
             # host/Agent IO happens in this extension transaction.
-            raw.execute("SELECT pg_advisory_xact_lock(%s)", (LOCK,))
+            if not readonly:
+                raw.execute("SELECT pg_advisory_xact_lock(%s)", (LOCK,))
             return Connection(raw)
         except BaseException:
             raw.close()
@@ -125,11 +128,12 @@ class PostgresStore(Store):
             record = json.loads(row[0])
             if record["status"] in TERMINAL - {"recoverable"}:
                 raise ValueError("Workflow is not recoverable")
-            if not for_cancel and db.execute("SELECT 1 FROM workflow_controls WHERE workflow=? AND key='cancel'", (run_id,)).fetchone():
+            if not for_cancel and (record["status"] == "cancelling" or db.execute("SELECT 1 FROM workflow_controls WHERE workflow=? AND key='cancel'", (run_id,)).fetchone()):
                 raise ValueError("Cancellation pending; cancel this workflow instead of recovering it")
-            self._capacity(db, owner, run_id)
+            if not for_cancel:
+                self._capacity(db, owner, run_id)
             self._claim(db, owner, record)
-            record.update(status="queued", revision=record.get("revision", 0) + 1)
+            record.update(status="cancelling" if for_cancel else "queued", revision=record.get("revision", 0) + 1)
             db.execute("UPDATE workflows SET status=?,data=?,revision=? WHERE id=?", (record["status"], json.dumps(record), record["revision"], run_id))
             return record
 
@@ -195,23 +199,33 @@ class PostgresStore(Store):
             db.execute("INSERT INTO workflow_definitions(owner,name,version,script) VALUES (?,?,?,?) ON CONFLICT DO NOTHING", (owner, name, version, script))
         return {"name": name, "version": version}
 
+    @staticmethod
+    def _project(row):
+        record = json.loads(row[0])
+        if record["status"] not in TERMINAL and not row[1]:
+            record["status"] = "recoverable"
+            record["error"] = "Execution owner unavailable; sign in to recover or cancel pending cleanup"
+        return record
+
     def get(self, owner, run_id):
-        with closing(self.connect()) as db:
-            row = db.execute("SELECT data FROM workflows WHERE owner=? AND id=?", (owner, run_id)).fetchone()
+        with closing(self.connect(readonly=True)) as db:
+            row = db.execute(
+                "SELECT w.data,l.expires_at > extract(epoch from clock_timestamp()) FROM workflows w LEFT JOIN extension_execution_leases l "
+                "ON l.namespace=? AND l.resource_id=w.id AND l.user_id=w.owner WHERE w.owner=? AND w.id=?",
+                (NAMESPACE, owner, run_id),
+            ).fetchone()
             if not row:
                 raise ValueError("Workflow unavailable")
-            record = json.loads(row[0])
-            if record["status"] not in TERMINAL:
-                lease = db.execute("SELECT expires_at > extract(epoch from clock_timestamp()) FROM extension_execution_leases WHERE namespace=? AND resource_id=?", (NAMESPACE, run_id)).fetchone()
-                if not lease or not lease[0]:
-                    record["status"] = "interrupted" if record["status"] == "cancelling" else "recoverable"
-                    record["error"] = "Execution owner unavailable; sign in to recover or reconcile child effects"
-            return record
+            return self._project(row)
 
     def list(self, owner):
-        with closing(self.connect()) as db:
-            ids = [r[0] for r in db.execute("SELECT id FROM workflows WHERE owner=? ORDER BY rowid DESC LIMIT 20", (owner,))]
-        return [self.get(owner, run_id) for run_id in ids]
+        with closing(self.connect(readonly=True)) as db:
+            rows = db.execute(
+                "SELECT w.data,l.expires_at > extract(epoch from clock_timestamp()) FROM workflows w LEFT JOIN extension_execution_leases l "
+                "ON l.namespace=? AND l.resource_id=w.id AND l.user_id=w.owner WHERE w.owner=? ORDER BY w.rowid DESC LIMIT 20",
+                (NAMESPACE, owner),
+            ).fetchall()
+            return [self._project(row) for row in rows]
 
     def delete(self, owner, run_id):
         with closing(self.connect()) as db, db:
@@ -229,5 +243,5 @@ class PostgresStore(Store):
             # Keep the lease generation tombstone: deletion never resets fencing.
 
     def database_identity(self):
-        with closing(self.connect()) as db:
+        with closing(self.connect(readonly=True)) as db:
             return tuple(db.execute("SELECT current_database(),current_schema(),inet_server_addr()::text,inet_server_port()").fetchone())

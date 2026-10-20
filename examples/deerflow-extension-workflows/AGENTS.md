@@ -80,3 +80,9 @@ reservations; there is no supported reconciliation attestation/release API yet.
 
 Keep the plugin registration and execution-lease namespace in constants.py as a
 single declaration. Include that module in the recovery runtime signature.
+
+Project expired cancelling as recoverable for cancel cleanup; never permit replay
+of stored cancelling. Cancel claims persist cancelling and bypass admission caps.
+Inspection/list reads use read-only, lock-free transactions and a single joined
+record/lease snapshot. Keep write serialization and fencing intact; pooling remains
+future work. Cover killed cancellation takeover and saturated cancellation cleanup.

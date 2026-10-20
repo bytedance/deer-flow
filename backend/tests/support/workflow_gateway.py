@@ -78,6 +78,8 @@ def install_barriers():
             boundary = "result"
         if any(c["status"] == "approved" for c in record["checkpoints"]):
             boundary = "approval"
+        if record["status"] == "cancelling":
+            boundary = "cancelling"
         if boundary:
             asyncio.run(barrier(boundary, record))
         return result

@@ -366,3 +366,56 @@ async def test_peer_rejects_configuration_change_and_expired_review(cluster):
     await asyncio.to_thread(expire_checkpoint)
     with pytest.raises(ValueError, match="expired"):
         await b.resume(payload, context(runs))
+
+
+@pytest.mark.parametrize("saturated", [False, True])
+async def test_expired_cancelling_can_finish_cleanup_and_delete(cluster, saturated):
+    import copy
+    from contextlib import closing
+
+    a, b, runs = cluster
+    run_id = (await a.launch({"request_id": "cancel-recovery", "script": "await pause({stepId:'p'}); return 1;", "args": {}}, context(runs)))["run_id"]
+    await poll(a, runs, run_id, "paused")
+    await a.stop()
+
+    # Crash image of cancel_recovered after persisting cancelling, before cleanup.
+    def crash():
+        with closing(b.store.connect()) as db, db:
+            import json
+
+            record = json.loads(db.execute("SELECT data FROM workflows WHERE id=?", (run_id,)).fetchone()[0])
+            record["status"] = "cancelling"
+            db.execute("UPDATE workflows SET status='cancelling',data=? WHERE id=?", (json.dumps(record), run_id))
+            db.execute("UPDATE extension_execution_leases SET expires_at=0 WHERE resource_id=?", (run_id,))
+            if saturated:
+                # Other active rows already consume both budget ceilings.
+                for i in range(max(b.config["max_workflows"], b.config["max_workflows_per_owner"])):
+                    other = copy.deepcopy(record)
+                    other.update(id=f"occupied-{i}", status="running")
+                    db.execute("INSERT INTO workflows(id,owner,request_id,fingerprint,status,data) VALUES (?,?,?,?,?,?)", (other["id"], "alice", other["id"], "occupied", "running", json.dumps(other)))
+
+    await asyncio.to_thread(crash)
+    session = replace(context(runs), interaction="session")
+    with pytest.raises(ValueError, match="Cancellation pending"):
+        await b.recover({"run_id": run_id}, session)
+    result = await b.cancel({"run_id": run_id}, session)
+    assert result["status"] == "cancelled"
+    await b.delete({"run_id": run_id}, session)
+    with pytest.raises(ValueError, match="unavailable"):
+        await b.get({"run_id": run_id}, session)
+    assert not runs.starts
+
+
+async def test_reads_do_not_wait_for_cluster_budget_lock(cluster):
+    import psycopg
+    from deerflow_extension_workflows.postgres import LOCK
+
+    a, b, runs = cluster
+    run_id = (await a.launch({"request_id": "read-lock", "script": "return 1;", "args": {}}, context(runs)))["run_id"]
+    await poll(a, runs, run_id, "completed")
+    with psycopg.connect(b.store.dsn) as blocker:
+        blocker.execute("SELECT pg_advisory_xact_lock(%s)", (LOCK,))
+        # A real held advisory lock makes the old read path hit lock_timeout.
+        assert (await asyncio.to_thread(b.store.get, "alice", run_id))["status"] == "completed"
+        assert [r["id"] for r in await asyncio.to_thread(b.store.list, "alice")] == [run_id]
+        assert await asyncio.to_thread(b.store.list, "other") == []

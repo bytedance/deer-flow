@@ -542,3 +542,34 @@ def test_peer_cancel_reaches_real_active_child(cluster):
         assert c.sql("SELECT count(*) FROM runs WHERE thread_id=%s", (thread,))[0][0] == 1
     finally:
         (c.root / "a/hold_model").unlink(missing_ok=True)
+
+
+def test_sigkill_during_cancel_takeover_can_finish_and_delete(cluster):
+    from concurrent.futures import ThreadPoolExecutor
+
+    c = cluster
+    run = c.launch("await pause({stepId:'p'}); return 1;")
+    c.wait(run, "paused")
+    c.kill("a")
+    try:
+        c.wait(run, "recoverable")
+        c.arm("cancelling", "b")
+        with ThreadPoolExecutor(1) as pool:
+            request = pool.submit(c.action, "b", "cancel", {"run_id": run})
+            c.reached("b")
+            assert c.sql("SELECT status FROM workflows WHERE id=%s", (run,))[0][0] == "cancelling"
+            c.kill("b")
+            with pytest.raises(httpx.TransportError):
+                request.result(timeout=10)
+        c.start("a")
+        c.wait(run, "recoverable", "a")
+        # A pending cancellation must never replay the workflow body.
+        c.action("a", "recover", {"run_id": run}, expected=422)
+        assert c.action("a", "cancel", {"run_id": run})["status"] == "cancelled"
+        c.action("a", "delete", {"run_id": run})
+        assert not c.sql("SELECT id FROM workflows WHERE id=%s", (run,))
+    finally:
+        if "a" not in c.processes:
+            c.start("a")
+        if "b" not in c.processes:
+            c.start("b")

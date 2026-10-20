@@ -95,3 +95,28 @@ on their original compatible runtime rather than rewriting stored fingerprints.
 - Acceptance teardown removed its Gateway processes and disposable containers;
   pytest temporary directories retain diagnostic logs. No production/user stack
   was reused or modified. The standalone PostgreSQL regression server was stopped.
+
+## Review follow-up (2026-10-20)
+
+Expired `cancelling` records now project as recoverable so authenticated cancellation
+can reclaim the lease and finish cleanup. Ordinary replay rejects stored cancelling,
+even without a cancel inbox entry; cancel claims themselves persist cancelling so a
+second crash cannot lose the cancellation intent. Cancel takeover bypasses workflow
+admission caps while retaining fencing and current permission/configuration checks.
+Uncertain child reservations still require reconciliation before deletion.
+
+Workflow get/list and database-identity reads use read-only transactions without
+the global budget advisory lock. Listing joins workflow records and lease visibility
+in one query/connection. Writes retain conservative global serialization; pooling
+and finer write-lock granularity remain deferred for this bounded mode.
+
+Regressions reproduce expired cancellation with and without saturated limits and
+inspection while another connection holds the budget lock. Deployed acceptance adds
+SIGKILL during cancellation takeover, then cleanup and deletion through a survivor.
+
+Review validation: 17 PostgreSQL cluster cases passed (the three new regressions
+failed before the fix); 15 real deployed acceptance cases passed. Full backend
+regression: 34,576 passed, 657 skipped; blocking-I/O: 262 passed, 1 skipped.
+Backend format/lint, frontend lint/typecheck, extension browser checks and diff
+whitespace checks passed. The acceptance processes/containers and the dedicated
+PostgreSQL regression server were cleaned up after validation.
