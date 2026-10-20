@@ -228,6 +228,45 @@ asyncio.run(main())
     assert (await b.get({"run_id": run_id}, session))["result"] == 7
 
 
+async def test_cancel_keeps_lease_until_child_cleanup_finishes(cluster, monkeypatch):
+    a, b, runs = cluster
+    cleaning = asyncio.Event()
+    finish_cleanup = asyncio.Event()
+    original_cancel = a.cancel_child
+
+    async def held_cancel(*args, **kwargs):
+        cleaning.set()
+        await finish_cleanup.wait()
+        return await original_cancel(*args, **kwargs)
+
+    monkeypatch.setattr(a, "cancel_child", held_cancel)
+    script = "return await agent({stepId:'a',agentRef:'lead_agent',task:'blocked'});"
+    run_id = (await a.launch({"request_id": "cleanup-lease", "script": script, "args": {}}, context(runs)))["run_id"]
+    await asyncio.wait_for(runs.entered.wait(), 5)
+    try:
+        # Agent admission signals before the supervisor persists its run ID.
+        # Wait for that commit so remote cancel does not race its revision CAS.
+        async with asyncio.timeout(5):
+            while True:
+                record = await b.get({"run_id": run_id}, context(runs))
+                if record["steps"][0]["status"] == "running":
+                    break
+                await asyncio.sleep(0.01)
+        await b.cancel({"run_id": run_id}, context(runs))
+        await asyncio.wait_for(cleaning.wait(), 5)
+        # The supervisor has stopped its worker but is still draining the child.
+        async with asyncio.timeout(5):
+            while run_id in a.processes:
+                await asyncio.sleep(0.01)
+    finally:
+        finish_cleanup.set()
+    await asyncio.wait_for(a.wait_idle(run_id), 10)
+    record = await b.get({"run_id": run_id}, context(runs))
+    assert record["status"] == "cancelled"
+    assert record["steps"][0]["status"] == "cancelled"
+    assert not a.entries
+
+
 async def test_shared_child_quota_and_cancel(cluster):
     a, b, runs = cluster
     a.config["global_concurrency"] = b.config["global_concurrency"] = 1

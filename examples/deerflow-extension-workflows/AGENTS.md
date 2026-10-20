@@ -86,3 +86,8 @@ of stored cancelling. Cancel claims persist cancelling and bypass admission caps
 Inspection/list reads use read-only, lock-free transactions and a single joined
 record/lease snapshot. Keep write serialization and fencing intact; pooling remains
 future work. Cover killed cancellation takeover and saturated cancellation cleanup.
+
+Keep the supervisor outcome private until child tasks and fenced cleanup finish.
+Child saves share the workflow record; publishing terminal status early retires
+the PostgreSQL lease before reservation release. Pin cancellation ordering with
+a barrier-based cluster regression.

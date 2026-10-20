@@ -666,6 +666,7 @@ class Workflows(Cluster, Recovery, Lifecycle, Artifacts):
         owner, record, runs = entry["owner"], entry["record"], entry["runs"]
         process = None
         workspace = None
+        final_state = {}
         try:
             if record.get("budget_deadline") is not None:
                 record["remaining_seconds"] = max(0, record["budget_deadline"] - time.time())
@@ -766,7 +767,7 @@ class Workflows(Cluster, Recovery, Lifecycle, Artifacts):
                             message = outcome.get("message")
                             raise ValueError(message[:240] if isinstance(message, str) else "Script failed or exceeded limits")
                         encoded(outcome["value"], 12000)
-                        record.update(status="completed", result=outcome["value"])
+                        final_state.update(status="completed", result=outcome["value"])
                         break
                     # Poll cancel/fault/worker exit while a response is pending. An idle worker can only progress
                     # on a response, so keep waiting here instead of sending empty frames (turns).
@@ -790,15 +791,15 @@ class Workflows(Cluster, Recovery, Lifecycle, Artifacts):
         except TimeoutError:
             # Keep this outside asyncio.timeout: its own cancellation must first
             # leave the context manager so it can be translated to TimeoutError.
-            record.update(
+            final_state.update(
                 status="failed",
                 error="Checkpoint wait deadline exceeded" if record["status"] in ("paused", "waiting_approval") else "Execution deadline exceeded",
             )
         except asyncio.CancelledError:
             entry["cancel"].set()
-            record.update(status="interrupted", error="Host interrupted; child cleanup required")
+            final_state.update(status="interrupted", error="Host interrupted; child cleanup required")
         except Exception as exc:
-            record.update(
+            final_state.update(
                 status="cancelled" if entry["cancel"].is_set() else "waiting_input" if entry["fault"] == "waiting_input" else "failed",
                 error=str(exc)[:240],
             )
@@ -826,6 +827,9 @@ class Workflows(Cluster, Recovery, Lifecycle, Artifacts):
                 for row in record["steps"]:
                     if row["status"] in ("completed", "cancelled", "waiting_input") or row.get("child_status") in ("success", "error", "interrupted", "timeout"):
                         await asyncio.to_thread(self.store.release_slot, owner, record, row["step_id"])
+            # Child saves must not publish a terminal workflow and retire its
+            # lease before all fenced cleanup and reservation releases finish.
+            record.update(final_state)
             if any(s["status"] == "needs_reconciliation" for s in record["steps"]):
                 record.update(
                     status="needs_reconciliation",
