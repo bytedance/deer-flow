@@ -584,6 +584,7 @@ async def test_matching_terminal_row_without_commit_ack_cannot_authorize_event(r
     assert not run.manager._has_final_terminal_ack(run.record)
     assert not await terminal_events(runtime, run.record)
     assert row["evidence_seal_state"] == "partial"
+    assert row["evidence_seal_error"] == "Terminal event lacks an attributable final commit ACK"
 
 
 @pytest.mark.asyncio

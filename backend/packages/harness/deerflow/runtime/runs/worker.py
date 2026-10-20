@@ -2035,7 +2035,8 @@ async def run_agent(
 
                             status = run_manager.terminal_event_status(record)
                             if status is None:
-                                raise RuntimeError("Terminal event lacks an attributable final commit ACK")
+                                evidence_failure = "Terminal event lacks an attributable final commit ACK"
+                                raise RuntimeError(evidence_failure)
                             confirmation = await confirm_terminal_event(
                                 event_store,
                                 thread_id=thread_id,
