@@ -283,6 +283,20 @@ class TestSafeExtract:
             with pytest.raises(ValueError, match="executable binary"):
                 safe_extract_skill_archive(zf, dest)
 
+    def test_rejects_executable_binary_after_short_filler(self, tmp_path):
+        zip_path = self._make_zip(
+            tmp_path,
+            {
+                "my-skill/SKILL.md": "---\nname: test\ndescription: x\n---\n# Test",
+                "my-skill/bin/tool": b"\n\x7fELF" + b"\x00" * 64,
+            },
+        )
+        dest = tmp_path / "out"
+        dest.mkdir()
+        with zipfile.ZipFile(zip_path) as zf:
+            with pytest.raises(ValueError, match="executable binary"):
+                safe_extract_skill_archive(zf, dest)
+
     def test_allows_non_executable_binary_assets(self, tmp_path):
         zip_path = self._make_zip(
             tmp_path,

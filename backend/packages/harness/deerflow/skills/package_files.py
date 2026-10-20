@@ -23,6 +23,10 @@ _EXECUTABLE_MAGIC_PREFIXES = (
     b"\xca\xfe\xba\xbf",  # Mach-O fat64 binary big-endian
     b"\xbf\xba\xfe\xca",  # Mach-O fat64 binary little-endian
 )
+MAX_EXECUTABLE_MAGIC_OFFSET = 63
+EXECUTABLE_BINARY_PROBE_BYTES = MAX_EXECUTABLE_MAGIC_OFFSET + max(map(len, _EXECUTABLE_MAGIC_PREFIXES))
+_UTF8_BOM = b"\xef\xbb\xbf"
+_EXECUTABLE_FILLER_BYTES = frozenset(b"\x00\t\n\v\f\r ")
 
 
 def _posix(path: str | PurePath) -> PurePosixPath:
@@ -40,6 +44,32 @@ def is_code_file(path: str | PurePath, head: bytes) -> bool:
     return is_code_path(path) or (not _posix(path).suffix and head.startswith(b"#!"))
 
 
+def executable_binary_kind(prefix: bytes) -> str | None:
+    """Return the executable format at byte zero or after a short filler run.
+
+    A UTF-8 BOM is consumed as one sequence so its final byte cannot combine
+    with following bytes to form a different executable magic. Other accepted
+    filler is limited to ASCII whitespace and NUL, with an explicit 63-byte
+    maximum offset to keep every caller's probe bounded.
+    """
+    offset = 0
+    while offset <= MAX_EXECUTABLE_MAGIC_OFFSET:
+        if prefix.startswith(_UTF8_BOM, offset):
+            offset += len(_UTF8_BOM)
+            continue
+        for magic in _EXECUTABLE_MAGIC_PREFIXES:
+            if prefix.startswith(magic, offset):
+                if magic == b"\x7fELF":
+                    return "ELF"
+                if magic == b"MZ":
+                    return "PE"
+                return "Mach-O"
+        if offset >= len(prefix) or prefix[offset] not in _EXECUTABLE_FILLER_BYTES:
+            return None
+        offset += 1
+    return None
+
+
 def is_executable_binary_prefix(prefix: bytes) -> bool:
-    """Detect ELF, PE, and Mach-O executables by magic bytes."""
-    return prefix.startswith(_EXECUTABLE_MAGIC_PREFIXES)
+    """Detect ELF, PE, and Mach-O magic with a bounded leading filler run."""
+    return executable_binary_kind(prefix) is not None

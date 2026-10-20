@@ -86,7 +86,7 @@ from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import Paths, get_paths
 from deerflow.integrations.lark_broker import LARK_BROKER_URL_ENV
 from deerflow.skills.installer import is_symlink_member, is_unsafe_zip_member
-from deerflow.skills.package_files import is_executable_binary_prefix
+from deerflow.skills.package_files import EXECUTABLE_BINARY_PROBE_BYTES, is_executable_binary_prefix
 from deerflow.skills.parser import parse_skill_file
 from deerflow.skills.permissions import make_skill_tree_sandbox_readable
 from deerflow.skills.types import SKILL_MD_FILE, SkillCategory
@@ -1295,7 +1295,7 @@ def _runtime_artifact_is_executable(relative: Path, candidate: Path) -> bool:
     if os.name != "nt":
         return candidate.stat().st_mode & 0o111 != 0
     with candidate.open("rb") as handle:
-        prefix = handle.read(4)
+        prefix = handle.read(EXECUTABLE_BINARY_PROBE_BYTES)
     if relative == Path("bin/lark-cli"):
         return prefix.startswith(b"#!")
     return is_executable_binary_prefix(prefix)
