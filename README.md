@@ -2975,6 +2975,11 @@ servers. Its token-bearing `base_url` must use HTTPS by default; plaintext HTTP
 requires an explicit local-development opt-in. See the
 [mem0 backend guide](backend/packages/harness/deerflow/agents/memory/backends/mem0/README.md).
 
+Malformed or undecodable mem0 JSON responses, non-object envelopes, and invalid
+result containers follow the configured read failure policy: `fail_open` returns
+empty recall data, while `fail_closed` raises a memory read error. An invalid
+later page does not return a partial list.
+
 An opt-in `honcho` backend is available for self-hosted or hosted Honcho (v3
 API). It builds user-model memory — long-term preferences and a cross-session
 working representation — on Honcho's server side, so the backend makes no LLM
