@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -487,6 +488,38 @@ def test_find_glob_matches_raises_not_a_directory(tmp_path) -> None:
         assert False, "Expected NotADirectoryError"
     except NotADirectoryError:
         pass
+
+
+def test_local_list_dir_propagates_permission_error(tmp_path, monkeypatch) -> None:
+    from deerflow.sandbox.local.list_dir import list_dir
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(
+        Path,
+        "iterdir",
+        lambda _path: (_ for _ in ()).throw(PermissionError("simulated EACCES")),
+    )
+
+    with pytest.raises(PermissionError, match="simulated EACCES"):
+        list_dir(str(workspace))
+
+
+def test_find_glob_matches_propagates_permission_error(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    def failing_walk(_root, **kwargs):
+        onerror = kwargs.get("onerror")
+        if onerror is None:
+            return iter(())
+        onerror(PermissionError("simulated EACCES"))
+        return iter(())
+
+    monkeypatch.setattr("deerflow.sandbox.search.os.walk", failing_walk)
+
+    with pytest.raises(PermissionError, match="simulated EACCES"):
+        find_glob_matches(workspace, "**/*.py")
 
 
 def test_find_grep_matches_accepts_single_file(tmp_path) -> None:
