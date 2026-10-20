@@ -327,6 +327,21 @@ def test_emergency_flush_neither_reads_nor_advances_the_persisted_watermark(tmp_
     assert "reply-a" not in llm.prompts[1]
 
 
+def test_an_unidentifiable_last_message_keeps_the_persisted_watermark(tmp_path: Path) -> None:
+    """A last message with neither id nor text has no identity. Writing that
+    through would delete a persisted watermark a peer may have advanced and
+    force a full feed on every replica."""
+    messages = _msgs("first")
+    _file_updater(tmp_path).update_memory(messages, thread_id="t1", agent_name="a", user_id="u")
+    before = _sidecar(tmp_path).read_bytes()
+
+    llm = _RecordingLLM()
+    updater = _file_updater(tmp_path, llm)
+    updater.update_memory(messages + _msgs("second") + [AIMessage(content="")], thread_id="t1", agent_name="a", user_id="u")
+    assert llm.invoke_count == 1
+    assert _sidecar(tmp_path).read_bytes() == before
+
+
 def test_persisted_watermark_stores_no_message_text(tmp_path: Path) -> None:
     """Messages without an id fall back to a content identity, which is
     persisted as a digest so the sidecar never holds conversation text."""

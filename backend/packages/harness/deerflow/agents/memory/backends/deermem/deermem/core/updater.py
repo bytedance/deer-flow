@@ -1728,7 +1728,7 @@ class MemoryUpdater:
     ) -> None:
         """Store ``value`` for ``key``, evicting the least-recently-used entry
         when the bounded LRU cache exceeds ``config.watermark_max_keys``, and
-        write it through to the storage sidecar.
+        write a real identity through to the storage sidecar.
 
         A dropped key is safe: the next turn for that thread finds no watermark
         and re-extracts one batch. ``0`` = unbounded (no eviction).
@@ -1776,17 +1776,20 @@ class MemoryUpdater:
     ) -> None:
         """Write ``key``'s watermark to the storage sidecar, best-effort.
 
+        A ``None`` identity (the last message has neither id nor text) is not
+        written: the persisted entry, possibly advanced by a peer, still marks
+        an extracted prefix, and the furthest-of-both read keeps using it.
         A failure is logged and leaves the in-process cache authoritative for
         this process; the extraction it follows has already been persisted, so
         it must not turn into a failed update.
         """
         scope = self._persisted_watermark_scope(key)
         setter = getattr(self._storage, "set_extraction_watermark", None)
-        if scope is None or setter is None:
+        if value is None or scope is None or setter is None:
             return
         thread_id, user_id, agent_name = scope
         try:
-            setter(thread_id, None if value is None else list(value), agent_name=agent_name, user_id=user_id)
+            setter(thread_id, list(value), agent_name=agent_name, user_id=user_id)
         except Exception:
             logger.warning("Failed to persist the memory watermark (thread=%s)", thread_id, exc_info=True)
 
