@@ -1281,7 +1281,7 @@ This release closes that milestone with **621 merged pull requests**.
   client, scope or audience starts a new chain from the configuration.
   `client_credentials` tokens stay in process. A declared multi-instance
   deployment with an enabled `refresh_token` OAuth server now refuses to start
-  without `DEER_FLOW_CREDENTIALS_KEY`. ([#TBD])
+  without `DEER_FLOW_CREDENTIALS_KEY`. ([#7207])
 
 - **skills:** `GET /api/skills/custom/{skill_name}/history` now answers an
   invalid skill name (not hyphen-case, or longer than 64 characters) with `400`,
@@ -11929,3 +11929,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7099]: https://github.com/bytedance/deer-flow/pull/7099
 [#7104]: https://github.com/bytedance/deer-flow/pull/7104
 [#7123]: https://github.com/bytedance/deer-flow/pull/7123
+[#7207]: https://github.com/bytedance/deer-flow/pull/7207

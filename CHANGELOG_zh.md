@@ -1026,7 +1026,7 @@
   端点并采用彼此的结果。修改配置中的种子、token 端点、client、scope 或 audience 会从配置
   开始新的令牌链。`client_credentials` 令牌仍留在进程内。声明多实例部署且启用了
   `refresh_token` OAuth 服务器时，缺少 `DEER_FLOW_CREDENTIALS_KEY` 现在会拒绝启动。
-  ([#TBD])
+  ([#7207])
 
 - **技能：** `GET /api/skills/custom/{skill_name}/history` 收到非法技能名（不是
   hyphen-case，或超过 64 个字符）时，现在与删除、回滚一样返回 `400`，不再返回 `500`
@@ -9476,3 +9476,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7099]: https://github.com/bytedance/deer-flow/pull/7099
 [#7104]: https://github.com/bytedance/deer-flow/pull/7104
 [#7123]: https://github.com/bytedance/deer-flow/pull/7123
+[#7207]: https://github.com/bytedance/deer-flow/pull/7207
