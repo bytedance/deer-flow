@@ -67,6 +67,10 @@ class ChannelStore(Protocol):
         """Create or update the mapping for an IM conversation/topic (an update keeps ``created_at``)."""
         ...
 
+    async def claim_thread_id(self, channel_name: str, chat_id: str, thread_id: str, *, topic_id: str | None = None, user_id: str = "") -> str:
+        """Map the conversation/topic to ``thread_id`` unless it is mapped already; return the mapped thread."""
+        ...
+
     async def remove(self, channel_name: str, chat_id: str, topic_id: str | None = None) -> bool:
         """Remove one topic mapping, or — without ``topic_id`` — the base mapping and every topic of that chat."""
         ...
@@ -160,6 +164,17 @@ class JsonChannelStore:
             }
             self._save()
 
+    def _claim_sync(self, key: str, thread_id: str, user_id: str) -> str:
+        with self._lock:
+            data = self._ensure_loaded()
+            existing = data.get(key)
+            if existing:
+                return existing["thread_id"]
+            now = time.time()
+            data[key] = {"thread_id": thread_id, "user_id": user_id, "created_at": now, "updated_at": now}
+            self._save()
+            return thread_id
+
     def _remove_sync(self, channel_name: str, chat_id: str, topic_id: str | None) -> bool:
         with self._lock:
             data = self._ensure_loaded()
@@ -203,6 +218,9 @@ class JsonChannelStore:
     async def set_thread_id(self, channel_name: str, chat_id: str, thread_id: str, *, topic_id: str | None = None, user_id: str = "") -> None:
         await asyncio.to_thread(self._set_sync, binding_key(channel_name, chat_id, topic_id), thread_id, user_id)
 
+    async def claim_thread_id(self, channel_name: str, chat_id: str, thread_id: str, *, topic_id: str | None = None, user_id: str = "") -> str:
+        return await asyncio.to_thread(self._claim_sync, binding_key(channel_name, chat_id, topic_id), thread_id, user_id)
+
     async def remove(self, channel_name: str, chat_id: str, topic_id: str | None = None) -> bool:
         return await asyncio.to_thread(self._remove_sync, channel_name, chat_id, topic_id)
 
@@ -231,6 +249,9 @@ class SqlChannelStore:
 
     async def set_thread_id(self, channel_name: str, chat_id: str, thread_id: str, *, topic_id: str | None = None, user_id: str = "") -> None:
         await self._repo.upsert(ChannelThreadBinding.build(channel_name, chat_id, thread_id, topic_id=topic_id, user_id=user_id, now=time.time()))
+
+    async def claim_thread_id(self, channel_name: str, chat_id: str, thread_id: str, *, topic_id: str | None = None, user_id: str = "") -> str:
+        return await self._repo.claim(ChannelThreadBinding.build(channel_name, chat_id, thread_id, topic_id=topic_id, user_id=user_id, now=time.time()))
 
     async def remove(self, channel_name: str, chat_id: str, topic_id: str | None = None) -> bool:
         if topic_id is not None:

@@ -299,6 +299,20 @@ async def test_create_and_get(manager: RunManager):
 
 
 @pytest.mark.anyio
+async def test_create_or_reject_uses_preallocated_run_id():
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+
+    record = await manager.create_or_reject(
+        "thread-preallocated",
+        run_id="preallocated-run",
+    )
+
+    assert record.run_id == "preallocated-run"
+    assert (await store.get("preallocated-run"))["thread_id"] == "thread-preallocated"
+
+
+@pytest.mark.anyio
 async def test_status_transitions(manager: RunManager):
     """Status should transition pending -> running -> success."""
     record = await manager.create("thread-1")
@@ -1134,6 +1148,17 @@ async def test_create_or_reject_does_not_interrupt_old_run_when_new_run_store_wr
     assert stored_old["status"] == "running"
 
 
+def cancel_after_registration(monkeypatch, manager, old):
+    original_index = manager._index_run_locked
+
+    def index_and_cancel(record):
+        original_index(record)
+        if record is not old:
+            asyncio.get_running_loop().call_soon(asyncio.current_task().cancel)
+
+    monkeypatch.setattr(manager, "_index_run_locked", index_and_cancel)
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("strategy", ["interrupt", "rollback"])
 async def test_create_or_reject_cancellation_after_registration_interrupts_replacement(
@@ -1145,20 +1170,8 @@ async def test_create_or_reject_cancellation_after_registration_interrupts_repla
     manager = RunManager(store=store)
     old = await manager.create("thread-1")
     await manager.set_status(old.run_id, RunStatus.running)
-    persist_started = asyncio.Event()
-    release_persist = asyncio.Event()
-    original_persist_status = manager._persist_status
-
-    async def blocking_persist_status(record: Any, status: RunStatus, **kwargs: Any) -> bool:
-        persist_started.set()
-        await asyncio.wait_for(release_persist.wait(), timeout=1)
-        return await original_persist_status(record, status, **kwargs)
-
-    monkeypatch.setattr(manager, "_persist_status", blocking_persist_status)
+    cancel_after_registration(monkeypatch, manager, old)
     create_task = asyncio.create_task(manager.create_or_reject("thread-1", multitask_strategy=strategy))
-    await asyncio.wait_for(persist_started.wait(), timeout=1)
-    create_task.cancel()
-    release_persist.set()
 
     with pytest.raises(asyncio.CancelledError):
         _ = await create_task
@@ -1182,33 +1195,23 @@ async def test_create_or_reject_repeated_cancellation_drains_replacement_cleanup
     manager = RunManager(store=store)
     old = await manager.create("thread-1")
     await manager.set_status(old.run_id, RunStatus.running)
-    old_persist_started = asyncio.Event()
-    release_old_persist = asyncio.Event()
     replacement_persist_started = asyncio.Event()
     release_replacement_persist = asyncio.Event()
     original_persist_status = manager._persist_status
 
     async def staged_persist_status(record: Any, status: RunStatus, **kwargs: Any) -> bool:
-        if record.run_id == old.run_id:
-            old_persist_started.set()
-            await asyncio.wait_for(release_old_persist.wait(), timeout=1)
-        else:
-            replacement_persist_started.set()
-            await asyncio.wait_for(release_replacement_persist.wait(), timeout=1)
+        replacement_persist_started.set()
+        await asyncio.wait_for(release_replacement_persist.wait(), timeout=1)
         return await original_persist_status(record, status, **kwargs)
 
     monkeypatch.setattr(manager, "_persist_status", staged_persist_status)
+    cancel_after_registration(monkeypatch, manager, old)
     create_task = asyncio.create_task(manager.create_or_reject("thread-1", multitask_strategy="interrupt"))
-    await asyncio.wait_for(old_persist_started.wait(), timeout=1)
-    replacement = next(record for record in manager._runs.values() if record.run_id != old.run_id)
-
-    create_task.cancel()
-    release_old_persist.set()
     await asyncio.wait_for(replacement_persist_started.wait(), timeout=1)
+    replacement = next(record for record in manager._runs.values() if record.run_id != old.run_id)
     create_task.cancel()
     await asyncio.sleep(0)
     assert not create_task.done()
-
     release_replacement_persist.set()
     with pytest.raises(asyncio.CancelledError):
         _ = await asyncio.wait_for(create_task, timeout=1)
@@ -1245,31 +1248,18 @@ async def test_create_or_reject_retries_replacement_when_cancel_status_cannot_pe
     manager = RunManager(store=store)
     old = await manager.create("thread-1", user_id="owner-1")
     await manager.set_status(old.run_id, RunStatus.running)
-    old_persist_started = asyncio.Event()
-    release_old_persist = asyncio.Event()
-    original_persist_status = manager._persist_status
-
-    async def block_old_persist(record: Any, status: RunStatus, **kwargs: Any) -> bool:
-        if record.run_id != old.run_id:
-            return await original_persist_status(record, status, **kwargs)
-        old_persist_started.set()
-        await asyncio.wait_for(release_old_persist.wait(), timeout=1)
-        return await original_persist_status(record, status, **kwargs)
-
-    monkeypatch.setattr(manager, "_persist_status", block_old_persist)
+    cancel_after_registration(monkeypatch, manager, old)
     create_task = asyncio.create_task(manager.create_or_reject("thread-1", multitask_strategy="interrupt", user_id="owner-1"))
-    await asyncio.wait_for(old_persist_started.wait(), timeout=1)
-    replacement = next(record for record in manager._runs.values() if record.run_id != old.run_id)
-    create_task.cancel()
-    release_old_persist.set()
 
     with pytest.raises(asyncio.CancelledError):
         _ = await asyncio.wait_for(create_task, timeout=1)
 
+    replacement = next(record for record in manager._runs.values() if record.run_id != old.run_id)
     stored_replacement = await store.get(replacement.run_id, user_id="owner-1")
     assert stored_replacement is not None
     assert stored_replacement["status"] == RunStatus.interrupted.value
     assert replacement.status == RunStatus.interrupted
+    assert replacement.terminal_status_persisted is True
     assert not await manager.has_inflight("thread-1")
 
 
@@ -1299,22 +1289,8 @@ async def test_create_or_reject_cleanup_failure_preserves_caller_cancellation(
     manager = RunManager(store=store)
     old = await manager.create("thread-1")
     await manager.set_status(old.run_id, RunStatus.running)
-    old_persist_started = asyncio.Event()
-    release_old_persist = asyncio.Event()
-    original_persist_status = manager._persist_status
-
-    async def block_old_persist(record: Any, status: RunStatus, **kwargs: Any) -> bool:
-        if record.run_id != old.run_id:
-            return await original_persist_status(record, status, **kwargs)
-        old_persist_started.set()
-        await asyncio.wait_for(release_old_persist.wait(), timeout=1)
-        return await original_persist_status(record, status, **kwargs)
-
-    monkeypatch.setattr(manager, "_persist_status", block_old_persist)
+    cancel_after_registration(monkeypatch, manager, old)
     create_task = asyncio.create_task(manager.create_or_reject("thread-1", multitask_strategy="interrupt"))
-    await asyncio.wait_for(old_persist_started.wait(), timeout=1)
-    create_task.cancel()
-    release_old_persist.set()
 
     with pytest.raises(asyncio.CancelledError):
         _ = await asyncio.wait_for(create_task, timeout=1)
@@ -1343,27 +1319,13 @@ async def test_create_or_reject_preserves_peer_terminal_status_during_cancel_ret
     manager = RunManager(store=store)
     old = await manager.create("thread-1")
     await manager.set_status(old.run_id, RunStatus.running)
-    old_persist_started = asyncio.Event()
-    release_old_persist = asyncio.Event()
-    original_persist_status = manager._persist_status
-
-    async def block_old_persist(record: Any, status: RunStatus, **kwargs: Any) -> bool:
-        if record.run_id != old.run_id:
-            return await original_persist_status(record, status, **kwargs)
-        old_persist_started.set()
-        await asyncio.wait_for(release_old_persist.wait(), timeout=1)
-        return await original_persist_status(record, status, **kwargs)
-
-    monkeypatch.setattr(manager, "_persist_status", block_old_persist)
+    cancel_after_registration(monkeypatch, manager, old)
     create_task = asyncio.create_task(manager.create_or_reject("thread-1", multitask_strategy="interrupt"))
-    await asyncio.wait_for(old_persist_started.wait(), timeout=1)
-    replacement = next(record for record in manager._runs.values() if record.run_id != old.run_id)
-    create_task.cancel()
-    release_old_persist.set()
 
     with pytest.raises(asyncio.CancelledError):
         _ = await asyncio.wait_for(create_task, timeout=1)
 
+    replacement = next(record for record in manager._runs.values() if record.run_id != old.run_id)
     stored_replacement = await store.get(replacement.run_id)
     assert stored_replacement is not None
     assert stored_replacement["status"] == RunStatus.error.value

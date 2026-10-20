@@ -21,7 +21,7 @@ import { getBackendBaseURL } from "../config";
 import { useI18n } from "../i18n/hooks";
 import { getMessageRunId } from "../messages/run-duration";
 import {
-  hasContent,
+  extractContentFromMessage,
   hasToolCalls,
   isHiddenFromUIMessage,
 } from "../messages/utils";
@@ -1072,7 +1072,9 @@ export function restoreReconnectedTurnMessageOrder(
     if (
       message.type === "ai" &&
       !isHiddenFromUIMessage(message) &&
-      hasContent(message) &&
+      // Thinking-only blocks (Anthropic) are not completed answers: require
+      // extractable text/image content to close the turn.
+      extractContentFromMessage(message).length > 0 &&
       !hasToolCalls(message)
     ) {
       candidateStart = index + 1;

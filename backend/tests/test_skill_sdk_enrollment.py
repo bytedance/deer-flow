@@ -47,6 +47,9 @@ def sdk_home(tmp_path):
     sessions = sessionmaker(engine, expire_on_commit=False)
     with sessions.begin() as session:
         session.add(UserRow(id="owner", email="owner@example.test"))
+    # Release the fixture's pooled SQLite connection before SDK subprocesses
+    # exercise database removal, which Windows forbids while the file is open.
+    engine.dispose()
     repository = SkillMutationRepository(sessions)
     yield tmp_path, config, root, repository
     engine.dispose()
@@ -84,6 +87,7 @@ else:
     return json.loads(result.stdout.splitlines()[-1])
 
 
+@pytest.mark.skipif(os.name != "posix", reason="package capture requires POSIX filesystem primitives")
 @pytest.mark.parametrize(
     "action",
     [
@@ -105,6 +109,7 @@ def test_fresh_sdk_refuses_enrolled_owner_without_gateway_runtime(sdk_home, acti
     assert after.mutation_seq == before.mutation_seq
 
 
+@pytest.mark.skipif(os.name != "posix", reason="package capture requires POSIX filesystem primitives")
 def test_fresh_sdk_global_toggle_cannot_bypass_another_enrolled_owner(sdk_home):
     _, _, root, repository = sdk_home
     repository.observe("owner", "example", capture_package(root).digest, True, exists=True)
