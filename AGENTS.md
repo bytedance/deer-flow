@@ -33,7 +33,8 @@ video uncompressed at the proxy layer.
 
 Keep the dedicated `/api/threads/{thread_id}/browser/stream` WebSocket regex before
 the generic threads regex in Docker, local and Helm nginx configs. Upgrade headers
-and 600s proxy timeouts are pinned by `backend/tests/test_nginx_browser_websocket.py`.
+and the 600s read timeout are pinned by `backend/tests/test_nginx_browser_websocket.py`.
+Helm uses nginx's default connect/send timeouts for the in-cluster Gateway.
 
 Both Compose files publish nginx at `"${BIND_HOST:-127.0.0.1}:${PORT:-2026}:2026"`
 (README's **loopback default**); bare `"${PORT}:2026"` binds `0.0.0.0`. Root `PORT`
