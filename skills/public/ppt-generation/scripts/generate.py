@@ -2,7 +2,7 @@ import json
 import os
 from io import BytesIO
 
-from PIL import Image
+from PIL import Image, ImageOps
 from pptx import Presentation
 from pptx.util import Inches
 
@@ -60,6 +60,7 @@ def generate_ppt(
 
         # Load and process image
         with Image.open(image_path) as img:
+            img = ImageOps.exif_transpose(img)
             # Convert to RGB if necessary (for PNG with transparency)
             if img.mode in ("RGBA", "P"):
                 img = img.convert("RGB")
@@ -93,7 +94,11 @@ def generate_ppt(
 
             # Add image to slide
             slide.shapes.add_picture(
-                img_bytes, left, top, Inches(new_width_emu / 914400), Inches(new_height_emu / 914400)
+                img_bytes,
+                left,
+                top,
+                Inches(new_width_emu / 914400),
+                Inches(new_height_emu / 914400),
             )
 
         # Add speaker notes if available in plan

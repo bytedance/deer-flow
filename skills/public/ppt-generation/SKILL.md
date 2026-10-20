@@ -146,6 +146,8 @@ python /mnt/skills/public/image-generation/scripts/generate.py \
 
 After all slide images are generated, call the composition script:
 
+Photos with EXIF orientation metadata are rotated or mirrored before sizing and embedding, preserving their displayed orientation in the presentation.
+
 ```bash
 python /mnt/skills/public/ppt-generation/scripts/generate.py \
   --plan-file /mnt/user-data/workspace/presentation-plan.json \
