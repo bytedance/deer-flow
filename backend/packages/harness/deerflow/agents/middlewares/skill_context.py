@@ -18,7 +18,9 @@ _SKILL_FILE_NAME = "SKILL.md"
 # `\ufeff` is the UTF-8 byte-order mark a Windows-saved SKILL.md can carry. The loader and
 # validator already tolerate it (see `deerflow.skills.frontmatter._FRONTMATTER_RE`); without it
 # here the match fails on the leading marker and the captured description comes back empty.
-_FRONT_MATTER_RE = re.compile(r"^\ufeff?---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+# Mirror that regex: allow trailing whitespace on the delimiters and end-of-string
+# after the closing fence, so a SKILL.md that ends right after `---` still parses.
+_FRONT_MATTER_RE = re.compile(r"^\ufeff?---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|$)", re.DOTALL)
 SKILL_CONTEXT_ENTRY_KEY = "skill_context_entry"
 # Stamped instead of SKILL_CONTEXT_ENTRY_KEY when the read SKILL.md belongs to
 # a skill whose action-scoped ``skill:activate`` decision is denied: the file
