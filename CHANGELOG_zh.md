@@ -1015,6 +1015,19 @@
 
 ### 修复
 
+- **MCP：** 使用 OAuth `refresh_token` 授权的 MCP 服务器，在提供方轮换 refresh token
+  （Auth0、Okta、Google）时，跨 Gateway 重启、工具缓存重置、个人连接的多次运行以及多个
+  Gateway 实例都能继续工作。此前令牌只保存在进程内存中，每个新进程或新 manager 都从配置里
+  的 refresh token 重新开始，而该 token 已被第一次刷新消耗，于是得到 `invalid_grant`。
+  当 `database.backend` 为 `sqlite` 或 `postgres` 时，每个连接的 access token 与最新的
+  refresh token 现保存在新表 `mcp_oauth_tokens`（迁移 `0047_mcp_oauth_tokens`）中，用
+  `DEER_FLOW_CREDENTIALS_KEY` 加密，按部署级服务器或个人连接的所有者分别建键。刷新前先重读
+  该行，并以短租约加版本号比较交换（compare-and-set）认领，因此并发实例只调用一次 token
+  端点并采用彼此的结果。修改配置中的种子、token 端点、client、scope 或 audience 会从配置
+  开始新的令牌链。`client_credentials` 令牌仍留在进程内。声明多实例部署且启用了
+  `refresh_token` OAuth 服务器时，缺少 `DEER_FLOW_CREDENTIALS_KEY` 现在会拒绝启动。
+  ([#TBD])
+
 - **技能：** `GET /api/skills/custom/{skill_name}/history` 收到非法技能名（不是
   hyphen-case，或超过 64 个字符）时，现在与删除、回滚一样返回 `400`，不再返回 `500`
   并在每次请求时记录一次带堆栈的错误日志。只有名称校验映射为 `400`：损坏的历史文件

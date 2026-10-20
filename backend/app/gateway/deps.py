@@ -296,9 +296,11 @@ def credentials_key_consumers(config: AppConfig) -> list[str]:
     """Return the enabled features that store data under ``DEER_FLOW_CREDENTIALS_KEY``.
 
     Each entry is the setting that enabled the feature, as refusal text spells
-    it. The Gateway loads the key only when this list is non-empty, and the
-    multi-instance gate below refuses a missing key only for these features, so
-    a deployment that stores no credentials keeps booting without one.
+    it. The Gateway loads the key at startup only when this list is non-empty,
+    and the multi-instance gate below refuses a missing key only for these
+    features, so a deployment that stores no credentials keeps booting without
+    one. Personal MCP OAuth connections are saved at runtime, so they cannot be
+    listed here; their store loads the key on first use.
     """
     consumers: list[str] = []
     connections = getattr(config, "channel_connections", None)
@@ -306,6 +308,13 @@ def credentials_key_consumers(config: AppConfig) -> list[str]:
         # ChannelConnectionRepository encrypts per-connection credentials, and
         # the runtime config store the bot credentials entered in the web UI.
         consumers.append("channel_connections.enabled=true")
+    extensions = getattr(config, "extensions", None)
+    if extensions is not None:
+        # deerflow.mcp.oauth_store keeps rotating refresh tokens in the database.
+        for name, server in extensions.get_enabled_mcp_servers().items():
+            oauth = server.oauth
+            if oauth is not None and oauth.enabled and oauth.grant_type == "refresh_token":
+                consumers.append(f"mcpServers.{name}.oauth.enabled=true")
     return consumers
 
 

@@ -412,9 +412,11 @@ Tool-cache resets and rediscovery keep that state. Token rotation does not
 modify the parsed configuration or trigger the startup-snapshot drift guard;
 real operator configuration changes still require a restart.
 
-This state is process-local and is never written back to `extensions_config.json`
-or an environment variable. A restarted Gateway needs a valid configured
-refresh token, and separate Gateway workers do not coordinate token rotation.
+This state is never written back to `extensions_config.json` or an environment
+variable. With a SQL database, a `refresh_token` connection's tokens are also kept
+in the shared `mcp_oauth_tokens` table, so a restarted Gateway and its peers
+continue the rotated chain (see
+[Refresh-token rotation](#refresh-token-rotation-across-restarts-and-replicas)).
 Personal MCP connections remain owner-scoped and do not use this deployment
 state, even if their runtime names match a deployment server. A personal
 server's runtime name is derived from its complete definition, so editing,
@@ -480,6 +482,43 @@ Example:
    }
 }
 ```
+
+### Refresh-token rotation across restarts and replicas
+
+Providers such as Auth0, Okta and Google rotate refresh tokens: every refresh
+returns a new one and invalidates the old one. With `database.backend: sqlite`
+or `postgres`, the Gateway keeps each `refresh_token` connection's latest access
+token and refresh token in the `mcp_oauth_tokens` table (migration
+`0047_mcp_oauth_tokens`), encrypted with `DEER_FLOW_CREDENTIALS_KEY` (see
+[CONFIGURATION.md](CONFIGURATION.md#credentials-encryption-key-deer_flow_credentials_key)):
+
+- A restart, a tool-cache reset, or a later run of a personal connection
+  continues from the stored chain instead of the configured `refresh_token`.
+- Gateway replicas share one chain. Before refreshing, a replica re-reads the
+  row and uses a peer's still-valid access token. Otherwise it claims the
+  refresh with a 30-second lease, so only one replica calls the token endpoint
+  and the others wait for its result. No row lock is held during the token
+  request.
+- The configured `refresh_token` is only the seed. The row records which
+  `token_url`, `client_id`, `grant_type`, `scope`, `audience` and seed it
+  continues (as a SHA-256 fingerprint). After you change any of them, the next
+  refresh starts again from the configured value. To recover from a revoked
+  chain (`invalid_grant`), configure a new `refresh_token`; changing only
+  `client_secret` keeps the stored chain.
+- Personal connections get one row per owner, keyed by their runtime name.
+  Editing a personal connection changes that name, so it starts again from its
+  configured refresh token.
+- `client_credentials` tokens are not stored; each process requests its own.
+- Tokens stay in process memory, as before, with `database.backend: memory`,
+  in the embedded `DeerFlowClient` (no Gateway), or when the credentials key
+  cannot be loaded. If the database cannot be read or written, the refresh
+  fails instead of consuming a refresh token that nothing records; a still-valid
+  access token keeps working.
+- A declared multi-instance deployment (`deployment.multi_instance: true`) with
+  an enabled `refresh_token` OAuth server refuses to start without a shared
+  `DEER_FLOW_CREDENTIALS_KEY`. Personal OAuth connections are saved at runtime,
+  so that startup check cannot see them; set the variable on every
+  multi-instance deployment that uses them.
 
 ## Request-Scoped Headers (HTTP/SSE MCP Servers)
 

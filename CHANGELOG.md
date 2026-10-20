@@ -1265,6 +1265,24 @@ This release closes that milestone with **621 merged pull requests**.
 
 ### Fixed
 
+- **mcp:** MCP servers using the OAuth `refresh_token` grant keep working
+  across Gateway restarts, tool-cache resets, repeated personal-connection runs
+  and multiple Gateway instances when the provider rotates refresh tokens
+  (Auth0, Okta, Google). Tokens lived only in process memory, so every new
+  process or manager started again from the configured refresh token, which
+  the first refresh had already consumed, and got `invalid_grant`. With
+  `database.backend: sqlite` or `postgres`, each connection's access token and
+  latest refresh token now live in the new `mcp_oauth_tokens` table (migration
+  `0047_mcp_oauth_tokens`), encrypted with `DEER_FLOW_CREDENTIALS_KEY` and keyed
+  per deployment server or per personal-connection owner. A refresh re-reads
+  the row first and is claimed with a short lease plus a version
+  compare-and-set, so concurrent instances call the token endpoint once and
+  adopt each other's result. Changing the configured seed, token endpoint,
+  client, scope or audience starts a new chain from the configuration.
+  `client_credentials` tokens stay in process. A declared multi-instance
+  deployment with an enabled `refresh_token` OAuth server now refuses to start
+  without `DEER_FLOW_CREDENTIALS_KEY`. ([#TBD])
+
 - **skills:** `GET /api/skills/custom/{skill_name}/history` now answers an
   invalid skill name (not hyphen-case, or longer than 64 characters) with `400`,
   as delete and rollback already do, instead of `500` with a logged traceback on

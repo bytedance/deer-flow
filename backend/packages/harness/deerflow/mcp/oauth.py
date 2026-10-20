@@ -5,13 +5,16 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from deerflow.config.extensions_config import ExtensionsConfig, McpOAuthConfig
+from deerflow.mcp import oauth_store
 from deerflow.mcp.headers import apply_header_overrides, header_spellings, illegal_header_value_reason
+from deerflow.mcp.oauth_store import McpOAuthTokenKey, McpOAuthTokenKeyUnavailable, McpOAuthTokenStore, McpOAuthTokenStoreUnavailable, get_mcp_oauth_token_store, oauth_config_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -37,12 +40,22 @@ class _OAuthState:
     token: _OAuthToken | None = None
     # Sync tool wrappers and the Gateway can refresh from different loops.
     lock: threading.Lock = field(default_factory=threading.Lock)
+    # Shared-store row and token-chain identity; only the refresh_token grant
+    # has a rotating credential worth sharing across processes.
+    store_key: McpOAuthTokenKey | None = None
+    fingerprint: str | None = None
 
 
 class OAuthTokenManager:
     """Acquire/cache/refresh OAuth tokens for MCP servers."""
 
-    def __init__(self, oauth_by_server: dict[str, McpOAuthConfig]):
+    def __init__(
+        self,
+        oauth_by_server: dict[str, McpOAuthConfig],
+        *,
+        owner_user_id: str | None = None,
+        token_store: McpOAuthTokenStore | None = None,
+    ):
         # Refresh-token rotation belongs to runtime state, not the parsed config
         # used by cache/snapshot validation or custom interceptor builders.
         # A plain threading.Lock, not asyncio.Lock: the embedded/TUI sync tool-call
@@ -55,7 +68,20 @@ class OAuthTokenManager:
         # either deadlocks silently or raises "bound to a different event loop".
         # threading.Lock has no loop affinity, so it is safe to share across
         # however many event loops/threads call into the same server's lock.
-        self._states = {name: _OAuthState(config=oauth.model_copy(deep=True)) for name, oauth in oauth_by_server.items()}
+        #
+        # ``owner_user_id`` marks a personal connection's manager; ``token_store``
+        # overrides the host-installed store (``oauth_store``) for refresh_token
+        # connections, which then survive restarts and are shared by replicas.
+        self._token_store = token_store
+        self._states = {name: self._new_state(name, oauth, owner_user_id) for name, oauth in oauth_by_server.items()}
+
+    @staticmethod
+    def _new_state(server_name: str, oauth: McpOAuthConfig, owner_user_id: str | None) -> _OAuthState:
+        state = _OAuthState(config=oauth.model_copy(deep=True))
+        if oauth.grant_type == "refresh_token":
+            state.store_key = McpOAuthTokenKey.for_server(server_name, owner_user_id)
+            state.fingerprint = oauth_config_fingerprint(oauth)
+        return state
 
     @classmethod
     def from_extensions_config(
@@ -63,17 +89,20 @@ class OAuthTokenManager:
         extensions_config: ExtensionsConfig,
         *,
         shared_manager: OAuthTokenManager | None = None,
+        owner_user_id: str | None = None,
+        token_store: McpOAuthTokenStore | None = None,
     ) -> OAuthTokenManager:
         """Build a manager, optionally reusing already-validated connection state.
 
         The durable runtime supplies ``shared_manager`` only after validating
-        the deployment snapshot. Personal connections must never use it.
+        the deployment snapshot. Personal connections must never use it; they
+        pass their ``owner_user_id`` instead, which keys their stored tokens.
         """
         oauth_by_server: dict[str, McpOAuthConfig] = {}
         for server_name, server_config in extensions_config.get_enabled_mcp_servers().items():
             if server_config.oauth and server_config.oauth.enabled:
                 oauth_by_server[server_name] = server_config.oauth
-        manager = cls(oauth_by_server)
+        manager = cls(oauth_by_server, owner_user_id=owner_user_id, token_store=token_store)
         if shared_manager is not None:
             for name in manager._states.keys() & shared_manager._states.keys():
                 manager._states[name] = shared_manager._states[name]
@@ -134,12 +163,90 @@ class OAuthTokenManager:
             if token and not self._is_expiring(token, oauth):
                 return self._authorization_value(token, server_name)
 
-            fresh = await self._fetch_token(oauth)
+            fresh = None
+            store = self._token_store or get_mcp_oauth_token_store()
+            if store is not None and state.store_key is not None:
+                try:
+                    fresh = await self._refresh_shared(state, store, server_name)
+                except McpOAuthTokenKeyUnavailable:
+                    logger.warning("Keeping OAuth tokens for MCP server '%s' in this process only: the credentials key cannot be loaded", server_name)
+            if fresh is None:
+                fresh = await self._fetch_token(oauth)
+                logger.info(f"Refreshed OAuth access token for MCP server: {server_name}")
             state.token = fresh
-            logger.info(f"Refreshed OAuth access token for MCP server: {server_name}")
             return self._authorization_value(fresh, server_name)
         finally:
             lock.release()
+
+    async def _refresh_shared(self, state: _OAuthState, store: McpOAuthTokenStore, server_name: str) -> _OAuthToken:
+        """Adopt a peer's token from the shared row, or refresh once for every process.
+
+        Runs under the connection's process lock. The row is re-read first,
+        since a peer (another replica, or this process before a restart) may
+        already hold a newer token. A refresh is claimed with a lease plus a
+        compare-and-set on the row's version and never holds a row lock across
+        the token request; while a peer holds the lease, the row is polled
+        until its token lands or the lease expires. The refreshed tokens,
+        including a rotated refresh token, are written back under the claim.
+        """
+        key, fingerprint, oauth = state.store_key, state.fingerprint, state.config
+        assert key is not None and fingerprint is not None
+        deadline = time.monotonic() + oauth_store.REFRESH_LEASE_SECONDS + 5
+        while True:
+            version, stored = await asyncio.to_thread(store.load, key, fingerprint=fingerprint)
+            if stored is not None:
+                # The row continues this chain; without one (or under another
+                # fingerprint) the configured seed is the refresh token.
+                oauth.refresh_token = stored.refresh_token
+                if stored.access_token and stored.expires_at is not None:
+                    token = _OAuthToken(access_token=stored.access_token, token_type=stored.token_type or oauth.default_token_type, expires_at=stored.expires_at)
+                    if not self._is_expiring(token, oauth):
+                        return token
+            lease_owner = await asyncio.to_thread(store.claim, key, fingerprint=fingerprint, expected_version=version)
+            if lease_owner is not None:
+                break
+            if time.monotonic() >= deadline:
+                raise McpOAuthTokenStoreUnavailable(f"Timed out waiting for another DeerFlow process to refresh the OAuth token for MCP server '{server_name}'")
+            await asyncio.sleep(oauth_store.REFRESH_POLL_SECONDS)
+
+        used_refresh_token = oauth.refresh_token
+        try:
+            fresh = await self._fetch_token(oauth)
+        except asyncio.CancelledError:
+            # A cancelled caller cannot await the release; hand it to a worker
+            # rather than make every peer wait out the lease.
+            asyncio.get_running_loop().run_in_executor(None, self._release_quietly, store, key, lease_owner)
+            raise
+        except Exception:
+            await asyncio.to_thread(self._release_quietly, store, key, lease_owner)
+            raise
+        logger.info(f"Refreshed OAuth access token for MCP server: {server_name}")
+        try:
+            saved = await asyncio.to_thread(
+                store.save,
+                key,
+                lease_owner=lease_owner,
+                fingerprint=fingerprint,
+                access_token=fresh.access_token,
+                token_type=fresh.token_type,
+                expires_at=fresh.expires_at,
+                refresh_token=oauth.refresh_token or "",
+                rotated=oauth.refresh_token != used_refresh_token,
+            )
+        except McpOAuthTokenStoreUnavailable:
+            # The token is valid for this process; the store already logged why
+            # peers cannot see it.
+            return fresh
+        if not saved:
+            logger.warning("The refresh lease for MCP server '%s' expired before its new OAuth token was stored; other processes keep the previous one", server_name)
+        return fresh
+
+    @staticmethod
+    def _release_quietly(store: McpOAuthTokenStore, key: McpOAuthTokenKey, lease_owner: str) -> None:
+        try:
+            store.release(key, lease_owner)
+        except McpOAuthTokenStoreUnavailable:
+            pass  # Logged by the store; the lease expires on its own.
 
     @staticmethod
     def _authorization_value(token: _OAuthToken, server_name: str) -> str:
@@ -219,9 +326,10 @@ class OAuthTokenManager:
 
         # Persist a rotated refresh_token so subsequent refreshes use the latest
         # value. This updates our private runtime copy only — neither the parsed
-        # extensions config nor extensions_config.json. Providers that rotate refresh
-        # tokens (Auth0, Okta, Google, etc.) return a new refresh_token on each
-        # refresh; discarding it makes the next refresh fail with invalid_grant.
+        # extensions config nor extensions_config.json; the shared token store,
+        # when installed, receives it from ``_refresh_shared``. Providers that rotate
+        # refresh tokens (Auth0, Okta, Google, etc.) return a new refresh_token on
+        # each refresh; discarding it makes the next refresh fail with invalid_grant.
         if oauth.grant_type == "refresh_token":
             rotated = payload.get("refresh_token")
             if isinstance(rotated, str) and rotated:
