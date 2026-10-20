@@ -167,7 +167,11 @@ def _render(tmp_path: Path, variant: str) -> subprocess.CompletedProcess[str]:
         DEER_FLOW_INTERNAL_AUTH_TOKEN="test-token",
     )
     return subprocess.run(
-        [DOCKER, "compose", "-p", "deer-flow-env-file-test", "-f", str(docker_dir / COMPOSE_PATHS[variant].name), "config", "--format", "json"],
+        # Enable every profile so profile-gated services (the dev provisioner)
+        # still render: `config` omits them otherwise, and these assertions are
+        # about a present .env reaching each service, not about what `up`
+        # starts by default.
+        [DOCKER, "compose", "--profile", "*", "-p", "deer-flow-env-file-test", "-f", str(docker_dir / COMPOSE_PATHS[variant].name), "config", "--format", "json"],
         env=env,
         capture_output=True,
         text=True,

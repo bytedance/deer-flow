@@ -6,7 +6,7 @@ import asyncio
 import logging
 import threading
 import time
-from collections.abc import Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
 from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -93,6 +93,9 @@ class InboundMessage:
         files: Optional list of file attachments (platform-specific dicts).
         metadata: Arbitrary extra data from the channel.
         created_at: Unix timestamp when the message was created.
+        dedupe_claimed: Set by ``MessageBus.claim_inbound`` once the
+            manager's dedupe key for this message is recorded, so the worker
+            does not record it again (it would read as a duplicate).
     """
 
     channel_name: str
@@ -108,6 +111,7 @@ class InboundMessage:
     files: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
+    dedupe_claimed: bool = False
 
 
 @dataclass
@@ -169,6 +173,8 @@ class OutboundMessage:
 # ---------------------------------------------------------------------------
 
 OutboundCallback = Callable[[OutboundMessage], Coroutine[Any, Any, None]]
+InboundClaim = Callable[[InboundMessage], Awaitable[bool]]
+InboundClaimRelease = Callable[[InboundMessage], Awaitable[None]]
 
 
 class InboundQueueFullError(RuntimeError):
@@ -227,6 +233,8 @@ class MessageBus:
         self._full_rejection_count = 0
         self._last_full_warning_at = 0.0
         self._outbound_listeners: list[OutboundCallback] = []
+        self._inbound_claim: InboundClaim | None = None
+        self._inbound_claim_release: InboundClaimRelease | None = None
 
     # -- inbound -----------------------------------------------------------
 
@@ -319,6 +327,29 @@ class MessageBus:
         with self._inbound_admission_lock:
             self._inbound_queued -= 1
         return msg
+
+    def set_inbound_claim(self, claim: InboundClaim, release: InboundClaimRelease) -> None:
+        """Install the dispatcher's dedupe claim (``ChannelManager._claim_inbound``)."""
+        self._inbound_claim = claim
+        self._inbound_claim_release = release
+
+    async def claim_inbound(self, msg: InboundMessage) -> bool:
+        """Claim *msg* against inbound dedupe before a platform side effect.
+
+        For an adapter whose side effect a duplicate delivery must not repeat
+        (Discord creating a thread): ``False`` means another delivery owns the
+        message. On ``True`` the adapter copies ``msg.dedupe_claimed`` onto the
+        message it publishes, and calls ``release_inbound_claim`` if it never
+        publishes one. Without a dispatcher every message may proceed. Must run
+        on the Gateway loop, where the dedupe store's engine lives.
+        """
+        if self._inbound_claim is None:
+            return True
+        return await self._inbound_claim(msg)
+
+    async def release_inbound_claim(self, msg: InboundMessage) -> None:
+        if self._inbound_claim_release is not None and msg.dedupe_claimed:
+            await self._inbound_claim_release(msg)
 
     def inbound_task_done(self) -> None:
         """Mark one dequeued inbound message as fully handled."""

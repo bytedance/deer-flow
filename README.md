@@ -469,6 +469,11 @@ frontend retain their own environment loading. Values they already export win.
 It does not select `ENV` profiles or isolate databases, storage or tenants.
 See [backend dotenv selection](backend/docs/CONFIGURATION.md#backend-dotenv-selection).
 
+Custom blob storage backends accept `blob_storage.backend: module.Class` or
+`module:Class`, including a single `.py` module importable by the Gateway.
+The selected class must implement `BlobStore`; backend options go under
+`blob_storage.backend_config`. See [blob storage](backend/docs/blob-storage.md).
+
 ### Running the Application
 
 #### Deployment Sizing
@@ -499,7 +504,7 @@ make docker-start   # Start services (auto-detects sandbox mode from config.yaml
 make docker-logs    # View logs
 ```
 
-`make docker-start` starts `provisioner` only when `config.yaml` uses provisioner mode (`sandbox.use: deerflow.community.aio_sandbox:AioSandboxProvider` with `provisioner_url`).
+`make docker-start` starts `provisioner` only when `config.yaml` uses provisioner mode (`sandbox.use: deerflow.community.aio_sandbox:AioSandboxProvider` with `provisioner_url`). Direct Compose users can add `--profile provisioner` to the dev command for the same mode; the default stack does not require Kubernetes.
 
 Docker builds use the upstream `uv` registry by default. The gateway image installs with `uv sync --locked`, and `uv.lock` pins `https://pypi.org/simple`, so `UV_INDEX_URL` has to keep that value: exporting a mirror such as `https://pypi.tuna.tsinghua.edu.cn/simple` fails the build with ``The lockfile at `uv.lock` needs to be updated, but `--locked` was provided`` (reproduce in an already-synced environment with `cd backend && UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple uv sync --locked --check`; if the environment itself is stale, `--check` reports that instead for either index, so use `uv lock --check` to see it without syncing). Installing from a mirror requires regenerating the lock or dropping `--locked`, and both change what the image installs, so keep the default index for a checkout you intend to contribute back. `NPM_REGISTRY=https://registry.npmmirror.com` is independent of this: it applies to the frontend image's `pnpm` install and to the gateway image's Lark CLI install (`@larksuite/cli`, which `backend/Dockerfile` installs with npm).
 
@@ -587,6 +592,8 @@ The unified nginx endpoint is same-origin by default and does not emit browser C
 
 When fine-grained authorization is enabled, Live Browser connections require `threads:write` as well as ownership of the thread, even when only viewing frames: the same connection can control the browser. Permission checks run when connecting. Restart Gateway after upgrading to disconnect sessions admitted by older code.
 
+The bundled Docker, local and Helm nginx configs proxy Live Browser WebSocket upgrades with a 600-second read timeout for quiet streams. Helm uses nginx's default connection and send timeouts for the in-cluster Gateway. Any additional Ingress or reverse proxy must also allow WebSocket upgrades.
+
 Browser login uses `HttpOnly` session cookies. The login page offers a "keep me signed in" option that extends the browser session when the request is HTTPS (including trusted `X-Forwarded-Proto: https`) or localhost HTTP. The localhost exception uses the direct request `Host` and ignores forwarded host headers. Public HTTP deployments, including many temporary sandbox URLs, fall back to session cookies by default. DeerFlow never stores the password in browser storage; the UI may remember only the email address.
 
 OIDC/SSO authorization endpoints may include provider query parameters such as `?prompt=login`. DeerFlow preserves those parameters when adding the login request, including for configured `authorization_endpoint` overrides.
@@ -639,7 +646,7 @@ DeerFlow still uses `Forwarded` / `X-Forwarded-*` headers to recover the browser
 
 > Cancelling a model recovery probe, including while it is queued or waiting to retry, lets the next call check whether the provider has recovered. Cancellation does not count as a provider failure or release another call's active recovery probe.
 >
-> Model retries honor valid provider `Retry-After` hints up to 24 hours, including waits longer than the local backoff cap. Malformed, non-finite, or over-limit hints use normal backoff instead. This applies to numeric/date hints in LLM error handling and integer-second hints in Claude's retry path.
+> Model retries honor valid provider `Retry-After` hints up to 24 hours, including waits longer than the local backoff cap. Malformed, non-finite, or over-limit hints use normal backoff instead. This applies to numeric and HTTP-date hints in LLM error handling and Codex's retry path, and integer-second hints in Claude's retry path. Codex prioritizes numeric `retry-after-ms` hints; past HTTP-date hints retry immediately.
 >
 > With lease heartbeat enabled, a transient RunStore renewal error is retried only until the last confirmed lease expires; the stale worker then cancels local execution and suppresses checkpoint, completion-hook, delivery-receipt, and thread-status finalization. A remote tool side effect already in flight may still be outside local cancellation.
 >
@@ -1014,6 +1021,15 @@ cleanup when migrating from legacy metadata credentials.
 DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.
 
 Cancelling a channel restart discards its pending configuration reload, preserving newer runtime settings applied afterward.
+
+Conversation-binding, runtime channel-credential and WeChat auth-state saves preserve the original
+persistence failure when staged-file cleanup also fails. Remaining cleanup still runs, and warnings
+identify copies that could not be removed. Buzz keeps failed snapshots available for retry, even if
+cleanup or logging fails.
+
+On startup, runtime credential and WeChat auth stores remove their own `.<state-file>.deerflow-*.tmp`
+staging files older than 24 hours. Fresh files, symlinks and unrelated files are preserved. Older
+anonymous `tmp*.tmp` files require manual inspection because their writer cannot be identified safely.
 
 DeerFlow can also expose user-owned IM channel connections in the workspace UI. When `channel_connections` is enabled, logged-in users can bind Telegram, Slack, Discord, Feishu/Lark, DingTalk, WeChat, WeCom, QQ, or Buzz from the sidebar / Settings > Channels. It reuses the existing outbound `channels.*` transports, so no public IP or provider callback URL is required. Incoming IM messages then run under the connected DeerFlow user account. See [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md) for setup and security notes. Buzz backlog paging stops with a warning if timestamp-based queries cannot advance, and channel removal closes both live and backlog subscriptions.
 
@@ -1508,6 +1524,11 @@ Skill Markdown and bundled text resources use UTF-8. Skill-creator CLI and revie
 Skill-creator benchmark aggregation uses recorded `timing.json` token counts even
 when `grading.json` already contains the run duration. Recorded zero counts are
 preserved; output character counts remain a legacy proxy only when token data is missing.
+Unreadable, non-UTF-8, malformed, or non-object `timing.json` data emits a warning
+and is treated as missing measurements. Its token and duration fields accept finite,
+non-negative numbers (including zero); invalid fields emit a warning naming the file
+and field and use the existing fallback independently, preserving valid measurements
+and other runs.
 
 `SKILL.md` YAML frontmatter must open and close with `---` on its own line (trailing spaces or tabs are allowed). A line such as `---suffix` is not a closing delimiter.
 
@@ -1522,6 +1543,8 @@ Directory listings ask for the repository's own default branch, so a repository 
 uses neither `main` nor `master` reports its current tree instead of a stale branch.
 
 Users can explicitly activate an enabled skill for a single turn by starting the request with `/skill-name`, for example `/data-analysis analyze uploads/foo.csv`. DeerFlow loads that skill's `SKILL.md` as hidden current-turn context while leaving the base prompt limited to skill metadata. Slash activation respects disabled skills, custom-agent skill whitelists, and existing channel commands such as `/new` and `/help`.
+
+Data-analysis Markdown exports escape pipes and backslashes in column names and values, and render cell line breaks as `<br>` so multiline data stays within its table cell.
 
 The **data-analysis** skill preserves each CSV file or Excel sheet when names collide across inputs. [Prepare its Python environment](skills/public/data-analysis/SKILL.md#environment-setup) explicitly with DuckDB and openpyxl; missing packages report setup instructions instead of installing themselves during analysis. Use the SQL names printed by `inspect` (such as `report`, `report_1`) for queries and summaries. Its cache follows ordered input basenames and contents, so renaming or reordering inputs rebuilds their table map instead of silently selecting a different source. Quoted original names also resolve without rewriting query text; apostrophes in upload paths and double quotes in column names are preserved through loading, inspection, queries, and summaries.
 
@@ -2119,6 +2142,8 @@ When the agent asks for clarification, the Web UI shows the structured response 
 
 Unsent Web UI composer drafts survive page reloads and switching between conversations within the same browser tab. Drafts are isolated by user, agent, and conversation, include the selected skill and explicit conversation references, and are cleared once a send is accepted. Project documents already attached to the thread also survive reloads; browser-local uploads and quoted message excerpts are not persisted.
 
+If an attachment upload reports `success: false`, the Web UI stops the send even when the HTTP response is 200. The upload error is shown and the composer keeps its draft and attachments for correction or retry. Files already accepted by a partially successful upload remain on the server; this does not roll them back.
+
 The Web UI composer supports `@` references at the cursor or through the `@` button. Search enabled skills, documents in the current project, and other conversations in a grouped picker; selected references appear inline alongside the draft text and can be removed with normal editing. Multiple skills can be selected in one message (up to 16 unique skills); selecting a checked skill again removes it, with each selection checked against the current user registry and agent allowlist. Project files are attached only after ingestion succeeds; conversation references require the `read_conversation` capability and retain its per-run limit. If capability discovery fails, saved conversation references remain intact and sending waits for a successful retry. Polishing preserves complete reference labels when instructions are reordered. The file group also offers local uploads. `/goal`, `/compact`, and legacy `/skill-name` input remain supported.
 
 After picking an inline reference, typing continues immediately after it. Moving the cursor keeps the position you chose, including when editing text beside a reference.
@@ -2165,6 +2190,8 @@ Supported commands:
 ```
 
 After each Gateway-backed run, DeerFlow evaluates the visible conversation, including the assistant's tool calls and shortened tool results, against the active goal with a non-thinking evaluator model. A successful tool result alone does not satisfy a goal, and when the assistant had to guess missing or ambiguous information the evaluator reports `needs_user_input`. The evaluator must return a typed blocker (`missing_evidence`, `needs_user_input`, `run_failed`, `external_wait`, or `goal_not_met_yet`) plus visible evidence. DeerFlow only injects a hidden continuation when the latest assistant turn is durably checkpointed, the blocker is `goal_not_met_yet`, the thread did not change during evaluation, and the no-progress breaker has not fired. The safety cap defaults to 8 hidden continuations, and repeated identical non-progress evaluations stop after 2 attempts. `/goal clear` and any user-authored new input win over queued continuations. When the evaluator considers the goal satisfied, DeerFlow clears it after the run successfully finalizes and publishes the updated thread state. The same checkpoint records the completion as `goal_outcome`, which stays until the next goal change. If required artifact delivery or its receipt persistence fails, the run reports an error and the goal remains active for a later retry; this does not start another hidden continuation.
+
+An unmet goal also stops automatic continuation after a token or loop-detection hard stop; it stays active for a later user turn.
 
 Regenerating an earlier response keeps the goal currently set for the chat and its used continuation budget. It does not restore a goal that was cleared or achieved. The earlier answer's completion record is removed when its historical checkpoint is replayed.
 
@@ -2403,6 +2430,8 @@ Embedded Python uploads use the same captured content for the saved document and
 返回游标。目录元数据或调用上下文变化时会明确要求重新枚举；详情见
 [文件上传文档](backend/docs/FILE_UPLOAD.md)。
 
+Native subagent hard timeouts publish `TIMED_OUT` at the execution deadline while cleanup continues under supervision. Durable batch workers wait up to 60 seconds for cleanup before recording the published outcome and applying the configured retry policy. Unfinished executions retain capacity and sandbox leases until teardown finishes; keep work idempotent because retries may overlap late cleanup.
+
 Durable `batch_task` workers use one app-owned plugin snapshot for tool assembly and execution. Recovered tasks adopt the new worker's plugin snapshot after a Gateway restart; plugin objects are never stored in durable task records.
 
 Ordinary `task` delegation and explicit durable `batch_task` execution share the startup-scoped `subagent_runtime` process capacity. Batch mode keeps large independent item sets in SQL with separate total, live, and running limits, restart recovery, bounded results, and a thread-scoped Web UI panel. The panel pages through bounded previews on demand; bulk stored results are available through the owner-scoped JSONL export, while internal execution and authorization context never enters owner-facing responses. If the batch worker is later stopped or disabled, threads with persisted batches retain read-only item inspection and JSONL export; execution controls remain disabled until the worker is running again. See `config.example.yaml` and [the implementation contract](docs/plans/2026-08-24-subagent-batch-capacity-implementation.md) for limits and recovery semantics.
@@ -2625,6 +2654,8 @@ removing the worker's temporary source. Automatic conversion remains off by defa
 
 Uploaded Markdown outlines recognize ATX heading syntax, clean closing markers with a linear suffix scan, and skip HTML comment blocks and fenced and indented code examples, so hashtags and code comments do not
 crowd out real document sections from the agent's heading preview. Indented bold examples are also excluded; PDF-style bold headings with up to three leading spaces remain supported.
+Whole-title bold wrappers and adjacent PDF bold spans are cleaned; separate bold
+spans joined by ordinary text retain their markers instead of losing only the outer pair.
 Split-bold numeric table rows, including parenthesized years, signed values, and
 currency-prefixed amounts, are excluded when any block after the section number
 is a numeric column, so they do not consume the outline's heading budget.
@@ -2890,6 +2921,18 @@ DeerMem debounces pending updates independently per conversation, user, and agen
 and `max_wait_seconds` caps debounce deferral from the first pending update
 (default 300 seconds). Activity in another conversation cannot extend that wait.
 Extraction remains serial, so backlog and LLM latency can still delay completion.
+Emergency snapshots of messages removed by compaction remain separate in arrival
+order, so later compactions cannot replace earlier pending snapshots.
+A backlog warning identifies the conversation, user, and agent at 32 pending emergency
+snapshots and each doubling. These snapshots remain admitted beyond `queue_max_depth`
+and stay in memory until processing. Check extraction latency when warnings appear;
+process exit can still lose pending work.
+
+Optional memory pre-screening and signal classification support TypeSafe (Jev)
+and OpenAI Decisions. With `combine: auto`, their different endpoint paths keep
+requests separate even behind the same gateway URL, model, and credentials.
+Compatible requests to the same endpoint can still share one call. See the
+[decision provider guide](backend/docs/GUARDRAILS.md).
 
 The opt-in [DeerMem scope-isolation benchmark](backend/scripts/benchmark/deermem_scope_isolation/README.md)
 checks semantic safety across facts and summaries, and fact routing across users
@@ -2898,9 +2941,13 @@ and agents. Failed extraction attempts are retryable execution errors, not safet
 For DeerMem, `memory.backend_config.storage_class: markdown` opts into tolerant
 summary reads while keeping JSON writes and the existing UI. A hand-edited
 `memory.json` can contain its JSON object inside a fenced `memory-json` block;
-embedded backticks and later fenced notes are supported. Unparseable summary
-text is moved to `memory.json.corrupt-<timestamp>` for recovery before rebuilding.
+embedded backticks and later fenced notes are supported. Invalid UTF-8 bytes and
+unparseable summary text are moved to `memory.json.corrupt-<timestamp>` for recovery
+before rebuilding. File-access and I/O read errors preserve the original file and
+fail the storage operation; retry after access recovers.
 `storage_path` must point to the data root directory, not an existing JSON file.
+Hand-edited DeerMem summaries and fact Markdown files may have a leading UTF-8
+BOM; reads accept it, while writes remain BOM-free UTF-8.
 
 Gateway shutdown drains memory updates before closing the backend, even when
 shutdown is cancelled. Config reload failures are logged without aborting runtime
@@ -3134,6 +3181,9 @@ from the project page's Documents section:
 - **Upload** a file (button or drag-drop, one file per request). Shelf size
   limits reuse `uploads.max_file_size` (default 50 MiB); re-uploading identical
   content returns the existing entry instead of creating a duplicate.
+  Oversized uploads return `413`; deduplicated uploads return `200`. Staging
+  cleanup failures are logged without replacing these outcomes or a missing,
+  foreign, or archived project's `404` response.
 - **List** entries with name, size, modified time, and provenance (uploaded vs.
   saved from a conversation), and preview or download any entry.
 - **Save to project** from a thread file: the read-only conversation-files
@@ -3425,6 +3475,11 @@ deerflow --recursion-limit 250 --print "task" # override the headless agent-loop
 Headless `--print` and `--json` exit with status `1` when the run fails, including provider errors returned as fallback messages. `--print` still writes the fallback text to stdout; `--json` appends a terminal error record.
 
 A keyboard-driven chat surface with a streaming transcript (Markdown-rendered answers), compact tool-activity cards, a `/` slash-command palette, display-only `/clear`, `/goal` goal management, `/model` and `/threads` pickers, input history, PageUp/PageDown transcript navigation, and `Esc` / `Ctrl+C` interrupt. The composer preserves line breaks and indentation in pasted code, stack traces, and multi-paragraph prompts; `Enter` sends the complete document. Transcript refreshes preserve your reading position after you scroll upward and resume following new output when you return to the bottom. `/clear` removes rows from the current terminal display without deleting the thread or its persisted conversation; `/new` and `/clear` ask you to wait during an active run instead of resetting in-flight display state. Sessions opened in the TUI also appear in the Web UI sidebar — it writes the shared thread store under the local default user, so terminal and web stay in sync **without running the Gateway**.
+
+TUI slash commands accept Unicode whitespace before their arguments, including
+spaces, tabs, line breaks, and nonbreaking spaces. A separator closes the slash
+palette so Enter submits the composed text. Pasted skill tasks can start on the
+next line; their internal line breaks and indentation are preserved.
 
 During an active run, `/resume`, `/threads`, and `/switch` ask you to wait before
 switching conversations. An invalid `/resume` reference displays an error without
