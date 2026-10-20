@@ -7,6 +7,10 @@ wait, and the loop that consumes it, without any network access.
 
 from __future__ import annotations
 
+import json
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
+
 import httpx
 import pytest
 from langchain_core.messages import HumanMessage
@@ -85,6 +89,58 @@ def test_a_zero_hint_means_retry_immediately():
     assert _calc_backoff_ms(1, error) == 0
 
 
+@pytest.fixture
+def fixed_clock(monkeypatch):
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    monkeypatch.setattr("deerflow.models.openai_codex_provider.time.time", lambda: now.timestamp())
+    return now
+
+
+@pytest.mark.parametrize(
+    ("delta_seconds", "expected_ms"),
+    [(-60, 0), (0, 0), (600, 600_000), (86400, MAX_RETRY_AFTER_MS), (86401, 2000)],
+)
+def test_http_date_retry_after_obeys_delay_boundaries(fixed_clock, delta_seconds, expected_ms):
+    raw = format_datetime(fixed_clock + timedelta(seconds=delta_seconds), usegmt=True)
+    error = _status_error(429, {"Retry-After": raw})
+    assert _calc_backoff_ms(1, error) == expected_ms
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "Thu, 01 Jan 2026 00:10:00 GMT",
+        "Thursday, 01-Jan-26 00:10:00 GMT",
+        "Thu Jan  1 00:10:00 2026",
+    ],
+)
+def test_http_date_retry_after_accepts_http_date_formats_in_utc(fixed_clock, raw):
+    error = _status_error(429, {"RETRY-AFTER": raw})
+    assert _calc_backoff_ms(1, error) == 600_000
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["Thu, 99 Jan 2026 00:10:00 GMT", "Thu, 01 Jan 2026 99:10:00 GMT", "Fri, 31 Dec 9999 23:59:59 GMT"],
+)
+def test_invalid_or_unbounded_http_dates_keep_local_backoff(fixed_clock, raw):
+    error = _status_error(429, {"Retry-After": raw})
+    assert _calc_backoff_ms(2, error) == 4000
+
+
+@pytest.mark.parametrize(("milliseconds", "expected_ms"), [("1500", 1500), ("invalid", 600_000)])
+def test_http_date_retry_after_preserves_millisecond_hint_precedence(fixed_clock, milliseconds, expected_ms):
+    raw = format_datetime(fixed_clock + timedelta(minutes=10), usegmt=True)
+    error = _status_error(429, {"retry-after-ms": milliseconds, "Retry-After": raw})
+    assert _calc_backoff_ms(1, error) == expected_ms
+
+
+def test_http_dates_are_not_accepted_as_millisecond_hints(fixed_clock):
+    raw = format_datetime(fixed_clock + timedelta(minutes=10), usegmt=True)
+    error = _status_error(429, {"retry-after-ms": raw})
+    assert _calc_backoff_ms(1, error) == 2000
+
+
 # ---------------------------------------------------------------------------
 # The loop, through the public model surface
 # ---------------------------------------------------------------------------
@@ -102,6 +158,38 @@ def _make_model(**kwargs):
         return_value=cred,
     ):
         return CodexChatModel(model="gpt-5.4", reasoning_effort="medium", **kwargs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize("status", [429, 500, 529])
+async def test_public_invocation_waits_for_http_date_retry_after(monkeypatch, fixed_clock, mode, status):
+    from deerflow.models import openai_codex_provider as provider
+
+    model = _make_model(retry_max_attempts=2)
+    calls = []
+    sleeps = []
+    raw = format_datetime(fixed_clock + timedelta(minutes=10), usegmt=True)
+
+    def respond(request):
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(status, headers={"Retry-After": raw}, json={"error": "synthetic throttle"})
+        event = {
+            "type": "response.completed",
+            "response": {"output": [{"type": "message", "content": [{"type": "output_text", "text": "recovered"}]}]},
+        }
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=f"data: {json.dumps(event)}\n\n")
+
+    client_class = httpx.Client
+    monkeypatch.setattr(provider.httpx, "Client", lambda **kwargs: client_class(transport=httpx.MockTransport(respond), trust_env=False, **kwargs))
+    monkeypatch.setattr(provider.time, "sleep", sleeps.append)
+
+    result = model.invoke("hi") if mode == "sync" else await model.ainvoke("hi")
+
+    assert result.content == "recovered"
+    assert len(calls) == 2
+    assert sleeps == [600.0]
 
 
 def test_loop_sleeps_for_the_server_hint(monkeypatch):

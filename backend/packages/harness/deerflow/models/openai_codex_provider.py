@@ -14,6 +14,8 @@ Supports:
 import json
 import logging
 import time
+from datetime import UTC
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
@@ -50,8 +52,17 @@ def _retry_after_ms(error: Exception) -> int | None:
             continue
         try:
             milliseconds = float(raw) * 1000 if "ms" not in (header.lower()) else float(raw)
-        except (TypeError, ValueError):
-            continue
+        except (TypeError, ValueError, OverflowError):
+            if "ms" in header.lower():
+                continue
+            try:
+                target = parsedate_to_datetime(str(raw))
+                # The obsolete asctime HTTP-date form has no timezone; it is UTC.
+                if target.tzinfo is None:
+                    target = target.replace(tzinfo=UTC)
+                milliseconds = (target.timestamp() - time.time()) * 1000
+            except (TypeError, ValueError, OverflowError):
+                continue
         bounded = bounded_retry_after_ms(milliseconds)
         if bounded is not None:
             return bounded
