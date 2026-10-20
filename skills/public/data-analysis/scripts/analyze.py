@@ -337,6 +337,18 @@ def _format_table(columns: list[str], rows: list[tuple]) -> str:
     return result
 
 
+def _markdown_cell(value: object) -> str:
+    """Keep table delimiters and line breaks inside a single Markdown cell."""
+    return (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace("|", "\\|")
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .replace("\n", "<br>")
+    )
+
+
 def _export_results(columns: list[str], rows: list[tuple], output_file: str) -> str:
     """Export query results to a file (CSV, JSON, or Markdown)."""
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
@@ -369,13 +381,11 @@ def _export_results(columns: list[str], rows: list[tuple], output_file: str) -> 
     elif ext == ".md":
         with open(output_file, "w", encoding="utf-8") as f:
             # Header
-            f.write("| " + " | ".join(columns) + " |\n")
+            f.write("| " + " | ".join(_markdown_cell(c) for c in columns) + " |\n")
             f.write("| " + " | ".join("---" for _ in columns) + " |\n")
             # Rows
             for row in rows:
-                f.write(
-                    "| " + " | ".join(str(v).replace("|", "\\|") for v in row) + " |\n"
-                )
+                f.write("| " + " | ".join(_markdown_cell(v) for v in row) + " |\n")
     else:
         msg = f"Unsupported output format: {ext}. Use .csv, .json, or .md"
         print(msg)
