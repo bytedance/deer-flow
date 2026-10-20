@@ -508,7 +508,7 @@ async def list_skills(request: Request, config: AppConfig = Depends(get_config))
         skills = await asyncio.to_thread(_load_user_skills, config)
     except Exception as e:
         logger.error(f"Failed to load skills: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to load skills: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to load skills.") from e
 
     visible_skills = await _filter_visible_skills(request, config, skills)
 
@@ -655,7 +655,7 @@ async def list_custom_skills(request: Request, config: AppConfig = Depends(get_c
         return SkillsListResponse(skills=[_skill_to_response(skill) for skill in visible_skills])
     except Exception as e:
         logger.error("Failed to list custom skills: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to list custom skills: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to list custom skills.") from e
 
 
 @router.get("/skills/diagnostics/custom", response_model=SkillDiagnosticsResponse, summary="List Owned Custom Skill YAML Errors")
@@ -1027,7 +1027,7 @@ async def get_skill(skill_name: str, request: Request, config: AppConfig = Depen
         raise
     except Exception as e:
         logger.error(f"Failed to get skill {skill_name}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to get skill: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get skill.") from e
 
 
 def _write_extensions_skill_state(
