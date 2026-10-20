@@ -116,7 +116,7 @@ import { Callout } from "nextra/components";
 
 ### 子 Agent 看不到用户自定义技能
 
-旧版本只读全局技能目录。[#4356](https://github.com/bytedance/deer-flow/pull/4356) 之后按父 run 的用户身份加载。若某个被动技能声明了 `allowed-tools` 导致子 Agent 丢失 `write_file` 等普通工具，那是 [#4497](https://github.com/bytedance/deer-flow/pull/4497) 之前的行为，现在技能懒激活，只有被选用的技能才施加其工具限制。
+旧版本只读全局技能目录。[#4356](https://github.com/bytedance/deer-flow/pull/4356) 之后按父 run 的用户身份加载。[#4497](https://github.com/bytedance/deer-flow/pull/4497) 之前，声明了 `allowed-tools` 的技能可能剥夺子 Agent 的 `write_file` 等普通工具；现在技能懒激活，而 `allowed-tools` 只是兼容性元数据，即使对已激活的技能也不限制或授予工具。工具权限由 Agent 的工具配置和运行时授权决定。
 
 ### 子 Agent 不知道今天的日期，或日期差了一天
 

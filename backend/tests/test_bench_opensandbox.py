@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from datetime import timedelta
 from types import SimpleNamespace
 
@@ -248,10 +249,12 @@ def test_image_override_and_failed_construction_restore_config(transport):
 
 
 def test_idle_reaping_forces_a_new_remote(transport, monkeypatch, tmp_path):
-    from deerflow.community import warm_pool_lifecycle
-
     clock = [100.0]
-    monkeypatch.setattr(warm_pool_lifecycle.time, "time", lambda: clock[0])
+    # Warm-pool idle age is written and read on the monotonic clock, so freeze
+    # that one and let the benchmark's sleep advance it. Freezing `time.time`
+    # instead leaves both ends of the comparison on the real clock: the entry
+    # never expires, the reaper removes nothing, and the next turn is a warm hit.
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(bench.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
     output = tmp_path / "idle.jsonl"
     assert (
