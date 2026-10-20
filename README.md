@@ -2906,6 +2906,12 @@ snapshots and each doubling. These snapshots remain admitted beyond `queue_max_d
 and stay in memory until processing. Check extraction latency when warnings appear;
 process exit can still lose pending work.
 
+Optional memory pre-screening and signal classification support TypeSafe (Jev)
+and OpenAI Decisions. With `combine: auto`, their different endpoint paths keep
+requests separate even behind the same gateway URL, model, and credentials.
+Compatible requests to the same endpoint can still share one call. See the
+[decision provider guide](backend/docs/GUARDRAILS.md).
+
 The opt-in [DeerMem scope-isolation benchmark](backend/scripts/benchmark/deermem_scope_isolation/README.md)
 checks semantic safety across facts and summaries, and fact routing across users
 and agents. Failed extraction attempts are retryable execution errors, not safety passes.

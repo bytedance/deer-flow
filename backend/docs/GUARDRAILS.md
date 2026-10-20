@@ -544,6 +544,23 @@ make dev   # then ask the agent to delete the disposable file with bash
 
 Check the denial message the agent receives and the `middleware:guardrail` journal event. Do not run this against real project data or a production key.
 
+**The same gate over another endpoint: OpenAI Decisions.** `deerflow.guardrails.openai_decisions:OpenAIDecisionsGuardrailProvider` asks one `predicate` question about the call at `POST {base_url}/v1/decisions` and denies at the same `threshold`. It is the same *gate*, not a re-implementation: the strict-JSON local preflight, `max_state_chars` as a character count, the cache, the fail-closed rule and the whole transport (auth, retry, deadline, bounded body) are inherited from the Option 4 provider and `deerflow.typesafe`, so a change to the security boundary lands once. What differs is the envelope:
+
+| | TypeSafe (Jev) | OpenAI Decisions |
+|---|---|---|
+| Endpoint | `POST /v1/systemone` | `POST /v1/decisions` |
+| Judged value | `state.tool_call` (name + argument JSON) | `input`: the same canonical argument JSON as text |
+| Question | `noul` with a `criteria` map | `predicate`; the endpoint has no criteria field, so the rubric rides inside `instructions` |
+| Refusal | not a response shape | `{"type": "refusal"}` — a per-question outcome, so the gate still denies for want of a verdict |
+| `model` | defaults to `jev-latest` | **required**: no default model is shipped, so a deployment cannot send tool text to a model nobody named |
+
+`use:` is the only wiring — `guardrails.provider.config` keeps accepting the same fields, and there is no new config schema. The memory pre-screen and signal classification have siblings in the same shape (`deerflow.agents.memory.prescreen.openai_decisions:OpenAIDecisionsMemoryPrescreen`, `deerflow.agents.memory.signals.openai_decisions:OpenAIDecisionsSignalClassifier`); their thresholds, modes, cache buckets and `request_failed` reporting are the coordinator's and unchanged, and a `sharing_key` difference keeps a Decisions side from ever being combined into a Jev request. Offline suite: `tests/test_openai_decisions.py`.
+
+The endpoint path participates in the sharing key and public policy identity, so
+`combine: auto` keeps Jev and Decisions requests separate even when their gateway
+base URL, model, credentials, and transport match. Matching endpoints can still
+combine. Missing credential and model errors name the configured service.
+
 ## Implementing a Provider
 
 ### Required Interface
