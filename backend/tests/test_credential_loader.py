@@ -421,10 +421,7 @@ def test_blank_env_token_is_logged_at_debug(monkeypatch, caplog):
     with caplog.at_level(logging.DEBUG, logger="deerflow.models.credential_loader"):
         load_claude_code_credential()
 
-    assert any(
-        record.levelno == logging.DEBUG and "CLAUDE_CODE_OAUTH_TOKEN" in record.getMessage()
-        for record in caplog.records
-    )
+    assert any(record.levelno == logging.DEBUG and "CLAUDE_CODE_OAUTH_TOKEN" in record.getMessage() for record in caplog.records)
 
 
 @pytest.mark.parametrize("access_token", [b"   ", b"\t\n"])
