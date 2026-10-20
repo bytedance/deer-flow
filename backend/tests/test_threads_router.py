@@ -4462,6 +4462,58 @@ def test_update_thread_state_forks_from_checkpoint_object(monkeypatch) -> None:
     assert forked.json()["values"]["title"] == "Forked from first"
 
 
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_update_thread_state_in_persisted_subgraph_namespace(monkeypatch, mode) -> None:
+    from langgraph.graph import StateGraph
+
+    from deerflow.agents.thread_state import get_thread_state_schema
+
+    app, _store, checkpointer = _build_thread_app()
+    app.state.checkpoint_channel_mode = mode
+    thread_id = f"state-subgraph-{mode}"
+    with TestClient(app) as client:
+        assert client.post("/api/threads", json={"thread_id": thread_id, "metadata": {}}).status_code == 200
+    schema = get_thread_state_schema(mode)
+    child = StateGraph(schema)
+    child.add_node("write_child", lambda state: {"title": "Child original"})
+    child.set_entry_point("write_child")
+    child.set_finish_point("write_child")
+    parent = StateGraph(schema)
+    parent.add_node("child", child.compile())
+    parent.set_entry_point("child")
+    parent.set_finish_point("child")
+    graph = parent.compile(checkpointer=checkpointer)
+    asyncio.run(graph.ainvoke({"title": "Root original"}, {"configurable": {"thread_id": thread_id}}))
+
+    namespaces = [ns for ns in checkpointer.storage[thread_id] if ns]
+    assert len(namespaces) == 1
+    namespace = namespaces[0]
+    selected = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": namespace}}))
+    assert selected is not None
+    selected_id = selected.config["configurable"]["checkpoint_id"]
+    root_before = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}))
+
+    async def mutation_boundary(request, *, thread_id, as_node, checkpoint_id=None, checkpoint_ns=""):
+        return gateway_services.build_checkpoint_state_mutation_accessor(request, thread_id=thread_id, as_node=as_node, checkpoint_id=checkpoint_id, checkpoint_ns=checkpoint_ns, state_schema=schema)
+
+    monkeypatch.setattr(threads, "build_thread_checkpoint_state_mutation_accessor", mutation_boundary)
+    with TestClient(app) as client:
+        response = client.post(
+            f"/api/threads/{thread_id}/state",
+            json={"checkpoint": {"thread_id": thread_id, "checkpoint_ns": namespace, "checkpoint_id": selected_id}, "values": {"title": "Child updated"}},
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["values"]["title"] == "Child updated"
+    assert response.json()["parent_checkpoint_id"] == selected_id
+    written = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": namespace}}))
+    assert written.config["configurable"]["checkpoint_id"] == response.json()["checkpoint_id"]
+    assert written.checkpoint["channel_values"]["title"] == "Child updated"
+    root_after = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}))
+    assert root_after.config == root_before.config
+    assert root_after.checkpoint == root_before.checkpoint
+
+
 def test_update_thread_state_rejects_checkpoint_object_for_another_thread() -> None:
     app, _store, _checkpointer = _build_thread_app()
     thread_id = "state-checkpoint-thread-mismatch"
