@@ -340,6 +340,9 @@ Honcho's `from_config` consumes the `should_keep_hidden_message` host hook.
 Its write path drops hidden human messages unless that hook accepts them;
 the host default keeps valid user clarification answers and rejects framework context.
 Without a callable hook, standalone construction drops all hidden human messages.
+If the hook raises an `Exception`, skip only that hidden message and continue the batch.
+Log a generic warning without message metadata, content or exception text.
+Keep this boundary around the hook; do not change HTTP write errors or catch `BaseException`.
 Keep the filter inside `add` so sync, async and pre-compaction writes share it;
 `tests/test_honcho_hidden_messages.py` checks the real HTTP payloads, middleware and host factory;
 `tests/blocking_io/test_honcho_memory_backend.py` keeps the filter hook off the event loop.

@@ -101,3 +101,26 @@ async def test_hidden_message_hook_runs_off_the_event_loop(tmp_path: Path, monke
     assert seen == [metadata]
     assert probe.read_text(encoding="utf-8") == "called"
     assert [item["content"] for item in outgoing] == (["hidden context", "reply"] if keep_hidden else ["reply"])
+
+
+@pytest.mark.asyncio
+async def test_hidden_hook_failure_keeps_visible_writes_off_event_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    probe = tmp_path / "failed-hidden-filter.txt"
+    outgoing = []
+
+    def keep(metadata: dict[str, Any]) -> bool:
+        probe.write_text("called", encoding="utf-8")
+        raise RuntimeError("private-filter-error")
+
+    manager = _manager(tmp_path, should_keep_hidden_message=keep)
+
+    def add_messages(workspace: str, session_id: str, messages: list[Any]) -> None:
+        manager._client._block()
+        outgoing.extend(messages)
+
+    monkeypatch.setattr(manager._client, "add_messages", add_messages)
+    messages = [HumanMessage("before"), HumanMessage("hidden", additional_kwargs={"hide_from_ui": True}), HumanMessage("after"), AIMessage("reply")]
+    await manager.aadd("thread-1", messages, user_id="alice")
+
+    assert probe.read_text(encoding="utf-8") == "called"
+    assert [item["content"] for item in outgoing] == ["before", "after", "reply"]

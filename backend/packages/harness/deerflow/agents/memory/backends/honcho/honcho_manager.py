@@ -191,8 +191,13 @@ class HonchoMemoryManager(MemoryManager):
             if msg_type == "human":
                 additional_kwargs = getattr(message, "additional_kwargs", {}) or {}
                 keep_hidden = self._should_keep_hidden_message
-                if additional_kwargs.get("hide_from_ui") and not (keep_hidden is not None and keep_hidden(additional_kwargs)):
-                    continue
+                if additional_kwargs.get("hide_from_ui"):
+                    try:
+                        if keep_hidden is None or not keep_hidden(additional_kwargs):
+                            continue
+                    except Exception:
+                        logger.warning("honcho memory: hidden message filter failed; skipping hidden message")
+                        continue
             text = _content_to_text(getattr(message, "content", "")).strip()
             if not text:
                 continue

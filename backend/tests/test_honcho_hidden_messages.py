@@ -163,3 +163,53 @@ def test_host_factory_preserves_clarification_but_drops_framework_context(captur
         assert [item["content"] for item in writes[0]["messages"]] == ["Use staging", "Use staging"]
     finally:
         manager.close()
+
+
+@pytest.mark.parametrize("method", ["add", "aadd", "add_nowait"])
+@pytest.mark.parametrize("mode", ["middleware", "tool"])
+def test_hidden_hook_failure_preserves_other_messages(capture, caplog, method, mode):
+    create, requests = capture
+    seen = []
+
+    def keep(metadata):
+        seen.append(metadata)
+        if metadata.get("fail_filter"):
+            raise RuntimeError("private-filter-error")
+        return _host_default_should_keep_hidden_message(metadata)
+
+    hidden = HumanMessage("private-hidden-content", additional_kwargs={"hide_from_ui": True, "fail_filter": True})
+    messages = [HumanMessage("before"), hidden, HumanMessage("after"), _answer("text"), AIMessage("reply")]
+    original = messages_to_dict(messages)
+
+    _write(create(hook=keep, mode=mode), method, messages)
+
+    writes = [json.loads(request.content) for request in requests if request.url.path.endswith("/messages")]
+    assert writes == [
+        {
+            "messages": [
+                {"peer_id": "user-peer", "content": "before"},
+                {"peer_id": "user-peer", "content": "after"},
+                {"peer_id": "user-peer", "content": "Use staging"},
+                {"peer_id": "deerflow", "content": "reply"},
+            ]
+        }
+    ]
+    assert seen == [hidden.additional_kwargs, messages[3].additional_kwargs]
+    assert messages_to_dict(messages) == original
+    assert caplog.messages == ["honcho memory: hidden message filter failed; skipping hidden message"]
+    assert "private-filter-error" not in caplog.text
+    assert "private-hidden-content" not in caplog.text
+
+
+@pytest.mark.parametrize("method", ["add", "aadd", "add_nowait"])
+def test_only_failing_hidden_hook_makes_no_http_requests(capture, caplog, method):
+    create, requests = capture
+
+    def keep(metadata):
+        raise RuntimeError("private-filter-error")
+
+    _write(create(hook=keep), method, [_reminder()])
+
+    assert requests == []
+    assert caplog.messages == ["honcho memory: hidden message filter failed; skipping hidden message"]
+    assert "private-filter-error" not in caplog.text
