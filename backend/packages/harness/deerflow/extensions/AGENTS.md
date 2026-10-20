@@ -59,8 +59,10 @@ that mode to a temporary file before atomically replacing the destination, inclu
 restoring `config.yaml` after a failed removal. A failed write, chmod, or replace leaves the
 current destination untouched. Temporary cleanup uses `cleanup_failed_atomic_write`, so a
 failed unlink or its warning log cannot replace the original error, including interruptions.
-The managed `plugins:` rewrite uses the same cleanup. Coverage:
-`tests/test_extension_atomic_write_cleanup.py`.
+Pass the raw descriptor only until `fdopen` succeeds; a close failure still attempts
+the unlink. The managed `plugins:` rewrite uses the same cleanup and records the
+temporary path before writing, so a short write still removes the hidden file.
+Coverage: `tests/test_extension_atomic_write_cleanup.py`.
 Package mutation is deferred from environment mutation: after `uv add/remove`
 updates the declaration and lock, one `uv sync --locked --all-packages` preserves the same
 config-/environment-detected optional extras as normal startup. All three uv calls pin the

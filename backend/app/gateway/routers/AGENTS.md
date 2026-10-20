@@ -63,5 +63,7 @@ extensions use it to distinguish owner review from model/tool output.
 
 Skill archive upload copies (`_copy_uploaded_skill_archive`) report the original
 size-limit or read error when temporary cleanup or its warning log fails.
-Successful copies still return the uploaded bytes unchanged. Coverage:
-`tests/test_skill_archive_upload_cleanup.py`.
+Successful copies still return the uploaded bytes unchanged. The upload route's
+`finally` discards that archive through the same helper, so a cleanup or
+warning failure cannot turn a successful install into a 500 or replace an
+install error. Coverage: `tests/test_skill_archive_upload_cleanup.py`.

@@ -586,7 +586,7 @@ async def upload_and_install_skill(
         if form is not None:
             await form.close()
         if temporary_path is not None:
-            await asyncio.to_thread(temporary_path.unlink, missing_ok=True)
+            await asyncio.to_thread(cleanup_failed_atomic_write, temporary_path)
 
 
 @router.post(

@@ -108,10 +108,15 @@ interruption. Successful cleanup stays quiet.
 Extension snapshot rollback and the managed plugins-block rewrite preserve the
 original publish error when temporary cleanup or its warning log fails.
 `tests/test_extension_atomic_write_cleanup.py` covers both writers, including
-interruptions, and keeps a successful plugins rewrite's bytes and mode.
+interruptions, an `fdopen` failure whose descriptor close also fails, a plugins
+rewrite that fails while writing, and a successful plugins rewrite's bytes and
+mode.
 Skill archive upload copies do the same in
 `tests/test_skill_archive_upload_cleanup.py`: a size-limit or read error stays
-visible, and a successful copy returns the original bytes.
+visible, a successful copy returns the original bytes, and the upload route's
+post-install discard cannot replace a successful install or an install error.
+Custom-skill file writes and per-user skill-state writes do the same in
+`tests/test_skill_storage_atomic_write_cleanup.py`.
 
 `blocking_io/test_web_tool_url_validation.py` resolves a synthetic `.invalid`
 hostname to loopback by patching `_socket.getaddrinfo`, below the real
