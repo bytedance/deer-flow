@@ -6111,6 +6111,14 @@ This release closes that milestone with **621 merged pull requests**.
 
 ### Security
 
+- **skills:** `GET /api/skills`, `GET /api/skills/custom` and
+  `GET /api/skills/{name}`, which every signed-in user can call, no longer put
+  the raw exception text in their `500` detail. A malformed or unreadable
+  `extensions_config.json` made all three answer with the file's absolute host
+  path (and, for a permission error, the `[Errno 13]` message). They now return
+  a fixed `Failed to load skills.` / `Failed to list custom skills.` /
+  `Failed to get skill.`, and the full error stays in the Gateway log. ([#7155])
+
 - **skillscan:** The pre-LLM static gate now matches fork bombs by shape
   instead of only the canonical `:(){ :|:& };:` spelling. `resource-fork-bomb`
   and the fork-bomb branch of `shell-destructive-command` matched just that
@@ -11911,3 +11919,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7099]: https://github.com/bytedance/deer-flow/pull/7099
 [#7104]: https://github.com/bytedance/deer-flow/pull/7104
 [#7123]: https://github.com/bytedance/deer-flow/pull/7123
+[#7155]: https://github.com/bytedance/deer-flow/pull/7155

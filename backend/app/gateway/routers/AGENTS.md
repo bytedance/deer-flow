@@ -16,6 +16,11 @@ create-only: collisions return 409, never overwrite or upsert. Ordinary creation
 and import share `_persist_new_agent`, which uses `run_drained_write` so a
 cancelled request still drains the owned persistence worker.
 
+`GET /api/skills`, `/api/skills/custom` and `/api/skills/{name}` serve every
+signed-in user, so their unexpected-failure 500s return a fixed detail. Load
+errors (e.g. a malformed `extensions_config.json`) carry host paths and stay in
+the server log.
+
 Skill mutation operation lists return `next_cursor: null` when `has_more` is false, including empty pages after a supplied `after_id`. The next cursor is the final returned operation only when a further page exists.
 
 `GET /api/agent-tool-groups` projects only configured group names for the
