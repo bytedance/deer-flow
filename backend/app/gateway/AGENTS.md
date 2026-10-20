@@ -23,10 +23,12 @@ its run drain and extension-service teardown can still make MCP calls during
 earlier shutdown hooks. Keep the pool close bounded and failure-isolated, but
 do not move it ahead of those session producers.
 
-Checkpoint retention runs inside durable same-thread admission, before the
-first checkpoint read, and under the local checkpoint lock. Protect explicit
-selectors; delete at most one trailing metadata-only leaf; invalidate wrapper
-caches before row deletion. Cleanup failures stay non-fatal.
+Checkpoint retention runs inside durable same-thread admission before the
+first checkpoint read, under the local checkpoint lock. Read only the root
+head and parent; probe only that leaf's writes. Protect explicit selectors,
+require identical parent channel versions, and invalidate wrapper caches before
+deletion. No history scan, statistics or blob GC on admission; failures stay
+non-fatal. The exhaustive service is for separate maintenance.
 
 `conversation_access.py` grants the opt-in read-only tool only for explicit
 `conversation_references` with effective `runs:read`; never infer grants from

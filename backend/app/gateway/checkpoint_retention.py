@@ -26,8 +26,10 @@ checkpoint that wrote the blob, so the same join keys clean them.
 The Gateway invokes the conservative production policy after the next run has
 won durable same-thread admission but before that worker reads a checkpoint.
 It removes at most the trailing duration/history-cache leaf; the sibling-branch
-shape remains opt-in. Measurement reports carry before/after
-per-thread stats in the same normalized shape as
+shape remains opt-in. The admission path reads only the root head and parent,
+checks that head for writes, and leaves shared blobs in place. The exhaustive
+maintenance policy alone collects before/after per-thread stats in the same
+normalized shape as
 ``scripts/benchmark/checkpoint/bench_channels.py``.
 
 History fast-path interaction: the trailing duration-only leaf is also the
@@ -60,6 +62,7 @@ __all__ = [
     "RetentionReport",
     "enforce_completed_run_retention",
     "enforce_thread_retention",
+    "enforce_trailing_duration_retention",
 ]
 
 logger = logging.getLogger(__name__)
@@ -247,6 +250,25 @@ async def _thread_storage_stats(saver: Any, thread_id: str) -> dict[str, int]:
     stats["logical_checkpoint_bytes"] = stats["checkpoint_bytes"] + stats["blob_bytes"]
     stats["logical_write_bytes"] = stats["write_bytes"]
     return stats
+
+
+async def _checkpoint_has_writes(saver: Any, key: tuple[str, str], thread_id: str) -> bool:
+    """Check one checkpoint's pending writes without scanning its thread."""
+    ns, cp_id = key
+    if isinstance(saver, InMemorySaver):
+        return bool(saver.writes.get((thread_id, ns, cp_id)))
+    if isinstance(saver, AsyncSqliteSaver):
+        async with saver.conn.execute(
+            "SELECT 1 FROM writes WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ? LIMIT 1",
+            (thread_id, ns, cp_id),
+        ) as cursor:
+            return await cursor.fetchone() is not None
+    async with saver._cursor() as cursor:
+        await cursor.execute(
+            "SELECT 1 FROM checkpoint_writes WHERE thread_id = %s AND checkpoint_ns = %s AND checkpoint_id = %s LIMIT 1",
+            (thread_id, ns, cp_id),
+        )
+        return await cursor.fetchone() is not None
 
 
 async def _checkpoint_ids_with_writes(saver: Any, thread_id: str) -> set[tuple[str, str]]:
@@ -533,6 +555,78 @@ async def enforce_thread_retention(
         return report
 
 
+async def enforce_trailing_duration_retention(
+    saver: BaseCheckpointSaver,
+    thread_id: str,
+    *,
+    protect_checkpoint_ids: frozenset[str] = frozenset(),
+    thread_lock: AbstractAsyncContextManager[None] | None = None,
+) -> RetentionReport:
+    """Prune at most the current root duration leaf with bounded storage work.
+
+    Read the head and its parent directly, then probe only the head's pending
+    writes. Identical channel-version maps prove that every blob referenced by
+    the leaf remains reachable through its parent, so no history scan, thread
+    statistics or blob GC is needed. Explicit admission selectors are protected.
+    Invalidate wrapper caches before deleting the source row; invalidation
+    failure must leave the row intact for delta reads.
+
+    As with the exhaustive service, callers must exclude same-thread mutation
+    for this entire operation. Gateway supplies durable admission and the local
+    checkpoint lock before the worker's first checkpoint read.
+    """
+    storage = _ensure_supported_saver(saver)
+    report = RetentionReport(thread_id=thread_id)
+    lock: AbstractAsyncContextManager[None] = thread_lock if thread_lock is not None else nullcontext()
+    async with lock:
+        latest = await storage.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
+        if latest is None:
+            return report
+        latest_config = checkpoint_configurable(latest)
+        latest_id = latest_config.get("checkpoint_id")
+        if not latest_id or latest_config.get("thread_id") != thread_id or latest_config.get("checkpoint_ns") or latest_id in protect_checkpoint_ids:
+            return report
+        parent_config = getattr(latest, "parent_config", None)
+        parent_values = parent_config.get("configurable") if isinstance(parent_config, dict) else None
+        if not isinstance(parent_values, dict):
+            return report
+        parent_id = parent_values.get("checkpoint_id")
+        if not parent_id or parent_id == latest_id or parent_values.get("thread_id") != thread_id or parent_values.get("checkpoint_ns"):
+            return report
+        parent = await storage.aget_tuple(parent_config)
+        if parent is None or checkpoint_configurable(parent).get("checkpoint_id") != parent_id:
+            return report
+
+        latest_versions = latest.checkpoint.get("channel_versions")
+        parent_versions = parent.checkpoint.get("channel_versions")
+        if not isinstance(latest_versions, dict) or latest_versions != parent_versions:
+            return report
+        metadata = latest.metadata or {}
+        run_durations = metadata.get("run_durations")
+        latest_node = _Node(
+            ns="",
+            cp_id=latest_id,
+            parent_ns="",
+            parent_id=parent_id,
+            duration_only=is_duration_only_checkpoint(latest),
+            metadata_source=metadata.get("source"),
+            carries_run_durations=isinstance(run_durations, dict) and bool(run_durations),
+            versions=frozenset(latest_versions.values()),
+        )
+        parent_node = _Node(ns="", cp_id=parent_id, parent_ns=None, parent_id=None, duration_only=False, versions=latest_node.versions)
+        _mark_duration_leaves_without_the_marker({("", latest_id): latest_node, ("", parent_id): parent_node})
+        if not latest_node.duration_only or await _checkpoint_has_writes(storage, ("", latest_id), thread_id):
+            return report
+
+        invalidate_cache = getattr(saver, "ainvalidate_history_cache", None)
+        if callable(invalidate_cache):
+            await invalidate_cache(thread_id)
+        await _delete_checkpoint_rows(storage, thread_id, ("", latest_id))
+        report.protected_head_ids = {"": parent_id}
+        report.deleted_checkpoint_ids.append(latest_id)
+        return report
+
+
 async def enforce_completed_run_retention(
     *,
     checkpointer: BaseCheckpointSaver,
@@ -549,23 +643,17 @@ async def enforce_completed_run_retention(
     The process-local checkpoint lock additionally serializes the local saver.
 
     Only the contract-proven trailing duration leaf is eligible.  Sibling
-    branches and resumable checkpoints remain protected, and the one-row cap
-    keeps terminal housekeeping bounded.
+    branches and resumable checkpoints remain protected. Storage work is bounded
+    to the root head, its parent and one pending-write probe, independently of
+    thread history length.
     """
     from deerflow.runtime.runs.worker import _checkpoint_thread_lock
 
-    report = await enforce_thread_retention(
+    report = await enforce_trailing_duration_retention(
         checkpointer,
         thread_id,
-        RetentionPolicy(
-            prune_trailing_duration_leaves=True,
-            prune_leaf_sibling_branches=False,
-            strict_pending_write_guard=True,
-            max_delete_per_run=1,
-            protect_checkpoint_ids=protect_checkpoint_ids,
-        ),
+        protect_checkpoint_ids=protect_checkpoint_ids,
         thread_lock=_checkpoint_thread_lock(thread_id),
-        collect_stats=False,
     )
     if report.deleted_checkpoint_ids:
         logger.info(

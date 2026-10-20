@@ -76,10 +76,10 @@ import { Callout } from "nextra/components";
 
 删除还带两条机械约束：
 
-- **联合表删除、先算孤儿。** 删除检查点行时必须判定哪些 writes 与 blob 行成了孤儿；只有当**幸存**检查点都不再引用某行时它才算孤儿，且要在整线程范围内计算。真实的仅耗时叶子并非没有负载——它会物化父节点的值——在 Postgres 上它的 blob 行与支撑父节点的正是同一批行。
+- **保留共享存储。** 通用保留策略需要在整线程范围内计算 blob 可达性。Admission 清理则要求根命名空间的仅耗时叶子与父节点具有完全相同的通道版本映射，只删除该叶子的 checkpoint/writes 行，保留全部共享 blob。
 - **要么全做，要么不做。** 留下悬空父链接的部分删除会把一次清理变成线程级故障：此后每一轮的分支与重新生成都会响亮失败。
 
-这里还存在一条历史快路径交互：尾部的仅耗时叶子同时承载 `run_durations` 与 `run_message_ids` 映射，`get_thread_history` 会从最新检查点读取它们。Gateway 会保留该叶子供历史读取，直到下一次 run 获得持久化的同线程 admission；随后在首次 checkpoint 读取前、持有 checkpoint 锁时删除它。
+这里还存在一条历史快路径交互：尾部的仅耗时叶子同时承载 `run_durations` 与 `run_message_ids` 映射，`get_thread_history` 会从最新检查点读取它们。Gateway 会保留该叶子供历史读取，直到下一次 run 获得持久化的同线程 admission；随后在首次 checkpoint 读取前、持有 checkpoint 锁时删除它。清理最多读取根命名空间的头节点与父节点，并只探测候选叶子的 pending writes；不扫描历史、不收集统计、不做 blob GC。显式 `checkpoint_id` 与 `checkpoint_map` 选择受到保护。删除前通过公共生命周期接口失效增量历史缓存；缓存失效失败时保留源检查点。
 
 ### 策略默认值
 

@@ -790,6 +790,195 @@ async def test_completed_run_retention_preserves_selected_duration_leaf(saver_en
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("steps", [1, 40], ids=["short", "long"])
+@pytest.mark.parametrize("duration_tail", [False, True], ids=["normal-head", "duration-head"])
+async def test_admission_retention_bounds_storage_work_independently_of_history(
+    saver_env: _SaverEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: int,
+    duration_tail: bool,
+) -> None:
+    thread_id, checkpoint_ids, _ = await _write_turns(saver_env, steps)
+    duration_id = await _append_duration_checkpoint(saver_env, thread_id) if duration_tail else None
+    original_get = saver_env.saver.aget_tuple
+    reads: list[dict[str, Any]] = []
+
+    async def count_read(config: dict[str, Any]) -> Any:
+        reads.append(config)
+        assert (config["configurable"].get("checkpoint_ns") or "") == ""
+        return await original_get(config)
+
+    def forbid_scan(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("admission retention must not scan history, writes, stats or blobs")
+
+    monkeypatch.setattr(saver_env.saver, "aget_tuple", count_read)
+    monkeypatch.setattr(saver_env.saver, "alist", forbid_scan)
+    for helper in ("_thread_storage_stats", "_checkpoint_ids_with_writes", "_delete_unreachable_blobs"):
+        monkeypatch.setattr(checkpoint_retention, helper, forbid_scan)
+
+    report = await enforce_completed_run_retention(checkpointer=saver_env.saver, thread_id=thread_id)
+
+    assert len(reads) <= 2
+    assert report.deleted_checkpoint_ids == ([duration_id] if duration_tail else [])
+    assert report.stats_before == report.stats_after == {}
+    head = await original_get(_config(thread_id))
+    assert head is not None
+    assert head.checkpoint["id"] == checkpoint_ids[-1]
+    # The parent retains all shared blobs, even though no blob GC ran.
+    materialized = await _build_graph(FullState, saver_env.saver).aget_state(_config(thread_id))
+    assert len(materialized.values["messages"]) == steps
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "shape",
+    ["pending-writes", "missing-parent", "no-parent-link", "changed-versions", "swapped-channels", "markerless", "empty-durations", "empty-write-entry"],
+)
+async def test_admission_retention_checks_only_a_proven_metadata_leaf(
+    saver_env: _SaverEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    shape: str,
+) -> None:
+    thread_id, _, _ = await _write_turns(saver_env, 2)
+    duration_id = await _append_duration_checkpoint(saver_env, thread_id)
+    original_get = saver_env.saver.aget_tuple
+    head = await original_get(_config(thread_id))
+    assert head is not None
+    parent = await original_get(head.parent_config)
+    assert parent is not None
+    parent_id = parent.checkpoint["id"]
+    if shape == "empty-write-entry" and saver_env.kind == "memory":
+        saver_env.saver.writes[(thread_id, "", duration_id)] = {}
+    elif shape == "pending-writes":
+        await saver_env.saver.aput_writes(head.config, [("messages", [HumanMessage(content="pending")])], task_id="pending")
+    elif shape in {"markerless", "empty-durations"}:
+        metadata = copy.deepcopy(head.metadata)
+        metadata.pop("writes", None)
+        if shape == "empty-durations":
+            metadata["run_durations"] = {}
+        await saver_env.saver.aput(head.parent_config, head.checkpoint, metadata, {})
+    elif shape in {"changed-versions", "swapped-channels"}:
+        checkpoint = copy.deepcopy(head.checkpoint)
+        versions = checkpoint["channel_versions"]
+        if shape == "changed-versions":
+            versions["messages"] = "different-version"
+        else:
+            # Equal sets of version values do not prove identical channel maps.
+            versions["renamed-messages"] = versions.pop("messages")
+        await saver_env.saver.aput(head.parent_config, checkpoint, head.metadata, {})
+    elif shape in {"missing-parent", "no-parent-link"}:
+
+        async def incomplete_chain(config: dict[str, Any]) -> Any:
+            result = await original_get(config)
+            if result is None:
+                return None
+            if shape == "missing-parent" and result.checkpoint["id"] == parent_id:
+                return None
+            if shape == "no-parent-link" and result.checkpoint["id"] == duration_id:
+                return result._replace(parent_config=None)
+            return result
+
+        monkeypatch.setattr(saver_env.saver, "aget_tuple", incomplete_chain)
+
+    report = await enforce_completed_run_retention(checkpointer=saver_env.saver, thread_id=thread_id)
+
+    assert report.deleted_checkpoint_ids == ([duration_id] if shape in {"markerless", "empty-write-entry"} else [])
+    retained = await original_get(_config_thread(thread_id, duration_id))
+    assert (retained is None) == (shape in {"markerless", "empty-write-entry"})
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("invalidation_fails", [False, True], ids=["invalidate", "fail-closed"])
+async def test_admission_retention_invalidates_delta_cache_before_deleting_source(
+    saver_env: _SaverEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    invalidation_fails: bool,
+) -> None:
+    cache = MemoryCheckpointHistoryCache(max_entries=16)
+    wrapped = CachedHistorySaver(saver_env.saver, cache, key_prefix="retention-order")
+    graph = _build_graph(DeltaState, wrapped)
+    thread_id = _thread_id()
+    await graph.ainvoke({"messages": [HumanMessage(content="preserved", id="message-1")]}, _config(thread_id))
+    assert await persist_run_history_metadata(checkpointer=wrapped, thread_id=thread_id, durations={"run-1": 3})
+    head = await wrapped.aget_tuple(_config(thread_id))
+    assert head is not None
+    duration_id = head.checkpoint["id"]
+    key = make_history_key("retention-order", thread_id, "", duration_id, "messages")
+    await cache.aset_many({key: {"writes": []}})
+    original_invalidate = wrapped.ainvalidate_history_cache
+    invalidated: list[str] = []
+
+    async def invalidate_before_delete(selected_thread: str) -> None:
+        assert await wrapped.source_saver.aget_tuple(_config_thread(thread_id, duration_id)) is not None
+        invalidated.append(selected_thread)
+        if invalidation_fails:
+            raise RuntimeError("cache unavailable")
+        await original_invalidate(selected_thread)
+
+    monkeypatch.setattr(wrapped, "ainvalidate_history_cache", invalidate_before_delete)
+    if invalidation_fails:
+        with pytest.raises(RuntimeError, match="cache unavailable"):
+            await enforce_completed_run_retention(checkpointer=wrapped, thread_id=thread_id)
+        assert await saver_env.saver.aget_tuple(_config_thread(thread_id, duration_id)) is not None
+        assert cache.stats().entries == 1
+    else:
+        report = await enforce_completed_run_retention(checkpointer=wrapped, thread_id=thread_id)
+        assert report.deleted_checkpoint_ids == [duration_id]
+        assert cache.stats().entries == 0
+        assert (await graph.aget_state(_config(thread_id))).values["messages"][-1].content == "preserved"
+    assert invalidated == [thread_id]
+
+
+@pytest.mark.anyio
+async def test_admission_retention_leaves_subgraph_and_other_thread_checkpoints_untouched(saver_env: _SaverEnv) -> None:
+    graph = _build_nested_graph(saver_env.saver)
+    thread_id = _thread_id()
+    await graph.ainvoke({"value": 10}, _config(thread_id))
+    before = {tuple_.checkpoint["id"] async for tuple_ in saver_env.saver.alist(_config(thread_id), limit=None)}
+    other_thread, _, _ = await _write_turns(saver_env, 1)
+    other_leaf = await _append_duration_checkpoint(saver_env, other_thread)
+    duration_id = await _append_duration_checkpoint(saver_env, thread_id)
+
+    report = await enforce_completed_run_retention(checkpointer=saver_env.saver, thread_id=thread_id)
+
+    assert report.deleted_checkpoint_ids == [duration_id]
+    assert await _listed_checkpoint_ids(saver_env, thread_id) == before
+    assert await saver_env.saver.aget_tuple(_config_thread(other_thread, other_leaf)) is not None
+    assert (await graph.aget_state(_config(thread_id))).values["value"] == 11
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("empty_thread", [False, True], ids=["selected-head", "empty-thread"])
+async def test_admission_retention_skips_selected_or_missing_head_without_parent_reads(
+    saver_env: _SaverEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    empty_thread: bool,
+) -> None:
+    thread_id = _thread_id()
+    protected = frozenset()
+    if not empty_thread:
+        thread_id, _, _ = await _write_turns(saver_env, 1)
+        protected = frozenset({await _append_duration_checkpoint(saver_env, thread_id)})
+    original_get = saver_env.saver.aget_tuple
+    reads = 0
+
+    async def read_head(config: dict[str, Any]) -> Any:
+        nonlocal reads
+        reads += 1
+        assert "checkpoint_id" not in config["configurable"]
+        return await original_get(config)
+
+    def forbid_scan(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("selected or missing heads need no history scan")
+
+    monkeypatch.setattr(saver_env.saver, "aget_tuple", read_head)
+    monkeypatch.setattr(saver_env.saver, "alist", forbid_scan)
+    report = await enforce_completed_run_retention(checkpointer=saver_env.saver, thread_id=thread_id, protect_checkpoint_ids=protected)
+    assert reads == 1
+    assert report.deleted_checkpoint_ids == []
+
+
+@pytest.mark.anyio
 async def test_gateway_admission_retention_failure_isolated_from_scheduler_completion(monkeypatch: pytest.MonkeyPatch) -> None:
     """Retention remains best-effort and scheduled completion stays separate."""
     from app.gateway import checkpoint_retention as retention_module

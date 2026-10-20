@@ -77,10 +77,10 @@ Exactly two shapes are proven safe, and the retention service implements only th
 
 Two mechanical constraints come with deletion:
 
-- **Joint table deletion, orphan-first.** Deleting a checkpoint row requires deciding which writes and blob rows are orphaned; a row is an orphan only if no *surviving* checkpoint references it, computed in a whole-thread pass. A real duration-only leaf is not payload-free — it materializes the parent's values — and on Postgres its blob rows are the same rows backing its parent.
+- **Preserve shared storage.** General retention computes blob reachability in a whole-thread pass. Admission cleanup instead requires the root duration leaf and its parent to have identical channel-version maps, deletes only the leaf's checkpoint/writes rows, and leaves all shared blobs intact.
 - **All-or-nothing.** A partial deletion that leaves a dangling parent link converts a cleanup into a thread-level outage: branch and regenerate fail loudly for every later turn.
 
-There is also a history fast-path interaction: the trailing duration-only leaf carries the `run_durations` and `run_message_ids` maps that `get_thread_history` reads from the latest checkpoint. The Gateway keeps that leaf available for history reads until the next run wins durable same-thread admission, then deletes it under the checkpoint lock before the run's first checkpoint read.
+There is also a history fast-path interaction: the trailing duration-only leaf carries the `run_durations` and `run_message_ids` maps that `get_thread_history` reads from the latest checkpoint. The Gateway keeps that leaf available for history reads until the next run wins durable same-thread admission, then deletes it under the checkpoint lock before the run's first checkpoint read. Cleanup reads at most the root head and its parent and probes only the candidate's pending writes; it performs no history scan, statistics pass or blob GC. Explicit `checkpoint_id` and `checkpoint_map` selections are protected. Delta-history caches are invalidated before deletion, and a cache failure preserves the source checkpoint.
 
 ### Policy defaults
 
