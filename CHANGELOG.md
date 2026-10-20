@@ -1265,6 +1265,14 @@ This release closes that milestone with **621 merged pull requests**.
 
 ### Fixed
 
+- **skills:** `GET /api/skills/custom/{skill_name}/history` now answers an
+  invalid skill name (not hyphen-case, or longer than 64 characters) with `400`,
+  as delete and rollback already do, instead of `500` with a logged traceback on
+  every request. Only the name check maps to `400`: a corrupt history file
+  (malformed JSON or non-UTF-8) is still a `500`, and `POST .../rollback`, which
+  answered one with `400`, now returns `500` too. Deleting a skill with an
+  invalid name no longer logs a mutation-tail error. ([#7123])
+
 - **channels:** An IM message delivered twice no longer runs twice, and two
   Gateway instances no longer split a new conversation across two threads.
   Discord direct messages had no inbound dedupe key (no guild id), and a reply
@@ -11902,3 +11910,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7040]: https://github.com/bytedance/deer-flow/pull/7040
 [#7099]: https://github.com/bytedance/deer-flow/pull/7099
 [#7104]: https://github.com/bytedance/deer-flow/pull/7104
+[#7123]: https://github.com/bytedance/deer-flow/pull/7123
