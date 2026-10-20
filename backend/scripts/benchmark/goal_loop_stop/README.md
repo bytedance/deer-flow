@@ -97,7 +97,7 @@ checks; other blockers and unclassified stop reasons keep their existing behavio
 - [Before](evidence/before.json), [after](evidence/after.json), and [CSV counts](evidence/comparison.csv)
 - [Source/version provenance](evidence/provenance.json)
 - [Historical investigation summary](evidence/investigation-context.json)
-- Vector figures: [call counts](figures/call-counts.svg), [flow](figures/flow.svg)
+- Figures: [call counts](figures/call-counts.png), [flow](figures/flow.png)
 
 All committed results are synthetic counts and non-secret version/source metadata.
 They contain no provider requests, credentials, user messages or production logs.
