@@ -71,29 +71,102 @@ through run-event or specialized APIs:
 ## Authoritative Run Outcome
 
 `run.terminal` (`trace`) records the owning Worker's confirmed final business
-status: `success`, `error`, `interrupted`, or `timeout`. Its content is exactly
-`{"status": "<status>"}`; metadata contains `protocol_version: 1` and
-`recovered: false`. The event is a run-scoped singleton confirmed through
-`put_if_absent()`. Graph outputs and error details are excluded.
+outcome. It is a singleton identified by `(thread_id, run_id, event_type)` and
+confirmed through `put_if_absent()`. Content contains only `status`:
+`success`, `error`, `interrupted`, or `timeout`; graph outputs and error details
+are excluded. Metadata requires `protocol_version: 1` and a boolean `recovered`.
+Current Workers emit `recovered: false`; the marker describes evidence origin
+and grants no publication authority. Field definitions remain in the
+[JSON contract](../../contracts/run_event_stream_contract.json).
 
-The Worker publishes it only after its final terminal commit ACK, completion
-hooks, and Journal producer freeze/drain. Rollback's intermediate `interrupted`
-ACK cannot authorize it. Confirmation precedes the Evidence Receipt and Seal;
-a conflicting or unconfirmed event leaves evidence partial without undoing the
-business outcome or disabling SSE completion.
+`run.start` and `run.end` retain their root-invocation producers, counts,
+categories, callback timing, and opaque output contract. A Run may produce
+several `run.end` events with success metadata before its business outcome
+becomes error. Use `run.terminal` for the confirmed Run outcome.
 
-`run.start` and `run.end` keep their root-invocation semantics. A Run may have
-several `run.end` events with opaque graph outputs and success metadata even
-when its eventual business status is error. Use `run.terminal` for the confirmed
-Run outcome. Historical seals without this additive event remain valid under
-their original contract; an event alone does not prove complete evidence.
+### Publication Authority
 
-Publication is best effort across the RunRow/event-store commit gap. A crash
-can leave a terminal row without an event; takeover backfill and a durable
-outbox are not implemented. Memory confirmation lasts for one process lifetime,
-JSONL provides its single-process guarantee, and shared deployments require the
-database store. Missing terminal events do not gate SSE recovery fallbacks.
-See [the terminal event protocol](../../docs/run-terminal-protocol.md).
+Only the current local Run owner's attributable final Terminal Commit ACK may
+authorize normal publication, with the acknowledged outcome still matching.
+Graph completion, a same-status RunRow read, a store-only hydrated record,
+a legacy `None` write result, or a truthy store response cannot replace that
+proof. Without a backing RunStore, a confirmed local Manager transition is
+authoritative only within that process lifetime.
+
+Rollback's `interrupted` ACK is intermediate while restoration remains pending;
+publication waits for restoration and the final `error` ACK. Ownership loss,
+rejected or unconfirmed commits, and unknown predecessor writes fail closed.
+Reading a historical terminal row does not create local publication authority.
+
+### Evidence Ordering
+
+The Worker holds its finalizing barrier through this sequence:
+
+1. Finish callback-producing completion hooks and lifecycle observers.
+2. Freeze Journal producers and drain accepted writes through the existing
+   `_stop_evidence_producers()` / `_drain_evidence()` machinery.
+3. Validate final commit authority and confirm the terminal singleton.
+4. Capture the Evidence Receipt's sequence boundary and event count.
+5. Persist the Evidence Seal.
+6. Release the finalizing barrier, then publish SSE END.
+
+`finish_evidence(before_receipt=...)` holds the Journal operation lock through
+freeze/drain, terminal confirmation, and Receipt capture, serializing normal
+flush/close. All accepted, confirmed Journal evidence precedes a new terminal
+event. Unfinished or UNKNOWN writes prohibit publication and complete sealing;
+only proven-not-committed Journal batches may be retried. Force close invalidates
+bounds even during Receipt capture. Preserve the existing cancellation and
+quarantine behavior rather than replaying an unsettled batch.
+
+The confirmed event must lie inside the Seal's captured boundary. An event
+appended later cannot be claimed as covered by an earlier Seal; an event alone
+does not prove complete evidence. Barrier release before END preserves immediate
+next-message admission, including when later cleanup is slow.
+
+### Idempotence and Failure Semantics
+
+Confirmation validates the returned event's identity, category, status, version,
+required field types, positive sequence, and database user ownership:
+
+| Outcome | Observation and behavior |
+| --- | --- |
+| `CONFIRMED_NEW` | Insertion is confirmed and the returned event matches; Receipt capture may proceed. |
+| `CONFIRMED_EXISTING` | The existing event itself matches; accept idempotently and preserve its sequence and original source marker. |
+| `CONFLICT` | Identity or protocol fields contradict expectations or are malformed; record the conflict, do not overwrite, and do not seal as complete. |
+| `UNKNOWN` | The operation outcome cannot be established; preserve uncertainty and do not seal as complete. |
+
+`created=False` alone proves neither success nor conflict. Additional optional
+metadata may differ without conflicting. At most two atomic singleton attempts
+resolve a lost ACK while final authority remains valid; this bounded confirmation
+never replays a quarantined Journal batch. Cancellation cannot authorize a Receipt.
+
+Publication or Seal failure cannot rewrite the acknowledged Run business status.
+A confirmed event may remain stored with partial evidence if sealing fails.
+Event-write failure must preserve normal SSE completion and existing `/stream`
+and `/wait` missing-stream fallbacks, including Memory Event Store loss after
+restart. Terminal singleton confirmation does not deduplicate Redis END.
+
+### Compatibility and Storage Guarantees
+
+Historical sealed evidence without `run.terminal` remains valid under its original
+coverage contract. Consumers claiming this protocol must validate the event
+inside the captured boundary; a code upgrade or Seal state alone is insufficient.
+Later recovery appends do not silently upgrade that historical coverage.
+
+Confirmation is limited to the Store's declared failure and concurrency model:
+
+| Backend | Guarantee boundary |
+| --- | --- |
+| Memory | One event loop/process lifetime; no persistence across restart. |
+| JSONL | File-backed within the declared single-process mutation boundary; no multi-process guarantee. |
+| SQLite | Database-backed confirmation with per-thread in-process serialization; this does not establish PostgreSQL or multi-Gateway concurrency semantics. |
+| PostgreSQL | Database-backed confirmation with per-thread transaction advisory locking across independent connections/processes; concurrency validation requires real sessions. |
+
+Singleton insertion and RunRow terminal commit are separate transactions. A crash
+between them can leave a terminal Run without an event. Recovery publication,
+takeover backfill, historical migration, and durable outbox/reconciliation are
+outside the current owner-side implementation; eventual evidence after every
+terminal commit is not guaranteed. Missing events must not gate SSE recovery.
 
 ## Producers
 
@@ -185,10 +258,10 @@ nested representation is not currently identical across storage backends:
   `json.dumps(default=str)`, so nested values that are not directly JSON
   serializable are read back as strings.
 
-Consumers may use `run.end` as completion evidence, but must not depend on
-backend-identical nested output values. Normalizing those values would be a
-separate runtime compatibility change rather than part of this current-state
-contract.
+Consumers may use `run.end` as root-invocation completion evidence, but must
+not infer the final Run outcome or depend on backend-identical nested output
+values. Normalizing those values would be a separate runtime compatibility
+change rather than part of this current-state contract.
 
 `subagents/step_events.py::subagent_run_event()` maps streamed `task_*` chunks
 to persisted events. The worker batches them through `put_batch()`:

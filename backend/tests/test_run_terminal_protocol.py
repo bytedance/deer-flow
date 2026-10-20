@@ -2,7 +2,7 @@
 
 Pinned baseline: fee0cd0c180874325305e995197db99f03fa6a6f. These tests
 exercise owner-side run.terminal publication through actual finalization.
-See docs/run-terminal-protocol.md for the protocol and test scope.
+See backend/docs/RUN_EVENT_STREAM.md for the protocol.
 """
 
 from __future__ import annotations

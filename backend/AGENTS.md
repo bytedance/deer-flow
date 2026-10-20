@@ -4,11 +4,7 @@
 
 The LangGraph backend provides sandbox execution, persistent memory, subagent delegation, and extensible tools, isolated per thread.
 
-**Architecture**:
-- **Gateway API** (port 8001): REST API plus embedded LangGraph-compatible agent runtime
-- **Frontend** (port 3000): Next.js web interface
-- **Nginx** (port 2026): Unified reverse proxy entry point
-- **Provisioner** (port 8002, optional in Docker dev): Started only when sandbox is configured for provisioner/Kubernetes mode
+Service roles and ports: [root service topology](../AGENTS.md#service-topology).
 
 **Runtime**:
 - `make dev`, Docker dev, and production all run the agent runtime in Gateway via `RunManager` + `run_agent()` + `StreamBridge` (`packages/harness/deerflow/runtime/`). Nginx exposes that runtime at `/api/langgraph/*` and rewrites it to Gateway's native `/api/*` routers.
@@ -26,36 +22,12 @@ The LangGraph backend provides sandbox execution, persistent memory, subagent de
 - Gateway MCP/skill updates write `extensions_config.json` at runtime. Production Compose mounts it read-write (`config.yaml` stays `:ro`); Helm seeds a writable home-volume copy. Hold both `extensions_config_write_lock` and the sidecar advisory `extensions_config_file_lock` during read-modify-write to prevent lost updates across workers. `atomic_write_extensions_config` uses temp-file replacement; only mount-point `EBUSY` permits a non-atomic in-place overwrite (crashes can truncate). Warn about this fallback once per target; propagate other errors. `get_extensions_config()` revalidates reads by file signature; see [config caching](packages/harness/deerflow/config/AGENTS.md). Tests: `tests/test_compose_extensions_config_writable.py`, `tests/test_extensions_config_atomic_write.py`, `tests/test_helm_extensions_config_writable.py`.
 - MCP cache reset scope and discovery fencing: [MCP guide](packages/harness/deerflow/mcp/AGENTS.md).
 
-**Project Structure** (backend/ subtree; the root guide maps the full repo):
-```
-backend/
-├── Makefile                    # Backend-only commands (dev, gateway, lint)
-├── langgraph.json              # LangGraph Studio graph configuration
-├── packages/
-│   ├── extension-api/          # public, host-independent extension contracts (import: deerflow_extension_api.*)
-│   └── harness/                # deerflow-harness package (import: deerflow.*)
-│       └── deerflow/
-│           ├── agents/         # LangGraph agent system (lead_agent/, middlewares/ — see Middleware Chain, memory/, thread_state.py)
-│           ├── sandbox/        # Sandbox execution system
-│           ├── subagents/      # Subagent delegation (builtins/, executor.py, registry.py)
-│           ├── tools/builtins/ # Built-in tools (present_files, ask_clarification, view_image, review_skill_package)
-│           ├── mcp/            # MCP integration (tools, cache, client)
-│           ├── integrations/   # Managed first-party integration installers (e.g. Lark CLI skill pack)
-│           ├── extensions/     # Python plugin loader, registry, placement, and isolation
-│           ├── models/         # Model factory with thinking/vision support
-│           ├── skills/         # Skills discovery, loading, parsing
-│           ├── config/         # Configuration system
-│           ├── community/      # Community tools (search/fetch/scrape, image search, AIO sandbox)
-│           ├── reflection/     # Dynamic module loading (resolve_variable, resolve_class)
-│           ├── utils/          # Utilities (network, readability)
-│           └── client.py       # Embedded Python client (DeerFlowClient)
-├── app/                        # Application layer (import: app.*)
-│   ├── gateway/                # FastAPI Gateway API (app.py, routers/)
-│   └── channels/               # IM platform integrations
-├── scripts/benchmark/          # Standalone reproducible backend benchmarks
-├── tests/                      # Test suite
-└── docs/                       # Documentation
-```
+**Project structure:** The [root repository map](../AGENTS.md#repository-map)
+indexes the stack. Backend code lives in `app/` (Gateway and channels),
+`packages/harness/deerflow/` (agent runtime), and `packages/extension-api/`
+(public extension contracts). Tests, detailed docs, and standalone benchmarks
+live in `tests/`, `docs/`, and `scripts/benchmark/` respectively. Module-local
+`AGENTS.md` files describe their implementation boundaries.
 
 ## Important Development Guidelines
 
@@ -229,20 +201,6 @@ only `AUTH_SOURCE_INTERNAL` run input may retain them.
 - Tests must pass before a feature is considered complete
 - For lightweight config/utility modules, prefer pure unit tests with no external dependencies
 - If a module causes circular import issues in tests, add a `sys.modules` mock in `tests/conftest.py` (see existing example for `deerflow.subagents.executor`)
-
-```bash
-# Four duration-balanced offline shards
-make test
-
-# Run strict blocking-I/O tests
-make test-blocking-io
-
-# Live API tests: require config.yaml, credentials, and explicit opt-in
-make test-live
-
-# Run a specific test file
-PYTHONPATH=. uv run pytest tests/test_<feature>.py -v
-```
 
 Keep live tests opt-in via `DEER_FLOW_RUN_LIVE_TESTS=1`; guard POSIX-only
 markers with `os.name` for Windows collection.
