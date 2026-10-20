@@ -1,6 +1,12 @@
 import type { AIMessage, Message } from "@langchain/langgraph-sdk";
 
 import {
+  parseScheduleToolResult,
+  SCHEDULE_TASK_TOOL_NAME,
+  type ScheduleToolResult,
+} from "@/core/scheduled-tasks/tool-result";
+import type { ScheduledOrigin } from "@/core/scheduled-tasks/types";
+import {
   FENCE_MARKER_RE,
   INDENTED_CODE_RE,
   isClosingFence,
@@ -12,7 +18,13 @@ interface GenericMessageGroup<T = string> {
   messages: Message[];
 }
 
-interface HumanMessageGroup extends GenericMessageGroup<"human"> {}
+interface HumanMessageGroup extends GenericMessageGroup<"human"> {
+  /**
+   * Set when the human message is a scheduled launch: the host-written prompt
+   * is replaced by these user-language parts, and the message is not editable.
+   */
+  scheduledOrigin?: ScheduledOrigin;
+}
 
 interface AssistantProcessingGroup extends GenericMessageGroup<"assistant:processing"> {}
 
@@ -24,13 +36,82 @@ interface AssistantClarificationGroup extends GenericMessageGroup<"assistant:cla
 
 interface AssistantSubagentGroup extends GenericMessageGroup<"assistant:subagent"> {}
 
+/**
+ * A `schedule_task` result shown as a live card. Like a clarification it is a
+ * standalone copy of a tool message that also stays in its processing group;
+ * unlike a clarification it is not a turn boundary.
+ */
+interface AssistantScheduledTaskGroup extends GenericMessageGroup<"assistant:scheduled-task"> {
+  scheduleResult: ScheduleToolResult;
+}
+
 export type MessageGroup =
   | HumanMessageGroup
   | AssistantProcessingGroup
   | AssistantMessageGroup
   | AssistantPresentFilesGroup
   | AssistantClarificationGroup
-  | AssistantSubagentGroup;
+  | AssistantSubagentGroup
+  | AssistantScheduledTaskGroup;
+
+/**
+ * `additional_kwargs` key of a scheduled launch's human message. Pinned as
+ * `scheduled_origin_key` in `contracts/scheduled_goal_notes_contract.json`
+ * (backend `SCHEDULED_ORIGIN_KEY`).
+ */
+export const SCHEDULED_ORIGIN_KEY = "deerflow_scheduled_origin";
+
+function stringOr<T>(value: unknown, fallback: T): string | T {
+  return typeof value === "string" ? value : fallback;
+}
+
+/** The scheduled-launch origin of a human message, or null for ordinary input. */
+export function scheduledOriginOf(message: Message): ScheduledOrigin | null {
+  if (message.type !== "human") {
+    return null;
+  }
+  const raw: unknown = message.additional_kwargs?.[SCHEDULED_ORIGIN_KEY];
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return null;
+  }
+  const origin = raw as Record<string, unknown>;
+  if (typeof origin.task_id !== "string" || !origin.task_id) {
+    return null;
+  }
+  return {
+    task_id: origin.task_id,
+    task_run_id: stringOr(origin.task_run_id, ""),
+    trigger: origin.trigger === "manual" ? "manual" : "scheduled",
+    run_number:
+      typeof origin.run_number === "number" ? origin.run_number : null,
+    scheduled_for: stringOr(origin.scheduled_for, ""),
+    timezone: stringOr(origin.timezone, ""),
+    schedule_type:
+      origin.schedule_type === "once" ||
+      origin.schedule_type === "cron" ||
+      origin.schedule_type === "interval"
+        ? origin.schedule_type
+        : null,
+    task_title: stringOr(origin.task_title, ""),
+    instructions: stringOr(origin.instructions, ""),
+    stop_condition: stringOr(origin.stop_condition, null),
+    standing_notes: Array.isArray(origin.standing_notes)
+      ? origin.standing_notes.filter(
+          (note): note is string => typeof note === "string",
+        )
+      : [],
+  };
+}
+
+/** A `schedule_task` tool message whose result renders as a card. */
+export function scheduleCardResultOf(
+  message: Message,
+): ScheduleToolResult | null {
+  if (message.type !== "tool" || message.name !== SCHEDULE_TASK_TOOL_NAME) {
+    return null;
+  }
+  return parseScheduleToolResult(message.content);
+}
 
 const HIDDEN_CONTROL_MESSAGE_NAMES = new Set([
   "summary",
@@ -54,8 +135,14 @@ export function getMessageGroups(
 
   // Returns the last group if it can still accept tool messages
   // (i.e. it's an in-flight processing group, not a terminal human/assistant group).
+  // A schedule card sits after its processing group while sibling tool results
+  // of the same AI message may still arrive, so look past it.
   function lastOpenGroup() {
-    const last = groups[groups.length - 1];
+    let index = groups.length - 1;
+    while (groups[index]?.type === "assistant:scheduled-task") {
+      index -= 1;
+    }
+    const last = groups[index];
     if (
       last &&
       last.type !== "human" &&
@@ -73,11 +160,22 @@ export function getMessageGroups(
     }
 
     if (message.type === "human") {
-      groups.push({ id: message.id, type: "human", messages: [message] });
+      const scheduledOrigin = scheduledOriginOf(message);
+      groups.push(
+        scheduledOrigin
+          ? {
+              id: message.id,
+              type: "human",
+              messages: [message],
+              scheduledOrigin,
+            }
+          : { id: message.id, type: "human", messages: [message] },
+      );
       continue;
     }
 
     if (message.type === "tool") {
+      const scheduleResult = scheduleCardResultOf(message);
       if (isClarificationToolMessage(message)) {
         // Add to the preceding processing group to preserve tool-call association,
         // then also open a standalone clarification group for prominent display.
@@ -86,6 +184,30 @@ export function getMessageGroups(
           id: message.id,
           type: "assistant:clarification",
           messages: [message],
+        });
+      } else if (scheduleResult) {
+        // Same association rule as clarifications: the step stays in its
+        // processing group and the card is a standalone group after it.
+        const open = lastOpenGroup();
+        if (open) {
+          open.messages.push(message);
+        }
+        // One card per task within an assistant turn: the latest result wins.
+        for (let index = groups.length - 1; index >= 0; index -= 1) {
+          const group = groups[index]!;
+          if (group.type === "human") break;
+          if (
+            group.type === "assistant:scheduled-task" &&
+            group.scheduleResult.task.id === scheduleResult.task.id
+          ) {
+            groups.splice(index, 1);
+          }
+        }
+        groups.push({
+          id: message.id,
+          type: "assistant:scheduled-task",
+          messages: [message],
+          scheduleResult,
         });
       } else {
         const open = lastOpenGroup();
@@ -288,6 +410,10 @@ export function getLatestEditableTurn(
 
     if (
       currentHumanGroup &&
+      // A scheduled launch's prompt belongs to the task, not to the user.
+      !(
+        currentHumanGroup.type === "human" && currentHumanGroup.scheduledOrigin
+      ) &&
       lastAIGroup?.type === "assistant" &&
       humanMessage &&
       isTerminalAssistantTextMessage(assistantMessage)

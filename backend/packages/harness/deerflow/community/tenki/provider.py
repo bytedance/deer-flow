@@ -330,11 +330,12 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
         # Best-effort: on failure the file APIs still work via the home remap.
         try:
             result = remote.exec("sh", "-lc", _bootstrap_script(self._config["home_dir"]), timeout=_BOOTSTRAP_TIMEOUT)
-            if result.exit_code not in (0, None) or "BOOTSTRAP_OK" not in (result.stdout_text or ""):
+            if result.timed_out or result.exit_code not in (0, None) or "BOOTSTRAP_OK" not in (result.stdout_text or ""):
                 logger.warning(
-                    "Tenki bootstrap for %s exited code=%s stderr=%s",
+                    "Tenki bootstrap for %s exited code=%s timed_out=%s stderr=%s",
                     sandbox_id,
                     result.exit_code,
+                    result.timed_out,
                     (result.stderr_text or "").strip(),
                 )
         except Exception as e:
@@ -386,7 +387,7 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
             if self._shutdown_called:
                 close_sandbox = sandbox
             else:
-                self._warm_pool[sandbox_id] = (sandbox, time.time())
+                self._warm_pool[sandbox_id] = (sandbox, time.monotonic())
 
         if close_sandbox is not None:
             self._close_quietly(close_sandbox, context="released during shutdown")
@@ -407,7 +408,12 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
 
         try:
             result = sandbox.execute_command("echo ok", timeout=10)
-            healthy = "ok" in result
+            # Login-shell profiles can add stdout/stderr around the probe marker.
+            # Keep rejecting adapter failure diagnostics even if "ok" was printed.
+            lines = result.splitlines()
+            healthy = "ok" in lines and not any(line.startswith(("Error:", "Exit Code:")) for line in lines)
+            if not healthy:
+                logger.warning("Tenki warm-pool sandbox %s health check failed: %s", sandbox_id, result)
         except Exception as e:
             logger.warning("Tenki warm-pool sandbox %s health check error: %s", sandbox_id, e)
             healthy = False
@@ -437,7 +443,7 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
         instance's idle reaper and atexit shutdown instead of orphaning them.
         """
         with self._lock:
-            now = time.time()
+            now = time.monotonic()
             for sandbox_id, sandbox in self._sandboxes.items():
                 self._warm_pool.setdefault(sandbox_id, (sandbox, now))
             self._sandboxes.clear()
@@ -450,7 +456,12 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
                 return
             self._shutdown_called = True
 
-        self._stop_idle_checker()
+        try:
+            self._stop_idle_checker()
+        except Exception:
+            with self._lock:
+                self._shutdown_called = False
+            raise
 
         with self._lock:
             active = list(self._sandboxes.values())

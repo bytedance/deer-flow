@@ -9,6 +9,41 @@ import {
 } from "@/core/knowledge/scope";
 
 describe("knowledge scope snapshots", () => {
+  test("preserves 256-code-point dataset and document ids and rejects 257", () => {
+    const selection = (
+      datasetId: string,
+      documentId: string,
+    ): KnowledgeScopeSelection => ({
+      mode: "selected",
+      datasets: [
+        {
+          id: datasetId,
+          name: "Dataset",
+          documents: {
+            mode: "selected",
+            items: [{ id: documentId, name: "Document" }],
+          },
+        },
+      ],
+    });
+    const datasetId = "界".repeat(256);
+    const documentId = "😀".repeat(256);
+    const snapshot = buildKnowledgeScopeSnapshot(
+      selection(datasetId, documentId),
+    );
+    expect(snapshot.dataset_ids).toEqual([datasetId]);
+    expect(snapshot.document_filters).toEqual([
+      { dataset_id: datasetId, document_ids: [documentId] },
+    ]);
+    expect(readKnowledgeScopeSnapshot(snapshot)).toEqual(snapshot);
+    for (const invalid of [
+      selection(datasetId + "界", documentId),
+      selection(datasetId, documentId + "😀"),
+    ]) {
+      expect(() => buildKnowledgeScopeSnapshot(invalid)).toThrow();
+    }
+  });
+
   test("builds selected datasets and file filters with bounded display labels", () => {
     const snapshot = buildKnowledgeScopeSnapshot({
       mode: "selected",

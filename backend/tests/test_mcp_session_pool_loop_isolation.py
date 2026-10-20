@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from deerflow.mcp.session_pool import MCPSessionPool
+from deerflow.mcp.session_pool import MCPSessionPool, call_pooled_session_tool
 from deerflow.tools.sync import make_sync_tool_wrapper
 
 
@@ -92,7 +92,7 @@ def test_owner_completion_does_not_remove_a_replacement(loop_pool):
 
     async def replace():
         await pool.get_session("s", "u:t", {})
-        key = ("s", "u:t", asyncio.get_running_loop())
+        key = ("s", "u:t", asyncio.get_running_loop(), "deployment")
         old_owner = pool._entries[key][2]
         await pool.close_session("s", "u:t")
         replacement = await pool.get_session("s", "u:t", {})
@@ -100,6 +100,48 @@ def test_owner_completion_does_not_remove_a_replacement(loop_pool):
         assert await pool.get_session("s", "u:t", {}) is replacement
 
     run(0, replace())
+
+
+@pytest.mark.parametrize("capacity", [1, 2])
+def test_capacity_pressure_on_foreign_loop_preserves_active_call(loop_pool, capacity):
+    pool, run, closed = loop_pool
+    pool.MAX_SESSIONS = capacity
+    active = run(0, pool.get_session("s", "u:t", {}))
+    idle = run(1, pool.get_session("s", "u:t", {})) if capacity == 2 else None
+    started = threading.Event()
+
+    async def start():
+        release = asyncio.Event()
+
+        async def slow(*args, **kwargs):
+            started.set()
+            await release.wait()
+            return "finished"
+
+        active.call_tool.side_effect = slow
+        task = asyncio.create_task(call_pooled_session_tool(active, pool, server_name="s", scope_key="u:t", tool_name="slow", arguments={}, call_kwargs={}))
+        return release, task
+
+    release, task = run(0, start())
+
+    async def finish():
+        release.set()
+        return await task
+
+    try:
+        assert started.wait(5)
+        if idle is not None:
+            run(1, pool.get_session("s", "new", {}))
+            assert idle in closed
+        else:
+            with pytest.raises(RuntimeError, match="capacity"):
+                run(1, pool.get_session("s", "new", {}))
+            assert not pool._inflight
+        assert active not in closed
+        assert run(0, finish()) == "finished"
+        assert not pool._active_calls
+    finally:
+        run(0, finish())
 
 
 @pytest.mark.parametrize("retirement", ["lru", "explicit"])
@@ -114,7 +156,7 @@ def test_abandoned_closed_loop_entry_can_be_retired(loop_pool, retirement):
     closed_loop.close()
     owner = MagicMock(spec=asyncio.Task)
     owner.done.return_value = False
-    key = ("s", "u:t", closed_loop)
+    key = ("s", "u:t", closed_loop, "deployment")
     pool._entries[key] = (MagicMock(), closed_loop, owner, asyncio.Event())
     pool.MAX_SESSIONS = 1
     if retirement == "explicit":

@@ -6,6 +6,8 @@ from typing import Any
 
 import httpx
 
+from deerflow.community.provider_credentials import redact_secret
+
 QUERY_MODES = ("naive", "local", "global", "hybrid", "mix")
 
 
@@ -49,10 +51,7 @@ class LightRAGClient:
         self._transport = transport
 
     def _redact(self, value: object) -> str:
-        text = str(value)
-        if self._api_key:
-            text = text.replace(self._api_key, "[REDACTED]")
-        return text
+        return redact_secret(value, self._api_key)
 
     def _error_message(self, payload: object, status_code: int) -> str | None:
         """Extract a redacted, human-readable message from an error payload.

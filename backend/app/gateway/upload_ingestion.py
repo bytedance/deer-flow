@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import HTTPException
 
 from deerflow.config.app_config import AppConfig
+from deerflow.uploads.companions import register_companion, unregister_companion
 from deerflow.utils.file_io import await_drained, run_file_io
 
 if TYPE_CHECKING:
@@ -154,6 +155,7 @@ class ThreadUploadIngestionService:
         self._auto_convert = False
         self._seen_filenames: set[str] = set()
         self._written_paths: list[Path] = []
+        self._companion_pairs: list[tuple[Path, Path]] = []
         self._sync_targets: list[tuple[Path, str]] = []
         self._total_size = 0
 
@@ -378,6 +380,7 @@ class ThreadUploadIngestionService:
                 if self._sync_to_sandbox:
                     self._sync_targets.append((md_path, md_virtual_path))
                 file_info["markdown_file"] = md_path.name
+                self._companion_pairs.append((file_path, md_path))
                 file_info["markdown_path"] = str(self._uploads_dir / md_path.name)
                 file_info["markdown_virtual_path"] = md_virtual_path
                 file_info["markdown_artifact_url"] = uploads.upload_artifact_url(self._thread_id, md_path.name)
@@ -403,6 +406,10 @@ class ThreadUploadIngestionService:
         if self._sync_to_sandbox and self._sandbox is not None:
             for file_path, virtual_path in self._sync_targets:
                 await run_file_io(uploads._sync_upload_to_sandbox, self._sandbox, file_path, virtual_path)
+        # Record the final inode/version only after sandbox-readable chmod and
+        # any synchronization have completed; chmod changes st_ctime_ns.
+        for original, markdown in self._companion_pairs:
+            await run_file_io(register_companion, original, markdown)
 
     async def cleanup_written(self) -> None:
         """Remove every file this session wrote (ordinary rejected-request cleanup)."""
@@ -410,6 +417,9 @@ class ThreadUploadIngestionService:
             return
         uploads = _uploads()
         await run_file_io(uploads._cleanup_uploaded_paths, self._written_paths)
+        for original, _ in self._companion_pairs:
+            await run_file_io(unregister_companion, original)
+        self._companion_pairs = []
         self._written_paths = []
 
     async def aclose(self) -> None:

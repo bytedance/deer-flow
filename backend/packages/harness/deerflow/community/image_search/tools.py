@@ -8,32 +8,16 @@ import logging
 
 from langchain.tools import tool
 
+from deerflow.community.search_max_results import DEFAULT_MAX_RESULTS, coerce_max_results
+from deerflow.community.url_safety import safe_public_result_url
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MAX_RESULTS = 5
-
-
-def _coerce_max_results(value: object) -> int:
-    """Normalize config/parameter values before passing them to DDGS."""
-    if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
-        # int() accepts booleans and silently truncates a YAML value such as 3.5.
-        count = 0
-    else:
-        try:
-            count = int(value)  # type: ignore[call-overload]
-        except (TypeError, ValueError, OverflowError):
-            count = 0
-    if count <= 0:
-        logger.warning("Invalid DDG image search max_results=%r; using default %s", value, DEFAULT_MAX_RESULTS)
-        return DEFAULT_MAX_RESULTS
-    return count
-
 
 def _search_images(
     query: str,
-    max_results: int = 5,
+    max_results: int = DEFAULT_MAX_RESULTS,
     region: str = "wt-wt",
     safesearch: str = "moderate",
     size: str | None = None,
@@ -96,7 +80,7 @@ def _search_images(
 @tool("image_search", parse_docstring=True)
 async def image_search_tool(
     query: str,
-    max_results: int = 5,
+    max_results: int = DEFAULT_MAX_RESULTS,
     size: str | None = None,
     color: str | None = None,
     type_image: str | None = None,
@@ -136,7 +120,7 @@ async def image_search_tool(
 
         return _search_images(
             query=query,
-            max_results=_coerce_max_results(resolved_max_results),
+            max_results=coerce_max_results(resolved_max_results, provider="DDG image search", logger=logger),
             size=size,
             color=color,
             type_image=type_image,
@@ -149,14 +133,26 @@ async def image_search_tool(
     if not results:
         return json.dumps({"error": "No images found", "query": query}, ensure_ascii=False)
 
-    normalized_results = [
-        {
-            "title": r.get("title", ""),
-            "image_url": r.get("image", ""),
-            "thumbnail_url": r.get("thumbnail", ""),
-        }
-        for r in results
-    ]
+    normalized_results = []
+    for row in results:
+        if not isinstance(row, dict):
+            continue
+        image_url = safe_public_result_url(row.get("image"))
+        thumbnail_url = safe_public_result_url(row.get("thumbnail"))
+        if not image_url and not thumbnail_url:
+            continue
+        title = row.get("title")
+        normalized_results.append(
+            {
+                "title": title if isinstance(title, str) else "",
+                "image_url": image_url,
+                "thumbnail_url": thumbnail_url,
+                "source_url": safe_public_result_url(row.get("url")),
+            }
+        )
+
+    if not normalized_results:
+        return json.dumps({"error": "No safe image URLs found", "query": query}, ensure_ascii=False)
 
     output = {
         "query": query,

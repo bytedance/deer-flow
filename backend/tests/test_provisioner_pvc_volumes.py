@@ -792,17 +792,13 @@ class TestLarkCliBrokerSidecar:
             ),
         ]
 
-    def test_no_sidecar_when_broker_image_unset(self, provisioner_module):
+    def test_broker_request_rejected_when_image_unset(self, provisioner_module):
         provisioner_module.SKILLS_PVC_NAME = ""
         provisioner_module.USERDATA_PVC_NAME = ""
         provisioner_module.LARK_CLI_BROKER_IMAGE = ""
-        pod = provisioner_module._build_pod(
-            "sandbox-1",
-            "thread-1",
-            provision_lark_cli_broker=True,
-        )
-        container_names = {c.name for c in pod.spec.containers}
-        assert "lark-cli-broker" not in container_names
+        with pytest.raises(provisioner_module.HTTPException) as error:
+            provisioner_module._build_pod("sandbox-1", "thread-1", provision_lark_cli_broker=True)
+        assert error.value.status_code == 503
 
     def test_no_sidecar_when_flag_disabled(self, provisioner_module):
         provisioner_module.SKILLS_PVC_NAME = ""

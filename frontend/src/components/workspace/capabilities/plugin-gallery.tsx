@@ -77,6 +77,7 @@ export function PluginGallery({ query }: { query: string }) {
   const labels = capabilityCopy(locale);
   const { user } = useAuth();
   const canManage = !!user && !isStaticWebsiteOnly();
+  const canManagePlatform = canManage && user?.system_role === "admin";
   const directory = useCapabilityCatalog();
   const definitions = directory.data ?? [];
   const adapterNames = [
@@ -175,9 +176,10 @@ export function PluginGallery({ query }: { query: string }) {
         ),
       });
     });
-  // Deployment entries remain read-only; the editor manages personal connections.
+  // Non-admins receive only the sanitized deployment installation projection.
   for (const item of installations.filter(
-    (item) => item.adapter === "mcp" && item.scope !== "user",
+    (item) =>
+      !canManagePlatform && item.adapter === "mcp" && item.scope !== "user",
   )) {
     const manifest = definitions.find((plugin) => plugin.id === item.plugin_id);
     platformCatalog.push({
@@ -267,12 +269,24 @@ export function PluginGallery({ query }: { query: string }) {
           </h2>
           <p className="text-muted-foreground text-sm">{labels.platformHint}</p>
         </div>
-        <PluginDirectory
-          query={query}
-          category={category}
-          installedOnly={filter === "installed"}
-          entries={platformCatalog}
-        />
+        {canManagePlatform ? (
+          <MCPPluginManager
+            key={`deployment:${user?.id}`}
+            scope="deployment"
+            query={query}
+            category={category}
+            installedOnly={filter === "installed"}
+            catalog={platformCatalog}
+            definitions={definitions}
+          />
+        ) : (
+          <PluginDirectory
+            query={query}
+            category={category}
+            installedOnly={filter === "installed"}
+            entries={platformCatalog}
+          />
+        )}
       </section>
       <section
         aria-labelledby="personal-plugins-heading"

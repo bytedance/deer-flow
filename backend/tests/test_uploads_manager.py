@@ -1,9 +1,12 @@
 """Tests for deerflow.uploads.manager — shared upload management logic."""
 
 import errno
+import logging
 import os
 import shutil
 import stat
+import time
+from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
@@ -11,14 +14,17 @@ import pytest
 from deerflow.uploads.manager import (
     PathTraversalError,
     UnsafeUploadPathError,
+    _staging_name_shares_inode_with_sibling,
     apply_upload_sandbox_permits,
     claim_unique_filename,
     cleanup_stale_upload_staging_files,
+    copy_upload_file_no_replace,
     copy_upload_file_no_symlink,
     delete_file_safe,
     list_files_in_dir,
     normalize_filename,
     validate_path_traversal,
+    validate_upload_destination,
     write_upload_file_no_symlink,
 )
 
@@ -78,6 +84,53 @@ class TestNormalizeFilename:
         with pytest.raises(ValueError, match="NUL"):
             normalize_filename("report\x00.pdf")
 
+    @pytest.mark.parametrize("filename", [".upload-notes.part", ".upload-.part", "folder/.upload-notes.part"])
+    def test_rejects_reserved_staging_names(self, filename):
+        with pytest.raises(ValueError, match="reserved upload staging"):
+            normalize_filename(filename)
+
+    @pytest.mark.parametrize("filename", [".upload-notes.txt", "notes.part", ".env", ".UPLOAD-notes.txt", "notes.PART"])
+    def test_keeps_non_staging_names(self, filename):
+        assert normalize_filename(filename) == filename
+
+    def test_reserved_name_rejected_before_writing_upload(self, tmp_path):
+        with pytest.raises(ValueError, match="reserved upload staging"):
+            write_upload_file_no_symlink(tmp_path, ".upload-notes.part", b"user document")
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.parametrize(
+        "filename",
+        ["CON", "con.txt", "PRN", "AUX", "NUL", "COM1", "COM9", "LPT1", "LPT9", "COM¹", "com².txt", "COM³.log", "LPT¹", "lpt².md", "LPT³.pdf", "file.txt.", "file.txt ", "a.", "folder/CON"],
+    )
+    def test_rejects_windows_incompatible_names(self, filename):
+        with pytest.raises(ValueError, match="not portable to Windows"):
+            normalize_filename(filename)
+
+    @pytest.mark.parametrize("filename", ["CONIN$", "conin$", "CONOUT$", "conout$", "CONIN$.txt", "folder/CONOUT$.log"])
+    def test_rejects_windows_console_device_names(self, filename):
+        with pytest.raises(ValueError, match="reserved Windows device name"):
+            normalize_filename(filename)
+
+    @pytest.mark.parametrize("filename", ["NUL .txt", "con  .log", "COM1 .txt", "lpt²  .md", "CONIN$ .txt", "conout$  .log"])
+    def test_rejects_windows_device_names_with_spaces_before_extension(self, filename):
+        with pytest.raises(ValueError, match="reserved Windows device name"):
+            normalize_filename(filename)
+
+    @pytest.mark.parametrize("filename", ["report .txt", "NULnotes .txt", "COM¹notes .txt", "NUL\u00a0.txt"])
+    def test_preserves_spaces_in_ordinary_filename_stems(self, filename):
+        assert normalize_filename(filename) == filename
+
+    @pytest.mark.parametrize("filename", ["CONIN", "CONOUT", "CONIN$notes.txt", "CONOUT$notes.log"])
+    def test_allows_names_resembling_console_devices(self, filename):
+        assert normalize_filename(filename) == filename
+
+    @pytest.mark.parametrize("filename", ["report.pdf", "contour.txt", "console.log", "COM0", "COM10", "COM⁴.txt", "LPT⁵", "COM¹notes.txt", "LPT²0.md", ".gitignore"])
+    def test_allows_portable_names(self, filename):
+        assert normalize_filename(filename) == filename
+
+    def test_reserved_parent_is_stripped_with_the_directory(self):
+        assert normalize_filename("CON/notes.md") == "notes.md"
+
 
 # ---------------------------------------------------------------------------
 # claim_unique_filename
@@ -94,6 +147,11 @@ class TestDeduplicateFilename:
         seen = {"data.txt"}
         assert claim_unique_filename("data.txt", seen) == "data_1.txt"
         assert "data_1.txt" in seen
+
+    def test_case_insensitive_collision_including_suffix(self):
+        seen = {"Report.txt", "report_1.TXT"}
+        assert claim_unique_filename("report.txt", seen) == "report_2.txt"
+        assert "report_2.txt" in seen
 
     def test_triple_collision(self):
         seen = {"data.txt", "data_1.txt", "data_2.txt"}
@@ -177,6 +235,51 @@ class TestValidatePathTraversal:
 
 
 class TestWriteUploadFileNoSymlink:
+    @pytest.mark.parametrize("without_nofollow", [False, True])
+    def test_exclusive_write_treats_existing_hardlink_as_collision(self, tmp_path, monkeypatch, without_nofollow):
+        if without_nofollow:
+            monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+        source = tmp_path / "source.txt"
+        source.write_bytes(b"existing upload")
+        os.link(source, tmp_path / "notes.txt")
+
+        with pytest.raises(FileExistsError):
+            write_upload_file_no_symlink(tmp_path, "notes.txt", b"new attachment", exclusive=True)
+        # The default replacement path still rejects hardlinks outright, where the
+        # platform maintains a trustworthy link count. Windows keeps a published
+        # upload at ``st_nlink == 2`` forever, so the replacement overwrites the
+        # destination (and, being a hard link, ``source`` with it).
+        if os.name == "nt":
+            assert write_upload_file_no_symlink(tmp_path, "notes.txt", b"replacement").read_bytes() == b"replacement"
+            assert source.read_bytes() == b"replacement"
+        else:
+            with pytest.raises(UnsafeUploadPathError, match="multiple links"):
+                write_upload_file_no_symlink(tmp_path, "notes.txt", b"replacement")
+            assert source.read_bytes() == b"existing upload"
+            assert (tmp_path / "notes.txt").read_bytes() == b"existing upload"
+
+    @pytest.mark.parametrize("without_nofollow", [False, True])
+    def test_exclusive_write_preserves_existing_file(self, tmp_path, monkeypatch, without_nofollow):
+        if without_nofollow:
+            monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+        dest = tmp_path / "notes.txt"
+        dest.write_bytes(b"previous upload")
+
+        with pytest.raises(FileExistsError):
+            write_upload_file_no_symlink(tmp_path, "notes.txt", b"new attachment", exclusive=True)
+
+        assert dest.read_bytes() == b"previous upload"
+
+    @pytest.mark.parametrize("without_nofollow", [False, True])
+    def test_exclusive_write_creates_new_file(self, tmp_path, monkeypatch, without_nofollow):
+        if without_nofollow:
+            monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+
+        dest = write_upload_file_no_symlink(tmp_path, "notes.txt", b"new attachment", exclusive=True)
+
+        assert dest == tmp_path / "notes.txt"
+        assert dest.read_bytes() == b"new attachment"
+
     def test_writes_new_file(self, tmp_path):
         dest = write_upload_file_no_symlink(tmp_path, "notes.txt", b"hello")
 
@@ -202,6 +305,23 @@ class TestWriteUploadFileNoSymlink:
         result = write_upload_file_no_symlink(tmp_path, "notes.txt", b"hello")
         assert result == tmp_path / "notes.txt"
         assert (tmp_path / "notes.txt").read_bytes() == b"hello"
+
+    def test_exclusive_write_keeps_post_open_link_guard_without_no_follow(self, tmp_path, monkeypatch):
+        """Without ``O_NOFOLLOW`` (the Windows fallback branch), the exclusive
+        path keeps its strict post-open single-link check: a file that opens
+        with more than one link is rejected on every platform. Only the
+        non-exclusive replacement path defers to the Windows-aware guard."""
+        monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+        real_fstat = os.fstat
+
+        def twin_linked_fstat(fd):
+            st = real_fstat(fd)
+            return os.stat_result((st.st_mode, st.st_ino, st.st_dev, 2, st.st_uid, st.st_gid, st.st_size, st.st_atime, st.st_mtime, st.st_ctime))
+
+        monkeypatch.setattr(os, "fstat", twin_linked_fstat)
+
+        with pytest.raises(UnsafeUploadPathError, match="not an exclusive regular file"):
+            write_upload_file_no_symlink(tmp_path, "notes.txt", b"new attachment", exclusive=True)
 
     def test_open_uses_nonblocking_flag_when_available(self, tmp_path):
         if not hasattr(os, "O_NONBLOCK"):
@@ -257,6 +377,64 @@ class TestCopyUploadFileNoSymlink:
         dest = copy_upload_file_no_symlink(uploads, "notes.txt", src)
 
         assert dest.read_bytes() == b"new contents"
+
+    def test_no_replace_copy_preserves_existing_file_and_cleans_stage(self, tmp_path):
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
+        dest = uploads / "notes.txt"
+        dest.write_bytes(b"old contents")
+        src = tmp_path / "notes.txt"
+        src.write_bytes(b"new contents")
+
+        with pytest.raises(FileExistsError):
+            copy_upload_file_no_replace(uploads, "notes.txt", src)
+
+        assert dest.read_bytes() == b"old contents"
+        assert sorted(path.name for path in uploads.iterdir()) == ["notes.txt"]
+
+    def test_no_replace_copy_failure_removes_stage_without_publishing(self, tmp_path):
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
+        src = tmp_path / "notes.txt"
+        src.write_bytes(b"new contents")
+
+        def fail_copy(source, staged):
+            staged.write(b"partial")
+            raise OSError("copy failed")
+
+        with patch("deerflow.uploads.manager.shutil.copyfileobj", side_effect=fail_copy):
+            with pytest.raises(OSError, match="copy failed"):
+                copy_upload_file_no_replace(uploads, "notes.txt", src)
+
+        assert list(uploads.iterdir()) == []
+
+    def test_no_replace_copy_publishes_complete_file_and_preserves_metadata(self, tmp_path):
+        uploads = tmp_path / "threads" / "t1" / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        src = tmp_path / "notes.txt"
+        src.write_bytes(b"complete contents")
+        src.chmod(0o640)
+        old_time = time.time_ns() - 3 * 24 * 60 * 60 * 1_000_000_000
+        os.utime(src, ns=(old_time, old_time))
+        source_stat = src.stat()
+        real_link = os.link
+
+        def publish(staged, dest, **kwargs):
+            assert not dest.exists()
+            assert list_files_in_dir(uploads)["files"] == []
+            assert staged.read_bytes() == b"complete contents"
+            assert cleanup_stale_upload_staging_files(tmp_path) == 0
+            real_link(staged, dest, **kwargs)
+
+        with patch("deerflow.uploads.manager.os.link", side_effect=publish):
+            dest = copy_upload_file_no_replace(uploads, "notes.txt", src)
+
+        assert dest.read_bytes() == b"complete contents"
+        assert sorted(path.name for path in uploads.iterdir()) == ["notes.txt"]
+        if os.chmod in os.supports_fd:
+            assert stat.S_IMODE(dest.stat().st_mode) == stat.S_IMODE(source_stat.st_mode)
+        if os.utime in os.supports_fd:
+            assert dest.stat().st_mtime_ns == source_stat.st_mtime_ns
 
     def test_rejects_symlink_destination(self, tmp_path):
         uploads = tmp_path / "uploads"
@@ -323,6 +501,41 @@ class TestCopyUploadFileNoSymlink:
 # ---------------------------------------------------------------------------
 
 
+class _VanishingDirEntry:
+    """DirEntry stand-in whose stat() raises, simulating a file removed mid-scan."""
+
+    def __init__(self, real, error):
+        self._real = real
+        self._error = error
+
+    @property
+    def name(self):
+        return self._real.name
+
+    @property
+    def path(self):
+        return self._real.path
+
+    def is_file(self, follow_symlinks=False):
+        return True
+
+    def stat(self, follow_symlinks=False):
+        raise self._error
+
+
+class _StaticScandir:
+    """Context manager mimicking os.scandir over a fixed entry list."""
+
+    def __init__(self, entries):
+        self._entries = entries
+
+    def __enter__(self):
+        return iter(self._entries)
+
+    def __exit__(self, *exc_info):
+        return False
+
+
 class TestListFilesInDir:
     def test_empty_dir(self, tmp_path):
         result = list_files_in_dir(tmp_path)
@@ -331,6 +544,42 @@ class TestListFilesInDir:
     def test_nonexistent_dir(self, tmp_path):
         result = list_files_in_dir(tmp_path / "nope")
         assert result == {"files": [], "count": 0}
+
+    @pytest.mark.parametrize("replacement", ["removed", "file"])
+    def test_directory_replaced_after_is_dir_check(self, tmp_path, monkeypatch, caplog, replacement):
+        directory = tmp_path / "uploads"
+        directory.mkdir()
+        real_scandir = os.scandir
+
+        def replace_before_scandir(path):
+            assert path == directory
+            directory.rmdir()
+            if replacement == "file":
+                directory.write_text("replacement", encoding="utf-8")
+            return real_scandir(path)
+
+        monkeypatch.setattr(os, "scandir", replace_before_scandir)
+
+        with caplog.at_level(logging.DEBUG, logger="deerflow.uploads.manager"):
+            assert list_files_in_dir(directory) == {"files": [], "count": 0}
+
+        assert (
+            "deerflow.uploads.manager",
+            logging.DEBUG,
+            f"Uploads directory vanished mid-scan, keeping partial snapshot of 0 entries: {directory}",
+        ) in caplog.record_tuples
+
+    @pytest.mark.parametrize("error_code", [errno.EACCES, errno.EIO])
+    def test_scandir_operational_error_still_propagates(self, tmp_path, monkeypatch, error_code):
+        def fail_scandir(path):
+            raise OSError(error_code, os.strerror(error_code), str(path))
+
+        monkeypatch.setattr(os, "scandir", fail_scandir)
+
+        with pytest.raises(OSError) as excinfo:
+            list_files_in_dir(tmp_path)
+
+        assert excinfo.value.errno == error_code
 
     def test_multiple_files_sorted(self, tmp_path):
         (tmp_path / "b.txt").write_text("b")
@@ -361,10 +610,45 @@ class TestListFilesInDir:
         assert result["count"] == 4
         assert [f["filename"] for f in result["files"]] == [".env", ".upload-note.txt", "draft.part", "visible.txt"]
 
+    @pytest.mark.parametrize("error_code", [errno.ENOENT, errno.ENOTDIR, errno.ELOOP])
+    def test_skips_entries_vanishing_mid_scan(self, tmp_path, monkeypatch, caplog, error_code):
+        (tmp_path / "kept.txt").write_text("kept")
+        (tmp_path / "gone.txt").write_text("gone")
+        with os.scandir(tmp_path) as it:
+            real_entries = {e.name: e for e in it}
+        vanished = _VanishingDirEntry(
+            real_entries["gone.txt"],
+            OSError(error_code, os.strerror(error_code), str(tmp_path / "gone.txt")),
+        )
+        monkeypatch.setattr(os, "scandir", lambda path: _StaticScandir([real_entries["kept.txt"], vanished]))
+
+        with caplog.at_level(logging.DEBUG, logger="deerflow.uploads.manager"):
+            result = list_files_in_dir(tmp_path)
+
+        assert result["count"] == 1
+        assert result["files"][0]["filename"] == "kept.txt"
+        assert any("vanished mid-scan" in record.message and str(tmp_path / "gone.txt") in record.message for record in caplog.records)
+
+    def test_stat_permission_error_still_propagates(self, tmp_path, monkeypatch):
+        (tmp_path / "locked.txt").write_text("locked")
+        with os.scandir(tmp_path) as it:
+            real_entry = next(iter(it))
+        locked = _VanishingDirEntry(real_entry, PermissionError(errno.EACCES, "Permission denied", str(tmp_path / "locked.txt")))
+        monkeypatch.setattr(os, "scandir", lambda path: _StaticScandir([locked]))
+
+        with pytest.raises(PermissionError):
+            list_files_in_dir(tmp_path)
+
 
 # ---------------------------------------------------------------------------
 # cleanup_stale_upload_staging_files
 # ---------------------------------------------------------------------------
+
+
+def _set_age(path, age: timedelta) -> None:
+    """Backdate *path*'s mtime so the cleanup sees it as *age* old."""
+    timestamp = time.time() - age.total_seconds()
+    os.utime(path, (timestamp, timestamp))
 
 
 class TestCleanupStaleUploadStagingFiles:
@@ -381,6 +665,15 @@ class TestCleanupStaleUploadStagingFiles:
         (legacy_uploads / ".env").write_text("intentional dotfile")
         (legacy_uploads / ".upload-note.txt").write_text("intentional upload")
         (legacy_uploads / "draft.part").write_text("intentional upload")
+        for path in (
+            legacy_uploads / ".upload-old.part",
+            user_uploads / ".upload-new.part",
+            unrelated_uploads / ".upload-ignore.part",
+            legacy_uploads / ".env",
+            legacy_uploads / ".upload-note.txt",
+            legacy_uploads / "draft.part",
+        ):
+            _set_age(path, timedelta(days=2))
 
         removed = cleanup_stale_upload_staging_files(tmp_path)
 
@@ -391,6 +684,195 @@ class TestCleanupStaleUploadStagingFiles:
         assert (legacy_uploads / ".env").exists()
         assert (legacy_uploads / ".upload-note.txt").exists()
         assert (legacy_uploads / "draft.part").exists()
+
+    def test_keeps_staging_files_younger_than_the_default_guard(self, tmp_path):
+        """On a volume shared by several Gateway replicas, a young ``.part`` may be
+        an upload another replica is still writing; only old ones are orphans."""
+        uploads_dir = tmp_path / "users" / "owner-1" / "threads" / "thread-1" / "user-data" / "uploads"
+        uploads_dir.mkdir(parents=True)
+        fresh = uploads_dir / ".upload-fresh.part"
+        recent = uploads_dir / ".upload-recent.part"
+        old = uploads_dir / ".upload-old.part"
+        for path in (fresh, recent, old):
+            path.write_text("partial")
+        _set_age(recent, timedelta(hours=23))
+        _set_age(old, timedelta(hours=25))
+
+        removed = cleanup_stale_upload_staging_files(tmp_path)
+
+        assert removed == 1
+        assert fresh.exists()
+        assert recent.exists()
+        assert not old.exists()
+
+    def test_min_age_is_configurable(self, tmp_path):
+        uploads_dir = tmp_path / "threads" / "thread-1" / "user-data" / "uploads"
+        uploads_dir.mkdir(parents=True)
+        young = uploads_dir / ".upload-young.part"
+        old = uploads_dir / ".upload-old.part"
+        for path in (young, old):
+            path.write_text("partial")
+        _set_age(young, timedelta(minutes=1))
+        _set_age(old, timedelta(minutes=10))
+
+        removed = cleanup_stale_upload_staging_files(tmp_path, min_age=timedelta(minutes=5))
+
+        assert removed == 1
+        assert young.exists()
+        assert not old.exists()
+
+    def test_sibling_inode_match_ignores_degenerate_zero_inodes(self):
+        """On volumes that cannot answer inode identity (FAT/exFAT, some SMB
+        shares) ``st_ino`` reads as 0; a zero-inode sibling must never mark a
+        staging file as a published alias, or the sweep would delete in-flight
+        uploads at any age."""
+
+        def fake_stat(ino, dev=1):
+            return os.stat_result((stat.S_IFREG | 0o644, ino, dev, 1, 0, 0, 4, 0.0, 0.0, 0.0))
+
+        siblings = {
+            "published.txt": fake_stat(42),
+            ".upload-zero.part": fake_stat(0),
+        }
+
+        # A degenerate zero inode matches nothing, not even a sibling reporting
+        # the same degenerate zero.
+        assert not _staging_name_shares_inode_with_sibling(siblings, ".upload-zero.part", fake_stat(0))
+        assert not _staging_name_shares_inode_with_sibling(siblings, ".upload-new.part", fake_stat(0))
+        # A real shared-inode alias is still detected.
+        assert _staging_name_shares_inode_with_sibling(siblings, ".upload-alias.part", fake_stat(42))
+        # A different device never matches, even with the same inode number.
+        assert not _staging_name_shares_inode_with_sibling(siblings, ".upload-alias.part", fake_stat(42, dev=2))
+
+    def test_sweep_scans_each_uploads_dir_once(self, tmp_path, monkeypatch):
+        """The sweep builds its inode map once per uploads directory instead of
+        rescanning the directory for every staging file, so N orphan parts cost
+        one directory scan, not N."""
+        uploads_dir = tmp_path / "threads" / "thread-1" / "user-data" / "uploads"
+        uploads_dir.mkdir(parents=True)
+        for i in range(5):
+            part = uploads_dir / f".upload-{i}.part"
+            part.write_text("partial")
+            _set_age(part, timedelta(days=2))
+
+        real_scandir = os.scandir
+        sweep_scans: list[str] = []
+
+        def counting_scandir(path, /):
+            if os.path.abspath(os.fspath(path)) == os.path.abspath(os.fspath(uploads_dir)):
+                sweep_scans.append(os.fspath(path))
+            return real_scandir(path)
+
+        monkeypatch.setattr(os, "scandir", counting_scandir)
+
+        removed = cleanup_stale_upload_staging_files(tmp_path)
+
+        assert removed == 5
+        assert len(sweep_scans) == 1
+
+    @pytest.mark.parametrize("error_code", [errno.EACCES, errno.EIO, errno.ENOENT])
+    def test_failed_directory_scan_preserves_files_and_continues_cleanup(self, tmp_path, monkeypatch, caplog, error_code):
+        failed_dir = tmp_path / "threads" / "failed" / "user-data" / "uploads"
+        healthy_dir = tmp_path / "threads" / "healthy" / "user-data" / "uploads"
+        for directory in (failed_dir, healthy_dir):
+            directory.mkdir(parents=True)
+            part = directory / ".upload-old.part"
+            part.write_text("partial", encoding="utf-8")
+            _set_age(part, timedelta(days=2))
+
+        real_scandir = os.scandir
+
+        def fail_one_scan(path):
+            if os.path.abspath(os.fspath(path)) == os.path.abspath(os.fspath(failed_dir)):
+                raise OSError(error_code, "scan failed")
+            return real_scandir(path)
+
+        monkeypatch.setattr(os, "scandir", fail_one_scan)
+        with caplog.at_level(logging.WARNING, logger="deerflow.uploads.manager"):
+            removed = cleanup_stale_upload_staging_files(tmp_path)
+
+        assert removed == 1
+        assert (failed_dir / ".upload-old.part").exists()
+        assert not (healthy_dir / ".upload-old.part").exists()
+        warnings = [record for record in caplog.records if record.name == "deerflow.uploads.manager" and record.levelno >= logging.WARNING]
+        if error_code == errno.ENOENT:
+            assert warnings == []
+        else:
+            assert len(warnings) == 1
+            assert "scan uploads directory for stale staging files" in warnings[0].getMessage()
+            assert str(failed_dir) in warnings[0].getMessage()
+            assert warnings[0].exc_info[1].errno == error_code
+
+    def test_keeps_staging_file_when_its_age_cannot_be_read(self, tmp_path, caplog):
+        uploads_dir = tmp_path / "threads" / "thread-1" / "user-data" / "uploads"
+        uploads_dir.mkdir(parents=True)
+        old = uploads_dir / ".upload-old.part"
+        old.write_text("partial")
+        _set_age(old, timedelta(days=2))
+
+        with (
+            patch("deerflow.uploads.manager._staging_entry_stat", side_effect=PermissionError(errno.EACCES, "denied")),
+            caplog.at_level("WARNING", logger="deerflow.uploads.manager"),
+        ):
+            removed = cleanup_stale_upload_staging_files(tmp_path)
+
+        assert removed == 0
+        assert old.exists()
+        assert any("keeping it" in record.getMessage() for record in caplog.records)
+
+    def test_removes_published_alias_at_any_age_but_keeps_lone_young_part(self, tmp_path):
+        """A crash between the commit's ``os.link`` and the staged-name removal
+        leaves the final file and its ``.part`` alias sharing one inode. The
+        alias is reclaimed on the next startup regardless of age, or the
+        destination would fail the multi-link check on its next replacement;
+        a lone young part next to it is still treated as in flight.
+
+        The multi-link check reads ``st_nlink``, which Windows never decrements
+        when a hard link is removed, so the pre-sweep rejection is only asserted
+        where that count is authoritative; the Windows path is exercised by the
+        replacement at the end of the test."""
+        uploads_dir = tmp_path / "users" / "owner-1" / "threads" / "thread-1" / "user-data" / "uploads"
+        uploads_dir.mkdir(parents=True)
+        published = uploads_dir / "notes.txt"
+        published.write_bytes(b"published bytes")
+        alias = uploads_dir / ".upload-abc123.part"
+        try:
+            os.link(published, alias)
+        except OSError as exc:  # pragma: no cover - filesystems without hard links
+            pytest.skip(f"hard links unsupported here: {exc}")
+        in_flight = uploads_dir / ".upload-inflight.part"
+        in_flight.write_bytes(b"partial")
+        if os.name != "nt":
+            with pytest.raises(UnsafeUploadPathError, match="multiple links"):
+                validate_upload_destination(uploads_dir, "notes.txt")
+
+        removed = cleanup_stale_upload_staging_files(tmp_path)
+
+        assert removed == 1
+        assert not alias.exists()
+        assert in_flight.exists()
+        assert published.read_bytes() == b"published bytes"
+        if os.name != "nt":
+            assert os.lstat(published).st_nlink == 1
+        assert validate_upload_destination(uploads_dir, "notes.txt") == published
+        replacement = tmp_path / "replacement.txt"
+        replacement.write_bytes(b"replacement bytes")
+        assert copy_upload_file_no_symlink(uploads_dir, "notes.txt", replacement) == published
+        assert published.read_bytes() == b"replacement bytes"
+
+    def test_skips_staging_file_that_vanished_before_its_age_was_read(self, tmp_path, caplog):
+        uploads_dir = tmp_path / "threads" / "thread-1" / "user-data" / "uploads"
+        uploads_dir.mkdir(parents=True)
+        (uploads_dir / ".upload-gone.part").write_text("partial")
+
+        with (
+            patch("deerflow.uploads.manager._staging_entry_stat", side_effect=FileNotFoundError),
+            caplog.at_level("WARNING", logger="deerflow.uploads.manager"),
+        ):
+            removed = cleanup_stale_upload_staging_files(tmp_path)
+
+        assert removed == 0
+        assert caplog.records == []
 
 
 # ---------------------------------------------------------------------------

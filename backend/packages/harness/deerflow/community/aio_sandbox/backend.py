@@ -49,6 +49,14 @@ def sandbox_http_trust_env(sandbox_url: str) -> bool:
 SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT = 60
 
 
+class SandboxCreationError(RuntimeError):
+    """Preserve a rejected creation result for ownership-fenced cleanup."""
+
+    def __init__(self, message: str, *, info: SandboxInfo):
+        super().__init__(message)
+        self.info = info
+
+
 def wait_for_sandbox_ready(
     sandbox_url: str,
     timeout: int = 30,
@@ -64,19 +72,34 @@ def wait_for_sandbox_ready(
     Returns:
         True if sandbox is ready, False otherwise.
     """
-    start_time = time.time()
+    # Measure the readiness budget on the monotonic clock and honor it the way
+    # the async twin does. ``timeout`` is an elapsed-time budget, so a backward
+    # wall-clock step (NTP correction, VM resume, manual change) must not stretch
+    # the wait — which on the acquisition path would pin the thread far past
+    # ``timeout`` — and a forward jump must not cut it short and destroy a sandbox
+    # that was about to become ready. Clamp both the per-probe request timeout and
+    # the inter-probe sleep to the remaining budget (``min(5.0, remaining)`` /
+    # ``min(1.0, remaining)``) so a single slow probe plus its backoff cannot
+    # overshoot ``timeout``, mirroring ``wait_for_sandbox_ready_async``.
+    deadline = time.monotonic() + timeout
     with requests.Session() as session:
         session.trust_env = sandbox_http_trust_env(sandbox_url)
         if headers:
             session.headers.update(headers)
-        while time.time() - start_time < timeout:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
             try:
-                response = session.get(f"{sandbox_url}/v1/sandbox", timeout=5)
+                response = session.get(f"{sandbox_url}/v1/sandbox", timeout=min(5.0, remaining))
                 if response.status_code == 200:
                     return True
             except requests.exceptions.RequestException:
                 pass
-            time.sleep(1)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(1.0, remaining))
     return False
 
 
@@ -201,6 +224,34 @@ class SandboxBackend(ABC):
             resources; the provider owns replacement fencing. None otherwise.
         """
         ...
+
+    def is_absent(self, sandbox_id: str) -> bool:
+        """Prove that no runtime exists under this logical ID, even if stopped.
+
+        Unknown/unavailable runtimes must never return True. Backends without
+        an authoritative absence check retain their quarantine fences.
+        """
+        return False
+
+    def complete_absent_teardown(self, sandbox_id: str) -> None:
+        """Finish cleanup bookkeeping after authoritative runtime absence.
+
+        The provider must confirm ``is_absent(sandbox_id) is True`` and hold
+        both its local teardown reservation and cross-worker teardown lease
+        throughout this call. Implementations may release pending resources
+        scoped to this absent logical ID. Failure must raise so quarantine is
+        retained and cleanup can be retried before creating a replacement.
+        Backends without pending cleanup require no completion work.
+        """
+
+    def inspect_runtime(self, sandbox_id: str) -> SandboxInfo | None:
+        """Inspect the runtime generation independently of endpoint readiness.
+
+        Return None only after confirming no resource has this logical ID,
+        including stopped or terminating resources. Unavailable or unsupported
+        inspections must raise rather than imply absence.
+        """
+        raise RuntimeError(f"Runtime inspection is unavailable for sandbox {sandbox_id}")
 
     def list_running(self) -> list[SandboxInfo]:
         """Enumerate all running sandboxes managed by this backend.

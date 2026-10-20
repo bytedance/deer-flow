@@ -276,6 +276,24 @@ def test_non_auth_mutation_rejects_mismatched_double_submit_token():
     assert response.json()["detail"] == "CSRF token mismatch."
 
 
+def test_non_auth_mutation_rejects_non_ascii_double_submit_token():
+    # Starlette decodes header bytes as latin-1, so a raw 0xE9 reaches the
+    # comparison as "é"; that must be a 403 mismatch, not a 500.
+    client = TestClient(_make_app(), base_url="https://deerflow.example")
+    client.cookies.set("csrf_token", "cookie-token")
+
+    response = client.post(
+        "/api/threads/abc/runs/stream",
+        headers={
+            "Origin": "https://deerflow.example",
+            "X-CSRF-Token": "cookie-tok\xe9n".encode("latin-1"),
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "CSRF token mismatch."
+
+
 def test_channel_posts_require_double_submit_csrf():
     client = TestClient(_make_app(), base_url="https://deerflow.example")
 

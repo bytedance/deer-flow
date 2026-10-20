@@ -13,7 +13,7 @@ This directory owns memory capture, storage, retrieval, prompt injection, and mo
 - `manager.py` defines the backend-neutral `MemoryManager` contract.
 - `agents/middlewares/memory_middleware.py` queues filtered conversations for passive capture.
 - `summarization_hook.py` connects memory work to the summarization lifecycle.
-- `tools.py` provides `memory_search`, `memory_add`, `memory_update`, and `memory_delete`.
+- `tools.py` provides `memory_search`, `memory_get`, `memory_add`, `memory_update`, and `memory_delete`.
 - `backends/deermem/` contains the default local backend.
 - `backends/mem0/`, `backends/openviking/`, and `backends/honcho/` contain optional adapters.
 
@@ -63,7 +63,22 @@ The legacy shared agent layout is read-only fallback data.
 
 DeerMem maps a missing agent name to `__default__`.
 That name is reserved and cannot identify a custom agent.
-Public agent names use lowercase canonical form.
+DeerMem canonicalizes public agent names to lowercase for local storage.
+Remote backends may preserve the case-sensitive identity used when facts were
+written.
+
+Gateway management reads, reload, import/export, clear, and single-fact CRUD
+accept an optional `agent_name`. A backend must opt in with
+`supports_agent_scoped_management = True`; otherwise a scoped request returns
+501 instead of silently operating on user-global or default-bucket data.
+Omitting the parameter preserves the legacy default bucket for reads, reload,
+import/export, and fact CRUD; omitting it from clear preserves the legacy
+user-wide clear. Gateway validates the public agent-name grammar but preserves
+the caller's spelling so case-sensitive remote identities remain reachable;
+each backend owns any storage-specific canonicalization.
+Scoped import replaces only the selected agent's facts. It always preserves the
+user's shared `user` and `history` summaries, including when an older or
+fact-only import payload supplies empty summary defaults.
 
 #### Operating modes
 
@@ -72,13 +87,50 @@ Public agent names use lowercase canonical form.
 It captures `user_id` when it enqueues work.
 This identity survives the background timer boundary.
 
-`memory.mode: tool` registers the four memory tools.
+DeerMem debounces each `(thread_id, user_id, agent_name)` independently using
+monotonic deadlines. Same-key coalescing preserves the first pending arrival;
+`backend_config.max_wait_seconds` (default 300) caps debounce deferral even
+under continuous updates. One timer wakes for the earliest deadline and one
+consumer processes eligible items serially. Other conversations cannot reset
+that deadline. Consumer backlog and LLM latency can still delay completion.
+Early wakeups rearm with a 50 ms minimum; arrivals during extraction wait for
+the finishing worker to rearm. Emergency snapshots are immediately eligible
+and remain separate in arrival order, including within the same conversation
+key: successive compactions can remove disjoint message partitions. Only normal
+cumulative updates coalesce; neither kind replaces the other.
+Emergency snapshots bypass `queue_max_depth`. Warn at 32 pending snapshots for
+one `(thread_id, user_id, agent_name)` key and each doubling, without logging
+message contents. Count only pending emergency items; drain, cancellation, and
+clear reset the threshold naturally. Retention remains unbounded and process-local.
+Regression coverage: `tests/test_memory_emergency_backlog.py`.
+`flush`, `flush_nowait`, and `flush_sync` make all pending items eligible.
+Tests in `tests/test_memory_queue_deadlines.py` use a fake monotonic clock and
+timer to exercise scheduling without timing-sensitive sleeps.
+`tests/test_memory_emergency_snapshots.py` covers overlapping compactions through
+the real memory hook, updater, and canonical storage, plus scoped cancellation
+and drain behavior.
+
+DeerMem and mem0 exclude assistant tool-call intent in every representation:
+`tool_calls`, `invalid_tool_calls`, and provider-raw `tool_calls`/`function_call`.
+An empty parsed call list does not make an attempted call a final response.
+Keep both portable backend filters aligned without importing host helpers;
+test the real queue/HTTP write boundary in `tests/test_memory_tool_call_intent.py`.
+
+Memory enqueue redaction also covers `invalid_tool_calls` arguments/error text
+and legacy `function_call` payloads. Keep sync, async and compaction admission
+aligned; preserve original messages and detector policy.
+
+`memory.mode: tool` registers the five memory tools.
 The model chooses when to search or change facts.
 Tool mode still uses `MemoryMiddleware` for passive writes on supported remote backends.
 
 Middleware injection includes shared summaries and the selected agent's facts.
 Tool-mode injection includes only shared summaries.
-Tool mode leaves agent facts behind `memory_search`.
+Tool mode leaves agent facts behind `memory_search` and `memory_get`.
+`memory_get` matches an exact fact ID inside `MemoryManager.get_memory()` for
+the runtime user and agent. Named-agent reads require
+`supports_agent_scoped_management`; unsupported reads return JSON errors.
+Missing and out-of-scope IDs share the same not-found response.
 `memory.injection_enabled: false` disables the complete injected block.
 
 Per-user lead-agent Custom Agents may set `memory_enabled: false` in their own
@@ -99,7 +151,11 @@ fence is accepted from Markdown. Decode the value before checking its closing
 fence so embedded backticks and later fenced notes stay lossless. Parser and
 storage regressions belong in `tests/test_memory_storage.py`; configure a data
 root directory, not the existing manifest file. Legacy v1 reads still migrate
-and advance the revision. Unparseable summary text is quarantined before rebuild.
+and advance the revision. Invalid UTF-8 bytes and unparseable summary text are
+quarantined before rebuild. Summary read `OSError`s raise `MemoryStorageCorruption`
+and preserve the file; `save()` returns false until access recovers.
+Summary and canonical fact reads strip a leading UTF-8 BOM; writes use UTF-8.
+Fact BOM regressions use public save/reload and preserve content and scope.
 
 `FileMemoryStorage` owns canonical storage and the retrieval adapter.
 Do not reach into its private adapter state from higher layers.
@@ -119,6 +175,8 @@ Use the typed conflict classes instead of matching exception text.
 
 The weak lock cache must not retain inactive user scopes.
 Cache validation uses the manifest metadata and persisted revision.
+Unlocked `load()`/`reload()` compute that signature before reading the document.
+Unlocked fact scans skip entries deleted after listing; present unreadable entries are corruption.
 Out-of-band Markdown edits require `reload()`.
 POSIX atomic replacement must sync the parent directory.
 
@@ -161,8 +219,8 @@ The older isolation migration remains available:
 PYTHONPATH=. python scripts/migrate_user_isolation.py --dry-run
 ```
 
-It assigns legacy `memory.json`, `threads/`, `agents/`, `skills/`, and the global
-`USER.md` to `--user-id` (default `default`).
+It assigns legacy `memory.json`, `agents/`, `skills/`, and the global `USER.md`
+to `--user-id` (default `default`); `threads/` go to their `threads_meta` owner.
 
 #### Retrieval
 
@@ -170,15 +228,38 @@ It assigns legacy `memory.json`, `threads/`, `agents/`, `skills/`, and the globa
 DeerMem selects persistent SQLite FTS5 by default.
 An empty value selects the substring fallback.
 
-SQLite index data lives below `.retrieval/` and remains rebuildable.
+The SQLite index is rebuildable derived data below `retrieval_index_path`
+(empty = `{storage_path}/.retrieval`; relative resolves against `storage_path`;
+`paths.retrieval_index_directory` is the one resolver). Instances sharing
+`storage_path` keep it instance-local: SQLite WAL is unsupported on network
+filesystems, and the full rebuild and one-shot corruption recovery touch only
+that local index. `deps._validate_memory_retrieval_index` warns when a declared
+multi-instance deployment leaves it inside `storage_path`.
 Chinese tokenization uses `jieba` only with the `memory-zh` extra.
 Malformed facts are logged and skipped during rebuild.
 A fatal rebuild failure keeps lazy retry active.
-A corrupt persistent database is deleted and recreated once.
 
 Storage sends adapter updates after it releases durable locks.
 Adapter failures mark the scope dirty.
 Search then uses canonical substring matching until rebuild succeeds.
+
+Cross-process freshness: `rebuild_index` records each agent scope's manifest
+signature `(mtime_ns, size, revision)` before reading that scope's complete
+fact list (never a `list_facts` page); `search_facts` rebuilds a scope whose
+live signature differs (a peer wrote the user's memory), and a manifest read
+failure during that compare logs and serves the local index. A commit that produced
+a new revision advances the recorded signatures of that user's scopes that were
+in sync at the pre-commit revision read under the user lock; a no-op commit
+advances nothing. Own writes therefore never rebuild while an interleaved peer
+write still does. Promotion is generation-fenced: `rebuild_index` bumps a
+per-scope (full rebuild: storage-wide) generation under `_cache_lock` when it
+publishes or forgets rows, the dispatcher snapshots them before its first
+adapter call, and a scope whose generation moved keeps the rebuild's own
+signature for the next search to compare; an own delta that cannot be proved
+compatible with the published snapshot forgets the mutated scope's signature
+instead of merely skipping promotion. A rebuild's row replacement and its
+publication run as one unit under `_retrieval_publish_lock` (fact reads stay
+outside), so overlapping refreshes of a scope publish in install order.
 
 Gateway startup schedules `DeerMem.warm_retrieval()` without delaying readiness.
 The first search can rebuild its exact scope.
@@ -192,6 +273,7 @@ Extraction labels proposals with `scope`, `durability`, and `authority`.
 Automatic writes accept only user-scoped, durable, descriptive facts.
 Summary prose must be user-scoped and descriptive.
 Missing labels reject that item without stopping unrelated updates.
+An out-of-range `confidence` (including a model-emitted percentage) is rejected per item with a warning that names the raw value, and is never rescaled: a silent scale rewrite would change the confidence-threshold semantics. Storage's own `[0, 1]` validation must not fail the batch, because a failed batch keeps the extraction watermark and repeats the same paid call. A batch that also proposes `factsToRemove` still fails closed when any new fact is dropped, because removal `replacementFactIndex` values refer to newFacts positions.
 
 Contradiction removals include `id`, `scope`, `reason`, and optional `replacementFactIndex`.
 Task-scoped and project-scoped removals fail closed.
@@ -339,6 +421,8 @@ runs by default.
   retrieval, while adapter indexing and warm-up remain configured.
 - Ranking reads at most 4096 characters and 128 tokens per query/fact. The
   no-jieba fallback emits both Latin words and CJK bigrams, including mixed text.
+  With jieba, tokens without a letter or digit (punctuation) are dropped, as in
+  the fallback, so they neither match nor use the 128-token budget.
   `DeerMem.warm()` initializes optional jieba before serving requests, even
   with character-based token counting. Invalid/missing confidence defaults to 0.
 - Search stops MMR after `top_k` picks. Injection diversifies guaranteed and

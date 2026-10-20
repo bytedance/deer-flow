@@ -297,6 +297,9 @@ Output from Benchmark mode. Located at `benchmarks/<timestamp>/benchmark.json`.
   - `configuration`: Must be `"with_skill"` or `"without_skill"` (the viewer uses this exact string for grouping and color coding)
   - `run_number`: Integer run number (1, 2, 3...)
   - `result`: Nested object with `pass_rate`, `passed`, `total`, `time_seconds`, `tokens`, `errors`
+    - `tokens`: Uses sibling `timing.json.total_tokens` when it is a finite, non-negative number (including zero), independently of duration fields in `grading.json`. If missing, null, or invalid, aggregation retains the legacy `execution_metrics.output_chars` proxy, defaulting to zero if that is also missing.
+    - `time_seconds`: Preserves the grading duration. When it is zero or absent, uses a finite, non-negative `timing.json.total_duration_seconds`, otherwise zero. Timing fields are validated independently, so an invalid duration does not discard valid tokens and vice versa.
+    - An unreadable or non-UTF-8 `timing.json`, malformed JSON, a non-object document, or an invalid timing field emits a warning identifying the file (and field, where applicable). Strings, booleans, arrays, objects, negative values, and non-finite numbers are invalid measurements. Missing or null fields use their fallbacks without a warning. Other runs continue to be aggregated.
 - `run_summary`: Statistical aggregates per configuration
   - `with_skill` / `without_skill`: Each contains `pass_rate`, `time_seconds`, `tokens` objects with `mean` and `stddev` fields
   - `delta`: Difference strings like `"+0.50"`, `"+13.0"`, `"+1700"`

@@ -20,7 +20,13 @@ test.beforeAll(async ({ request }) => {
   gatewayURL = `http://127.0.0.1:${address.port}`;
   const backend = path.resolve(process.cwd(), "../backend");
   gateway = spawn(
-    path.join(backend, ".venv/bin/python"),
+    process.env.PLAYWRIGHT_PYTHON ??
+      path.join(
+        backend,
+        process.platform === "win32"
+          ? ".venv/Scripts/python.exe"
+          : ".venv/bin/python",
+      ),
     [
       "-m",
       "extension_test_fixtures.bookmark_plugin_gateway",
@@ -41,7 +47,7 @@ test.beforeAll(async ({ request }) => {
           .then((r) => r.status())
           .catch(() => 0);
       },
-      { timeout: 20_000 },
+      { timeout: 60_000 },
     )
     .toBe(200);
 });
@@ -201,7 +207,7 @@ for (const source of ["default", "custom-toolbar", "custom-sidebar"]) {
       });
     }
     await page
-      .getByRole("button", { name: "View 会话书签 / Bookmarks", exact: true })
+      .getByRole("button", { name: "View Bookmarks", exact: true })
       .click();
     await expect(
       page.getByRole("searchbox", { name: "Search bookmarks" }),
@@ -442,11 +448,188 @@ for (const locale of ["en-US", "zh-CN"]) {
         exact: true,
       }),
     ).toBeVisible();
+    await expect(page.getByRole("article")).toHaveCount(10);
+    const weknoraTitle = zh
+      ? "WeKnora 知识检索"
+      : "WeKnora knowledge retrieval";
+    const weknora = page.getByRole("article").filter({ hasText: weknoraTitle });
+    await expect(weknora).toHaveCount(1);
+    await expect(weknora).toContainText(
+      zh
+        ? "需要管理员安装并配置访问权限。"
+        : "Requires administrator installation and access configuration.",
+    );
+    await weknora
+      .getByRole("button", {
+        name: zh ? `查看 ${weknoraTitle}` : `View ${weknoraTitle}`,
+        exact: true,
+      })
+      .click();
+    await expect(
+      page.getByRole("link", {
+        name: zh ? "查看安装说明" : "Installation guide",
+      }),
+    ).toHaveAttribute("href", /deerflow-extension-weknora#readme$/);
+    await page
+      .getByRole("button", {
+        name: zh ? "全部扩展" : "All extensions",
+        exact: true,
+      })
+      .click();
+    const knowledgeTitle = zh ? "知识范围选择示例" : "Knowledge scope example";
+    const knowledge = page
+      .getByRole("article")
+      .filter({ hasText: knowledgeTitle });
+    await expect(knowledge).toHaveCount(1);
+    await expect(knowledge).toContainText(
+      zh
+        ? "用示例文档演示知识库和文件范围选择、检索及来源引用。"
+        : "Search sample documents within selected knowledge bases or files and inspect source citations.",
+    );
+    await knowledge
+      .getByRole("button", {
+        name: zh ? `查看 ${knowledgeTitle}` : `View ${knowledgeTitle}`,
+        exact: true,
+      })
+      .click();
+    await expect(
+      page.getByRole("heading", { name: knowledgeTitle, exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("link", {
+        name: zh ? "查看安装说明" : "Installation guide",
+      }),
+    ).toHaveAttribute("href", /deerflow-extension-knowledge#readme$/);
+    await page
+      .getByRole("button", {
+        name: zh ? "全部扩展" : "All extensions",
+        exact: true,
+      })
+      .click();
+    const workflow = page.getByRole("article").filter({
+      hasText: zh ? "脚本工作流" : "Script workflows",
+    });
+    await expect(workflow).toHaveCount(1);
+    await expect(workflow).toContainText(
+      zh
+        ? "不支持重启回放或硬金额预算"
+        : "No restart replay or hard monetary budget",
+    );
+    await workflow
+      .getByRole("button", {
+        name: zh ? "查看 脚本工作流" : "View Script workflows",
+        exact: true,
+      })
+      .click();
+    await expect(
+      page.getByRole("link", {
+        name: zh ? "查看安装说明" : "Installation guide",
+      }),
+    ).toHaveAttribute("href", /deerflow-extension-workflows#readme$/);
+    await page
+      .getByRole("button", {
+        name: zh ? "全部扩展" : "All extensions",
+        exact: true,
+      })
+      .click();
+    await expect(
+      page.getByRole("button", {
+        name: zh ? "查看 会话书签" : "View Bookmarks",
+        exact: true,
+      }),
+    ).toBeVisible();
+    await page
+      .getByRole("button", {
+        name: zh ? "查看 Agent 团队" : "View Agent teams",
+        exact: true,
+      })
+      .click();
+    await expect(
+      page.getByRole("heading", {
+        name: zh ? "Agent 团队" : "Agent teams",
+        exact: true,
+      }),
+    ).toBeVisible();
     await expect(
       page.getByText(
-        zh ? "没有匹配的已安装扩展。" : "No matching installed extensions.",
+        zh
+          ? "此条目来自仓库扩展目录；实际安装和启用状态请由部署管理员确认。"
+          : "This entry comes from the repository extension catalog. Ask your deployment administrator to confirm its installation and activation status.",
         { exact: true },
       ),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("link", {
+        name: zh ? "查看安装说明" : "Installation guide",
+      }),
+    ).toHaveAttribute("href", /deerflow-extension-agent-teams#readme$/);
+    await page
+      .getByRole("button", {
+        name: zh ? "全部扩展" : "All extensions",
+        exact: true,
+      })
+      .click();
+    await page
+      .getByPlaceholder(
+        zh ? "按名称或用途搜索扩展" : "Search extensions by name or purpose",
+      )
+      .fill("deerflow-extension-retrieval");
+    await expect(page.getByRole("article")).toHaveCount(1);
+    await page
+      .getByRole("button", {
+        name: zh ? "查看 本地检索示例" : "View Local retrieval example",
+        exact: true,
+      })
+      .click();
+    await expect(
+      page.getByRole("heading", {
+        name: zh ? "本地检索示例" : "Local retrieval example",
+        exact: true,
+      }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("link", {
+        name: zh ? "查看安装说明" : "Installation guide",
+      }),
+    ).toHaveAttribute("href", /deerflow-extension-retrieval#readme$/);
+    await page
+      .getByRole("button", {
+        name: zh ? "全部扩展" : "All extensions",
+        exact: true,
+      })
+      .click();
+    await page
+      .getByPlaceholder(
+        zh ? "按名称或用途搜索扩展" : "Search extensions by name or purpose",
+      )
+      .fill("jev-screening");
+    await expect(page.getByRole("article")).toHaveCount(1);
+    await page
+      .getByRole("button", {
+        name: zh ? "查看 内容风险提示" : "View Content risk warnings",
+        exact: true,
+      })
+      .click();
+    await expect(
+      page.getByRole("link", {
+        name: zh ? "查看安装说明" : "Installation guide",
+      }),
+    ).toHaveAttribute("href", /deerflow-extension-jev-screening#readme$/);
+    await page
+      .getByRole("button", {
+        name: zh ? "全部扩展" : "All extensions",
+        exact: true,
+      })
+      .click();
+    await page
+      .getByPlaceholder(
+        zh ? "按名称或用途搜索扩展" : "Search extensions by name or purpose",
+      )
+      .fill("no-such-extension");
+    await expect(
+      page.getByText(zh ? "没有匹配的扩展。" : "No matching extensions.", {
+        exact: true,
+      }),
     ).toBeVisible();
     await page.goto("/workspace/extensions/missing.plugin/library");
     await expect(
@@ -469,4 +652,40 @@ test("unregistered plugin pages stay unavailable", async ({ page }) => {
   await expect(
     page.getByRole("searchbox", { name: "Search bookmarks" }),
   ).toHaveCount(0);
+});
+
+test("catalog remains discoverable when runtime discovery fails", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  await page.route("**/api/plugins", (route) =>
+    route.fulfill({ status: 503, json: { detail: "Unavailable" } }),
+  );
+  await page.goto("/workspace/capabilities?tab=extensions");
+  await expect(
+    page.getByRole("alert").filter({ hasText: "Extensions unavailable." }),
+  ).toBeVisible();
+  await expect(page.getByRole("article")).toHaveCount(10);
+  await expect(
+    page.getByRole("article").filter({ hasText: "Catalog extension" }),
+  ).toHaveCount(10);
+  await expect(
+    page.getByRole("article").filter({ hasText: "Script workflows" }),
+  ).toHaveCount(1);
+  const knowledge = page
+    .getByRole("article")
+    .filter({ hasText: "Knowledge scope example" });
+  await expect(knowledge).toHaveCount(1);
+  await expect(knowledge).toContainText(
+    "Search sample documents within selected knowledge bases or files and inspect source citations.",
+  );
+  await knowledge
+    .getByRole("button", { name: "View Knowledge scope example", exact: true })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "Knowledge scope example", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "Installation guide" }),
+  ).toHaveAttribute("href", /deerflow-extension-knowledge#readme$/);
 });

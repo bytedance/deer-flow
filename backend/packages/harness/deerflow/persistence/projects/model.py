@@ -57,6 +57,7 @@ class ProjectDocumentRow(Base):
     stored_relpath: Mapped[str] = mapped_column(String)
     sha256: Mapped[str] = mapped_column(String(64), index=True)
     size_bytes: Mapped[int] = mapped_column(Integer)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_thread_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     source_kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
     source_name: Mapped[str | None] = mapped_column(String(255), nullable=True)

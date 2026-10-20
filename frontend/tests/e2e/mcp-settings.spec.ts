@@ -22,8 +22,12 @@ for (const { viewport, name } of [
 
     for (const mode of ["edit", "add"] as const) {
       await page
+        .getByRole("region", { name: "My plugins", exact: true })
         .getByRole("button", {
-          name: mode === "edit" ? `Edit ${name}` : "Add MCP plugin",
+          name:
+            mode === "edit"
+              ? `Edit ${name} (My plugins)`
+              : "Add MCP plugin (My plugins)",
           exact: true,
         })
         .click();
@@ -116,8 +120,12 @@ for (const viewport of [
 
     for (const mode of ["edit", "add"] as const) {
       await page
+        .getByRole("region", { name: "My plugins", exact: true })
         .getByRole("button", {
-          name: mode === "edit" ? "Edit github" : "Add MCP plugin",
+          name:
+            mode === "edit"
+              ? "Edit github (My plugins)"
+              : "Add MCP plugin (My plugins)",
           exact: true,
         })
         .click();
@@ -226,7 +234,9 @@ test.describe("MCP server settings", () => {
 
     const settingsDialog = page;
     await expect(page).toHaveURL(/workspace\/capabilities$/);
-    await settingsDialog.getByRole("button", { name: "Edit remote" }).click();
+    await settingsDialog
+      .getByRole("button", { name: "Edit remote (My plugins)" })
+      .click();
 
     const editor = page.getByRole("dialog", { name: "Edit MCP server" });
     const definitionBox = editor.getByRole("textbox");

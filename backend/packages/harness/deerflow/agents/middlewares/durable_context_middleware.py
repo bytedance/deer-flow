@@ -308,6 +308,8 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
         inject_tool_artifacts: bool = True,
         task_continuity_enabled: bool = False,
         pii_redaction_config: PiiRedactionConfig | None = None,
+        skill_authorization=None,
+        entry_decisions_owner_token: str | None = None,
     ) -> None:
         super().__init__()
         self._task_continuity_enabled = task_continuity_enabled
@@ -315,6 +317,8 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
         self._skills_root = _normalize_skills_root(skills_container_path)
         self._skill_read_tool_names = frozenset(DEFAULT_SKILL_FILE_READ_TOOL_NAMES if skill_file_read_tool_names is None else skill_file_read_tool_names)
         self._inject_tool_artifacts = inject_tool_artifacts
+        self._skill_authorization = skill_authorization
+        self._entry_decisions_owner_token = entry_decisions_owner_token
 
     def release_policy_parameters(self) -> dict[str, object]:
         """Describe the normalized inputs that govern capture and injection."""
@@ -324,7 +328,31 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
             "task_continuity_enabled": self._task_continuity_enabled,
             "inject_tool_artifacts": self._inject_tool_artifacts,
             "pii_redaction_enabled": bool(self._pii_redaction_config and self._pii_redaction_config.enabled),
+            "skill_entry_render_filter": bool(self._skill_authorization),
         }
+
+    def _renderable_skills(self, request: ModelRequest, entries: list) -> list:
+        """Filter persisted ``skill_context`` entries the provider now denies.
+
+        The rendered "Active skills" reminder must not advertise a skill whose
+        ``skill:activate`` decision is denied — the same denial
+        ``describe_skill`` applies to the catalog. Decisions come from the
+        skill-activation middleware's per-step publication (path-keyed, owner
+        token authenticated); this middleware performs no provider or storage
+        work of its own. Nothing published (authorization disabled, no
+        entries, or a foreign carrier) renders unchanged — absent is
+        permissive, matching the other run-context carriers. A published
+        ``False`` hides the entry from the reminder only; state is untouched.
+        """
+        if not entries or self._skill_authorization is None or not self._entry_decisions_owner_token:
+            return entries
+        from deerflow.runtime.secret_context import read_skill_entry_decisions
+
+        context = getattr(getattr(request, "runtime", None), "context", None)
+        decisions = read_skill_entry_decisions(context, owner_token=self._entry_decisions_owner_token)
+        if decisions is None:
+            return entries
+        return [entry for entry in entries if isinstance(entry, dict) and decisions.get(posixpath.normpath(entry.get("path") or ""), False)]
 
     @override
     def before_model(self, state: AgentState, runtime: Runtime) -> dict | None:
@@ -385,7 +413,7 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
         data_block = _render_durable_context_data(
             redact_text(state.get("summary_text"), self._pii_redaction_config),
             state.get("delegations") or [],
-            state.get("skill_context") or [],
+            self._renderable_skills(request, state.get("skill_context") or []),
             (state.get("task_notes") or {}) if self._task_continuity_enabled else None,
             state.get("task_history") if self._task_continuity_enabled else None,
             artifacts=artifacts,

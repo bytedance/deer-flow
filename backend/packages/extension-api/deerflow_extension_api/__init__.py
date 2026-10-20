@@ -7,6 +7,7 @@ extensions can therefore be released independently of the host.
 
 from __future__ import annotations
 
+from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY, AGENT_RUNS_RESOLVER_KEY, AgentRun, AgentRunError, AgentRuns, require_agent_runs, resolve_agent_runs
 from deerflow_extension_api.assembly import (
     AgentAssemblyDescriptor,
     AgentAssemblyObserver,
@@ -27,6 +28,7 @@ from deerflow_extension_api.compaction import (
     CompactionEvent,
     ContextCompactionObserver,
 )
+from deerflow_extension_api.completed_run_evidence import CompletedRunEvent, CompletedRunEventPage, CompletedRunEvidenceReader, CompletedRunSnapshot, EvidenceLimits
 from deerflow_extension_api.contracts import (
     ExtensionInstall,
     ExtensionRegistry,
@@ -43,6 +45,7 @@ from deerflow_extension_api.contracts import (
     TaskOutcome,
     extension,
 )
+from deerflow_extension_api.host_capabilities import HostCapabilityError
 from deerflow_extension_api.model_invocation import (
     ModelInvocationError,
     ModelInvocationFailed,
@@ -61,7 +64,7 @@ from deerflow_extension_api.placement import (
     MiddlewarePlacement,
     Placement,
 )
-from deerflow_extension_api.plugins import ActionContext, BackendAction, BrowserAssets, BrowserModule, ModelTool, PluginContribution, ToolContext
+from deerflow_extension_api.plugins import ActionContext, BackendAction, BrowserAssets, BrowserModule, ModelTool, PluginContribution, PluginToolResult, ToolContext
 from deerflow_extension_api.provenance import (
     MESSAGE_CONTENT_KIND_KEY,
     MESSAGE_PRODUCER_ENTITY_ID_KEY,
@@ -94,13 +97,21 @@ from deerflow_extension_api.runtime_bridge import (
     task_store_from_runtime,
 )
 from deerflow_extension_api.settings import SettingsField
+from deerflow_extension_api.skill_mutations import AssessmentRef, AssetRevision, BundleFile, HostCheckResult, MutationCapabilities, Operation, Proposal, ProposalBundle, SkillMutationService, SkillRevisionView
 from deerflow_extension_api.state import ExtensionData
 
 #: Contract version. Before 1.0, minors may break and patches are additive.
 #: From 1.0 on, bump the major for breaking changes.
-API_VERSION = "0.2.4"
+API_VERSION = "0.2.8"
 
 __all__ = [
+    "AGENT_RUNS_CONTEXT_KEY",
+    "AGENT_RUNS_RESOLVER_KEY",
+    "AgentRun",
+    "AgentRunError",
+    "AgentRuns",
+    "require_agent_runs",
+    "resolve_agent_runs",
     "ModelInvocationError",
     "ModelInvocationFailed",
     "ModelInvocationRequest",
@@ -116,9 +127,26 @@ __all__ = [
     "BrowserAssets",
     "BrowserModule",
     "ModelTool",
+    "PluginToolResult",
     "PluginContribution",
-    "ToolContext",
     "SettingsField",
+    "ToolContext",
+    "CompletedRunEvent",
+    "CompletedRunEventPage",
+    "CompletedRunEvidenceReader",
+    "CompletedRunSnapshot",
+    "EvidenceLimits",
+    "HostCapabilityError",
+    "AssessmentRef",
+    "AssetRevision",
+    "BundleFile",
+    "HostCheckResult",
+    "MutationCapabilities",
+    "Operation",
+    "Proposal",
+    "ProposalBundle",
+    "SkillMutationService",
+    "SkillRevisionView",
     "API_VERSION",
     "EXTENSION_PLUGIN_AUTHZ_RESOLVER_ASYNC_KEY",
     "EXTENSION_PLUGIN_AUTHZ_RESOLVER_KEY",

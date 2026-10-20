@@ -249,7 +249,12 @@ def test_delete_recovers_multiple_legacy_identity_collisions(capability_client):
         before_raw = json.loads(path.read_text())
         assert client.delete(f"/api/mcp/config/servers/{removed}").status_code == 200
         del before_raw["mcpServers"][removed]
-        assert json.loads(path.read_text()) == before_raw
+        written = json.loads(path.read_text())
+        assert written["mcpServers"] == before_raw["mcpServers"]
+        assert written.get("skills") == before_raw.get("skills")
+        # The controlled writer commits the shared lifecycle ledger in the same write; every
+        # server here is HTTP, so there are no stdio entries and it stays empty.
+        assert written.get("mcpLifecycle") == {"version": 1, "servers": {}}
         items = client.get("/api/capabilities/installations/mcp").json()["items"]
         ambiguous = [item for item in items if not item["selectable"]]
         assert len(ambiguous) == {"unrelated": 4, "legacy-peer": 2, "pair-two-b": 0}[removed]

@@ -174,6 +174,14 @@ def _removal_scope_gate_reason(removal: dict[str, Any]) -> str | None:
     return None
 
 
+def _log_dropped_confidence(raw: object) -> None:
+    """Make a systematic out-of-range confidence visible without logging content."""
+    logger.warning(
+        "Dropping an extracted fact with out-of-range confidence %s; expected 0.0-1.0. A model emitting a percentage scale would lose every extracted fact.",
+        repr(raw)[:80],
+    )
+
+
 def _normalize_memory_update_fact(fact: Any) -> dict[str, Any] | None:
     """Normalize a single fact entry from a model-produced memory update."""
     if not isinstance(fact, dict):
@@ -198,14 +206,29 @@ def _normalize_memory_update_fact(fact: Any) -> dict[str, Any] | None:
             return None
         try:
             raw_confidence = float(raw_confidence)
-        except ValueError:
+        except (OverflowError, ValueError):
             return None
-    elif isinstance(raw_confidence, (int, float)):
+    elif isinstance(raw_confidence, int):
+        # Range-check before float(): an unbounded JSON integer such as 10**400
+        # raises OverflowError in float() and would fail the whole batch.
+        if not 0 <= raw_confidence <= 1:
+            _log_dropped_confidence(raw_confidence)
+            return None
         raw_confidence = float(raw_confidence)
+    elif isinstance(raw_confidence, float):
+        pass
     else:
         return None
 
-    if not math.isfinite(raw_confidence):
+    if not math.isfinite(raw_confidence) or not 0.0 <= raw_confidence <= 1.0:
+        # Out-of-range confidence (for example a model emitting 95 or 1.5) is
+        # malformed like every other shape above: drop this item instead of
+        # letting the storage layer reject the whole update. A rejected batch
+        # never advances the extraction watermark, so the same paid call would
+        # otherwise repeat on every turn. Values are dropped, never rescaled:
+        # silently rewriting the scale would change the confidence-threshold
+        # semantics, and the warning makes a percentage-scale model visible.
+        _log_dropped_confidence(raw_confidence)
         return None
 
     normalized_fact = {
@@ -960,7 +983,14 @@ class MemoryUpdater:
         except Exception:
             logger.warning("Failed to record capacity-eviction audit", exc_info=True)
 
-    def import_memory_data(self, memory_data: dict[str, Any], agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
+    def import_memory_data(
+        self,
+        memory_data: dict[str, Any],
+        agent_name: str | None = None,
+        *,
+        user_id: str | None = None,
+        replace_shared_summaries: bool = True,
+    ) -> dict[str, Any]:
         """Persist imported memory data via the injected storage."""
         if not isinstance(memory_data, dict):
             raise ValueError("memory_data")
@@ -985,14 +1015,19 @@ class MemoryUpdater:
             )
             current_by_id = {str(fact.get("id")): fact for fact in current.get("facts", []) if isinstance(fact, dict)}
             incoming_ids = {str(fact.get("id")) for fact in incoming_facts}
+            change_set = {
+                "upserts": incoming_facts,
+                "upsertRevisions": {str(fact.get("id")): (int(current_by_id[str(fact.get("id"))].get("revision") or 1) if str(fact.get("id")) in current_by_id else None) for fact in incoming_facts},
+                "deletes": [fact_id for fact_id in current_by_id if fact_id not in incoming_ids],
+                "deleteRevisions": {fact_id: int(fact.get("revision") or 1) for fact_id, fact in current_by_id.items() if fact_id not in incoming_ids},
+            }
+            if replace_shared_summaries:
+                change_set["summaries"] = {
+                    "user": copy.deepcopy(memory_data.get("user", {})),
+                    "history": copy.deepcopy(memory_data.get("history", {})),
+                }
             self._storage.apply_changes(
-                {
-                    "upserts": incoming_facts,
-                    "upsertRevisions": {str(fact.get("id")): (int(current_by_id[str(fact.get("id"))].get("revision") or 1) if str(fact.get("id")) in current_by_id else None) for fact in incoming_facts},
-                    "deletes": [fact_id for fact_id in current_by_id if fact_id not in incoming_ids],
-                    "deleteRevisions": {fact_id: int(fact.get("revision") or 1) for fact_id, fact in current_by_id.items() if fact_id not in incoming_ids},
-                    "summaries": {"user": copy.deepcopy(memory_data.get("user", {})), "history": copy.deepcopy(memory_data.get("history", {}))},
-                },
+                change_set,
                 agent_name=agent_name,
                 user_id=user_id,
                 expected_manifest_revision=int(current.get("revision") or 0),

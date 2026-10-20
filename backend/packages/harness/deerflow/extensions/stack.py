@@ -55,10 +55,10 @@ def _anchors() -> dict[Placement, PlacementAnchor]:
         ),
         Placement.TOOL_VISIBLE: outermost(),
         # As close to the tool callable as the chain allows. Deliberately NOT
-        # inner_of(ToolErrorHandlingMiddleware): SkillToolPolicyMiddleware and
-        # ClarificationMiddleware are appended later and also wrap tool calls,
-        # so anchoring there left two wrappers inner of "raw" and the placement
-        # silently stopped meaning what it says.
+        # inner_of(ToolErrorHandlingMiddleware): later-appended middlewares such
+        # as ClarificationMiddleware also wrap tool calls, so anchoring there
+        # left wrappers inner of "raw" and the placement silently stopped
+        # meaning what it says.
         #
         # ClarificationMiddleware remains the one carve-out, the same shape as
         # MODEL_PHYSICAL's above: it must stay last (it short-circuits the tool

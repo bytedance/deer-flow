@@ -7,7 +7,7 @@ from deerflow.config.app_config import AppConfig
 from deerflow.config.reload_boundary import STARTUP_ONLY_FIELDS, STARTUP_ONLY_PREFIX
 from deerflow.config.subagent_batches_config import SubagentBatchesConfig
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
-from deerflow.config.subagents_config import effective_subagent_concurrency
+from deerflow.config.subagents_config import SubagentsAppConfig, effective_subagent_concurrency, effective_total_subagents_per_run
 
 
 def test_subagent_runtime_defaults_are_safe_and_bounded() -> None:
@@ -56,3 +56,12 @@ def test_ordinary_task_limit_uses_frozen_execution_capacity_after_reload() -> No
     reloaded_config = SimpleNamespace(subagent_runtime=SubagentRuntimeConfig(max_running=12))
     assert effective_subagent_concurrency(None, reloaded_config, execution_capacity=3) == 3
     assert effective_subagent_concurrency(10, reloaded_config, execution_capacity=3) == 3
+
+
+def test_per_run_delegation_cap_treats_explicit_null_as_unset() -> None:
+    config = SimpleNamespace(subagents=SubagentsAppConfig(max_total_per_run=7))
+    assert effective_total_subagents_per_run(None, config) == 7
+    assert effective_total_subagents_per_run(5, config) == 5
+    assert effective_total_subagents_per_run(99, config) == 50
+    assert effective_total_subagents_per_run(0, config) == 1
+    assert effective_total_subagents_per_run(None, SimpleNamespace()) == 6

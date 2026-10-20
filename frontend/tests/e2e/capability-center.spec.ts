@@ -161,7 +161,9 @@ test("catalog navigation, search, details, and migrated settings", async ({
     .getByRole("textbox", { name: "搜索插件名称或用途" })
     .fill("Notion");
   await expect(page.locator("article")).toHaveCount(1);
-  await page.getByRole("button", { name: "编辑 Notion", exact: true }).click();
+  await page
+    .getByRole("button", { name: "编辑 Notion (我的插件)", exact: true })
+    .click();
   await expect(page.getByRole("dialog")).toBeVisible();
   await expect(
     page.getByRole("textbox", { name: "MCP 服务器 JSON 定义" }),
@@ -229,7 +231,9 @@ test("MCP access errors preserve the independently available Lark integration", 
     page.locator("article").filter({ hasText: "Lark / Feishu" }),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Add MCP plugin" }),
+    page
+      .getByRole("region", { name: "My plugins", exact: true })
+      .getByRole("button", { name: "Add MCP plugin (My plugins)" }),
   ).toHaveCount(0);
 });
 
@@ -283,14 +287,16 @@ test("plugin filters remain usable after an MCP refetch fails", async ({
   await installed.click();
   await expect(page.locator("article")).toHaveCount(5);
   await page
-    .getByRole("switch", { name: "Enabled GitHub", exact: true })
+    .getByRole("switch", { name: "Enabled GitHub (My plugins)", exact: true })
     .click();
   await expect(
     page.getByRole("alert").filter({ hasText: "Admin privileges" }),
   ).toBeVisible();
   await expect(installed).toHaveAttribute("aria-selected", "true");
   await expect(
-    page.getByRole("button", { name: "Add MCP plugin" }),
+    page
+      .getByRole("region", { name: "My plugins", exact: true })
+      .getByRole("button", { name: "Add MCP plugin (My plugins)" }),
   ).toHaveCount(0);
   await page.getByRole("tab", { name: "All plugins", exact: true }).click();
   await expect(
@@ -425,14 +431,20 @@ test("manifest installation saves through the adapter and refreshes the catalog"
     .getByRole("textbox", { name: "Search plugins by name or purpose" })
     .fill("");
   await expect(
-    page.getByRole("button", { name: "Edit team-code", exact: true }),
+    page.getByRole("button", {
+      name: "Edit team-code (My plugins)",
+      exact: true,
+    }),
   ).toBeVisible();
   await expect(
     page.locator("article").filter({ hasText: "team-code" }),
   ).toHaveCount(1);
   await page.reload();
   await expect(
-    page.getByRole("button", { name: "Edit team-code", exact: true }),
+    page.getByRole("button", {
+      name: "Edit team-code (My plugins)",
+      exact: true,
+    }),
   ).toBeVisible();
 });
 

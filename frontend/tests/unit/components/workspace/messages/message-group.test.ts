@@ -3,9 +3,13 @@ import { afterEach, describe, expect, it, rs } from "@rstest/core";
 import { createElement, type ComponentProps } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { MessageGroup } from "@/components/workspace/messages/message-group";
+import {
+  MessageGroup,
+  scheduleToolLabel,
+} from "@/components/workspace/messages/message-group";
 import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
+import { zhCN } from "@/core/i18n/locales/zh-CN";
 
 const artifactsMockState = rs.hoisted(() => ({
   autoOpen: false,
@@ -33,6 +37,105 @@ afterEach(() => {
 });
 
 describe("MessageGroup", () => {
+  it.each(["array", "webz"])(
+    "retains valid search links when %s results contain malformed entries",
+    (shape) => {
+      const results = [
+        { title: "First source", url: "https://example.com/first" },
+        null,
+        "not a result",
+        { title: { text: "Invalid title" }, url: "https://example.com/bad" },
+        { title: "Invalid URL", url: 42 },
+        { url: "https://example.com/missing-title" },
+        { title: "Missing URL" },
+        { title: "Last source", url: "https://example.com/last" },
+        { title: "Unsafe source", url: "javascript:alert(1)" },
+      ];
+      const payload =
+        shape === "webz"
+          ? { query: "news", returned_results: results.length, results }
+          : results;
+      const html = renderToolCall(
+        "web_search",
+        { query: "news" },
+        JSON.stringify(payload),
+      );
+      expect(html).toContain('href="https://example.com/first"');
+      expect(html).toContain('href="https://example.com/last"');
+      expect(anchorCount(html)).toBe(2);
+      expect(unsafeMarkerCount(html)).toBe(1);
+      expect(html).not.toContain("Invalid title");
+    },
+  );
+
+  it.each(["array", "webz"])(
+    "renders source links from a %s search response",
+    (shape) => {
+      const results = [
+        {
+          title: "Renewable energy news",
+          url: "https://example.com/news",
+          content: "Matching passage",
+          published_at: "2026-09-20T12:00:00Z",
+          source: { domain: "example.com", language: "english", country: "US" },
+        },
+      ];
+      const payload =
+        shape === "webz"
+          ? { query: "renewable energy", returned_results: 1, results }
+          : results;
+      const html = renderToolCall(
+        "web_search",
+        { query: "renewable energy" },
+        JSON.stringify(payload),
+      );
+      expect(html).toContain('href="https://example.com/news"');
+      expect(html).toContain(">Renewable energy news</a>");
+      expect(anchorCount(html)).toBe(1);
+    },
+  );
+
+  it("keeps unsafe links blocked inside a Webz response envelope", () => {
+    const html = renderToolCall(
+      "web_search",
+      { query: "news" },
+      JSON.stringify({
+        query: "news",
+        returned_results: 1,
+        results: [
+          {
+            title: "Unsafe source",
+            url: "javascript:alert(1)",
+            content: "",
+            published_at: "",
+            source: {},
+          },
+        ],
+      }),
+    );
+    expect(unsafeMarkerCount(html)).toBe(1);
+    expect(anchorCount(html)).toBe(0);
+  });
+
+  it.each([
+    null,
+    { results: null },
+    { results: {} },
+    { error: "Webz request failed" },
+    { results: [] },
+  ])(
+    "renders a search step without links for an empty or invalid envelope %j",
+    (payload) => {
+      const html = renderToolCall(
+        "web_search",
+        { query: "news" },
+        JSON.stringify(payload),
+      );
+      expect(html).toContain("news");
+      expect(anchorCount(html)).toBe(0);
+    },
+  );
+
   it("renders unresolved streaming assistant text before a tool call arrives", () => {
     const html = renderGroup(
       [
@@ -516,6 +619,91 @@ describe("MessageGroup", () => {
   });
 });
 
+describe("scheduler tool steps", () => {
+  const actions = [
+    ["create", "Scheduled a task", "已创建定时任务"],
+    ["update", "Updated a scheduled task", "已修改定时任务"],
+    ["list", "Checked scheduled tasks", "查看了定时任务"],
+    ["pause", "Paused a scheduled task", "已暂停定时任务"],
+    ["resume", "Resumed a scheduled task", "已恢复定时任务"],
+    ["delete", "Deleted a scheduled task", "已删除定时任务"],
+    ["note", "Saved a note for a scheduled task", "已为定时任务保存备注"],
+    ["trial", "Started a trial run", "已开始试运行"],
+    ["something-else", "Managed scheduled tasks", "处理了定时任务"],
+  ] as const;
+
+  it.each(actions)("labels schedule_task %s in en and zh", (action, en, zh) => {
+    expect(
+      scheduleToolLabel("schedule_task", { action }, undefined, enUS),
+    ).toBe(en);
+    expect(
+      scheduleToolLabel("schedule_task", { action }, undefined, zhCN),
+    ).toBe(zh);
+  });
+
+  it("labels a coded error result as a failed change", () => {
+    const error = { error: "Ask which timezone", code: "timezone_required" };
+    expect(
+      scheduleToolLabel("schedule_task", { action: "create" }, error, enUS),
+    ).toBe("The scheduled task change didn't go through");
+    expect(
+      scheduleToolLabel("schedule_task", { action: "create" }, error, zhCN),
+    ).toBe("定时任务操作没有成功");
+  });
+
+  it("labels a tool-level failure (text, not a JSON result) as failed", () => {
+    const text =
+      "Error invoking tool 'schedule_task': schedule_type: Input should be 'once', 'interval' or 'cron'";
+    expect(
+      scheduleToolLabel("schedule_task", { action: "create" }, text, enUS),
+    ).toBe("The scheduled task change didn't go through");
+    expect(scheduleToolLabel("stop_scheduled_task", {}, text, zhCN)).toBe(
+      "定时任务操作没有成功",
+    );
+    expect(
+      scheduleToolLabel(
+        "schedule_task",
+        { action: "toString" },
+        undefined,
+        enUS,
+      ),
+    ).toBe("Managed scheduled tasks");
+  });
+
+  it("labels the self-stop and ignores other tools", () => {
+    expect(scheduleToolLabel("stop_scheduled_task", {}, undefined, enUS)).toBe(
+      "Paused this scheduled task (takes effect when this run ends)",
+    );
+    expect(scheduleToolLabel("stop_scheduled_task", {}, undefined, zhCN)).toBe(
+      "已暂停此定时任务（本次运行结束后生效）",
+    );
+    expect(scheduleToolLabel("bash", {}, undefined, enUS)).toBeNull();
+  });
+
+  it("renders human step labels, never the generic tool label", () => {
+    const html =
+      renderToolCall(
+        "schedule_task",
+        { action: "create" },
+        JSON.stringify({
+          action: "create",
+          display: "card",
+          task: { id: "task-1" },
+        }),
+      ) +
+      renderToolCall(
+        "stop_scheduled_task",
+        {},
+        JSON.stringify({ action: "stop", stop_requested: true }),
+      );
+    expect(html).toContain("Scheduled a task");
+    expect(html).toContain("Paused this scheduled task");
+    expect(html).not.toContain("schedule_task");
+    expect(html).not.toContain("stop_scheduled_task");
+    expect(html).not.toContain("Use ");
+  });
+});
+
 // Tool args come from the model and results from search providers, so a
 // prompt-injected URL must not become a navigable anchor. React only rewrites
 // javascript: hrefs; local and OS-handler schemes would otherwise pass through.
@@ -625,6 +813,8 @@ describe("MessageGroup tool links", () => {
     "bash",
     "ask_clarification",
     "write_todos",
+    "schedule_task",
+    "stop_scheduled_task",
     "browser_navigate",
     "mcp_lookup",
   ])("renders a %s step whose tool call has no args", (name) => {

@@ -979,6 +979,59 @@ async def test_admission_retention_skips_selected_or_missing_head_without_parent
 
 
 @pytest.mark.anyio
+async def test_gateway_context_keeps_agent_runs_binding_and_retention_hooks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Main's delegation binding and admission cleanup must share one context."""
+    from app.gateway import deps
+
+    saver = InMemorySaver()
+    wrapped = CachedHistorySaver(saver, MemoryCheckpointHistoryCache(max_entries=16), key_prefix="context-retention")
+    thread_id = _thread_id()
+    await _build_graph(DeltaState, wrapped).ainvoke({"messages": [HumanMessage(content="preserved")]}, _config(thread_id))
+    assert await persist_run_durations(checkpointer=wrapped, thread_id=thread_id, durations={"prior": 1})
+    leaf = await saver.aget_tuple(_config(thread_id))
+    assert leaf is not None
+    leaf_id = leaf.checkpoint["id"]
+    delegation = object()
+    bound_requests: list[Any] = []
+    completed: list[Any] = []
+
+    class Host:
+        def bind(self, request: Any) -> Any:
+            bound_requests.append(request)
+            return delegation
+
+    class Scheduler:
+        async def handle_run_completion(self, record: Any) -> None:
+            completed.append(record)
+
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                agent_runs_host=Host(),
+                scheduled_task_service=Scheduler(),
+                checkpointer=wrapped,
+                store=object(),
+                run_event_store=object(),
+                thread_store=object(),
+            )
+        )
+    )
+    monkeypatch.setattr(deps, "get_config", lambda: SimpleNamespace())
+    context = deps.get_run_context(request)
+
+    assert context.agent_runs is delegation
+    assert bound_requests == [request]
+    assert context.checkpointer is wrapped
+    record = SimpleNamespace(thread_id=thread_id, run_id="next")
+    await context.on_run_admitted(record, {"configurable": {"checkpoint_map": {"": leaf_id}}})
+    assert await saver.aget_tuple(_config_thread(thread_id, leaf_id)) is not None
+    await context.on_run_admitted(record, _config(thread_id))
+    assert await saver.aget_tuple(_config_thread(thread_id, leaf_id)) is None
+    await context.on_run_completed(record)
+    assert completed == [record]
+
+
+@pytest.mark.anyio
 async def test_gateway_admission_retention_failure_isolated_from_scheduler_completion(monkeypatch: pytest.MonkeyPatch) -> None:
     """Retention remains best-effort and scheduled completion stays separate."""
     from app.gateway import checkpoint_retention as retention_module

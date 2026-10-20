@@ -7,21 +7,23 @@ import shlex
 import threading
 from typing import TYPE_CHECKING
 
-from e2b import FileNotFoundException
+from e2b import CommandExitException, FileNotFoundException, TimeoutException
 from e2b_code_interpreter import Sandbox as E2BClientSandbox
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT as _MAX_DOWNLOAD_SIZE
+from deerflow.sandbox.download import download_limit, read_download_stream
+from deerflow.sandbox.read_file_contract import split_file_lines
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.remote_search import parse_remote_search_output, remote_search_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
-from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
+from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path_under_root, truncate_line
 
 if TYPE_CHECKING:
     from deerflow.community.e2b_sandbox.e2b_sandbox_provider import MountUploadResult
 
 logger = logging.getLogger(__name__)
 
-_MAX_DOWNLOAD_SIZE = 100 * 1024 * 1024  # 100 MB
 
 # Where DeerFlow's ``/mnt/user-data`` virtual prefix is materialised inside
 # the e2b sandbox.  e2b code-interpreter templates default to ``/home/user``
@@ -165,7 +167,13 @@ class E2BSandbox(Sandbox):
                     kwargs["envs"] = env
                 if timeout is not None:
                     kwargs["timeout"] = timeout
-                result = client.commands.run(command, **kwargs)
+                try:
+                    result = client.commands.run(command, **kwargs)
+                except CommandExitException as exc:
+                    # The SDK raises on a nonzero exit instead of returning a
+                    # result. The exception is itself a ``CommandResult``, so
+                    # format it like one to keep stdout and the exit marker.
+                    result = exc
                 stdout = getattr(result, "stdout", "") or ""
                 stderr = getattr(result, "stderr", "") or ""
                 exit_code = getattr(result, "exit_code", 0)
@@ -180,6 +188,11 @@ class E2BSandbox(Sandbox):
                     # actual shell status.
                     output = f"{output}\nExit Code: {exit_code}" if output else f"Command exited with code {exit_code}"
                 return output if output else "(no output)"
+            except TimeoutException:
+                # A command deadline is a shell outcome, not a provider hiccup:
+                # end with the same Exit Code: 124 marker Local/AIO/Tenki emit
+                # on timeout so evidence consumers recover the real status.
+                return "Error: command timed out\nExit Code: 124"
             except Exception as e:
                 if _is_sandbox_gone_error(e):
                     self._dead = True
@@ -233,7 +246,7 @@ class E2BSandbox(Sandbox):
             if start_line is None and end_line is None:
                 return content.decode("utf-8", errors="replace") if isinstance(content, bytes) else content or ""
             text = content.decode("utf-8", errors="replace") if isinstance(content, bytes) else content or ""
-            lines = text.splitlines()
+            lines = split_file_lines(text)
             # Clamp like LocalSandbox.read_file: a negative start would otherwise
             # wrap around through Python's negative-index slicing.
             start = max(start_line or 1, 1)
@@ -244,7 +257,8 @@ class E2BSandbox(Sandbox):
             logger.error("Failed to read file %s in e2b sandbox: %s", resolved, e)
             return f"Error: {e}"
 
-    def download_file(self, path: str) -> bytes:
+    def download_file(self, path: str, *, max_bytes: int | None = None) -> bytes:
+        limit = download_limit(max_bytes, _MAX_DOWNLOAD_SIZE)
         normalised = path.replace("\\", "/")
         for segment in normalised.split("/"):
             if segment == "..":
@@ -276,7 +290,9 @@ class E2BSandbox(Sandbox):
                 raise RuntimeError("sandbox client has been closed")
             try:
                 data = client.files.read(resolved, format="stream")
-            except TypeError:
+            except TypeError as error:
+                if max_bytes is not None:
+                    raise OSError("Bounded downloads require E2B streaming support") from error
                 try:
                     data = client.files.read(resolved, format="bytes")
                 except Exception as e:
@@ -286,58 +302,39 @@ class E2BSandbox(Sandbox):
                 logger.error("Failed to download file %s from e2b sandbox: %s", resolved, e)
                 raise OSError(f"Failed to download file '{path}' from sandbox: {e}") from e
 
+        if max_bytes is not None and isinstance(data, (bytes, bytearray, str)):
+            raise OSError("Bounded downloads require an E2B byte stream")
+
         if data is None:
             return b""
 
         # Buffered fallbacks (bytes/bytearray/str): apply the cap up front so
         # we still refuse oversize payloads even on this path.
         if isinstance(data, (bytes, bytearray)):
-            if len(data) > _MAX_DOWNLOAD_SIZE:
+            if len(data) > limit:
                 raise OSError(
                     errno.EFBIG,
-                    f"File exceeds maximum download size of {_MAX_DOWNLOAD_SIZE} bytes",
+                    f"File exceeds maximum download size of {limit} bytes",
                     path,
                 )
             return bytes(data)
         if isinstance(data, str):
             encoded = data.encode("utf-8")
-            if len(encoded) > _MAX_DOWNLOAD_SIZE:
+            if len(encoded) > limit:
                 raise OSError(
                     errno.EFBIG,
-                    f"File exceeds maximum download size of {_MAX_DOWNLOAD_SIZE} bytes",
+                    f"File exceeds maximum download size of {limit} bytes",
                     path,
                 )
             return encoded
 
-        chunks: list[bytes] = []
-        total = 0
-        close = getattr(data, "close", None)
         try:
-            try:
-                for chunk in data:
-                    if not chunk:
-                        continue
-                    chunk_bytes = chunk if isinstance(chunk, bytes) else bytes(chunk)
-                    total += len(chunk_bytes)
-                    if total > _MAX_DOWNLOAD_SIZE:
-                        raise OSError(
-                            errno.EFBIG,
-                            f"File exceeds maximum download size of {_MAX_DOWNLOAD_SIZE} bytes",
-                            path,
-                        )
-                    chunks.append(chunk_bytes)
-            except OSError:
-                raise
-            except Exception as e:
-                logger.error("Failed to stream file %s from e2b sandbox: %s", resolved, e)
-                raise OSError(f"Failed to download file '{path}' from sandbox: {e}") from e
-        finally:
-            if callable(close):
-                try:
-                    close()
-                except Exception:
-                    pass
-        return b"".join(chunks)
+            return read_download_stream(data, limit, path)
+        except OSError:
+            raise
+        except Exception as e:
+            logger.error("Failed to stream file %s from e2b sandbox: %s", resolved, e)
+            raise OSError(f"Failed to download file '{path}' from sandbox: {e}") from e
 
     def list_dir(self, path: str, max_depth: int = 2) -> list[str]:
         resolved = self._resolve_path(path)
@@ -347,6 +344,12 @@ class E2BSandbox(Sandbox):
                 raise RuntimeError("sandbox client has been closed")
             try:
                 result = client.commands.run(remote_list_dir_command(resolved, max_depth))
+            except CommandExitException as exc:
+                # The listing script exits nonzero on reachable outcomes (missing
+                # root: 1; head truncating a large listing: SIGPIPE 141). The SDK
+                # raises for those, but the exception carries stdout, whose
+                # status marker the parser trusts over the exit code.
+                result = exc
             except Exception as e:
                 logger.error("Failed to list_dir %s in e2b sandbox: %s", resolved, e)
                 raise OSError(f"Failed to list_dir {resolved} in e2b sandbox: {e}") from e
@@ -427,13 +430,14 @@ class E2BSandbox(Sandbox):
         matches: list[str] = []
         root = resolved.rstrip("/") or "/"
         root_prefix = root if root == "/" else f"{root}/"
-        for entry in output.text.splitlines():
+        # Records are LF-delimited; other splitlines() boundaries can be path characters.
+        for entry in output.text.split("\n"):
             # Do NOT strip: trailing whitespace can be part of the filename.
             if not entry:
                 continue
             if entry != root and not entry.startswith(root_prefix):
                 continue
-            if should_ignore_path(entry):
+            if should_ignore_path_under_root(entry, root):
                 continue
             rel_path = entry[len(root) :].lstrip("/")
             if not rel_path:
@@ -458,14 +462,21 @@ class E2BSandbox(Sandbox):
         case_sensitive: bool = False,
         max_results: int = 100,
     ) -> tuple[list[GrepMatch], bool]:
-        regex_source = re.escape(pattern) if literal else pattern
-        re.compile(regex_source, 0 if case_sensitive else re.IGNORECASE)
+        # Sanity-check a regex pattern as a Python regex at the boundary (grep uses
+        # POSIX ERE, but this catches gross errors); a literal needs no validation.
+        # grep receives the RAW pattern: -F matches it literally, -E as a regex.
+        # Escaping it first would double-escape -- fixed-string grep would then
+        # search for the added backslashes as text (``alpha\.beta``) and never
+        # match the exact line (#5626).
+        if not literal:
+            re.compile(pattern, 0 if case_sensitive else re.IGNORECASE)
 
         resolved = self._resolve_path(path)
         # Build a portable ``grep`` invocation:
         # -r recursive, -n line numbers, -H always print filename, -I skip
         # binary files, -E extended regex (or -F for literal/fixed strings).
-        flags = ["-r", "-n", "-H", "-I"]
+        # --null separates filenames from line numbers even when a path contains colons.
+        flags = ["-r", "-n", "-H", "-I", "--null"]
         if not case_sensitive:
             flags.append("-i")
         if literal:
@@ -481,13 +492,13 @@ class E2BSandbox(Sandbox):
             # pattern) and enforce the real directory scope below via
             # ``path_matches``, the same helper ``glob()`` uses.
             include_pattern = glob.split("/")[-1] or glob
-            flags.append(f"--include={include_pattern}")
+            flags.append(shlex.quote(f"--include={include_pattern}"))
 
         per_file_cap = max(max_results + 1, 50)
         total_cap = max(max_results * 4, max_results + 50)
         flags.append(f"-m{per_file_cap}")
 
-        search = "grep " + " ".join(flags) + f" -- {shlex.quote(regex_source)} {shlex.quote(resolved)} 2>/dev/null"
+        search = "grep " + " ".join(flags) + f" -- {shlex.quote(pattern)} {shlex.quote(resolved)} 2>/dev/null"
 
         with self._lock:
             client = self._client
@@ -506,16 +517,18 @@ class E2BSandbox(Sandbox):
 
         matches: list[GrepMatch] = []
         truncated = output.truncated
-        for raw in output.text.splitlines():
+        # Keep non-LF separators inside filenames and matched text intact.
+        for raw in output.text.split("\n"):
             try:
-                file_path, line_no_str, line_text = raw.split(":", 2)
+                file_path, match_text = raw.split("\0", 1)
+                line_no_str, line_text = match_text.split(":", 1)
             except ValueError:
                 continue
             try:
                 line_number = int(line_no_str)
             except ValueError:
                 continue
-            if should_ignore_path(file_path):
+            if should_ignore_path_under_root(file_path, root):
                 continue
             if glob is not None:
                 # Restrict to the caller's real directory scope -- the

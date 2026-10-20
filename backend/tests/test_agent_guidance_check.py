@@ -9,19 +9,30 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CHECKER_PATH = REPO_ROOT / "scripts" / "check_agent_guidance.py"
 EXPECTED_GUIDANCE_PATHS = {
     "AGENTS.md",
+    "skills/public/data-analysis/AGENTS.md",
     "backend/AGENTS.md",
     "backend/tests/AGENTS.md",
     "frontend/AGENTS.md",
     "backend/app/gateway/AGENTS.md",
+    "backend/app/gateway/routers/AGENTS.md",
     "backend/app/channels/AGENTS.md",
     "backend/packages/harness/deerflow/AGENTS.md",
     "backend/packages/harness/deerflow/agents/AGENTS.md",
     "backend/packages/harness/deerflow/agents/middlewares/AGENTS.md",
     "backend/packages/harness/deerflow/agents/memory/AGENTS.md",
     "backend/packages/harness/deerflow/agents/task_continuity/AGENTS.md",
+    "backend/packages/harness/deerflow/community/brave/AGENTS.md",
+    "backend/packages/harness/deerflow/community/groundroute/AGENTS.md",
+    "backend/packages/harness/deerflow/community/image_search/AGENTS.md",
+    "backend/packages/harness/deerflow/community/infoquest/AGENTS.md",
+    "backend/packages/harness/deerflow/community/jina_ai/AGENTS.md",
     "backend/packages/harness/deerflow/community/ragflow/AGENTS.md",
+    "backend/packages/harness/deerflow/community/serper/AGENTS.md",
     "backend/packages/harness/deerflow/community/tavily/AGENTS.md",
+    "backend/packages/harness/deerflow/community/ddg_search/AGENTS.md",
     "backend/packages/harness/deerflow/community/e2b_sandbox/AGENTS.md",
+    "backend/packages/harness/deerflow/community/aio_sandbox/AGENTS.md",
+    "backend/packages/harness/deerflow/community/opensandbox/AGENTS.md",
     "backend/packages/harness/deerflow/config/AGENTS.md",
     "backend/packages/harness/deerflow/extensions/AGENTS.md",
     "backend/packages/harness/deerflow/runtime/AGENTS.md",
@@ -39,9 +50,14 @@ EXPECTED_GUIDANCE_PATHS = {
     "backend/packages/harness/deerflow/tracing/AGENTS.md",
     "backend/packages/harness/deerflow/tui/AGENTS.md",
     "backend/packages/harness/deerflow/typesafe/AGENTS.md",
+    "backend/packages/harness/deerflow/uploads/AGENTS.md",
     "backend/packages/harness/deerflow/utils/AGENTS.md",
     "frontend/src/AGENTS.md",
+    "frontend/src/core/memory/AGENTS.md",
     "scripts/AGENTS.md",
+    "examples/deerflow-extension-agent-teams/AGENTS.md",
+    "examples/deerflow-extension-workflows/AGENTS.md",
+    "examples/deerflow-extension-weknora/AGENTS.md",
 }
 
 
@@ -200,3 +216,8 @@ def test_repository_exposes_one_local_and_one_ci_entrypoint() -> None:
     assert "fetch-depth: 0" in workflow
     assert "--base-ref" in workflow
     assert "--before" in workflow
+
+
+def test_repository_guidance_chains_fit_hard_budget() -> None:
+    files = {PurePosixPath(relative): (REPO_ROOT / relative).read_text(encoding="utf-8") for relative in EXPECTED_GUIDANCE_PATHS}
+    assert not [finding for finding in checker.analyze(REPO_ROOT, files) if finding.severity == "error"]

@@ -137,6 +137,24 @@ def tree(tmp_path):
     return root
 
 
+@pytest.fixture
+def ignored_name_tree(tmp_path):
+    """A tree whose root *and* one nested directory carry an ignored name.
+
+    ``build`` is in ``IGNORE_PATTERNS``; ``node_modules`` is ignored one level
+    below it. ``list_dir`` already scopes ignore patterns to the listing root,
+    so an ignored name may not hide the root that was explicitly requested,
+    while an ignored name inside the tree keeps hiding its descendants.
+    """
+    root = tmp_path / "build"
+    (root / "node_modules" / "dep").mkdir(parents=True)
+    (root / "workspace").mkdir()
+    (root / "notes.txt").write_text("header\nneedle build\n", encoding="utf-8")
+    (root / "workspace" / "report.txt").write_text("needle nested\n", encoding="utf-8")
+    (root / "node_modules" / "dep" / "lib.js").write_text("needle hidden\n", encoding="utf-8")
+    return root
+
+
 def _relative_paths(paths, root):
     # Directory suffixes and inclusion of the requested root are legitimate
     # provider presentation differences; names and descendants must agree.
@@ -167,6 +185,40 @@ def test_glob_can_include_directories(provider, tree):
     assert truncated is False
 
 
+def test_search_root_at_an_ignored_name_keeps_its_contents(provider, ignored_name_tree):
+    assert _relative_paths(provider.sandbox.list_dir(str(ignored_name_tree)), ignored_name_tree) == {"notes.txt", "workspace", "workspace/report.txt"}
+    matches, truncated = provider.sandbox.glob(str(ignored_name_tree), "**/*.txt")
+    assert _relative_paths(matches, ignored_name_tree) == {"notes.txt", "workspace/report.txt"}
+    assert truncated is False
+
+
+def test_search_root_below_an_ignored_name_keeps_its_contents(provider, ignored_name_tree):
+    root = ignored_name_tree / "workspace"
+    matches, truncated = provider.sandbox.glob(str(root), "**/*.txt")
+    assert _relative_paths(matches, root) == {"report.txt"}
+    assert truncated is False
+
+
+def test_search_root_at_an_ignored_name_still_hides_ignored_descendants(provider, ignored_name_tree):
+    assert provider.sandbox.glob(str(ignored_name_tree), "**/*.js") == ([], False)
+    matches, truncated = provider.sandbox.grep(str(ignored_name_tree), "needle")
+    assert {(Path(m.path).relative_to(ignored_name_tree).as_posix(), m.line_number) for m in matches} == {
+        ("notes.txt", 2),
+        ("workspace/report.txt", 1),
+    }
+    assert truncated is False
+
+
+def test_glob_with_directories_at_an_ignored_name_keeps_its_contents(provider, ignored_name_tree):
+    matches, truncated = provider.sandbox.glob(str(ignored_name_tree), "**/workspace", include_dirs=True)
+    assert _relative_paths(matches, ignored_name_tree) == {"workspace"}
+    assert truncated is False
+
+
+def test_glob_with_directories_at_an_ignored_name_still_hides_ignored_descendants(provider, ignored_name_tree):
+    assert provider.sandbox.glob(str(ignored_name_tree), "**/*.js", include_dirs=True) == ([], False)
+
+
 def test_grep_preserves_line_numbers_and_ignores_descendants(provider, tree):
     matches, truncated = provider.sandbox.grep(str(tree), "needle", case_sensitive=True)
     assert {(Path(m.path).relative_to(tree).as_posix(), m.line_number, m.line) for m in matches} == {
@@ -183,9 +235,79 @@ def test_grep_case_insensitive_and_file_scope(provider, tree):
     assert truncated is False
 
 
+@pytest.mark.parametrize(
+    ("pattern", "line"),
+    [
+        ("alpha.beta", "alpha.beta"),
+        ("hello world", "hello world"),
+        ("x[0]", "x[0]"),
+        ("path\\file", "path\\file"),
+        ("a+b", "a+b"),
+    ],
+    ids=["dot", "space", "brackets", "backslash", "plus"],
+)
+def test_grep_literal_matches_regex_metacharacters(provider, tmp_path, pattern, line):
+    # A literal pattern is matched verbatim: the sandbox must hand the RAW
+    # pattern to ``grep -F``. Re-escaping it first (``alpha\.beta``) makes
+    # fixed-string grep search for the backslash as part of the text, so an
+    # exact line never matches (#5626).
+    root = tmp_path / "literal"
+    root.mkdir()
+    (root / "sample.txt").write_text(f"header\n{line}\ntrailer\n", encoding="utf-8")
+
+    matches, truncated = provider.sandbox.grep(str(root), pattern, literal=True)
+
+    assert [(m.line_number, m.line) for m in matches] == [(2, line)]
+    assert truncated is False
+
+
+@pytest.mark.parametrize("single_file", [False, True], ids=["directory", "file"])
+@pytest.mark.parametrize("case_sensitive", [False, True], ids=["ignore-case", "match-case"])
+def test_grep_literal_finds_long_lines_with_bounded_prefix_summaries(provider, tmp_path, single_file, case_sensitive):
+    root = tmp_path / "long-lines"
+    root.mkdir()
+    target = root / "data.json"
+    target.write_text("header\n" + "x" * 2500 + "Needle[0].value\nNeedle0Xvalue\n", encoding="utf-8")
+    search_root = target if single_file else root
+    pattern = "Needle[0].value" if case_sensitive else "needle[0].VALUE"
+
+    matches, truncated = provider.sandbox.grep(str(search_root), pattern, literal=True, case_sensitive=case_sensitive)
+
+    # Search the full eligible line even when the fixed-length preview ends
+    # before the needle. `truncated` describes result limits, not preview text.
+    assert [(match.path, match.line_number, match.line) for match in matches] == [(str(target), 2, "x" * 197 + "...")]
+    assert truncated is False
+
+
 def test_grep_glob_filter_is_root_relative(provider, tree):
     matches, truncated = provider.sandbox.grep(str(tree), "needle", glob="nested/*.txt")
     assert [(m.path, m.line_number) for m in matches] == [(str(tree / "nested" / "result.txt"), 1)]
+    assert truncated is False
+
+
+@pytest.mark.parametrize(
+    ("filename", "glob"),
+    [
+        ("release notes.txt", "release *.txt"),
+        ("author's-notes.txt", "author's-*.txt"),
+        ('release"notes.txt', 'release"*.txt'),
+        ("price$USD.txt", "price$USD.txt"),
+        ("report1.txt", "report[0-9].txt"),
+        ("plain.txt", "*.txt"),
+    ],
+    ids=["space", "single-quote", "double-quote", "dollar", "character-range", "wildcard"],
+)
+def test_grep_glob_preserves_filename_characters(provider, tmp_path, filename, glob):
+    root = tmp_path / "workspace"
+    for directory in (root / "docs", root / "other", root / "docs" / "nested"):
+        directory.mkdir(parents=True)
+        (directory / filename).write_text("header\nneedle\n", encoding="utf-8")
+    (root / "docs" / "excluded.md").write_text("needle\n", encoding="utf-8")
+    provider.transport.env["USD"] = "expanded"
+
+    matches, truncated = provider.sandbox.grep(str(root), "needle", glob=f"docs/{glob}")
+
+    assert [(match.path, match.line_number, match.line) for match in matches] == [(str(root / "docs" / filename), 2, "needle")]
     assert truncated is False
 
 

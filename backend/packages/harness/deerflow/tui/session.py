@@ -29,7 +29,7 @@ class Session:
         if plan.thread_id:
             return self.resolve_ref(plan.thread_id)
         if plan.continue_recent:
-            threads = self.client.list_threads(limit=1).get("thread_list", [])
+            threads = self.client.list_threads(limit=1, sort_by="updated_at").get("thread_list", [])
             if threads:
                 return threads[0].get("thread_id")
         return None
