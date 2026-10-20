@@ -556,6 +556,44 @@ class TestHomeDirectorySpellingsStayAllowed:
         assert _classify_command(cmd) == "pass", f"Expected 'pass' for: {cmd!r}"
 
 
+class TestLowercaseHomeVariableGap:
+    """``$home`` / ``${home}`` stay a known gap beside ``${HOME:-/tmp}``.
+
+    Bash treats those names as different variables from ``$HOME``. An unset
+    ``$home`` lets ``rm -rf $home/*`` expand to ``rm -rf /*``, and the
+    case-sensitive pattern still classifies that as pass. Uppercase spellings
+    stay blocked.
+    """
+
+    @pytest.mark.parametrize(
+        ("cmd", "expected"),
+        [
+            ("rm -rf $home", "pass"),
+            ("rm -rf $home/", "pass"),
+            ("rm -rf $home/*", "pass"),
+            ("rm -rf ${home}", "pass"),
+            ("rm -rf ${home}/", "pass"),
+            ("rm -rf ${home}/*", "pass"),
+            ("rm -fr $home/", "pass"),
+            ("> $home/.bashrc", "pass"),
+            (">> ${home}/.profile", "pass"),
+            ("> ${home}/.zshrc", "pass"),
+            ("rm -rf $Home/*", "pass"),
+            ("rm -rf ${Home}/*", "pass"),
+            ("rm -rf $HOME", "block"),
+            ("rm -rf $HOME/", "block"),
+            ("rm -rf $HOME/*", "block"),
+            ("rm -rf ${HOME}", "block"),
+            ("rm -rf ${HOME}/", "block"),
+            ("rm -rf ${HOME}/*", "block"),
+            ("> $HOME/.bashrc", "block"),
+            ("> ${HOME}/.zshrc", "block"),
+        ],
+    )
+    def test_lowercase_home_gap_stays_pass_while_uppercase_blocks(self, cmd, expected):
+        assert _classify_command(cmd) == expected, f"Expected {expected!r} for: {cmd!r}"
+
+
 class TestHomeDirectoryReadsStillExecute:
     """Allowed home spellings must still run the bash tool (#7029)."""
 

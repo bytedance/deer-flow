@@ -53,8 +53,9 @@ _LEADING_FLAGS = r"(?:-\w+\s+){0,4}"
 # removes the quotes in ``rm -rf "$HOME/"``. ``_split_compound_command`` keeps
 # quote characters, so the raw-text rule never sees a bare ``$HOME`` there.
 # A longer name (``$HOMELESS``, ``$MY_HOME``, ``${HOME_CACHE}``) fails the
-# path suffix that follows. Default-value forms such as ``${HOME:-/tmp}`` are
-# outside this best-effort pattern.
+# path suffix that follows. Default-value forms such as ``${HOME:-/tmp}`` and
+# case-distinct spellings such as ``$home`` and ``${home}`` (any other case of
+# those names too) are outside this best-effort pattern.
 _HOME_TARGET = r"(?:~|\$HOME|\$\{HOME\})"
 
 # Each pattern is compiled once at import time.
