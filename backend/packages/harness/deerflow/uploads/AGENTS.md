@@ -31,3 +31,12 @@ regular files and symlinks, and remove a mismatched publication before reporting
 failure. Cleanup errors are logged without masking success or the original error.
 Keep publication/fallback coverage in `backend/tests/test_upload_copy_publication.py`
 and capture-through-collision cases in `backend/tests/test_client_upload_snapshot.py`.
+
+`companions.py::register_companion` publishes its ownership record through
+`utils.atomic_write.cleanup_failed_atomic_write`. Do not restore a bare
+`finally: os.unlink(staged)`: it runs on the success path too, so a failing
+unlink turned a completed registration into an exception, and it replaced the
+original `json.dump` error on the failure path. Pass the raw descriptor only
+until `fdopen` succeeds, and keep cleanup best-effort so a leftover staged
+record is reported rather than becoming the caller's error. Coverage:
+`backend/tests/test_atomic_cleanup_preserves_primary_error.py`.

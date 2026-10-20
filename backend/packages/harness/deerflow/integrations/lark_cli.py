@@ -90,6 +90,7 @@ from deerflow.skills.package_files import is_executable_binary_prefix
 from deerflow.skills.parser import parse_skill_file
 from deerflow.skills.permissions import make_skill_tree_sandbox_readable
 from deerflow.skills.types import SKILL_MD_FILE, SkillCategory
+from deerflow.utils.atomic_write import cleanup_failed_atomic_write
 
 logger = logging.getLogger(__name__)
 
@@ -1265,15 +1266,18 @@ def _publish_bytes_atomically(path: Path, content: bytes) -> None:
     ``make_skill_tree_sandbox_readable``. The parent directory is not fsynced,
     so this helper alone does not guarantee publication survives power loss.
     """
-    fd, temporary = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    fd, temporary_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    temporary = Path(temporary_name)
     try:
-        with os.fdopen(fd, "wb") as handle:
+        handle = os.fdopen(fd, "wb")
+        fd = None  # The file object now owns the descriptor.
+        with handle:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
     except BaseException:
-        Path(temporary).unlink(missing_ok=True)
+        cleanup_failed_atomic_write(temporary, fd)
         raise
 
 
