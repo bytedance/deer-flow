@@ -54,7 +54,8 @@ _SLASH_SKILL_ACTIVATION_TARGET_ID_KEY = "slash_skill_activation_target_id"
 # misses — resolved per the carried fail-closed/fail-open policy with a
 # WARNING, never a silent synchronous fallback.
 # Entries bind nothing for that call instead (fail closed by construction).
-# Same marker pattern as SkillToolPolicyMiddleware._REGISTRY_LOAD_FAILED.
+# Same marker pattern as the registry-load marker used by the secret-binding
+# resolution below.
 _REGISTRY_LOAD_FAILED = object()
 
 # _SECRETS_BINDING_AUDIT_KEY: last audited binding (skill and secret names only,
@@ -845,9 +846,8 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         not keep binding secrets after the provider starts denying activation.
 
         *exclude_names* carries the slash-activated skill names: explicit slash
-        activation dominates for the rest of the run (the same rule the
-        tool-policy middleware applies), and the slash source is resolved from
-        a fresher registry than the entry snapshot — letting the same skill
+        activation dominates for the rest of the run, and the slash source is resolved
+        from a fresher registry than the entry snapshot — letting the same skill
         contribute both sources would bind two eras of its declarations when
         they change across the prepass→activation window. *exclude_paths*
         carries the authenticated slash identity's container path — the stable
