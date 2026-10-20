@@ -1,4 +1,4 @@
-"""Additive Skill host schema and current migration-chain head."""
+"""Additive Skill host schema and its migration-chain ancestry."""
 
 import asyncio
 
@@ -15,9 +15,9 @@ REVISION = "0046_skill_mutations"
 TABLES = {"skill_mutation_assets", "skill_mutation_owners", "skill_mutation_proposals", "skill_mutation_operations", "skill_mutation_scan_attempts"}
 
 
-def test_0046_is_the_chain_head():
-    assert bootstrap._get_head_revision() == REVISION
+def test_0046_remains_in_the_chain_before_tracing_profiles():
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
+    assert script.get_revision("0047_tracing_profiles").down_revision == REVISION
     assert script.get_revision(REVISION).down_revision == "0045_completed_run_evidence"
     assert script.get_revision("0045_completed_run_evidence").down_revision == "0044_channel_runtime_configs"
     assert script.get_revision("0044_channel_runtime_configs").down_revision == "0043_runtime_im_notices"
