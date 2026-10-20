@@ -5,6 +5,8 @@ import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SKILL_CREATOR_ROOT = REPO_ROOT / "skills" / "public" / "skill-creator"
 SCRIPTS_DIR = SKILL_CREATOR_ROOT / "scripts"
@@ -125,13 +127,18 @@ def test_skill_creator_text_io_declares_utf8() -> None:
             if not isinstance(node, ast.Call):
                 continue
 
+            read_only = False
             if isinstance(node.func, ast.Attribute) and node.func.attr in {"read_text", "write_text"}:
                 operation = node.func.attr
+                read_only = operation == "read_text"
             elif isinstance(node.func, ast.Name) and node.func.id == "open":
                 mode = node.args[1] if len(node.args) > 1 else next((keyword.value for keyword in node.keywords if keyword.arg == "mode"), None)
                 if isinstance(mode, ast.Constant) and isinstance(mode.value, str) and "b" in mode.value:
                     continue
                 operation = "open"
+                # ``utf-8-sig`` is the documented read encoding for SKILL.md
+                # (it strips a leading BOM); writes must stay plain UTF-8.
+                read_only = not (isinstance(mode, ast.Constant) and isinstance(mode.value, str) and any(flag in mode.value for flag in "wax+"))
             elif isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name) and node.func.value.id == "subprocess":
                 keywords = {keyword.arg: keyword.value for keyword in node.keywords if keyword.arg is not None}
                 text_mode = any(isinstance(keywords.get(name), ast.Constant) and keywords[name].value is True for name in ("text", "universal_newlines"))
@@ -142,8 +149,77 @@ def test_skill_creator_text_io_declares_utf8() -> None:
                 continue
 
             encoding = next((keyword.value for keyword in node.keywords if keyword.arg == "encoding"), None)
-            if not isinstance(encoding, ast.Constant) or encoding.value != "utf-8":
+            allowed = {"utf-8", "utf-8-sig"} if read_only else {"utf-8"}
+            if not isinstance(encoding, ast.Constant) or encoding.value not in allowed:
                 relative_path = script_path.relative_to(SKILL_CREATOR_ROOT)
                 missing_encoding.append(f"{relative_path}:{node.lineno} {operation}")
 
-    assert not missing_encoding, f"text I/O must declare encoding='utf-8': {missing_encoding}"
+    assert not missing_encoding, f"text I/O must declare encoding='utf-8' (or 'utf-8-sig' for reads): {missing_encoding}"
+
+
+def _write_skill(tmp_path: Path, content: str) -> Path:
+    skill_dir = tmp_path / "demo-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(content, encoding="utf-8", newline="")
+    return skill_dir
+
+
+def test_validate_skill_accepts_bom_prefixed_frontmatter(tmp_path: Path) -> None:
+    validator = _load_validator()
+    skill_dir = _write_skill(
+        tmp_path,
+        "﻿---\nname: demo-skill\ndescription: Handles BOM-prefixed files.\n---\n\n# Demo\n",
+    )
+
+    assert validator.validate_skill(skill_dir) == (True, "Skill is valid!")
+
+
+@pytest.mark.parametrize(
+    ("field", "message"),
+    [
+        ("name", "Name cannot be empty"),
+        ("description", "Description cannot be empty"),
+    ],
+)
+def test_validate_skill_rejects_empty_required_fields(tmp_path: Path, field: str, message: str) -> None:
+    validator = _load_validator()
+    values = {"name": "demo-skill", "description": "Handles empty fields."}
+    values[field] = '""'
+    content = "---\n" + "\n".join(f"{key}: {value}" for key, value in values.items()) + "\n---\n\n# Demo\n"
+
+    assert validator.validate_skill(_write_skill(tmp_path, content)) == (False, message)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        'argument-hint: "[file]"',
+        "required-secrets:\n  - API_KEY",
+        "secrets-autonomous: false",
+        "version: 1.0.0",
+        "author: someone",
+    ],
+)
+def test_validate_skill_accepts_runtime_frontmatter_fields(tmp_path: Path, extra: str) -> None:
+    validator = _load_validator()
+    content = f"---\nname: demo-skill\ndescription: Handles runtime fields.\n{extra}\n---\n\n# Demo\n"
+
+    assert validator.validate_skill(_write_skill(tmp_path, content)) == (True, "Skill is valid!")
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        ("required-secrets: API_KEY", "required-secrets must be a list"),
+        (
+            'required-secrets:\n  - name: API_KEY\n    optional: "no"',
+            "required-secrets entry 'API_KEY' optional must be a boolean",
+        ),
+        ('secrets-autonomous: "yes"', "secrets-autonomous must be a boolean"),
+    ],
+)
+def test_validate_skill_rejects_malformed_runtime_fields(tmp_path: Path, extra: str, message: str) -> None:
+    validator = _load_validator()
+    content = f"---\nname: demo-skill\ndescription: Handles malformed fields.\n{extra}\n---\n\n# Demo\n"
+
+    assert validator.validate_skill(_write_skill(tmp_path, content)) == (False, message)
