@@ -1,13 +1,15 @@
 """Web search tool powered by Tencent Cloud Web Search API (WSA)."""
 
+import asyncio
 import json
 import logging
 import os
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
-from langchain.tools import tool
+from langchain_core.tools import StructuredTool
 
 from deerflow.config import get_app_config
 
@@ -140,14 +142,39 @@ def _search(api_key: str, payload: dict[str, object], query: str) -> tuple[dict[
                 },
                 json=payload,
             )
+    except httpx.HTTPError as exc:
+        return _transport_error(exc, query)
+    return _decode_search_response(response, query)
+
+
+async def _asearch(api_key: str, payload: dict[str, object], query: str) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT_S) as client:
+            response = await client.post(
+                _SEARCH_ENDPOINT,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json; charset=utf-8",
+                },
+                json=payload,
+            )
+    except httpx.HTTPError as exc:
+        return _transport_error(exc, query)
+    return _decode_search_response(response, query)
+
+
+def _transport_error(exc: httpx.HTTPError, query: str) -> tuple[None, str]:
+    logger.error("Tencent Cloud WSA request failed: %s", exc)
+    return None, _error("Tencent Cloud WSA request failed", query)
+
+
+def _decode_search_response(response: httpx.Response, query: str) -> tuple[dict[str, Any] | None, str | None]:
+    try:
         response.raise_for_status()
         data = response.json()
     except httpx.HTTPStatusError as exc:
         logger.error("Tencent Cloud WSA API returned HTTP %s", exc.response.status_code)
         return None, _error(f"Tencent Cloud WSA API error: HTTP {exc.response.status_code}", query)
-    except httpx.HTTPError as exc:
-        logger.error("Tencent Cloud WSA request failed: %s", exc)
-        return None, _error("Tencent Cloud WSA request failed", query)
     except (TypeError, ValueError):
         logger.error("Tencent Cloud WSA returned an invalid JSON response")
         return None, _error("Tencent Cloud WSA returned an invalid JSON response", query)
@@ -234,16 +261,15 @@ def _parse_results(response: dict[str, Any], *, max_results: int) -> list[dict[s
     return results
 
 
-@tool("web_search", parse_docstring=True)
-def web_search_tool(query: str, max_results: int = _DEFAULT_MAX_RESULTS) -> str:
-    """Search the web using Tencent Cloud Web Search API.
+@dataclass(frozen=True)
+class _SearchRequest:
+    query: str
+    max_results: int
+    api_key: str
+    payload: dict[str, object]
 
-    Args:
-        query: Search keywords describing what you want to find.
-        max_results: Maximum number of search results to return. Default is 5.
-    """
 
-    extras = _get_tool_extras("web_search")
+def _prepare_search(query: str, max_results: int, extras: Mapping[str, Any]) -> _SearchRequest | str:
     if "max_results" in extras:
         max_results = extras["max_results"]
     max_results = _coerce_max_results(max_results)
@@ -263,7 +289,11 @@ def web_search_tool(query: str, max_results: int = _DEFAULT_MAX_RESULTS) -> str:
     if request_count is not None:
         payload["Cnt"] = request_count
 
-    data, error_json = _search(api_key, payload, query)
+    return _SearchRequest(query, max_results, api_key, payload)
+
+
+def _format_search_response(request: _SearchRequest, data: dict[str, Any] | None, error_json: str | None) -> str:
+    query, max_results = request.query, request.max_results
     if error_json is not None:
         return error_json
     assert data is not None
@@ -287,3 +317,36 @@ def web_search_tool(query: str, max_results: int = _DEFAULT_MAX_RESULTS) -> str:
     if request_id:
         output["request_id"] = request_id
     return json.dumps(output, indent=2, ensure_ascii=False)
+
+
+async def _async_web_search(query: str, max_results: int = _DEFAULT_MAX_RESULTS) -> str:
+    # Config discovery can touch disk. Preserve context while keeping it off-loop;
+    # only this short lookup, not the HTTP request, uses the default executor.
+    extras = await asyncio.to_thread(_get_tool_extras, "web_search")
+    request = _prepare_search(query, max_results, extras)
+    if isinstance(request, str):
+        return request
+    data, error_json = await _asearch(request.api_key, request.payload, request.query)
+    return _format_search_response(request, data, error_json)
+
+
+def _sync_web_search(query: str, max_results: int = _DEFAULT_MAX_RESULTS) -> str:
+    """Search the web using Tencent Cloud Web Search API.
+
+    Args:
+        query: Search keywords describing what you want to find.
+        max_results: Maximum number of search results to return. Default is 5.
+    """
+    request = _prepare_search(query, max_results, _get_tool_extras("web_search"))
+    if isinstance(request, str):
+        return request
+    data, error_json = _search(request.api_key, request.payload, request.query)
+    return _format_search_response(request, data, error_json)
+
+
+web_search_tool = StructuredTool.from_function(
+    func=_sync_web_search,
+    coroutine=_async_web_search,
+    name="web_search",
+    parse_docstring=True,
+)

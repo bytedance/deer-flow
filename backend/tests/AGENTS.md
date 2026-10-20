@@ -337,3 +337,12 @@ setup, after the autouse fixtures initialize runtime, to avoid the package cycle
 ### Web model provider presets
 
 `test_managed_provider_presets.py` covers encrypted compatibility, auto IDs, key switching, snapshot isolation and native/compatible protocols. Its HTTP double is below actual LangChain/vendor SDK serialization; do not replace these adapters with successful stubs. `test_managed_presets_live.py` requires explicit opt-in and vendor credentials, and remains skipped in CI.
+
+## Tencent WSA async invocation
+
+`test_tencent_wsa_tools.py` runs the provider contract through both sync and async
+invocation. Keep payload, coercion, normalization and error assertions shared.
+`test_tencent_wsa_async.py` parks a real loopback HTTP response with a single-worker
+default executor, then requires independent offloaded work to complete before
+releasing the response. Always release and drain requests on assertion failures.
+Also preserve off-loop config ContextVars and client cleanup on cancellation.
