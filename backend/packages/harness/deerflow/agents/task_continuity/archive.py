@@ -237,7 +237,7 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
     archived_ids = {item["id"] for item in archived_matches}
     active_by_id = {row["id"]: row for row in active}
     archived_matches = [active_by_id.get(row["id"], row) for row in archived_matches]
-    active_only = active_matches if source_id else [row for row in active_matches if row["id"] not in archived_ids]
+    active_only = [row for row in active_matches if row["id"] not in archived_ids]
     results = archived_matches[: max(0, 8 - len(active_only))] + active_only[:8]
     if excerpts and query is not None:
         excerpts_result = []

@@ -116,6 +116,20 @@ def test_active_search_results_deduplicate_against_archived_matches(scoped):
     assert "current" in message_ids
 
 
+def test_read_by_id_deduplicates_active_and_archived_source(scoped):
+    message = HumanMessage(content="needle archived and active", id="shared")
+    history = archive.capture({}, scoped, [message], TaskContinuityConfig(enabled=True))
+    source_id = archive.records([message])[0]["id"]
+
+    result = archive.lookup(
+        {"task_history": history, "messages": [message]},
+        scoped,
+        source_id=source_id,
+    )
+
+    assert [row["id"] for row in result["results"]] == [source_id]
+
+
 def test_retention_is_explicit_and_duplicate_capture_is_idempotent(scoped):
     config = TaskContinuityConfig(enabled=True, max_batches=1)
     old = {"task_history": archive.capture({}, scoped, conversation(), config)}
