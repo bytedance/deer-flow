@@ -7,9 +7,11 @@ umask; replacements preserve existing permission bits before publication. Never
 read the process umask by changing it in this threaded runtime. Behavioral tests
 for both tool imports live in `tests/test_browser_outputs_atomic.py`.
 `cleanup_failed_atomic_write` shares best-effort cleanup across this publisher,
-`skills/projection.py`'s private manifest writer, and project document staging.
+`skills/projection.py`'s private manifest writer, project document staging, and
+Gateway upload staging.
 Use it on publication failure or after deciding to discard an owned
-temporary; pass a raw descriptor only until `fdopen` succeeds. Shelf discards
+temporary; pass a raw descriptor only until `fdopen` succeeds, or an explicitly
+transferred duplicate descriptor owned by the cleanup caller. Shelf discards
 must preserve both a rejected project's 404 and a dedup hit's 200 response.
 Callers retain their own serialization, permissions and publication policy.
 Failure cleanup must preserve the original publication exception, including
