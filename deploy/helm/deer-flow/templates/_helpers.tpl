@@ -157,9 +157,7 @@ imagePullSecrets:
        3. chart-managed secret `<release>-redis`
      Only #3 is created by this chart; #1/#2 must exist already. */}}
 {{- define "deer-flow.redisUrlSecret" -}}
-{{- if .Values.redis.external.existingSecret -}}{{- .Values.redis.external.existingSecret -}}
-{{- else if .Values.redis.existingSecret -}}{{- .Values.redis.existingSecret -}}
-{{- else -}}{{- include "deer-flow.redisFullname" . -}}{{- end -}}
+{{- include "deer-flow.redisUserSecret" . | default (include "deer-flow.redisFullname" .) -}}
 {{- end -}}
 
 {{/* Name of the operator-managed redis Secret, or empty when the chart owns the

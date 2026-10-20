@@ -316,3 +316,11 @@ setup, after the autouse fixtures initialize runtime, to avoid the package cycle
 ### Web model provider presets
 
 `test_managed_provider_presets.py` covers encrypted compatibility, auto IDs, key switching, snapshot isolation and native/compatible protocols. Its HTTP double is below actual LangChain/vendor SDK serialization; do not replace these adapters with successful stubs. `test_managed_presets_live.py` requires explicit opt-in and vendor credentials, and remains skipped in CI.
+
+## Helm Redis credentials
+
+`test_helm_redis_existing_secret.py` renders the chart and executes its startup
+and both probe commands with argument-recording Redis stubs through
+`support.shell.require_posix_sh`. Keep missing/empty password keys, stale values
+passwords, Secret precedence, external mode and shell metacharacters covered.
+Render tests skip when Helm is unavailable; they need no Kubernetes cluster.
