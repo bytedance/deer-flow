@@ -192,7 +192,10 @@ def load_run_results(benchmark_dir: Path) -> dict:
 
                 results[config].append(result)
 
-    return results
+    # The improved skill is the primary configuration, even when an old_skill
+    # baseline sorts first or the earliest eval only has a baseline result.
+    # Preserve the remaining order for custom configuration names.
+    return dict(sorted(results.items(), key=lambda item: item[0] != "with_skill"))
 
 
 def aggregate_results(results: dict) -> dict:
