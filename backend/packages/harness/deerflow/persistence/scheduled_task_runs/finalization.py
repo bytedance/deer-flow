@@ -155,7 +155,10 @@ async def finalize_occurrence(
         task.last_run_at = launched_at
         task.last_run_id = run_id
         task.last_thread_id = occurrence.thread_id
-        task.next_run_at = next_run_at(task.schedule_type, task.schedule_spec, task.timezone, now=launched_at)
+        # A manual recurring run is an extra trial. Keep the task's existing
+        # cadence; only scheduled runs and once-task boundary logic advance it.
+        if not (occurrence.trigger == "manual" and task.schedule_type != "once"):
+            task.next_run_at = next_run_at(task.schedule_type, task.schedule_spec, task.timezone, now=launched_at)
         task.lease_owner = None
         task.lease_expires_at = None
         if task.schedule_type != "once" and task.status == "running":

@@ -211,12 +211,15 @@ class ScheduledTaskRunRepository:
         task.last_run_at = launched_at
         task.last_run_id = candidate.run_id
         task.last_thread_id = row.thread_id
-        task.next_run_at = compute_next_run_at(
-            task.schedule_type,
-            task.schedule_spec,
-            task.timezone,
-            now=launched_at,
-        )
+        # A manual recurring run is an extra trial. Keep the task's existing
+        # cadence while repairing launch bookkeeping after a crash.
+        if not (row.trigger == "manual" and task.schedule_type != "once"):
+            task.next_run_at = compute_next_run_at(
+                task.schedule_type,
+                task.schedule_spec,
+                task.timezone,
+                now=launched_at,
+            )
         task.lease_owner = None
         task.lease_expires_at = None
         task.updated_at = datetime.now(UTC)

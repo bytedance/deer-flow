@@ -70,6 +70,23 @@ async def _create_once_task(tasks, *, run_at: datetime, status: str = "enabled")
     return await tasks.get(TASK_ID, user_id=OWNER)
 
 
+async def _create_recurring_task(tasks, *, task_id: str, schedule_type: str, schedule_spec: dict, next_run_at: datetime) -> dict:
+    await tasks.create(
+        task_id=task_id,
+        user_id=OWNER,
+        thread_id=None,
+        context_mode="fresh_thread_per_run",
+        assistant_id=None,
+        title="Release check",
+        prompt="Check the release checklist.",
+        schedule_type=schedule_type,
+        schedule_spec=schedule_spec,
+        timezone="UTC",
+        next_run_at=next_run_at,
+    )
+    return await tasks.get(task_id, user_id=OWNER)
+
+
 def _record(launch: dict, run_id: str, status: RunStatus, error: str | None = None) -> RunRecord:
     return RunRecord(
         run_id=run_id,
@@ -284,6 +301,101 @@ async def test_recovered_trial_launch_keeps_the_once_task_enabled(repos):
 
     after = await tasks.get(TASK_ID, user_id=OWNER)
     assert (after["status"], after["last_run_id"], after["next_run_at"]) == ("enabled", "run-trial", coerce_iso(run_at))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("schedule_type", "schedule_spec"),
+    [("interval", {"every_seconds": 3600}), ("cron", {"cron": "0 10 * * *"})],
+)
+async def test_manual_trial_does_not_push_recurring_next_run(repos, schedule_type, schedule_spec):
+    """A trial before the next occurrence leaves the recurring cadence claimable."""
+    tasks, runs = repos
+    scheduled_at = datetime(2030, 1, 1, 10, tzinfo=UTC)
+    trial_at = scheduled_at - timedelta(minutes=1)
+    task_id = f"task-{schedule_type}"
+    launches = []
+
+    async def launch_run(**kwargs):
+        launches.append(kwargs)
+        return {"run_id": f"run-{schedule_type}-trial", "thread_id": kwargs["thread_id"]}
+
+    service = _service(tasks, runs, launch_run)
+    task = await _create_recurring_task(
+        tasks,
+        task_id=task_id,
+        schedule_type=schedule_type,
+        schedule_spec=schedule_spec,
+        next_run_at=scheduled_at,
+    )
+
+    result = await service.dispatch_task(task, now=trial_at, trigger="manual")
+    assert result["outcome"] == "launched"
+    assert (await tasks.get(task_id, user_id=OWNER))["next_run_at"] == coerce_iso(scheduled_at)
+
+    await service.handle_run_completion(_record(launches[0], result["run_id"], RunStatus.success))
+    after = await tasks.get(task_id, user_id=OWNER)
+    assert (after["status"], after["next_run_at"]) == ("enabled", coerce_iso(scheduled_at))
+
+    claimed = await tasks.claim_due_tasks(now=scheduled_at, lease_owner="poller", lease_seconds=30, limit=10)
+    assert [claimed_task["id"] for claimed_task in claimed] == [task_id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("schedule_type", "schedule_spec"),
+    [("interval", {"every_seconds": 3600}), ("cron", {"cron": "0 10 * * *"})],
+)
+async def test_recovered_recurring_trial_keeps_next_run(repos, schedule_type, schedule_spec):
+    """Crash recovery must preserve cadence for a manual recurring trial too."""
+    tasks, runs = repos
+    scheduled_at = datetime(2030, 1, 1, 10, tzinfo=UTC)
+    trial_at = scheduled_at - timedelta(minutes=1)
+    task_id = f"recovered-{schedule_type}"
+    await _create_recurring_task(
+        tasks,
+        task_id=task_id,
+        schedule_type=schedule_type,
+        schedule_spec=schedule_spec,
+        next_run_at=scheduled_at,
+    )
+    await runs.create(
+        run_record_id=f"occurrence-{schedule_type}",
+        task_id=task_id,
+        thread_id=f"thread-{schedule_type}",
+        scheduled_for=trial_at,
+        trigger="manual",
+        status="queued",
+        coordinate_with_task=True,
+        expected_task_user_id=OWNER,
+        expected_task_status="enabled",
+    )
+    assert (
+        await runs.claim_queued_run(
+            f"occurrence-{schedule_type}",
+            lease_owner="crashed",
+            now=trial_at,
+            lease_seconds=120,
+            global_max_concurrent_runs=3,
+        )
+        is not None
+    )
+    async with get_session_factory()() as session:
+        session.add(
+            RunRow(
+                run_id=f"run-{schedule_type}-trial",
+                thread_id=f"thread-{schedule_type}",
+                user_id=OWNER,
+                status="running",
+                metadata_json={"scheduled_task_id": task_id, "scheduled_task_run_id": f"occurrence-{schedule_type}"},
+                created_at=trial_at,
+            )
+        )
+        await session.commit()
+
+    assert await runs.recover_expired_launch_claims(error="recovered", now=trial_at + timedelta(minutes=5)) == 1
+    after = await tasks.get(task_id, user_id=OWNER)
+    assert (after["status"], after["last_run_id"], after["next_run_at"]) == ("enabled", f"run-{schedule_type}-trial", coerce_iso(scheduled_at))
 
 
 @pytest.mark.asyncio
