@@ -21,6 +21,10 @@ signed-in user, so their unexpected-failure 500s return a fixed detail. Load
 errors (e.g. a malformed `extensions_config.json`) carry host paths and stay in
 the server log.
 
+Thread upload, upload delete and shelf attach-to-thread 500s name the file but
+not the cause: staging and unlink `OSError`s carry host paths and stay in the
+server log.
+
 Skill mutation operation lists return `next_cursor: null` when `has_more` is false, including empty pages after a supplied `after_id`. The next cursor is the final returned operation only when a further page exists.
 
 `GET /api/agent-tool-groups` projects only configured group names for the

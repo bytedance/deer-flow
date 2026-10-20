@@ -6123,6 +6123,14 @@ This release closes that milestone with **621 merged pull requests**.
 
 ### Security
 
+- **uploads:** Thread uploads (`POST /api/threads/{thread_id}/uploads`), upload
+  deletes (`DELETE /api/threads/{thread_id}/uploads/{filename}`) and shelf
+  attach-to-thread no longer put the raw `OSError` text in their `500` detail. A
+  permission error, or a disk too full to create the staging file, answered with
+  the absolute host path of the thread's uploads directory, including the user
+  and thread IDs. They now return `Failed to upload <name>.` /
+  `Failed to delete <name>.`, and the full error stays in the Gateway log.
+
 - **skills:** `GET /api/skills`, `GET /api/skills/custom` and
   `GET /api/skills/{name}`, which every signed-in user can call, no longer put
   the raw exception text in their `500` detail. A malformed or unreadable
