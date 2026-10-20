@@ -1450,6 +1450,11 @@ establish that a package is valid or readable. The scope note remains visible
 even when there are no YAML warnings; check Gateway logs for other load failures.
 Parsing remains strict and invalid skills stay unavailable to agents.
 
+The [skill-creator benchmark](skills/public/skill-creator/SKILL.md) reports
+`with_skill` before its baseline, including `old_skill` when improving an existing
+skill. Deltas are the improved skill minus the baseline for pass rate, time, and
+tokens.
+
 #### Read-only knowledge sources
 
 Configure `knowledge_search` with either
