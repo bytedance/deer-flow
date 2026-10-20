@@ -1,6 +1,7 @@
 """Cancellation at the real upload consumer must not abandon filesystem owners."""
 
 import asyncio
+import hashlib
 import shutil
 import threading
 from pathlib import Path
@@ -350,6 +351,169 @@ def test_request_close_drains_release_under_repeated_cancellation():
             assert closed.is_set(), "request holder escaped its release"
         finally:
             release.set()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("failure", ["close", "staging_unlink", "published_unlink", "companion_unlink"])
+@pytest.mark.parametrize("broken_logging", [False, True])
+@pytest.mark.parametrize("outcome", ["cancel", "cancel_repeated", "too_large"])
+def test_rejected_request_preserves_outcome_when_cleanup_fails(local_uploads, monkeypatch, failure, broken_logging, outcome):
+    """Exercise cleanup failures through the real multi-file upload consumer."""
+    directory, _ = local_uploads
+    survivor = directory / "keep.txt"
+    survivor.write_bytes(b"another request")
+    monkeypatch.setattr(uploads, "_auto_convert_documents_enabled", lambda _: True)
+    monkeypatch.setattr(uploads, "_get_upload_limits", lambda _: SimpleNamespace(max_files=10, max_file_size=20, max_total_size=100))
+    captured, record_attempts, diagnostics = [], [], []
+    cleanup_entered, cleanup_release = threading.Event(), threading.Event()
+    prepare = uploads._prepare_upload_destination
+    native_unlink, native_path_unlink = uploads.os.unlink, Path.unlink
+    first_record = hashlib.sha256(b"first.pdf").hexdigest() + ".json"
+    second_record = hashlib.sha256(b"second.pdf").hexdigest() + ".json"
+
+    def fail_cleanup(message):
+        if outcome == "cancel_repeated":
+            cleanup_entered.set()
+            assert cleanup_release.wait(10), "test did not release the cleanup worker"
+        raise OSError(message)
+
+    class FailingClose:
+        def __init__(self, handle):
+            self.handle = handle
+
+        def __getattr__(self, name):
+            return getattr(self.handle, name)
+
+        def close(self):
+            self.handle.close()
+            fail_cleanup("synthetic staged close/flush failure")
+
+    def capture_pending(directory, name):
+        staged = prepare(directory, name)
+        if name == "pending.txt":
+            captured.append(staged)
+            if failure == "close":
+                staged.handle = FailingClose(staged.handle)
+        return staged
+
+    def unlink(path, *args, **kwargs):
+        if failure == "staging_unlink" and captured and Path(path) == captured[0].temp_path:
+            fail_cleanup("synthetic staging unlink failure")
+        if failure == "published_unlink" and Path(path) == directory / "second.pdf":
+            fail_cleanup("synthetic published unlink failure")
+        return native_unlink(path, *args, **kwargs)
+
+    def unlink_record(path, *args, **kwargs):
+        if path.parent == directory.parent / "upload-companions":
+            record_attempts.append(path.name)
+            if failure == "companion_unlink" and path.name == first_record:
+                fail_cleanup("synthetic companion unlink failure")
+        return native_path_unlink(path, *args, **kwargs)
+
+    def warn(message, *args, **kwargs):
+        diagnostics.append(message)
+        if broken_logging:
+            raise RuntimeError("synthetic logging handler failure")
+
+    async def convert(source, output_path):
+        await run_file_io(output_path.write_bytes, b"converted bytes")
+        return output_path
+
+    monkeypatch.setattr(uploads, "_prepare_upload_destination", capture_pending)
+    monkeypatch.setattr(uploads, "convert_file_to_markdown", convert)
+    monkeypatch.setattr(uploads.os, "unlink", unlink)
+    monkeypatch.setattr(Path, "unlink", unlink_record)
+    monkeypatch.setattr(uploads.logger, "warning", warn)
+    monkeypatch.setattr(upload_ingestion.logger, "warning", warn)
+    error_log = MagicMock()
+    monkeypatch.setattr(uploads.logger, "error", error_log)
+
+    async def scenario():
+        waiting, network = asyncio.Event(), asyncio.Event()
+
+        class PendingUpload:
+            filename = "pending.txt"
+
+            async def read(self, size):
+                waiting.set()
+                if outcome == "too_large":
+                    return b"x" * 30
+                await network.wait()
+                return b""
+
+        files = [_Upload("first.pdf", b"first"), _Upload("second.pdf", b"second"), PendingUpload()]
+        task = asyncio.create_task(call_unwrapped(uploads.upload_files, "cleanup-owner", request=MagicMock(), files=files, config=SimpleNamespace()))
+        try:
+            await asyncio.wait_for(waiting.wait(), 10)
+            if outcome != "too_large":
+                task.cancel("client disconnected")
+                if outcome == "cancel_repeated":
+                    assert await asyncio.to_thread(cleanup_entered.wait, 10)
+                    task.cancel("host shutdown")
+                    await asyncio.sleep(0)
+                    task.cancel("repeated host shutdown")
+                    cleanup_release.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                assert task.cancelled()
+            else:
+                with pytest.raises(uploads.HTTPException) as error:
+                    await task
+                assert error.value.status_code == 413
+            error_log.assert_not_called()
+            assert diagnostics, "cleanup failure was not reported"
+            assert record_attempts == [first_record, second_record], "one failed cleanup skipped the remaining companion"
+            assert captured[0].handle.closed
+            expected = {survivor}
+            if failure == "staging_unlink":
+                expected.add(captured[0].temp_path)
+            if failure == "published_unlink":
+                expected.add(directory / "second.pdf")
+            assert set(directory.iterdir()) == expected
+            assert survivor.read_bytes() == b"another request"
+        finally:
+            cleanup_release.set()
+            network.set()
+            await asyncio.gather(task, return_exceptions=True)
+            for staged in captured:
+                if not staged.handle.closed:
+                    staged.handle.close()
+                if staged.temp_path.exists():
+                    native_unlink(staged.temp_path)
+
+    asyncio.run(scenario())
+
+
+def test_failed_lease_release_logging_preserves_request_cancellation(local_uploads, monkeypatch):
+    directory, provider = local_uploads
+    provider.uses_thread_data_mounts = False
+    lease = SimpleNamespace(sandbox=object(), sandbox_id="synthetic", denied=False, release=AsyncMock(side_effect=OSError("synthetic lease release failure")))
+    monkeypatch.setattr(uploads, "try_acquire_sandbox_for_request", AsyncMock(return_value=lease))
+    monkeypatch.setattr(upload_ingestion.logger, "warning", MagicMock(side_effect=RuntimeError("synthetic logging handler failure")))
+
+    async def scenario():
+        waiting, network = asyncio.Event(), asyncio.Event()
+
+        class PendingUpload:
+            filename = "pending.txt"
+
+            async def read(self, size):
+                waiting.set()
+                await network.wait()
+                return b""
+
+        task = asyncio.create_task(call_unwrapped(uploads.upload_files, "lease-owner", request=MagicMock(), files=[PendingUpload()], config=SimpleNamespace()))
+        try:
+            await asyncio.wait_for(waiting.wait(), 10)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            lease.release.assert_awaited_once()
+            assert list(directory.iterdir()) == []
+        finally:
+            network.set()
             await asyncio.gather(task, return_exceptions=True)
 
     asyncio.run(scenario())

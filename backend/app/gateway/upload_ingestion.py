@@ -35,6 +35,7 @@ import shutil
 import tempfile
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -61,7 +62,8 @@ def _close_fd(fd: int | None) -> None:
     try:
         os.close(fd)
     except OSError:
-        logger.warning("Failed to close upload conversion descriptor", exc_info=True)
+        with suppress(Exception):
+            logger.warning("Failed to close upload conversion descriptor", exc_info=True)
 
 
 def _close_abandoned_fd(duplication: asyncio.Future) -> None:
@@ -253,7 +255,11 @@ class ThreadUploadIngestionService:
         try:
             return await self._ingest_chunks(chunks, display_name=display_name)
         except asyncio.CancelledError:
-            await self.cleanup_written()
+            try:
+                await self.cleanup_written()
+            except Exception:
+                with suppress(Exception):
+                    logger.warning("Failed to reclaim cancelled upload session files", exc_info=True)
             raise
 
     async def _ingest_chunks(self, chunks: AsyncIterator[bytes], *, display_name: str) -> dict[str, Any]:
@@ -468,7 +474,11 @@ class ThreadUploadIngestionService:
         uploads = _uploads()
         await run_file_io(uploads._cleanup_uploaded_paths, self._written_paths)
         for original, _ in self._companion_pairs:
-            await run_file_io(unregister_companion, original)
+            try:
+                await run_file_io(unregister_companion, original)
+            except Exception:
+                with suppress(Exception):
+                    logger.warning("Failed to remove upload companion record for %s", original, exc_info=True)
         self._companion_pairs = []
         self._written_paths = []
 
@@ -479,8 +489,9 @@ class ThreadUploadIngestionService:
         try:
             await await_drained(self._sandbox_lease.release())
         except Exception:
-            logger.warning(
-                "Failed to release sandbox request lease after upload sync: %s",
-                self._sandbox_lease.sandbox_id,
-                exc_info=True,
-            )
+            with suppress(Exception):
+                logger.warning(
+                    "Failed to release sandbox request lease after upload sync: %s",
+                    self._sandbox_lease.sandbox_id,
+                    exc_info=True,
+                )
