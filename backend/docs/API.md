@@ -1189,6 +1189,9 @@ GET /api/skills/custom/{skill_name}/history
 }
 ```
 
+An invalid skill name returns `400`; a skill with neither a `SKILL.md` nor
+recorded history returns `404`.
+
 #### Rollback Custom Skill
 
 Restore a custom skill's `SKILL.md` from a history entry. The restored content is

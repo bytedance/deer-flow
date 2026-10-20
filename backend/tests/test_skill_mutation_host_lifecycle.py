@@ -1,6 +1,7 @@
 """The host owns recovery even when every extension is disabled."""
 
 import asyncio
+import os
 import threading
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -20,6 +21,8 @@ from deerflow.persistence.run import RunRepository
 from deerflow.persistence.skill_mutations.model import SkillOwnerRow, SkillProposalRow
 from deerflow.persistence.user.model import UserRow
 from deerflow.runtime.events.store.db import DbRunEventStore
+
+pytestmark = pytest.mark.skipif(os.name != "posix", reason="host skill mutation tests require POSIX filesystem primitives")
 
 
 @pytest_asyncio.fixture

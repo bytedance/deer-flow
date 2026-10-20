@@ -2,6 +2,7 @@
 
 import asyncio
 import importlib.util
+import os
 from dataclasses import asdict, dataclass
 from types import SimpleNamespace
 
@@ -23,6 +24,8 @@ from deerflow.skills.mutations.guard import SkillMutationRuntime, configure_muta
 from deerflow.skills.mutations.repository import SkillMutationRepository
 from deerflow.skills.mutations.scanner import ScanVerdict
 from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
+
+pytestmark = pytest.mark.skipif(os.name != "posix", reason="host skill mutation tests require POSIX filesystem primitives")
 
 CONTENT = "---\nname: example\ndescription: Before\n---\nA\n"
 NEW = CONTENT.replace("\nA\n", "\nB\n")

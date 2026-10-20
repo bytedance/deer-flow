@@ -1015,6 +1015,13 @@
 
 ### 修复
 
+- **技能：** `GET /api/skills/custom/{skill_name}/history` 收到非法技能名（不是
+  hyphen-case，或超过 64 个字符）时，现在与删除、回滚一样返回 `400`，不再返回 `500`
+  并在每次请求时记录一次带堆栈的错误日志。只有名称校验映射为 `400`：损坏的历史文件
+  （JSON 格式错误或非 UTF-8）仍返回 `500`，此前对其返回 `400` 的
+  `POST .../rollback` 现在也返回 `500`。用非法名称删除技能时不再记录变更尾部
+  （mutation tail）错误日志。 ([#7123])
+
 - **渠道：** 同一条 IM 消息被投递两次不再被执行两次，两个 Gateway 实例也不再把一个新
   会话拆到两个线程上。Discord 私信此前没有入站去重键（没有 guild id），而 Discord 线程
   内的回复在不跟踪该线程的实例上会得到另一个键；由于每个实例的会话都会收到每条消息，
@@ -9455,3 +9462,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7040]: https://github.com/bytedance/deer-flow/pull/7040
 [#7099]: https://github.com/bytedance/deer-flow/pull/7099
 [#7104]: https://github.com/bytedance/deer-flow/pull/7104
+[#7123]: https://github.com/bytedance/deer-flow/pull/7123
