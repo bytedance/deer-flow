@@ -5,7 +5,6 @@ import pytest
 import pytest_asyncio
 from fastapi import HTTPException
 
-from app.gateway.services import BusyThreadConflict
 from app.scheduler.service import ScheduledTaskService
 from deerflow.runtime import ConflictError, RunStatus
 from deerflow.runtime.runs.manager import RunRecord
@@ -389,10 +388,13 @@ async def test_plain_409_from_launch_is_a_permanent_failure():
 
     assert result["outcome"] == "failed"
     assert run_repo.updated[-1][1]["status"] == "failed"
+    assert "Idempotency-Key already used" in run_repo.updated[-1][1]["error"]
 
 
 @pytest.mark.asyncio
 async def test_busy_thread_http_conflict_is_kept_in_queue():
+    from app.gateway.services import BusyThreadConflict
+
     async def fake_launch(**_kwargs):
         raise BusyThreadConflict("Thread thread-1 already has an active run")
 

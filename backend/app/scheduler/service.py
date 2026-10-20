@@ -476,6 +476,12 @@ class ScheduledTaskService:
         # typed HTTP 409. Other 409s (idempotency-key mismatch, thread or
         # assistant drift) are permanent launch failures; retrying them would
         # keep the occurrence queued until the queue timeout.
+        #
+        # Keep the import local to avoid changing the scheduler module's
+        # load-time import graph. The scheduler is wired by the Gateway, where
+        # ``app.gateway.services`` is already loaded, so this lookup is
+        # guaranteed; do not make it optional without moving the
+        # classification to a dependency that is always importable here.
         from app.gateway.services import BusyThreadConflict
 
         return isinstance(exc, BusyThreadConflict)
