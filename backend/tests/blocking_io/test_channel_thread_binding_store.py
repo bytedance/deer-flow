@@ -69,8 +69,10 @@ async def store(request, tmp_path) -> AsyncIterator[ChannelStore]:
 
 
 async def test_store_round_trip_does_not_block_loop(store) -> None:
-    """get / set / overwrite / list / remove on the loop, including the JSON file's atomic rewrite."""
+    """get / claim / set / overwrite / list / remove on the loop, including the JSON file's atomic rewrite."""
     assert await store.get_thread_id("slack", "C1") is None
+    assert await store.claim_thread_id("slack", "C1", "thread-0", user_id="U1") == "thread-0"
+    assert await store.claim_thread_id("slack", "C1", "thread-peer", user_id="U1") == "thread-0"
     await store.set_thread_id("slack", "C1", "thread-1", user_id="U1")
     await store.set_thread_id("slack", "C1", "thread-1b", topic_id="171.1", user_id="U1")
     await store.set_thread_id("slack", "C1", "thread-2", user_id="U2")  # overwrite
@@ -88,6 +90,7 @@ async def test_manager_lookup_and_store_do_not_block_loop(store) -> None:
     msg = InboundMessage(channel_name="slack", chat_id="C1", user_id="U1", text="hi", topic_id="171.1")
     assert await manager._lookup_thread_id(msg) is None
     assert await lookup_thread_id(msg, repo=None, store=store) is None
+    assert await manager._claim_thread_id(msg, "thread-0") == "thread-0"
     await manager._store_thread_id(msg, "thread-1")
     assert await manager._lookup_thread_id(msg) == "thread-1"
     assert await lookup_thread_id(msg, repo=None, store=store) == "thread-1"

@@ -1265,6 +1265,47 @@ This release closes that milestone with **621 merged pull requests**.
 
 ### Fixed
 
+- **channels:** An IM message delivered twice no longer runs twice, and two
+  Gateway instances no longer split a new conversation across two threads.
+  Discord direct messages had no inbound dedupe key (no guild id), and a reply
+  in a Discord thread got a different key on an instance that does not track
+  that thread, so with every instance's session receiving every message both
+  answered. Discord messages are now keyed by guild (`dm` for a direct message)
+  and by the channel they were posted in, and the adapter claims that key
+  before it creates a Discord thread, so only one instance creates one. Past
+  the 10-minute dedupe window, after a restart, or while the shared dedupe
+  store is unavailable, a redelivery used to start a second run (a GitHub
+  "Redeliver" could post a duplicate comment). Every IM run request for a keyed
+  message now carries an `Idempotency-Key` derived from the dedupe key, with a
+  human message id derived from the same key, so the Gateway returns the run
+  it admitted for the first delivery: the redelivery replays its stream, reads
+  this message's turn from the thread state, or replies that the message is
+  still being processed, and never runs the turn again, even when the first
+  run failed or `/new` has since moved the conversation to a new thread: the
+  Gateway scopes `Idempotency-Key`s from trusted internal callers by owner
+  instead of owner and thread, and a key already used on another thread now
+  answers `409` instead of `500`. When two instances create a thread for a
+  conversation's first message, the binding is now claimed insert-if-absent in
+  `channel_conversations` / `channel_thread_bindings`: the instance that loses
+  adopts the winner's thread and deletes its own empty one, and `/new` still
+  rebinds. (issue #7103, [#7104])
+- **skills:** A skill the agent creates, edits, patches or deletes with the
+  `skill_manage` tool now reaches every Gateway process sharing the home
+  volume, as a change made through the skills API already did. The tool
+  refreshed only its own process's skills prompt cache, so a peer replica kept
+  rendering the previous skill list for that user; it now publishes the same
+  user-scoped shared cache reset marker after the local refresh, off the event
+  loop. The write, its history record, the refresh and the marker settle as
+  one unit, so a run cancelled while the write is in flight no longer leaves
+  this or a peer process serving the stale list. When the marker cannot be
+  written, the tool reports that the change was applied but other processes
+  were not notified, instead of reading as a failed write. ([#7099])
+- **provisioner:** When two provisioner replicas start together and
+  `K8S_NAMESPACE` does not exist yet, the one that loses the create race no
+  longer crashes at startup: its `409 AlreadyExists` now counts as the
+  namespace existing, as the Pod and Service creates already did. Helm
+  deployments, where the provisioner runs inside the namespace it manages,
+  never took this path. ([#7099])
 - **projects:** A shelf upload or save-from-thread into a project the caller
   cannot write no longer leaves a directory behind or answers `500`. Both
   routes staged the body under `users/{user_id}/projects/{project_id}/` before
@@ -1274,7 +1315,6 @@ This release closes that milestone with **621 merged pull requests**.
   now check for an owned, active project first and answer the same `404`
   without writing; the shelf insert still re-checks under the project row lock.
   ([#7040])
-
 - **workflows:** A script workflow waiting on a long child Agent run no longer
   fails with `Worker turn limit` after about 209 seconds regardless of
   `timeout_seconds`. The supervisor re-sent an empty frame to the QuickJS worker
@@ -11860,3 +11900,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6988]: https://github.com/bytedance/deer-flow/pull/6988
 [#6991]: https://github.com/bytedance/deer-flow/pull/6991
 [#7040]: https://github.com/bytedance/deer-flow/pull/7040
+[#7099]: https://github.com/bytedance/deer-flow/pull/7099
+[#7104]: https://github.com/bytedance/deer-flow/pull/7104
