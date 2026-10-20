@@ -138,6 +138,7 @@ describe("describeGoalBar", () => {
     ],
     ["no_progress_detected", {}, "noProgress", "stopped"],
     ["token_capped", {}, "tokenCapped", "stopped"],
+    ["loop_capped", {}, "loopCapped", "stopped"],
     ["blocked:missing_evidence", {}, "missingEvidence", "stopped"],
     ["blocked:run_failed", {}, "runFailed", "stopped"],
     ["blocked:external_wait", {}, "external", "waiting"],
