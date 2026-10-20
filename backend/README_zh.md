@@ -46,26 +46,27 @@ DeerFlow 是一个基于 LangGraph 的 AI 超级智能体，具备沙箱执行�
 唯一的 LangGraph 智能体（`lead_agent`）是运行时入口，通过 `make_lead_agent(config)` 创建。它组合了：
 
 - 支持思考和视觉能力的**动态模型选择**
-- 处理横切关注点的**中间件链**（9 个中间件）
+- 根据配置组装、处理横切关注点的**中间件链**
 - 包含沙箱、MCP、社区工具和内置工具的**工具系统**
 - 用于并行执行任务的**子智能体委派**
 - 注入技能、记忆上下文和工作目录指导的**系统提示词**
 
 ### 中间件链
 
-中间件按照严格顺序执行，每个中间件负责一个特定关注点：
+中间件链由 [`build_middlewares()`](packages/harness/deerflow/agents/lead_agent/agent.py) 组装：先构建共享运行时中间件，再添加主智能体中间件，最后合并扩展贡献。配置、模型能力、记忆模式和扩展共同决定最终组成，数量并不固定。
 
-| # | 中间件 | 用途 |
-|---|--------|------|
-| 1 | **ThreadDataMiddleware** | 为每个线程创建独立目录（工作区、上传、输出） |
-| 2 | **UploadsMiddleware** | 将新上传的文件注入对话上下文 |
-| 3 | **SandboxMiddleware** | 获取用于代码执行的沙箱环境 |
-| 4 | **SummarizationMiddleware** | 接近 Token 限制时压缩上下文（可选） |
-| 5 | **TodoListMiddleware** | 在计划模式中跟踪多步骤任务（可选） |
-| 6 | **TitleMiddleware** | 在第一次交互后自动生成对话标题 |
-| 7 | **MemoryMiddleware** | 将对话加入异步记忆提取队列 |
-| 8 | **ViewImageMiddleware** | 为支持视觉的模型注入图像数据（有条件启用） |
-| 9 | **ClarificationMiddleware** | 拦截澄清请求并中断执行（必须放在最后） |
+下表按职责分组，并非完整清单或执行顺序：
+
+| 职责 | 示例 |
+|---|---|
+| 线程资源 | `ThreadDataMiddleware`、`UploadsMiddleware`、`SandboxMiddleware` |
+| 模型与工具边界 | 输入与结果清理、模型和工具错误处理、沙箱审计 |
+| 上下文与技能 | `DynamicContextMiddleware`、技能激活、持久上下文、可选压缩 |
+| 对话功能 | 可选任务清单、标题、适用时的记忆提取、视觉支持 |
+| 运行限制 | 按配置启用的子智能体限制、循环检测、Token 统计和预算 |
+| 响应收尾 | 终止响应、模型长度限制、可选安全终止处理和澄清 |
+
+注册顺序不等于所有钩子的执行顺序：`after_model` 按逆序执行，最先注册的包装器位于最外层。`ClarificationMiddleware` 在扩展合并前被追加到内置主智能体栈的最后。详见[架构指南](docs/ARCHITECTURE.md#agent-architecture)。
 
 ### 沙箱系统
 

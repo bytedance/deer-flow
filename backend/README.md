@@ -45,26 +45,27 @@ DeerFlow is a LangGraph-based AI super agent with sandbox execution, persistent 
 The single LangGraph agent (`lead_agent`) is the runtime entry point, created via `make_lead_agent(config)`. It combines:
 
 - **Dynamic model selection** with thinking and vision support
-- **Middleware chain** for cross-cutting concerns (9 middlewares)
+- **Configuration-dependent middleware chain** for cross-cutting concerns
 - **Tool system** with sandbox, MCP, community, and built-in tools
 - **Subagent delegation** for parallel task execution
 - **System prompt** with skills injection, memory context, and working directory guidance
 
 ### Middleware Chain
 
-Middlewares execute in strict order, each handling a specific concern:
+[`build_middlewares()`](packages/harness/deerflow/agents/lead_agent/agent.py) starts with the shared runtime middleware builder, adds the lead-specific stack, and then merges extension contributions. Configuration, model capabilities, memory mode, and installed extensions determine the final composition; there is no fixed middleware count.
 
-| # | Middleware | Purpose |
-|---|-----------|---------|
-| 1 | **ThreadDataMiddleware** | Creates per-thread isolated directories (workspace, uploads, outputs) |
-| 2 | **UploadsMiddleware** | Injects newly uploaded files into conversation context |
-| 3 | **SandboxMiddleware** | Acquires sandbox environment for code execution |
-| 4 | **SummarizationMiddleware** | Reduces context when approaching token limits (optional) |
-| 5 | **TodoListMiddleware** | Tracks multi-step tasks in plan mode (optional) |
-| 6 | **TitleMiddleware** | Auto-generates conversation titles from the original user request after first exchange; attachment-only messages use a sanitized file name (or `N files uploaded` for multiple attachments) |
-| 7 | **MemoryMiddleware** | Queues conversations for async memory extraction |
-| 8 | **ViewImageMiddleware** | Injects image data for vision-capable models (conditional) |
-| 9 | **ClarificationMiddleware** | Intercepts clarification requests and interrupts execution (must be last) |
+The following groups describe responsibilities, not a complete inventory or execution order:
+
+| Responsibility | Examples |
+|---|---|
+| Thread resources | `ThreadDataMiddleware`, `UploadsMiddleware`, `SandboxMiddleware` |
+| Model and tool boundaries | Input/result sanitization, model/tool error handling, sandbox auditing |
+| Context and skills | `DynamicContextMiddleware`, skill activation, durable context, optional summarization |
+| Conversation features | Optional todos, titles, memory capture when applicable, vision support |
+| Run limits | Configured subagent limits, loop detection, token accounting and budgets |
+| Response completion | Terminal-response handling, model-length and optional safety-finish handling, clarification |
+
+Registration order is not the execution order of every hook: `after_model` hooks run in reverse registration order, while the first registered wrapper is outermost. `ClarificationMiddleware` is appended last to the built-in lead stack before extension composition. See the [architecture guide](docs/ARCHITECTURE.md#agent-architecture) for assembly and request-flow diagrams with source entry points.
 
 When `loop_detection.enabled` is set, loop detection checks both repeated
 tool-call sets and per-tool frequency. Warnings do not skip the rest of a

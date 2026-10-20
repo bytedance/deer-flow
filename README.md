@@ -3505,7 +3505,7 @@ See [backend/docs/TUI.md](backend/docs/TUI.md) for the full guide.
 
 - [Contributing Guide](CONTRIBUTING.md) - Development environment setup and workflow
 - [Configuration Guide](backend/docs/CONFIGURATION.md) - Setup and configuration instructions
-- [Architecture Overview](backend/CLAUDE.md) - Technical architecture details
+- [Architecture Overview](backend/docs/ARCHITECTURE.md) - Technical architecture details
 - [Backend Architecture](backend/README.md) - Backend architecture and API reference
 
 ## ⚠️ Security Notice

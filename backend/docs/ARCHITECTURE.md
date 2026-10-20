@@ -4,49 +4,27 @@ This document provides a comprehensive overview of the DeerFlow backend architec
 
 ## System Architecture
 
+```mermaid
+flowchart TD
+    browser["Browser"] --> nginx["Nginx · 2026"]
+    nginx -->|"Non-API requests"| frontend["Next.js · 3000"]
+    nginx -->|"API requests and streaming"| gateway["FastAPI Gateway · 8001"]
+    gateway --> runtime["Embedded agent runtime"]
+    runtime --> harness["Lead agent, middleware, tools, subagents"]
+    harness --> models["Configured model providers"]
+    harness --> execution["Sandbox and external tools"]
+    runtime --> persistence["Checkpoints and run/event stores"]
 ```
-┌──────────────────────────────────────────────────────────────────────────┐
-│                              Client (Browser)                             │
-└─────────────────────────────────┬────────────────────────────────────────┘
-                                  │
-                                  ▼
-┌──────────────────────────────────────────────────────────────────────────┐
-│                          Nginx (Port 2026)                               │
-│                    Unified Reverse Proxy Entry Point                      │
-│  ┌────────────────────────────────────────────────────────────────────┐  │
-│  │  /api/langgraph/*  →  Gateway LangGraph-compatible runtime (8001)  │  │
-│  │  /api/*            →  Gateway REST APIs (8001)                     │  │
-│  │  /*                →  Frontend (3000)                               │  │
-│  └────────────────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────┬────────────────────────────────────────┘
-                                  │
-          ┌───────────────────────┴───────────────────────┐
-          │                                               │
-          ▼                                               ▼
-┌─────────────────────────────────────────────┐ ┌─────────────────────┐
-│              Gateway API                    │ │     Frontend        │
-│              (Port 8001)                    │ │    (Port 3000)      │
-│                                             │ │                     │
-│  - LangGraph-compatible runs/threads API    │ │  - Next.js App      │
-│  - Embedded Agent Runtime                   │ │  - React UI         │
-│  - SSE Streaming                            │ │  - Chat Interface   │
-│  - Checkpointing                            │ │                     │
-│  - Models, MCP, Skills, Uploads, Artifacts  │ │                     │
-│  - Thread Cleanup                           │ │                     │
-└─────────────────────────────────────────────┘ └─────────────────────┘
-          │
-          ▼
-┌──────────────────────────────────────────────────────────────────────────┐
-│                         Shared Configuration                              │
-│  ┌─────────────────────────┐  ┌────────────────────────────────────────┐ │
-│  │      config.yaml        │  │      extensions_config.json            │ │
-│  │  - Models               │  │  - MCP Servers                         │ │
-│  │  - Tools                │  │  - Skills State                        │ │
-│  │  - Sandbox              │  │                                        │ │
-│  │  - Summarization        │  │                                        │ │
-│  └─────────────────────────┘  └────────────────────────────────────────┘ │
-└──────────────────────────────────────────────────────────────────────────┘
-```
+
+Nginx rewrites `/api/langgraph/*` to the Gateway's native `/api/*` routes;
+other `/api/*` requests also reach the Gateway. The frontend consumes
+streaming responses through this proxy. The optional provisioner (`8002`)
+is used only for provisioner/Kubernetes sandbox mode.
+
+The application layer (`app/`) imports the reusable harness
+(`packages/harness/deerflow/`); the harness must not import `app.*`.
+`config.yaml` selects models, tools, sandbox, and runtime policies, while
+`extensions_config.json` holds MCP-server configuration and skill state.
 
 ## Component Details
 
@@ -113,36 +91,68 @@ The web conversation delete flow first deletes Gateway-managed thread state thro
 
 ### Agent Architecture
 
+The lead graph is built by
+[`assemble_lead_agent()`](../packages/harness/deerflow/agents/lead_agent/agent.py).
+`make_lead_agent(config)` returns its graph; the Gateway uses the richer
+assembly result.
+
+```mermaid
+flowchart TD
+    assembly["assemble_lead_agent"] --> model["Resolve model and prompt"]
+    assembly --> tools["Resolve authorized tools and skills"]
+    assembly --> base["Build shared runtime middleware"]
+    base --> lead["Add lead-specific middleware"]
+    lead --> extensions["Compose extension contributions"]
+    model --> graph["LangChain create_agent / LangGraph graph"]
+    tools --> graph
+    extensions --> graph
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                           make_lead_agent(config)                        │
-└────────────────────────────────────┬────────────────────────────────────┘
-                                     │
-                                     ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                            Middleware Chain                              │
-│  ┌──────────────────────────────────────────────────────────────────┐   │
-│  │ 1. ThreadDataMiddleware  - Initialize workspace/uploads/outputs  │   │
-│  │ 2. UploadsMiddleware     - Process uploaded files               │   │
-│  │ 3. SandboxMiddleware     - Acquire sandbox environment          │   │
-│  │ 4. SummarizationMiddleware - Context reduction (if enabled)     │   │
-│  │ 5. TitleMiddleware       - Auto-generate titles                 │   │
-│  │ 6. TodoListMiddleware    - Task tracking (if plan_mode)         │   │
-│  │ 7. ViewImageMiddleware   - Vision model support                 │   │
-│  │ 8. ClarificationMiddleware - Handle clarifications              │   │
-│  └──────────────────────────────────────────────────────────────────┘   │
-└────────────────────────────────────┬────────────────────────────────────┘
-                                     │
-                                     ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                              Agent Core                                  │
-│  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────────┐   │
-│  │      Model       │  │      Tools       │  │    System Prompt     │   │
-│  │  (from factory)  │  │  (configured +   │  │  (with skills)       │   │
-│  │                  │  │   MCP + builtin) │  │                      │   │
-│  └──────────────────┘  └──────────────────┘  └──────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────────┘
+
+There is no fixed middleware count. The shared
+[`build_lead_runtime_middlewares()`](../packages/harness/deerflow/agents/middlewares/tool_error_handling_middleware.py)
+builds runtime boundaries and thread-resource hooks. The lead's
+[`build_middlewares()`](../packages/harness/deerflow/agents/lead_agent/agent.py)
+adds context and skill handling, optional summarization and todos, conversation
+features, configured run limits, and response-completion handling.
+[`compose_with_extensions()`](../packages/harness/deerflow/extensions/stack.py)
+merges extension contributions after the complete lead stack exists.
+
+These are assembly stages, not the execution order of every hook.
+`after_model` hooks run in reverse registration order; the first registered
+wrapper is outermost. The built-in stack appends `ClarificationMiddleware`
+last before extension composition. Model capabilities, memory mode, runtime
+configuration, and extensions affect the resulting stack.
+
+### Request and Agent Execution Flow
+
+```mermaid
+flowchart TD
+    request["Thread run request"] --> admission["Gateway admission and configuration"]
+    admission --> manager["RunManager starts run_agent"]
+    manager --> graph["Assemble graph and restore state"]
+    graph --> model["Call model through middleware"]
+    model --> decision{"Tool calls?"}
+    decision -->|"Yes, permitted"| tools["Execute tools or delegate to subagent"]
+    tools -->|"Results update state"| model
+    decision -->|"No"| finish["Finalize run"]
+    model -.-> events["StreamBridge → Gateway SSE → browser"]
+    tools -.-> events
+    finish -.-> events
 ```
+
+This is the ordinary tool loop. Clarification, cancellation, errors, and
+configured limits can interrupt or stop it. Checkpoints retain graph state;
+run records and events track execution and support history/streaming features.
+Tool implementations perform actual I/O; model output selects calls that the
+runtime and its policies dispatch.
+
+| Stage | Source |
+|---|---|
+| HTTP run routes | [`app/gateway/routers/thread_runs.py`](../app/gateway/routers/thread_runs.py) |
+| Admission and configuration | [`app/gateway/services.py`](../app/gateway/services.py), `start_run()` |
+| Run lifecycle | [`runtime/runs/manager.py`](../packages/harness/deerflow/runtime/runs/manager.py), `RunManager` |
+| Graph execution | [`runtime/runs/worker.py`](../packages/harness/deerflow/runtime/runs/worker.py), `run_agent()` |
+| Event transport | [`runtime/stream_bridge/`](../packages/harness/deerflow/runtime/stream_bridge/) |
 
 ### Thread State
 
