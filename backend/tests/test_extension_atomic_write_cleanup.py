@@ -264,3 +264,50 @@ def test_plugins_short_write_still_removes_the_temporary(tmp_path, monkeypatch, 
     finally:
         for path in created:
             real_unlink(path, missing_ok=True)
+
+
+@pytest.mark.parametrize("failure", ["unlink", "logging"])
+def test_snapshot_delete_branch_cleanup_failure_does_not_skip_later_restores(tmp_path, monkeypatch, caplog, failure):
+    created = tmp_path / "uv.lock"
+    kept = tmp_path / "pyproject.toml"
+    kept.write_bytes(b"mutated")
+    created.write_bytes(b"created-by-install")
+    missing = _FileSnapshot(created, None, None)
+    later = _FileSnapshot(kept, b"original", 0o644 if os.name != "nt" else None)
+    operation_error = RuntimeError("install failed")
+
+    real_unlink = Path.unlink
+
+    def unlink(path, *args, **kwargs):
+        if path == created:
+            raise OSError("temporary unlink failed")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    if failure == "logging":
+
+        def boom_log(*args, **kwargs):
+            raise RuntimeError("log handler failed")
+
+        monkeypatch.setattr("deerflow.utils.atomic_write.logger.warning", boom_log)
+
+    def _rollback():
+        try:
+            raise operation_error
+        except RuntimeError:
+            for snapshot in (missing, later):
+                snapshot.restore()
+            raise
+
+    with caplog.at_level(logging.WARNING, logger="deerflow.utils.atomic_write"):
+        with pytest.raises(RuntimeError) as raised:
+            _rollback()
+
+    assert raised.value is operation_error
+    assert created.read_bytes() == b"created-by-install"
+    assert kept.read_bytes() == b"original"
+    if failure == "unlink":
+        assert "Failed to remove temporary output file" in caplog.text
+        assert str(created) in caplog.text
+        assert "temporary unlink failed" in caplog.text
+        assert "log handler failed" not in str(raised.value)

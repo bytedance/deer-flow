@@ -139,7 +139,9 @@ class _FileSnapshot:
 
     def restore(self) -> None:
         if self.content is None:
-            self.path.unlink(missing_ok=True)
+            # Rollback loops call this for every snapshot. A bare unlink can
+            # replace the original operation error and skip later restores.
+            cleanup_failed_atomic_write(self.path)
         else:
             _write_bytes_atomically(self.path, self.content, self.mode)
 

@@ -94,10 +94,15 @@ def test_copy_success_returns_the_uploaded_bytes():
 
 
 class _Form:
-    def __init__(self) -> None:
+    def __init__(self, *, close_error: BaseException | None = None) -> None:
         self.archive = skills_router.UploadFile(BytesIO(b"unused"), filename="demo.skill")
+        self.close_error = close_error
+        self.closed = False
 
     async def close(self) -> None:
+        self.closed = True
+        if self.close_error is not None:
+            raise self.close_error
         await self.archive.close()
 
     def get(self, _key: str) -> skills_router.UploadFile:
@@ -167,5 +172,67 @@ async def test_upload_finally_preserves_install_outcome(tmp_path, monkeypatch, c
                 assert "Failed to remove temporary output file" in caplog.text
                 assert str(archive) in caplog.text
                 assert "temporary unlink failed" in caplog.text
+    finally:
+        real_unlink(archive, missing_ok=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["success", "install_error"])
+@pytest.mark.parametrize("failure", ["none", "unlink"])
+async def test_upload_finally_close_failure_still_discards_and_preserves_outcome(tmp_path, monkeypatch, caplog, outcome, failure):
+    archive = tmp_path / "uploaded.skill"
+    archive.write_bytes(b"archive-bytes")
+    response = skills_router.SkillInstallResponse(success=True, skill_name="demo", message="installed")
+    install_error = RuntimeError("install failed")
+    close_error = RuntimeError("form close failed")
+    form = _Form(close_error=close_error)
+
+    async def _admin(*_args, **_kwargs):
+        return None
+
+    async def _parse(_request):
+        return form
+
+    def _copy(_source):
+        return archive
+
+    async def _install(path, _config):
+        assert path.read_bytes() == b"archive-bytes"
+        if outcome == "install_error":
+            raise install_error
+        return response
+
+    monkeypatch.setattr(skills_router, "require_admin_user", _admin)
+    monkeypatch.setattr(skills_router, "_parse_skill_archive_form", _parse)
+    monkeypatch.setattr(skills_router, "_copy_uploaded_skill_archive", _copy)
+    monkeypatch.setattr(skills_router, "_install_skill_archive", _install)
+
+    real_unlink = Path.unlink
+    if failure == "unlink":
+
+        def unlink(path, *args, **kwargs):
+            if path == archive:
+                raise OSError("temporary unlink failed")
+            return real_unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", unlink)
+
+    try:
+        with caplog.at_level(logging.WARNING, logger="deerflow.utils.atomic_write"):
+            if outcome == "success":
+                result = await skills_router.upload_and_install_skill(SimpleNamespace(), SimpleNamespace())
+                assert result == response
+            else:
+                with pytest.raises(RuntimeError) as raised:
+                    await skills_router.upload_and_install_skill(SimpleNamespace(), SimpleNamespace())
+                assert raised.value is install_error
+        assert form.closed
+        assert "form close failed" not in caplog.text
+        if failure == "none":
+            assert not archive.exists()
+        else:
+            assert archive.exists()
+            assert "Failed to remove temporary output file" in caplog.text
+            assert "temporary unlink failed" in caplog.text
     finally:
         real_unlink(archive, missing_ok=True)

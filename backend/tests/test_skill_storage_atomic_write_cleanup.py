@@ -145,3 +145,54 @@ def test_skill_states_preserve_save_error_when_cleanup_fails(monkeypatch, caplog
     finally:
         for path in staged:
             real_unlink(path, missing_ok=True)
+
+
+@pytest.mark.parametrize("failure", ["none", "unlink", "logging"])
+def test_skill_states_keyboard_interrupt_still_cleans(monkeypatch, caplog, user_storage, failure):
+    target = user_storage._skill_states_file
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text('{"old-skill": {"enabled": false}}\n', encoding="utf-8")
+
+    primary = KeyboardInterrupt()
+    staged: list[Path] = []
+    cleanup_unlinks: list[Path] = []
+    real_replace = Path.replace
+    real_unlink = Path.unlink
+
+    monkeypatch.setattr(Path, "replace", _failing_replace(real_replace, target.name, primary, staged))
+    if failure in {"unlink", "logging"}:
+
+        def unlink(path, *args, **kwargs):
+            if staged and path == staged[0]:
+                cleanup_unlinks.append(path)
+                raise OSError("temporary unlink failed")
+            return real_unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", unlink)
+    if failure == "logging":
+
+        def boom_log(*args, **kwargs):
+            raise RuntimeError("log handler failed")
+
+        monkeypatch.setattr("deerflow.utils.atomic_write.logger.warning", boom_log)
+
+    try:
+        with caplog.at_level(logging.WARNING, logger="deerflow.utils.atomic_write"):
+            with pytest.raises(KeyboardInterrupt) as raised:
+                user_storage._write_skill_states({"new-skill": {"enabled": True}})
+        assert raised.value is primary
+        assert target.read_text(encoding="utf-8") == '{"old-skill": {"enabled": false}}\n'
+        assert len(staged) == 1
+        if failure == "none":
+            assert not staged[0].exists()
+            assert "Failed to remove temporary output file" not in caplog.text
+        else:
+            assert staged[0].exists()
+            assert cleanup_unlinks == [staged[0]]
+            if failure == "unlink":
+                assert "Failed to remove temporary output file" in caplog.text
+                assert str(staged[0]) in caplog.text
+                assert "temporary unlink failed" in caplog.text
+    finally:
+        for path in staged:
+            real_unlink(path, missing_ok=True)

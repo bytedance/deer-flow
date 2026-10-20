@@ -138,7 +138,7 @@ class UserScopedSkillStorage(LocalSkillStorage):
             with handle:
                 json.dump(states, handle, indent=2)
             tmp_path.replace(self._skill_states_file)
-        except Exception:
+        except BaseException:
             cleanup_failed_atomic_write(tmp_path, fd)
             raise
 

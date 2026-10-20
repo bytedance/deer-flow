@@ -4,7 +4,7 @@ import logging
 import tempfile
 import threading
 from collections.abc import AsyncGenerator, Callable, Coroutine, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any, BinaryIO, Literal
 
@@ -583,10 +583,13 @@ async def upload_and_install_skill(
     except MultiPartException as e:
         raise HTTPException(status_code=400, detail=e.message) from e
     finally:
-        if form is not None:
-            await form.close()
+        # Discard before close. SpooledTemporaryFile.close can raise while
+        # flushing, which would mask the install outcome and skip the discard.
         if temporary_path is not None:
             await asyncio.to_thread(cleanup_failed_atomic_write, temporary_path)
+        if form is not None:
+            with suppress(Exception):
+                await form.close()
 
 
 @router.post(
