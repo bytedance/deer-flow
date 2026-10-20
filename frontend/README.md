@@ -2,6 +2,8 @@
 
 Like the original DeerFlow 1.0, we would love to give the community a minimalistic and easy-to-use web interface with a more modern and flexible architecture.
 
+Switching accounts reloads projects, custom agents, models, and other cached workspace data for the new account. Logging out immediately hides the previous account's data; refreshing the same account preserves its cache.
+
 ## Tech Stack
 
 - **Framework**: [Next.js 16](https://nextjs.org/) with [App Router](https://nextjs.org/docs/app)

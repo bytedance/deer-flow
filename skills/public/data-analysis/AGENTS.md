@@ -28,3 +28,7 @@ Export paths resolve relative to the caller's working directory, including bare
 filenames. Keep real DuckDB regressions for CSV/JSON/Markdown, empty results,
 existing and missing parent directories, and the cache-hit CLI path in
 `tests/skills/test_data_analysis_export_paths.py`.
+
+Markdown exports use the same cell escaping for headers and values. Escape
+backslashes before pipes and normalize CRLF, CR, and LF to inline `<br>` breaks;
+raw newlines must not split one query-result row across Markdown table rows.

@@ -639,3 +639,188 @@ class TestDeleteScopesToTheUrlProject:
             assert client.delete(f"/api/projects/{project_a['id']}/documents/{doc['id']}").status_code == 404
             assert client.get(f"/api/projects/{project_b['id']}/documents/{doc['id']}/content").status_code == 200
             assert client.delete(f"/api/projects/{project_b['id']}/documents/{doc['id']}").status_code == 204
+
+
+class TestStagingFailureCleanup:
+    @pytest.mark.parametrize("failure", ["none", "close", "unlink", "logging"])
+    def test_oversize_upload_keeps_413_when_cleanup_fails(self, tmp_path, monkeypatch, caplog, failure):
+        import logging
+        from pathlib import Path
+
+        from deerflow.projects import documents
+        from deerflow.utils import atomic_write
+
+        app = _build_app(tmp_path)
+        app.dependency_overrides[get_config] = lambda: SimpleNamespace(uploads={"max_file_size": 3})
+        with TestClient(app) as client:
+            pid = _create_project(client)["id"]
+            staging = get_paths().project_documents_dir("user-a", pid) / ".staging"
+            if failure == "close":
+                open_staging = documents._open_staging
+
+                def open_with_close_error(*args):
+                    handle = open_staging(*args)
+                    close = handle.close
+
+                    def fail_close():
+                        close()
+                        raise OSError("staging close failed")
+
+                    handle.close = fail_close
+                    return handle
+
+                monkeypatch.setattr(documents, "_open_staging", open_with_close_error)
+            elif failure in {"unlink", "logging"}:
+                unlink = Path.unlink
+
+                def fail_unlink(path, *args, **kwargs):
+                    if path.parent == staging:
+                        raise OSError("staging unlink failed")
+                    return unlink(path, *args, **kwargs)
+
+                monkeypatch.setattr(Path, "unlink", fail_unlink)
+                if failure == "logging":
+
+                    def fail_warning(*args, **kwargs):
+                        raise RuntimeError("logging handler failed")
+
+                    monkeypatch.setattr(atomic_write.logger, "warning", fail_warning)
+            with caplog.at_level(logging.WARNING):
+                response = _upload(client, pid, "large.txt", b"1234")
+            assert response.status_code == 413
+            assert response.json()["detail"] == "File too large: large.txt"
+            assert client.get(f"/api/projects/{pid}/documents").json()["total"] == 0
+            remaining = list(staging.iterdir())
+            if failure in {"unlink", "logging"}:
+                assert len(remaining) == 1
+                if failure == "unlink":
+                    assert str(remaining[0]) in caplog.text
+                    assert "staging unlink failed" in caplog.text
+            else:
+                assert remaining == []
+                if failure == "close":
+                    assert str(staging) in caplog.text
+                    assert "staging close failed" in caplog.text
+
+    @pytest.mark.parametrize("after_commit", [False, True])
+    def test_insert_failure_cleanup_preserves_error_or_committed_document(self, tmp_path, monkeypatch, caplog, after_commit):
+        from pathlib import Path
+
+        from deerflow.projects import documents
+
+        app = _build_app(tmp_path)
+        primary = OSError("original shelf insert failure")
+        insert = app.state.project_document_repo.insert_active
+        if after_commit:
+
+            async def insert_then_fail(*args, **kwargs):
+                await insert(*args, **kwargs)
+                raise primary
+
+            monkeypatch.setattr(app.state.project_document_repo, "insert_active", insert_then_fail)
+        else:
+
+            def fail_replace(*args, **kwargs):
+                raise primary
+
+            monkeypatch.setattr(documents.os, "replace", fail_replace)
+        with TestClient(app) as client:
+            pid = _create_project(client)["id"]
+            staging = get_paths().project_documents_dir("user-a", pid) / ".staging"
+            unlink = Path.unlink
+
+            def fail_unlink(path, *args, **kwargs):
+                if path.parent == staging:
+                    raise OSError("staging unlink failed")
+                return unlink(path, *args, **kwargs)
+
+            monkeypatch.setattr(Path, "unlink", fail_unlink)
+            if after_commit:
+                response = _upload(client, pid, "saved.txt", b"saved bytes")
+                assert response.status_code == 201
+                doc = response.json()["document"]
+                assert client.get(f"/api/projects/{pid}/documents/{doc['id']}/content").content == b"saved bytes"
+                assert client.get(f"/api/projects/{pid}/documents").json()["total"] == 1
+            else:
+                with pytest.raises(OSError) as caught:
+                    _upload(client, pid, "saved.txt", b"saved bytes")
+                assert caught.value is primary
+                assert client.get(f"/api/projects/{pid}/documents").json()["total"] == 0
+            assert "staging unlink failed" in caplog.text
+
+    @pytest.mark.parametrize("outcome", ["dedup", "archived"])
+    @pytest.mark.parametrize("failure", ["none", "unlink", "logging"])
+    def test_staging_discard_preserves_upload_outcome(self, tmp_path, monkeypatch, caplog, outcome, failure):
+        import logging
+        from pathlib import Path
+
+        from deerflow.utils import atomic_write
+
+        app = _build_app(tmp_path)
+        payload = b"same shelf bytes"
+        with TestClient(app) as client:
+            pid = _create_project(client)["id"]
+            staging = get_paths().project_documents_dir("user-a", pid) / ".staging"
+            if outcome == "dedup":
+                first = _upload(client, pid, "first.txt", payload)
+                assert first.status_code == 201
+                original = first.json()["document"]
+            else:
+                real_stage = project_documents.stage_document_bytes
+
+                async def archive_then_stage(*args, **kwargs):
+                    # The locked insert rejects a project archived after admission.
+                    await app.state.project_repo.set_status(kwargs["project_id"], "archived")
+                    return await real_stage(*args, **kwargs)
+
+                monkeypatch.setattr(project_documents, "stage_document_bytes", archive_then_stage)
+
+            unlink = Path.unlink
+            attempts = []
+
+            def discard(path, *args, **kwargs):
+                if path.parent == staging:
+                    attempts.append(path)
+                    if failure != "none":
+                        raise PermissionError("staging discard failed")
+                return unlink(path, *args, **kwargs)
+
+            monkeypatch.setattr(Path, "unlink", discard)
+            warning = MagicMock(wraps=atomic_write.logger.warning)
+            monkeypatch.setattr(atomic_write.logger, "warning", warning)
+            # This stdlib handler raises from emit when its delayed open fails.
+            handler = logging.FileHandler(tmp_path / "missing-logs" / "gateway.log", delay=True)
+            handler.emit = MagicMock(wraps=handler.emit)
+            if failure == "logging":
+                atomic_write.logger.addHandler(handler)
+            try:
+                with caplog.at_level(logging.WARNING, logger=atomic_write.__name__):
+                    response = _upload(client, pid, "duplicate.txt", payload)
+                if outcome == "dedup":
+                    assert response.status_code == 200
+                    body = response.json()
+                    assert body["deduplicated"] is True
+                    assert body["document"]["id"] == original["id"]
+                    assert body["document"]["name"] == "first.txt"
+                    assert client.get(f"/api/projects/{pid}/documents/{original['id']}/content").content == payload
+                    assert client.get(f"/api/projects/{pid}/documents").json()["total"] == 1
+                else:
+                    assert response.status_code == 404
+                    assert client.get(f"/api/projects/{pid}/documents").json()["total"] == 0
+                assert len(attempts) == 1
+                if failure == "none":
+                    assert list(staging.iterdir()) == []
+                    warning.assert_not_called()
+                else:
+                    assert list(staging.iterdir()) == attempts
+                    assert attempts[0].read_bytes() == payload
+                    warning.assert_called_once()
+                    assert attempts[0] in warning.call_args.args
+                    assert warning.call_args.kwargs["exc_info"] is True
+                    if failure == "unlink":
+                        assert str(attempts[0]) in caplog.text
+                        assert "staging discard failed" in caplog.text
+                assert handler.emit.call_count == int(failure == "logging")
+            finally:
+                atomic_write.logger.removeHandler(handler)
+                handler.close()

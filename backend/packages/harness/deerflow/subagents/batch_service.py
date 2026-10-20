@@ -36,6 +36,10 @@ logger = logging.getLogger(__name__)
 # weak references to its tasks.
 _pending_releases: set[Future[None]] = set()
 
+# Terminal outcomes must not keep durable attempts leased forever when resource
+# teardown hangs. The execution supervisor still owns those resources afterwards.
+_TERMINAL_CLEANUP_GRACE_SECONDS = 60.0
+
 
 def _usage(records: list[dict[str, Any]] | None) -> dict[str, int] | None:
     if not records:
@@ -361,6 +365,8 @@ class SubagentBatchService:
             self._execution_ids[item_id] = execution_id
             marked_running = False
             status_poll_every = min(self._config.poll_interval_seconds, max(1.0, self._config.lease_seconds / 3))
+            cleanup_deadline: float | None = None
+            loop = asyncio.get_running_loop()
             while True:
                 result = get_background_task_result(execution_id)
                 if result is None:
@@ -373,12 +379,27 @@ class SubagentBatchService:
                     )
                     if not marked_running:
                         request_cancel_background_task(execution_id)
+                status_wait = status_poll_every
+                execution_done = getattr(result, "execution_done_event", None)
                 if result.status.is_terminal:
-                    break
+                    if execution_done is None or execution_done.is_set():
+                        break
+                    if cleanup_deadline is None:
+                        cleanup_deadline = loop.time() + _TERMINAL_CLEANUP_GRACE_SECONDS
+                    remaining = cleanup_deadline - loop.time()
+                    if remaining <= 0:
+                        logger.warning(
+                            "Batch execution %s cleanup exceeded %.0fs; finalizing its published %s outcome while resource cleanup remains supervised",
+                            execution_id,
+                            _TERMINAL_CLEANUP_GRACE_SECONDS,
+                            result.status.value,
+                        )
+                        break
+                    status_wait = min(status_wait, remaining)
                 if not lease.valid:
                     request_cancel_background_task(execution_id)
                 try:
-                    await asyncio.wait_for(self._stop.wait(), timeout=status_poll_every)
+                    await asyncio.wait_for(self._stop.wait(), timeout=status_wait)
                     if self._stop.is_set():
                         raise asyncio.CancelledError
                 except TimeoutError:
