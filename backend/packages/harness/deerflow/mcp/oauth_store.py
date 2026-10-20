@@ -23,10 +23,10 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Literal, NamedTuple
 
 from deerflow.config.credentials_key import CredentialsCipher, CredentialsDecryptError
 from deerflow.config.extensions_config import McpOAuthConfig
@@ -74,6 +74,19 @@ class PersistedOAuthToken:
     refresh_token: str
 
 
+class StoredTokenLookup(NamedTuple):
+    """A row read for one token chain: ``version`` is ``None`` without a row; ``token`` is ``None`` when unusable."""
+
+    version: int | None
+    token: PersistedOAuthToken | None
+    #: The row matched this chain but no configured key could decrypt it.
+    undecryptable: bool = False
+
+
+def _server_subject(key: McpOAuthTokenKey) -> str:
+    return f"MCP server '{key.server_key}'"
+
+
 def oauth_config_fingerprint(oauth: McpOAuthConfig) -> str:
     """Identify the configured token chain, so a changed seed wins over a stored rotation.
 
@@ -108,7 +121,7 @@ class McpOAuthTokenStore:
             logger.exception("Failed to load the credentials key for MCP OAuth tokens")
             raise McpOAuthTokenKeyUnavailable("The credentials key for stored MCP OAuth tokens cannot be loaded") from None
 
-    def _call(self, key: McpOAuthTokenKey, action: str, operation: Callable[[], object]):
+    def _call(self, subject: str, action: str, operation: Callable[[], object]):
         try:
             return operation()
         except McpOAuthTokenStoreUnavailable:
@@ -116,18 +129,18 @@ class McpOAuthTokenStore:
         except Exception:
             # Database errors render the statement and its parameters; keep
             # them in the log, never in the model-visible tool error.
-            logger.exception("Failed to %s the stored OAuth token for MCP server '%s'", action, key.server_key)
-            raise McpOAuthTokenStoreUnavailable(f"OAuth token storage is unavailable for MCP server '{key.server_key}'; try again later") from None
+            logger.exception("Failed to %s the stored OAuth tokens for %s", action, subject)
+            raise McpOAuthTokenStoreUnavailable(f"OAuth token storage is unavailable for {subject}; try again later") from None
 
-    def load(self, key: McpOAuthTokenKey, *, fingerprint: str) -> tuple[int | None, PersistedOAuthToken | None]:
-        """Return ``(version, token)``: no row is ``(None, None)``; a row this chain cannot use has no token."""
+    def load(self, key: McpOAuthTokenKey, *, fingerprint: str) -> StoredTokenLookup:
+        """Read the chain's row: no row has no version; a row this chain cannot use has no token."""
         cipher = self._cipher()
-        row = self._call(key, "read", lambda: self._repo.get(key.scope, key.owner_user_id, key.server_key))
+        row = self._call(_server_subject(key), "read", lambda: self._repo.get(key.scope, key.owner_user_id, key.server_key))
         if row is None:
-            return None, None
+            return StoredTokenLookup(None, None)
         if row.config_fingerprint != fingerprint or row.refresh_token_enc is None:
             # Written for another seed/endpoint, or claimed but never filled.
-            return row.version, None
+            return StoredTokenLookup(row.version, None)
         try:
             refresh_token = cipher.decrypt_text(row.refresh_token_enc)
             access_token = cipher.decrypt_text(row.access_token_enc) if row.access_token_enc is not None else None
@@ -136,15 +149,15 @@ class McpOAuthTokenStore:
                 "Stored OAuth token for MCP server '%s' cannot be decrypted with the configured credentials key(s); using the configured refresh token. Every instance needs the same DEER_FLOW_CREDENTIALS_KEY.",
                 key.server_key,
             )
-            return row.version, None
+            return StoredTokenLookup(row.version, None, undecryptable=True)
         expires_at = datetime.fromtimestamp(row.access_expires_at, UTC) if row.access_expires_at is not None else None
-        return row.version, PersistedOAuthToken(access_token=access_token, token_type=row.token_type, expires_at=expires_at, refresh_token=refresh_token)
+        return StoredTokenLookup(row.version, PersistedOAuthToken(access_token=access_token, token_type=row.token_type, expires_at=expires_at, refresh_token=refresh_token))
 
     def claim(self, key: McpOAuthTokenKey, *, fingerprint: str, expected_version: int | None) -> str | None:
         """Claim the next refresh; returns the lease token, or ``None`` while a peer holds it or wrote since the read."""
         lease_owner = str(uuid.uuid4())
         claimed = self._call(
-            key,
+            _server_subject(key),
             "claim",
             lambda: self._repo.claim(
                 key.scope,
@@ -176,7 +189,7 @@ class McpOAuthTokenStore:
         access_token_enc = cipher.encrypt_text(access_token)
         refresh_token_enc = cipher.encrypt_text(refresh_token)
         return self._call(
-            key,
+            _server_subject(key),
             "write",
             lambda: self._repo.write(
                 key.scope,
@@ -194,7 +207,17 @@ class McpOAuthTokenStore:
         )
 
     def release(self, key: McpOAuthTokenKey, lease_owner: str) -> bool:
-        return self._call(key, "release", lambda: self._repo.release(key.scope, key.owner_user_id, key.server_key, lease_owner=lease_owner))
+        return self._call(_server_subject(key), "release", lambda: self._repo.release(key.scope, key.owner_user_id, key.server_key, lease_owner=lease_owner))
+
+    def forget_unconfigured(self, owner_user_id: str | None, configured_server_keys: Collection[str]) -> int:
+        """Delete the rows of one owner's connections (``None``: the deployment's) that a saved configuration no longer has.
+
+        A removed connection's key can never be derived again, so its row would
+        only keep refresh-token ciphertext around. Returns how many were deleted.
+        """
+        scope_key = McpOAuthTokenKey.for_server("", owner_user_id)
+        subject = "deployment MCP servers" if owner_user_id is None else f"personal MCP connections of user '{owner_user_id}'"
+        return self._call(subject, "prune", lambda: self._repo.delete_except(scope_key.scope, scope_key.owner_user_id, configured_server_keys))
 
 
 _store: McpOAuthTokenStore | None = None

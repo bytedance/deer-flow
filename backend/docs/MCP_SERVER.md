@@ -507,7 +507,16 @@ token and refresh token in the `mcp_oauth_tokens` table (migration
   `client_secret` keeps the stored chain.
 - Personal connections get one row per owner, keyed by their runtime name.
   Editing a personal connection changes that name, so it starts again from its
-  configured refresh token.
+  configured refresh token. Saving a configuration deletes the rows of the
+  connections it no longer has: an edited or deleted personal connection, or a
+  deployment server removed through the MCP configuration API (a server removed
+  by hand-editing `extensions_config.json` is dropped on the next API save).
+  Disabling a connection keeps its row, so re-enabling it continues the chain.
+- When the provider rejects the refresh token (`invalid_grant`), the tool call
+  fails with an error that names the server and asks for a new refresh token.
+  If the instance fell back to the seed because it could not decrypt the chain
+  another instance stored, the error also says that every instance needs the
+  same `DEER_FLOW_CREDENTIALS_KEY`.
 - `client_credentials` tokens are not stored; each process requests its own.
 - Tokens stay in process memory, as before, with `database.backend: memory`,
   in the embedded `DeerFlowClient` (no Gateway), or when the credentials key

@@ -23,6 +23,41 @@ logger = logging.getLogger(__name__)
 _DEFAULT_TOKEN_LIFETIME_SECONDS = 3600
 
 
+class McpOAuthReauthorizationRequired(RuntimeError):
+    """The token endpoint rejected the refresh token (``invalid_grant``); only a new one fixes the connection.
+
+    The message names the server and the remedy, never a token: on the tool
+    interceptor path it is the model-visible tool error the owner reads.
+    """
+
+
+class _RefreshTokenRejected(Exception):
+    """Internal: ``invalid_grant`` for a refresh_token request, before the server name is known."""
+
+    def __init__(self) -> None:
+        super().__init__("invalid_grant")
+        # Set when this process fell back to the seed because it could not
+        # decrypt the chain a peer stored: a key mismatch, not a lapsed grant.
+        self.stored_chain_unreadable = False
+
+
+def _is_invalid_grant(response: Any) -> bool:
+    if getattr(response, "status_code", None) not in (400, 401):
+        return False
+    try:
+        payload = response.json()
+    except ValueError:
+        return False
+    return isinstance(payload, dict) and payload.get("error") == "invalid_grant"
+
+
+def _reauthorization_message(server_name: str, *, stored_chain_unreadable: bool) -> str:
+    message = f"The OAuth provider rejected the refresh token for MCP server '{server_name}' (invalid_grant). Re-authorize this connection by configuring a new refresh token for it."
+    if stored_chain_unreadable:
+        message += " This Gateway instance could not decrypt the token chain another instance stored, so every instance needs the same DEER_FLOW_CREDENTIALS_KEY; ask the operator to set it."
+    return message
+
+
 @dataclass
 class _OAuthToken:
     """Cached OAuth token."""
@@ -165,14 +200,18 @@ class OAuthTokenManager:
 
             fresh = None
             store = self._token_store or get_mcp_oauth_token_store()
-            if store is not None and state.store_key is not None:
-                try:
-                    fresh = await self._refresh_shared(state, store, server_name)
-                except McpOAuthTokenKeyUnavailable:
-                    logger.warning("Keeping OAuth tokens for MCP server '%s' in this process only: the credentials key cannot be loaded", server_name)
-            if fresh is None:
-                fresh = await self._fetch_token(oauth)
-                logger.info(f"Refreshed OAuth access token for MCP server: {server_name}")
+            try:
+                if store is not None and state.store_key is not None:
+                    try:
+                        fresh = await self._refresh_shared(state, store, server_name)
+                    except McpOAuthTokenKeyUnavailable:
+                        logger.warning("Keeping OAuth tokens for MCP server '%s' in this process only: the credentials key cannot be loaded", server_name)
+                if fresh is None:
+                    fresh = await self._fetch_token(oauth)
+                    logger.info(f"Refreshed OAuth access token for MCP server: {server_name}")
+            except _RefreshTokenRejected as exc:
+                logger.warning("OAuth refresh token for MCP server '%s' was rejected (invalid_grant); the connection needs a new refresh token", server_name)
+                raise McpOAuthReauthorizationRequired(_reauthorization_message(server_name, stored_chain_unreadable=exc.stored_chain_unreadable)) from exc.__cause__
             state.token = fresh
             return self._authorization_value(fresh, server_name)
         finally:
@@ -193,7 +232,7 @@ class OAuthTokenManager:
         assert key is not None and fingerprint is not None
         deadline = time.monotonic() + oauth_store.REFRESH_LEASE_SECONDS + 5
         while True:
-            version, stored = await asyncio.to_thread(store.load, key, fingerprint=fingerprint)
+            version, stored, unreadable = await asyncio.to_thread(store.load, key, fingerprint=fingerprint)
             if stored is not None:
                 # The row continues this chain; without one (or under another
                 # fingerprint) the configured seed is the refresh token.
@@ -217,8 +256,10 @@ class OAuthTokenManager:
             # rather than make every peer wait out the lease.
             asyncio.get_running_loop().run_in_executor(None, self._release_quietly, store, key, lease_owner)
             raise
-        except Exception:
+        except Exception as exc:
             await asyncio.to_thread(self._release_quietly, store, key, lease_owner)
+            if isinstance(exc, _RefreshTokenRejected):
+                exc.stored_chain_unreadable = unreadable
             raise
         logger.info(f"Refreshed OAuth access token for MCP server: {server_name}")
         try:
@@ -317,6 +358,11 @@ class OAuthTokenManager:
 
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.post(oauth.token_url, data=data)
+            if oauth.grant_type == "refresh_token" and _is_invalid_grant(response):
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    raise _RefreshTokenRejected() from exc
             response.raise_for_status()
             payload = response.json()
 

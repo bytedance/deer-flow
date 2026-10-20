@@ -1279,9 +1279,13 @@ This release closes that milestone with **621 merged pull requests**.
   compare-and-set, so concurrent instances call the token endpoint once and
   adopt each other's result. Changing the configured seed, token endpoint,
   client, scope or audience starts a new chain from the configuration.
-  `client_credentials` tokens stay in process. A declared multi-instance
-  deployment with an enabled `refresh_token` OAuth server now refuses to start
-  without `DEER_FLOW_CREDENTIALS_KEY`. ([#7207])
+  `client_credentials` tokens stay in process. Saving an MCP configuration
+  deletes the stored tokens of connections it no longer has, and a rejected
+  refresh token now fails the tool call with an error asking for a new refresh
+  token (adding, when the instance could not decrypt the stored chain, that
+  every instance needs the same key). A declared multi-instance deployment with
+  an enabled `refresh_token` OAuth server now refuses to start without
+  `DEER_FLOW_CREDENTIALS_KEY`. ([#7207])
 
 - **memory:** DeerMem no longer sends conversation turns it already extracted
   to the memory LLM again when a thread's next turn runs on another Gateway

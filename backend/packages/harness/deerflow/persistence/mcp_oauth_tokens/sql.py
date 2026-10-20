@@ -19,6 +19,8 @@ Instead it is claimed and fenced in single statements:
 - ``write`` stores the new tokens, bumps ``version`` and clears the lease, only
   while ``refresh_lease_owner`` is still the claim's own token.
 - ``release`` clears the lease under the same fence after a failed refresh.
+- ``delete_except`` drops one owner's rows for connections a saved
+  configuration no longer has; their keys can never be derived again.
 
 The lease is judged against the database clock (``db_now``), never an
 instance's wall clock. Outcomes come from the affected-row count, except the
@@ -29,7 +31,9 @@ CONFLICT DO NOTHING``). Ciphertext is opaque here; encryption lives in
 
 from __future__ import annotations
 
-from sqlalchemy import or_, update
+from collections.abc import Collection
+
+from sqlalchemy import delete, or_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, sessionmaker
@@ -158,3 +162,13 @@ class SqlMcpOAuthTokenRepository:
             released = session.execute(stmt).rowcount == 1
             session.commit()
         return released
+
+    def delete_except(self, scope: str, owner_user_id: str, keep_server_keys: Collection[str]) -> int:
+        """Delete ``(scope, owner_user_id)``'s rows whose ``server_key`` is not kept; returns how many."""
+        stmt = delete(McpOAuthTokenRow).where(McpOAuthTokenRow.scope == scope, McpOAuthTokenRow.owner_user_id == owner_user_id)
+        if keep_server_keys:
+            stmt = stmt.where(McpOAuthTokenRow.server_key.not_in(sorted(keep_server_keys)))
+        with self._sf() as session:
+            deleted = session.execute(stmt).rowcount
+            session.commit()
+        return int(deleted)

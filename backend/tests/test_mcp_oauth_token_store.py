@@ -29,8 +29,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from deerflow.config.credentials_key import CredentialsCipher
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.mcp import oauth_store
-from deerflow.mcp.oauth import OAuthTokenManager
-from deerflow.mcp.oauth_store import McpOAuthTokenStore, McpOAuthTokenStoreUnavailable, oauth_config_fingerprint, set_mcp_oauth_token_store
+from deerflow.mcp.oauth import McpOAuthReauthorizationRequired, OAuthTokenManager
+from deerflow.mcp.oauth_store import McpOAuthTokenStore, McpOAuthTokenStoreUnavailable, StoredTokenLookup, oauth_config_fingerprint, set_mcp_oauth_token_store
 from deerflow.persistence.base import Base
 from deerflow.persistence.mcp_oauth_tokens import McpOAuthTokenRow, SqlMcpOAuthTokenRepository
 from deerflow.persistence.postgres_schema import dsn_with_search_path
@@ -241,14 +241,19 @@ async def test_tokens_are_encrypted_at_rest_and_unreadable_rows_fall_back_to_the
     assert cipher.decrypt_text(row.refresh_token_enc) == "refresh-1"
 
     # A process with another key cannot read the row; it falls back to the
-    # seed (here already consumed) instead of failing on the ciphertext.
+    # seed (here already consumed) instead of failing on the ciphertext, and
+    # the rejection tells the connection's user why and who can fix it.
     other = _replica(session_factory, CredentialsCipher.from_keys([Fernet.generate_key()]))
     with caplog.at_level("WARNING", logger="deerflow.mcp.oauth_store"):
-        with pytest.raises(httpx.HTTPStatusError):
+        with pytest.raises(McpOAuthReauthorizationRequired) as rejected:
             await other.get_authorization_header(SERVER)
     assert endpoint.refresh_requests == ["refresh-0", "refresh-0"]
     assert "cannot be decrypted" in caplog.text
     assert "refresh-1" not in caplog.text
+    message = str(rejected.value)
+    assert f"'{SERVER}'" in message and "invalid_grant" in message and "DEER_FLOW_CREDENTIALS_KEY" in message
+    assert "refresh-0" not in message and "refresh-1" not in message
+    assert isinstance(rejected.value.__cause__, httpx.HTTPStatusError)
 
 
 @pytest.mark.asyncio
@@ -347,9 +352,11 @@ async def test_installed_store_is_used_by_managers_built_without_one(session_fac
 async def test_without_a_store_tokens_stay_in_process(endpoint):
     assert await OAuthTokenManager.from_extensions_config(_config()).get_authorization_header(SERVER) == "Bearer access-1"
     _expire_access_tokens()
-    # Today's behaviour: a new manager starts again from the configured seed.
-    with pytest.raises(httpx.HTTPStatusError):
+    # Today's behaviour: a new manager starts again from the configured seed,
+    # and the rejection names the remedy instead of a bare HTTP 400.
+    with pytest.raises(McpOAuthReauthorizationRequired, match="configuring a new refresh token") as rejected:
         await OAuthTokenManager.from_extensions_config(_config()).get_authorization_header(SERVER)
+    assert "DEER_FLOW_CREDENTIALS_KEY" not in str(rejected.value)
 
 
 def test_fingerprint_follows_the_token_chain_identity_not_the_client_secret():
@@ -380,12 +387,12 @@ def test_a_claim_fails_once_a_peer_wrote_since_the_read(session_factory, cipher)
     assert a.save(key, lease_owner=lease, fingerprint=fingerprint, access_token="access-2", token_type="Bearer", expires_at=expires_at, refresh_token="refresh-2", rotated=True)
 
     assert b.claim(key, fingerprint=fingerprint, expected_version=1) is None, "the lease is free, but the row moved on"
-    version, stored = b.load(key, fingerprint=fingerprint)
+    version, stored, _unreadable = b.load(key, fingerprint=fingerprint)
     assert (version, stored.refresh_token, stored.access_token) == (2, "refresh-2", "access-2")
     # A write under a lease that is no longer held is refused.
     assert not b.save(key, lease_owner="not-the-holder", fingerprint=fingerprint, access_token="x", token_type="Bearer", expires_at=expires_at, refresh_token="y", rotated=True)
     assert b.load(key, fingerprint=fingerprint)[1].refresh_token == "refresh-2"
-    assert b.load(key, fingerprint="another-chain") == (2, None)
+    assert b.load(key, fingerprint="another-chain") == StoredTokenLookup(2, None)
 
 
 @pytest.mark.asyncio
@@ -415,3 +422,35 @@ def test_gateway_shares_tokens_only_through_a_sql_database(backend, tmp_path):
     else:
         assert isinstance(store, McpOAuthTokenStore)
     assert build_mcp_oauth_token_store(SimpleNamespace()) is None
+
+
+def test_forgetting_unconfigured_connections_deletes_only_that_owners_other_rows(session_factory, cipher):
+    store = McpOAuthTokenStore(SqlMcpOAuthTokenRepository(session_factory), cipher=cipher)
+    for owner, name in ((None, "kept"), (None, "removed"), ("alice", "kept"), ("alice", "removed"), ("bob", "removed")):
+        assert store.claim(oauth_store.McpOAuthTokenKey.for_server(name, owner), fingerprint="f" * 64, expected_version=None)
+
+    assert store.forget_unconfigured("alice", {"kept"}) == 1
+    assert store.forget_unconfigured(None, {"kept", "never-stored"}) == 1
+    assert [(row.scope, row.owner_user_id, row.server_key) for row in _rows(session_factory)] == [
+        ("deployment", "", "kept"),
+        ("personal", "alice", "kept"),
+        ("personal", "bob", "removed"),
+    ]
+    # An owner with no connections left loses every row.
+    assert store.forget_unconfigured("bob", set()) == 1
+    assert [row.owner_user_id for row in _rows(session_factory)] == ["", "alice"]
+
+
+@pytest.mark.asyncio
+async def test_a_revoked_stored_chain_asks_to_reauthorize_without_blaming_the_key(session_factory, cipher, endpoint):
+    assert await _replica(session_factory, cipher).get_authorization_header(SERVER) == "Bearer access-1"
+    endpoint.refresh_token = "revoked-by-the-provider"
+    _expire_access_tokens()
+
+    with pytest.raises(McpOAuthReauthorizationRequired) as rejected:
+        await _replica(session_factory, cipher).get_authorization_header(SERVER)
+    assert "configuring a new refresh token" in str(rejected.value)
+    assert "DEER_FLOW_CREDENTIALS_KEY" not in str(rejected.value)
+    (row,) = _rows(session_factory)
+    assert row.refresh_lease_owner is None, "a rejected refresh releases its lease"
+    assert endpoint.refresh_requests == ["refresh-0", "refresh-1"]
