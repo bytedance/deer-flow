@@ -14,7 +14,7 @@ def package_script(monkeypatch):
     return runpy.run_path(str(root / "scripts/package_skill.py"))
 
 
-@pytest.mark.parametrize("destination", ["root", "nested", "cwd", "outside"])
+@pytest.mark.parametrize("destination", ["root", "nested", "cwd", "aliased_cwd", "outside"])
 def test_package_skips_its_own_archive(
     tmp_path, monkeypatch, package_script, destination
 ):
@@ -38,10 +38,18 @@ def test_package_skips_its_own_archive(
         "root": skill,
         "nested": skill / "dist",
         "cwd": None,
+        "aliased_cwd": None,
         "outside": tmp_path / "output",
     }[destination]
     if destination == "cwd":
         monkeypatch.chdir(skill)
+
+    if destination == "aliased_cwd":
+        # Model Windows cwd() retaining junction components without requiring
+        # platform-specific symlink privileges in the test environment.
+        alias = skill / "alias"
+        alias.mkdir()
+        monkeypatch.setattr(Path, "cwd", classmethod(lambda cls: alias / ".."))
 
     result = package_script["package_skill"](skill, output)
 

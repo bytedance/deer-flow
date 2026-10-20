@@ -86,6 +86,8 @@ def package_skill(skill_path, output_dir=None):
 
     skill_filename = output_path / f"{skill_name}.skill"
 
+    archive_target = skill_filename.resolve()
+
     # Create the .skill file (zip format)
     try:
         with zipfile.ZipFile(skill_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
@@ -93,7 +95,7 @@ def package_skill(skill_path, output_dir=None):
             for file_path in skill_path.rglob('*'):
                 if not file_path.is_file():
                     continue
-                if file_path.resolve() == skill_filename:
+                if file_path.resolve() == archive_target:
                     continue
                 arcname = file_path.relative_to(skill_path.parent)
                 if should_exclude(arcname):
