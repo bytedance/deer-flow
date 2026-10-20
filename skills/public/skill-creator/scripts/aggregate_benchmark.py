@@ -85,7 +85,9 @@ def load_run_results(benchmark_dir: Path) -> dict:
     Load all run results from a benchmark directory.
 
     Returns dict keyed by config name (e.g. "with_skill"/"without_skill",
-    or "new_skill"/"old_skill"), each containing a list of run results.
+    or "with_skill"/"old_skill"), each containing a list of run results.
+    Only "with_skill" is guaranteed to be first; other configuration names
+    retain their discovery order.
     """
     # Support both layouts: eval dirs directly under benchmark_dir, or under runs/
     runs_dir = benchmark_dir / "runs"
