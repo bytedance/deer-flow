@@ -1275,7 +1275,7 @@ This release closes that milestone with **621 merged pull requests**.
   process copy and the persisted one. Clearing memory deletes the file with
   the agent's other `.metadata` sidecars. Messages without an id are identified
   by a SHA-256 digest of their text, so the sidecar holds no conversation text.
-  (issue #TBD, [#TBD])
+  (issue #7204, [#7205])
 
 - **skills:** `GET /api/skills/custom/{skill_name}/history` now answers an
   invalid skill name (not hyphen-case, or longer than 64 characters) with `400`,
@@ -11923,3 +11923,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7099]: https://github.com/bytedance/deer-flow/pull/7099
 [#7104]: https://github.com/bytedance/deer-flow/pull/7104
 [#7123]: https://github.com/bytedance/deer-flow/pull/7123
+[#7205]: https://github.com/bytedance/deer-flow/pull/7205

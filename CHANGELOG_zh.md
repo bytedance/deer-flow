@@ -1022,7 +1022,7 @@
   约束，不改变记忆 revision），每次更新从进程内副本与持久化副本中更靠后的那一个之后开始。
   清空记忆时，该文件与该 agent 的其他 `.metadata` sidecar 一并删除。没有 id 的消息以其
   文本的 SHA-256 摘要识别，sidecar 中不保存对话文本。
-  (issue #TBD, [#TBD])
+  (issue #7204, [#7205])
 
 - **技能：** `GET /api/skills/custom/{skill_name}/history` 收到非法技能名（不是
   hyphen-case，或超过 64 个字符）时，现在与删除、回滚一样返回 `400`，不再返回 `500`
@@ -9472,3 +9472,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7099]: https://github.com/bytedance/deer-flow/pull/7099
 [#7104]: https://github.com/bytedance/deer-flow/pull/7104
 [#7123]: https://github.com/bytedance/deer-flow/pull/7123
+[#7205]: https://github.com/bytedance/deer-flow/pull/7205
