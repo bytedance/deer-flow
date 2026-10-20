@@ -71,7 +71,8 @@ export function AuthProvider({
 }: AuthProviderProps) {
   const [user, setUser] = useState<User | null>(initialUser);
   const [authKnown, setAuthKnown] = useState(!initialAuthUnknown);
-  useArtifactDraftOwner(authKnown ? (user?.id ?? null) : undefined);
+  const authQueryScope = authKnown ? (user?.id ?? null) : undefined;
+  useArtifactDraftOwner(authQueryScope);
   const [isLoading, setIsLoading] = useState(false);
   // Logout and externally confirmed users supersede pending auth refreshes.
   const authRequestRef = React.useRef(0);
@@ -222,9 +223,7 @@ export function AuthProvider({
 
   return (
     <AuthContext.Provider value={value}>
-      <AuthQueryScopeContext.Provider
-        value={authKnown ? (user?.id ?? null) : undefined}
-      >
+      <AuthQueryScopeContext.Provider value={authQueryScope}>
         {children}
       </AuthQueryScopeContext.Provider>
     </AuthContext.Provider>
