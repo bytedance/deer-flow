@@ -17,6 +17,7 @@ def cleanup_failed_atomic_write(temporary: Path, fd: int | None = None) -> None:
 
     Pass *fd* only while the raw descriptor is still owned by the caller;
     successful ``fdopen`` transfers that ownership to the file object.
+    An explicitly transferred duplicate descriptor is also caller-owned.
     Also use this to discard staging after a publication decision. Filesystem
     and logging-handler errors remain independent best-effort steps.
     """
