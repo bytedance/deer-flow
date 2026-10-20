@@ -806,7 +806,7 @@ class TestChannelManager:
                     await allow_third_lookup.wait()
                 return None
 
-            async def create_thread(_client, _msg):
+            async def create_first_thread(_client, _msg):
                 nonlocal create_calls, active_later_creates, max_active_later_creates
                 create_calls += 1
                 call_number = create_calls
@@ -825,10 +825,10 @@ class TestChannelManager:
                     await release_later_creates.wait()
                 finally:
                     active_later_creates -= 1
-                return f"thread-{call_number}"
+                return f"thread-{call_number}", True
 
             manager._lookup_thread_id = lookup_thread_id
-            manager._create_thread = create_thread
+            manager._create_first_thread = create_first_thread
             client = MagicMock()
             first_msg = InboundMessage(channel_name="slack", chat_id="C1", user_id="U1", text="first")
             second_msg = InboundMessage(channel_name="slack", chat_id="C1", user_id="U1", text="second")
@@ -6832,6 +6832,10 @@ class _BoundIdentityRepo:
                 "thread_id": thread_id,
             }
         )
+
+    async def claim_thread_id(self, **binding) -> str:
+        await self.set_thread_id(**binding)
+        return binding["thread_id"]
 
 
 class TestChannelManagerBoundIdentityPolicy:
@@ -13557,12 +13561,12 @@ class TestHandleGoalCommand:
             chats = []
 
             async def _create(client, msg):
-                return "new-thread"
+                return "new-thread", True
 
             async def _handle_chat(msg, **kwargs):
                 chats.append((msg, kwargs))
 
-            monkeypatch.setattr(manager, "_create_thread", _create)
+            monkeypatch.setattr(manager, "_create_first_thread", _create)
             monkeypatch.setattr(manager, "_get_client", lambda: object())
             monkeypatch.setattr(manager, "_handle_chat", _handle_chat)
 

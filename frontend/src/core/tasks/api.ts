@@ -16,10 +16,11 @@ type FetchedEvent = Parameters<typeof eventsToSteps>[0][number] & {
  * Fetch a subtask's persisted step history for a historical run (#3779).
  *
  * Scoped server-side to this `taskId` (and to `subagent.step` events) and paged
- * forward with an `after_seq` cursor until a short page, so the run-wide event
- * limit can never truncate a subagent's step timeline — even for long runs or
- * runs with several subagents. Used by the subtask card to backfill steps on
- * expand when the live SSE steps are gone (e.g. after a page reload).
+ * forward with an `after_seq` cursor until a short page or a page that fails to
+ * advance the cursor, so the run-wide event limit can never truncate a
+ * subagent's step timeline — even for long runs or runs with several subagents.
+ * Used by the subtask card to backfill steps on expand when the live SSE steps
+ * are gone (e.g. after a page reload).
  */
 export async function fetchSubtaskSteps(
   threadId: string,
@@ -49,15 +50,28 @@ export async function fetchSubtaskSteps(
       throw new Error(`Failed to fetch subtask steps: ${res.status}`);
     }
     const batch = (await res.json()) as FetchedEvent[];
-    events.push(...batch);
 
     if (batch.length < pageSize) {
+      events.push(...batch);
       break;
     }
     const lastSeq = batch[batch.length - 1]?.seq;
     if (lastSeq === undefined) {
+      events.push(...batch);
       break; // can't advance the cursor; stop rather than refetch page 0 forever
     }
+    if (afterSeq !== undefined && lastSeq <= afterSeq) {
+      // The store contract is `seq > after_seq`, so a full page whose last seq
+      // fails to advance the cursor is stale or malformed. Drop that page and
+      // return the pages already accumulated, matching the missing-`seq`
+      // fallback above: the expand-backfill caller swallows a rejection and
+      // resets its one-shot guard, so throwing here would render an empty card
+      // and replay the same futile requests on every expand. `mergeSteps`
+      // dedupes by `message_index`, so the retained prefix stays correct.
+      break;
+    }
+
+    events.push(...batch);
     afterSeq = lastSeq;
   }
 

@@ -111,6 +111,15 @@ from .store.base import canonical_run_created_at
 
 logger = logging.getLogger(__name__)
 _THREAD_INCARNATION_UNSET = object()
+_MISSING_BRIDGE_METHOD = object()
+
+
+def _declared_bridge_method(bridge: Any, name: str) -> Any | None:
+    """Return a real bridge method without triggering dynamic mock attributes."""
+    if inspect.getattr_static(bridge, name, _MISSING_BRIDGE_METHOD) is _MISSING_BRIDGE_METHOD:
+        return None
+    method = getattr(bridge, name, None)
+    return method if callable(method) else None
 
 
 def _log_cancelled_stream_close_failure(
@@ -988,6 +997,7 @@ async def run_agent(
     accessor: CheckpointStateAccessor | None = None
     rollback_point: RollbackPoint | None = None
     journal = None
+    seq_stamper: _MessageSeqStamper | None = None
     runtime_ctx: dict[str, Any] | None = None
     runtime: Any | None = None
     agent: Any | None = None
@@ -998,18 +1008,38 @@ async def run_agent(
     scheduled_goal: GoalState | None = None
     final_goal_verdict: dict[str, Any] | None = None
     produced_output_paths: list[str] | None = None
+    terminal_error_frame: dict[str, str] | None = None
     # Journal construction moved ahead of preflight so every terminal run can
     # emit a receipt. Completion persistence keeps its prior boundary: before
     # #4272 the journal did not exist until preflight had succeeded, so early
     # checkpoint failures / cancellation while waiting did not write an empty
     # completion snapshot into RunStore.
     persist_completion = False
+    evidence_execution_started = False
     completion_data: dict[str, Any] | None = None
     # Buffers subagent step events for batched persistence (#3779); assigned once
     # streaming starts and flushed in the finally block. Pre-bound to None so the
     # finally is safe even if an exception fires before streaming begins.
     subagent_events: _SubagentEventBuffer | None = None
     started = False
+    stream_producer_lease_started = False
+
+    async def _ensure_stream_producer_lease() -> None:
+        nonlocal stream_producer_lease_started
+        if stream_producer_lease_started:
+            return
+        start_producer_lease = _declared_bridge_method(
+            bridge,
+            "start_producer_lease",
+        )
+        if start_producer_lease is None:
+            return
+        tracked = await start_producer_lease(run_id)
+        if not tracked:
+            # A registration failure whose marker rollback was confirmed keeps
+            # the historical conservative recovery behavior.
+            return
+        stream_producer_lease_started = True
 
     async def _finish_cancellation(
         action: str,
@@ -1017,14 +1047,22 @@ async def run_agent(
         restore_checkpoint: bool = True,
     ) -> None:
         nonlocal checkpoint_rollback_completed
+        if record.ownership_lost:
+            return
+        await _ensure_stream_producer_lease()
         await run_manager.set_finalizing(run_id, True)
+        if record.ownership_lost:
+            return
         if action == "rollback":
+            record.rollback_finalization_pending = run_manager.heartbeat_enabled and run_manager._store is not None
             await run_manager.set_status(
                 run_id,
                 RunStatus.error,
                 error="Rolled back by user",
-                **terminal_status_kwargs,
+                **({"persist": False} if record.rollback_finalization_pending else terminal_status_kwargs),
             )
+            if record.ownership_lost:
+                return
             if not restore_checkpoint:
                 return
             try:
@@ -1072,6 +1110,7 @@ async def run_agent(
                 thread_id=thread_id,
                 event_store=event_store,
                 track_token_usage=getattr(run_events_config, "track_token_usage", True),
+                user_id=record.user_id,
                 progress_reporter=lambda snapshot: run_manager.update_run_progress(run_id, **snapshot),
             )
 
@@ -1395,16 +1434,11 @@ async def run_agent(
                         graph_input["goal"] = Overwrite(copy.deepcopy(current_values.get("goal")))
                     graph_input["goal_outcome"] = None
 
-        # Capture the effective (resolved) model name from the agent's metadata.
-        # _resolve_model_name in agent.py may return the default model if the
-        # requested name is not in the allowlist — this update ensures the
-        # persisted model_name reflects the actual model used.
-        if record.model_name is not None:
-            resolved = getattr(agent, "metadata", {}) or {}
-            if isinstance(resolved, dict):
-                effective = resolved.get("model_name")
-                if effective and effective != record.model_name:
-                    await run_manager.update_model_name(record.run_id, effective)
+        # Persist the model assembly resolved — the default when the request
+        # named none, or a fallback when the requested model is unavailable —
+        # so the stored model_name reflects the actual model used (#3109).
+        if effective_model and effective_model != record.model_name:
+            await run_manager.update_model_name(record.run_id, effective_model)
 
         # 4. Attach checkpointer and store
         if checkpointer is not None:
@@ -1572,6 +1606,7 @@ async def run_agent(
                 if stand_down_reason.startswith("thread_changed"):
                     final_goal_verdict.update(satisfied=False, blocker="missing_evidence", relied_on_assumption=False)
 
+        evidence_execution_started = True
         await _stream_once(graph_input, initial_runnable_config)
         while not record.abort_event.is_set() and not llm_error_fallback_message and (journal is None or not journal.had_llm_error_fallback):
             continuation_input = await _prepare_goal_continuation_input(
@@ -1604,6 +1639,7 @@ async def run_agent(
         record.goal_verdict = final_goal_verdict
 
         # 8. Final status
+        await _ensure_stream_producer_lease()
         if record.abort_event.is_set():
             await _finish_cancellation(record.abort_action)
         elif llm_error_fallback_message or (journal is not None and journal.had_llm_error_fallback):
@@ -1665,6 +1701,7 @@ async def run_agent(
     except Exception as exc:
         error_msg = f"{exc}"
         logger.exception("Run %s failed: %s", run_id, error_msg)
+        await _ensure_stream_producer_lease()
         await _ensure_finalizing_before_edit_failure(run_manager, record)
         cancel_action = await run_manager.set_status_if_not_cancelled(
             run_id,
@@ -1674,15 +1711,19 @@ async def run_agent(
         )
         if cancel_action is not None:
             await _finish_cancellation(cancel_action)
-        else:
-            await bridge.publish(
-                run_id,
-                "error",
-                {
-                    "message": error_msg,
-                    "name": type(exc).__name__,
-                },
-            )
+        elif not record.ownership_lost:
+            error_frame = {
+                "message": error_msg,
+                "name": type(exc).__name__,
+            }
+            if record.status not in (RunStatus.pending, RunStatus.running) and getattr(record, "terminal_status_persisted", True):
+                await bridge.publish(
+                    run_id,
+                    "error",
+                    error_frame,
+                )
+            else:
+                terminal_error_frame = error_frame
 
     finally:
         completion_hook_task: asyncio.Task[None] | None = None
@@ -1696,10 +1737,11 @@ async def run_agent(
 
         async def finalize() -> None:
             nonlocal completion_hook_task
+            nonlocal journal, seq_stamper
             nonlocal accessor, agent, agent_result, cancel_action, checkpoint_rollback_completed
             nonlocal completion_data, deferred_finalization_interrupt, delivery_content, goal_completion, goal_evaluator_model
             nonlocal graph_input, pre_run_workspace_snapshot, produced_output_paths, rollback_point, runtime
-            nonlocal runtime_ctx, subagent_events, task_info, task_store
+            nonlocal runtime_ctx, subagent_events, task_info, task_store, terminal_error_frame
 
             try:
                 if record.ownership_lost:
@@ -1811,17 +1853,17 @@ async def run_agent(
                         logger.warning("Could not remove scheduled goal for run %s", run_id, exc_info=True)
                         await run_manager.set_status(run_id, RunStatus.error, error="Scheduled goal cleanup failed", persist=False)
 
-                if not record.ownership_lost and (event_store is not None or scheduled_goal is not None):
+                if not record.ownership_lost and (event_store is not None or scheduled_goal is not None or record.rollback_finalization_pending):
                     try:
                         # Even after bounded receipt retries are exhausted, persist the
                         # real worker outcome. Leaving a successful row inflight would
                         # let lease recovery rewrite it as an error with a synthetic
                         # zero receipt.
                         if record.abort_event.is_set():
-                            if scheduled_goal is not None:
-                                # A cancel may arrive while scheduled cleanup was
-                                # awaiting its saver. The local status may still be
-                                # staged success; apply the accepted action, including
+                            if scheduled_goal is not None or record.status == RunStatus.success:
+                                # A cancel may arrive while receipt or scheduled
+                                # cleanup is awaiting I/O. Apply the accepted action
+                                # to a still-staged success, including
                                 # rollback, before committing any terminal outcome.
                                 await _finish_cancellation(record.abort_action, restore_checkpoint=not checkpoint_rollback_completed)
                             await run_manager.persist_current_status(run_id)
@@ -1832,9 +1874,11 @@ async def run_agent(
                                 await run_manager.persist_current_status(run_id)
                     except Exception:
                         logger.warning("Failed to persist terminal status for run %s after delivery receipt attempts", run_id, exc_info=True)
-                # The deferred commit has been attempted. A failed write is left to
-                # completion fallback or lease recovery, as before.
-                record.terminal_commit_pending = False
+                # Only a confirmed terminal write or ownership loss releases the
+                # renewal barrier in multi-worker mode. A returned/aborted call is
+                # not evidence that this worker committed its terminal outcome.
+                if record.terminal_commit_pending and run_manager.can_release_terminal_barrier(record):
+                    record.terminal_commit_pending = False
 
                 if not record.ownership_lost and journal is not None and persist_completion:
                     try:
@@ -1981,10 +2025,46 @@ async def run_agent(
                             "Extension task-stop notification interrupted for run %s; completing cleanup first",
                             run_id,
                         )
+                if not record.ownership_lost and journal is not None:
+                    evidence_failure = None
+                    try:
+                        evidence_receipt = await journal.finish_evidence()
+                        if evidence_receipt is not None:
+                            if not evidence_execution_started:
+                                evidence_failure = "Lead graph execution did not begin; producer coverage is partial."
+                            elif not await run_manager.seal_completed_evidence(run_id, evidence_receipt):
+                                evidence_failure = "The owning worker could not persist the journal seal."
+                    except BaseException as exc:
+                        evidence_failure = f"Journal seal failed ({type(exc).__name__})."
+                        if not isinstance(exc, Exception):
+                            deferred_finalization_interrupt = _defer_finalization_interrupt(deferred_finalization_interrupt, exc)
+                        logger.warning("Failed to seal completed-run evidence for %s (non-fatal)", run_id, exc_info=True)
+                    if evidence_failure is not None:
+                        try:
+                            await run_manager.mark_evidence_partial(run_id, error=evidence_failure)
+                        except Exception:
+                            logger.warning("Failed to persist partial evidence for %s (non-fatal)", run_id, exc_info=True)
+                        except BaseException as exc:
+                            deferred_finalization_interrupt = _defer_finalization_interrupt(deferred_finalization_interrupt, exc)
+                            logger.warning("Partial evidence persistence interrupted for %s; completing cleanup first", run_id)
+
                 if record.finalizing:
                     await run_manager.set_finalizing(run_id, False)
 
-                await bridge.publish_end(run_id)
+                terminal_stream_authorized = not record.ownership_lost and record.status not in (RunStatus.pending, RunStatus.running) and getattr(record, "terminal_status_persisted", True)
+                if terminal_stream_authorized:
+                    if terminal_error_frame is not None:
+                        await bridge.publish(
+                            run_id,
+                            "error",
+                            terminal_error_frame,
+                        )
+                    await bridge.publish_end(run_id)
+                else:
+                    logger.warning(
+                        "Skipping stream end for run %s because its durable terminal status is unconfirmed",
+                        run_id,
+                    )
 
                 if deferred_finalization_interrupt is not None:
                     raise deferred_finalization_interrupt
@@ -1996,6 +2076,15 @@ async def run_agent(
                         except Exception:
                             logger.warning("Failed to close journal for run %s", run_id, exc_info=True)
                 finally:
+                    if stream_producer_lease_started:
+                        try:
+                            await bridge.finish_producer_lease(run_id)
+                        except Exception:
+                            logger.warning(
+                                "Failed to finish stream producer lease for run %s",
+                                run_id,
+                                exc_info=True,
+                            )
                     lease_cleanup_interrupt: BaseException | None = None
                     try:
                         from deerflow.sandbox.lease import release_sandbox_execution_lease_async
@@ -2020,6 +2109,10 @@ async def run_agent(
                         )
                     # Drop graph and per-run payload references before the terminal
                     # worker task itself becomes collectable.
+                    # Diagnostic tracebacks can retain this frame. Release both
+                    # the journal and the stamper callback that closes over it.
+                    seq_stamper = None
+                    journal = None
                     agent = None
                     agent_result = None
                     accessor = None
@@ -2053,12 +2146,21 @@ async def run_agent(
         # The registered worker remains the owner until every terminal and
         # resource-cleanup await settles. Never cancel or detach this task.
         finalizer = asyncio.create_task(finalize(), name=f"run-finalization-{run_id}")
+        if stream_producer_lease_started:
+            transfer_producer_lease = _declared_bridge_method(
+                bridge,
+                "transfer_producer_lease",
+            )
+            if transfer_producer_lease is not None:
+                transfer_producer_lease(run_id, finalizer)
         await _drain_run_finalization(finalizer, on_host_cancel=interrupt_completion_hook)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+_GOAL_RUN_HARD_STOP_REASONS = frozenset({"token_capped", "loop_capped"})
 
 
 @dataclass(frozen=True)
@@ -2560,11 +2662,10 @@ async def _prepare_goal_continuation_input(
         return _GoalCompletionCandidate(copy.deepcopy(current_goal), conversation_signature_before, evaluation)
 
     stand_down_reason = _stand_down_reason(goal, evaluation, no_progress_count)
-    if stand_down_reason is None and run_stop_reason == "token_capped":
-        # The run already used up its token budget, and continuations share that
-        # budget, so another hidden turn would spend one more model call only to
-        # have its tool calls stripped.
-        stand_down_reason = "token_capped"
+    if stand_down_reason is None and run_stop_reason in _GOAL_RUN_HARD_STOP_REASONS:
+        # Both guards keep their safety state across hidden turns in this run.
+        # Respect the hard stop instead of re-entering the same run budget.
+        stand_down_reason = run_stop_reason
     if stand_down_reason is not None or not should_continue_goal(goal, evaluation, no_progress_count=no_progress_count):
         await _persist(goal, evaluation, no_progress_count, stand_down_reason=stand_down_reason)
         return None

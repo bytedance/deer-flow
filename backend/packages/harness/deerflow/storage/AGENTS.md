@@ -61,8 +61,8 @@ backend name == `blob_storage.backend` value:
 3. Keep the portability rule: a backend talks to the host through the method
    arguments and its `backend_config` dict only. The single `deerflow` import a
    backend folder needs is the contract line importing `BlobStore`, so a
-   third-party backend can live outside this tree and be selected with a dotted
-   path (`pkg.mod.Class` or `pkg.mod:Class`).
+   third-party backend can live outside this tree and be selected with an import
+   path (`module.Class` or `module:Class`, including single-file modules).
 4. Reject an unusable config by raising; a store that silently starts on a
    different root or backend strands previously written content.
 5. Add the backend's semantics tests to `backend/tests/test_blob_store.py`; the

@@ -59,7 +59,8 @@ storage and transfer cost bounded relative to lossless PNG. The explicit
 `browser_screenshot` tool remains PNG because it creates a user-requested
 artifact. New automatic capture entry points must reuse the shared progress
 encoding definition in `tools.py` so the byte encoding and `.jpg` suffix cannot
-drift.
+drift. `browser_screenshot` never replaces an `outputs/` file: it hard-links
+onto the first free `-N` name.
 
 ### Embedded Client (`packages/harness/deerflow/client.py`)
 

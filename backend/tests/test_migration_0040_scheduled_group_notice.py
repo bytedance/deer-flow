@@ -16,13 +16,13 @@ from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 
 REVISION = "0040_scheduled_group_notice"
 PREVIOUS = "0039_user_disabled"
-CURRENT_HEAD = "0043_runtime_im_notices"
 COLUMN = "notification_group_connection_id"
 
 
-def test_group_notification_revision_has_one_head_after_0039():
+def test_group_notification_revision_is_in_single_chain_after_0039():
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
-    assert script.get_heads() == [CURRENT_HEAD]
+    assert len(script.get_heads()) == 1
+    assert REVISION in {revision.revision for revision in script.walk_revisions()}
     assert script.get_revision("0041_im_notice_preferences").down_revision == REVISION
     assert script.get_revision(REVISION).down_revision == PREVIOUS
     assert len(REVISION) <= 32

@@ -192,6 +192,15 @@ class TestModeOff:
 
 
 class TestIdentities:
+    def test_endpoint_path_separates_sharing_and_public_policy_identity(self):
+        settings = {"api_key": "key-a", "model": "gateway-model", "base_url": "https://gateway.example"}
+        jev = resolve_connection(settings=settings, configuration_source="tests.typesafe")
+        decisions = resolve_connection(settings=settings, configuration_source="tests.decisions", endpoint_path="/v1/decisions")
+
+        assert TypeSafeClient(jev).sharing_key() != TypeSafeClient(decisions).sharing_key()
+        assert jev.public_parameters()["endpoint_path"] == "/v1/systemone"
+        assert decisions.public_parameters()["endpoint_path"] == "/v1/decisions"
+
     def test_the_sharing_key_tracks_every_sharing_dimension(self):
         base = {"api_key": "key-a", "model": "jev-latest"}
         baseline = _client(**base).sharing_key(max_state_chars=100)

@@ -150,7 +150,7 @@ def test_passive_empty_skill_policy_preserves_deferred_mcp_discovery_and_calling
     )
 
     result = graph.invoke(
-        {"messages": [HumanMessage(content="use the configured MCP calculator")]},
+        {"messages": [HumanMessage(content="use the configured MCP calculator", id="user-passive")]},
         context={},
     )
 
@@ -160,7 +160,11 @@ def test_passive_empty_skill_policy_preserves_deferred_mcp_discovery_and_calling
     # skill applied a policy restriction.
     assert "denied_lookup" not in model.bound_tool_names[1]
     assert _CALC_CALLS == ["2 + 2"]
-    assert result["promoted"] == {"catalog_hash": setup.catalog_hash, "names": ["calc"]}
+    assert result["promoted"] == {
+        "catalog_hash": setup.catalog_hash,
+        "names": ["calc"],
+        "turn_id": "user-passive",
+    }
     assert storage.load_calls == 0
 
 
@@ -211,7 +215,7 @@ def test_active_skill_can_search_promote_and_call_allowed_deferred_tool():
 
     result = asyncio.run(
         graph.ainvoke(
-            {"messages": [HumanMessage(content="use the allowed calculator")]},
+            {"messages": [HumanMessage(content="use the allowed calculator", id="user-active")]},
             context=context,
         )
     )
@@ -220,7 +224,11 @@ def test_active_skill_can_search_promote_and_call_allowed_deferred_tool():
     assert "calc" in model.bound_tool_names[1]
     assert "denied_lookup" not in model.bound_tool_names[1]
     assert _CALC_CALLS == ["2 + 2"]
-    assert result["promoted"] == {"catalog_hash": setup.catalog_hash, "names": ["calc"]}
+    assert result["promoted"] == {
+        "catalog_hash": setup.catalog_hash,
+        "names": ["calc"],
+        "turn_id": "user-active",
+    }
     search_result = [message for message in result["messages"] if isinstance(message, ToolMessage) and message.tool_call_id == "search-call"]
     assert len(search_result) == 1
     assert '"name": "calc"' in search_result[0].content
@@ -272,7 +280,7 @@ def test_tool_search_promotion_cannot_expose_or_execute_denied_deferred_tool():
     )
 
     result = graph.invoke(
-        {"messages": [HumanMessage(content="try the denied lookup")]},
+        {"messages": [HumanMessage(content="try the denied lookup", id="user-denied")]},
         context=context,
     )
 
@@ -281,6 +289,7 @@ def test_tool_search_promotion_cannot_expose_or_execute_denied_deferred_tool():
     assert result["promoted"] == {
         "catalog_hash": setup.catalog_hash,
         "names": [],
+        "turn_id": "user-denied",
     }
     search_result = [message for message in result["messages"] if isinstance(message, ToolMessage) and message.tool_call_id == "search-denied"]
     assert len(search_result) == 1
@@ -329,7 +338,7 @@ def test_auto_promotion_cannot_expose_or_execute_denied_deferred_tool():
     )
 
     result = graph.invoke(
-        {"messages": [HumanMessage(content="run the denied lookup")]},
+        {"messages": [HumanMessage(content="run the denied lookup", id="user-auto-denied")]},
         context=context,
     )
 
@@ -338,6 +347,7 @@ def test_auto_promotion_cannot_expose_or_execute_denied_deferred_tool():
     assert result["promoted"] == {
         "catalog_hash": setup.catalog_hash,
         "names": ["denied_lookup"],
+        "turn_id": "user-auto-denied",
     }
     blocked = [message for message in result["messages"] if isinstance(message, ToolMessage) and message.tool_call_id == "auto-denied-call"]
     assert len(blocked) == 1

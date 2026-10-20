@@ -406,7 +406,12 @@ def _render_fact_markdown(fact: dict[str, Any]) -> bytes:
 
 def _parse_fact_markdown(path: Path) -> dict[str, Any]:
     try:
-        text = path.read_text(encoding="utf-8")
+        # ``utf-8-sig`` drops a leading BOM, matching ``_load_memory_file``.
+        # Facts are hand-editable ``.md`` files, so a Windows editor can add one;
+        # the ``startswith("---\n")`` check below would then read a valid fact as
+        # "missing YAML front matter" and raise MemoryStorageCorruption over an
+        # encoding artifact.
+        text = path.read_text(encoding="utf-8-sig")
         if not text.startswith("---\n"):
             raise ValueError("missing YAML front matter")
         front, body = text[4:].split("\n---\n", 1)
@@ -1143,7 +1148,11 @@ class FileMemoryStorage(MemoryStorage):
         if not path.exists():
             return None
         try:
-            value = json.loads(path.read_text(encoding="utf-8"))
+            # utf-8-sig: a summary hand-edited on Windows may carry a BOM. The
+            # payload is still valid JSON, so raising MemoryStorageCorruption
+            # here would brick the backend (and the opt-in Markdown loader
+            # would quarantine recoverable state) over an encoding artifact.
+            value = json.loads(path.read_text(encoding="utf-8-sig"))
         except (json.JSONDecodeError, OSError, UnicodeError) as exc:
             raise MemoryStorageCorruption(f"Failed to load global memory JSON {path}: {exc}") from exc
         if not isinstance(value, dict):

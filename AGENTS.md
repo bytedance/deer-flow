@@ -31,6 +31,11 @@ Nginx is the single public entry: it proxies `/api/*` to the Gateway, rewriting
 HTML and configured textual assets, deliberately leaving SSE, fonts, images, audio, and
 video uncompressed at the proxy layer.
 
+Keep the dedicated `/api/threads/{thread_id}/browser/stream` WebSocket regex before
+the generic threads regex in Docker, local and Helm nginx configs. Upgrade headers
+and the 600s read timeout are pinned by `backend/tests/test_nginx_browser_websocket.py`.
+Helm uses nginx's default connect/send timeouts for the in-cluster Gateway.
+
 Both Compose files publish nginx at `"${BIND_HOST:-127.0.0.1}:${PORT:-2026}:2026"`
 (README's **loopback default**); bare `"${PORT}:2026"` binds `0.0.0.0`. Root `PORT`
 controls Docker ingress only; local Next.js stays on `3000` so `.env` cannot
@@ -83,7 +88,8 @@ generic hook to the extension contract plus an extension that uses it — do not
 hard-code business logic into core. Working examples:
 `examples/deerflow-extension-{example,bookmarks,agent-teams}`.
 [Workflow guide](examples/deerflow-extension-workflows/AGENTS.md): public
-AgentRuns; POSIX, one process/store; live resume/approval; no restart replay or hard currency budget.
+AgentRuns; POSIX, one process/store; approval and session-authorized recovery; uncertain admissions need reconciliation;
+no multi-Gateway failover or hard currency budget.
 
 Root runtime configs: copy `config.example.yaml` → `config.yaml` and
 `extensions_config.example.json` → `extensions_config.json` (MCP/skills).
@@ -214,9 +220,9 @@ Repo-wide conventions:
   with the optional import unavailable and mock HTTP transport to keep tests offline.
 - **Before pushing** — backend `make format`, frontend `pnpm check`.
   Backend CI enforces `ruff format --check`.
-- **Skill text encoding** — treat `SKILL.md` and other textual skill resources as UTF-8;
-  Python utilities that read or write them must pass `encoding="utf-8"` rather than
-  relying on the platform locale.
+- **Skill text encoding** — use explicit UTF-8 for textual skill resources.
+  Read `SKILL.md` with `encoding="utf-8-sig"` to strip a leading BOM; write with
+  `encoding="utf-8"`. Never rely on the platform locale.
 - **Version sources must stay in lockstep** — a release version must match identically in
   `backend/pyproject.toml`, `frontend/package.json`, and `deploy/helm/deer-flow/Chart.yaml`
   (`version` + `appVersion`), and `backend/uv.lock` must record the same version for the root

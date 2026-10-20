@@ -304,7 +304,8 @@ def credentials_key_consumers(config: AppConfig) -> list[str]:
     consumers: list[str] = []
     connections = getattr(config, "channel_connections", None)
     if connections is not None and getattr(connections, "enabled", False):
-        # ChannelConnectionRepository encrypts per-connection credentials.
+        # ChannelConnectionRepository encrypts per-connection credentials, and
+        # the runtime config store the bot credentials entered in the web UI.
         consumers.append("channel_connections.enabled=true")
     return consumers
 
@@ -489,6 +490,18 @@ async def _drain_inflight_runs(run_manager: RunManager) -> None:
         logger.exception("Failed to drain in-flight runs during shutdown")
 
 
+async def _retry_recovered_run_stream_end(
+    bridge: StreamBridge,
+    run_id: str,
+    *,
+    retry_delay: float,
+    cleanup_delay: float,
+) -> None:
+    await asyncio.sleep(max(0.0, retry_delay))
+    await bridge.publish_end(run_id)
+    await bridge.cleanup(run_id, delay=cleanup_delay)
+
+
 async def _publish_recovered_run_stream_end(
     bridge: StreamBridge,
     recovered_runs: list[RunRecord],
@@ -498,12 +511,57 @@ async def _publish_recovered_run_stream_end(
 ) -> list[tuple[str, asyncio.Task[None]]]:
     """Terminate retained streams for runs recovered as orphaned."""
     cleanup_tasks: list[tuple[str, asyncio.Task[None]]] = []
+
+    def schedule_retry(record: RunRecord) -> bool:
+        retry_delay = getattr(
+            bridge,
+            "producer_lease_retry_delay_seconds",
+            None,
+        )
+        if not isinstance(retry_delay, (int, float)) or isinstance(retry_delay, bool) or retry_delay < 0:
+            return False
+        task = asyncio.create_task(
+            _retry_recovered_run_stream_end(
+                bridge,
+                record.run_id,
+                retry_delay=float(retry_delay),
+                cleanup_delay=cleanup_delay,
+            )
+        )
+        task.add_done_callback(
+            lambda task, run_id=record.run_id: _log_recovered_stream_cleanup_result(
+                task,
+                run_id,
+            )
+        )
+        cleanup_tasks.append((record.run_id, task))
+        if on_cleanup_scheduled is not None:
+            on_cleanup_scheduled(record.run_id, task)
+        return True
+
     for record in recovered_runs:
         stream_exists = getattr(bridge, "stream_exists", None)
         if stream_exists is not None:
             try:
                 if not await stream_exists(record.run_id):
                     logger.debug("Skipping recovered stream end for %s: stream already expired", record.run_id)
+                    cleanup_expired_producer = getattr(
+                        bridge,
+                        "cleanup_expired_producer",
+                        None,
+                    )
+                    if callable(cleanup_expired_producer):
+                        try:
+                            cleaned = bool(await cleanup_expired_producer(record.run_id))
+                        except Exception:
+                            logger.warning(
+                                "Failed to clean expired stream producer marker for %s",
+                                record.run_id,
+                                exc_info=True,
+                            )
+                            cleaned = False
+                        if not cleaned:
+                            schedule_retry(record)
                     continue
             except Exception:
                 logger.debug("Failed to check recovered stream existence for %s", record.run_id, exc_info=True)
@@ -515,6 +573,7 @@ async def _publish_recovered_run_stream_end(
                 record.run_id,
                 exc_info=True,
             )
+            schedule_retry(record)
             continue
         task = asyncio.create_task(bridge.cleanup(record.run_id, delay=cleanup_delay))
         task.add_done_callback(lambda task, run_id=record.run_id: _log_recovered_stream_cleanup_result(task, run_id))
@@ -854,6 +913,14 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         from deerflow.extensions.gateway import start_services, stop_services
 
         extensions = getattr(app.state, "extensions", EMPTY_EXTENSIONS)
+        from deerflow.extensions.host_capabilities import HostCapabilities
+
+        host_capabilities = HostCapabilities(config, app.state.run_store, app.state.run_event_store)
+        app.state.skill_mutation_host = host_capabilities
+        # Own partial startup and cancellation before acquiring any locks or
+        # worker resources. LIFO shutdown stops plugins before host recovery.
+        stack.push_async_callback(host_capabilities.close)
+        await host_capabilities.start()
         attempted_services: list[tuple[str, Any]] = []
 
         async def stop_extension_services() -> None:
@@ -875,6 +942,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 config,
                 sf,
                 run_evidence_reader=app.state.run_evidence_reader,
+                host_capabilities=host_capabilities.bindings,
                 attempted_services=attempted_services,
             )
         )

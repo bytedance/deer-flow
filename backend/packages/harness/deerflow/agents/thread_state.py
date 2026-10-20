@@ -159,27 +159,35 @@ def merge_goal(existing: GoalState | None, new: GoalState | None) -> GoalState |
 class PromotedTools(TypedDict):
     catalog_hash: str
     names: list[str]
+    turn_id: NotRequired[str]
 
 
 def merge_promoted(existing: PromotedTools | None, new: PromotedTools | None) -> PromotedTools | None:
-    """Reducer for deferred-tool promotions, scoped by catalog hash.
+    """Reducer for deferred-tool promotions, scoped by catalog and user turn.
 
     - new None/empty -> preserve existing (node didn't touch promotions).
-    - catalog_hash changed -> replace wholesale, dropping stale names (prevents a
-      persisted bare name from exposing a different tool after catalog drift).
-    - same catalog_hash -> union names, dedupe, preserve order.
+    - catalog_hash or explicit turn_id changed -> replace wholesale, dropping
+      stale names.
+    - same scope -> union names, dedupe, preserve order.
+    - a missing new turn_id inherits the existing scope. ``tool_search`` writes
+      this shape after the filter establishes the current turn before the model.
     """
     if not new:
         return existing
-    if existing is None or existing.get("catalog_hash") != new["catalog_hash"]:
-        return {
-            "catalog_hash": new["catalog_hash"],
-            "names": list(dict.fromkeys(new["names"])),
-        }
-    return {
-        "catalog_hash": existing["catalog_hash"],
-        "names": list(dict.fromkeys(existing["names"] + new["names"])),
+    new_turn_id = new.get("turn_id")
+    replace = existing is None or existing.get("catalog_hash") != new["catalog_hash"] or (new_turn_id is not None and existing.get("turn_id") != new_turn_id)
+    existing_names = existing.get("names") if existing is not None else None
+    if not isinstance(existing_names, list) or not all(isinstance(name, str) for name in existing_names):
+        existing_names = []
+    names = new["names"] if replace else existing_names + new["names"]
+    merged: PromotedTools = {
+        "catalog_hash": new["catalog_hash"],
+        "names": list(dict.fromkeys(names)),
     }
+    turn_id = new_turn_id if new_turn_id is not None else (existing or {}).get("turn_id")
+    if turn_id is not None:
+        merged["turn_id"] = turn_id
+    return merged
 
 
 TERMINAL_STATUSES: frozenset[str] = frozenset(SUBAGENT_STATUS_VALUES)
