@@ -16,6 +16,7 @@ from typing import Any
 
 from app.gateway.checkpoint_retention import enforce_trailing_duration_retention
 from deerflow.runtime import ThreadOperationKind
+from deerflow.runtime.runs import ConflictError
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.worker import _checkpoint_thread_lock
 
@@ -79,6 +80,12 @@ async def run_gateway_completion_hooks(
                     record.thread_id,
                     record.run_id,
                 )
+        except ConflictError:
+            logger.debug(
+                "Checkpoint retention skipped after run %s for thread %s: thread operation already admitted; leaving duration leaf for a later completion",
+                record.run_id,
+                record.thread_id,
+            )
         except Exception:
             # Retention is a storage hygiene pass. A backend outage, an
             # unsupported saver, or a schema mismatch must never rewrite a

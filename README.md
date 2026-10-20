@@ -567,6 +567,10 @@ updates both nested usage and top-level token counters, even if initial usage wa
 The original request, model, and status metadata stay intact; flushed events are
 not rewritten. See the [run event contract](contracts/run_event_stream_contract.json).
 
+After successful runs, checkpoint cleanup skips a busy thread with a DEBUG message
+and no traceback. Storage or schema failures still produce a WARNING with a traceback.
+Both paths preserve the completed run and scheduled-task finalization.
+
 The unified nginx endpoint is same-origin by default and does not emit browser CORS headers. If you run a split-origin or port-forwarded browser client, set `GATEWAY_CORS_ORIGINS` to comma-separated exact origins such as `http://localhost:3000`; the Gateway then applies the CORS allowlist and matching CSRF origin checks.
 
 When fine-grained authorization is enabled, Live Browser connections require `threads:write` as well as ownership of the thread, even when only viewing frames: the same connection can control the browser. Permission checks run when connecting. Restart Gateway after upgrading to disconnect sessions admitted by older code.

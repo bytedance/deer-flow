@@ -10,6 +10,7 @@ rewrite the run outcome or strand a scheduled occurrence.
 from __future__ import annotations
 
 import asyncio
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -20,6 +21,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from app.gateway import checkpoint_retention, deps, run_completion
 from app.gateway.checkpoint_retention import RetentionReport
+from deerflow.runtime import ThreadOperationKind
 from deerflow.runtime.checkpoint_cache.memory import MemoryCheckpointHistoryCache
 from deerflow.runtime.checkpointer.cached_saver import CachedHistorySaver
 from deerflow.runtime.runs.manager import RunManager
@@ -131,29 +133,36 @@ async def test_successful_completion_uses_durable_reservation(monkeypatch: pytes
 
 
 @pytest.mark.anyio
-async def test_durable_reservation_conflict_skips_cleanup(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_durable_reservation_conflict_skips_cleanup(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     retain = AsyncMock()
+    scheduler = SimpleNamespace(handle_run_completion=AsyncMock())
     monkeypatch.setattr(run_completion, "enforce_trailing_duration_retention", retain)
+    store = MemoryRunStore()
+    peer = RunManager(store=store, worker_id="retention-peer")
+    manager = RunManager(store=store, worker_id="retention-completion")
+    record = _record()
 
-    class ConflictReservation:
-        def reserve_thread_operation(self, *_args: object, **_kwargs: object) -> object:
-            class Context:
-                async def __aenter__(self) -> None:
-                    raise RuntimeError("another checkpoint operation won")
-
-                async def __aexit__(self, *_exc: object) -> None:
-                    return None
-
-            return Context()
-
-    await run_completion.run_gateway_completion_hooks(
-        _record(),
-        checkpointer=object(),
-        run_manager=ConflictReservation(),
-        scheduled_service=None,
-    )
+    # A real peer reservation must raise the public ConflictError through the
+    # completion manager's admission path, rather than a generic backend error.
+    async with peer.reserve_thread_operation(record.thread_id, kind=ThreadOperationKind.checkpoint_write, user_id=record.user_id):
+        with caplog.at_level(logging.DEBUG, logger=run_completion.__name__):
+            await run_completion.run_gateway_completion_hooks(
+                record,
+                checkpointer=object(),
+                run_manager=manager,
+                scheduled_service=scheduler,
+            )
 
     retain.assert_not_awaited()
+    scheduler.handle_run_completion.assert_awaited_once_with(record)
+    assert record.status == RunStatus.success
+    records = [entry for entry in caplog.records if entry.name == run_completion.__name__]
+    assert len(records) == 1
+    assert records[0].levelno == logging.DEBUG
+    assert "Checkpoint retention skipped" in records[0].getMessage()
+    assert record.run_id in records[0].getMessage()
+    assert record.thread_id in records[0].getMessage()
+    assert records[0].exc_info is None
 
 
 @pytest.mark.anyio
@@ -192,19 +201,33 @@ async def test_retention_receives_bounded_completion_policy(monkeypatch: pytest.
 
 
 @pytest.mark.anyio
-async def test_retention_failure_is_fail_open_for_scheduler(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+@pytest.mark.parametrize("failure_at", ["reservation", "retention"])
+async def test_retention_failure_is_fail_open_for_scheduler(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, failure_at: str) -> None:
     scheduler = SimpleNamespace(handle_run_completion=AsyncMock())
-
-    async def retain(*_args: object, **_kwargs: object) -> RetentionReport:
-        raise RuntimeError("database temporarily unavailable")
-
+    failure = RuntimeError("database temporarily unavailable")
+    retain = AsyncMock(side_effect=failure)
     monkeypatch.setattr(run_completion, "enforce_trailing_duration_retention", retain)
+    manager = None
+    if failure_at == "reservation":
+        reservation = AsyncMock()
+        reservation.__aenter__.side_effect = failure
+        manager = SimpleNamespace(reserve_thread_operation=lambda *_args, **_kwargs: reservation)
+    record = _record()
 
-    with caplog.at_level("WARNING"):
-        await run_completion.run_gateway_completion_hooks(_record(), checkpointer=object(), scheduled_service=scheduler)
+    with caplog.at_level(logging.WARNING, logger=run_completion.__name__):
+        await run_completion.run_gateway_completion_hooks(record, checkpointer=object(), run_manager=manager, scheduled_service=scheduler)
 
-    scheduler.handle_run_completion.assert_awaited_once()
-    assert "Checkpoint retention failed after run completion-run" in caplog.text
+    scheduler.handle_run_completion.assert_awaited_once_with(record)
+    assert record.status == RunStatus.success
+    records = [entry for entry in caplog.records if entry.name == run_completion.__name__]
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    assert "Checkpoint retention failed after run completion-run" in records[0].getMessage()
+    assert records[0].exc_info[1] is failure
+    if failure_at == "reservation":
+        retain.assert_not_awaited()
+    else:
+        retain.assert_awaited_once()
 
 
 @pytest.mark.anyio
@@ -275,7 +298,6 @@ def test_get_run_context_installs_gateway_completion_adapter(monkeypatch: pytest
     checkpointer = object()
     adapter = AsyncMock()
     monkeypatch.setattr(deps, "get_checkpointer", lambda _request: checkpointer)
-    monkeypatch.setattr(deps, "get_run_manager", lambda _request: run_manager)
     monkeypatch.setattr(deps, "get_store", lambda _request: None)
     monkeypatch.setattr(deps, "get_run_event_store", lambda _request: None)
     monkeypatch.setattr(deps, "get_thread_store", lambda _request: None)

@@ -102,8 +102,10 @@ the bounded trailing-duration retention helper after a successful run's duration
 checkpoint and before the worker drops its finalizing fence. It holds both the
 durable `checkpoint_write` reservation and the process-local
 `_checkpoint_thread_lock`, and allows one contract-proven duration leaf per
-completion. Retention is fail-open and the scheduler completion observer still
-runs if the pass fails; it never changes run status or deletes resumable
+completion. Reservation conflicts log a DEBUG skip without traceback; storage
+and schema failures remain WARNINGs with traceback. Retention is fail-open;
+the scheduler completion observer still runs if the pass fails. It never
+changes run status or deletes resumable
 ancestors. History reads may recreate the fast-path duration leaf after a later
 read, so this hook is a bounded hygiene pass rather than an unbounded sweep.
 

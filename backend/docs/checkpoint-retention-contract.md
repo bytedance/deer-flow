@@ -162,6 +162,8 @@ forking from a row after classification but before deletion; the
 process-local lock additionally serializes same-worker history and duration
 writers. If another operation has already won admission, the hook leaves the
 leaf for a later completion rather than attempting an unsafe deletion.
+These expected reservation conflicts produce a DEBUG skip without a traceback;
+backend and schema failures remain WARNINGs with their exception traceback.
 
 Retention is fail-open: unsupported savers, transient database errors, and
 schema mismatches are logged and leave the run outcome and scheduled-task
