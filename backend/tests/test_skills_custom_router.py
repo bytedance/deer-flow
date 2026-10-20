@@ -31,6 +31,12 @@ def _make_admin_user() -> User:
     return User(email="admin-test@example.com", password_hash="x", system_role="admin", id=uuid4())
 
 
+def _make_member_user() -> User:
+    from uuid import uuid4
+
+    return User(email="member-test@example.com", password_hash="x", system_role="user", id=uuid4())
+
+
 def _skill_content(name: str, description: str = "Demo skill") -> str:
     return f"---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n"
 
@@ -778,7 +784,7 @@ def test_custom_skill_delete_preserves_history_and_allows_restore(monkeypatch, t
         assert refresh_calls == [("refresh", "default"), ("refresh", "default")]
 
 
-def _make_demo_custom_skill_app(monkeypatch, tmp_path: Path) -> FastAPI:
+def _make_demo_custom_skill_app(monkeypatch, tmp_path: Path, *, user_factory=None) -> FastAPI:
     from deerflow.config.paths import Paths
 
     custom_dir = _user_custom_dir(tmp_path, "default") / "demo-skill"
@@ -793,7 +799,7 @@ def _make_demo_custom_skill_app(monkeypatch, tmp_path: Path) -> FastAPI:
     monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
     monkeypatch.setattr("deerflow.config.paths._paths", None)
     monkeypatch.setattr("app.gateway.routers.skills.get_effective_user_id", lambda: "default")
-    return _make_test_app(config)
+    return _make_test_app(config, user_factory=user_factory)
 
 
 @pytest.mark.parametrize(
@@ -857,6 +863,31 @@ def test_custom_skill_corrupt_history_record_stays_server_error(monkeypatch, tmp
 
     assert response.status_code == 500
     assert response.json()["detail"].startswith(detail)
+
+
+@pytest.mark.parametrize(
+    ("path", "detail"),
+    [
+        ("/api/skills", "Failed to load skills."),
+        ("/api/skills/custom", "Failed to list custom skills."),
+        ("/api/skills/demo-skill", "Failed to get skill."),
+    ],
+)
+def test_member_skill_reads_keep_load_error_text_out_of_500(monkeypatch, tmp_path, caplog, path, detail):
+    """Any signed-in user reaches these reads, so a load failure's host path stays in the server log."""
+    import logging
+
+    extensions_config = tmp_path / "extensions_config.json"
+    extensions_config.write_text("{not json", encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_config))
+    app = _make_demo_custom_skill_app(monkeypatch, tmp_path, user_factory=_make_member_user)
+
+    with TestClient(app) as client, caplog.at_level(logging.ERROR, logger=skills_router.__name__):
+        response = client.get(path)
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": detail}
+    assert str(extensions_config) in caplog.text
 
 
 def test_custom_skill_delete_continues_when_history_write_is_readonly(monkeypatch, tmp_path):

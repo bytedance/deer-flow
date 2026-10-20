@@ -4606,6 +4606,13 @@
 
 ### 安全
 
+- **技能：** 所有已登录用户都能调用的 `GET /api/skills`、`GET /api/skills/custom`
+  和 `GET /api/skills/{name}`，其 `500` 响应的 detail 不再包含原始异常文本。此前
+  `extensions_config.json` 格式错误或不可读时，这三个接口都会在响应中返回该文件的
+  宿主机绝对路径（权限错误时还会附带 `[Errno 13]` 信息）。现在它们分别返回固定的
+  `Failed to load skills.` / `Failed to list custom skills.` /
+  `Failed to get skill.`，完整错误只记录在 Gateway 日志中。
+
 - **skillscan：** LLM 之前的静态门禁现在按形状匹配 fork 炸弹，而不再只匹配
   `:(){ :|:& };:` 这一规范写法。`resource-fork-bomb` 和 `shell-destructive-command`
   的 fork 炸弹分支此前只匹配那一种写法，因此 #6651 报告的改名或改空格的载荷——
