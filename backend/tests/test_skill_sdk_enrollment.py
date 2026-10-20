@@ -47,6 +47,9 @@ def sdk_home(tmp_path):
     sessions = sessionmaker(engine, expire_on_commit=False)
     with sessions.begin() as session:
         session.add(UserRow(id="owner", email="owner@example.test"))
+    # Release the fixture's pooled SQLite connection before SDK subprocesses
+    # exercise database removal, which Windows forbids while the file is open.
+    engine.dispose()
     repository = SkillMutationRepository(sessions)
     yield tmp_path, config, root, repository
     engine.dispose()
