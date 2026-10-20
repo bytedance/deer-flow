@@ -300,9 +300,9 @@ class TestWebSearchTool:
         assert [r["title"] for r in parsed] == ["Kept"]
 
     def test_partial_or_null_fields_default_to_empty_string(self, mock_config_with_key):
-        parsed = _invoke({"results": [{}, {"title": None, "url": None, "snippet": None, "published_at": None}]})
+        parsed = _invoke({"results": [{"url": "https://ex.com/a"}, {"title": None, "url": "https://ex.com/b", "snippet": None, "published_at": None}]})
 
-        assert parsed == [{"title": "", "url": "", "snippet": ""}, {"title": "", "url": "", "snippet": ""}]
+        assert parsed == [{"title": "", "url": "https://ex.com/a", "snippet": ""}, {"title": "", "url": "https://ex.com/b", "snippet": ""}]
 
     @pytest.mark.parametrize(
         ("status", "hint"),
@@ -342,6 +342,48 @@ class TestWebSearchTool:
             patcher.stop()
 
         assert parsed["error"] == "timeout"
+
+
+class TestResultUrlScreening:
+    """Result URLs go through ``url_safety.safe_public_result_url``; rejected hits are dropped."""
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://localhost:8000/admin",
+            "http://app.localhost/",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://metadata.google.internal/computeMetadata/v1/",
+            "http://10.0.0.5/internal",
+            "http://127.0.0.1:8080/",
+            "http://[::1]/",
+            "http://2130706433/",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "",
+            None,
+        ],
+    )
+    def test_non_public_urls_are_dropped_and_public_ones_kept_in_order(self, url, mock_config_with_key):
+        payload = {"results": [_hit(url="https://ex.com/a", title="A"), _hit(url=url, title="Bad"), _hit(url="https://ex.com/b", title="B")]}
+
+        with patch("socket.getaddrinfo", side_effect=AssertionError("Result screening must not perform DNS")):
+            parsed = _invoke(payload)
+
+        assert [(r["title"], r["url"]) for r in parsed] == [("A", "https://ex.com/a"), ("B", "https://ex.com/b")]
+
+    def test_dropped_hits_do_not_count_against_max_results(self, mock_config_with_key):
+        bad = [_hit(url="http://169.254.169.254/", title="Bad0"), _hit(url="http://localhost/", title="Bad1")]
+        payload = {"results": bad + [_hit(url=f"https://w{i}.com", title=f"W{i}") for i in range(6)]}
+
+        parsed = _invoke(payload)
+
+        assert [r["title"] for r in parsed] == ["W0", "W1", "W2", "W3", "W4"]
+
+    def test_all_hits_screened_out_returns_no_results(self, mock_config_with_key):
+        parsed = _invoke({"results": [_hit(url="http://localhost/"), _hit(url="http://10.1.2.3/")]}, {"query": "internal"})
+
+        assert parsed == {"error": "No results found", "query": "internal"}
 
 
 @pytest.mark.parametrize(

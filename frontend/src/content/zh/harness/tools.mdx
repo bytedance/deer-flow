@@ -219,7 +219,7 @@ tools:
   - use: deerflow.community.keenable.tools:web_search_tool
     # api_key: $KEENABLE_API_KEY # 可选；不填则使用免密钥端点
 ```
-返回 Keenable 自有索引的结果，每条结果附带从页面正文提取的片段（上限 1500 个字符），而不只是一段元描述。未配置 Key 时使用免密钥端点（按 IP 限流，目前为每秒 10 次、每小时 1000 次）；配置 `KEENABLE_API_KEY` 后可获得更高的额度。`max_results` 上限为 50。
+返回 Keenable 自有索引的结果，每条结果附带从页面正文提取的片段（上限 1500 个字符），而不只是一段元描述。未配置 Key 时使用免密钥端点（按 IP 限流，目前为每秒 10 次、每小时 1000 次）；配置 `KEENABLE_API_KEY` 后可获得更高的额度。`max_results` 上限为 50。结果 URL 经过共享的公网 URL 筛查，指向私有、回环或元数据地址的结果会被丢弃。
 
 API Key 可选，可在 [Keenable](https://keenable.ai) 获取。
 

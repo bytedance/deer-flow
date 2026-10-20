@@ -22,7 +22,9 @@ Keenable hosts.
 Both endpoints return the same body, ``{"results": [...]}``, so one normalizer
 covers both. ``web_search`` returns a JSON list of ``{title, url, snippet}``,
 plus ``published_at`` when Keenable knows the publication date. Snippets can
-run to several thousand characters, so each one is capped at 1500.
+run to several thousand characters, so each one is capped at 1500. Result URLs
+go through the shared ``safe_public_result_url`` screen, and a hit whose URL it
+rejects is dropped rather than returned with an empty link.
 
 This module is self-contained (httpx only, no Keenable SDK and no new
 dependency).
@@ -36,6 +38,7 @@ import httpx
 from langchain.tools import tool
 
 from deerflow.community.search_max_results import coerce_max_results
+from deerflow.community.url_safety import safe_public_result_url
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -144,10 +147,14 @@ def _snippet(result: dict) -> str:
     return snippet[:_SNIPPET_MAX_CHARS]
 
 
-def _normalize(result: dict) -> dict:
+def _normalize(result: dict) -> dict | None:
+    """Normalize one hit, or return None when its URL fails the public-URL screen."""
+    url = safe_public_result_url(result.get("url"))
+    if not url:
+        return None
     normalized = {
         "title": _text(result.get("title")),
-        "url": _text(result.get("url")),
+        "url": url,
         "snippet": _snippet(result),
     }
     published_at = result.get("published_at")
@@ -206,5 +213,7 @@ def web_search_tool(query: str, max_results: int | None = None) -> str:
     if not results:
         return json.dumps({"error": "No results found", "query": query}, ensure_ascii=False)
 
-    normalized_results = [_normalize(r) for r in results[:count]]
+    normalized_results = [normalized for normalized in map(_normalize, results) if normalized is not None][:count]
+    if not normalized_results:
+        return json.dumps({"error": "No results found", "query": query}, ensure_ascii=False)
     return json.dumps(normalized_results, indent=2, ensure_ascii=False)
