@@ -1750,7 +1750,10 @@ for validation and query-length limits.
 
 Serper web and image search support opt-in transient recovery with
 `max_retries: 1` (default `0`, maximum `3`) in each tool's configuration.
-`retry_budget_seconds` bounds retry scheduling, not active synchronous requests.
+Async agent calls use native async HTTP and retry waits, so a slow Serper response
+does not occupy a default-executor worker throughout the request. Synchronous
+Python calls remain supported. Cancelling an async call closes its request client.
+`retry_budget_seconds` bounds retry scheduling, not active HTTP requests.
 Budget exhaustion is logged separately while the tool returns the last error.
 Extra requests may consume quota or incur cost. See
 [Serper retries](backend/docs/CONFIGURATION.md#serper-retries).

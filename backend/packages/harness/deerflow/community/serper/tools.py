@@ -5,6 +5,7 @@ Serper provides real-time Google Search and Google Images results via a JSON
 API. An API key is required. Sign up at https://serper.dev to get one.
 """
 
+import asyncio
 import json
 import logging
 import math
@@ -13,13 +14,15 @@ import random
 import re
 import time
 from collections.abc import Mapping
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from ipaddress import IPv4Address, ip_address
 from urllib.parse import urlparse
 
 import httpx
-from langchain.tools import tool
+from langchain_core.tools import StructuredTool
 
 from deerflow.community.search_max_results import coerce_max_results
 from deerflow.community.search_time_range import SearchTimeRange
@@ -228,8 +231,7 @@ def _is_url_present(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
-def _retry_options(config) -> dict:
-    extra = config.model_extra if config is not None else {}
+def _retry_options(extra: Mapping[str, object]) -> dict:
     return {name: extra[name] for name in ("max_retries", "retry_budget_seconds") if name in extra}
 
 
@@ -279,6 +281,94 @@ def _retry_after(response: httpx.Response) -> float | None:
         return None
 
 
+def _prepare_post(
+    endpoint: str,
+    api_key: str,
+    query: str,
+    max_results: int,
+    *,
+    time_range: SearchTimeRange | None = None,
+    base_url: object | None = None,
+    max_retries: int = 0,
+    retry_budget_seconds: float = 30,
+) -> tuple[str, dict, dict, float]:
+    """Capture transport inputs and the scheduling deadline before opening a client."""
+    headers = {
+        "X-API-KEY": api_key,
+        "Content-Type": "application/json",
+    }
+    payload = {"q": query, "num": max_results}
+    if time_range is not None:
+        payload["tbs"] = _SERPER_TBS_BY_TIME_RANGE[time_range]
+
+    if isinstance(max_retries, bool) or not isinstance(max_retries, int) or not 0 <= max_retries <= 3:
+        raise ValueError("max_retries must be an integer between 0 and 3")
+    if isinstance(retry_budget_seconds, bool) or not isinstance(retry_budget_seconds, (int, float)) or not 0 < retry_budget_seconds <= 300 or not math.isfinite(retry_budget_seconds):
+        raise ValueError("retry_budget_seconds must be a finite number greater than 0 and at most 300")
+    deadline = time.monotonic() + retry_budget_seconds
+    # Resolve once before transport setup so retries can reuse this endpoint.
+    if not isinstance(base_url, str) or not base_url.strip():
+        base_url = os.getenv("SERPER_BASE_URL") or ""
+    base_url = base_url.strip()
+    if base_url:
+        try:
+            parsed_base = urlparse(base_url)
+            valid_base = parsed_base.scheme in {"http", "https"} and bool(parsed_base.netloc and parsed_base.hostname) and "?" not in base_url and "#" not in base_url
+            # Accessing port also rejects invalid and out-of-range ports.
+            parsed_base.port
+        except ValueError:
+            valid_base = False
+        if not valid_base:
+            raise ValueError("Invalid Serper base_url/SERPER_BASE_URL: use an absolute HTTP(S) URL with a host, a valid port, and no query or fragment")
+        endpoint = base_url.rstrip("/") + "/" + endpoint.rsplit("/", 1)[-1]
+        parsed_endpoint = urlparse(endpoint)
+        logger.debug(
+            "Serper endpoint from base_url/SERPER_BASE_URL: %s://%s%s",
+            parsed_endpoint.scheme,
+            parsed_endpoint.netloc.rsplit("@", 1)[-1],
+            parsed_endpoint.path,
+        )
+    return endpoint, headers, payload, deadline
+
+
+def _retry_delay(exc: httpx.RequestError | httpx.HTTPStatusError, attempt: int, max_retries: int, deadline: float) -> float | None:
+    if attempt >= max_retries:
+        return None
+    hint = None
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        if status in (429, 503):
+            hint = _retry_after(exc.response)
+        if status not in (502, 503, 504) and not (status == 429 and hint is not None):
+            return None
+    # Equal jitter retains exponential pacing even for Retry-After: 0.
+    backoff = min(0.5 * 2**attempt, 2.0)
+    delay = max(random.uniform(backoff / 2, backoff), hint or 0.0)
+    if delay >= deadline - time.monotonic():
+        logger.warning("Serper retry time budget exhausted before backoff after %d attempt(s)", attempt + 1)
+        return None
+    return delay
+
+
+def _post_result(response: httpx.Response, query: str) -> tuple[dict | None, str | None]:
+    data = response.json()
+    if not isinstance(data, dict):
+        logger.error("Serper returned an unexpected payload type: %s", type(data).__name__)
+        return None, _unexpected_format_error(query)
+    return data, None
+
+
+def _post_error(exc: Exception, query: str) -> tuple[None, str]:
+    if isinstance(exc, httpx.HTTPStatusError):
+        resp_text = (exc.response.text or "")[:500]
+        logger.error("Serper API returned HTTP %s: %s", exc.response.status_code, resp_text)
+        message = f"Serper API error: HTTP {exc.response.status_code}"
+    else:
+        logger.error("Serper request failed: %s: %s", type(exc).__name__, str(exc)[:500])
+        message = str(exc)[:500]
+    return None, json.dumps({"error": message, "query": query}, ensure_ascii=False)
+
+
 def _serper_post(
     endpoint: str,
     api_key: str,
@@ -294,53 +384,11 @@ def _serper_post(
 
     Retries share a scheduling deadline, not a hard synchronous I/O deadline.
     HTTPX timeouts remain per phase; an active request cannot be cancelled here.
-
-    ``query`` is expected to already be normalized via :func:`_clean_query`.
-    A non-blank string ``base_url`` overrides ``SERPER_BASE_URL``; other raw
-    tool-config values fall back to the environment and then the default endpoint.
-    Overrides must be absolute HTTP(S) URLs with a host and no query or fragment.
-    The API key is sent only via ``X-API-KEY`` to the resolved endpoint.
-
-    Returns a ``(data, error_json)`` tuple: on success ``data`` is the parsed
-    JSON response and ``error_json`` is ``None``; on failure ``data`` is ``None``
-    and ``error_json`` is a serialized structured error ready to return.
+    The query is already normalized; endpoint, key and payload stay captured
+    across retries. Return parsed data or a serialized structured error.
     """
-    headers = {
-        "X-API-KEY": api_key,
-        "Content-Type": "application/json",
-    }
-    payload = {"q": query, "num": max_results}
-    if time_range is not None:
-        payload["tbs"] = _SERPER_TBS_BY_TIME_RANGE[time_range]
-
     try:
-        if isinstance(max_retries, bool) or not isinstance(max_retries, int) or not 0 <= max_retries <= 3:
-            raise ValueError("max_retries must be an integer between 0 and 3")
-        if isinstance(retry_budget_seconds, bool) or not isinstance(retry_budget_seconds, (int, float)) or not 0 < retry_budget_seconds <= 300 or not math.isfinite(retry_budget_seconds):
-            raise ValueError("retry_budget_seconds must be a finite number greater than 0 and at most 300")
-        deadline = time.monotonic() + retry_budget_seconds
-        # Resolve once before transport setup so retries can reuse this endpoint.
-        if not isinstance(base_url, str) or not base_url.strip():
-            base_url = os.getenv("SERPER_BASE_URL") or ""
-        base_url = base_url.strip()
-        if base_url:
-            try:
-                parsed_base = urlparse(base_url)
-                valid_base = parsed_base.scheme in {"http", "https"} and bool(parsed_base.netloc and parsed_base.hostname) and "?" not in base_url and "#" not in base_url
-                # Accessing port also rejects invalid and out-of-range ports.
-                parsed_base.port
-            except ValueError:
-                valid_base = False
-            if not valid_base:
-                raise ValueError("Invalid Serper base_url/SERPER_BASE_URL: use an absolute HTTP(S) URL with a host, a valid port, and no query or fragment")
-            endpoint = base_url.rstrip("/") + "/" + endpoint.rsplit("/", 1)[-1]
-            parsed_endpoint = urlparse(endpoint)
-            logger.debug(
-                "Serper endpoint from base_url/SERPER_BASE_URL: %s://%s%s",
-                parsed_endpoint.scheme,
-                parsed_endpoint.netloc.rsplit("@", 1)[-1],
-                parsed_endpoint.path,
-            )
+        endpoint, headers, payload, deadline = _prepare_post(endpoint, api_key, query, max_results, time_range=time_range, base_url=base_url, max_retries=max_retries, retry_budget_seconds=retry_budget_seconds)
         with httpx.Client(timeout=30) as client:
             for attempt in range(max_retries + 1):
                 try:
@@ -348,77 +396,146 @@ def _serper_post(
                     response.raise_for_status()
                     break
                 except (httpx.ConnectError, httpx.ConnectTimeout, httpx.HTTPStatusError) as exc:
-                    if attempt >= max_retries:
-                        raise
-                    hint = None
-                    if isinstance(exc, httpx.HTTPStatusError):
-                        status = exc.response.status_code
-                        if status in (429, 503):
-                            hint = _retry_after(exc.response)
-                        if status not in (502, 503, 504) and not (status == 429 and hint is not None):
-                            raise
-                    # Equal jitter retains exponential pacing even for Retry-After: 0.
-                    backoff = min(0.5 * 2**attempt, 2.0)
-                    delay = max(random.uniform(backoff / 2, backoff), hint or 0.0)
-                    if delay >= deadline - time.monotonic():
-                        logger.warning("Serper retry time budget exhausted before backoff after %d attempt(s)", attempt + 1)
+                    delay = _retry_delay(exc, attempt, max_retries, deadline)
+                    if delay is None:
                         raise
                     time.sleep(delay)
                     if time.monotonic() >= deadline:
                         logger.warning("Serper retry time budget exhausted after backoff after %d attempt(s)", attempt + 1)
                         raise
-        data = response.json()
-        if not isinstance(data, dict):
-            logger.error("Serper returned an unexpected payload type: %s", type(data).__name__)
-            return None, _unexpected_format_error(query)
-        return data, None
-    except httpx.HTTPStatusError as e:
-        resp_text = (e.response.text or "")[:500]
-        logger.error("Serper API returned HTTP %s: %s", e.response.status_code, resp_text)
-        return None, json.dumps(
-            {"error": f"Serper API error: HTTP {e.response.status_code}", "query": query},
-            ensure_ascii=False,
-        )
-    except Exception as e:
-        logger.error("Serper request failed: %s: %s", type(e).__name__, str(e)[:500])
-        return None, json.dumps({"error": str(e)[:500], "query": query}, ensure_ascii=False)
+        return _post_result(response, query)
+    except Exception as exc:
+        return _post_error(exc, query)
 
 
-@tool("web_search", parse_docstring=True)
-def web_search_tool(query: str, max_results: int = 5, time_range: SearchTimeRange | None = None) -> str:
-    """Search the web for information using Google Search via Serper.
-
-    Args:
-        query: Search keywords describing what you want to find. Be specific for better results.
-        max_results: Maximum number of search results to return. Default is 5, capped at 10.
-        time_range: Optional relative publication/update window. Use only when the request requires recent results.
-    """
-    config = get_app_config().get_tool_config("web_search")
-    if config is not None and "max_results" in config.model_extra:
-        max_results = config.model_extra.get("max_results", max_results)
-    max_results = _count_for_request(max_results)
-    query = _clean_query(query)
-
+async def _finish_cleanup(close, *, cancelled: bool = False):
+    """Finish owned client cleanup before propagating repeated cancellation."""
+    cleanup = asyncio.create_task(close)
     try:
-        extra = config.model_extra if config is not None else {}
-        include = _domain_list(extra, "include_domains")
-        exclude = _domain_list(extra, "exclude_domains")
-        search_query = _domain_query(query, include, exclude)
-    except ValueError as exc:
-        logger.error("Invalid Serper domain filters: %s", exc)
-        return json.dumps({"error": str(exc), "query": query}, ensure_ascii=False)
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                cancelled = True
+        cleanup.result()
+    finally:
+        if cancelled:
+            raise asyncio.CancelledError
 
-    api_key = _get_api_key("web_search", extras=extra)
+
+@asynccontextmanager
+async def _async_client():
+    # HTTPX construction may read SSL certificates; only setup occupies a worker.
+    creation = asyncio.create_task(asyncio.to_thread(httpx.AsyncClient, timeout=30))
+    client = None
+    cancelled = False
+    try:
+        client = await asyncio.shield(creation)
+        yield client
+    except asyncio.CancelledError:
+        cancelled = True
+        raise
+    finally:
+        if client is None:
+            # A cancelled constructor still owns its eventual client. Drain it
+            # before closing, so no connection pool is abandoned during handoff.
+            while not creation.done():
+                try:
+                    await asyncio.shield(creation)
+                except asyncio.CancelledError:
+                    cancelled = True
+                    continue
+                except Exception:
+                    break
+            if not creation.cancelled() and creation.exception() is None:
+                client = creation.result()
+        if client is not None:
+            await _finish_cleanup(client.aclose(), cancelled=cancelled)
+        elif cancelled:
+            raise asyncio.CancelledError
+
+
+async def _aserper_post(
+    endpoint: str,
+    api_key: str,
+    query: str,
+    max_results: int,
+    *,
+    time_range: SearchTimeRange | None = None,
+    base_url: object | None = None,
+    max_retries: int = 0,
+    retry_budget_seconds: float = 30,
+) -> tuple[dict | None, str | None]:
+    """Use native async HTTP and backoff with the synchronous retry policy."""
+    try:
+        endpoint, headers, payload, deadline = _prepare_post(endpoint, api_key, query, max_results, time_range=time_range, base_url=base_url, max_retries=max_retries, retry_budget_seconds=retry_budget_seconds)
+        async with _async_client() as client:
+            for attempt in range(max_retries + 1):
+                try:
+                    response = await client.post(endpoint, headers=headers, json=payload)
+                    response.raise_for_status()
+                    break
+                except (httpx.ConnectError, httpx.ConnectTimeout, httpx.HTTPStatusError) as exc:
+                    delay = _retry_delay(exc, attempt, max_retries, deadline)
+                    if delay is None:
+                        raise
+                    await asyncio.sleep(delay)
+                    if time.monotonic() >= deadline:
+                        logger.warning("Serper retry time budget exhausted after backoff after %d attempt(s)", attempt + 1)
+                        raise
+        return _post_result(response, query)
+    except Exception as exc:
+        return _post_error(exc, query)
+
+
+@dataclass
+class _SearchRequest:
+    query: str
+    max_results: int
+    include: list[str]
+    exclude: list[str]
+    endpoint: str
+    api_key: str
+    search_query: str
+    options: dict
+
+
+def _prepare_search(tool_name: str, query: str, max_results: int, time_range: SearchTimeRange | None = None) -> _SearchRequest | str:
+    config = get_app_config().get_tool_config(tool_name)
+    extra = dict(config.model_extra) if config is not None else {}
+    max_results = _count_for_request(extra.get("max_results", max_results))
+    query = _clean_query(query)
+    include, exclude = [], []
+    search_query = query
+    if tool_name == "web_search":
+        try:
+            include = _domain_list(extra, "include_domains")
+            exclude = _domain_list(extra, "exclude_domains")
+            search_query = _domain_query(query, include, exclude)
+        except ValueError as exc:
+            logger.error("Invalid Serper domain filters: %s", exc)
+            return json.dumps({"error": str(exc), "query": query}, ensure_ascii=False)
+    api_key = _get_api_key(tool_name, extras=extra)
     if not api_key:
-        return _missing_key_error(query, "web_search")
+        return _missing_key_error(query, tool_name)
+    endpoint = _SERPER_SEARCH_ENDPOINT if tool_name == "web_search" else _SERPER_IMAGES_ENDPOINT
+    options = {"base_url": extra.get("base_url"), **_retry_options(extra)}
+    if tool_name == "web_search":
+        options["time_range"] = time_range
+    return _SearchRequest(query, max_results, include, exclude, endpoint, api_key, search_query, options)
 
-    base_url = extra.get("base_url")
-    data, error_json = _serper_post(_SERPER_SEARCH_ENDPOINT, api_key, search_query, max_results, time_range=time_range, base_url=base_url, **_retry_options(config))
+
+def _render_search(request: _SearchRequest, data: dict | None, error_json: str | None) -> str:
     if error_json is not None:
         error = json.loads(error_json)
-        error["query"] = query
+        error["query"] = request.query
         return json.dumps(error, ensure_ascii=False)
+    if request.endpoint == _SERPER_SEARCH_ENDPOINT:
+        return _web_results(data, request.query, request.max_results, request.include, request.exclude)
+    return _image_results(data, request.query, request.max_results)
 
+
+def _web_results(data: dict, query: str, max_results: int, include: list[str], exclude: list[str]) -> str:
     organic, error_json = _response_items(data, "organic", query)
     if error_json is not None:
         return error_json
@@ -448,32 +565,7 @@ def web_search_tool(query: str, max_results: int = 5, time_range: SearchTimeRang
     return json.dumps(output, indent=2, ensure_ascii=False)
 
 
-@tool("image_search", parse_docstring=True)
-def image_search_tool(query: str, max_results: int = 5) -> str:
-    """Search for images online using Google Images via Serper. Use this tool BEFORE image generation to find reference images for characters, portraits, objects, scenes, or any content requiring visual accuracy.
-
-    The returned image URLs can be used as reference images in image generation to significantly improve quality.
-
-    Args:
-        query: Search keywords describing the images you want to find. Be specific for better results (e.g., "Japanese woman street photography 1990s" instead of just "woman").
-        max_results: Maximum number of images to return. Default is 5, capped at 10.
-    """
-    config = get_app_config().get_tool_config("image_search")
-    if config is not None and "max_results" in config.model_extra:
-        max_results = config.model_extra.get("max_results", max_results)
-    max_results = _count_for_request(max_results)
-    query = _clean_query(query)
-
-    extra = config.model_extra if config is not None else {}
-    api_key = _get_api_key("image_search", extras=extra)
-    if not api_key:
-        return _missing_key_error(query, "image_search")
-
-    base_url = extra.get("base_url")
-    data, error_json = _serper_post(_SERPER_IMAGES_ENDPOINT, api_key, query, max_results, base_url=base_url, **_retry_options(config))
-    if error_json is not None:
-        return error_json
-
+def _image_results(data: dict, query: str, max_results: int) -> str:
     images, error_json = _response_items(data, "images", query)
     if error_json is not None:
         return error_json
@@ -517,3 +609,50 @@ def image_search_tool(query: str, max_results: int = 5) -> str:
         "usage_hint": "Use the 'image_url' values as reference images in image generation. Download them first if needed.",
     }
     return json.dumps(output, indent=2, ensure_ascii=False)
+
+
+def web_search_tool(query: str, max_results: int = 5, time_range: SearchTimeRange | None = None) -> str:
+    """Search the web for information using Google Search via Serper.
+
+    Args:
+        query: Search keywords describing what you want to find. Be specific for better results.
+        max_results: Maximum number of search results to return. Default is 5, capped at 10.
+        time_range: Optional relative publication/update window. Use only when the request requires recent results.
+    """
+    request = _prepare_search("web_search", query, max_results, time_range)
+    if isinstance(request, str):
+        return request
+    return _render_search(request, *_serper_post(request.endpoint, request.api_key, request.search_query, request.max_results, **request.options))
+
+
+async def _aweb_search(query: str, max_results: int = 5, time_range: SearchTimeRange | None = None) -> str:
+    request = await asyncio.to_thread(_prepare_search, "web_search", query, max_results, time_range)
+    if isinstance(request, str):
+        return request
+    return _render_search(request, *await _aserper_post(request.endpoint, request.api_key, request.search_query, request.max_results, **request.options))
+
+
+def image_search_tool(query: str, max_results: int = 5) -> str:
+    """Search for images online using Google Images via Serper. Use this tool BEFORE image generation to find reference images for characters, portraits, objects, scenes, or any content requiring visual accuracy.
+
+    The returned image URLs can be used as reference images in image generation to significantly improve quality.
+
+    Args:
+        query: Search keywords describing the images you want to find. Be specific for better results (e.g., "Japanese woman street photography 1990s" instead of just "woman").
+        max_results: Maximum number of images to return. Default is 5, capped at 10.
+    """
+    request = _prepare_search("image_search", query, max_results)
+    if isinstance(request, str):
+        return request
+    return _render_search(request, *_serper_post(request.endpoint, request.api_key, request.search_query, request.max_results, **request.options))
+
+
+async def _aimage_search(query: str, max_results: int = 5) -> str:
+    request = await asyncio.to_thread(_prepare_search, "image_search", query, max_results)
+    if isinstance(request, str):
+        return request
+    return _render_search(request, *await _aserper_post(request.endpoint, request.api_key, request.search_query, request.max_results, **request.options))
+
+
+web_search_tool = StructuredTool.from_function(func=web_search_tool, coroutine=_aweb_search, name="web_search", parse_docstring=True)
+image_search_tool = StructuredTool.from_function(func=image_search_tool, coroutine=_aimage_search, name="image_search", parse_docstring=True)

@@ -1073,12 +1073,21 @@ changing the returned error.
 
 One monotonic scheduling deadline starts before client creation, counting elapsed
 requests and waits; it is checked before waiting and again before a retry.
-It does **not** interrupt active synchronous HTTP requests, response streaming,
-or worker threads. HTTPX's unchanged 30-second timeout applies per network phase,
+It does **not** interrupt active HTTP requests or response streaming.
+HTTPX's unchanged 30-second timeout applies per network phase,
 so this is **not** a hard end-to-end wall-clock deadline. The initial request is
 always allowed. Payload, API key, domain restrictions and time range stay identical
 across attempts; errors still report the cleaned original query. No refill,
 cache, global limiter or model-level retry is added.
+
+Async agent invocations use native async HTTP and nonblocking backoff. Only
+configuration reads and client setup use a worker; network waits leave the
+default executor available to unrelated work. Cancellation during a request or
+backoff propagates after the client closes. If cancellation arrives during
+client construction or cleanup, that short lifecycle operation is drained first.
+Synchronous Python invocations keep their blocking behavior and the same retry
+policy. Cancelling local HTTP work does not undo requests already received by
+the provider.
 
 #### Serper endpoints
 

@@ -33,8 +33,8 @@ request, and verify diagnostic host/port and credential omission in both modes.
 Mock HTTP; live Serper semantics remain unverified. See
 `backend/docs/CONFIGURATION.md#serper-source-filters` for the operator contract.
 
-`_serper_post` owns default-off physical retries (0–3) and one monotonic
-scheduling budget (>0–300s), not cancellation of synchronous I/O. Keep config
+`_serper_post` and `_aserper_post` share default-off physical retries (0–3)
+and one monotonic scheduling budget (>0–300s), not a hard request deadline. Keep config
 validation before transport and retry only connect failures, 502/503/504 and
 hinted 429. Provider-local hint parsing avoids coupling to Jina. Whole-tool
 extension hooks cannot isolate this boundary. Test with real MockTransport
@@ -50,3 +50,14 @@ Image result URLs use `community.url_safety.safe_public_result_url` (imported
 as `_safe_public_url`); do not add a provider-local copy. It checks strings
 without DNS and shares the non-public address predicate with fetch validation.
 Tests: `tests/test_image_result_url_safety.py` plus the existing provider suite.
+
+Both tools bind synchronous and native asynchronous functions through
+`StructuredTool.from_function`; preserve `.invoke`/`.func`, model schemas and
+Google-style docstrings. Share configuration preparation, retry decisions and
+result rendering between paths. Async calls offload configuration preparation
+and HTTPX client construction only (both may read files), preserving ContextVars;
+HTTP and retry waits use `AsyncClient.post` and `asyncio.sleep`. Keep one client
+per call and close it before propagating cancellation, including cancellation
+during offloaded construction or repeated cancellation during cleanup.
+Offline async coverage lives in `backend/tests/test_serper_async.py`; real
+loopback HTTP checks that a pending search leaves the default executor available.

@@ -1,5 +1,6 @@
 """Offline recovery through production tools and real HTTPX transports."""
 
+import asyncio
 import json
 import logging
 import time
@@ -12,20 +13,27 @@ import pytest
 from deerflow.community.serper import tools
 
 
-@pytest.fixture(params=["web_search", "image_search"])
+@pytest.fixture(params=[(name, mode) for name in ("web_search", "image_search") for mode in ("sync", "async")])
 def search(request, monkeypatch):
-    name = request.param
+    name, mode = request.param
     clients = []
     requests = []
     transports = []
     clock = SimpleNamespace(now=0.0, wall=1700000000.0, waits=[], elapsed=0.0, oversleep=0.0, jitter=1.0, ranges=[])
     real_client = httpx.Client
+    real_async_client = httpx.AsyncClient
 
     def sleep(delay):
         clock.waits.append(delay)
         clock.now += delay + clock.oversleep
 
     monkeypatch.setattr(tools, "time", SimpleNamespace(monotonic=lambda: clock.now, time=lambda: clock.wall, sleep=sleep), raising=False)
+
+    async def async_sleep(delay):
+        # Reuse the same clock and reload hooks without patching asyncio globally.
+        tools.time.sleep(delay)
+
+    monkeypatch.setattr(tools, "asyncio", SimpleNamespace(**{**vars(asyncio), "sleep": async_sleep}), raising=False)
 
     def uniform(low, high):
         clock.ranges.append((low, high))
@@ -39,6 +47,10 @@ def search(request, monkeypatch):
         def close(self):
             self.closed = True
             super().close()
+
+        async def aclose(self):
+            self.closed = True
+            await super().aclose()
 
     def run(outcomes, options=None, configured=True, direct=False):
         extra = {"api_key": "dummy-key", **(options or {})}
@@ -66,15 +78,27 @@ def search(request, monkeypatch):
             clients.append(result)
             return result
 
+        def async_client(**kwargs):
+            transport = Transport(handle)
+            transports.append(transport)
+            result = real_async_client(transport=transport, **kwargs)
+            clients.append(result)
+            return result
+
         monkeypatch.setattr(tools.httpx, "Client", client)
+        monkeypatch.setattr(tools.httpx, "AsyncClient", async_client)
         if direct:
-            data, error = tools._serper_post("https://google.serper.dev/search", "dummy-key", "news", 5, **(options or {}))
+            if mode == "async":
+                data, error = asyncio.run(tools._aserper_post("https://google.serper.dev/search", "dummy-key", "news", 5, **(options or {})))
+            else:
+                data, error = tools._serper_post("https://google.serper.dev/search", "dummy-key", "news", 5, **(options or {}))
             result = json.loads(error) if error else data
         else:
             arguments = {"query": " news "}
             if name == "web_search":
                 arguments["time_range"] = "week"
-            result = json.loads(getattr(tools, name + "_tool").invoke(arguments))
+            selected_tool = getattr(tools, name + "_tool")
+            result = json.loads(asyncio.run(selected_tool.ainvoke(arguments)) if mode == "async" else selected_tool.invoke(arguments))
         assert all(client.is_closed for client in clients)
         assert all(transport.closed for transport in transports)
         return result
