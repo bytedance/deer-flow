@@ -151,7 +151,9 @@ fence is accepted from Markdown. Decode the value before checking its closing
 fence so embedded backticks and later fenced notes stay lossless. Parser and
 storage regressions belong in `tests/test_memory_storage.py`; configure a data
 root directory, not the existing manifest file. Legacy v1 reads still migrate
-and advance the revision. Unparseable summary text is quarantined before rebuild.
+and advance the revision. Invalid UTF-8 bytes and unparseable summary text are
+quarantined before rebuild. Summary read `OSError`s raise `MemoryStorageCorruption`
+and preserve the file; `save()` returns false until access recovers.
 Summary and canonical fact reads strip a leading UTF-8 BOM; writes use UTF-8.
 Fact BOM regressions use public save/reload and preserve content and scope.
 
