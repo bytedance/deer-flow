@@ -1,7 +1,7 @@
 """Unit tests for the GroundRoute community web search + fetch tools."""
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -43,10 +43,10 @@ def _make_search_response(payload: dict) -> MagicMock:
 
 
 def _patch_post(mock_resp: MagicMock):
-    """Patch httpx.Client so the context-managed .post returns mock_resp."""
-    patcher = patch("deerflow.community.groundroute.tools.httpx.Client")
+    """Patch httpx.AsyncClient so the context-managed .post returns mock_resp."""
+    patcher = patch("deerflow.community.groundroute.tools.httpx.AsyncClient")
     mock_client_cls = patcher.start()
-    mock_client_cls.return_value.__enter__.return_value.post.return_value = mock_resp
+    mock_client_cls.return_value.__aenter__.return_value.post = AsyncMock(return_value=mock_resp)
     return patcher, mock_client_cls
 
 
@@ -105,7 +105,8 @@ class TestGetApiKey:
 
 
 class TestWebSearchTool:
-    def test_basic_search_returns_normalized_list_with_source_engine(self, mock_config_with_key):
+    @pytest.mark.anyio
+    async def test_basic_search_returns_normalized_list_with_source_engine(self, mock_config_with_key):
         payload = {
             "request_id": "r1",
             "results": [
@@ -117,7 +118,7 @@ class TestWebSearchTool:
         try:
             from deerflow.community.groundroute.tools import web_search_tool
 
-            result = web_search_tool.invoke({"query": "vector databases"})
+            result = await web_search_tool.ainvoke({"query": "vector databases"})
             parsed = json.loads(result)
         finally:
             patcher.stop()
@@ -132,7 +133,8 @@ class TestWebSearchTool:
         }
         assert {r["source_engine"] for r in parsed} == {"serper", "exa"}
 
-    def test_uses_web_search_config_key(self):
+    @pytest.mark.anyio
+    async def test_uses_web_search_config_key(self):
         """web_search authenticates with the web_search config block's key."""
         with patch("deerflow.community.groundroute.tools.get_app_config") as mock:
             mock.return_value = _per_tool_config(
@@ -144,15 +146,16 @@ class TestWebSearchTool:
             try:
                 from deerflow.community.groundroute.tools import web_search_tool
 
-                web_search_tool.invoke({"query": "hello world"})
-                call = mock_client_cls.return_value.__enter__.return_value.post.call_args
+                await web_search_tool.ainvoke({"query": "hello world"})
+                call = mock_client_cls.return_value.__aenter__.return_value.post.call_args
             finally:
                 patcher.stop()
 
         assert call.kwargs["headers"]["Authorization"] == "Bearer search-key"
         assert call.kwargs["json"]["query"] == "hello world"
 
-    def test_agent_max_results_is_honored_over_config(self):
+    @pytest.mark.anyio
+    async def test_agent_max_results_is_honored_over_config(self):
         """A caller-supplied max_results wins over the config value (not silently discarded)."""
         with patch("deerflow.community.groundroute.tools.get_app_config") as mock:
             tool_config = MagicMock()
@@ -163,28 +166,30 @@ class TestWebSearchTool:
             try:
                 from deerflow.community.groundroute.tools import web_search_tool
 
-                web_search_tool.invoke({"query": "test", "max_results": 20})
-                body = mock_client_cls.return_value.__enter__.return_value.post.call_args.kwargs["json"]
+                await web_search_tool.ainvoke({"query": "test", "max_results": 20})
+                body = mock_client_cls.return_value.__aenter__.return_value.post.call_args.kwargs["json"]
             finally:
                 patcher.stop()
 
         assert body["max_results"] == 20
 
-    def test_config_max_results_used_when_caller_omits(self, mock_config_with_key):
+    @pytest.mark.anyio
+    async def test_config_max_results_used_when_caller_omits(self, mock_config_with_key):
         """When the caller omits max_results, the configured value is used."""
         payload = {"results": [{"url": "u", "title": "t", "snippet": "s", "source_engine": "exa"}]}
         patcher, mock_client_cls = _patch_post(_make_search_response(payload))
         try:
             from deerflow.community.groundroute.tools import web_search_tool
 
-            web_search_tool.invoke({"query": "test"})
-            body = mock_client_cls.return_value.__enter__.return_value.post.call_args.kwargs["json"]
+            await web_search_tool.ainvoke({"query": "test"})
+            body = mock_client_cls.return_value.__aenter__.return_value.post.call_args.kwargs["json"]
         finally:
             patcher.stop()
 
         assert body["max_results"] == 5
 
-    def test_max_results_clamped_to_cap(self):
+    @pytest.mark.anyio
+    async def test_max_results_clamped_to_cap(self):
         with patch("deerflow.community.groundroute.tools.get_app_config") as mock:
             tool_config = MagicMock()
             tool_config.model_extra = {"api_key": "k", "max_results": "500"}
@@ -194,79 +199,85 @@ class TestWebSearchTool:
             try:
                 from deerflow.community.groundroute.tools import web_search_tool
 
-                web_search_tool.invoke({"query": "test"})
-                body = mock_client_cls.return_value.__enter__.return_value.post.call_args.kwargs["json"]
+                await web_search_tool.ainvoke({"query": "test"})
+                body = mock_client_cls.return_value.__aenter__.return_value.post.call_args.kwargs["json"]
             finally:
                 patcher.stop()
 
         assert body["max_results"] == 50
 
-    def test_empty_results_returns_error_json(self, mock_config_with_key):
+    @pytest.mark.anyio
+    async def test_empty_results_returns_error_json(self, mock_config_with_key):
         patcher, _ = _patch_post(_make_search_response({"results": []}))
         try:
             from deerflow.community.groundroute.tools import web_search_tool
 
-            parsed = json.loads(web_search_tool.invoke({"query": "no results"}))
+            parsed = json.loads(await web_search_tool.ainvoke({"query": "no results"}))
         finally:
             patcher.stop()
 
         assert parsed["error"] == "No results found"
         assert parsed["query"] == "no results"
 
-    def test_missing_api_key_returns_error_json(self, mock_config_no_key):
+    @pytest.mark.anyio
+    async def test_missing_api_key_returns_error_json(self, mock_config_no_key):
         with patch.dict("os.environ", {}, clear=True):
             from deerflow.community.groundroute.tools import web_search_tool
 
-            parsed = json.loads(web_search_tool.invoke({"query": "test"}))
+            parsed = json.loads(await web_search_tool.ainvoke({"query": "test"}))
 
         assert "error" in parsed
         assert "GROUNDROUTE_API_KEY" in parsed["error"]
 
-    def test_missing_api_key_logs_warning_once(self, mock_config_no_key, caplog):
+    @pytest.mark.anyio
+    async def test_missing_api_key_logs_warning_once(self, mock_config_no_key, caplog):
         import logging
 
         with patch.dict("os.environ", {}, clear=True):
             from deerflow.community.groundroute.tools import web_search_tool
 
             with caplog.at_level(logging.WARNING, logger="deerflow.community.groundroute.tools"):
-                web_search_tool.invoke({"query": "q1"})
-                web_search_tool.invoke({"query": "q2"})
+                await web_search_tool.ainvoke({"query": "q1"})
+                await web_search_tool.ainvoke({"query": "q2"})
 
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert len(warnings) == 1
 
-    def test_http_error_returns_structured_error(self, mock_config_with_key):
+    @pytest.mark.anyio
+    async def test_http_error_returns_structured_error(self, mock_config_with_key):
         mock_resp = MagicMock()
         mock_resp.raise_for_status.side_effect = httpx.HTTPStatusError("402", request=MagicMock(), response=MagicMock(status_code=402, text="Payment Required"))
         patcher, _ = _patch_post(mock_resp)
         try:
             from deerflow.community.groundroute.tools import web_search_tool
 
-            parsed = json.loads(web_search_tool.invoke({"query": "test"}))
+            parsed = json.loads(await web_search_tool.ainvoke({"query": "test"}))
         finally:
             patcher.stop()
 
         assert "error" in parsed
         assert "402" in parsed["error"]
 
-    def test_network_exception_returns_error_json(self, mock_config_with_key):
+    @pytest.mark.anyio
+    async def test_network_exception_returns_error_json(self, mock_config_with_key):
         patcher, mock_client_cls = _patch_post(MagicMock())
-        mock_client_cls.return_value.__enter__.return_value.post.side_effect = Exception("timeout")
+        mock_client_cls.return_value.__aenter__.return_value.post.side_effect = Exception("timeout")
         try:
             from deerflow.community.groundroute.tools import web_search_tool
 
-            parsed = json.loads(web_search_tool.invoke({"query": "test"}))
+            parsed = json.loads(await web_search_tool.ainvoke({"query": "test"}))
         finally:
             patcher.stop()
 
         assert "error" in parsed
 
-    def test_partial_fields_default_to_empty_string(self, mock_config_with_key):
+    @pytest.mark.anyio
+    async def test_partial_fields_default_to_empty_string(self, mock_config_with_key):
         patcher, _ = _patch_post(_make_search_response({"results": [{}]}))
         try:
             from deerflow.community.groundroute.tools import web_search_tool
 
-            parsed = json.loads(web_search_tool.invoke({"query": "test"}))
+            parsed = json.loads(await web_search_tool.ainvoke({"query": "test"}))
         finally:
             patcher.stop()
 
@@ -274,14 +285,15 @@ class TestWebSearchTool:
 
 
 class TestWebFetchTool:
-    def test_fetch_returns_titled_content(self, mock_config_with_key):
+    @pytest.mark.anyio
+    async def test_fetch_returns_titled_content(self, mock_config_with_key):
         payload = {"results": [{"title": "Page", "content": "Body text", "url": "https://ex.com"}]}
         patcher, mock_client_cls = _patch_post(_make_search_response(payload))
         try:
             from deerflow.community.groundroute.tools import web_fetch_tool
 
-            result = web_fetch_tool.invoke({"url": "https://ex.com"})
-            body = mock_client_cls.return_value.__enter__.return_value.post.call_args.kwargs["json"]
+            result = await web_fetch_tool.ainvoke({"url": "https://ex.com"})
+            body = mock_client_cls.return_value.__aenter__.return_value.post.call_args.kwargs["json"]
         finally:
             patcher.stop()
 
@@ -290,7 +302,8 @@ class TestWebFetchTool:
         assert body["mode"] == "page"
         assert body["query"] == "https://ex.com"
 
-    def test_fetch_uses_web_fetch_config_key(self):
+    @pytest.mark.anyio
+    async def test_fetch_uses_web_fetch_config_key(self):
         """web_fetch must authenticate with the web_fetch config block's key, not web_search's."""
         with patch("deerflow.community.groundroute.tools.get_app_config") as mock:
             mock.return_value = _per_tool_config(
@@ -302,28 +315,30 @@ class TestWebFetchTool:
             try:
                 from deerflow.community.groundroute.tools import web_fetch_tool
 
-                web_fetch_tool.invoke({"url": "https://ex.com"})
-                call = mock_client_cls.return_value.__enter__.return_value.post.call_args
+                await web_fetch_tool.ainvoke({"url": "https://ex.com"})
+                call = mock_client_cls.return_value.__aenter__.return_value.post.call_args
             finally:
                 patcher.stop()
 
         assert call.kwargs["headers"]["Authorization"] == "Bearer fetch-key"
 
-    def test_fetch_missing_key_returns_error(self, mock_config_no_key):
+    @pytest.mark.anyio
+    async def test_fetch_missing_key_returns_error(self, mock_config_no_key):
         with patch.dict("os.environ", {}, clear=True):
             from deerflow.community.groundroute.tools import web_fetch_tool
 
-            parsed = json.loads(web_fetch_tool.invoke({"url": "https://ex.com"}))
+            parsed = json.loads(await web_fetch_tool.ainvoke({"url": "https://ex.com"}))
 
         assert "error" in parsed
         assert "GROUNDROUTE_API_KEY" in parsed["error"]
 
-    def test_fetch_no_results_returns_error_string(self, mock_config_with_key):
+    @pytest.mark.anyio
+    async def test_fetch_no_results_returns_error_string(self, mock_config_with_key):
         patcher, _ = _patch_post(_make_search_response({"results": []}))
         try:
             from deerflow.community.groundroute.tools import web_fetch_tool
 
-            result = web_fetch_tool.invoke({"url": "https://ex.com"})
+            result = await web_fetch_tool.ainvoke({"url": "https://ex.com"})
         finally:
             patcher.stop()
 

@@ -11,6 +11,15 @@ truncating to the snippet limit, and renders a missing or falsy title as empty, 
 well-formed result object whose leaf fields are not strings still returns text rather
 than raising.
 
+Both tools are coroutines and send their request through `httpx.AsyncClient`. A
+sync client would run the whole tool on the default executor and hold one of that
+pool's threads for the network round-trip, so several providers queried in parallel
+queued behind each other. Resolve the config in the same coroutine, but keep the
+config file read off the event loop: the tool body now runs on the loop, so a file
+read left in it would block it. `backend/tests/blocking_io/test_groundroute_search_async.py`
+pins both halves — the request is awaited on the loop thread, and the config lookup
+does not run there.
+
 `web_search` returns the structured `{"error": ..., "query": ...}` response; `web_fetch`
 returns the `Error: ...` string. Log the malformed container's type, or that no usable
 result objects remain, before returning — never the query, URL, credentials, or payload
