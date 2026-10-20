@@ -80,7 +80,7 @@ def test_resolve_builtin_with_args():
     assert res.args == "thread-123"
 
 
-@pytest.mark.parametrize("separator", [" ", "\t", "\n", "\r\n"])
+@pytest.mark.parametrize("separator", [" ", "\t", "\n", "\r\n", "\v", "\f", "\u0085", "\u00a0", "\u2003", "\u2028", "\u202f", "\u3000"])
 @pytest.mark.parametrize(("name", "kind"), [("resume", "builtin"), ("goal", "builtin"), ("tdd", "skill")])
 def test_resolve_whitespace_separated_command_preserves_multiline_args(separator, name, kind):
     args = "First line\n    indented detail\nLast line"
