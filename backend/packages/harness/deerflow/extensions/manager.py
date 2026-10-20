@@ -24,6 +24,7 @@ from typing import Any
 import yaml
 from packaging.requirements import InvalidRequirement, Requirement
 
+from deerflow.utils.atomic_write import cleanup_failed_atomic_write
 from deerflow.utils.file_lock import retry_until_locked as _retry_until_locked
 
 logger = logging.getLogger(__name__)
@@ -103,7 +104,8 @@ def _write_bytes_atomically(path: Path, content: bytes, mode: int | None) -> Non
     ``Path.write_bytes`` opens with ``O_TRUNC``, so a rollback that dies midway
     leaves pyproject.toml / uv.lock / config.yaml half written — the failed
     install would then take the checkout with it. The rest of the codebase
-    already publishes through a temporary file plus ``os.replace``.
+    already publishes through a temporary file plus ``os.replace``. Cleanup of
+    that temporary must not replace the publication error.
     """
     fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
@@ -115,7 +117,7 @@ def _write_bytes_atomically(path: Path, content: bytes, mode: int | None) -> Non
             os.fsync(handle.fileno())
         os.replace(temporary, path)
     except BaseException:
-        Path(temporary).unlink(missing_ok=True)
+        cleanup_failed_atomic_write(Path(temporary))
         raise
 
 
@@ -1000,7 +1002,7 @@ def _write_plugins_block(path: Path, original: str, plugins: list[Any]) -> None:
         temporary = None
     finally:
         if temporary is not None:
-            temporary.unlink(missing_ok=True)
+            cleanup_failed_atomic_write(temporary)
 
 
 def _plugins_block_span(original: str) -> tuple[int, int] | None:

@@ -105,6 +105,14 @@ Browserless reservation cleanup tests require a warning with the leftover path
 and unlink error while preserving the original publication exception, including
 interruption. Successful cleanup stays quiet.
 
+Extension snapshot rollback and the managed plugins-block rewrite preserve the
+original publish error when temporary cleanup or its warning log fails.
+`tests/test_extension_atomic_write_cleanup.py` covers both writers, including
+interruptions, and keeps a successful plugins rewrite's bytes and mode.
+Skill archive upload copies do the same in
+`tests/test_skill_archive_upload_cleanup.py`: a size-limit or read error stays
+visible, and a successful copy returns the original bytes.
+
 `blocking_io/test_web_tool_url_validation.py` resolves a synthetic `.invalid`
 hostname to loopback by patching `_socket.getaddrinfo`, below the real
 `socket.getaddrinfo` wrapper. Do not replace that wrapper or the production URL

@@ -60,3 +60,8 @@ external filesystem writers do not participate in this history guarantee.
 Plugin actions stamp `ActionContext.interaction=session` only from authenticated
 session provenance. Never accept it from payloads or propagate it to model tools;
 extensions use it to distinguish owner review from model/tool output.
+
+Skill archive upload copies (`_copy_uploaded_skill_archive`) report the original
+size-limit or read error when temporary cleanup or its warning log fails.
+Successful copies still return the uploaded bytes unchanged. Coverage:
+`tests/test_skill_archive_upload_cleanup.py`.
