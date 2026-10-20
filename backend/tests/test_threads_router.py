@@ -4463,7 +4463,8 @@ def test_update_thread_state_forks_from_checkpoint_object(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize("mode", ["full", "delta"])
-def test_update_thread_state_in_persisted_subgraph_namespace(monkeypatch, mode) -> None:
+@pytest.mark.parametrize("include_checkpoint_id", [True, False])
+def test_update_thread_state_in_persisted_subgraph_namespace(monkeypatch, mode, include_checkpoint_id) -> None:
     from langgraph.graph import StateGraph
 
     from deerflow.agents.thread_state import get_thread_state_schema
@@ -4498,9 +4499,12 @@ def test_update_thread_state_in_persisted_subgraph_namespace(monkeypatch, mode) 
 
     monkeypatch.setattr(threads, "build_thread_checkpoint_state_mutation_accessor", mutation_boundary)
     with TestClient(app) as client:
+        checkpoint = {"thread_id": thread_id, "checkpoint_ns": namespace}
+        if include_checkpoint_id:
+            checkpoint["checkpoint_id"] = selected_id
         response = client.post(
             f"/api/threads/{thread_id}/state",
-            json={"checkpoint": {"thread_id": thread_id, "checkpoint_ns": namespace, "checkpoint_id": selected_id}, "values": {"title": "Child updated"}},
+            json={"checkpoint": checkpoint, "values": {"title": "Child updated"}},
         )
 
     assert response.status_code == 200, response.text
@@ -4509,6 +4513,30 @@ def test_update_thread_state_in_persisted_subgraph_namespace(monkeypatch, mode) 
     written = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": namespace}}))
     assert written.config["configurable"]["checkpoint_id"] == response.json()["checkpoint_id"]
     assert written.checkpoint["channel_values"]["title"] == "Child updated"
+    root_after = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}))
+    assert root_after.config == root_before.config
+    assert root_after.checkpoint == root_before.checkpoint
+
+
+def test_update_thread_state_rejects_nonexistent_namespace_without_checkpoint_id(monkeypatch) -> None:
+    app, _store, checkpointer = _build_thread_app()
+    thread_id = "state-unknown-namespace"
+    namespace = "child:ghost"
+
+    async def mutation_boundary(request, *, thread_id, as_node, checkpoint_id=None, checkpoint_ns=""):
+        return gateway_services.build_checkpoint_state_mutation_accessor(request, thread_id=thread_id, as_node=as_node, checkpoint_id=checkpoint_id, checkpoint_ns=checkpoint_ns)
+
+    monkeypatch.setattr(threads, "build_thread_checkpoint_state_mutation_accessor", mutation_boundary)
+    with TestClient(app) as client:
+        assert client.post("/api/threads", json={"thread_id": thread_id, "metadata": {}}).status_code == 200
+        root_before = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}))
+        response = client.post(
+            f"/api/threads/{thread_id}/state",
+            json={"checkpoint": {"thread_id": thread_id, "checkpoint_ns": namespace}, "values": {"title": "Must not be written"}},
+        )
+
+    assert response.status_code == 404, response.text
+    assert asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": namespace}})) is None
     root_after = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}))
     assert root_after.config == root_before.config
     assert root_after.checkpoint == root_before.checkpoint

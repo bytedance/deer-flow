@@ -141,6 +141,8 @@ class CheckpointStateAccessor:
             # A state-only mutation graph has no subgraphs to delegate to. Bind
             # the saver explicitly so LangGraph reads/writes this namespace on
             # the graph itself, including when reading back an updated config.
+            # This private key is verified against LangGraph 1.2.9; recheck it
+            # when upgrading LangGraph because its internal location may move.
             from langgraph._internal._constants import CONFIG_KEY_CHECKPOINTER
 
             prepared["configurable"][CONFIG_KEY_CHECKPOINTER] = self.checkpointer

@@ -1647,23 +1647,25 @@ async def update_thread_state(thread_id: ThreadId, body: ThreadStateUpdateReques
         if raw_checkpoint_ns is not None:
             checkpoint_ns = str(raw_checkpoint_ns)
 
-    if checkpoint_id is not None:
-        if not checkpoint_id:
+    if checkpoint_id is not None or checkpoint_ns:
+        if checkpoint_id is not None and not checkpoint_id:
             raise HTTPException(status_code=404, detail="Checkpoint not found")
         selected_config = {
             "configurable": {
                 "thread_id": thread_id,
                 "checkpoint_ns": checkpoint_ns,
-                "checkpoint_id": checkpoint_id,
             }
         }
+        if checkpoint_id is not None:
+            selected_config["configurable"]["checkpoint_id"] = checkpoint_id
         try:
             checkpoint_tuple = await get_checkpointer(request).aget_tuple(selected_config)
         except Exception:
             logger.exception("Failed to get state for thread %s", sanitize_log_param(thread_id))
             raise HTTPException(status_code=500, detail="Failed to get thread state")
         if checkpoint_tuple is None:
-            raise HTTPException(status_code=404, detail=f"Checkpoint {checkpoint_id} not found")
+            detail = f"Checkpoint {checkpoint_id} not found" if checkpoint_id is not None else "Checkpoint not found"
+            raise HTTPException(status_code=404, detail=detail)
 
     mutation_node = body.as_node or "manual_state_update"
     # Resolve through the shared boundary (thread metadata -> assistant_id ->
