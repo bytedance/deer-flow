@@ -1747,12 +1747,13 @@ def _walk_client_branching(node: ast.AST, scope: _ClientScope, inherited: _Clien
     case 1).
 
     Names the statement binds as it dispatches -- a loop target, an `except ... as` name, a `match`
-    capture -- are dropped before every part, and everything the statement may bind is dropped from
-    the enclosing scope once its parts are walked, so a binding made inside a part never reaches the
-    code that follows the statement.
+    capture -- are dropped after the header is walked and before every part, because the header is
+    evaluated while those bindings do not exist yet: a sink in `for s in s.post(...)` really happens
+    under the enclosing handle. Everything the statement may bind is then dropped from the enclosing
+    scope once its parts are walked, so a binding made inside a part never reaches the code that
+    follows the statement.
     """
     entry_names = _branching_entry_bound_names(node, analysis)
-    _drop_client_bindings(scope, entry_names)
     # Names rebound by ordinary statements inside the parts: which part ran is undecided here, so they
     # stay dropped for the parts that can follow a sibling and live for the parts that cannot.
     sibling_names = _branching_bound_names(node, analysis) - entry_names
@@ -1764,6 +1765,7 @@ def _walk_client_branching(node: ast.AST, scope: _ClientScope, inherited: _Clien
         _walk_client_scope(header, scope, inherited, analysis)
         if analysis.found is not None:
             return
+    _drop_client_bindings(scope, entry_names)
     for body, follows_sibling in _branching_parts(node):
         branch_scope = scope.copy_without(analysis, sibling_names if follows_sibling else None)
         _walk_client_statements(body, branch_scope, inherited, analysis)
