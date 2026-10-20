@@ -1072,6 +1072,8 @@ export function restoreReconnectedTurnMessageOrder(
     if (
       message.type === "ai" &&
       !isHiddenFromUIMessage(message) &&
+      // Thinking-only blocks (Anthropic) are not completed answers: require
+      // extractable text/image content to close the turn.
       extractContentFromMessage(message).length > 0 &&
       !hasToolCalls(message)
     ) {
