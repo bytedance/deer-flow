@@ -1,6 +1,6 @@
 # AGENTS.md
 
-This is the source of truth for DeerFlow frontend coding agents; the sibling `CLAUDE.md` imports it via `@AGENTS.md`.
+DeerFlow frontend guidance source of truth; `CLAUDE.md` imports `@AGENTS.md`.
 
 ## Project Overview
 
@@ -42,10 +42,12 @@ Webpack is the default development bundler. Use `DEER_FLOW_DEV_BUNDLER=turbo` wi
 
 On Windows `pnpm dev` binds `127.0.0.1` by default because Hyper-V/winnat excluded port ranges can reject Next's default `0.0.0.0` bind with `EACCES` (#2870). Pass `pnpm dev -- --hostname 0.0.0.0` to listen on a LAN interface instead.
 
-Rstest uses node for `*.test.ts(x)` and happy-dom for `*.dom.test.ts(x)`
-(`rstest.config.ts`). Keep pure logic in node: DOM tests cost about 3x more.
-Components and hooks that depend on real React effects, cleanup, or rerenders
-belong in DOM tests, rather than node tests that mock React.
+`rstest.config.ts` separates **node** (`*.test.ts` / `*.test.tsx`) for pure logic
+from **happy-dom** (`*.dom.test.ts` / `*.dom.test.tsx`) for components and hooks
+rendered with `@testing-library/react`'s `renderHook`. Keep the split: DOM tests
+cost roughly 3x more runtime. Hooks that depend on React effect ordering, unmount
+cleanup, or re-renders on store changes belong in `.dom.test.*`; do not mock React
+in node tests to cover those behaviors.
 
 E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`. The real-backend auth contract in `tests/e2e-real-backend/auth-disabled-contract.spec.ts` and `backend/tests/test_auth_me_permissions.py` pin the complete route-permission list; update both when adding registered permissions (including `projects:read/write/delete`).
 
@@ -157,6 +159,10 @@ document through `core/agents/api.ts`. Keep file parsing client-side only for
 previewing the proposed local name; the Gateway is authoritative for schema,
 name, model, and conflict validation. Export downloads must never synthesize
 runtime state from browser caches.
+
+New-Agent saves need the latest `setup_agent` success and API read-back.
+Failed/exhausted saves restore Save. Fence superseded or unmounted callbacks.
+DOM regression: `new-agent-save.dom.test.tsx`.
 
 - **Imports**: Enforced ordering (builtin → external → internal → parent → sibling), alphabetized, newlines between groups. Use inline type imports: `import { type Foo }`.
 - **Unused variables**: Prefix with `_`.
@@ -392,10 +398,11 @@ through the contract's aliases/default (`resolveReasoningEffort`). Effort values
 are open strings (`ReasoningEffortValue`), so provider-specific tokens such as
 `max` flow through local settings and account preferences unchanged; the custom
 agent dialog offers only the intersection with the per-agent `low/medium/high`
-schema and hides "off" for required-thinking models. Do not read the booleans in
-components directly. On a legacy model, `resolveReasoningEffort` keeps only its
-advertised generic values; this drops a remembered provider-specific token after
-a model switch without changing the backend's direct legacy-request behavior.
+schema and blocks new "off" for required-thinking models. Do not read the booleans in
+components directly. Legacy `resolveReasoningEffort` keeps only advertised generic
+values, dropping provider tokens after a switch; backend requests stay unchanged.
+Agent settings omit untouched reasoning, show invalid saved values for clearing,
+and require a known model to save a model switch.
 
 ## Full-stack plugin UI
 

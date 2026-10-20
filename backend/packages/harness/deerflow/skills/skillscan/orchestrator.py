@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import ast
 import io
+import json
 import logging
+import math
 import posixpath
 import re
 import stat
@@ -126,6 +128,8 @@ _PLACEHOLDER_VALUES = {"", "x", "xx", "xxx", "xxxx", "changeme", "change-me", "e
 # word (`tokenizer`, `secretive`) still stays quiet, so this is not a blanket match.
 _SECRET_ASSIGNMENT_RE = re.compile(r"(?im)(?<![A-Za-z0-9])(token|password|passwd|api[_-]?key|secret|credential)s?\b[\"']?\s*[:=]\s*[\"']?([^\"'\s#]+)")
 _SECRET_ASSIGNMENT_NAME_RE = re.compile(r"(?i)^(?:token|password|passwd|api[_-]?key|secret|credential)s?$")
+# Model-usage counters share the credential suffix but hold integer measurements.
+_TOKEN_COUNT_NAMES = {"tokens", "total_tokens", "input_tokens", "output_tokens", "prompt_tokens", "completion_tokens", "cached_tokens", "reasoning_tokens"}
 _SECRET_TOKEN_PATTERNS = tuple(
     re.compile(pattern)
     for pattern in (
@@ -400,9 +404,52 @@ def _scan_secret_assignments_by_text(rel_path: str, text: str) -> list[SecurityF
     """``name[:=]value`` sweep for line-oriented text, and for Python that will not parse."""
     for match in _SECRET_ASSIGNMENT_RE.finditer(text):
         value = match.group(2).strip()
+        if _is_token_usage_measurement(text, match):
+            continue
         if not _looks_like_placeholder(value):
             return [_finding_from_match("secret-env-assignment", rel_path, text, match)]
     return []
+
+
+def _is_token_usage_measurement(text: str, match: re.Match[str]) -> bool:
+    """Recognize typed usage counts and benchmark summaries, not credentials."""
+    if match.group(1).lower() != "token" or text[match.end(1) : match.end(1) + 1].lower() != "s":
+        return False
+    start = match.start(1)
+    # Recover the entire key: matching only its suffix would also exempt an
+    # unrelated credential such as access_total_tokens. Scan only this key.
+    while start and (text[start - 1].isalnum() or text[start - 1] in "_.-"):
+        start -= 1
+    end = match.end(1) + 1
+    name = text[start:end].lower()
+    if name not in _TOKEN_COUNT_NAMES:
+        return False
+    if text[end : end + 1] in {'"', "'"} and (not start or text[start - 1] != text[end]):
+        return False
+    value_start = match.start(2)
+    quote = text[value_start - 1] if value_start else ""
+    # The text sweep includes an adjacent JSON delimiter in the value. Require
+    # the whole value to be numeric so strings and trailing payloads stay visible.
+    if quote not in {'"', "'"} and re.fullmatch(r"[0-9]+[,}\]]?", match.group(2)):
+        return True
+    if name != "tokens":
+        return False
+    # Benchmark summaries use four numeric statistics or a signed numeric delta.
+    # Bound parsing independently of file size; other containers remain findings.
+    if quote == '"':
+        value_start -= 1
+    try:
+        value, _ = json.JSONDecoder(object_pairs_hook=tuple).raw_decode(text[value_start : value_start + 512])
+    except ValueError:
+        return False
+    if isinstance(value, str):
+        return re.fullmatch(r"[+-][0-9]+(?:\.[0-9]+)?", value) is not None
+    return (
+        isinstance(value, tuple)
+        and len(value) == 4
+        and {key for key, _ in value} == {"mean", "stddev", "min", "max"}
+        and all(type(number) in {int, float} and number >= 0 and (isinstance(number, int) or math.isfinite(number)) for _, number in value)
+    )
 
 
 def _python_secret_assignment_target(node: ast.expr) -> str | None:

@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Repository guidance source of truth; `CLAUDE.md` imports `@AGENTS.md`.
+Guidance source; `CLAUDE.md` imports `@AGENTS.md`.
 Module guides:
 
 - **[backend/AGENTS.md](backend/AGENTS.md)** — backend depth: harness/app split, agent &
@@ -11,10 +11,8 @@ Module guides:
 
 ## What is DeerFlow
 
-DeerFlow pairs a LangGraph super agent with a Next.js chat UI. The backend provides
-sandboxed execution, persistent memory, subagents, and extensible built-in, MCP,
-and community tools, isolated per thread. Feishu, Slack, Telegram, Discord, and
-DingTalk connect through the Gateway.
+DeerFlow combines LangGraph and Next.js with thread-isolated sandbox execution,
+memory, subagents and extensible tools. IM channels connect through the Gateway.
 
 ## Service Topology
 
@@ -84,13 +82,13 @@ compaction, or authentication. If existing hooks cannot express the feature, add
 generic hook to the extension contract plus an extension that uses it — do not
 hard-code business logic into core. Working examples:
 `examples/deerflow-extension-{example,bookmarks,agent-teams}`.
-[Script workflows guide](examples/deerflow-extension-workflows/AGENTS.md): public
-AgentRuns; POSIX, one process/store; no resume/replay or hard currency budget.
+[Workflow guide](examples/deerflow-extension-workflows/AGENTS.md): public
+AgentRuns; POSIX, one process/store; approval and session-authorized recovery; uncertain admissions need reconciliation;
+no multi-Gateway failover or hard currency budget.
 
-Runtime config lives at the **repo root**: copy `config.example.yaml` → `config.yaml`
-(main app config) and `extensions_config.example.json` → `extensions_config.json` (MCP
-servers + skills). Both real files are gitignored and may be edited at runtime via the
-Gateway API. Config schema and resolution order are documented in
+Root runtime configs: copy `config.example.yaml` → `config.yaml` and
+`extensions_config.example.json` → `extensions_config.json` (MCP/skills).
+Both are gitignored and Gateway-editable; schema/resolution:
 [backend/AGENTS.md](backend/AGENTS.md).
 
 Skill quality review note:
@@ -164,8 +162,6 @@ cd frontend && pnpm check     # Lint + type check (run before committing)
 cd frontend && pnpm test      # Unit tests
 ```
 
-Root `make` drives the stack; backend `make` and frontend `pnpm` drive their modules.
-
 Host pnpm calls use `scripts/pnpm.py`: native Windows tries `pnpm.cmd` before
 `pnpm`; POSIX reverses the order. Its Corepack fallback applies the same ordering
 to `corepack.cmd` and `corepack`. The runner operates from `frontend/` so
@@ -173,16 +169,9 @@ Corepack honors its pinned package-manager version.
 
 ### Prerequisites before `make dev`
 
-First-time setup (`make dev` does not generate config):
-
-```bash
-make config      # copy config.example.yaml -> config.yaml and extensions_config.example.json -> extensions_config.json (both gitignored)
-make install     # install frontend + backend deps and pre-commit hooks
-make dev         # then start everything
-```
-
-Services require `config.yaml`. Both runtime configs are API-editable and gitignored;
-never commit them.
+Run `make config`, then `make install`, then `make dev` on first setup.
+`make dev` requires existing config; both runtime configs are API-editable and
+gitignored. Never commit them.
 
 ### Run a single test
 
@@ -226,9 +215,9 @@ Repo-wide conventions:
   with the optional import unavailable and mock HTTP transport to keep tests offline.
 - **Before pushing** — backend `make format`, frontend `pnpm check`.
   Backend CI enforces `ruff format --check`.
-- **Skill text encoding** — treat `SKILL.md` and other textual skill resources as UTF-8;
-  Python utilities that read or write them must pass `encoding="utf-8"` rather than
-  relying on the platform locale.
+- **Skill text encoding** — use explicit UTF-8 for textual skill resources.
+  Read `SKILL.md` with `encoding="utf-8-sig"` to strip a leading BOM; write with
+  `encoding="utf-8"`. Never rely on the platform locale.
 - **Version sources must stay in lockstep** — a release version must match identically in
   `backend/pyproject.toml`, `frontend/package.json`, and `deploy/helm/deer-flow/Chart.yaml`
   (`version` + `appVersion`), and `backend/uv.lock` must record the same version for the root

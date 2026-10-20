@@ -8,7 +8,7 @@ import pytest
 from deerflow.community.aio_sandbox import aio_sandbox_provider as provider_module
 from deerflow.community.aio_sandbox import local_backend as local_backend_module
 from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
-from deerflow.community.aio_sandbox.aio_sandbox_provider import AioSandboxProvider
+from deerflow.community.aio_sandbox.aio_sandbox_provider import AioSandboxProvider, SandboxPolicyReplacementDeferredError
 from deerflow.community.aio_sandbox.backend import SandboxCreationError
 from deerflow.community.aio_sandbox.local_backend import LocalContainerBackend
 from deerflow.community.aio_sandbox.sandbox_info import SandboxInfo
@@ -103,25 +103,60 @@ def test_profile_revision_changes_local_sandbox_identity_without_changing_base(m
 
 
 @pytest.mark.parametrize("policy_active", [True, False])
-def test_active_container_survives_image_profile_rotation(monkeypatch, policy_active):
+def test_rotated_image_container_is_parked_before_the_next_acquire(monkeypatch, policy_active):
     provider = object.__new__(AioSandboxProvider)
     provider._config = {"skills_container_path": "/mnt/skills"}
     provider._backend = object.__new__(LocalContainerBackend)
     monkeypatch.setattr(provider, "_thread_skill_projection_active", lambda *_args: policy_active)
     monkeypatch.setattr(provider, "_managed_image_profile", lambda: SimpleNamespace(revision="new", usable=lambda: True))
+    monkeypatch.setattr(provider, "_image_acquisition_context", lambda: (None, None))
     base = provider._base_sandbox_id_for_thread("thread", "user")
-    sandbox = SimpleNamespace(_deerflow_base_identity=base)
+    monkeypatch.setattr(provider, "_base_sandbox_id_for_thread", lambda *_args: base)
+    monkeypatch.setattr(provider, "_sandbox_id_for_thread", lambda *_args: "new-id")
+    sandbox = SimpleNamespace(_deerflow_base_identity=base, requires_container_recycle=False, close=lambda: None)
     provider._thread_sandboxes = {("user", "thread"): "old-id"}
     provider._sandboxes = {"old-id": sandbox}
-    provider._sandbox_infos = {"old-id": None}
-    provider._lock = threading.Lock()
+    provider._sandbox_infos = {"old-id": SandboxInfo("old-id", "http://sandbox")}
+    provider._warm_pool = {}
+    provider._warm_pool_identity = {}
+    provider._active_sandbox_identity = {"old-id": ("user", "thread")}
+    provider._acquire_epoch = {}
+    provider._lock = threading.RLock()
     provider._local_teardown = set()
     provider._last_activity = {}
+    monkeypatch.setattr(provider, "_refresh_ownership", lambda _id: True)
     monkeypatch.setattr(provider, "_check_tracked_sandbox_alive", lambda *_args: True)
     monkeypatch.setattr(provider, "_publish_ownership", lambda *_args: None)
     monkeypatch.setattr(provider, "destroy", lambda *_args: pytest.fail("active container was destroyed"))
 
-    assert provider._reuse_in_process_sandbox("thread", user_id="user") == "old-id"
+    assert provider._reuse_in_process_sandbox("thread", user_id="user") is None
+    assert "old-id" in provider._warm_pool
+    assert provider._thread_sandboxes == {}
+
+
+@pytest.mark.parametrize("policy_active", [True, False])
+def test_rotated_image_container_waits_for_a_live_holder(monkeypatch, policy_active):
+    provider = object.__new__(AioSandboxProvider)
+    provider._config = {"skills_container_path": "/mnt/skills"}
+    provider._backend = object.__new__(LocalContainerBackend)
+    monkeypatch.setattr(provider, "_thread_skill_projection_active", lambda *_args: policy_active)
+    monkeypatch.setattr(provider, "_managed_image_profile", lambda: SimpleNamespace(revision="new", usable=lambda: True))
+    monkeypatch.setattr(provider, "_image_acquisition_context", lambda: (None, None))
+    base = provider._base_sandbox_id_for_thread("thread", "user")
+    monkeypatch.setattr(provider, "_base_sandbox_id_for_thread", lambda *_args: base)
+    monkeypatch.setattr(provider, "_sandbox_id_for_thread", lambda *_args: "new-id")
+    sandbox = SimpleNamespace(_deerflow_base_identity=base)
+    provider._thread_sandboxes = {("user", "thread"): "old-id"}
+    provider._sandboxes = {"old-id": sandbox}
+    provider._sandbox_infos = {"old-id": SandboxInfo("old-id", "http://sandbox")}
+    provider._lock = threading.RLock()
+    provider._local_teardown = set()
+    monkeypatch.setattr(provider, "release", lambda _id: None)  # The live holder defers parking.
+    monkeypatch.setattr(provider, "destroy", lambda *_args: pytest.fail("live container was destroyed"))
+
+    with pytest.raises(SandboxPolicyReplacementDeferredError):
+        provider._reuse_in_process_sandbox("thread", user_id="user")
+    assert provider._thread_sandboxes[("user", "thread")] == "old-id"
 
 
 def test_bound_container_records_only_its_matching_profile_revision(monkeypatch):

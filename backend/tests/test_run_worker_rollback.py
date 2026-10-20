@@ -635,6 +635,7 @@ def test_install_runtime_context_removes_caller_sandbox_execution_identities():
         "context": {
             SANDBOX_LEASE_OWNER_CONTEXT_KEY: "forged-owner",
             SANDBOX_COMMAND_SCOPE_CONTEXT_KEY: "forged-scope",
+            "__deerflow_sandbox_prewarm": "forged-prewarm",
         }
     }
 
@@ -648,6 +649,7 @@ def test_install_runtime_context_removes_caller_sandbox_execution_identities():
 
     assert SANDBOX_LEASE_OWNER_CONTEXT_KEY not in config["context"]
     assert SANDBOX_COMMAND_SCOPE_CONTEXT_KEY not in config["context"]
+    assert "__deerflow_sandbox_prewarm" not in config["context"]
 
 
 def test_build_runtime_context_ignores_caller_project_context_key():
@@ -1449,7 +1451,8 @@ async def test_terminal_cycle_collection_is_coalesced_contextless_and_off_loop(m
 
 
 @pytest.mark.anyio
-async def test_run_agent_releases_terminal_runtime_callbacks(caplog):
+@pytest.mark.parametrize("fail_checkpoint_inspection", [False, True])
+async def test_run_agent_releases_terminal_runtime_callbacks(caplog, fail_checkpoint_inspection):
     from deerflow.runtime.journal import RunJournal
 
     caplog.set_level(logging.DEBUG, logger="deerflow.runtime.runs.worker")
@@ -1471,8 +1474,10 @@ async def test_run_agent_releases_terminal_runtime_callbacks(caplog):
             yield {"messages": []}
 
         async def aget_state(self, _config):
-            # Finalization reads checkpoint messages. A missing-method traceback
-            # retained by DEBUG log capture would itself keep the journal alive.
+            # A real checkpoint failure can retain the worker frame through a
+            # diagnostic traceback, just as a missing mock method can.
+            if fail_checkpoint_inspection:
+                raise RuntimeError("checkpoint inspection unavailable")
             return SimpleNamespace(values={"messages": []})
 
     await run_agent(
@@ -1490,7 +1495,10 @@ async def test_run_agent_releases_terminal_runtime_callbacks(caplog):
 
     stream_config = captured["config"]
     journal = captured["journal"]
-    assert "Failed to inspect trailing human_input_request" not in caplog.text
+    if fail_checkpoint_inspection:
+        assert any(record.exc_info and "Failed to inspect trailing human_input_request" in record.message for record in caplog.records)
+    else:
+        assert "Failed to inspect trailing human_input_request" not in caplog.text
     assert "__pregel_runtime" not in stream_config["configurable"]
     assert "__run_journal" not in stream_config["context"]
     assert journal not in (stream_config.get("callbacks") or [])
@@ -2808,12 +2816,14 @@ def test_build_runtime_context_ignores_caller_sandbox_execution_identities():
     caller_context = {
         SANDBOX_LEASE_OWNER_CONTEXT_KEY: "forged-owner",
         SANDBOX_COMMAND_SCOPE_CONTEXT_KEY: "forged-scope",
+        "__deerflow_sandbox_prewarm": "forged-prewarm",
     }
 
     ctx = _build_runtime_context("thread-1", "run-1", caller_context)
 
     assert SANDBOX_LEASE_OWNER_CONTEXT_KEY not in ctx
     assert SANDBOX_COMMAND_SCOPE_CONTEXT_KEY not in ctx
+    assert "__deerflow_sandbox_prewarm" not in ctx
 
 
 def test_build_runtime_context_ignores_caller_audit_attribution_and_recorders():
@@ -4172,7 +4182,7 @@ async def test_worker_finally_block_swallows_helper_exceptions(monkeypatch):
 
 @pytest.mark.anyio
 async def test_worker_skips_execution_and_finalization_after_ownership_loss():
-    """A fenced worker closes its stream without starting or finalizing work."""
+    """A fenced worker leaves terminal publication to durable recovery."""
     run_manager = RunManager()
     record = await run_manager.create("thread-lease-lost")
     record.ownership_lost = True
@@ -4209,7 +4219,7 @@ async def test_worker_skips_execution_and_finalization_after_ownership_loss():
     thread_store.update_display_name.assert_not_awaited()
     thread_store.update_status.assert_not_awaited()
     on_run_completed.assert_not_awaited()
-    bridge.publish_end.assert_awaited_once_with(record.run_id)
+    bridge.publish_end.assert_not_awaited()
 
 
 @pytest.mark.anyio

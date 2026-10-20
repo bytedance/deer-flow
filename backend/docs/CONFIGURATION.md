@@ -760,6 +760,7 @@ Notes:
 - Set `multi_instance: true` (or export `DEER_FLOW_MULTI_INSTANCE=1`, which lets deploy tooling such as a Helm chart set it from its replica count) on every instance that shares one database. Startup then enforces the same prerequisites as `GATEWAY_WORKERS > 1`: `database.backend: postgres`, `run_events.backend: db`, `run_ownership.heartbeat_enabled: true`, and a Redis stream bridge (`stream_bridge.type: redis` or `DEER_FLOW_STREAM_BRIDGE_REDIS_URL`). It refuses an explicit `sandbox.ownership.type: memory`, process-local browser tools, and `scheduler.enabled: true` without `scheduler.multi_instance: true`.
 - `DEER_FLOW_MULTI_INSTANCE` treats blank, `0`, `false`, `no` and `off` as "not declared"; any other value declares a multi-instance deployment, so a typo fails closed.
 - `GET /health/ready` pings the Redis stream bridge on every probe and answers 503 (`stream_bridge: unreachable`) while Redis is down, so the orchestrator drains that instance instead of routing it runs it cannot publish or stream; the memory bridge reports `not_configured`. When `sandbox.provisioner_url` is set, the body also carries the provisioner's `/health` verdict (`provisioner: ok|unreachable`), which never changes the status code because every instance shares one provisioner. That probe follows the sandbox clients' proxy policy: loopback, private, link-local and cluster-local provisioner addresses bypass `HTTP_PROXY`, external hosts keep the environment's proxy settings.
+- `stream_bridge.producer_lease_recovery_enabled` is a restart-required activation gate for recovering a terminal Redis stream whose producer died before publishing END. Keep it `false` during the binary rollout: upgraded writers already publish producer markers, while old writers do not. After every old Gateway has stopped and its runs have drained, set it to `true` on every instance and restart them together. Enabling it while an old worker may still finalize a run can make a new consumer mistake that untracked legacy producer for completed history.
 - The declaration also drives the `agent_storage.backend: file` divergence warning, the inbound webhook dedupe warning, the `auth.local.throttle_storage: memory` warning, and the WeChat QR-login guard, which otherwise only look at the worker count.
 - Login lockouts are shared through the database: `auth.local.throttle_storage` (startup-only) defaults to `auto`, which keeps the per-IP failed-login counters for `POST /api/v1/auth/login/local` in the `login_throttle` table whenever `database.backend` is `sqlite` or `postgres`, so every instance enforces one `max_login_attempts` limit per client IP and a lockout on one instance holds on all of them. `memory` keeps the historical per-process counter (N instances give an attacker N × `max_login_attempts` guesses; a declared multi-instance deployment logs a warning), and `db` forces the table (it falls back to memory with a warning when the database backend is `memory`, and refuses to start when the configured database's engine is unavailable; `auto` falls back with a warning in that case). `max_login_attempts` and `lockout_seconds` stay live-read.
 - IM chat-to-thread bindings are shared through the database too: with `database.backend: sqlite` or `postgres` the `ChannelManager` keeps the `channel_name:chat_id[:topic_id]` → thread mapping of unbound IM conversations in the `channel_thread_bindings` table (migration `0038_channel_thread_bindings`), so a conversation created on one instance continues on the same thread when its next message lands on another. On the first start after upgrading, an existing `{base_dir}/channels/store.json` is imported once — only into an empty table, with `INSERT … ON CONFLICT DO NOTHING` so concurrently starting instances cannot duplicate a binding — and renamed `store.json.migrated`; a populated table leaves the file untouched. `memory` keeps the per-process JSON file.
@@ -822,14 +823,14 @@ Every IM channel except GitHub connects outbound to its platform (Telegram long 
 - Ownership is decided against the **database clock** inside each SQL statement (an expired lease changes hands only once it has been expired for `grace_seconds`, and every acquisition bumps a fencing `epoch`), so clock skew between hosts cannot hand a provider to two instances. The holder fails closed on its own monotonic clock: when a renewal is rejected, or cannot be confirmed for long enough that the next renewal would come too late, it stops the transport first — at least `grace_seconds` before a peer is allowed to connect.
 - Every instance tries to take every free lease of a provider it has enabled, so providers spread across instances by whoever starts first. A holder whose transport fails to start keeps the lease and retries with backoff (up to 5 minutes); a transport that cannot be stopped within its bounded teardown keeps its lease until it expires rather than invite a second connection.
 - `GET /api/channels/` reports, per arbitrated provider, `leader` (the holder's instance id, the RunManager worker id `hostname:uuid`) and `leader_here`, and `running` reflects the holder's transport on every instance, so `GET /api/channels/providers` and `POST /api/channels/{provider}/connect` behave the same wherever the load balancer sends them. `POST /api/channels/{name}/restart` on a non-holder answers `success: false` and names the holder. Scheduled-task IM notifications are claimed only by the holder of their provider.
-- Runtime channel configuration does not cross instances yet: `POST /api/channels/{provider}/runtime-config` saves the values (in the shared `runtime-config.json`) and applies them only where the provider's transport runs — a non-holder accepts them without restarting the holder, which keeps its current credentials until it next starts the channel (an instance taking a lease over reloads the provider's saved config first). Make credential changes on a single instance or restart the holder afterwards.
+- Runtime channel configuration crosses instances: `POST` / `DELETE /api/channels/{provider}/runtime-config` writes the provider's row in the shared `channel_runtime_configs` table (migration `0044_channel_runtime_configs`, encrypted with [`DEER_FLOW_CREDENTIALS_KEY`](#credentials-encryption-key-deer_flow_credentials_key)) and bumps its `version`. Every instance compares those versions on each renewal tick, so credentials saved or a disconnect made on any instance reach the holder within one renewal interval: it restarts the transport with the new credentials (or starts it, if a start on the old ones had failed), or stops it and releases the lease. A save served by a non-holder answers before the holder has tried the credentials; a failed restart shows as `running: false` and retries with the usual backoff. An instance taking a lease over reads the provider's current config, a disconnect included, before connecting.
 - The block is validated on every topology: an unknown key, a non-mapping value, `enabled` outside `auto | true | false`, `lease_seconds < 3` or `grace_seconds < 0` stop startup with the dotted path in the message.
 - Restart-required (`channels.leader_lease` in the reload-boundary registry): the gate evaluates it once and `ChannelService` captures it at construction. Change it on every instance and restart them together.
 - Known limits: a leader change loses the IM replies in flight on the old holder. The runs themselves continue on the Gateway executing them (channel runs are created with `on_disconnect: continue`) and their thread state is persisted, so the answer stays readable in the web UI, but the transport-local state that would deliver it (a Telegram placeholder message, a Feishu running card, a DingTalk replier) is gone with the old holder; a run executing on the instance that died is recovered as an error like any run of a dead worker.
 
 ### Credentials encryption key (`DEER_FLOW_CREDENTIALS_KEY`)
 
-DeerFlow encrypts credentials it stores at rest (today: per-connection IM channel credentials in the `channel_credentials` table) with a deployment key read **only** from the environment — there is no `config.yaml` key, and it is never derived from `AUTH_JWT_SECRET`.
+DeerFlow encrypts credentials it stores at rest (today: per-connection IM channel credentials in the `channel_credentials` table, and the IM bot credentials an admin enters in the web UI, in `channel_runtime_configs`) with a deployment key read **only** from the environment — there is no `config.yaml` key, and it is never derived from `AUTH_JWT_SECRET`.
 
 ```bash
 # Generate a key (urlsafe base64 of 32 random bytes, a Fernet key):
@@ -841,7 +842,7 @@ export DEER_FLOW_CREDENTIALS_KEY=<key>
 - **Single instance:** when the variable is unset or blank, the Gateway generates `{DEER_FLOW_HOME}/.credentials_key` (mode `0600`) on first use and reuses it. The file is created exclusively, so uvicorn workers sharing the runtime home converge on one key. It is only created when a feature that stores credentials is enabled.
 - **Multi-instance:** instances that do not share a runtime home would each generate their own file and could not decrypt what their peers stored. Startup therefore refuses a declared multi-instance deployment (`deployment.multi_instance: true` / `DEER_FLOW_MULTI_INSTANCE=1`) that enables `channel_connections` without the variable. Multiple workers of one process tree (`GATEWAY_WORKERS > 1` without the declaration) share the file and are not refused. Deployments that store no credentials keep booting without a key.
 - **Malformed keys** (wrong length, standard rather than urlsafe base64, any bad entry in the list) stop startup with an error that never repeats the key material.
-- **Backup:** losing the key makes every stored credential unreadable. Unreadable values are treated as missing (logged as a warning), never as a crash — Slack, for example, falls back to the deployment bot token.
+- **Backup:** losing the key makes every stored credential unreadable. Unreadable values are treated as missing (logged), never as a crash — Slack, for example, falls back to the deployment bot token, and a bot configured from the web UI reads as not configured until its credentials are saved again. If no key can be loaded at all (an unreadable key file), saving bot credentials from the web UI answers `503` instead of storing them in plaintext.
 - **Deployment tooling:** the Helm chart generates the key into its app Secret and preserves it across upgrades; `make up` (`scripts/deploy.sh`) honors a shell or `.env` value and otherwise generates and persists `$DEER_FLOW_HOME/.credentials_key` — the same file the Gateway would generate, so whichever side created it first wins.
 - The persisted `.jwt_secret` (used when `AUTH_JWT_SECRET` is unset) is created the same exclusive way, so replicas cold-starting on a shared volume no longer keep different session-signing secrets.
 
@@ -1327,6 +1328,8 @@ sandbox:
 ```yaml
 sandbox:
    use: deerflow.community.aio_sandbox:AioSandboxProvider # Docker-based sandbox
+   prewarm: true # optional: overlap likely sandbox work with the first model call
+   prewarm_max_concurrent: 1 # pending or ready-but-unused prewarms per process/provider
 ```
 
 For AIO images on the supported semver line (`1.9.3` through the recommended
@@ -1347,6 +1350,32 @@ affected creation plane is quarantined, bounded best-effort session cleanup
 is attempted, and the container is recycled instead of being returned to the
 warm pool. Session-level cleanup does not clear that quarantine because a
 timed-out create may commit after cleanup has already returned.
+
+`prewarm` is disabled by default and applies only to asynchronous AIO runs with
+an unconditional outer execution-lease cleanup: the Gateway/embedded run worker
+and native subagent executor. Direct `create_deerflow_agent(...).ainvoke()` and
+`.astream()` calls retain ordinary lazy acquisition even when this setting is on.
+For likely sandbox turns (for example, code fences or explicit shell commands),
+startup can overlap the first model call. Authorization is checked before
+speculation and checked again when a tool uses the sandbox. The acquisition
+belongs to the run's execution lease; cancellation, model failure, and turns
+without a sandbox tool drain startup and release that owner. Unused sandboxes
+follow the provider's normal warm-pool/idle cleanup policy, so false positives
+can still consume resources until eviction.
+
+Internal prewarm handles and the non-serializable cleanup marker belong only in
+server-owned runtime context, never checkpoint state. Register the marker only
+inside an unconditional async execution-lease cleanup; revoke it during cleanup,
+which must drain startup and release the owner even if no sandbox ID was published.
+
+`prewarm_max_concurrent` is a positive integer, default `1`. It bounds pending
+and ready-but-unused prewarms for each provider instance in a process. When
+full, DeerFlow skips speculation without queuing or delaying foreground tools.
+The limit is not a total-container cap or a deployment-wide quota; multiple
+Gateway processes have separate budgets. Other providers and synchronous
+embedded calls keep their existing acquisition behavior. Restart after changing
+these settings. Use the [sandbox benchmarks](../scripts/benchmark/sandbox/README.md)
+to measure first-tool wait, unused speculation, and resource pressure on your host.
 
 **BoxLite micro-VM Sandbox** (runs sandbox code in daemonless OCI micro-VMs):
 ```yaml

@@ -176,6 +176,32 @@ async def test_corrupt_default_can_be_replaced_without_hiding_healthy_profiles(s
     assert (await router.list_image_profiles(admin))["status"]["default_active"] is True
 
 
+def test_profiles_stay_visible_when_saved_default_becomes_unreadable_mid_list(store, monkeypatch):
+    from app.gateway.routers import image_generation as router
+    from deerflow.config.image_generation import ImageGenerationDefaultStore, image_profile_identity
+
+    web = store.save(profile(), expected_revision=None)
+    environment = {"GEMINI_API_KEY": "synthetic-server-key"}
+    config = AppConfig.model_validate({"sandbox": {"use": "test", "environment": environment}})
+    monkeypatch.setattr(router, "get_app_config", lambda: config)
+    default_store = ImageGenerationDefaultStore()
+    default_store.save("managed", target_identity=image_profile_identity(web), expected_revision=None, environment=environment)
+    original = router.saved_image_generation_source
+
+    def corrupt_during_lookup(raw_environment):
+        default_store.path.write_text("{invalid synthetic default", encoding="utf-8")
+        return original(raw_environment)
+
+    monkeypatch.setattr(router, "saved_image_generation_source", corrupt_during_lookup)
+
+    listed = router._list_profiles()
+
+    assert {item["source"] for item in listed["profiles"]} == {"managed", "config"}
+    assert listed["status"]["default_revision"] is None
+    assert listed["status"]["default_active"] is False
+    assert listed["status"]["choice_required"] is True
+
+
 def test_profile_catalog_marks_the_effective_source_when_server_and_web_both_exist(store, monkeypatch):
     from app.gateway.routers import image_generation as router
 

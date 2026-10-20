@@ -27,11 +27,16 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+SANDBOX_PREWARM_CONTEXT_KEY = "__deerflow_sandbox_prewarm"
+SANDBOX_PREWARM_CLEANUP_CONTEXT_KEY = "__deerflow_sandbox_prewarm_cleanup"
+_PREWARM_CLEANUP_MARKER = object()
 SANDBOX_LEASE_OWNER_CONTEXT_KEY = "sandbox_lease_owner_id"
 SANDBOX_COMMAND_SCOPE_CONTEXT_KEY = "sandbox_command_scope_id"
 SANDBOX_SERVER_OWNED_CONTEXT_KEYS = frozenset(
     {
         SANDBOX_LEASE_OWNER_CONTEXT_KEY,
+        SANDBOX_PREWARM_CONTEXT_KEY,
+        SANDBOX_PREWARM_CLEANUP_CONTEXT_KEY,
         SANDBOX_COMMAND_SCOPE_CONTEXT_KEY,
     }
 )
@@ -734,6 +739,16 @@ def discard_sandbox_lease_manager(provider: SandboxProvider) -> None:
         manager.close()
 
 
+def register_sandbox_prewarm_cleanup(context: dict[str, Any]) -> None:
+    """Admit prewarm only inside an unconditional async lease-release finally."""
+    context[SANDBOX_PREWARM_CLEANUP_CONTEXT_KEY] = _PREWARM_CLEANUP_MARKER
+
+
+def sandbox_prewarm_cleanup_registered(context: Any) -> bool:
+    """Do not accept a serialized caller flag as an execution cleanup boundary."""
+    return isinstance(context, dict) and context.get(SANDBOX_PREWARM_CLEANUP_CONTEXT_KEY) is _PREWARM_CLEANUP_MARKER
+
+
 def ensure_sandbox_lease_owner(context: Any) -> str | None:
     """Create one ephemeral owner id in a mutable runtime context."""
     if not isinstance(context, dict):
@@ -789,13 +804,22 @@ def release_sandbox_execution_lease(context: Any) -> None:
 
 
 async def release_sandbox_execution_lease_async(context: Any) -> None:
-    """Async counterpart to :func:`release_sandbox_execution_lease`."""
-    lease = _sandbox_execution_lease(context)
-    if lease is None:
-        return
+    """Drain speculative work before releasing the ordinary execution lease."""
+    from deerflow.sandbox.prewarm import close_sandbox_prewarm_context
 
-    from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+    if isinstance(context, dict):
+        context.pop(SANDBOX_PREWARM_CLEANUP_CONTEXT_KEY, None)
+    try:
+        await close_sandbox_prewarm_context(context)
+    finally:
+        # Disabled/skipped speculation may own no lease while a later real tool
+        # does. Its cleanup can re-raise cancellation after draining, or fail;
+        # neither may bypass that ordinary execution's release. Do not return
+        # from this finally: cancellation must survive even without a binding.
+        lease = _sandbox_execution_lease(context)
+        if lease is not None:
+            from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 
-    owner_id, _sandbox_id = lease
-    provider = get_sandbox_provider()
-    await get_sandbox_lease_manager(provider).release_async(owner_id)
+            owner_id, _sandbox_id = lease
+            provider = get_sandbox_provider()
+            await get_sandbox_lease_manager(provider).release_async(owner_id)

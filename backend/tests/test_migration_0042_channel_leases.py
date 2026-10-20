@@ -22,7 +22,7 @@ from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 
 REVISION = "0042_channel_leases"
 PREVIOUS = "0041_im_notice_preferences"
-CURRENT_HEAD = "0043_runtime_im_notices"
+NEXT = "0043_runtime_im_notices"
 TABLE = "channel_leases"
 COLUMNS = {"provider", "owner_id", "epoch", "lease_expires_at", "transport_running", "updated_at"}
 pytestmark = pytest.mark.asyncio
@@ -30,8 +30,10 @@ pytestmark = pytest.mark.asyncio
 
 async def test_0042_remains_in_the_single_migration_chain():
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
-    assert script.get_heads() == [CURRENT_HEAD]
-    assert script.get_revision(CURRENT_HEAD).down_revision == REVISION
+    assert len(script.get_heads()) == 1
+    assert REVISION in {revision.revision for revision in script.walk_revisions()}
+    assert script.get_revision("0044_channel_runtime_configs").down_revision == NEXT
+    assert script.get_revision(NEXT).down_revision == REVISION
     assert script.get_revision(REVISION).down_revision == PREVIOUS
     # alembic_version.version_num is VARCHAR(32).
     assert len(REVISION) <= 32
@@ -156,6 +158,6 @@ async def test_bootstrap_provisions_the_table_on_an_empty_database(tmp_path):
         await bootstrap.bootstrap_schema(engine, backend="sqlite")
         assert set((await _shape(engine))["columns"]) == COLUMNS
         async with engine.connect() as conn:
-            assert (await conn.execute(sa.text("SELECT version_num FROM alembic_version"))).scalar_one() == CURRENT_HEAD
+            assert (await conn.execute(sa.text("SELECT version_num FROM alembic_version"))).scalar_one() == bootstrap._get_head_revision()
     finally:
         await engine.dispose()

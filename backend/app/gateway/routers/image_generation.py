@@ -125,7 +125,8 @@ def _list_profiles() -> dict:
     except ValueError:
         current_default = None
         default_unreadable = True
-    status["default_revision"] = current_default.revision if current_default else None
+    enabled = [item for item in stored_profiles if item.enabled]
+    fallback_choice_required = legacy is not None and legacy.usable() and len(enabled) == 1 and enabled[0].usable()
     if current_default is None or (legacy is None and not any(item.enabled for item in stored_profiles)):
         default_source = None
     else:
@@ -133,12 +134,25 @@ def _list_profiles() -> dict:
             default_source = saved_image_generation_source(get_app_config().image_generation_environment)
         except ImageConfigurationError:
             default_source = None
-    status["default_active"] = current_default is not None and default_source == current_default.source
+        except ValueError:
+            # The default can become unreadable after the first read. Keep the
+            # healthy profile catalog visible and treat the choice as unsaved.
+            current_default = None
+            default_source = None
+            default_unreadable = True
     if default_unreadable:
-        enabled = [item for item in stored_profiles if item.enabled]
-        choice_required = legacy is not None and legacy.usable() and len(enabled) == 1 and enabled[0].usable()
+        choice_required = fallback_choice_required
     else:
-        choice_required = legacy is not None and image_profile_choice_needed(get_app_config().image_generation_environment)
+        try:
+            choice_required = legacy is not None and image_profile_choice_needed(get_app_config().image_generation_environment)
+        except ImageConfigurationError:
+            raise
+        except ValueError:
+            current_default = None
+            default_source = None
+            choice_required = fallback_choice_required
+    status["default_revision"] = current_default.revision if current_default else None
+    status["default_active"] = current_default is not None and default_source == current_default.source
     status["choice_required"] = choice_required
     managed_selected = status["source"] == "managed"
     for item in profiles:

@@ -127,11 +127,14 @@ def probe_image_profile(profile: ImageGenerationProfile, operation: str) -> str:
                 return _probe_gemini(client, profile, key, prompt, operation)
             return _probe_minimax(client, profile, key, prompt, operation)
     except httpx.HTTPStatusError as exc:
-        if exc.response.status_code in {401, 403}:
+        status_code = exc.response.status_code
+        if status_code in {401, 403}:
             return "authentication_failed"
-        if exc.response.status_code == 429:
+        if status_code == 429:
             return "rate_limited"
-        if exc.response.status_code in {404, 405, 501} and operation == "edit":
+        if 500 <= status_code < 600:
+            return "unreachable"
+        if status_code in {404, 405} and operation == "edit":
             return "unsupported_edit"
         return "provider_rejected"
     except httpx.HTTPError:

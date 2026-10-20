@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 60
+config_version: 61
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -1714,6 +1714,13 @@ sandbox:
   # not a secure isolation boundary for shell access. Enable only for fully
   # trusted, single-user local workflows.
   allow_host_bash: false
+  # For AioSandboxProvider only: overlap likely sandbox work with the first
+  # model call. It is disabled by default and ignored by other providers.
+  prewarm: false
+  # Bound pending/ready-unused speculation per provider instance, per process.
+  # A full budget skips prewarming; foreground tools still acquire normally.
+  # This is not a total container or deployment-wide capacity limit.
+  prewarm_max_concurrent: 1
   # Optional: Mount additional host directories into the sandbox.
   # Each mount maps a host path to a virtual container path accessible by the agent.
   # Note: with LocalSandboxProvider under `make up` (docker-compose), host_path is
@@ -2971,6 +2978,11 @@ run_ownership:
 #   stream_ttl_seconds: 86400    # rolling TTL for retained stream buffers.
 #                                # Refreshed on each publish/publish_end; set 0
 #                                # to disable. This is not a run timeout.
+#   producer_lease_recovery_enabled: false  # restart-required activation gate.
+#                                # First roll this binary to every Gateway and
+#                                # drain pre-upgrade runs; then enable on every
+#                                # instance together. Never enable during a
+#                                # mixed-version rollout.
 #   recovered_stream_cleanup_delay_seconds: 60  # seconds to wait after
 #                                # publishing END for a recovered orphan run
 #                                # before deleting the stream key (max: 86400).
@@ -3601,6 +3613,19 @@ authorization:
 #     package: deerflow-extension-example # Python distribution managed by uv
 #     use: deerflow_extension_example:install
 #     enabled: true                       # false skips import and registration
+#     # Optional, restart-required host grants. Omit for legacy behavior.
+#     # Requires durable database + run_events.backend: db for automatic updates.
+#     # Only enable on one POSIX host with local disk and ALL writers upgraded.
+#     # SQLite additionally requires exactly one Gateway process.
+#     # host_access:
+#     #   evidence:
+#     #     owners: ["exact-user-id"]
+#     #   skill_mutations:
+#     #     owners: ["exact-user-id"]     # subset of evidence.owners
+#     #     operations: [stage, check, commit, revert]
+#     #     trigger_agents: [lead_agent]  # canonical agent name, not display name
+#     #     target_skills: [example-skill]
+#     #     topology: single_host_local   # operator assertion; excludes NFS/CSI
 #     required: false                     # true makes load failure abort Gateway startup
 #                                         # (install --required opts in)
 #     host_access:                        # optional host-owned grants (restart required)

@@ -3,6 +3,7 @@
 import base64
 
 import httpx
+import pytest
 
 from app.gateway import image_generation_probe as probe
 from deerflow.config.image_generation import ImageGenerationProfile
@@ -38,6 +39,16 @@ def test_status_and_malformed_provider_response_are_redacted(monkeypatch):
     client_with(denied, monkeypatch)
     result = probe.probe_image_profile(profile(), "generation")
     assert result == "authentication_failed"
+    assert "synthetic-secret" not in result
+
+
+@pytest.mark.parametrize("status_code,operation", [(500, "generation"), (501, "edit"), (502, "generation"), (503, "generation"), (504, "generation")])
+def test_provider_outage_is_unreachable_without_exposing_response(monkeypatch, status_code, operation):
+    client_with(lambda _request: httpx.Response(status_code, json={"error": "synthetic-secret must stay private"}), monkeypatch)
+
+    result = probe.probe_image_profile(profile(), operation)
+
+    assert result == "unreachable"
     assert "synthetic-secret" not in result
 
 

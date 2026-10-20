@@ -35,6 +35,7 @@ export interface Translations {
       | "screening"
       | "retrieval"
       | "knowledge"
+      | "weknora"
       | "example",
       { title: string; description: string }
     >;
@@ -1146,6 +1147,7 @@ export interface Translations {
     saveRequested: string;
     saveHint: string;
     saveCommandMessage: string;
+    agentSaveFailed: string;
     agentCreatedPendingRefresh: string;
     more: string;
     agentCreated: string;
@@ -1168,6 +1170,10 @@ export interface Translations {
     settingsKnowledgeSaveToolAccess: string;
     settingsModel: string;
     settingsModelDefault: string;
+    settingsModelSwitchNeedsCatalog: string;
+    settingsReasoningUnsupported: string;
+    settingsThinkingRequiredHint: string;
+    settingsReasoningUnsupportedHint: string;
     settingsTemperature: string;
     settingsTemperatureHint: string;
     settingsMaxTokens: string;

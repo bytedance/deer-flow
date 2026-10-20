@@ -46,6 +46,14 @@ trimming its contents. Offline CLI coverage:
 
 ## Service Startup Contracts
 
+Both launchers call `sandbox-mode.sh` via Bash; keep it Bash/awk-only.
+Dev passes `$PROJECT_ROOT/config.yaml`; prod passes `$DEER_FLOW_CONFIG_PATH`.
+For AIO, omitted/blank/empty-quoted/YAML-null URLs (including comments) select
+`aio`; preserve quoting so `"null"` and `"~"` remain nonempty strings.
+This is not a general YAML parser or URL validator; aliases, multiline values
+and environment expansion are out of scope. Offline helper and launcher tests:
+`backend/tests/test_docker_sandbox_mode_detection.py`.
+
 The setup wizard offers Webz.io as a news-only `web_search` provider using
 `deerflow.community.webz.tools:web_search_tool` and `WEBZ_API_KEY`. Keep its
 entry aligned with the credential check in `doctor.py` and the example config.
@@ -64,6 +72,13 @@ indentless lists are supported; nested option names and block-scalar text
 must not enable the browser extra. Keep the detector standard-library-only
 because it runs before dependency synchronization. Read UTF-8 config files
 with or without a leading BOM so the first section remains detectable.
+`detect_uv_extras.py` checks an existing `DEER_FLOW_CONFIG_PATH` first, then
+`DEER_FLOW_PROJECT_ROOT/config.yaml`, before the legacy checkout candidates.
+Keep this lookup standard-library-only; test shadowing checkout configs and
+the CLI under `python -S` in `backend/tests/test_detect_uv_extras.py`.
+`serve.sh`'s config-presence gate also accepts the project-root file when the
+checkout has no config. `tests/test_serve_config_presence.py` runs the full
+launcher through dependency detection with service operations stubbed.
 `setup-sandbox.sh` also strips the leading BOM and normalizes CRLF before selecting the image;
 keep its shell filter compatible with GNU and BSD sed.
 An Apple Container pull that succeeds on macOS must not fail the setup step
