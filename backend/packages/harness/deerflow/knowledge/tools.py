@@ -36,7 +36,9 @@ async def execute_knowledge_search(query: str, runtime: Runtime, *, tool_name: s
     """Retrieve evidence from the configured knowledge provider.
 
     Args:
-        query: Specific question or search terms for private documents.
+        query: Specific question or search terms for the configured retrieval tool.
+        runtime: Trusted execution context and run configuration.
+        tool_name: Configured document, Wiki entry, or entity relation tool.
     """
     if not query.strip():
         return "Error: query must not be empty.", None

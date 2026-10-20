@@ -8,6 +8,7 @@ through the operator-controlled extension registry and the generic core tool.
 from __future__ import annotations
 
 import inspect
+import logging
 from typing import Any
 
 from deerflow.knowledge_scope import execution_scope
@@ -17,6 +18,8 @@ from .contract import KnowledgeCapabilities, KnowledgeRequestContext, RetrievalP
 RAGFLOW_KNOWLEDGE_TOOL = "deerflow.community.ragflow.tools:knowledge_search_tool"
 LIGHTRAG_KNOWLEDGE_TOOL = "deerflow.community.lightrag.tools:knowledge_search_tool"
 GENERIC_KNOWLEDGE_TOOL = "deerflow.knowledge.tools:knowledge_search_tool"
+
+logger = logging.getLogger(__name__)
 
 KNOWLEDGE_TOOL_OPERATIONS = {
     "knowledge_search": "search",
@@ -103,7 +106,18 @@ def get_knowledge_capabilities(app_config: Any, *, extensions: Any = None) -> Kn
             identities.add(use)
         else:
             provider = _registered_provider(tool, extensions=extensions)
-            capabilities = operation_capabilities(provider.capabilities, KNOWLEDGE_TOOL_OPERATIONS[name]) if provider is not None else KnowledgeCapabilities(operations=frozenset())
+            provider_name = (getattr(tool, "model_extra", None) or {}).get("provider")
+            operation = KNOWLEDGE_TOOL_OPERATIONS[name]
+            if provider is None or not provider.capabilities.supports(operation):
+                logger.error(
+                    "Invalid knowledge tool configuration: tool=%r provider=%r operation=%r (%s)",
+                    name,
+                    provider_name,
+                    operation,
+                    "not registered" if provider is None else "operation not advertised",
+                )
+                raise ValueError("Invalid knowledge tool configuration; check operator logs")
+            capabilities = operation_capabilities(provider.capabilities, operation)
             identities.add((getattr(tool, "model_extra", None) or {}).get("provider"))
         projected.append(set(capabilities.operations))
     operations = set.intersection(*projected)

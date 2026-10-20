@@ -116,3 +116,28 @@ def test_combined_scope_is_intersection_and_rejects_mixed_namespaces():
     entries["knowledge_entries_search"].model_extra["provider"] = "two"
     caps = get_knowledge_capabilities(config, extensions=registry.build())
     assert caps.supports("search") and not caps.supports("dataset_filter")
+
+
+@pytest.mark.parametrize("registered", [True, False])
+def test_incompatible_tool_reports_pair_without_silently_emptying_capabilities(caplog, registered):
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+    from deerflow.config.tool_config import ToolConfig
+    from deerflow.extensions import ExtensionRegistry
+    from deerflow.knowledge.providers import get_knowledge_capabilities
+
+    registry = ExtensionRegistry()
+    if registered:
+        provider = SimpleNamespace(capabilities=KnowledgeCapabilities(operations={"search"}), search=AsyncMock())
+        with registry.attributed_to("test:install"):
+            registry.knowledge_provider("documents-only", provider)
+    names = ["knowledge_search", "knowledge_entries_search"]
+    config = AppConfig(
+        sandbox=SandboxConfig(use="example:Sandbox"),
+        tools=[ToolConfig(name=name, group="knowledge", use=f"deerflow.knowledge.tools:{name}_tool", provider="documents-only") for name in names],
+    )
+    with pytest.raises(ValueError, match="Invalid knowledge tool configuration"):
+        get_knowledge_capabilities(config, extensions=registry.build())
+    assert "documents-only" in caplog.text
+    assert ("knowledge_entries_search" if registered else "knowledge_search") in caplog.text
+    assert ("entries_search" if registered else "not registered") in caplog.text

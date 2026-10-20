@@ -337,3 +337,9 @@ unsupported filters and evidence joins. The opt-in `test_knowledge_phase1_live.p
 WeKnora/LightRAG services with bge-m3 and a GLM-5.3 three-tool agent loop.
 See the [live validation record](../../examples/deerflow-extension-lightrag/VALIDATION.md)
 for exact coverage, reproduction and limits; this is not browser-chat acceptance.
+
+Configured generic retrieval tools must resolve to a registered provider advertising
+that tool's operation. Capability resolution rejects an invalid pair and logs the
+tool name, provider registration name and missing operation for the operator;
+it does not silently intersect it into an empty capability set. Model-visible
+errors remain generic so provider details are not exposed in tool results.

@@ -80,6 +80,11 @@ export const enUS: Translations = {
         description:
           "Demonstrate read-only retrieval and structured tool results using fixed sample documents, without an external knowledge service.",
       },
+      lightrag: {
+        title: "LightRAG",
+        description:
+          "Retrieve documents and entity relations from LightRAG with shared source citations.",
+      },
       weknora: {
         title: "WeKnora knowledge retrieval",
         description:
