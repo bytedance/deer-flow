@@ -282,7 +282,8 @@ async def test_changed_outputs_fail_closed_when_not_presented(monkeypatch):
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("modify_existing", [False, True], ids=["unproven-new-output", "observed-modified-output"])
-async def test_truncated_snapshots_limit_output_delivery_verification(tmp_path, monkeypatch, modify_existing):
+@pytest.mark.parametrize("terminal_outcome", ["success", "error", "cancelled"])
+async def test_truncated_snapshots_limit_output_delivery_verification(tmp_path, monkeypatch, modify_existing, terminal_outcome):
     paths = Paths(base_dir=tmp_path)
     monkeypatch.setattr("deerflow.workspace_changes.recorder.get_paths", lambda: paths)
     run_manager = RunManager()
@@ -307,6 +308,10 @@ async def test_truncated_snapshots_limit_output_delivery_verification(tmp_path, 
             (outputs / "a.txt").write_text("new output\n", encoding="utf-8")
             if modify_existing:
                 (outputs / "b.txt").write_text("modified\n", encoding="utf-8")
+            if terminal_outcome == "error":
+                raise RuntimeError("Agent failed after producing output")
+            if terminal_outcome == "cancelled":
+                raise asyncio.CancelledError
             yield {"messages": [AIMessage(content="Created the output.")]}
 
     await run_agent(
@@ -331,12 +336,65 @@ async def test_truncated_snapshots_limit_output_delivery_verification(tmp_path, 
         assert content["produced_paths"] == ["/mnt/user-data/outputs/b.txt"]
         assert content["verification"]["source"] == "outputs_changed"
         assert content["satisfied"] is False
+        assert "verification_skipped" not in content
+    else:
+        assert content == {"presented": 0, "paths": [], "by_tool": {}, "verification_skipped": "truncated_pre_run_snapshot"}
+    if terminal_outcome == "error":
+        assert record.status == RunStatus.error
+        assert record.error == "Agent failed after producing output"
+    elif terminal_outcome == "cancelled":
+        assert record.status == RunStatus.interrupted
+    elif modify_existing:
         assert record.status == RunStatus.error
         assert record.error == "Artifact delivery incomplete: no produced output artifact was presented"
     else:
-        assert content == {"presented": 0, "paths": [], "by_tool": {}}
         assert record.status == RunStatus.success
         assert record.error is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("failure_stage", ["before", "after"])
+async def test_snapshot_capture_failure_does_not_claim_truncated_verification(tmp_path, monkeypatch, failure_stage):
+    paths = Paths(base_dir=tmp_path)
+    monkeypatch.setattr("deerflow.workspace_changes.recorder.get_paths", lambda: paths)
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    store = MemoryRunEventStore()
+    outputs = paths.sandbox_outputs_dir("thread-1", user_id=get_effective_user_id())
+    outputs.mkdir(parents=True)
+    captures = 0
+
+    async def capture_or_fail(*args, **kwargs):
+        nonlocal captures
+        captures += 1
+        if captures == (1 if failure_stage == "before" else 2):
+            raise OSError("Snapshot capture unavailable")
+        return await capture_workspace_snapshot(*args, **kwargs)
+
+    monkeypatch.setattr("deerflow.runtime.runs.worker.capture_workspace_snapshot", capture_or_fail)
+
+    class ProducingAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            (outputs / "report.md").write_text("Report ready\n", encoding="utf-8")
+            yield {"messages": [AIMessage(content="Created report.md.")]}
+
+    await run_agent(
+        _make_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=store),
+        agent_factory=lambda *, config: ProducingAgent(),
+        graph_input={},
+        config={},
+    )
+
+    assert captures == (1 if failure_stage == "before" else 2)
+    assert (outputs / "report.md").is_file()
+    delivery = await _delivery_events(store, "thread-1", record.run_id)
+    assert len(delivery) == 1
+    assert delivery[0]["content"] == {"presented": 0, "paths": [], "by_tool": {}}
+    assert record.status == RunStatus.success
+    assert record.error is None
 
 
 @pytest.mark.anyio

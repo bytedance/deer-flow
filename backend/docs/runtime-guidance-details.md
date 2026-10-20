@@ -122,8 +122,15 @@ are suppressed when the before snapshot was truncated, while modifications
 observed in both snapshots remain eligible. The worker passes this list through
 `_produced_output_paths()` to its delivery check; an empty list leaves
 `produced_paths` and `verification` absent from the delivery receipt, and
-`_delivery_error()` returns no error. Both cases are pinned through real
-snapshot capture and `run_agent()` in `tests/test_run_worker_delivery.py`.
+`_delivery_error()` returns no error. When that empty list accompanies a truncated
+pre-run snapshot, the receipt includes
+`verification_skipped: "truncated_pre_run_snapshot"` on both normal completion and
+failure/cancellation cleanup. This marker explains the skipped check without
+asserting that no outputs were produced. Observed modifications still receive the
+ordinary verification verdict, without a skip marker. A missing snapshot or
+capture error alone does not imply this skip reason. These cases are pinned
+through real snapshot capture and `run_agent()` in
+`tests/test_run_worker_delivery.py`.
 
 **Extension changed-run discovery** (`runtime/runs/store/` and
 `extensions/run_evidence.py`) orders public run-record changes by the
