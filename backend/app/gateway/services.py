@@ -2279,7 +2279,9 @@ async def start_run(
             config,
             run_metadata,
             thread_id=thread_id,
-            agent_name=scope_assistant_id,
+            # Bootstrap executes the built-in builder; the context Agent name
+            # is the creation target and has no definition/incarnation yet.
+            agent_name=None if scope_runtime_config.get("is_bootstrap") else scope_assistant_id,
             user_id=str(tracing_user_id),
             resume=isinstance(graph_input, Command),
             scheduled_references=scheduled_task_runtime.get("tracing_snapshot_refs") if scheduled_task_runtime is not None else None,
