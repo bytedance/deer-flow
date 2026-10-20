@@ -1,12 +1,27 @@
 """Unit tests for the Tencent Cloud Web Search API community provider."""
 
 import asyncio
+import inspect
 import json
 import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+
+
+def test_agent_visible_tool_contract():
+    from deerflow.community.tencent_wsa.tools import web_search_tool
+
+    assert web_search_tool.name == "web_search"
+    assert web_search_tool.description == "Search the web using Tencent Cloud Web Search API."
+    assert web_search_tool.args == {
+        "query": {"description": "Search keywords describing what you want to find.", "title": "Query", "type": "string"},
+        "max_results": {"default": 5, "description": "Maximum number of search results to return. Default is 5.", "title": "Max Results", "type": "integer"},
+    }
+    assert web_search_tool.args_schema.model_json_schema()["required"] == ["query"]
+    assert web_search_tool.coroutine is not None
+    assert inspect.signature(web_search_tool.func) == inspect.signature(web_search_tool.coroutine)
 
 
 @pytest.fixture(autouse=True)

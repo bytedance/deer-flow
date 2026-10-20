@@ -269,17 +269,17 @@ class _SearchRequest:
     payload: dict[str, object]
 
 
-def _prepare_search(query: str, max_results: int, extras: Mapping[str, Any]) -> _SearchRequest | str:
+def _prepare_search(query: str, max_results: int, extras: Mapping[str, Any]) -> tuple[_SearchRequest | None, str | None]:
     if "max_results" in extras:
         max_results = extras["max_results"]
     max_results = _coerce_max_results(max_results)
     query = query.strip()
     if not query:
-        return _error("Search query must not be empty", query)
+        return None, _error("Search query must not be empty", query)
 
     api_key = _get_api_key("web_search", extras=extras)
     if not api_key:
-        return _missing_key_error(query, "web_search")
+        return None, _missing_key_error(query, "web_search")
 
     payload: dict[str, object] = {"Query": query}
     mode = _get_mode(extras=extras)
@@ -289,7 +289,7 @@ def _prepare_search(query: str, max_results: int, extras: Mapping[str, Any]) -> 
     if request_count is not None:
         payload["Cnt"] = request_count
 
-    return _SearchRequest(query, max_results, api_key, payload)
+    return _SearchRequest(query, max_results, api_key, payload), None
 
 
 def _format_search_response(request: _SearchRequest, data: dict[str, Any] | None, error_json: str | None) -> str:
@@ -323,9 +323,10 @@ async def _async_web_search(query: str, max_results: int = _DEFAULT_MAX_RESULTS)
     # Config discovery can touch disk. Preserve context while keeping it off-loop;
     # only this short lookup, not the HTTP request, uses the default executor.
     extras = await asyncio.to_thread(_get_tool_extras, "web_search")
-    request = _prepare_search(query, max_results, extras)
-    if isinstance(request, str):
-        return request
+    request, error_json = _prepare_search(query, max_results, extras)
+    if error_json is not None:
+        return error_json
+    assert request is not None
     data, error_json = await _asearch(request.api_key, request.payload, request.query)
     return _format_search_response(request, data, error_json)
 
@@ -337,9 +338,10 @@ def _sync_web_search(query: str, max_results: int = _DEFAULT_MAX_RESULTS) -> str
         query: Search keywords describing what you want to find.
         max_results: Maximum number of search results to return. Default is 5.
     """
-    request = _prepare_search(query, max_results, _get_tool_extras("web_search"))
-    if isinstance(request, str):
-        return request
+    request, error_json = _prepare_search(query, max_results, _get_tool_extras("web_search"))
+    if error_json is not None:
+        return error_json
+    assert request is not None
     data, error_json = _search(request.api_key, request.payload, request.query)
     return _format_search_response(request, data, error_json)
 

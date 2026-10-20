@@ -342,6 +342,8 @@ setup, after the autouse fixtures initialize runtime, to avoid the package cycle
 
 `test_tencent_wsa_tools.py` runs the provider contract through both sync and async
 invocation. Keep payload, coercion, normalization and error assertions shared.
+Pin the agent-visible name, parameter schema, description and sync/async
+signature parity when changing tool registration.
 `test_tencent_wsa_async.py` parks a real loopback HTTP response with a single-worker
 default executor, then requires independent offloaded work to complete before
 releasing the response. Always release and drain requests on assertion failures.
