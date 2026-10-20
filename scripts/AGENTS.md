@@ -46,6 +46,12 @@ trimming its contents. Offline CLI coverage:
 
 ## Service Startup Contracts
 
+`wait-for-port.sh` validates timeout seconds before probing: accept non-negative
+decimal integers within Bash's integer range, including zero and leading zeros;
+omitted/empty values retain the 60-second default. Invalid values must exit 1
+rather than leave a failed integer comparison in the polling loop. Offline
+probe-stub coverage lives in `backend/tests/test_wait_for_port_script.py`.
+
 Both launchers call `sandbox-mode.sh` via Bash; keep it Bash/awk-only.
 Dev passes `$PROJECT_ROOT/config.yaml`; prod passes `$DEER_FLOW_CONFIG_PATH`.
 For AIO, omitted/blank/empty-quoted/YAML-null URLs (including comments) select

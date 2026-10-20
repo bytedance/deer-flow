@@ -741,6 +741,11 @@ Local services always use their internal ports (`8001`, `3000`, and `2026`).
 The root `.env` variable `PORT` configures only the published Docker ingress;
 it does not change the Next.js port used by `make dev`.
 
+For direct use of `bash scripts/wait-for-port.sh <port> [timeout_seconds]`,
+the timeout must be a non-negative integer within Bash's integer range
+(default: 60 seconds). Zero checks once without waiting; invalid timeouts
+exit with status 1 before checking the port.
+
 #### Startup Modes
 
 DeerFlow runs the agent runtime inside the Gateway API. Development mode enables hot-reload; production mode uses a pre-built frontend.
