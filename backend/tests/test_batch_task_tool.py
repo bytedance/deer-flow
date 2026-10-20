@@ -23,6 +23,8 @@ def _runtime(thread_incarnation=_MISSING):
         "run_id": "run-1",
         "user_id": "user-1",
         "user_role": "member",
+        "deerflow_tracing_snapshot_id": "frozen-parent",
+        "deerflow_tracing_agent_name": "parent-agent",
         "__knowledge_scope_execution": {
             "version": 1,
             "mode": "selected",
@@ -72,6 +74,9 @@ async def test_batch_task_is_explicit_idempotent_submission(
         "status": "queued",
         "total_items": 2,
     }
+    parents = {"arize": {"trace_id": "1" * 32, "span_id": "2" * 16, "trace_flags": 1}}
+    assert hasattr(tool_module, "capture_tracing_parent_context"), "durable batch submission does not capture its parent tracing lineage"
+    monkeypatch.setattr(tool_module, "capture_tracing_parent_context", lambda: parents)
     monkeypatch.setattr(tool_module, "get_subagent_batch_submitter", lambda: submitter)
     monkeypatch.setattr(
         tool_module,
@@ -104,6 +109,9 @@ async def test_batch_task_is_explicit_idempotent_submission(
     request = submitter.submit.await_args.args[0]
     assert request.submission_key == "run-1:call-1"
     assert request.execution_spec["mcp_plugins"] == ["stable-plugin"]
+    assert request.execution_spec["deerflow_tracing_snapshot_id"] == "frozen-parent"
+    assert request.execution_spec["deerflow_tracing_agent_name"] == "parent-agent"
+    assert request.execution_spec["tracing_parent_contexts"] == parents
     assert request.user_id == "user-1"
     assert [item["key"] for item in request.items] == ["record-1", "record-2"]
     assert request.max_live_items == 20

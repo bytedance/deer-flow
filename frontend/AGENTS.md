@@ -4,6 +4,12 @@ DeerFlow frontend guidance source of truth; `CLAUDE.md` imports `@AGENTS.md`.
 
 ## Project Overview
 
+Agent settings hosts `agent-tracing-settings.tsx`; `core/tracing/` owns its
+separate profile/binding API. Tracing writes must not enter ordinary Agent
+updates or package exports. Scope every tracing query and mutation to the
+`AuthQueryScopeContext` viewer ID. Credentials are write-only draft fields;
+configuration-ready and destination-delivery verification are separate states.
+
 DeerFlow's Next.js 16 frontend provides thread-based AI conversations with streaming responses, artifacts, skills, and tools through a LangGraph backend.
 
 **Stack**: Next.js 16, React 19, TypeScript 5.8, Tailwind CSS 4, pnpm 10.26.2. Requires Node.js 22+ and pnpm 10.26.2+.

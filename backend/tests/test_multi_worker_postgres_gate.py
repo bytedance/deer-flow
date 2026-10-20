@@ -871,9 +871,10 @@ def _with_channel_connections(config, *, enabled: bool = True):
 
 
 def test_credentials_key_consumers_name_the_enabled_features():
-    assert credentials_key_consumers(_cluster_ready()) == [], "a config without the section uses no key"
-    assert credentials_key_consumers(_with_channel_connections(_cluster_ready(), enabled=False)) == []
-    assert credentials_key_consumers(_with_channel_connections(_cluster_ready())) == ["channel_connections.enabled=true"]
+    assert credentials_key_consumers(_config_with_backend("memory")) == []
+    assert credentials_key_consumers(_cluster_ready()) == ["database.backend=postgres (tracing snapshots)"]
+    assert credentials_key_consumers(_with_channel_connections(_cluster_ready(), enabled=False)) == ["database.backend=postgres (tracing snapshots)"]
+    assert credentials_key_consumers(_with_channel_connections(_cluster_ready())) == ["database.backend=postgres (tracing snapshots)", "channel_connections.enabled=true"]
 
 
 def test_declared_multi_instance_with_channel_connections_requires_the_credentials_key():
@@ -887,7 +888,8 @@ def test_declared_multi_instance_with_channel_connections_requires_the_credentia
     assert GENERATE_KEY_COMMAND in msg, "the refusal must say how to generate a key"
     assert "Helm" in msg
     assert "deployment.multi_instance=false" in msg, "must name the rollback knob"
-    assert "or set channel_connections.enabled=false" in msg, "must name the setting that turns the consumer off"
+    assert "tracing snapshots" in msg
+    assert "tracing snapshots)=false" not in msg
 
 
 def test_env_declared_multi_instance_names_the_env_knob(monkeypatch):
@@ -905,12 +907,13 @@ def test_declared_multi_instance_accepts_a_shared_credentials_key(monkeypatch):
 
 
 @pytest.mark.parametrize("channel_connections", [None, False], ids=["section-absent", "disabled"])
-def test_declared_multi_instance_without_key_consumers_keeps_booting(channel_connections):
-    """Existing multi-instance deployments that store no credentials must not need the key."""
+def test_declared_multi_instance_requires_snapshot_key_even_without_channel_credentials(channel_connections):
+    """Inherited tracing snapshots also need to decrypt on every replica."""
     config = _cluster_ready(deployment_multi_instance=True)
     if channel_connections is not None:
         _with_channel_connections(config, enabled=channel_connections)
-    _enforce_credentials_key(config)
+    with pytest.raises(SystemExit, match="tracing snapshots"):
+        _enforce_credentials_key(config)
 
 
 def test_multi_worker_without_a_declaration_shares_the_generated_key_file(monkeypatch):

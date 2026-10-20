@@ -1324,6 +1324,11 @@ schemas, arguments, results, or catalog hash into the promotion event itself.
 
 #### LangSmith Tracing
 
+Agent settings also supports authorized tracing profiles, explicit per-Agent
+disable, shared revision activation, and Arize AX. See the
+[Agent tracing guide](backend/docs/AGENT_TRACING.md) for storage prerequisites,
+credential rotation, and run snapshot behavior.
+
 DeerFlow has built-in [LangSmith](https://smith.langchain.com) integration for observability. When enabled, all LLM calls, agent runs, and tool executions are traced and visible in the LangSmith dashboard.
 
 Add the following to your `.env` file:

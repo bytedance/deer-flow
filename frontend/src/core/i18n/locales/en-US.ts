@@ -17,6 +17,76 @@ export const enUS: Translations = {
     localName: "English",
   },
 
+  tracing: {
+    title: "Agent tracing",
+    description:
+      "Choose where future runs send traces. Tracing changes apply independently of other Agent settings.",
+    mode: "Tracing mode",
+    profile: "Tracing profile",
+    chooseProfile: "Choose a profile",
+    missingProfile: "Saved profile is unavailable",
+    chooseProfileHint: "Load and choose an authorized profile before applying.",
+    apply: "Apply tracing",
+    applying: "Saving…",
+    saved:
+      "Tracing settings saved. Apply to the next run; delivery is not verified.",
+    loading: "Loading tracing settings…",
+    loadFailed: "Unable to load tracing settings. Reload to retry.",
+    unavailable: "Tracing configuration is unavailable in this storage mode.",
+    noPermission: "You do not have permission to change this Agent’s tracing.",
+    operatorLock:
+      "Monocle is enabled by the deployment. Agent tracing overrides are locked.",
+    effective: "Effective tracing configuration",
+    source: "Source",
+    revision: "Revision",
+    effectiveRevision: "Effective revision",
+    noDestinations: "No effective tracing destinations.",
+    deliveryUnverified: "Delivery has not been verified.",
+    errorDetails: "Runtime error details",
+    reload: "Reload saved tracing",
+    conflict:
+      "Tracing changed elsewhere. Your draft is preserved. Reload saved tracing before trying again.",
+    profileConflict:
+      "This profile changed elsewhere. Your draft is preserved for copying. Cancel this editor, then reopen the profile to load its latest revision before retrying.",
+    saveFailed: "Unable to save tracing settings. Your draft is preserved.",
+    manageProfiles: "Manage tracing profiles",
+    addProfile: "Add tracing profile",
+    edit: "Edit",
+    profileName: "Profile name",
+    allowedUsers: "Authorized user IDs",
+    allowedUsersHint:
+      "Separate user IDs with commas or spaces. Empty means administrators only.",
+    providers: "Tracing providers",
+    endpoint: "Endpoint",
+    project: "Project",
+    spaceId: "Space ID",
+    workspaceId: "Workspace ID",
+    workspaceIdOptional: "Workspace ID (optional)",
+    transport: "Transport",
+    apiKey: "API key",
+    secretKey: "Secret key",
+    publicKey: "Public key",
+    credentialStored: "Configured · leave blank to retain",
+    rotationHint:
+      "Enter a new key to rotate credentials. Changing the provider, endpoint, transport, or Langfuse public key requires new credentials.",
+    credentialsRequired:
+      "Enter the required credentials. Changed connection settings require a new key.",
+    providerRequired: "Select at least one tracing provider.",
+    arizeDestinationRequired: "Enter the Arize project and Space ID.",
+    saveProfile: "Save profile",
+    modes: {
+      inherit: "Inherit deployment settings",
+      disabled: "Disabled",
+      configured: "Configured profile",
+    },
+    status: {
+      active: "Configuration ready · delivery unverified",
+      pending: "Pending initialization",
+      degraded: "Partially unavailable",
+      unavailable: "Unavailable",
+    },
+  },
+
   extensions: {
     title: "Extensions",
     navigation: "Extensions",

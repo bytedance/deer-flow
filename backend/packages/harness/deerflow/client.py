@@ -65,6 +65,7 @@ from deerflow.runtime.checkpoint_mode import (
     inject_checkpoint_mode,
 )
 from deerflow.runtime.goal import DEFAULT_MAX_GOAL_CONTINUATIONS, build_goal_state, goal_thread_lock, read_thread_goal, write_thread_goal
+from deerflow.runtime.tracing_snapshot import TRACING_SERVER_OWNED_KEYS, snapshot_references, stamp_snapshot_references
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.describe import build_skill_search_setup
 from deerflow.skills.storage import get_or_new_user_skill_storage
@@ -72,6 +73,8 @@ from deerflow.subagents.capacity import configure_subagent_execution_capacity
 from deerflow.tools.builtins.tool_search import assemble_deferred_tools, build_mcp_routing_middleware, get_mcp_routing_hints_prompt_section
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, bind_trace_id, ensure_trace_id, generate_trace_id, get_current_trace_id, reset_trace_id
 from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
+from deerflow.tracing.profiles import resolve_run_snapshot
+from deerflow.tracing.scoped import TracingSession, get_current_snapshot
 from deerflow.uploads.manager import (
     UnsafeUploadPathError,
     claim_unique_filename,
@@ -872,6 +875,8 @@ class DeerFlowClient:
         """
         # Resolve the id once, without mutating the caller's context.
         trace_id = get_current_trace_id() or generate_trace_id()
+        snapshot = resolve_run_snapshot(self._agent_name, kwargs.get("user_id") or get_effective_user_id(), app_config=self._app_config)
+        tracing_session = TracingSession(snapshot)
 
         # Bind the trace id only around each ``next()`` step, never across a
         # ``yield``. ``stream()`` is a sync generator, which shares the
@@ -889,7 +894,8 @@ class DeerFlowClient:
                 token = bind_trace_id(trace_id)
                 try:
                     try:
-                        event = next(inner)
+                        with tracing_session.activate():
+                            event = next(inner)
                     except StopIteration:
                         event = _EXHAUSTED
                 finally:
@@ -906,9 +912,11 @@ class DeerFlowClient:
             # when GC closes the generator from another Context.
             token = bind_trace_id(trace_id)
             try:
-                inner.close()
+                with tracing_session.activate():
+                    inner.close()
             finally:
                 reset_trace_id(token)
+                tracing_session.close()
 
     def _stream_turn(
         self,
@@ -1002,6 +1010,14 @@ class DeerFlowClient:
         thread_id = resolve_thread_id(thread_id)
 
         config = self._get_runnable_config(thread_id, **kwargs)
+        # Only the control-plane resolver may supply run tracing identity.
+        for section in ("configurable", "context", "metadata"):
+            carrier = config.get(section)
+            if isinstance(carrier, dict):
+                for key in TRACING_SERVER_OWNED_KEYS:
+                    carrier.pop(key, None)
+        snapshot = get_current_snapshot()
+        stamp_snapshot_references(config.setdefault("metadata", {}), snapshot)
         inject_checkpoint_mode(config, self._checkpoint_channel_mode)
         checkpoint_config = {
             "configurable": {
@@ -1053,9 +1069,11 @@ class DeerFlowClient:
         # survives worker/isolated-loop boundaries and matches the identity
         # used by prompt assembly and the agent cache.
         context["user_id"] = effective_user_id
+        context.update(snapshot_references(snapshot))
         self._ensure_agent(config, context=context)
         configurable = config.get("configurable") or {}
         effective_model_name = getattr(self, "_effective_model_name", None)
+        config.setdefault("metadata", {}).update({"thread_id": thread_id, "deerflow_run_id": run_id, "model_name": effective_model_name or configurable.get("model_name") or self._model_name})
         inject_langfuse_metadata(
             config,
             thread_id=thread_id,

@@ -5089,6 +5089,52 @@ class TestSubagentTracingWiring:
         )
 
     @pytest.mark.anyio
+    async def test_background_execution_keeps_parent_snapshot_after_profile_change(self, classes, executor_module, monkeypatch):
+        from contextlib import contextmanager
+
+        from deerflow.tracing.profiles import RunTracingSnapshot
+        from deerflow.tracing.scoped import get_current_snapshot, tracing_scope
+
+        original = RunTracingSnapshot(snapshot_id="parent-frozen", owner_user_id="alice", agent_name="parent", mode="disabled", revision="1", providers=())
+        replacement = original.model_copy(update={"snapshot_id": "later-profile", "revision": "2"})
+        observed = []
+        parents = {"arize": {"trace_id": "1" * 32, "span_id": "2" * 16, "trace_flags": 1}}
+        assert hasattr(executor_module, "capture_tracing_parent_context"), "subagent execution does not capture its parent tracing lineage"
+        monkeypatch.setattr(executor_module, "capture_tracing_parent_context", lambda: parents)
+        entered_parents = []
+
+        @contextmanager
+        def scope(snapshot, **kwargs):
+            entered_parents.append(kwargs.get("parent_contexts"))
+            with tracing_scope(snapshot, **kwargs):
+                yield
+
+        monkeypatch.setattr(executor_module, "tracing_scope", scope)
+
+        class Agent(_FakeStreamAgent):
+            async def astream(self, *args, **kwargs):
+                observed.append(get_current_snapshot())
+                async for chunk in super().astream(*args, **kwargs):
+                    yield chunk
+
+        with tracing_scope(original):
+            executor = self._make_executor(classes, user_id="alice")
+        fake_agent = Agent()
+        executor.run_id = "parent-run-1"
+        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(executor, "_create_agent", _async_create_agent_double(fake_agent))
+        with tracing_scope(replacement):
+            await executor._aexecute("run later")
+
+        assert observed == [original]
+        assert entered_parents == [parents]
+        assert fake_agent.captured_context["deerflow_tracing_snapshot_id"] == "parent-frozen"
+        assert fake_agent.captured_config["metadata"]["deerflow_tracing_snapshot_id"] == "parent-frozen"
+        assert fake_agent.captured_config["metadata"]["deerflow_run_id"] == "parent-run-1"
+        assert fake_agent.captured_config["metadata"]["thread_id"] == "thread-trace-1"
+        assert fake_agent.captured_config["run_name"] == "subagent:general-purpose"
+
+    @pytest.mark.anyio
     async def test_aexecute_appends_tracing_callbacks_to_run_config(
         self,
         classes,

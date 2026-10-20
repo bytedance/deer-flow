@@ -64,6 +64,10 @@ dependencies = [
     # wheel when the image has none (stripped containers, Windows without
     # tzdata), keeping the DEER_FLOW_DATE_TIMEZONE knob portable.
     "tzdata>=2025.1",
+    "opentelemetry-sdk>=1.41.1",
+    "langsmith>=0.8.18",
+    "opentelemetry-exporter-otlp-proto-common>=1.41.1",
+    "grpcio>=1.80.0",
 ]
 
 [project.scripts]

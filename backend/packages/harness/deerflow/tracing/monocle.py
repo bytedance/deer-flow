@@ -28,6 +28,9 @@ def setup_monocle_tracing_if_enabled() -> bool:
     ``monocle_apptrace.setup_monocle_telemetry()`` is idempotent, so this stays a thin,
     config-gated wrapper. Returns ``True`` when enabled.
     """
+    from deerflow.tracing.scoped import install_global_tracing_guard
+
+    install_global_tracing_guard()
     if not is_monocle_tracing_enabled():
         return False
 

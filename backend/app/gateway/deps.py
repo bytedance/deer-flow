@@ -301,6 +301,10 @@ def credentials_key_consumers(config: AppConfig) -> list[str]:
     a deployment that stores no credentials keeps booting without one.
     """
     consumers: list[str] = []
+    if getattr(getattr(config, "database", None), "backend", None) in {"sqlite", "postgres"}:
+        # Every durable run freezes inherited tracing too. Snapshot ciphertext
+        # must remain readable after a restart and on every Gateway replica.
+        consumers.append(f"database.backend={config.database.backend} (tracing snapshots)")
     connections = getattr(config, "channel_connections", None)
     if connections is not None and getattr(connections, "enabled", False):
         # ChannelConnectionRepository encrypts per-connection credentials, and
@@ -334,12 +338,14 @@ def _enforce_credentials_key(config: AppConfig) -> None:
     if not consumers:
         return
     enabled = ", ".join(consumers)
-    disabled = ", ".join(consumer.removesuffix("=true") + "=false" for consumer in consumers)
+    disabled = ", ".join(consumer.removesuffix("=true") + "=false" for consumer in consumers if consumer.endswith("=true"))
+    # Disabling channel connections cannot disable durable run snapshots.
+    disable_hint = f", or set {disabled}" if disabled and all(consumer.endswith("=true") for consumer in consumers) else ""
     raise SystemExit(
         f"{declaration.knob} with {enabled} requires {CREDENTIALS_KEY_ENV_VAR}: without it every instance generates its own "
         f"{{base_dir}}/{CREDENTIALS_KEY_FILENAME}, and credentials one instance stores cannot be decrypted on its peers. "
         f"Generate one key with {GENERATE_KEY_COMMAND} and set the same value on every instance (the Helm chart and "
-        f"scripts/deploy.sh generate and inject it automatically), {declaration.rollback}, or set {disabled}."
+        f"scripts/deploy.sh generate and inject it automatically), {declaration.rollback}{disable_hint}."
     )
 
 

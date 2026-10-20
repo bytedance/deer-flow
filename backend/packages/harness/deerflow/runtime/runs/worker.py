@@ -94,11 +94,13 @@ from deerflow.runtime.runs.stream_cleanup import close_agent_stream
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
 from deerflow.runtime.stream_modes import normalize_stream_modes, to_langgraph_stream_modes
+from deerflow.runtime.tracing_snapshot import ROOT_TRACING_BOUND_KEY, TRACING_SERVER_OWNED_KEYS, restore_snapshot, snapshot_references, stamp_snapshot_references
 from deerflow.runtime.user_context import get_current_user, get_effective_user_id, resolve_runtime_user_id
 from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS, register_sandbox_prewarm_cleanup
 from deerflow.scheduler.runtime import SCHEDULER_CAPABILITY_CONTEXT_KEY, SchedulerRunCapability
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_id
-from deerflow.tracing import inject_langfuse_metadata
+from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
+from deerflow.tracing.scoped import tracing_scope
 from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.messages import message_to_text
 from deerflow.workspace_changes import capture_workspace_snapshot, get_changed_output_paths, record_workspace_changes
@@ -575,6 +577,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
         }
     )
     | SANDBOX_SERVER_OWNED_CONTEXT_KEYS
+    | TRACING_SERVER_OWNED_KEYS
 )
 
 
@@ -692,6 +695,8 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
         configurable.pop(CONVERSATION_READER_CONTEXT_KEY, None)
         configurable.pop(SCHEDULER_CAPABILITY_CONTEXT_KEY, None)
         configurable.pop(AGENT_RUNS_CONTEXT_KEY, None)
+        for key in TRACING_SERVER_OWNED_KEYS:
+            configurable.pop(key, None)
     existing_context = config.get("context")
     if isinstance(existing_context, dict):
         existing_context.setdefault("thread_id", runtime_context["thread_id"])
@@ -1023,6 +1028,8 @@ async def run_agent(
     subagent_events: _SubagentEventBuffer | None = None
     started = False
     stream_producer_lease_started = False
+    tracing_context = None
+    tracing_snapshot = None
 
     async def _ensure_stream_producer_lease() -> None:
         nonlocal stream_producer_lease_started
@@ -1113,6 +1120,13 @@ async def run_agent(
                 user_id=record.user_id,
                 progress_reporter=lambda snapshot: run_manager.update_run_progress(run_id, **snapshot),
             )
+
+        # The durable record, rather than request config or today's profile,
+        # selects the immutable snapshot throughout execution and finalization.
+        tracing_snapshot = await asyncio.to_thread(restore_snapshot, record.metadata or {}, user_id=record.user_id or get_effective_user_id(), app_config=ctx.app_config)
+        tracing_context = tracing_scope(tracing_snapshot)
+        tracing_context.__enter__()
+        stamp_snapshot_references(config.setdefault("metadata", {}), tracing_snapshot)
 
         # Keep cancellable preflight work under the worker's terminal guard so
         # cancellation cannot strand a pending RunRecord or stream subscriber.
@@ -1271,6 +1285,7 @@ async def run_agent(
             config["metadata"] = checkpoint_metadata
         checkpoint_metadata[CHECKPOINT_AGENT_NAME_METADATA_KEY] = DEFAULT_AGENT_NAME_METADATA_VALUE if checkpoint_agent_name is None else checkpoint_agent_name
         _pin_admission_project_context(config, runtime_ctx)
+        runtime_ctx.update(snapshot_references(tracing_snapshot))
         if knowledge_scope is not None:
             runtime_ctx[KNOWLEDGE_SCOPE_RUNTIME_KEY] = execution_scope(knowledge_scope)
         deerflow_trace_id = _bind_trace_id(config, runtime_ctx)
@@ -1288,6 +1303,12 @@ async def run_agent(
         # on_llm_end captures token usage; on_chain_start/end captures lifecycle.
         if journal is not None:
             config.setdefault("callbacks", []).append(journal)
+
+        # Callback instances own run trees. Build them for this invocation,
+        # keeping graph construction and cached graph objects credential-free.
+        existing_callbacks = [handler for handler in (config.get("callbacks") or []) if not getattr(handler, "deerflow_scoped_tracing", False)]
+        config["callbacks"] = [*existing_callbacks, *build_tracing_callbacks()]
+        config[ROOT_TRACING_BOUND_KEY] = True
 
         # Resolve after runtime context installation so context/configurable reflect
         # the agent name that this run will actually execute.
@@ -1330,6 +1351,8 @@ async def run_agent(
         # model that will run, rather than the model name originally requested.
         effective_model = _assembled_model_name(agent_result) or record.model_name
         for trace_config in (config, initial_runnable_config):
+            # LangGraph reserves metadata.run_id for reconnect detection.
+            trace_config.setdefault("metadata", {}).update({"thread_id": thread_id, "deerflow_run_id": run_id, "model_name": effective_model})
             inject_langfuse_metadata(
                 trace_config,
                 thread_id=thread_id,
@@ -2145,15 +2168,19 @@ async def run_agent(
 
         # The registered worker remains the owner until every terminal and
         # resource-cleanup await settles. Never cancel or detach this task.
-        finalizer = asyncio.create_task(finalize(), name=f"run-finalization-{run_id}")
-        if stream_producer_lease_started:
-            transfer_producer_lease = _declared_bridge_method(
-                bridge,
-                "transfer_producer_lease",
-            )
-            if transfer_producer_lease is not None:
-                transfer_producer_lease(run_id, finalizer)
-        await _drain_run_finalization(finalizer, on_host_cancel=interrupt_completion_hook)
+        try:
+            finalizer = asyncio.create_task(finalize(), name=f"run-finalization-{run_id}")
+            if stream_producer_lease_started:
+                transfer_producer_lease = _declared_bridge_method(
+                    bridge,
+                    "transfer_producer_lease",
+                )
+                if transfer_producer_lease is not None:
+                    transfer_producer_lease(run_id, finalizer)
+            await _drain_run_finalization(finalizer, on_host_cancel=interrupt_completion_hook)
+        finally:
+            if tracing_context is not None:
+                tracing_context.__exit__(None, None, None)
 
 
 # ---------------------------------------------------------------------------

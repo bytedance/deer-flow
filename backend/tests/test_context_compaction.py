@@ -52,6 +52,18 @@ class _FakeAccessor:
         }
 
 
+def test_manual_compaction_requests_standalone_model_tracing(monkeypatch):
+    captured = {}
+
+    def build(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(context_compaction, "create_summarization_middleware", build)
+    context_compaction._create_compaction_middleware(app_config=SimpleNamespace(), keep=None)
+    assert captured["attach_tracing"] is True
+
+
 class _FakeCompactionMiddleware:
     def __init__(self, *, should_compact: bool = True) -> None:
         self.should_compact = should_compact
@@ -151,6 +163,19 @@ async def test_compact_thread_context_rejects_unavailable_checkpoint_before_summ
 
 @pytest.mark.asyncio
 async def test_compact_thread_context_real_mutation_graph_finishes_without_scheduling(monkeypatch):
+    from langchain_core.callbacks.manager import AsyncCallbackManager
+    from langchain_core.tracers.langchain import LangChainTracer
+
+    from deerflow.tracing.profiles import RunTracingSnapshot
+    from deerflow.tracing.scoped import get_current_snapshot
+
+    frozen = RunTracingSnapshot(snapshot_id="disabled-history", owner_user_id="test-user-autouse", agent_name="lead_agent", mode="disabled", revision="1", providers=())
+    refs = {"deerflow_tracing_snapshot_id": "disabled-history", "deerflow_tracing_agent_name": "lead_agent", "deerflow_tracing_managed": True}
+    assert hasattr(context_compaction, "restore_snapshot"), "manual compaction does not restore tracing before invoking summary LLMs"
+    monkeypatch.setattr(context_compaction, "restore_snapshot", lambda *args, **kwargs: frozen)
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGCHAIN_TRACING_V2", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "unit-test-never-export")
     messages = [
         HumanMessage(id="h1", content="old question"),
         AIMessage(id="a1", content="old answer"),
@@ -172,6 +197,7 @@ async def test_compact_thread_context_real_mutation_graph_finishes_without_sched
     )
     seed_config["metadata"] = {
         CHECKPOINT_AGENT_NAME_METADATA_KEY: DEFAULT_AGENT_NAME_METADATA_VALUE,
+        **refs,
     }
     await seed_accessor.aupdate(
         seed_config,
@@ -186,10 +212,18 @@ async def test_compact_thread_context_real_mutation_graph_finishes_without_sched
         thread_id="thread-real-compaction",
         as_node="manual_compaction",
     )
+
+    class RecordingCompaction(_FakeCompactionMiddleware):
+        async def acompact_state(self, *args, **kwargs):
+            assert get_current_snapshot() == frozen
+            callbacks = AsyncCallbackManager.configure()
+            assert not any(isinstance(handler, LangChainTracer) for handler in callbacks.handlers)
+            return await super().acompact_state(*args, **kwargs)
+
     monkeypatch.setattr(
         context_compaction,
         "_create_compaction_middleware",
-        lambda **_kwargs: _FakeCompactionMiddleware(),
+        lambda **_kwargs: RecordingCompaction(),
     )
 
     result = await compact_thread_context(
@@ -204,6 +238,8 @@ async def test_compact_thread_context_real_mutation_graph_finishes_without_sched
     assert snapshot.values["summary_text"] == "COMPRESSED SUMMARY"
     assert snapshot.next == ()
     assert snapshot.metadata[CHECKPOINT_AGENT_NAME_METADATA_KEY] == DEFAULT_AGENT_NAME_METADATA_VALUE
+    assert {key: snapshot.metadata.get(key) for key in refs} == refs
+    assert get_current_snapshot() is None
 
 
 @pytest.mark.asyncio

@@ -178,7 +178,7 @@ async def test_run_agent_tags_the_effective_model(monkeypatch, requested_model):
 
     monkeypatch.setattr(lead_agent_module, "create_chat_model", create_model)
     monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: fake_agent)
-    monkeypatch.setattr(lead_agent_module, "build_tracing_callbacks", lambda: [callback])
+    monkeypatch.setattr("deerflow.runtime.runs.worker.build_tracing_callbacks", lambda: [callback])
 
     def agent_factory(config):
         return lead_agent_module.assemble_lead_agent(config, app_config=app_config)
