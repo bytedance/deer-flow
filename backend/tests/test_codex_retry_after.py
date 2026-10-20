@@ -15,9 +15,7 @@ from deerflow.models.openai_codex_provider import _calc_backoff_ms
 from deerflow.utils.retry_after import MAX_RETRY_AFTER_MS
 
 
-def _status_error(
-    status: int, headers: dict[str, str] | None = None
-) -> httpx.HTTPStatusError:
+def _status_error(status: int, headers: dict[str, str] | None = None) -> httpx.HTTPStatusError:
     request = httpx.Request("POST", "https://example.invalid/responses")
     return httpx.HTTPStatusError(
         "boom",
