@@ -42,6 +42,7 @@ import logging
 import tempfile
 import threading
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -140,8 +141,19 @@ class JsonChannelStore:
             fd.close()
             Path(fd.name).replace(self._path)
         except BaseException:
-            fd.close()
-            Path(fd.name).unlink(missing_ok=True)
+            # Cleanup is best-effort: a failing close or unlink must not take the
+            # original save error with it, and the unlink is still attempted after
+            # a failed close.
+            try:
+                fd.close()
+            except OSError:
+                with suppress(Exception):
+                    logger.warning("Failed to close temporary channel store file %s", fd.name, exc_info=True)
+            try:
+                Path(fd.name).unlink(missing_ok=True)
+            except OSError:
+                with suppress(Exception):
+                    logger.warning("Failed to remove temporary channel store file %s", fd.name, exc_info=True)
             raise
 
     # -- sync bodies -------------------------------------------------------
