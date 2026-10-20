@@ -678,6 +678,30 @@ class FileMemoryStorage(MemoryStorage):
             return expected_type()
         return value
 
+    @staticmethod
+    def _read_watermark_sidecar(path: Path) -> dict[str, Any]:
+        """Read the watermark sidecar, raising when the file cannot be read.
+
+        Unlike ``_read_json_sidecar`` an ``OSError`` other than a missing file
+        propagates: the writer rewrites the whole file, and treating an
+        unreadable one as empty would replace every other thread's watermark.
+        Content that is not a JSON object holds no usable watermark, so it reads
+        as empty and the next write repairs it.
+        """
+        try:
+            raw = path.read_bytes()
+        except FileNotFoundError:
+            return {}
+        try:
+            value = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            logger.warning("Ignoring malformed DeerMem watermark sidecar %s", path)
+            return {}
+        if not isinstance(value, dict):
+            logger.warning("Ignoring DeerMem watermark sidecar with invalid root type: %s", path)
+            return {}
+        return value
+
     def get_fact_usage(
         self,
         *,
@@ -908,7 +932,7 @@ class FileMemoryStorage(MemoryStorage):
                 float(getattr(self._config, "file_lock_timeout_seconds", 10)),
             ),
         ):
-            raw = self._read_json_sidecar(agent_watermark_path(path, agent_name), expected_type=dict)
+            raw = self._read_watermark_sidecar(agent_watermark_path(path, agent_name))
         value = raw.get(thread_id)
         return list(value) if _is_extraction_watermark(value) else None
 
@@ -925,7 +949,9 @@ class FileMemoryStorage(MemoryStorage):
         The sidecar is keyed by thread id and bounded by
         ``watermark_max_keys`` (0 = unbounded). The advanced thread is
         re-inserted last, so the cap drops the least-recently-advanced threads;
-        a dropped thread re-extracts one batch on its next turn.
+        a dropped thread re-extracts one batch on its next turn. A sidecar that
+        cannot be read raises before anything is written, so the other threads'
+        watermarks survive.
         """
         path = self._get_memory_file_path(agent_name, user_id=user_id)
         sidecar_path = agent_watermark_path(path, agent_name)
@@ -937,7 +963,7 @@ class FileMemoryStorage(MemoryStorage):
                 float(getattr(self._config, "file_lock_timeout_seconds", 10)),
             ),
         ):
-            raw = self._read_json_sidecar(sidecar_path, expected_type=dict)
+            raw = self._read_watermark_sidecar(sidecar_path)
             watermarks = {other: value for other, value in raw.items() if other != thread_id and _is_extraction_watermark(value)}
             if watermark is not None:
                 watermarks[thread_id] = list(watermark)

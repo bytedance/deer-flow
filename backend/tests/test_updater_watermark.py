@@ -7,10 +7,12 @@ process or a peer replica on the same storage root does not re-extract turns.
 
 from __future__ import annotations
 
+import errno
 import json
 from pathlib import Path
 from typing import Any
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
@@ -386,3 +388,39 @@ def test_malformed_watermark_sidecar_entries_are_ignored(tmp_path: Path) -> None
 
     storage.set_extraction_watermark("t4", ["id", "m4"], agent_name="a", user_id="u")
     assert json.loads(sidecar.read_text(encoding="utf-8")) == {"t4": ["id", "m4"]}
+
+
+def test_unreadable_watermark_sidecar_is_never_replaced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A read error is not an empty sidecar: every write rewrites the whole
+    file, so treating it as empty would drop the other threads' watermarks."""
+    config = _config(storage_path=str(tmp_path), retrieval_adapter="")
+    storage = FileMemoryStorage(config)
+    storage.set_extraction_watermark("t1", ["id", "m1"], agent_name="a", user_id="u")
+    storage.set_extraction_watermark("t2", ["id", "m2"], agent_name="a", user_id="u")
+    sidecar = _sidecar(tmp_path)
+    before = sidecar.read_bytes()
+
+    def _fail_on_sidecar(read: Any) -> Any:
+        def wrapper(self: Path, *args: Any, **kwargs: Any) -> Any:
+            if self.name == "watermarks.json":
+                raise OSError(errno.EIO, "Input/output error", str(self))
+            return read(self, *args, **kwargs)
+
+        return wrapper
+
+    monkeypatch.setattr(Path, "read_bytes", _fail_on_sidecar(Path.read_bytes))
+    monkeypatch.setattr(Path, "read_text", _fail_on_sidecar(Path.read_text))
+
+    with pytest.raises(OSError):
+        storage.set_extraction_watermark("t3", ["id", "m3"], agent_name="a", user_id="u")
+    with pytest.raises(OSError):
+        storage.set_extraction_watermark("t1", None, agent_name="a", user_id="u")
+    # Through the updater the extraction still succeeds; only the write-through is skipped.
+    llm = _RecordingLLM()
+    assert MemoryUpdater(config, storage, llm).update_memory(_msgs("first"), thread_id="t3", agent_name="a", user_id="u") is True
+    assert llm.invoke_count == 1
+
+    monkeypatch.undo()
+    assert sidecar.read_bytes() == before
+    assert storage.get_extraction_watermark("t1", agent_name="a", user_id="u") == ["id", "m1"]
+    assert storage.get_extraction_watermark("t2", agent_name="a", user_id="u") == ["id", "m2"]
