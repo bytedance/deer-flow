@@ -172,7 +172,7 @@ type Answer = NoulAnswer | ChoiceAnswer
 class QuestionError:
     """A question-level failure: the request was usable, this question's answer was not.
 
-    ``category`` is one of ``missing``, ``type``, ``probability`` or ``label``.
+    ``category`` is one of ``missing``, ``type``, ``probability``, ``label`` or ``refusal``.
     ``message`` names the problem without repeating the response body, which a
     malformed or hostile endpoint can fill with echoed state.
     """

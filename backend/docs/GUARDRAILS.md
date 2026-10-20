@@ -556,6 +556,11 @@ Check the denial message the agent receives and the `middleware:guardrail` journ
 
 `use:` is the only wiring — `guardrails.provider.config` keeps accepting the same fields, and there is no new config schema. The memory pre-screen and signal classification have siblings in the same shape (`deerflow.agents.memory.prescreen.openai_decisions:OpenAIDecisionsMemoryPrescreen`, `deerflow.agents.memory.signals.openai_decisions:OpenAIDecisionsSignalClassifier`); their thresholds, modes, cache buckets and `request_failed` reporting are the coordinator's and unchanged, and a `sharing_key` difference keeps a Decisions side from ever being combined into a Jev request. Offline suite: `tests/test_openai_decisions.py`.
 
+The endpoint path participates in the sharing key and public policy identity, so
+`combine: auto` keeps Jev and Decisions requests separate even when their gateway
+base URL, model, credentials, and transport match. Matching endpoints can still
+combine. Missing credential and model errors name the configured service.
+
 ## Implementing a Provider
 
 ### Required Interface

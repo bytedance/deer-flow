@@ -28,9 +28,11 @@ import pytest
 from deerflow.agents.memory.prescreen.contract import MODE_ENFORCE, resolve_memory_prescreen
 from deerflow.agents.memory.prescreen.openai_decisions import OpenAIDecisionsMemoryPrescreen
 from deerflow.agents.memory.prescreen.typesafe import QUESTION_ID as PRESCREEN_QUESTION
+from deerflow.agents.memory.prescreen.typesafe import TypeSafeMemoryPrescreen
 from deerflow.agents.memory.signals.contract import LABEL_REINFORCEMENT
+from deerflow.agents.memory.signals.coordinator import MemoryBatchContext, MemorySignalCoordinator
 from deerflow.agents.memory.signals.openai_decisions import OpenAIDecisionsSignalClassifier
-from deerflow.agents.memory.signals.typesafe import QUESTION_AFFIRMATION, QUESTION_NEGATION
+from deerflow.agents.memory.signals.typesafe import QUESTION_AFFIRMATION, QUESTION_NEGATION, TypeSafeSignalClassifier
 from deerflow.guardrails.openai_decisions import OpenAIDecisionsGuardrailError, OpenAIDecisionsGuardrailProvider
 from deerflow.guardrails.provider import GuardrailRequest
 from deerflow.openai_decisions.client import (
@@ -172,6 +174,18 @@ class TestRequestMapping:
 
 
 class TestConnectionDefaults:
+    @pytest.mark.parametrize("provider", [OpenAIDecisionsGuardrailProvider, OpenAIDecisionsMemoryPrescreen, OpenAIDecisionsSignalClassifier])
+    @pytest.mark.parametrize("settings, field", [({"api_key": "", "model": _MODEL}, "API key"), ({"api_key": _API_KEY}, "model")])
+    def test_construction_errors_name_the_configured_service(self, provider, settings, field):
+        with pytest.raises(ValueError) as excinfo:
+            provider(**settings)
+
+        message = str(excinfo.value)
+        assert "OpenAI Decisions" in message
+        assert "TypeSafe" not in message
+        assert field in message
+        assert _API_KEY not in message
+
     def test_the_backend_defaults_to_its_own_service_not_the_jev_one(self):
         server = _Server()
 
@@ -438,13 +452,12 @@ class TestMemorySides:
     def test_the_two_backends_never_share_one_combined_request(self):
         """``sharing_key`` is what lets two sides travel together; a different endpoint or a
         different credential must separate them or a verdict could be served to the wrong service."""
-        jev = _Server(lambda request: httpx.Response(200, json={"model": "jev", "answers": [_predicate_answer(PRESCREEN_QUESTION, 0.1)]}))
-        decisions = _Server(lambda request: httpx.Response(200, json={"answers": [_predicate_answer(PRESCREEN_QUESTION, 0.1)]}))
-        from deerflow.agents.memory.prescreen.typesafe import TypeSafeMemoryPrescreen
+        server = _Server()
+        settings = {"api_key": _API_KEY, "model": _MODEL, "base_url": "https://decision-gateway.example", "transport_factory": server.transport}
+        left = TypeSafeMemoryPrescreen(**settings)
+        right = OpenAIDecisionsMemoryPrescreen(**settings)
 
-        left = TypeSafeMemoryPrescreen(api_key=_API_KEY, model=_MODEL, transport_factory=jev.transport)
-        right = _prescreen(decisions)
-
+        assert left._connection.url != right._connection.url
         assert left.sharing_key() != right.sharing_key()
 
     def test_it_resolves_from_the_existing_provider_slot_without_a_schema_change(self):
@@ -456,6 +469,75 @@ class TestMemorySides:
 
         assert provider.name == "openai_decisions"
         assert provider.policy_id == "deerflow.memory.prescreen.openai_decisions"
+
+
+def _gateway_response(request: httpx.Request) -> httpx.Response:
+    """One gateway serves both dialects, with different classifier opinions."""
+    questions = json.loads(request.content)["questions"]
+    if request.url.path == "/v1/systemone":
+        assert isinstance(questions, dict)
+        return httpx.Response(200, json={"model": "jev-test", "answers": {name: {"type": "noul", "noul": 0.1} for name in questions}})
+    assert request.url.path == "/v1/decisions"
+    probabilities = {PRESCREEN_QUESTION: 0.1, QUESTION_AFFIRMATION: 0.9, QUESTION_NEGATION: 0.1}
+    return httpx.Response(200, json={"answers": [_predicate_answer(question["name"], probabilities[question["name"]]) for question in questions]})
+
+
+def _judge_gateway(prescreen_type, classifier_type, combine):
+    server = _Server(_gateway_response)
+    settings = {"api_key": _API_KEY, "model": _MODEL, "base_url": "https://decision-gateway.example", "transport_factory": server.transport}
+    coordinator = MemorySignalCoordinator(
+        prescreen=prescreen_type(mode="enforce", **settings),
+        prescreen_mode="enforce",
+        classifier=classifier_type(mode="hints", **settings),
+        classifier_mode="hints",
+        combine=combine,
+    )
+    text = "user: Continue using the same editor preference."
+    verdict = coordinator.judge(MemoryBatchContext(batch_text=text, digest=hashlib.sha256(text.encode()).hexdigest()[:16]))
+    return server, verdict
+
+
+class TestSameGatewayCoordination:
+    @pytest.mark.parametrize("combine", ["auto", "never"])
+    @pytest.mark.parametrize(
+        "prescreen_type, classifier_type, paths, veto",
+        [
+            (TypeSafeMemoryPrescreen, OpenAIDecisionsSignalClassifier, ["/v1/systemone", "/v1/decisions"], True),
+            (OpenAIDecisionsMemoryPrescreen, TypeSafeSignalClassifier, ["/v1/decisions", "/v1/systemone"], False),
+        ],
+    )
+    def test_mixed_backends_keep_their_requests_and_verdicts(self, combine, prescreen_type, classifier_type, paths, veto):
+        server, verdict = _judge_gateway(prescreen_type, classifier_type, combine)
+
+        assert [request.url.path for request in server.requests] == paths
+        for request, expected_questions in zip(server.requests, [{PRESCREEN_QUESTION}, {QUESTION_AFFIRMATION, QUESTION_NEGATION}], strict=True):
+            body = json.loads(request.content)
+            if request.url.path == "/v1/systemone":
+                assert set(body["questions"]) == expected_questions
+                assert "state" in body and "input" not in body
+            else:
+                assert {question["name"] for question in body["questions"]} == expected_questions
+                assert "input" in body and "state" not in body
+        assert verdict.skip is not veto
+        assert verdict.vetoed_by_model_signal is veto
+        assert verdict.hints == (frozenset({LABEL_REINFORCEMENT}) if veto else frozenset())
+
+    @pytest.mark.parametrize(
+        "prescreen_type, classifier_type, path, veto",
+        [
+            (TypeSafeMemoryPrescreen, TypeSafeSignalClassifier, "/v1/systemone", False),
+            (OpenAIDecisionsMemoryPrescreen, OpenAIDecisionsSignalClassifier, "/v1/decisions", True),
+        ],
+    )
+    def test_matching_backends_still_combine(self, prescreen_type, classifier_type, path, veto):
+        server, verdict = _judge_gateway(prescreen_type, classifier_type, "auto")
+
+        assert [request.url.path for request in server.requests] == [path]
+        questions = json.loads(server.requests[0].content)["questions"]
+        names = set(questions) if path == "/v1/systemone" else {question["name"] for question in questions}
+        assert names == {PRESCREEN_QUESTION, QUESTION_AFFIRMATION, QUESTION_NEGATION}
+        assert verdict.skip is not veto
+        assert verdict.vetoed_by_model_signal is veto
 
 
 def _prescreen_request(text: str):

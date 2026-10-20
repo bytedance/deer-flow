@@ -100,6 +100,7 @@ class TypeSafeConnection:
         return {
             "model": self.model,
             "base_url": self.base_url.rstrip("/"),
+            "endpoint_path": self.endpoint_path,
             "timeout": self.timeout,
             "deadline_seconds": self.deadline_seconds,
             "max_attempts": self.max_attempts,
@@ -113,6 +114,7 @@ def resolve_connection(
     defaults: Mapping[str, object] | None = None,
     configuration_source: str,
     endpoint_path: str = ENDPOINT_PATH,
+    provider_label: str = "TypeSafe",
 ) -> TypeSafeConnection:
     """Resolve the effective connection for one consumer.
 
@@ -130,6 +132,7 @@ def resolve_connection(
 
     ``endpoint_path`` is what the calling backend serves, not something a consumer
     configures; it is validated here so a malformed value cannot become a per-request URL error.
+    ``provider_label`` names that backend in construction-time diagnostics.
     """
     if not isinstance(endpoint_path, str) or not endpoint_path.startswith("/"):
         raise ValueError("endpoint_path must be an absolute request path such as '/v1/systemone'")
@@ -142,7 +145,7 @@ def resolve_connection(
 
     api_key = _resolve_credential(override, fallback, api_key_env)
     if not isinstance(api_key, str) or not api_key:
-        raise ValueError(f"TypeSafe requires an API key: pass 'api_key' in {configuration_source} or set the {api_key_env} environment variable")
+        raise ValueError(f"{provider_label} requires an API key: pass 'api_key' in {configuration_source} or set the {api_key_env} environment variable")
     # Shape only, and never echoed: a key that cannot travel as a header value is a
     # configuration error here instead of a per-call protocol error whose message
     # carries the whole ``Bearer`` header into the guardrail's exception log.
@@ -152,7 +155,7 @@ def resolve_connection(
 
     model = _first(override, fallback, "model", DEFAULT_MODEL)
     if not isinstance(model, str) or not model.strip():
-        raise ValueError("model must be a non-empty string; TypeSafe returns the version it actually served")
+        raise ValueError(f"{provider_label} model must be a non-empty string")
 
     return TypeSafeConnection(
         api_key=api_key,

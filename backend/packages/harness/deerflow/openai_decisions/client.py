@@ -89,6 +89,7 @@ def resolve_decisions_connection(*, settings: Mapping[str, object] | None = None
         defaults={**provider_defaults(), **(defaults or {})},
         configuration_source=configuration_source,
         endpoint_path=ENDPOINT_PATH,
+        provider_label="OpenAI Decisions",
     )
 
 

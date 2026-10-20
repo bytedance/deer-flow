@@ -58,7 +58,12 @@ of them can drift unnoticed. Two seams carry a dialect, and they are the only tw
 failure must not tell an operator about a service they did not configure), and
 ``TypeSafeConnection.endpoint_path``, which the connection composes into ``url`` so an endpoint
 path belongs to the backend that resolves the connection rather than to the base URL it happens
-to share. ``openai_decisions.client.resolve_decisions_connection`` pairs the two, so a
+to share. The endpoint path is included in ``public_parameters()`` and therefore in both the
+sharing key and public policy identity: different dialects behind one gateway cannot share a
+combined memory request. Matching endpoints may still combine when the other settings match.
+``resolve_connection(provider_label=...)`` also names the configured service in credential
+and model construction errors. ``openai_decisions.client.resolve_decisions_connection`` pairs
+the endpoint and service label, so a
 "Decisions" connection cannot be built pointing at System One. A dialect adds no threshold, no
 rubric and no failure policy: the three adapters override their connection resolution, their
 client and the value the endpoint judges (``input`` text instead of a ``state`` object), and
