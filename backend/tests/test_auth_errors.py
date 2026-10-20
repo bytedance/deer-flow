@@ -73,3 +73,12 @@ def test_decode_token_returns_payload_on_valid():
     result = decode_token(token)
     assert not isinstance(result, TokenError)
     assert result.sub == "user-123"
+
+
+def test_decode_token_returns_token_error_on_signed_token_with_wrong_claims():
+    _setup_config()
+    # The OIDC state cookie is signed with the same secret but has no sub/exp.
+    state_payload = {"provider": "google", "state": "abc", "issued_at": 1}
+    token = pyjwt.encode(state_payload, _TEST_SECRET, algorithm="HS256")
+
+    assert decode_token(token) == TokenError.MALFORMED
