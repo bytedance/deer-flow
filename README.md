@@ -2906,6 +2906,12 @@ snapshots and each doubling. These snapshots remain admitted beyond `queue_max_d
 and stay in memory until processing. Check extraction latency when warnings appear;
 process exit can still lose pending work.
 
+Optional memory pre-screening and signal classification support TypeSafe (Jev)
+and OpenAI Decisions. With `combine: auto`, their different endpoint paths keep
+requests separate even behind the same gateway URL, model, and credentials.
+Compatible requests to the same endpoint can still share one call. See the
+[decision provider guide](backend/docs/GUARDRAILS.md).
+
 The opt-in [DeerMem scope-isolation benchmark](backend/scripts/benchmark/deermem_scope_isolation/README.md)
 checks semantic safety across facts and summaries, and fact routing across users
 and agents. Failed extraction attempts are retryable execution errors, not safety passes.
@@ -2913,8 +2919,10 @@ and agents. Failed extraction attempts are retryable execution errors, not safet
 For DeerMem, `memory.backend_config.storage_class: markdown` opts into tolerant
 summary reads while keeping JSON writes and the existing UI. A hand-edited
 `memory.json` can contain its JSON object inside a fenced `memory-json` block;
-embedded backticks and later fenced notes are supported. Unparseable summary
-text is moved to `memory.json.corrupt-<timestamp>` for recovery before rebuilding.
+embedded backticks and later fenced notes are supported. Invalid UTF-8 bytes and
+unparseable summary text are moved to `memory.json.corrupt-<timestamp>` for recovery
+before rebuilding. File-access and I/O read errors preserve the original file and
+fail the storage operation; retry after access recovers.
 `storage_path` must point to the data root directory, not an existing JSON file.
 Hand-edited DeerMem summaries and fact Markdown files may have a leading UTF-8
 BOM; reads accept it, while writes remain BOM-free UTF-8.
@@ -3151,6 +3159,9 @@ from the project page's Documents section:
 - **Upload** a file (button or drag-drop, one file per request). Shelf size
   limits reuse `uploads.max_file_size` (default 50 MiB); re-uploading identical
   content returns the existing entry instead of creating a duplicate.
+  Oversized uploads return `413`; deduplicated uploads return `200`. Staging
+  cleanup failures are logged without replacing these outcomes or a missing,
+  foreign, or archived project's `404` response.
 - **List** entries with name, size, modified time, and provenance (uploaded vs.
   saved from a conversation), and preview or download any entry.
 - **Save to project** from a thread file: the read-only conversation-files
@@ -3442,6 +3453,11 @@ deerflow --recursion-limit 250 --print "task" # override the headless agent-loop
 Headless `--print` and `--json` exit with status `1` when the run fails, including provider errors returned as fallback messages. `--print` still writes the fallback text to stdout; `--json` appends a terminal error record.
 
 A keyboard-driven chat surface with a streaming transcript (Markdown-rendered answers), compact tool-activity cards, a `/` slash-command palette, display-only `/clear`, `/goal` goal management, `/model` and `/threads` pickers, input history, PageUp/PageDown transcript navigation, and `Esc` / `Ctrl+C` interrupt. The composer preserves line breaks and indentation in pasted code, stack traces, and multi-paragraph prompts; `Enter` sends the complete document. Transcript refreshes preserve your reading position after you scroll upward and resume following new output when you return to the bottom. `/clear` removes rows from the current terminal display without deleting the thread or its persisted conversation; `/new` and `/clear` ask you to wait during an active run instead of resetting in-flight display state. Sessions opened in the TUI also appear in the Web UI sidebar — it writes the shared thread store under the local default user, so terminal and web stay in sync **without running the Gateway**.
+
+TUI slash commands accept Unicode whitespace before their arguments, including
+spaces, tabs, line breaks, and nonbreaking spaces. A separator closes the slash
+palette so Enter submits the composed text. Pasted skill tasks can start on the
+next line; their internal line breaks and indentation are preserved.
 
 During an active run, `/resume`, `/threads`, and `/switch` ask you to wait before
 switching conversations. An invalid `/resume` reference displays an error without
