@@ -4611,7 +4611,7 @@
   `extensions_config.json` 格式错误或不可读时，这三个接口都会在响应中返回该文件的
   宿主机绝对路径（权限错误时还会附带 `[Errno 13]` 信息）。现在它们分别返回固定的
   `Failed to load skills.` / `Failed to list custom skills.` /
-  `Failed to get skill.`，完整错误只记录在 Gateway 日志中。
+  `Failed to get skill.`，完整错误只记录在 Gateway 日志中。 ([#7155])
 
 - **skillscan：** LLM 之前的静态门禁现在按形状匹配 fork 炸弹，而不再只匹配
   `:(){ :|:& };:` 这一规范写法。`resource-fork-bomb` 和 `shell-destructive-command`
@@ -9470,3 +9470,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7099]: https://github.com/bytedance/deer-flow/pull/7099
 [#7104]: https://github.com/bytedance/deer-flow/pull/7104
 [#7123]: https://github.com/bytedance/deer-flow/pull/7123
+[#7155]: https://github.com/bytedance/deer-flow/pull/7155
