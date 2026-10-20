@@ -165,7 +165,10 @@ Read the nearest scoped `AGENTS.md` for subsystem ownership.
 
 ## Architecture
 
-Read-only knowledge: [contract](docs/KNOWLEDGE.md).
+Read-only knowledge: [contract](docs/KNOWLEDGE.md). Three independently configured
+retrieval tools share contextual dispatch, scope intersection and evidence
+formatting. Provider-specific Wiki and entity relation mappings remain in optional
+extensions; filter capabilities are independent for each retrieval operation.
 
 ### Harness / App Split
 
