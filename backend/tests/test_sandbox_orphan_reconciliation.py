@@ -745,12 +745,12 @@ def test_idle_reap_does_not_destroy_peer_owned_warm_entry():
     worker_a = _make_provider_for_reconciliation(worker_id="worker-a", store=shared)
     worker_b = _make_provider_for_reconciliation(worker_id="worker-b", store=shared)
     worker_b._config["idle_timeout"] = 60
-    now = time.time()
+    now = time.monotonic()
     info = SandboxInfo(
         sandbox_id="a99c8444",
         sandbox_url="http://localhost:8080",
         container_name="deer-flow-sandbox-a99c8444",
-        created_at=now - 50,
+        created_at=time.time() - 50,
     )
     # Simulate the bad old path: B already has it in warm (or adopted wrongly).
     worker_b._warm_pool["a99c8444"] = (info, now - 61)
@@ -1250,7 +1250,7 @@ def test_lost_lease_drops_sandbox_without_destroying_container():
     worker_a._sandboxes["moved01"] = sandbox
     worker_a._sandbox_infos["moved01"] = info
     worker_a._thread_sandboxes[("u1", "t1")] = "moved01"
-    worker_a._last_activity["moved01"] = time.time()
+    worker_a._last_activity["moved01"] = time.monotonic()
     worker_a._publish_ownership("moved01")
 
     # The thread's next turn routes to B, which takes over ownership.
@@ -2359,7 +2359,7 @@ def test_idle_destroy_does_not_stop_a_container_this_instance_just_reused():
     provider._ownership = gate
     info = _info("idle1")
     _active_sandbox(provider, "idle1", info)
-    provider._last_activity["idle1"] = 0.0  # long idle
+    provider._last_activity["idle1"] = time.monotonic() - 10_000  # long idle
     provider._ownership._inner.take("idle1")
 
     handed_out = _run_reap_vs_promote(
@@ -2386,7 +2386,7 @@ def test_reuse_does_not_return_a_sandbox_reserved_during_its_health_check():
     provider._ownership = gate
     info = _info("idlerace")
     _active_sandbox(provider, "idlerace", info)
-    provider._last_activity["idlerace"] = 0.0
+    provider._last_activity["idlerace"] = time.monotonic() - 10_000
     provider._ownership._inner.take("idlerace")
 
     health_started, let_health_finish = threading.Event(), threading.Event()
@@ -2622,7 +2622,7 @@ def test_idle_destroy_skips_a_sandbox_re_acquired_after_the_idle_snapshot():
     provider = _make_provider_for_reconciliation()
     info = _info("idle2")
     _active_sandbox(provider, "idle2", info)
-    provider._last_activity["idle2"] = 0.0
+    provider._last_activity["idle2"] = time.monotonic() - 10_000
     provider._ownership.take("idle2")
 
     real_destroy_tracked = provider._destroy_tracked
