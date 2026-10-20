@@ -1,4 +1,4 @@
-"""The image providers enforce the same string-only result URL policy."""
+"""The image and text-search providers enforce the same string-only result URL policy."""
 
 import importlib
 import inspect
