@@ -10,6 +10,8 @@ ownership and capture cleanup. Retain the real XLSX conversion coverage.
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+`test_goal_loop_stop_probe.py` runs the standalone Goal-loop reproduction through the native graph, loop middleware, worker and checkpoints. Only model responses are scripted; do not replace the Goal decision or simulate the stop-reason write.
+
 InfoQuest fetch log assertions install the real `UrlRedactionFilter` on the
 capture handler with fixture-scoped cleanup. Expect scheme/host context with
 redacted paths, so isolated runs and full-suite logging configuration agree;

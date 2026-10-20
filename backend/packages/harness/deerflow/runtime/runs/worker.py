@@ -2160,6 +2160,8 @@ async def run_agent(
 # Helpers
 # ---------------------------------------------------------------------------
 
+_GOAL_RUN_HARD_STOP_REASONS = frozenset({"token_capped", "loop_capped"})
+
 
 @dataclass(frozen=True)
 class _GoalCompletionCandidate:
@@ -2660,11 +2662,10 @@ async def _prepare_goal_continuation_input(
         return _GoalCompletionCandidate(copy.deepcopy(current_goal), conversation_signature_before, evaluation)
 
     stand_down_reason = _stand_down_reason(goal, evaluation, no_progress_count)
-    if stand_down_reason is None and run_stop_reason == "token_capped":
-        # The run already used up its token budget, and continuations share that
-        # budget, so another hidden turn would spend one more model call only to
-        # have its tool calls stripped.
-        stand_down_reason = "token_capped"
+    if stand_down_reason is None and run_stop_reason in _GOAL_RUN_HARD_STOP_REASONS:
+        # Both guards keep their safety state across hidden turns in this run.
+        # Respect the hard stop instead of re-entering the same run budget.
+        stand_down_reason = run_stop_reason
     if stand_down_reason is not None or not should_continue_goal(goal, evaluation, no_progress_count=no_progress_count):
         await _persist(goal, evaluation, no_progress_count, stand_down_reason=stand_down_reason)
         return None
