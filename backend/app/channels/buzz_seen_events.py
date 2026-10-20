@@ -56,6 +56,7 @@ import logging
 import tempfile
 import threading
 from collections import OrderedDict, deque
+from contextlib import suppress
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -150,10 +151,14 @@ class BuzzSeenEventStore:
             Path(tmp_name).replace(path)
             return True
         except Exception:
-            # Mirror ChannelStore._save: never leave the temp file behind, or a
-            # persistently failing write accumulates one *.tmp per attempt.
+            # Cleanup is best-effort: a failed unlink must not replace the save
+            # error or suppress the warning that makes the failed write visible.
             if tmp_name is not None:
-                Path(tmp_name).unlink(missing_ok=True)
+                try:
+                    Path(tmp_name).unlink(missing_ok=True)
+                except OSError:
+                    with suppress(Exception):
+                        logger.warning("Failed to remove temporary seen-event file %s", tmp_name, exc_info=True)
             logger.warning("[buzz] failed to persist seen-event store (will retry on next flush)", exc_info=True)
             return False
 

@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import logging
+from pathlib import Path
 
 import pytest
 
@@ -270,6 +272,38 @@ def test_failed_save_leaves_no_tmp_files(tmp_path, monkeypatch):
     monkeypatch.undo()
     store.record(CHANNEL, "id-3")  # recovery: next flush persists everything
     assert json.loads(path.read_text())[CHANNEL] == ["id-0", "id-1", "id-2", "id-3"]
+
+
+def test_failed_temp_cleanup_does_not_mask_save_error(tmp_path, monkeypatch, caplog):
+    path = tmp_path / "seen.json"
+    store = BuzzSeenEventStore(path)
+
+    def fail_save(*args, **kwargs):
+        raise OSError("disk full")
+
+    original_unlink = Path.unlink
+
+    def fail_temp_cleanup(self, *args, **kwargs):
+        if self.suffix == ".tmp":
+            raise OSError("cleanup denied")
+        return original_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr("app.channels.buzz_seen_events.json.dump", fail_save)
+    monkeypatch.setattr(Path, "unlink", fail_temp_cleanup)
+    try:
+        with caplog.at_level(logging.WARNING, logger="app.channels.buzz_seen_events"):
+            saved = store._write_snapshot({CHANNEL: ["event-1"]})
+
+        assert not saved
+        persist_logs = [record for record in caplog.records if "failed to persist seen-event store" in record.getMessage()]
+        assert len(persist_logs) == 1
+        assert isinstance(persist_logs[0].exc_info[1], OSError)
+        assert str(persist_logs[0].exc_info[1]) == "disk full"
+        assert "Failed to remove temporary seen-event file" in caplog.text
+    finally:
+        monkeypatch.undo()
+        for staged_file in tmp_path.glob("*.tmp"):
+            staged_file.unlink(missing_ok=True)
 
 
 def test_channel_stop_flushes_pending_records(tmp_path):
