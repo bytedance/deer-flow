@@ -587,6 +587,8 @@ The unified nginx endpoint is same-origin by default and does not emit browser C
 
 When fine-grained authorization is enabled, Live Browser connections require `threads:write` as well as ownership of the thread, even when only viewing frames: the same connection can control the browser. Permission checks run when connecting. Restart Gateway after upgrading to disconnect sessions admitted by older code.
 
+The bundled Docker, local and Helm nginx configs proxy Live Browser WebSocket upgrades with a 600-second read timeout for quiet streams. Helm uses nginx's default connection and send timeouts for the in-cluster Gateway. Any additional Ingress or reverse proxy must also allow WebSocket upgrades.
+
 Browser login uses `HttpOnly` session cookies. The login page offers a "keep me signed in" option that extends the browser session when the request is HTTPS (including trusted `X-Forwarded-Proto: https`) or localhost HTTP. The localhost exception uses the direct request `Host` and ignores forwarded host headers. Public HTTP deployments, including many temporary sandbox URLs, fall back to session cookies by default. DeerFlow never stores the password in browser storage; the UI may remember only the email address.
 
 OIDC/SSO authorization endpoints may include provider query parameters such as `?prompt=login`. DeerFlow preserves those parameters when adding the login request, including for configured `authorization_endpoint` overrides.
@@ -3161,6 +3163,9 @@ from the project page's Documents section:
 - **Upload** a file (button or drag-drop, one file per request). Shelf size
   limits reuse `uploads.max_file_size` (default 50 MiB); re-uploading identical
   content returns the existing entry instead of creating a duplicate.
+  Oversized uploads return `413`; deduplicated uploads return `200`. Staging
+  cleanup failures are logged without replacing these outcomes or a missing,
+  foreign, or archived project's `404` response.
 - **List** entries with name, size, modified time, and provenance (uploaded vs.
   saved from a conversation), and preview or download any entry.
 - **Save to project** from a thread file: the read-only conversation-files
