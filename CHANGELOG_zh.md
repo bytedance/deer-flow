@@ -1015,6 +1015,15 @@
 
 ### 修复
 
+- **记忆：** 线程的下一轮落到另一个 Gateway 实例上或进程重启后，DeerMem 不再把已经
+  抽取过的对话轮次再次交给记忆 LLM。抽取水位（每个线程已抽取到的最后一条消息）此前只
+  存在进程内缓存中；现在还会写入共享 `storage_path` 下的
+  `users/{user}/agents/{agent}/.metadata/watermarks.json`（条目数受 `watermark_max_keys`
+  约束，不改变记忆 revision），每次更新从进程内副本与持久化副本中更靠后的那一个之后开始。
+  清空记忆时，该文件与该 agent 的其他 `.metadata` sidecar 一并删除。没有 id 的消息以其
+  文本的 SHA-256 摘要识别，sidecar 中不保存对话文本。
+  (issue #TBD, [#TBD])
+
 - **技能：** `GET /api/skills/custom/{skill_name}/history` 收到非法技能名（不是
   hyphen-case，或超过 64 个字符）时，现在与删除、回滚一样返回 `400`，不再返回 `500`
   并在每次请求时记录一次带堆栈的错误日志。只有名称校验映射为 `400`：损坏的历史文件

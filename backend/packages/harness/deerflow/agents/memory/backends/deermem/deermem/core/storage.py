@@ -39,6 +39,7 @@ from .paths import (
     agent_facts_directory,
     agent_metadata_directory,
     agent_usage_path,
+    agent_watermark_path,
     fact_file_path,
     memory_file_path,
     safe_user_id,
@@ -456,6 +457,11 @@ def _parse_listed_fact(path: Path) -> dict[str, Any] | None:
         return None
 
 
+def _is_extraction_watermark(value: Any) -> bool:
+    """A persisted watermark is a non-empty list of strings (a message identity)."""
+    return isinstance(value, list) and bool(value) and all(isinstance(part, str) for part in value)
+
+
 def _fsync_parent_directory(directory: Path) -> None:
     """Make a completed rename durable on POSIX filesystems."""
     if os.name == "nt":
@@ -603,6 +609,26 @@ class MemoryStorage(abc.ABC):
         fact_ids: list[str] | None = None,
     ) -> None:
         """Remove sidecar data for selected facts, or the whole scope."""
+
+    def get_extraction_watermark(
+        self,
+        thread_id: str,
+        *,
+        agent_name: str,
+        user_id: str | None = None,
+    ) -> list[str] | None:
+        """Return one thread's persisted extraction watermark; None = none kept."""
+        return None
+
+    def set_extraction_watermark(
+        self,
+        thread_id: str,
+        watermark: list[str] | None,
+        *,
+        agent_name: str,
+        user_id: str | None = None,
+    ) -> None:
+        """Persist one thread's extraction watermark (None drops it); optional."""
 
     def close(self) -> None:
         """Release optional storage resources."""
@@ -865,6 +891,66 @@ class FileMemoryStorage(MemoryStorage):
                 metadata_path.rmdir()
             except OSError:
                 pass
+
+    def get_extraction_watermark(
+        self,
+        thread_id: str,
+        *,
+        agent_name: str,
+        user_id: str | None = None,
+    ) -> list[str] | None:
+        path = self._get_memory_file_path(agent_name, user_id=user_id)
+        key = self._cache_key(agent_name, user_id=user_id)
+        with (
+            self._scope_lock(key),
+            _process_file_lock(
+                path.parent / ".memory.lock",
+                float(getattr(self._config, "file_lock_timeout_seconds", 10)),
+            ),
+        ):
+            raw = self._read_json_sidecar(agent_watermark_path(path, agent_name), expected_type=dict)
+        value = raw.get(thread_id)
+        return list(value) if _is_extraction_watermark(value) else None
+
+    def set_extraction_watermark(
+        self,
+        thread_id: str,
+        watermark: list[str] | None,
+        *,
+        agent_name: str,
+        user_id: str | None = None,
+    ) -> None:
+        """Write through one thread's watermark without touching the manifest.
+
+        The sidecar is keyed by thread id and bounded by
+        ``watermark_max_keys`` (0 = unbounded). The advanced thread is
+        re-inserted last, so the cap drops the least-recently-advanced threads;
+        a dropped thread re-extracts one batch on its next turn.
+        """
+        path = self._get_memory_file_path(agent_name, user_id=user_id)
+        sidecar_path = agent_watermark_path(path, agent_name)
+        key = self._cache_key(agent_name, user_id=user_id)
+        with (
+            self._scope_lock(key),
+            _process_file_lock(
+                path.parent / ".memory.lock",
+                float(getattr(self._config, "file_lock_timeout_seconds", 10)),
+            ),
+        ):
+            raw = self._read_json_sidecar(sidecar_path, expected_type=dict)
+            watermarks = {other: value for other, value in raw.items() if other != thread_id and _is_extraction_watermark(value)}
+            if watermark is not None:
+                watermarks[thread_id] = list(watermark)
+            cap = self._config.watermark_max_keys
+            if cap > 0 and len(watermarks) > cap:
+                watermarks = dict(list(watermarks.items())[-cap:])
+            if watermarks:
+                _atomic_write(
+                    sidecar_path,
+                    json.dumps(watermarks, ensure_ascii=False, indent=2).encode("utf-8"),
+                )
+            else:
+                sidecar_path.unlink(missing_ok=True)
 
     @staticmethod
     def _cache_key(agent_name: str | None = None, *, user_id: str | None = None) -> tuple[str | None, str | None]:

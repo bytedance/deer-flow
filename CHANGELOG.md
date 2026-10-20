@@ -1265,6 +1265,18 @@ This release closes that milestone with **621 merged pull requests**.
 
 ### Fixed
 
+- **memory:** DeerMem no longer sends conversation turns it already extracted
+  to the memory LLM again when a thread's next turn runs on another Gateway
+  instance or after a restart. The extraction watermark (the last message of
+  each thread already extracted) lived only in a per-process cache; it is now
+  also written to `users/{user}/agents/{agent}/.metadata/watermarks.json` under
+  the shared `storage_path` (bounded by `watermark_max_keys`, without changing
+  the memory revision), and each update starts after the furthest of the
+  process copy and the persisted one. Clearing memory deletes the file with
+  the agent's other `.metadata` sidecars. Messages without an id are identified
+  by a SHA-256 digest of their text, so the sidecar holds no conversation text.
+  (issue #TBD, [#TBD])
+
 - **skills:** `GET /api/skills/custom/{skill_name}/history` now answers an
   invalid skill name (not hyphen-case, or longer than 64 characters) with `400`,
   as delete and rollback already do, instead of `500` with a logged traceback on
