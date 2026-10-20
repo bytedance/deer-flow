@@ -27,7 +27,7 @@ requires_posix_host = pytest.mark.skipif(
     reason=(
         "the host skill-mutation service is POSIX-only: "
         "HostSkillMutationService._authorize and PublicationTopology.acquire raise "
-        "UNSUPPORTED_TOPOLOGY on os.name != \"posix\", and capture_package rejects it "
+        'UNSUPPORTED_TOPOLOGY on os.name != "posix", and capture_package rejects it '
         "with UNSUPPORTED_ASSET (it needs os.O_NOFOLLOW and dir_fd directory walking)"
     ),
 )
