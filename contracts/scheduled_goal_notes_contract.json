@@ -12,6 +12,7 @@
     "max_continuations_reached",
     "no_progress_detected",
     "token_capped",
+    "loop_capped",
     "evaluator_failed",
     "no_durable_end_of_turn",
     "thread_changed_after_evaluation",
