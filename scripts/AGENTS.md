@@ -203,6 +203,13 @@ likewise prefix the target with `bash`. This keeps documented `make` commands
 working when a source archive, `core.fileMode=false`, or a non-POSIX filesystem
 does not preserve executable bits.
 
+The Windows wrapper resolves `bash.exe` under the Git installation root, which
+is the parent of `cmd/`, `bin/`, or `mingw64/bin/` depending on the distribution:
+Git for Windows puts `git.exe` in `cmd/`, while PortableGit and GitHub Desktop
+put it in `mingw64/bin/`. Bash and sh stay at `<root>/bin` and `<root>/usr/bin`
+in both layouts. `backend/tests/support/shell.py` mirrors the same rule for the
+shell-script suites.
+
 `make clean` deletes `backend/.deer-flow` (database, users, threads, uploads,
 secrets), which both compose stacks mount into `deer-flow-gateway`. Its recipe
 runs `check-data-not-in-use.sh` before `make stop` (which would stop a live

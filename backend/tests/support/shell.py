@@ -19,13 +19,27 @@ from pathlib import Path
 import pytest
 
 
+def _git_roots(git: str) -> list[Path]:
+    """Return the Git installation roots that can hold *git*'s executables, nearest first.
+
+    Git for Windows keeps ``git.exe`` in ``<root>/cmd`` or ``<root>/bin``, but
+    PortableGit and GitHub Desktop put it in ``<root>/mingw64/bin``, one level
+    deeper. Bash and sh stay at ``<root>/bin`` and ``<root>/usr/bin`` in both
+    layouts, so the installation root — not ``git.exe``'s parent — is what the
+    shell candidates hang off.
+    """
+    git_dir = Path(git).resolve().parent
+    roots = [git_dir.parent]
+    if git_dir.parent.name.casefold() == "mingw64":
+        roots.append(git_dir.parent.parent)
+    return roots
+
+
 def _script_bash_candidates(git: str | None, program_files: str | None, path_bash: str | None) -> list[Path]:
     """Build the ordered bash candidate list for Windows hosts."""
     candidates: list[Path] = []
     if git is not None:
-        # Git for Windows layout: <root>/cmd/git.exe (or <root>/bin/git.exe)
-        # both resolve to <root>/bin/bash.exe two levels up from git's parent.
-        candidates.append(Path(git).resolve().parent.parent / "bin" / "bash.exe")
+        candidates.extend(root / "bin" / "bash.exe" for root in _git_roots(git))
     if program_files:
         candidates.append(Path(program_files) / "Git" / "bin" / "bash.exe")
     if path_bash is not None:
@@ -42,9 +56,9 @@ def _script_sh_candidates(git: str | None, program_files: str | None) -> list[Pa
     """
     candidates: list[Path] = []
     if git is not None:
-        git_root = Path(git).resolve().parent.parent
-        candidates.append(git_root / "bin" / "sh.exe")
-        candidates.append(git_root / "usr" / "bin" / "sh.exe")
+        for root in _git_roots(git):
+            candidates.append(root / "bin" / "sh.exe")
+            candidates.append(root / "usr" / "bin" / "sh.exe")
     if program_files:
         program_files_git = Path(program_files) / "Git"
         candidates.append(program_files_git / "bin" / "sh.exe")
