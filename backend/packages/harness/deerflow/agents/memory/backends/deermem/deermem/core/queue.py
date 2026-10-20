@@ -36,6 +36,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_EMERGENCY_BACKLOG_WARNING_DEPTH = 32
+
 
 class QueueFull(Exception):
     """Raised when a non-signal update is rejected under backpressure.
@@ -220,6 +222,19 @@ class MemoryUpdateQueue:
         if existing is not None:
             self._items = [c for c in self._items if not (queue_key(c.thread_id, c.user_id, c.agent_name) == key and c.bypass_watermark == bypass_watermark)]
         self._items.append(context)
+        if bypass_watermark and len(self._items) >= _EMERGENCY_BACKLOG_WARNING_DEPTH:
+            emergency_depth = sum(c.bypass_watermark and queue_key(c.thread_id, c.user_id, c.agent_name) == key for c in self._items)
+            # Warn at 32, 64, 128, ... pending snapshots for this key. Deriving
+            # the depth from pending items naturally resets after drain/cancel,
+            # without retaining per-key warning state or warning on every arrival.
+            if emergency_depth >= _EMERGENCY_BACKLOG_WARNING_DEPTH and emergency_depth & (emergency_depth - 1) == 0:
+                logger.warning(
+                    "Memory extraction backlog: %d pending emergency snapshots for thread %r (user_id=%r, agent_name=%r); retaining all snapshots in memory. Check extraction latency; pending snapshots can be lost on process exit.",
+                    emergency_depth,
+                    thread_id,
+                    user_id,
+                    agent_name,
+                )
         return context
 
     def _rearm_timer_locked(self) -> None:

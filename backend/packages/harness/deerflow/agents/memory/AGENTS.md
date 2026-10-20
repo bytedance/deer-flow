@@ -98,6 +98,11 @@ the finishing worker to rearm. Emergency snapshots are immediately eligible
 and remain separate in arrival order, including within the same conversation
 key: successive compactions can remove disjoint message partitions. Only normal
 cumulative updates coalesce; neither kind replaces the other.
+Emergency snapshots bypass `queue_max_depth`. Warn at 32 pending snapshots for
+one `(thread_id, user_id, agent_name)` key and each doubling, without logging
+message contents. Count only pending emergency items; drain, cancellation, and
+clear reset the threshold naturally. Retention remains unbounded and process-local.
+Regression coverage: `tests/test_memory_emergency_backlog.py`.
 `flush`, `flush_nowait`, and `flush_sync` make all pending items eligible.
 Tests in `tests/test_memory_queue_deadlines.py` use a fake monotonic clock and
 timer to exercise scheduling without timing-sensitive sleeps.
