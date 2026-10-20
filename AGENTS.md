@@ -18,11 +18,11 @@ memory, subagents and extensible tools. IM channels connect through the Gateway.
 
 A single `make dev` / Docker stack runs four cooperating services:
 
-| Service         | Port   | Role                                                                 |
-| --------------- | ------ | ------------------------------------------------------------------- |
-| **Nginx**       | `2026` | Unified reverse-proxy entry point — open this in the browser        |
-| **Gateway API** | `8001` | FastAPI REST API + embedded LangGraph-compatible agent runtime      |
-| **Frontend**    | `3000` | Next.js web interface                                               |
+| Service | Port | Role |
+| --- | --- | --- |
+| **Nginx** | `2026` | Unified reverse-proxy entry point — open this in the browser |
+| **Gateway API** | `8001` | FastAPI REST API + embedded LangGraph-compatible agent runtime |
+| **Frontend** | `3000` | Next.js web interface |
 | **Provisioner** | `8002` | Optional — only when sandbox is configured for provisioner/K8s mode |
 
 Nginx is the single public entry: it proxies `/api/*` to the Gateway, rewriting
@@ -43,25 +43,25 @@ Require explicit bind addresses for new published ports;
 
 ```
 deer-flow/
-├── Makefile                        # Root orchestration: drives the full stack (dev/start/stop, docker, setup)
-├── config.example.yaml             # Template → copy to config.yaml (gitignored) at repo root
+├── Makefile  # Root orchestration: drives the full stack (dev/start/stop, docker, setup)
+├── config.example.yaml  # Template → copy to config.yaml (gitignored) at repo root
 ├── extensions_config.example.json  # Template → copy to extensions_config.json (gitignored): MCP servers + skills
-├── backend/                        # Python backend — see backend/AGENTS.md
-│   ├── Makefile                    # Per-module backend commands (dev, gateway, test, lint, migrate-rev)
-│   ├── extensions/sources/         # Deployable snapshots of locally installed Python extensions
-│   ├── packages/extension-api/     # deerflow-extension-api package (import: deerflow_extension_api.*) — public extension contract
-│   ├── packages/harness/           # deerflow-harness package (import: deerflow.*) — agent framework
-│   └── app/                        # FastAPI Gateway + IM channels (import: app.*)
-├── frontend/                       # Next.js frontend (pnpm) — see frontend/AGENTS.md
-├── docker/                         # docker-compose files, nginx config, provisioner
-├── skills/                         # Agent skills: public/ (committed), custom/ (gitignored)
-│                                    # Managed integration skill packs are global at .deer-flow/integrations/skills/{provider}/
-│                                    # Integration credentials and enabled state remain per-user
-├── contracts/                      # Cross-component JSON contracts (e.g. subagent status, skill review)
-├── examples/                       # Extension examples: deerflow-extension-{example,bookmarks,agent-teams}
-├── scripts/                        # Root orchestration scripts invoked by the Makefile (check, configure, doctor, support_bundle, serve, nginx, docker, deploy, setup_wizard)
-├── tests/                          # Root-level tests (currently tests/skills/ — public skill tests)
-└── docs/                           # Cross-cutting docs, plans, and design notes
+├── backend/  # Python backend — see backend/AGENTS.md
+│   ├── Makefile  # Per-module backend commands (dev, gateway, test, lint, migrate-rev)
+│   ├── extensions/sources/  # Deployable snapshots of locally installed Python extensions
+│   ├── packages/extension-api/  # deerflow-extension-api package (import: deerflow_extension_api.*) — public extension contract
+│   ├── packages/harness/  # deerflow-harness package (import: deerflow.*) — agent framework
+│   └── app/  # FastAPI Gateway + IM channels (import: app.*)
+├── frontend/  # Next.js frontend (pnpm) — see frontend/AGENTS.md
+├── docker/  # docker-compose files, nginx config, provisioner
+├── skills/  # Agent skills: public/ (committed), custom/ (gitignored)
+│  # Managed integration skill packs are global at .deer-flow/integrations/skills/{provider}/
+│  # Integration credentials and enabled state remain per-user
+├── contracts/  # Cross-component JSON contracts (e.g. subagent status, skill review)
+├── examples/  # Extension examples: deerflow-extension-{example,bookmarks,agent-teams}
+├── scripts/  # Root orchestration scripts invoked by the Makefile (check, configure, doctor, support_bundle, serve, nginx, docker, deploy, setup_wizard)
+├── tests/  # Root-level tests (currently tests/skills/ — public skill tests)
+└── docs/  # Cross-cutting docs, plans, and design notes
 ```
 
 Third-party extensions load from operator-controlled `config.yaml -> plugins:`.
