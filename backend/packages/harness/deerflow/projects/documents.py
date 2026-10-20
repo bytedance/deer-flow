@@ -297,11 +297,11 @@ async def add_staged_document(
         raise
     if row is None:
         # Missing/foreign/archived project: nothing was placed or inserted.
-        await run_file_io(_remove_staging, staged.staging_path)
+        await run_file_io(cleanup_failed_atomic_write, staged.staging_path)
         return None
     if row["id"] != document_id:
         # Dedup hit: the existing row wins; discard the staged duplicate.
-        await run_file_io(_remove_staging, staged.staging_path)
+        await run_file_io(cleanup_failed_atomic_write, staged.staging_path)
         return row, False
     return row, True
 
