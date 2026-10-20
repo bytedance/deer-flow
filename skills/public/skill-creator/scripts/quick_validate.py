@@ -26,8 +26,9 @@ def validate_skill(skill_path):
     if not content.startswith('---'):
         return False, "No YAML frontmatter found"
 
-    # Extract frontmatter
-    match = re.match(r'^---\n(.*?)\n---', content, re.DOTALL)
+    # Extract frontmatter. Allow trailing whitespace on the delimiters, like
+    # the runtime parser in backend/packages/harness/deerflow/skills/frontmatter.py.
+    match = re.match(r'^---[ \t]*\n(.*?)\n---[ \t]*(?:\n|$)', content, re.DOTALL)
     if not match:
         return False, "Invalid frontmatter format"
 
@@ -38,12 +39,15 @@ def validate_skill(skill_path):
         frontmatter = yaml.safe_load(frontmatter_text)
         if not isinstance(frontmatter, dict):
             return False, "Frontmatter must be a YAML dictionary"
+        # YAML permits non-string keys; downstream validation expects strings.
+        frontmatter = {str(key): value for key, value in frontmatter.items()}
     except yaml.YAMLError as e:
         return False, f"Invalid YAML in frontmatter: {e}"
 
     # Define allowed properties. Keep this in sync with the runtime schema in
-    # backend/packages/harness/deerflow/skills/frontmatter.py: a skill that the
-    # runtime accepts must not be rejected here before packaging.
+    # backend/packages/harness/deerflow/skills/frontmatter.py and the field
+    # rules in backend/packages/harness/deerflow/skills/validation.py: a skill
+    # that the runtime accepts must not be rejected here before packaging.
     ALLOWED_PROPERTIES = {
         'name', 'description', 'license', 'allowed-tools', 'argument-hint',
         'required-secrets', 'secrets-autonomous', 'metadata', 'compatibility',

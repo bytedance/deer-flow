@@ -223,3 +223,38 @@ def test_validate_skill_rejects_malformed_runtime_fields(tmp_path: Path, extra: 
     content = f"---\nname: demo-skill\ndescription: Handles malformed fields.\n{extra}\n---\n\n# Demo\n"
 
     assert validator.validate_skill(_write_skill(tmp_path, content)) == (False, message)
+
+
+def test_validate_skill_accepts_trailing_whitespace_on_delimiters(tmp_path: Path) -> None:
+    validator = _load_validator()
+    content = "--- \nname: demo-skill\ndescription: Handles padded delimiters.\n--- \n\n# Demo\n"
+
+    assert validator.validate_skill(_write_skill(tmp_path, content)) == (True, "Skill is valid!")
+
+
+def test_validate_skill_reports_mixed_non_string_keys_without_crashing(tmp_path: Path) -> None:
+    validator = _load_validator()
+    content = "---\nname: demo-skill\ndescription: Handles odd keys.\n42: bad\ncustom-field: bad\n---\n\n# Demo\n"
+
+    valid, message = validator.validate_skill(_write_skill(tmp_path, content))
+
+    assert valid is False
+    assert "Unexpected key(s)" in message
+    assert "42" in message
+    assert "custom-field" in message
+
+
+def test_shared_skill_parser_accepts_bom_prefixed_frontmatter(tmp_path: Path) -> None:
+    utils = _load_script("utils")
+    skill_dir = tmp_path / "demo-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "﻿---\nname: demo-skill\ndescription: Handles BOM-prefixed files.\n---\n\n# Demo\n",
+        encoding="utf-8",
+        newline="",
+    )
+
+    name, description, _ = utils.parse_skill_md(skill_dir)
+
+    assert name == "demo-skill"
+    assert description == "Handles BOM-prefixed files."
