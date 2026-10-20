@@ -148,7 +148,7 @@ class _BoundAgentRuns:
             async with reserve_artifact_write(request, thread_id, user_id=self._user_id):
                 return await asyncio.to_thread(read_output_snapshot, self._user_id, thread_id, path)
 
-    async def configuration_revision(self, *, assistant_ids: list[str]) -> str:
+    async def configuration_revision(self, *, assistant_ids: list[str], durable: bool = False) -> str:
         from deerflow.config.agents_config import load_agent_config, load_agent_soul
         from deerflow.config.app_config import get_app_config
         from deerflow.config.extensions_config import get_extensions_config
@@ -173,7 +173,12 @@ class _BoundAgentRuns:
                     agents[name] = [config.model_dump(mode="json"), load_agent_soul(name, user_id=self._user_id)]
                 value = [get_app_config().model_dump(mode="json"), get_extensions_config().model_dump(mode="json"), names, agents]
                 raw = json.dumps(value, sort_keys=True, ensure_ascii=True, default=str).encode()
-                return hmac.new(self._host.revision_key, raw, hashlib.sha256).hexdigest()
+                key = self._host.revision_key
+                if durable:
+                    from app.gateway.auth.config import get_auth_config
+
+                    key = hmac.new(get_auth_config().jwt_secret.encode(), b"deerflow:configuration-revision:v1", hashlib.sha256).digest()
+                return hmac.new(key, raw, hashlib.sha256).hexdigest()
 
             return await asyncio.to_thread(snapshot)
 

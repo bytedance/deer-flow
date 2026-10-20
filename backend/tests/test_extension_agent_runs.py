@@ -445,3 +445,24 @@ async def test_evidence_persistence_failure_prevents_execution(runtime, monkeypa
     assert not handles
     with pytest.raises(AgentRunError, match="unavailable"):
         await runs.configuration_evidence(thread_id=thread, run_id=run.run_id)
+
+
+@pytest.mark.asyncio
+async def test_durable_configuration_revision_survives_host_replacement_and_rotation(host, monkeypatch):
+    control, request, load_user = host
+    monkeypatch.setattr("deerflow.config.app_config.get_app_config", lambda: SimpleNamespace(model_dump=lambda **kw: {"model": "test"}))
+    monkeypatch.setattr("deerflow.config.extensions_config.get_extensions_config", lambda: SimpleNamespace(model_dump=lambda **kw: {}))
+    secret = SimpleNamespace(jwt_secret="stable-test-signing-key")
+    monkeypatch.setattr("app.gateway.auth.config.get_auth_config", lambda: secret)
+    first = control.bind(request)
+    durable = await first.configuration_revision(assistant_ids=["lead_agent"], durable=True)
+    ephemeral = await first.configuration_revision(assistant_ids=["lead_agent"])
+    control.close()
+    second = GatewayAgentRunsHost(request.app, load_user=load_user).bind(request)
+    assert durable == await second.configuration_revision(assistant_ids=["lead_agent"], durable=True)
+    assert ephemeral != await second.configuration_revision(assistant_ids=["lead_agent"])
+    secret.jwt_secret = "rotated"
+    assert durable != await second.configuration_revision(assistant_ids=["lead_agent"], durable=True)
+    load_user.return_value = None
+    with pytest.raises(AgentRunError):
+        await second.configuration_revision(assistant_ids=["lead_agent"], durable=True)

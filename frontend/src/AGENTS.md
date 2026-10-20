@@ -116,6 +116,8 @@ Tests: `html-assets.dom.test.ts`, `artifact-file-preview.dom.test.tsx`,
    prompt/error, never permission to overwrite the existing Agent.
    Import errors join FastAPI 422 validation messages into readable text while
    preserving string conflict details; unusable error bodies use a status fallback.
+   New-Agent saves require the latest `setup_agent` success and read-back.
+   ToolMessage/`deerflow_tool_meta.status` errors or exhausted retries restore Save.
 6. Components subscribe to thread state and render updates
 
 AI message grouping uses `extractContentFromMessage()` to identify visible answer content. A non-empty content array may contain only Anthropic thinking blocks; keep it in `assistant:processing` until answer content arrives. Cover both streamed snapshots in `tests/unit/core/messages/utils.test.ts`.
@@ -223,7 +225,8 @@ export on a page error or non-advancing cursor; demos keep their fixture path.
 Model picker, chat entry pages, branch tree, and browser-control ownership are
 detailed in `frontend/docs/conversation-ui-ownership.md`.
 
-- `src/core/threads/hooks.ts` owns pre-submit upload state and thread submission. The optimistic human bubble (before and after upload) and the submitted message all build `additional_kwargs` through `buildHumanMessageAdditionalKwargs`, so quote/reference metadata and staged project files survive the upload; never replace them with only the uploaded files.
+- `core/threads/hooks.ts` owns uploads/sends. Both optimistic and submitted humans use `buildHumanMessageAdditionalKwargs` to retain quote/reference metadata and staged project files.
+- `core/uploads/api.ts` rejects `success: false` before send or composer clear. Keep the existing retry path; accepted files are not rolled back.
 - `src/components/workspace/chats/chat-box.tsx` owns the desktop right-panel layout, and **all three** right panels (artifacts, sidecar, browser) share one `ResizablePanelGroup` — do not fork a non-resizable branch per panel kind, which is how the artifacts divider silently lost its drag handle (#4465). Open/close is `collapse()` / `resize()` on the side panel's imperative handle, not conditional rendering, so the width can animate. Three constraints hold that together: the size transition is applied from the group as `[&>[data-panel]]:transition-[flex-grow]` because the sized flex item is the library's own `[data-panel]` element rather than the child `className` lands on; it is applied only while an open/close is in flight, so a drag is not interpolated frame by frame; and during the animation the panel content is held at its final width in `cqw` and clipped, because a reflowing message list re-runs its scroll-to-bottom (pinned by `tests/e2e/sidecar-chat.spec.ts`'s no-animated-scroll test) and a re-wrapping composer changes which responsive labels it shows. Because the panel is `collapsible`, the library can also collapse it to `0%` on its own when a drag crosses `minSize`, without going through the state that owns it. `onResize` records the last positive size while the pointer moves, but the owning `sidecar` / `browserView` / `artifactsOpen` state must only mirror a final `0%` layout from `onLayoutChanged`, after pointer release; closing on the first `0%` resize frame breaks a continuous drag that reaches the edge and then reverses before release.
 
 `ask_clarification` ToolMessages delimit runs despite hidden human replies; skill
