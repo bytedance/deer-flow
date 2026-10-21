@@ -11,9 +11,10 @@ two distinct defects appear:
 * a ``with os.fdopen(fd, ...)`` that never binds leaks ``fd``, because the
   ``with`` cannot close a descriptor it never received.
 
-``uploads/companions.py`` is the strongest case: its unguarded ``finally``
-discarded the staged record even on the success path, so an unlink failure
-turned a successful registration into an exception.
+``uploads/companions.py`` is the strongest case: after a successful
+``os.replace`` the staged name was already gone, so the unguarded ``finally``
+only ever ran on the failure path, where its own error replaced the
+``json.dump``/``os.replace`` one the caller needed.
 
 Sites are pinned separately because they own different parts of the pipeline.
 The channel publishers (#7106), project staging (#7141), the extension manager
@@ -274,7 +275,7 @@ def test_companion_registration_success_is_unchanged(tmp_path):
     companions.register_companion(original, markdown)
 
     records_dir = tmp_path / "thread" / "upload-companions"
-    assert [p.name for p in records_dir.iterdir() if p.name.startswith(".json")] or list(records_dir.glob("*.json"))
+    assert [p.name for p in records_dir.iterdir() if p.name.endswith(".json")] or list(records_dir.glob("*.json"))
     assert not list(records_dir.glob(".companion-*"))
     assert companions.resolve_companion(original) == markdown
 
@@ -290,3 +291,50 @@ def test_companion_registration_still_succeeds_when_publish_cleanup_would_fail(t
 
     assert companions.resolve_companion(original) == markdown
     assert records.records == []
+
+
+class _ArchiveResponse:
+    """A download response that trips the archive size guard."""
+
+    def __init__(self, chunk: bytes) -> None:
+        self._chunk = chunk
+
+    def __enter__(self) -> _ArchiveResponse:
+        return self
+
+    def __exit__(self, *_exc: object) -> bool:
+        return False
+
+    def read(self, _size: int) -> bytes:
+        return self._chunk
+
+
+def test_lark_archive_too_large_keeps_its_error_when_cleanup_fails(monkeypatch, real_unlink):
+    """The size guard's ValueError must survive a failing download cleanup."""
+    from deerflow.integrations import lark_cli
+
+    oversized = b"x" * (lark_cli.LARK_CLI_MAX_ARCHIVE_BYTES + 1)
+    monkeypatch.setattr(
+        lark_cli.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _ArchiveResponse(oversized),
+    )
+    _fail_unlink_on(monkeypatch, lambda path: path.suffix == ".zip", real_unlink)
+
+    with pytest.raises(ValueError, match="too large"):
+        lark_cli._download_lark_archive("v1.2.3")
+
+
+def test_lark_archive_download_error_keeps_its_message_when_cleanup_fails(monkeypatch, real_unlink):
+    """The network boundary's ValueError must survive a failing download cleanup."""
+
+    def _offline(*_args, **_kwargs):
+        raise OSError("network down")
+
+    from deerflow.integrations import lark_cli
+
+    monkeypatch.setattr(lark_cli.urllib.request, "urlopen", _offline)
+    _fail_unlink_on(monkeypatch, lambda path: path.suffix == ".zip", real_unlink)
+
+    with pytest.raises(ValueError, match="Could not download the Lark skill pack"):
+        lark_cli._download_lark_archive("v1.2.3")

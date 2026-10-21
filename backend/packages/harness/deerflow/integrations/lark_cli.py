@@ -2852,10 +2852,10 @@ def _download_lark_archive(version: str) -> Path:
                         raise ValueError("Lark CLI source archive is too large.")
                     out.write(chunk)
     except ValueError:
-        archive_path.unlink(missing_ok=True)
+        cleanup_failed_atomic_write(archive_path)
         raise
     except Exception as exc:  # noqa: BLE001 - network boundary
-        archive_path.unlink(missing_ok=True)
+        cleanup_failed_atomic_write(archive_path)
         raise ValueError(f"Could not download the Lark skill pack ({version}) from GitHub. Check the Gateway's internet access, or pre-stage the archive via {LARK_CLI_SOURCE_ARCHIVE_ENV}.") from exc
     return archive_path
 
