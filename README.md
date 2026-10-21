@@ -1036,6 +1036,10 @@ DeerFlow supports receiving tasks from messaging apps. Channels auto-start when 
 
 Cancelling a channel restart discards its pending configuration reload, preserving newer runtime settings applied afterward.
 
+Invalid UTF-8 in `channels/store.json` follows the same recovery policy as malformed JSON:
+SQL migration warns and skips the file, leaving it unchanged so channels can start; the
+memory backend's JSON store warns and starts empty, replacing the file on its next write.
+
 Conversation-binding, runtime channel-credential and WeChat auth-state saves preserve the original
 persistence failure when staged-file cleanup also fails. Remaining cleanup still runs, and warnings
 identify copies that could not be removed. Buzz keeps failed snapshots available for retry, even if
