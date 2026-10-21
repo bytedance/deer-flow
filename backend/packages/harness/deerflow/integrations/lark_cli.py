@@ -423,18 +423,16 @@ def _walk_and_harden(root: Path, apply_: Callable[[Path, str], None]) -> None:
     pending: list[Path] = [root]
     while pending:
         path = pending.pop()
-        kind = _credential_tree_path_kind(path)
-        if kind == "gone":
-            # Vanished between iterdir() and here (concurrent atomic rename or
-            # marker unlink); nothing to harden, keep walking the rest.
-            continue
-        apply_(path, kind)
-        if kind == "dir":
-            try:
+        try:
+            kind = _credential_tree_path_kind(path)
+            apply_(path, kind)
+            if kind == "dir":
                 pending.extend(path.iterdir())
-            except FileNotFoundError:
-                # Directory unlinked concurrently (same churn as above).
-                continue
+        except FileNotFoundError:
+            # Atomic publication may remove a descendant at any walk step.
+            # Losing the root itself is a broken credential boundary.
+            if path == root:
+                raise
 
 
 def _credential_tree_path_kind(path: Path) -> str:
@@ -443,14 +441,7 @@ def _credential_tree_path_kind(path: Path) -> str:
     Rejects any symlink and any Windows reparse point *before* the caller may
     descend, so a junction cannot redirect traversal outside the tree.
     """
-    try:
-        info = path.lstat()
-    except FileNotFoundError:
-        # The single-flight login run writes marker/result/flow-state files in
-        # this directory via atomic rename, and another thread may unlink a
-        # marker between our iterdir() and here; a vanished entry is not a
-        # security violation, so let the walk skip it instead of aborting.
-        return "gone"
+    info = path.lstat()
     if stat.S_ISLNK(info.st_mode):
         raise ValueError(f"Lark CLI credential path must not be a symlink: {path}")
     if os.name == "nt" and (getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
