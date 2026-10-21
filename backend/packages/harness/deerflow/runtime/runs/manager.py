@@ -188,6 +188,10 @@ class RunIdempotencyUnsupported(RuntimeError):
     """The configured store cannot safely persist the requested idempotency fields."""
 
 
+class RunIdempotencyKeyMismatch(RuntimeError):
+    """The idempotency key belongs to a run of another thread or user: a different request."""
+
+
 def _store_accepts_idempotency_parameter(store: RunStore, parameter_name: str) -> bool:
     """Require an explicit keyword parameter or an opt-in owned by the method."""
     callable_ = store.create_thread_operation_atomic
@@ -2080,7 +2084,7 @@ class RunManager:
                     if existing.idempotency_key != idempotency_key:
                         continue
                     if existing.thread_id != thread_id or existing.user_id != user_id:
-                        raise RuntimeError("Run idempotency key resolved to a different thread or user")
+                        raise RunIdempotencyKeyMismatch("Run idempotency key resolved to a different thread or user")
                     existing.idempotency_reused = True
                     return existing
 
@@ -2094,7 +2098,7 @@ class RunManager:
                 # for get(), cancel(), and orphan reconciliation.
                 existing = self._record_from_store(conflict.existing)
                 if existing.thread_id != thread_id or existing.user_id != user_id:
-                    raise RuntimeError("Run idempotency key resolved to a different thread or user") from conflict
+                    raise RunIdempotencyKeyMismatch("Run idempotency key resolved to a different thread or user") from conflict
                 existing.idempotency_reused = True
                 return existing
 

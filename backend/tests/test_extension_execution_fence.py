@@ -142,14 +142,17 @@ async def test_execution_fence_migration_upgrade_and_downgrade(tmp_path):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'fence-migration.db'}")
     config = bootstrap._get_alembic_config(engine)
     try:
-        await asyncio.to_thread(bootstrap._upgrade, config, "0046_skill_mutations")
+        await asyncio.to_thread(bootstrap._upgrade, config, "0047_mcp_oauth_tokens")
         async with engine.begin() as connection:
             await connection.execute(sa.text("DROP TABLE IF EXISTS extension_execution_leases"))
-        await asyncio.to_thread(bootstrap._upgrade, config, "0047_extension_execution_leases")
+        await asyncio.to_thread(bootstrap._upgrade, config, "0048_extension_execution_leases")
         async with engine.connect() as connection:
             assert "extension_execution_leases" in await connection.run_sync(lambda c: sa.inspect(c).get_table_names())
-        await asyncio.to_thread(command.downgrade, config, "0046_skill_mutations")
+        await asyncio.to_thread(command.downgrade, config, "0047_mcp_oauth_tokens")
         async with engine.connect() as connection:
-            assert "extension_execution_leases" not in await connection.run_sync(lambda c: sa.inspect(c).get_table_names())
+            names = await connection.run_sync(lambda c: sa.inspect(c).get_table_names())
+            assert "extension_execution_leases" not in names
+            assert "mcp_oauth_tokens" in names
+            assert (await connection.execute(sa.text("SELECT version_num FROM alembic_version"))).scalar_one() == "0047_mcp_oauth_tokens"
     finally:
         await engine.dispose()

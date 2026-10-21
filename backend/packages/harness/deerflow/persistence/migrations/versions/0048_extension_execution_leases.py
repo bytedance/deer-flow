@@ -1,14 +1,14 @@
 """Generic extension execution fences.
 
-Revision ID: 0047_extension_execution_leases
-Revises: 0046_skill_mutations
+Revision ID: 0048_extension_execution_leases
+Revises: 0047_mcp_oauth_tokens
 """
 
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0047_extension_execution_leases"
-down_revision = "0046_skill_mutations"
+revision = "0048_extension_execution_leases"
+down_revision = "0047_mcp_oauth_tokens"
 branch_labels = None
 depends_on = None
 

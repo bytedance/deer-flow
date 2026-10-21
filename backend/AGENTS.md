@@ -174,6 +174,8 @@ The backend is split into two layers with a strict dependency direction:
 - **Harness** (`packages/harness/deerflow/`): Publishable agent framework package (`deerflow-harness`). Import prefix: `deerflow.*`. Contains agent orchestration, tools, sandbox, models, MCP, skills, config — everything needed to build and run agents.
 - **App** (`app/`): Unpublished application code. Import prefix: `app.*`. Contains the FastAPI Gateway API and IM channel integrations (Feishu, Slack, Telegram, DingTalk). Feishu option clarifications can render as interactive button cards behind `channels.feishu.card_interaction_enabled` (default off); see `app/channels/AGENTS.md`.
 
+Channel credential staging (`app/channels/credential_staging.py`) is swept on worker-thread state loads, including SQL legacy import. Only owned regular files older than 24h are removed; leave anonymous temporary files alone and keep WeChat constructors IO-free.
+
 **Dependency rule**: App imports deerflow, but deerflow never imports app. This boundary is enforced by `tests/test_harness_boundary.py` which runs in CI.
 
 **Import conventions**:

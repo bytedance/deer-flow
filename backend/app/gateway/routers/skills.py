@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import tempfile
 import threading
@@ -507,7 +508,7 @@ async def list_skills(request: Request, config: AppConfig = Depends(get_config))
         skills = await asyncio.to_thread(_load_user_skills, config)
     except Exception as e:
         logger.error(f"Failed to load skills: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to load skills: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to load skills.") from e
 
     visible_skills = await _filter_visible_skills(request, config, skills)
 
@@ -654,7 +655,7 @@ async def list_custom_skills(request: Request, config: AppConfig = Depends(get_c
         return SkillsListResponse(skills=[_skill_to_response(skill) for skill in visible_skills])
     except Exception as e:
         logger.error("Failed to list custom skills: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to list custom skills: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to list custom skills.") from e
 
 
 @router.get("/skills/diagnostics/custom", response_model=SkillDiagnosticsResponse, summary="List Owned Custom Skill YAML Errors")
@@ -817,6 +818,9 @@ async def delete_custom_skill(skill_name: str, request: Request, config: AppConf
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
+        # Reject a malformed name (400 below) before the drained tail: failing
+        # there first takes the owner's mutation lock and logs a caller error.
+        SkillStorage.validate_skill_name(skill_name)
         # A cold user-scoped storage resolves the project root and builds
         # absolute paths on construction: blocking filesystem IO.
         storage = await asyncio.to_thread(_get_user_skill_storage, config)
@@ -863,6 +867,15 @@ async def get_custom_skill_history(skill_name: str, request: Request, config: Ap
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
+        # A malformed name is a client error (400, as delete and rollback
+        # answer). Validate it here rather than with a handler-wide
+        # ``except ValueError``: a corrupt history file raises
+        # ``json.JSONDecodeError`` or ``UnicodeDecodeError``, both ValueErrors,
+        # and must stay a 500.
+        try:
+            SkillStorage.validate_skill_name(skill_name)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
         def _read_history() -> list[dict] | None:
             # Worker thread: storage construction, the existence probes, and the
@@ -972,6 +985,12 @@ async def rollback_custom_skill(skill_name: str, body: SkillRollbackRequest, req
         raise HTTPException(status_code=400, detail="history_index is out of range")
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        # A corrupt (malformed JSON or non-UTF-8) history file is a server
+        # fault, not a bad request; both are ValueErrors, so they must be
+        # caught before the 400 mapping below.
+        logger.error("Failed to roll back custom skill %s: %s", skill_name, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to roll back custom skill: {str(e)}")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -1008,7 +1027,7 @@ async def get_skill(skill_name: str, request: Request, config: AppConfig = Depen
         raise
     except Exception as e:
         logger.error(f"Failed to get skill {skill_name}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to get skill: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get skill.") from e
 
 
 def _write_extensions_skill_state(
