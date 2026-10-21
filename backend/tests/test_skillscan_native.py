@@ -596,6 +596,30 @@ def test_archive_preflight_rejects_ntfs_ads_colon_member(tmp_path: Path) -> None
     assert result["blocked"] is True
 
 
+@pytest.mark.parametrize(
+    ("filler", "magic"),
+    [
+        (b"\n", b"\x7fELF"),
+        (b"\xef\xbb\xbf", b"\x7fELF"),
+        (b" " * 63, b"\xbf\xba\xfe\xca"),
+    ],
+    ids=["newline-elf", "bom-elf", "max-offset-macho-fat64-le"],
+)
+def test_nested_zip_with_filler_prefixed_executable_escalates_to_critical(tmp_path: Path, filler: bytes, magic: bytes) -> None:
+    payload = filler + magic + b"\x00" * 64
+    archive = tmp_path / "demo-skill.skill"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("demo-skill/SKILL.md", "---\nname: demo-skill\ndescription: Demo skill\n---\n")
+        zf.writestr("demo-skill/payload.zip", _nested_zip_bytes("tool", payload))
+
+    result = scan_archive_preflight(archive)
+
+    finding = _finding_by_rule(result["findings"], "package-nested-archive")
+    assert finding["severity"] == "CRITICAL"
+    assert "contains an executable binary member" in (finding["evidence"] or "")
+    assert result["blocked"] is True
+
+
 def test_nested_zip_with_executable_member_escalates_to_critical(tmp_path: Path) -> None:
     archive = tmp_path / "demo-skill.skill"
     with zipfile.ZipFile(archive, "w") as zf:
