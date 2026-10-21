@@ -549,6 +549,8 @@ def test_ls_tool_permission_error_names_denied_entry(tmp_path, monkeypatch) -> N
         locked.chmod(0o700)
     assert result.startswith("Error: Permission denied:"), result
     assert "/mnt/user-data/workspace/locked" in result
+    assert str(workspace) not in result
+    assert str(tmp_path) not in result
 
 
 @_NON_ROOT_POSIX
@@ -572,7 +574,8 @@ def test_glob_tool_permission_error_names_denied_subdirectory(tmp_path, monkeypa
         locked.chmod(0o700)
     assert result.startswith("Error: Permission denied:"), result
     assert "/mnt/user-data/workspace/locked" in result
-    assert "private-host-mount" not in result
+    assert str(workspace) not in result
+    assert str(tmp_path) not in result
 
 
 def test_find_grep_matches_accepts_single_file(tmp_path) -> None:
