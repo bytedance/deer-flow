@@ -22,7 +22,7 @@ def config_checkout(tmp_path: Path) -> Path:
     return tmp_path
 
 
-@pytest.mark.parametrize("encoding", ["ascii", "cp1252", "utf-8"])
+@pytest.mark.parametrize("encoding", ["ascii", "cp1252", "cp936", "utf-8"])
 def test_configure_succeeds_with_restricted_stdout_encoding(config_checkout: Path, encoding: str):
     result = subprocess.run(
         [sys.executable, str(config_checkout / "scripts" / "configure.py")],

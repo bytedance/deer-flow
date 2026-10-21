@@ -34,6 +34,11 @@ Tests: `backend/tests/test_extension_check_script.py`.
 status in `make check`, independently of the host locale.
 Tests: `backend/tests/test_check_script.py`.
 
+`doctor.py` and `setup_wizard.py` configure stdout with `errors="replace"` at
+the start of `main`, preserving its encoding so legacy terminals and pipes can
+finish reports and setup. Guard `reconfigure` for embedded/captured streams.
+Offline subprocess coverage: `backend/tests/test_setup_script_encoding.py`.
+
 ## Manual Claude OAuth Export
 
 `export_claude_code_oauth.py` validates Keychain JSON as an object containing an

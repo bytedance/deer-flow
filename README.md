@@ -207,6 +207,8 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
    Jina can also bound concurrent HTTP attempts and FIFO waiting with the opt-in `request_admission` tool extra. One immutable budget is shared across clients and agent threads in each process; replicas have independent budgets. See [Jina request admission](backend/docs/CONFIGURATION.md#jina-request-admission).
 
    Run `make doctor` at any time to verify your setup and get actionable fix hints.
+   The setup wizard and health check support legacy terminal encodings, including
+   Windows cp936, replacing unsupported characters so both commands can finish.
    If you are opening a GitHub issue about a local setup or runtime problem, run
    `make support-bundle`. The command prints reporter next steps, writes a
    `*-issue-summary.md` file to paste into the issue, a `*-issue-draft.md` file
