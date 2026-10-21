@@ -172,6 +172,10 @@ one content tree at a time. Header, channel, menu, and history visibility follow
 desktop `SidebarProvider.open` preference. Keep the activity poll and shared
 delete-dialog provider outside the switching content. Regression coverage lives
 in the frame DOM tests and `tests/e2e/sidebar.spec.ts`.
+Reuse the generated `Sidebar` for the mobile drawer so its width and accessibility
+markup stay shared. Close the mobile drawer on pathname changes, and restore rail
+focus after the drawer portal unmounts. Workspace header triggers expose their
+expanded state and announce the mobile dialog.
 
 Scheduled-task list search filters the current authorized query result by title or
 prompt, composing with status/type filters and thread scope. Selection must derive

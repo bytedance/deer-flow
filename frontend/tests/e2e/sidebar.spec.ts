@@ -40,12 +40,17 @@ test.describe("Sidebar navigation", () => {
         ).toBeVisible();
         const trigger = sidebar.locator("[data-sidebar='trigger']");
         await expect(trigger).toBeVisible();
+        await expect(trigger).toHaveAttribute("aria-expanded", "false");
+        await expect(trigger).toHaveAttribute("aria-haspopup", "dialog");
         await trigger.tap();
 
         const drawer = page.locator(
           "[data-mobile='true'][data-sidebar='sidebar']",
         );
         await expect(drawer).toBeVisible();
+        const drawerTrigger = drawer.locator("[data-sidebar='trigger']");
+        await expect(drawerTrigger).toHaveAttribute("aria-expanded", "true");
+        await expect(drawerTrigger).toHaveAttribute("aria-haspopup", "dialog");
         await expect(
           drawer.getByText("Existing conversation", { exact: true }),
         ).toBeVisible();
@@ -65,6 +70,9 @@ test.describe("Sidebar navigation", () => {
           sidebar.locator("a[href='/workspace/agents']"),
         ).toBeVisible();
         await expect(sidebar.locator("[data-sidebar='trigger']")).toBeFocused();
+        await expect(
+          sidebar.locator("[data-sidebar='trigger']"),
+        ).toHaveAttribute("aria-expanded", "false");
         await expect
           .poll(() => page.evaluate(() => document.documentElement.scrollWidth))
           .toBeLessThanOrEqual(width);
@@ -85,6 +93,44 @@ test.describe("Sidebar navigation", () => {
         ).toBeHidden();
       });
     }
+
+    test("mobile drawer closes after tapping a navigation link", async ({
+      page,
+      context,
+      baseURL,
+    }) => {
+      await context.addCookies([
+        { name: "sidebar_state", value: "false", url: baseURL! },
+      ]);
+      await page.setViewportSize({ width: 390, height: 812 });
+      mockLangGraphAPI(page);
+      await page.goto("/workspace/chats/new");
+      await expect(page.getByRole("textbox").first()).toBeVisible();
+
+      const sidebar = page.locator("[data-sidebar='sidebar']:visible");
+      await sidebar.locator("[data-sidebar='trigger']").tap();
+      const drawer = page.locator(
+        "[data-mobile='true'][data-sidebar='sidebar']",
+      );
+      await expect(drawer).toBeVisible();
+
+      await drawer.locator("a[href='/workspace/agents']").tap();
+      await expect(page).toHaveURL(/\/workspace\/agents$/);
+      await expect(drawer).toBeHidden();
+      await expect(sidebar.locator("a[href='/workspace/chats']")).toBeVisible();
+      await expect(sidebar.locator("[data-sidebar='trigger']")).toHaveAttribute(
+        "aria-expanded",
+        "false",
+      );
+
+      await sidebar.locator("a[href='/workspace/chats']").tap();
+      await expect(page).toHaveURL(/\/workspace\/chats$/);
+      expect(
+        (await context.cookies()).find(
+          (cookie) => cookie.name === "sidebar_state",
+        )?.value,
+      ).toBe("false");
+    });
   });
 
   test("sidebar contains Chats and Agents nav links", async ({ page }) => {

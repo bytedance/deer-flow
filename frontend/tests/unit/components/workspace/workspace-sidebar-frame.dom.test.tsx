@@ -18,8 +18,14 @@ import {
   useWorkspaceSidebarExpanded,
 } from "@/components/workspace/workspace-sidebar-frame";
 
-const { mobile } = rs.hoisted(() => ({ mobile: { value: true } }));
+const { mobile, navigation } = rs.hoisted(() => ({
+  mobile: { value: true },
+  navigation: { pathname: "/workspace/chats/new" },
+}));
 rs.mock("@/hooks/use-mobile", () => ({ useIsMobile: () => mobile.value }));
+rs.mock("next/navigation", () => ({
+  usePathname: () => navigation.pathname,
+}));
 
 function Contents() {
   const expanded = useWorkspaceSidebarExpanded();
@@ -61,10 +67,49 @@ function Harness({
 afterEach(() => {
   cleanup();
   mobile.value = true;
+  navigation.pathname = "/workspace/chats/new";
   document.cookie = "sidebar_state=; path=/; max-age=0";
 });
 
 describe("workspace mobile sidebar", () => {
+  it("uses the standard mobile drawer width with a collapsed desktop preference", async () => {
+    render(<Harness defaultOpen />);
+    fireEvent.click(screen.getByRole("button", { name: "Toggle Sidebar" }));
+    const standardDrawer = await screen.findByRole("dialog");
+    const standardWidth =
+      standardDrawer.style.getPropertyValue("--sidebar-width");
+    expect(standardWidth).not.toBe("");
+    cleanup();
+
+    render(<Harness />);
+    fireEvent.click(screen.getByRole("button", { name: "Toggle navigation" }));
+    const drawer = await screen.findByRole("dialog");
+    expect(drawer.style.getPropertyValue("--sidebar-width")).toBe(
+      standardWidth,
+    );
+  });
+
+  for (const defaultOpen of [false, true]) {
+    it(`closes the mobile drawer on navigation with desktop open=${defaultOpen}`, async () => {
+      const view = render(<Harness defaultOpen={defaultOpen} />);
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: defaultOpen ? "Toggle Sidebar" : "Toggle navigation",
+        }),
+      );
+      await screen.findByRole("dialog");
+
+      navigation.pathname = "/workspace/agents";
+      view.rerender(<Harness defaultOpen={defaultOpen} />);
+
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      expect(screen.getByTestId("desktop-state").textContent).toBe(
+        String(defaultOpen),
+      );
+      expect(document.cookie).not.toContain("sidebar_state=");
+    });
+  }
+
   it("keeps a collapsed rail and opens full content without changing the desktop preference", async () => {
     render(<Harness />);
     expect(screen.getByRole("link", { name: "Agents" })).toBeDefined();

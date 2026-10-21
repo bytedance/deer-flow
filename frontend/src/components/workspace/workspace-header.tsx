@@ -41,6 +41,8 @@ export function WorkspaceHeader({ className }: { className?: string }) {
               DF
             </div>
             <SidebarTrigger
+              aria-expanded={isSidebarOpen}
+              aria-haspopup={isMobile ? "dialog" : undefined}
               className={cn(
                 "pl-2",
                 !isMobile && "hidden group-hover/workspace-header:block",
@@ -58,7 +60,10 @@ export function WorkspaceHeader({ className }: { className?: string }) {
                 DeerFlow
               </div>
             )}
-            <SidebarTrigger />
+            <SidebarTrigger
+              aria-expanded={isSidebarOpen}
+              aria-haspopup={isMobile ? "dialog" : undefined}
+            />
           </div>
         )}
       </div>

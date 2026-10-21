@@ -1,14 +1,15 @@
 "use client";
 
-import { createContext, useContext, useRef, type ReactNode } from "react";
-
+import { usePathname } from "next/navigation";
 import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
+  createContext,
+  useContext,
+  useEffect,
+  useRef,
+  type ReactNode,
+  type RefObject,
+} from "react";
+
 import { Sidebar, useSidebar } from "@/components/ui/sidebar";
 import { cn } from "@/lib/utils";
 
@@ -35,6 +36,25 @@ function Presentation({
   );
 }
 
+function RestoreRailFocus({
+  railRef,
+}: {
+  railRef: RefObject<HTMLDivElement | null>;
+}) {
+  useEffect(
+    () => () => {
+      // Wait for the stock drawer portal to unmount before restoring focus.
+      setTimeout(() => {
+        railRef.current
+          ?.querySelector<HTMLButtonElement>('[data-sidebar="trigger"]')
+          ?.focus();
+      }, 0);
+    },
+    [railRef],
+  );
+  return null;
+}
+
 export function WorkspaceSidebarFrame({
   children,
   collapsible = "icon",
@@ -45,7 +65,12 @@ export function WorkspaceSidebarFrame({
   ...props
 }: React.ComponentProps<typeof Sidebar>) {
   const { isMobile, open, openMobile, setOpenMobile } = useSidebar();
+  const pathname = usePathname();
   const railRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    setOpenMobile(false);
+  }, [pathname, setOpenMobile]);
 
   if (!isMobile || collapsible !== "icon" || open) {
     return (
@@ -67,7 +92,7 @@ export function WorkspaceSidebarFrame({
   }
 
   return (
-    <Sheet open={openMobile} onOpenChange={setOpenMobile}>
+    <>
       {/* Keep the gap while the modal is open so the page does not reflow. */}
       <div
         className="w-(--sidebar-width-icon) shrink-0"
@@ -93,30 +118,11 @@ export function WorkspaceSidebarFrame({
           </div>
         )}
       </div>
-      <SheetContent
-        data-sidebar="sidebar"
-        data-slot="sidebar"
-        data-mobile="true"
-        side={side}
-        className="bg-sidebar text-sidebar-foreground w-(--sidebar-width) gap-0 p-0 [&>button]:hidden"
-        style={{ "--sidebar-width": "18rem" } as React.CSSProperties}
-        onCloseAutoFocus={(event) => {
-          const trigger = railRef.current?.querySelector<HTMLButtonElement>(
-            '[data-sidebar="trigger"]',
-          );
-          if (trigger) {
-            event.preventDefault();
-            trigger.focus();
-          }
-        }}
-      >
-        <SheetHeader className="sr-only">
-          <SheetTitle>Sidebar</SheetTitle>
-          <SheetDescription>Displays the mobile sidebar.</SheetDescription>
-        </SheetHeader>
+      <Sidebar side={side} variant={variant} collapsible={collapsible}>
+        <RestoreRailFocus railRef={railRef} />
         {/* Only one content tree is mounted: no duplicate menus or queries. */}
         {openMobile && <Presentation expanded>{children}</Presentation>}
-      </SheetContent>
-    </Sheet>
+      </Sidebar>
+    </>
   );
 }
