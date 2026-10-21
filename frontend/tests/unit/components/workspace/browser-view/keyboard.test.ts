@@ -71,6 +71,12 @@ describe("decideBrowserKeyInput", () => {
       key: "Control+Backspace",
     });
     expect(
+      decideBrowserKeyInput(ctx({ key: "Backspace", metaKey: true })),
+    ).toEqual({
+      type: "key",
+      key: "Meta+Backspace",
+    });
+    expect(
       decideBrowserKeyInput(ctx({ key: "ArrowRight", altKey: true })),
     ).toEqual({
       type: "key",
