@@ -203,4 +203,4 @@ Tests: `test_migration_0041_im_notice_preferences.py`.
 
 - `0045_completed_run_evidence` adds nullable evidence sealing fields and completed-run snapshots after `0044_channel_runtime_configs`.
 - `0046_skill_mutations` adds durable owner enrollment, asset revisions, proposals, publication operations and scan leases.
-- `0047_mcp_oauth_tokens` creates the table-guarded `mcp_oauth_tokens` (PK `scope`, `owner_user_id` (`''` for deployment), `server_key`; encrypted token columns, fingerprint, `version`, refresh lease) with no backfill. The single-head pin lives in `tests/test_migration_0047_mcp_oauth_tokens.py`.
+- `0047_mcp_oauth_tokens` creates the table-guarded `mcp_oauth_tokens` (PK `scope`, `owner_user_id` (`''` for deployment), `server_key`; encrypted token columns, chain and request fingerprints, `version`, refresh lease) with no backfill. The single-head pin lives in `tests/test_migration_0047_mcp_oauth_tokens.py`.

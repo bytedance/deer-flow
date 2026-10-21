@@ -16,6 +16,10 @@ expiry and the latest (possibly rotated) refresh token -- as
 ``DEER_FLOW_CREDENTIALS_KEY`` ciphertext. ``config_fingerprint`` identifies the
 configured token chain (``deerflow.mcp.oauth_store.oauth_config_fingerprint``):
 a row written under another fingerprint is ignored, so a changed seed wins.
+``token_request_fingerprint`` identifies how the stored access token was
+requested and read (``extra_token_params`` such as ``resource``, and the
+response fields): a process configured differently refreshes from the stored
+refresh token instead of reusing that access token.
 
 ``version`` grows by one on every token write; a refresh is claimed with a
 compare-and-set on it plus the ``refresh_lease_*`` columns, so peers that read
@@ -50,6 +54,7 @@ class McpOAuthTokenRow(Base):
     server_key: Mapped[str] = mapped_column(String(MCP_OAUTH_TOKEN_SERVER_KEY_LENGTH), nullable=False)
     config_fingerprint: Mapped[str] = mapped_column(String(MCP_OAUTH_TOKEN_FINGERPRINT_LENGTH), nullable=False)
     access_token_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    token_request_fingerprint: Mapped[str | None] = mapped_column(String(MCP_OAUTH_TOKEN_FINGERPRINT_LENGTH), nullable=True)
     token_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
     access_expires_at: Mapped[float | None] = mapped_column(Double, nullable=True)
     refresh_token_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -68,6 +73,7 @@ class StoredMcpOAuthToken:
 
     config_fingerprint: str
     access_token_enc: str | None
+    token_request_fingerprint: str | None
     token_type: str | None
     access_expires_at: float | None
     refresh_token_enc: str | None

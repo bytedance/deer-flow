@@ -34,9 +34,12 @@ from deerflow.persistence.mcp_oauth_tokens import SqlMcpOAuthTokenRepository
 
 logger = logging.getLogger(__name__)
 
-#: How long a claimed refresh may run before a peer may take it over: twice the
-#: token request's 15 s timeout, so a live refresh is never overtaken.
+#: How long a claimed refresh stays reserved without a renewal. The holder
+#: renews it every third of this while its token request runs, because HTTP
+#: timeouts bound each I/O wait, not the whole request.
 REFRESH_LEASE_SECONDS = 30.0
+#: The longest a token request may hold the lease; it is abandoned after this.
+REFRESH_MAX_SECONDS = 120.0
 #: How often a process waiting on a peer's refresh re-reads the row.
 REFRESH_POLL_SECONDS = 0.2
 
@@ -99,6 +102,19 @@ def oauth_config_fingerprint(oauth: McpOAuthConfig) -> str:
     return hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
+def oauth_token_request_fingerprint(oauth: McpOAuthConfig) -> str:
+    """Identify how an access token is requested and read, beyond the token chain.
+
+    ``extra_token_params`` (for example a ``resource`` or provider-specific
+    audience) select what the issued access token is for, and the response
+    fields select which value is used. A stored access token is reused only
+    by a process whose fingerprint matches; otherwise it refreshes from the
+    stored refresh token, which stays valid across such changes.
+    """
+    identity = [sorted(oauth.extra_token_params.items()), oauth.token_field, oauth.token_type_field, oauth.expires_in_field, oauth.default_token_type]
+    return hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
 class McpOAuthTokenStore:
     """Encrypt and arbitrate one process's view of ``mcp_oauth_tokens``.
 
@@ -132,8 +148,12 @@ class McpOAuthTokenStore:
             logger.exception("Failed to %s the stored OAuth tokens for %s", action, subject)
             raise McpOAuthTokenStoreUnavailable(f"OAuth token storage is unavailable for {subject}; try again later") from None
 
-    def load(self, key: McpOAuthTokenKey, *, fingerprint: str) -> StoredTokenLookup:
-        """Read the chain's row: no row has no version; a row this chain cannot use has no token."""
+    def load(self, key: McpOAuthTokenKey, *, fingerprint: str, request_fingerprint: str) -> StoredTokenLookup:
+        """Read the chain's row: no row has no version; a row this chain cannot use has no token.
+
+        The access token is withheld (``None``) when it was requested under
+        another ``request_fingerprint``; the refresh token is still returned.
+        """
         cipher = self._cipher()
         row = self._call(_server_subject(key), "read", lambda: self._repo.get(key.scope, key.owner_user_id, key.server_key))
         if row is None:
@@ -143,7 +163,8 @@ class McpOAuthTokenStore:
             return StoredTokenLookup(row.version, None)
         try:
             refresh_token = cipher.decrypt_text(row.refresh_token_enc)
-            access_token = cipher.decrypt_text(row.access_token_enc) if row.access_token_enc is not None else None
+            reusable = row.access_token_enc is not None and row.token_request_fingerprint == request_fingerprint
+            access_token = cipher.decrypt_text(row.access_token_enc) if reusable else None
         except CredentialsDecryptError:
             logger.warning(
                 "Stored OAuth token for MCP server '%s' cannot be decrypted with the configured credentials key(s); using the configured refresh token. Every instance needs the same DEER_FLOW_CREDENTIALS_KEY.",
@@ -178,6 +199,7 @@ class McpOAuthTokenStore:
         *,
         lease_owner: str,
         fingerprint: str,
+        request_fingerprint: str,
         access_token: str,
         token_type: str,
         expires_at: datetime,
@@ -198,6 +220,7 @@ class McpOAuthTokenStore:
                 lease_owner=lease_owner,
                 config_fingerprint=fingerprint,
                 access_token_enc=access_token_enc,
+                token_request_fingerprint=request_fingerprint,
                 token_type=token_type,
                 access_expires_at=expires_at.timestamp(),
                 refresh_token_enc=refresh_token_enc,
@@ -205,6 +228,10 @@ class McpOAuthTokenStore:
                 now=time.time(),
             ),
         )
+
+    def renew(self, key: McpOAuthTokenKey, lease_owner: str) -> bool:
+        """Extend the claim's lease by ``REFRESH_LEASE_SECONDS``; ``False`` once it is no longer held."""
+        return self._call(_server_subject(key), "renew", lambda: self._repo.renew(key.scope, key.owner_user_id, key.server_key, lease_owner=lease_owner, lease_seconds=REFRESH_LEASE_SECONDS))
 
     def release(self, key: McpOAuthTokenKey, lease_owner: str) -> bool:
         return self._call(_server_subject(key), "release", lambda: self._repo.release(key.scope, key.owner_user_id, key.server_key, lease_owner=lease_owner))

@@ -497,8 +497,18 @@ token and refresh token in the `mcp_oauth_tokens` table (migration
 - Gateway replicas share one chain. Before refreshing, a replica re-reads the
   row and uses a peer's still-valid access token. Otherwise it claims the
   refresh with a 30-second lease, so only one replica calls the token endpoint
-  and the others wait for its result. No row lock is held during the token
-  request.
+  and the others wait for its result. The holder renews the lease while the
+  token request runs (HTTP timeouts bound each read, not the whole response)
+  and abandons a request after 120 seconds. No row lock is held during the
+  token request.
+- If the new tokens cannot be stored (the database is briefly unavailable),
+  the process keeps using them, retries storing them every few seconds, and
+  stores them before its next refresh, so nobody falls back to the refresh
+  token it already consumed.
+- A stored access token is reused only by processes that request it the same
+  way (`extra_token_params` such as `resource`, and the response-field
+  settings). After such a change the next request refreshes from the stored
+  refresh token instead, so the chain is kept.
 - The configured `refresh_token` is only the seed. The row records which
   `token_url`, `client_id`, `grant_type`, `scope`, `audience` and seed it
   continues (as a SHA-256 fingerprint). After you change any of them, the next

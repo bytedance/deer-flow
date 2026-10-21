@@ -29,6 +29,7 @@ COLUMNS = {
     "server_key",
     "config_fingerprint",
     "access_token_enc",
+    "token_request_fingerprint",
     "token_type",
     "access_expires_at",
     "refresh_token_enc",
@@ -38,7 +39,7 @@ COLUMNS = {
     "rotated_at",
     "updated_at",
 }
-NULLABLE = {"access_token_enc", "token_type", "access_expires_at", "refresh_token_enc", "refresh_lease_owner", "refresh_lease_until", "rotated_at"}
+NULLABLE = {"access_token_enc", "token_request_fingerprint", "token_type", "access_expires_at", "refresh_token_enc", "refresh_lease_owner", "refresh_lease_until", "rotated_at"}
 pytestmark = pytest.mark.asyncio
 
 

@@ -1407,9 +1407,10 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
   latest refresh token now live in the new `mcp_oauth_tokens` table (migration
   `0047_mcp_oauth_tokens`), encrypted with `DEER_FLOW_CREDENTIALS_KEY` and keyed
   per deployment server or per personal-connection owner. A refresh re-reads
-  the row first and is claimed with a short lease plus a version
-  compare-and-set, so concurrent instances call the token endpoint once and
-  adopt each other's result. Changing the configured seed, token endpoint,
+  the row first and is claimed with a short lease (renewed while the token
+  request runs) plus a version compare-and-set, so concurrent instances call
+  the token endpoint once and adopt each other's result; a rotation that could
+  not be stored is kept and stored before the next refresh. Changing the configured seed, token endpoint,
   client, scope or audience starts a new chain from the configuration.
   `client_credentials` tokens stay in process. Saving an MCP configuration
   deletes the stored tokens of connections it no longer has, and a rejected

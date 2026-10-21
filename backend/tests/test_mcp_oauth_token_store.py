@@ -30,12 +30,20 @@ from deerflow.config.credentials_key import CredentialsCipher
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.mcp import oauth_store
 from deerflow.mcp.oauth import McpOAuthReauthorizationRequired, OAuthTokenManager
-from deerflow.mcp.oauth_store import McpOAuthTokenStore, McpOAuthTokenStoreUnavailable, StoredTokenLookup, oauth_config_fingerprint, set_mcp_oauth_token_store
+from deerflow.mcp.oauth_store import (
+    McpOAuthTokenStore,
+    McpOAuthTokenStoreUnavailable,
+    StoredTokenLookup,
+    oauth_config_fingerprint,
+    oauth_token_request_fingerprint,
+    set_mcp_oauth_token_store,
+)
 from deerflow.persistence.base import Base
 from deerflow.persistence.mcp_oauth_tokens import McpOAuthTokenRow, SqlMcpOAuthTokenRepository
 from deerflow.persistence.postgres_schema import dsn_with_search_path
 
 SERVER = "reports"
+REQUEST = "r" * 64
 
 
 class _Clock:
@@ -53,6 +61,7 @@ class _RotatingTokenEndpoint:
         self.refresh_token = "refresh-0"
         self.generation = 0
         self.refresh_requests: list[str] = []
+        self.forms: list[dict[str, list[str]]] = []
         self.fail_with: int | None = None
 
     def handle(self, request: httpx.Request) -> httpx.Response:
@@ -60,6 +69,7 @@ class _RotatingTokenEndpoint:
         form = parse_qs(request.content.decode())
         submitted = form["refresh_token"][0]
         self.refresh_requests.append(submitted)
+        self.forms.append(form)
         if self.fail_with is not None:
             return httpx.Response(self.fail_with, json={"error": "server_error"})
         if submitted != self.refresh_token:
@@ -122,8 +132,8 @@ def cipher() -> CredentialsCipher:
     return CredentialsCipher.from_keys([Fernet.generate_key()])
 
 
-def _config(*, seed: str = "refresh-0", grant_type: str = "refresh_token", name: str = SERVER) -> ExtensionsConfig:
-    oauth = {"token_url": "https://auth.example.invalid/token", "grant_type": grant_type, "refresh_skew_seconds": 0}
+def _config(*, seed: str = "refresh-0", grant_type: str = "refresh_token", name: str = SERVER, token_url: str = "https://auth.example.invalid/token", extra_token_params: dict[str, str] | None = None) -> ExtensionsConfig:
+    oauth = {"token_url": token_url, "grant_type": grant_type, "refresh_skew_seconds": 0, "extra_token_params": extra_token_params or {}}
     if grant_type == "refresh_token":
         oauth["refresh_token"] = seed
     else:
@@ -378,21 +388,21 @@ def test_a_claim_fails_once_a_peer_wrote_since_the_read(session_factory, cipher)
     expires_at = datetime(2030, 1, 1, tzinfo=UTC)
 
     lease = a.claim(key, fingerprint=fingerprint, expected_version=None)
-    assert a.save(key, lease_owner=lease, fingerprint=fingerprint, access_token="access-1", token_type="Bearer", expires_at=expires_at, refresh_token="refresh-1", rotated=True)
-    assert b.load(key, fingerprint=fingerprint)[0] == 1
+    assert a.save(key, lease_owner=lease, fingerprint=fingerprint, request_fingerprint=REQUEST, access_token="access-1", token_type="Bearer", expires_at=expires_at, refresh_token="refresh-1", rotated=True)
+    assert b.load(key, fingerprint=fingerprint, request_fingerprint=REQUEST)[0] == 1
     # Both read version 1; A refreshes first.
     lease = a.claim(key, fingerprint=fingerprint, expected_version=1)
     assert lease is not None
     assert b.claim(key, fingerprint=fingerprint, expected_version=1) is None, "a live lease must block the peer"
-    assert a.save(key, lease_owner=lease, fingerprint=fingerprint, access_token="access-2", token_type="Bearer", expires_at=expires_at, refresh_token="refresh-2", rotated=True)
+    assert a.save(key, lease_owner=lease, fingerprint=fingerprint, request_fingerprint=REQUEST, access_token="access-2", token_type="Bearer", expires_at=expires_at, refresh_token="refresh-2", rotated=True)
 
     assert b.claim(key, fingerprint=fingerprint, expected_version=1) is None, "the lease is free, but the row moved on"
-    version, stored, _unreadable = b.load(key, fingerprint=fingerprint)
+    version, stored, _unreadable = b.load(key, fingerprint=fingerprint, request_fingerprint=REQUEST)
     assert (version, stored.refresh_token, stored.access_token) == (2, "refresh-2", "access-2")
     # A write under a lease that is no longer held is refused.
-    assert not b.save(key, lease_owner="not-the-holder", fingerprint=fingerprint, access_token="x", token_type="Bearer", expires_at=expires_at, refresh_token="y", rotated=True)
-    assert b.load(key, fingerprint=fingerprint)[1].refresh_token == "refresh-2"
-    assert b.load(key, fingerprint="another-chain") == StoredTokenLookup(2, None)
+    assert not b.save(key, lease_owner="not-the-holder", fingerprint=fingerprint, request_fingerprint=REQUEST, access_token="x", token_type="Bearer", expires_at=expires_at, refresh_token="y", rotated=True)
+    assert b.load(key, fingerprint=fingerprint, request_fingerprint=REQUEST)[1].refresh_token == "refresh-2"
+    assert b.load(key, fingerprint="another-chain", request_fingerprint=REQUEST) == StoredTokenLookup(2, None)
 
 
 @pytest.mark.asyncio
@@ -454,3 +464,212 @@ async def test_a_revoked_stored_chain_asks_to_reauthorize_without_blaming_the_ke
     (row,) = _rows(session_factory)
     assert row.refresh_lease_owner is None, "a rejected refresh releases its lease"
     assert endpoint.refresh_requests == ["refresh-0", "refresh-1"]
+
+
+class _SlowStreamingTokenServer:
+    """A real loopback token endpoint that streams its JSON body in slow chunks.
+
+    HTTPX timeouts bound each read, not the whole response, so a body that
+    keeps trickling in can outlive any fixed lease.
+    """
+
+    def __init__(self, *, chunks: int, chunk_delay: float) -> None:
+        import http.server
+        import json as json_module
+        import socketserver
+        import time as time_module
+
+        self.requests: list[str] = []
+        self.started = threading.Event()
+        endpoint = self
+        current = {"refresh_token": "refresh-0", "generation": 0}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers["Content-Length"])).decode()
+                submitted = parse_qs(body)["refresh_token"][0]
+                endpoint.requests.append(submitted)
+                endpoint.started.set()
+                if submitted != current["refresh_token"]:
+                    payload = json_module.dumps({"error": "invalid_grant"}).encode()
+                    self.send_response(400)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+                    return
+                current["generation"] += 1
+                current["refresh_token"] = f"refresh-{current['generation']}"
+                payload = json_module.dumps({"access_token": f"access-{current['generation']}", "refresh_token": current["refresh_token"], "expires_in": 120}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Transfer-Encoding", "chunked")
+                self.end_headers()
+                size = -(-len(payload) // chunks)
+                for offset in range(0, len(payload), size):
+                    piece = payload[offset : offset + size]
+                    self.wfile.write(f"{len(piece):x}\r\n".encode() + piece + b"\r\n")
+                    self.wfile.flush()
+                    time_module.sleep(chunk_delay)
+                self.wfile.write(b"0\r\n\r\n")
+
+        self._server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+        self._server.daemon_threads = True
+        self.url = f"http://127.0.0.1:{self._server.server_address[1]}/token"
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def test_a_slow_token_response_keeps_its_lease_until_the_token_lands(session_factory, cipher, monkeypatch):
+    """The holder renews its lease while the body streams, so a peer waits instead of resending the consumed token."""
+    for variable in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setattr(oauth_store, "REFRESH_LEASE_SECONDS", 0.6)
+    monkeypatch.setattr(oauth_store, "REFRESH_POLL_SECONDS", 0.05)
+
+    # About 1.8 s of streaming: three times the lease.
+    with _SlowStreamingTokenServer(chunks=6, chunk_delay=0.3) as server:
+        config = _config(token_url=server.url)
+        a = _replica(session_factory, cipher, config)
+        b = _replica(session_factory, cipher, config)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(lambda: asyncio.run(a.get_authorization_header(SERVER)))
+            assert server.started.wait(10), "replica A never reached the token endpoint"
+            second = executor.submit(lambda: asyncio.run(b.get_authorization_header(SERVER)))
+            assert first.result(timeout=20) == "Bearer access-1"
+            assert second.result(timeout=20) == "Bearer access-1"
+    assert server.requests == ["refresh-0"]
+    (row,) = _rows(session_factory)
+    assert (row.version, row.refresh_lease_owner) == (1, None)
+    assert cipher.decrypt_text(row.refresh_token_enc) == "refresh-1"
+
+
+@pytest.mark.asyncio
+async def test_a_token_request_that_never_finishes_gives_up_and_releases_the_lease(session_factory, cipher, endpoint, monkeypatch):
+    monkeypatch.setattr(oauth_store, "REFRESH_MAX_SECONDS", 0.3)
+    handle = endpoint.handle
+
+    async def stalled(request):
+        await asyncio.sleep(5)
+        return handle(request)
+
+    monkeypatch.setattr(endpoint, "handle", stalled)
+    with pytest.raises(RuntimeError, match="did not finish within"):
+        await asyncio.wait_for(_replica(session_factory, cipher).get_authorization_header(SERVER), 5)
+    (row,) = _rows(session_factory)
+    assert row.refresh_lease_owner is None
+
+
+def _fail_next_writes(store: McpOAuthTokenStore, monkeypatch, count: int = 1) -> None:
+    """Make the next ``count`` token writes fail like a database outage."""
+    original = store._repo.write
+    remaining = {"n": count}
+
+    def write(*args, **kwargs):
+        if remaining["n"] > 0:
+            remaining["n"] -= 1
+            raise sa.exc.OperationalError("UPDATE mcp_oauth_tokens", {}, Exception("database is unavailable"))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store._repo, "write", write)
+
+
+@pytest.mark.asyncio
+async def test_a_rotation_the_store_missed_is_stored_before_the_next_refresh(session_factory, cipher, endpoint, monkeypatch):
+    a = _replica(session_factory, cipher)
+    assert await a.get_authorization_header(SERVER) == "Bearer access-1"
+    _expire_access_tokens()
+    _fail_next_writes(a._token_store, monkeypatch)
+    # refresh-1 -> refresh-2, but the row keeps the consumed refresh-1.
+    assert await a.get_authorization_header(SERVER) == "Bearer access-2"
+    _expire_access_tokens()
+
+    # The live refresh-2 is stored first instead of being replaced by refresh-1.
+    assert await a.get_authorization_header(SERVER) == "Bearer access-3"
+    _expire_access_tokens()
+    assert await _replica(session_factory, cipher).get_authorization_header(SERVER) == "Bearer access-4"
+    assert endpoint.refresh_requests == ["refresh-0", "refresh-1", "refresh-2", "refresh-3"]
+
+
+@pytest.mark.asyncio
+async def test_a_missed_rotation_reaches_peers_while_the_access_token_is_still_valid(session_factory, cipher, endpoint, monkeypatch):
+    monkeypatch.setattr("deerflow.mcp.oauth._UNSAVED_ROTATION_RETRY_SECONDS", 0.0)
+    a = _replica(session_factory, cipher)
+    _fail_next_writes(a._token_store, monkeypatch)
+    assert await a.get_authorization_header(SERVER) == "Bearer access-1"
+    assert _rows(session_factory)[0].refresh_token_enc is None, "the first write failed"
+
+    # The next call, still within the token's lifetime, stores the rotation.
+    assert await a.get_authorization_header(SERVER) == "Bearer access-1"
+    _expire_access_tokens()
+    assert await _replica(session_factory, cipher).get_authorization_header(SERVER) == "Bearer access-2"
+    assert endpoint.refresh_requests == ["refresh-0", "refresh-1"]
+
+
+@pytest.mark.asyncio
+async def test_a_newer_peer_chain_supersedes_a_missed_rotation(session_factory, cipher, endpoint, monkeypatch):
+    a = _replica(session_factory, cipher)
+    assert await a.get_authorization_header(SERVER) == "Bearer access-1"
+    _expire_access_tokens()
+    _fail_next_writes(a._token_store, monkeypatch)
+    assert await a.get_authorization_header(SERVER) == "Bearer access-2"
+
+    # Meanwhile a peer stored a newer chain over version 1 (e.g. a provider with a reuse grace period).
+    peer = McpOAuthTokenStore(SqlMcpOAuthTokenRepository(session_factory), cipher=cipher)
+    key = oauth_store.McpOAuthTokenKey.for_server(SERVER, None)
+    oauth = _config().mcp_servers[SERVER].oauth
+    lease = peer.claim(key, fingerprint=oauth_config_fingerprint(oauth), expected_version=1)
+    assert lease is not None
+    assert peer.save(
+        key,
+        lease_owner=lease,
+        fingerprint=oauth_config_fingerprint(oauth),
+        request_fingerprint=oauth_token_request_fingerprint(oauth),
+        access_token="peer-access",
+        token_type="Bearer",
+        expires_at=_Clock.current + timedelta(seconds=900),
+        refresh_token="peer-refresh",
+        rotated=True,
+    )
+    _expire_access_tokens()
+
+    assert await a.get_authorization_header(SERVER) == "Bearer peer-access"
+    assert endpoint.refresh_requests == ["refresh-0", "refresh-1"]
+
+
+@pytest.mark.asyncio
+async def test_changed_token_request_parameters_refresh_from_the_stored_chain_instead_of_reusing_the_access_token(session_factory, cipher, endpoint):
+    assert await _replica(session_factory, cipher, _config(extra_token_params={"resource": "https://old-api"})).get_authorization_header(SERVER) == "Bearer access-1"
+
+    # A hot-reloaded server asks for another resource: the old access token is
+    # for the wrong audience, but its refresh-token chain is still the live one.
+    changed = _config(extra_token_params={"resource": "https://new-api"})
+    assert await _replica(session_factory, cipher, changed).get_authorization_header(SERVER) == "Bearer access-2"
+    assert endpoint.refresh_requests == ["refresh-0", "refresh-1"]
+    assert endpoint.forms[-1]["resource"] == ["https://new-api"]
+    # Processes with the new parameters now share the new access token.
+    assert await _replica(session_factory, cipher, changed).get_authorization_header(SERVER) == "Bearer access-2"
+    assert len(endpoint.refresh_requests) == 2
+
+
+def test_request_fingerprint_follows_token_request_parameters_not_the_chain():
+    base = _config(extra_token_params={"resource": "https://api"}).mcp_servers[SERVER].oauth
+    fingerprint = oauth_token_request_fingerprint(base)
+    for update in ({"extra_token_params": {"resource": "https://other"}}, {"extra_token_params": {}}, {"token_field": "id_token"}):
+        changed = base.model_copy(update=update)
+        assert oauth_token_request_fingerprint(changed) != fingerprint, update
+        assert oauth_config_fingerprint(changed) == oauth_config_fingerprint(base), "the refresh-token chain is unaffected"
+    assert oauth_token_request_fingerprint(base.model_copy(update={"extra_token_params": {"resource": "https://api"}})) == fingerprint

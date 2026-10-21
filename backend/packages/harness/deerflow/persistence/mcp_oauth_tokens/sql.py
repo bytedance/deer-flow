@@ -16,6 +16,9 @@ Instead it is claimed and fenced in single statements:
   ``version``, so the claim fails and the caller re-reads instead of
   refreshing with a consumed refresh token. A missing row is claimed by
   inserting it at version 0 with ``ON CONFLICT DO NOTHING``.
+- ``renew`` extends a live lease while the claim's token request runs: HTTP
+  timeouts bound each I/O wait, not the whole request, so a slow response must
+  not let a peer take over and resend the same refresh token.
 - ``write`` stores the new tokens, bumps ``version`` and clears the lease, only
   while ``refresh_lease_owner`` is still the claim's own token.
 - ``release`` clears the lease under the same fence after a failed refresh.
@@ -67,6 +70,7 @@ class SqlMcpOAuthTokenRepository:
             return StoredMcpOAuthToken(
                 config_fingerprint=row.config_fingerprint,
                 access_token_enc=row.access_token_enc,
+                token_request_fingerprint=row.token_request_fingerprint,
                 token_type=row.token_type,
                 access_expires_at=row.access_expires_at,
                 refresh_token_enc=row.refresh_token_enc,
@@ -129,6 +133,7 @@ class SqlMcpOAuthTokenRepository:
         lease_owner: str,
         config_fingerprint: str,
         access_token_enc: str,
+        token_request_fingerprint: str,
         token_type: str,
         access_expires_at: float,
         refresh_token_enc: str,
@@ -139,6 +144,7 @@ class SqlMcpOAuthTokenRepository:
         values = {
             "config_fingerprint": config_fingerprint,
             "access_token_enc": access_token_enc,
+            "token_request_fingerprint": token_request_fingerprint,
             "token_type": token_type,
             "access_expires_at": access_expires_at,
             "refresh_token_enc": refresh_token_enc,
@@ -154,6 +160,15 @@ class SqlMcpOAuthTokenRepository:
             written = session.execute(stmt).rowcount == 1
             session.commit()
         return written
+
+    def renew(self, scope: str, owner_user_id: str, server_key: str, *, lease_owner: str, lease_seconds: float) -> bool:
+        """Extend the claim's lease while it is still live; ``False`` once it expired or changed hands."""
+        with self._sf() as session:
+            clock = db_now(_dialect(session))
+            stmt = update(McpOAuthTokenRow).where(*_key(scope, owner_user_id, server_key), McpOAuthTokenRow.refresh_lease_owner == lease_owner, McpOAuthTokenRow.refresh_lease_until > clock).values(refresh_lease_until=clock + lease_seconds)
+            renewed = session.execute(stmt).rowcount == 1
+            session.commit()
+        return renewed
 
     def release(self, scope: str, owner_user_id: str, server_key: str, *, lease_owner: str) -> bool:
         """Give up a claimed lease without writing a token."""

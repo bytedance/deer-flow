@@ -14,13 +14,23 @@ from typing import Any
 from deerflow.config.extensions_config import ExtensionsConfig, McpOAuthConfig
 from deerflow.mcp import oauth_store
 from deerflow.mcp.headers import apply_header_overrides, header_spellings, illegal_header_value_reason
-from deerflow.mcp.oauth_store import McpOAuthTokenKey, McpOAuthTokenKeyUnavailable, McpOAuthTokenStore, McpOAuthTokenStoreUnavailable, get_mcp_oauth_token_store, oauth_config_fingerprint
+from deerflow.mcp.oauth_store import (
+    McpOAuthTokenKey,
+    McpOAuthTokenKeyUnavailable,
+    McpOAuthTokenStore,
+    McpOAuthTokenStoreUnavailable,
+    get_mcp_oauth_token_store,
+    oauth_config_fingerprint,
+    oauth_token_request_fingerprint,
+)
 
 logger = logging.getLogger(__name__)
 
 # Used when the token endpoint omits ``expires_in`` or returns a value the
 # manager cannot turn into a lifetime.
 _DEFAULT_TOKEN_LIFETIME_SECONDS = 3600
+# How often a still-valid token retries storing a rotation the store missed.
+_UNSAVED_ROTATION_RETRY_SECONDS = 5.0
 
 
 class McpOAuthReauthorizationRequired(RuntimeError):
@@ -79,6 +89,13 @@ class _OAuthState:
     # has a rotating credential worth sharing across processes.
     store_key: McpOAuthTokenKey | None = None
     fingerprint: str | None = None
+    request_fingerprint: str | None = None
+    # Set when this process's latest refresh could not be stored: the row
+    # version it refreshed from. Peers still see the consumed refresh token,
+    # so the live one in ``config`` is written back before anything older is
+    # adopted or refreshed with.
+    unsaved_base_version: int | None = None
+    unsaved_retry_at: float = 0.0
 
 
 class OAuthTokenManager:
@@ -116,6 +133,7 @@ class OAuthTokenManager:
         if oauth.grant_type == "refresh_token":
             state.store_key = McpOAuthTokenKey.for_server(server_name, owner_user_id)
             state.fingerprint = oauth_config_fingerprint(oauth)
+            state.request_fingerprint = oauth_token_request_fingerprint(oauth)
         return state
 
     @classmethod
@@ -156,7 +174,7 @@ class OAuthTokenManager:
 
         oauth = state.config
         token = state.token
-        if token and not self._is_expiring(token, oauth):
+        if token and not self._is_expiring(token, oauth) and state.unsaved_base_version is None:
             return self._authorization_value(token, server_name)
 
         lock = state.lock
@@ -194,12 +212,14 @@ class OAuthTokenManager:
             lock.release()
             raise
         try:
+            store = self._token_store or get_mcp_oauth_token_store()
             token = state.token
             if token and not self._is_expiring(token, oauth):
+                if state.unsaved_base_version is not None and store is not None:
+                    await self._retry_unsaved_rotation(state, store)
                 return self._authorization_value(token, server_name)
 
             fresh = None
-            store = self._token_store or get_mcp_oauth_token_store()
             try:
                 if store is not None and state.store_key is not None:
                     try:
@@ -224,33 +244,51 @@ class OAuthTokenManager:
         since a peer (another replica, or this process before a restart) may
         already hold a newer token. A refresh is claimed with a lease plus a
         compare-and-set on the row's version and never holds a row lock across
-        the token request; while a peer holds the lease, the row is polled
-        until its token lands or the lease expires. The refreshed tokens,
-        including a rotated refresh token, are written back under the claim.
+        the token request; the lease is renewed while the request runs, because
+        HTTP timeouts bound each I/O wait rather than the whole request. While
+        a peer holds the lease, the row is polled until its token lands or the
+        lease expires. The refreshed tokens, including a rotated refresh token,
+        are written back under the claim; a rotation the store missed stays
+        pending and is written back before anything older is used.
         """
-        key, fingerprint, oauth = state.store_key, state.fingerprint, state.config
-        assert key is not None and fingerprint is not None
-        deadline = time.monotonic() + oauth_store.REFRESH_LEASE_SECONDS + 5
+        key, fingerprint, request_fingerprint, oauth = state.store_key, state.fingerprint, state.request_fingerprint, state.config
+        assert key is not None and fingerprint is not None and request_fingerprint is not None
+        # A waiter must outlast a live holder, which may renew its lease for
+        # up to REFRESH_MAX_SECONDS; a dead holder's lease expires sooner.
+        deadline = time.monotonic() + oauth_store.REFRESH_MAX_SECONDS + oauth_store.REFRESH_LEASE_SECONDS
         while True:
-            version, stored, unreadable = await asyncio.to_thread(store.load, key, fingerprint=fingerprint)
-            if stored is not None:
-                # The row continues this chain; without one (or under another
-                # fingerprint) the configured seed is the refresh token.
-                oauth.refresh_token = stored.refresh_token
-                if stored.access_token and stored.expires_at is not None:
-                    token = _OAuthToken(access_token=stored.access_token, token_type=stored.token_type or oauth.default_token_type, expires_at=stored.expires_at)
-                    if not self._is_expiring(token, oauth):
-                        return token
-            lease_owner = await asyncio.to_thread(store.claim, key, fingerprint=fingerprint, expected_version=version)
-            if lease_owner is not None:
-                break
+            version, stored, unreadable = await asyncio.to_thread(store.load, key, fingerprint=fingerprint, request_fingerprint=request_fingerprint)
+            if state.unsaved_base_version is not None and version != state.unsaved_base_version:
+                # A peer stored a newer chain after this process's rotation.
+                state.unsaved_base_version = None
+            if state.unsaved_base_version is not None:
+                # The row still holds the refresh token this process consumed;
+                # store the live one first, then continue from the row.
+                if await self._store_unsaved_rotation(state, store, version):
+                    continue
+            else:
+                if stored is not None:
+                    # The row continues this chain; without one (or under another
+                    # fingerprint) the configured seed is the refresh token.
+                    oauth.refresh_token = stored.refresh_token
+                    if stored.access_token and stored.expires_at is not None:
+                        token = _OAuthToken(access_token=stored.access_token, token_type=stored.token_type or oauth.default_token_type, expires_at=stored.expires_at)
+                        if not self._is_expiring(token, oauth):
+                            return token
+                lease_owner = await asyncio.to_thread(store.claim, key, fingerprint=fingerprint, expected_version=version)
+                if lease_owner is not None:
+                    break
             if time.monotonic() >= deadline:
                 raise McpOAuthTokenStoreUnavailable(f"Timed out waiting for another DeerFlow process to refresh the OAuth token for MCP server '{server_name}'")
             await asyncio.sleep(oauth_store.REFRESH_POLL_SECONDS)
 
+        # A claim on a missing row inserts it at version 0.
+        base_version = 0 if version is None else version
         used_refresh_token = oauth.refresh_token
+        renewal = asyncio.create_task(self._renew_lease(store, key, lease_owner, server_name), name=f"oauth-lease-renewal:{server_name}")
         try:
-            fresh = await self._fetch_token(oauth)
+            async with asyncio.timeout(oauth_store.REFRESH_MAX_SECONDS):
+                fresh = await self._fetch_token(oauth)
         except asyncio.CancelledError:
             # A cancelled caller cannot await the release; hand it to a worker
             # rather than make every peer wait out the lease.
@@ -260,7 +298,11 @@ class OAuthTokenManager:
             await asyncio.to_thread(self._release_quietly, store, key, lease_owner)
             if isinstance(exc, _RefreshTokenRejected):
                 exc.stored_chain_unreadable = unreadable
+            if isinstance(exc, TimeoutError):
+                raise RuntimeError(f"The OAuth token request for MCP server '{server_name}' did not finish within {oauth_store.REFRESH_MAX_SECONDS:g} seconds") from None
             raise
+        finally:
+            renewal.cancel()
         logger.info(f"Refreshed OAuth access token for MCP server: {server_name}")
         try:
             saved = await asyncio.to_thread(
@@ -268,6 +310,7 @@ class OAuthTokenManager:
                 key,
                 lease_owner=lease_owner,
                 fingerprint=fingerprint,
+                request_fingerprint=request_fingerprint,
                 access_token=fresh.access_token,
                 token_type=fresh.token_type,
                 expires_at=fresh.expires_at,
@@ -275,12 +318,81 @@ class OAuthTokenManager:
                 rotated=oauth.refresh_token != used_refresh_token,
             )
         except McpOAuthTokenStoreUnavailable:
-            # The token is valid for this process; the store already logged why
-            # peers cannot see it.
-            return fresh
-        if not saved:
-            logger.warning("The refresh lease for MCP server '%s' expired before its new OAuth token was stored; other processes keep the previous one", server_name)
+            # Logged by the store. Free the claim so the pending rotation (or a
+            # peer) need not wait out the lease once the database answers again.
+            saved = False
+            await asyncio.to_thread(self._release_quietly, store, key, lease_owner)
+        if saved:
+            state.unsaved_base_version = None
+        else:
+            # The token is valid for this process, but peers still read the
+            # refresh token it consumed: keep the new one pending.
+            state.unsaved_base_version = base_version
+            state.unsaved_retry_at = time.monotonic() + _UNSAVED_ROTATION_RETRY_SECONDS
+            logger.warning("The new OAuth token for MCP server '%s' could not be stored; this process keeps it and retries storing it before other processes refresh again", server_name)
         return fresh
+
+    async def _store_unsaved_rotation(self, state: _OAuthState, store: McpOAuthTokenStore, version: int | None) -> bool:
+        """Write the pending rotation over the row it was refreshed from; ``False`` while a peer holds the lease."""
+        key, oauth, token = state.store_key, state.config, state.token
+        assert key is not None and state.fingerprint is not None and state.request_fingerprint is not None
+        if token is None:
+            state.unsaved_base_version = None
+            return True
+        lease_owner = await asyncio.to_thread(store.claim, key, fingerprint=state.fingerprint, expected_version=version)
+        if lease_owner is None:
+            return False
+        try:
+            saved = await asyncio.to_thread(
+                store.save,
+                key,
+                lease_owner=lease_owner,
+                fingerprint=state.fingerprint,
+                request_fingerprint=state.request_fingerprint,
+                access_token=token.access_token,
+                token_type=token.token_type,
+                expires_at=token.expires_at,
+                refresh_token=oauth.refresh_token or "",
+                rotated=True,
+            )
+        except McpOAuthTokenStoreUnavailable:
+            await asyncio.to_thread(self._release_quietly, store, key, lease_owner)
+            raise
+        if saved:
+            state.unsaved_base_version = None
+        return saved
+
+    async def _retry_unsaved_rotation(self, state: _OAuthState, store: McpOAuthTokenStore) -> None:
+        """While the local token is still valid, retry storing a missed rotation now and then.
+
+        Until it is stored, a peer whose token expires first would refresh with
+        the consumed refresh token. Best effort: failures wait for the next try.
+        """
+        if time.monotonic() < state.unsaved_retry_at:
+            return
+        state.unsaved_retry_at = time.monotonic() + _UNSAVED_ROTATION_RETRY_SECONDS
+        key = state.store_key
+        assert key is not None and state.fingerprint is not None and state.request_fingerprint is not None
+        try:
+            version, _stored, _unreadable = await asyncio.to_thread(store.load, key, fingerprint=state.fingerprint, request_fingerprint=state.request_fingerprint)
+            if version != state.unsaved_base_version:
+                state.unsaved_base_version = None
+                return
+            await self._store_unsaved_rotation(state, store, version)
+        except McpOAuthTokenStoreUnavailable:
+            pass  # Logged by the store.
+
+    async def _renew_lease(self, store: McpOAuthTokenStore, key: McpOAuthTokenKey, lease_owner: str, server_name: str) -> None:
+        """Keep the claim's lease alive while its token request runs (cancelled when it ends)."""
+        while True:
+            await asyncio.sleep(oauth_store.REFRESH_LEASE_SECONDS / 3)
+            try:
+                renewed = await asyncio.to_thread(store.renew, key, lease_owner)
+            except McpOAuthTokenStoreUnavailable:
+                continue  # Logged by the store; the next tick retries.
+            if not renewed:
+                logger.warning("The refresh lease for MCP server '%s' expired while its token request was running; another process may refresh too", server_name)
+                return
 
     @staticmethod
     def _release_quietly(store: McpOAuthTokenStore, key: McpOAuthTokenKey, lease_owner: str) -> None:

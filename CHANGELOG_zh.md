@@ -1119,8 +1119,9 @@
   当 `database.backend` 为 `sqlite` 或 `postgres` 时，每个连接的 access token 与最新的
   refresh token 现保存在新表 `mcp_oauth_tokens`（迁移 `0047_mcp_oauth_tokens`）中，用
   `DEER_FLOW_CREDENTIALS_KEY` 加密，按部署级服务器或个人连接的所有者分别建键。刷新前先重读
-  该行，并以短租约加版本号比较交换（compare-and-set）认领，因此并发实例只调用一次 token
-  端点并采用彼此的结果。修改配置中的种子、token 端点、client、scope 或 audience 会从配置
+  该行，并以短租约（token 请求进行期间持续续约）加版本号比较交换（compare-and-set）认领，
+  因此并发实例只调用一次 token 端点并采用彼此的结果；未能写入的轮换结果会被保留，并在下次
+  刷新前先写回。修改配置中的种子、token 端点、client、scope 或 audience 会从配置
   开始新的令牌链。`client_credentials` 令牌仍留在进程内。保存 MCP 配置时会删除配置中已不存在
   的连接所存的令牌；refresh token 被拒绝时，工具调用会报出要求重新配置 refresh token 的错误
   （若本实例无法解密其他实例存下的令牌链，还会提示所有实例需要相同的密钥）。声明多实例部署且启用了

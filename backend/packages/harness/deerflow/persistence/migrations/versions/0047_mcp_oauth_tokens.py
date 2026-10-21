@@ -7,8 +7,9 @@ Creates ``mcp_oauth_tokens``: one row per MCP OAuth connection that uses the
 ``refresh_token`` grant, keyed by ``(scope, owner_user_id, server_key)``
 (``owner_user_id`` is ``''`` for deployment servers). It holds the access
 token and the latest, possibly rotated, refresh token as
-``DEER_FLOW_CREDENTIALS_KEY`` ciphertext, the fingerprint of the configured
-token chain, a ``version`` bumped on every token write, and the refresh lease
+``DEER_FLOW_CREDENTIALS_KEY`` ciphertext, the fingerprints of the configured
+token chain and of the access-token request, a ``version`` bumped on every
+token write, and the refresh lease
 that lets one Gateway process refresh at a time
 (``deerflow.mcp.oauth_store``). Tokens used to live only in process memory,
 so this revision moves no data: every connection starts from its configured
@@ -50,6 +51,7 @@ def upgrade() -> None:
         sa.Column("server_key", sa.String(length=255), nullable=False),
         sa.Column("config_fingerprint", sa.String(length=64), nullable=False),
         sa.Column("access_token_enc", sa.Text(), nullable=True),
+        sa.Column("token_request_fingerprint", sa.String(length=64), nullable=True),
         sa.Column("token_type", sa.String(length=64), nullable=True),
         sa.Column("access_expires_at", sa.Double(), nullable=True),
         sa.Column("refresh_token_enc", sa.Text(), nullable=True),
