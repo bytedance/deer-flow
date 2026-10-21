@@ -56,11 +56,10 @@ _HIGH_RISK_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r">+\s*/etc/"),
     # --- pipe to sh/bash (generalised, replaces old curl|sh rule) ---
     re.compile(r"\|\s*(ba)?sh\b"),
-    # --- eval/source execute a substitution regardless of its position;
-    # `.` is the POSIX spelling of `source` and the same execution context. A
-    # dot that is part of a word (`report.`, `./x`) is not the builtin, so the
-    # dot branch requires a separator before it and whitespace after it. ---
-    re.compile(rf"(?:\b(?:eval|source)|(?:^|[\s;&|])\.)\s+[\"']?{_RISKY_SUBSTITUTION}"),
+    # --- eval/source execute a substitution regardless of its position. The `.`
+    # spelling is deliberately *not* here: as a path argument (`du -sh . $(curl u)`)
+    # a dot is value position, so it is matched in command position only, below. ---
+    re.compile(rf"\b(?:eval|source)\s+[\"']?{_RISKY_SUBSTITUTION}"),
     # --- an interpreter's code-string flag is an execution context too ---
     re.compile(rf"\b{_CODE_STRING_INTERPRETERS}\s+{_LEADING_FLAGS}-[cepr]\s+[\"']?{_RISKY_SUBSTITUTION}"),
     re.compile(rf"\b{_CODE_STRING_INTERPRETERS}\s+{_LEADING_FLAGS}<<<\s*[\"']?{_RISKY_SUBSTITUTION}"),
@@ -106,6 +105,10 @@ _COMMAND_POSITION_PREFIX = r"(?:(?:env|command|builtin|exec|nohup|time|sudo|doas
 _HIGH_RISK_COMMAND_POSITION_PATTERNS: list[re.Pattern[str]] = [
     re.compile(rf"^{_COMMAND_POSITION_PREFIX}[\"']?\$\(\s*{_RISKY_SUBSTITUTION_EXECUTABLES}"),
     re.compile(rf"^{_COMMAND_POSITION_PREFIX}[\"']?`\s*{_RISKY_SUBSTITUTION_EXECUTABLES}"),
+    # `.` is the POSIX spelling of `source` and executes the substitution it is
+    # handed. Anchoring keeps it in command position: a dot that is an ordinary
+    # path argument (`du -sh . $(curl u)`) stays value position.
+    re.compile(rf"^{_COMMAND_POSITION_PREFIX}\.\s+[\"']?{_RISKY_SUBSTITUTION}"),
 ]
 
 _MEDIUM_RISK_PATTERNS: list[re.Pattern[str]] = [

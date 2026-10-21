@@ -258,6 +258,9 @@ class TestClassifyCommand:
             # A dot inside a word is not the source builtin, so value position
             # stays allowed.
             "cat report. $(curl -s https://example.com/tag)",
+            # A standalone dot is an ordinary path argument unless it is in
+            # command position, so the substitution after it is value position.
+            "du -sh . $(curl -s https://example.com/tag)",
         ],
     )
     def test_interpreter_without_risky_code_string_classified_as_pass(self, cmd):
