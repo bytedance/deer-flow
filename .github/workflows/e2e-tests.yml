@@ -42,6 +42,10 @@ jobs:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
 
     steps:
       - name: Checkout
@@ -84,20 +88,32 @@ jobs:
 
       - name: Run E2E tests
         working-directory: frontend
-        run: pnpm exec playwright test
+        run: >-
+          pnpm exec playwright test
+          --shard=${{ matrix.shard }}/4
+          --workers=1
+          --reporter=github,html
+          --output=test-results/e2e
         env:
           SKIP_ENV_VALIDATION: '1'
+          PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report/e2e
 
       - name: Run auth recovery E2E tests
+        # Keep auth coverage unsharded and run it even if the first shard fails.
+        if: ${{ !cancelled() && matrix.shard == 1 }}
         working-directory: frontend
-        run: pnpm exec playwright test -c playwright.auth.config.ts
+        run: >-
+          pnpm exec playwright test -c playwright.auth.config.ts
+          --reporter=github,html
+          --output=test-results/auth
         env:
           SKIP_ENV_VALIDATION: '1'
+          PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report/auth
 
       - name: Upload Playwright report
         uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:
-          name: playwright-report
+          name: playwright-report-${{ matrix.shard }}
           path: frontend/playwright-report/
           retention-days: 7

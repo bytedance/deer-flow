@@ -1397,6 +1397,29 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Fixed
 
+- **mcp:** MCP servers using the OAuth `refresh_token` grant keep working
+  across Gateway restarts, tool-cache resets, repeated personal-connection runs
+  and multiple Gateway instances when the provider rotates refresh tokens
+  (Auth0, Okta, Google). Tokens lived only in process memory, so every new
+  process or manager started again from the configured refresh token, which
+  the first refresh had already consumed, and got `invalid_grant`. With
+  `database.backend: sqlite` or `postgres`, each connection's access token and
+  latest refresh token now live in the new `mcp_oauth_tokens` table (migration
+  `0047_mcp_oauth_tokens`), encrypted with `DEER_FLOW_CREDENTIALS_KEY` and keyed
+  per deployment server or per personal-connection owner. A refresh re-reads
+  the row first and is claimed with a short lease (renewed while the token
+  request runs) plus a version compare-and-set, so concurrent instances call
+  the token endpoint once and adopt each other's result; a rotation that could
+  not be stored is kept and stored before the next refresh. Changing the configured seed, token endpoint,
+  client, scope or audience starts a new chain from the configuration.
+  `client_credentials` tokens stay in process. Saving an MCP configuration
+  deletes the stored tokens of connections it no longer has, and a rejected
+  refresh token now fails the tool call with an error asking for a new refresh
+  token (adding, when the instance could not decrypt the stored chain, that
+  every instance needs the same key). A declared multi-instance deployment with
+  an enabled `refresh_token` OAuth server now refuses to start without
+  `DEER_FLOW_CREDENTIALS_KEY`. ([#7207])
+
 - **community:** Reject booleans in numeric LightRAG and RAGFlow
   `knowledge_search` settings instead of silently treating `true` as a
   one-second timeout, one result or one character of output. Invalid settings
@@ -2063,6 +2086,7 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
   `channel_conversations` / `channel_thread_bindings`: the instance that loses
   adopts the winner's thread and deletes its own empty one, and `/new` still
   rebinds. (issue #7103, [#7104])
+  
 - **skills:** A skill the agent creates, edits, patches or deletes with the
   `skill_manage` tool now reaches every Gateway process sharing the home
   volume, as a change made through the skills API already did. The tool
@@ -2074,12 +2098,14 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
   this or a peer process serving the stale list. When the marker cannot be
   written, the tool reports that the change was applied but other processes
   were not notified, instead of reading as a failed write. ([#7099])
+  
 - **provisioner:** When two provisioner replicas start together and
   `K8S_NAMESPACE` does not exist yet, the one that loses the create race no
   longer crashes at startup: its `409 AlreadyExists` now counts as the
   namespace existing, as the Pod and Service creates already did. Helm
   deployments, where the provisioner runs inside the namespace it manages,
   never took this path. ([#7099])
+  
 - **projects:** A shelf upload or save-from-thread into a project the caller
   cannot write no longer leaves a directory behind or answers `500`. Both
   routes staged the body under `users/{user_id}/projects/{project_id}/` before
@@ -2089,6 +2115,18 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
   now check for an owned, active project first and answer the same `404`
   without writing; the shelf insert still re-checks under the project row lock.
   ([#7040])
+  
+- **skills:** Toggling a skill when no `extensions_config.json` exists yet now
+  creates the file in the project root (`DEER_FLOW_PROJECT_ROOT`, else the
+  working directory), where the MCP editor already creates it and where config
+  resolution looks first. The toggle used the working directory's parent
+  instead: with the Gateway started from anywhere but `backend/`, the new file
+  landed outside the search path, so the toggle was silently lost after reload
+  and the next MCP edit created a second file. Both routers now share
+  `ExtensionsConfig.default_config_path()`. Docker and `make dev` were not
+  affected: they set the config path, or a project root equal to that parent.
+  ([#7048])
+
 - **workflows:** A script workflow waiting on a long child Agent run no longer
   fails with `Worker turn limit` after about 209 seconds regardless of
   `timeout_seconds`. The supervisor re-sent an empty frame to the QuickJS worker
@@ -2097,7 +2135,8 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
   and the supervisor then waits on the pending calls locally (still checking
   cancellation, faults and worker exits every 20 ms) without exchanging frames,
   so idle waits no longer consume turns and `timeout_seconds` is the only wall-clock bound;
-  scripts that spin the job queue still hit the turn cap. (issue #7022, [#7024])
+  scripts that spin the job queue still hit the turn cap. (issue [#7022], [#7024])
+  
 - **browser:** `browser_screenshot` no longer replaces a file that already
   exists in the thread's outputs directory. A screenshot saved as
   `report.png` used to overwrite the user's own `report.png`, an earlier
@@ -12907,6 +12946,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7035]: https://github.com/bytedance/deer-flow/pull/7035
 [#7039]: https://github.com/bytedance/deer-flow/pull/7039
 [#7040]: https://github.com/bytedance/deer-flow/pull/7040
+[#7048]: https://github.com/bytedance/deer-flow/pull/7048
 [#7042]: https://github.com/bytedance/deer-flow/pull/7042
 [#7051]: https://github.com/bytedance/deer-flow/pull/7051
 [#7053]: https://github.com/bytedance/deer-flow/pull/7053
@@ -12944,3 +12984,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7167]: https://github.com/bytedance/deer-flow/pull/7167
 [#7170]: https://github.com/bytedance/deer-flow/pull/7170
 [#7205]: https://github.com/bytedance/deer-flow/pull/7205
+[#7207]: https://github.com/bytedance/deer-flow/pull/7207
