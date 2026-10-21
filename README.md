@@ -1051,6 +1051,9 @@ embedded downloads keep distinct filenames, including when concurrent uploads
 choose the same name. The final filename is passed to the agent and used for
 sandbox sync; an existing conversation file is not overwritten.
 
+Feishu and DingTalk attachment transfers return standalone temporary sandboxes
+to the pool after synchronization, without interrupting an active run.
+
 **Configuration in `config.yaml`:**
 
 Discord's `channels.discord.allowed_guilds` accepts one positive numeric guild
