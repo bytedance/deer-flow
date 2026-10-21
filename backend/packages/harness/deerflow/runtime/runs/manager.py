@@ -188,6 +188,10 @@ class RunIdempotencyUnsupported(RuntimeError):
     """The configured store cannot safely persist the requested idempotency fields."""
 
 
+class RunIdempotencyKeyMismatch(RuntimeError):
+    """The idempotency key belongs to a run of another thread or user: a different request."""
+
+
 def _store_accepts_idempotency_parameter(store: RunStore, parameter_name: str) -> bool:
     """Require an explicit keyword parameter or an opt-in owned by the method."""
     callable_ = store.create_thread_operation_atomic
@@ -422,6 +426,24 @@ class RunManager:
             payload["stop_reason"] = record.stop_reason
         return payload
 
+    @staticmethod
+    def _terminal_row_matches_payload(
+        row: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> bool:
+        return all(
+            row.get(key) == payload.get(key)
+            for key in (
+                "thread_id",
+                "user_id",
+                "owner_worker_id",
+                "status",
+                "error",
+                "stop_reason",
+                "goal_verdict",
+            )
+        )
+
     async def _call_store_with_retry(
         self,
         operation_name: str,
@@ -646,6 +668,7 @@ class RunManager:
                 await self._fence_unconfirmed_terminal(record)
             return False
         row_recovery_payload = self._store_put_payload(record, error=error, stop_reason=stop_reason)
+        row_recovery_payload["status"] = status.value
         try:
             updated = await self._call_store_with_retry(
                 "update_status",
@@ -662,7 +685,10 @@ class RunManager:
                 existing = await self._store.get(record.run_id, user_id=record.user_id)
                 if existing is not None:
                     existing_status = existing.get("status")
-                    if existing_status == status.value:
+                    if existing_status == status.value and self._terminal_row_matches_payload(
+                        existing,
+                        row_recovery_payload,
+                    ):
                         logger.info(
                             "Run %s status update to %s was already persisted",
                             record.run_id,
@@ -1226,6 +1252,7 @@ class RunManager:
                     async with self._lock:
                         if record.status == RunStatus.pending:
                             record.status = RunStatus.interrupted
+                            record.terminal_status_persisted = False
                             record.abort_event.set()
                             record.updated_at = _now_iso()
                     return RunStartOutcome.cancelled
@@ -1257,11 +1284,19 @@ class RunManager:
             if record is None or record.status != RunStatus.pending:
                 return False
             record.status = RunStatus.error
+            record.terminal_status_persisted = self._store is None
             record.error = error
             record.abort_event.set()
             record.updated_at = _now_iso()
 
-        await self._persist_status(record, RunStatus.error, error=error)
+        persisted = await self._persist_status(
+            record,
+            RunStatus.error,
+            error=error,
+        )
+        async with self._lock:
+            if self._runs.get(run_id) is record:
+                record.terminal_status_persisted = persisted
         return True
 
     async def get_many_by_thread(
@@ -1735,6 +1770,7 @@ class RunManager:
                 if task_active and record.status == RunStatus.running:
                     record.task.cancel()
                 record.status = RunStatus.interrupted
+                record.terminal_status_persisted = self._store is None
                 record.updated_at = _now_iso()
 
         # Persist outside the lock so store calls don't block other mutations.
@@ -1745,6 +1781,9 @@ class RunManager:
                 # cancellation; ordinary runs retain immediate persistence.
                 return CancelOutcome.cancelled
             persisted = await self._persist_status(record, RunStatus.interrupted)
+            async with self._lock:
+                if self._runs.get(run_id) is record:
+                    record.terminal_status_persisted = self._has_final_terminal_ack(record) if self.heartbeat_enabled and self._store is not None else persisted
             if not persisted and self._store is not None:
                 # ``_persist_status`` already fetched ``existing`` internally;
                 # re-check the store to see if a peer takeover flipped the
@@ -1878,6 +1917,7 @@ class RunManager:
         evidence_origin: str = "unknown",
         evidence_agent_id: str | None = None,
         idempotency_request: dict[str, Any] | None = None,
+        run_id: str | None = None,
     ) -> RunRecord:
         """Atomically admit a normal agent run for a thread."""
         return await self._admit_thread_operation(
@@ -1894,6 +1934,7 @@ class RunManager:
             evidence_origin=evidence_origin,
             evidence_agent_id=evidence_agent_id,
             idempotency_request=idempotency_request,
+            run_id=run_id,
         )
 
     async def _close_cancelled_admission(self, record: RunRecord) -> None:
@@ -1942,6 +1983,10 @@ class RunManager:
         async with self._lock:
             if self._runs.get(record.run_id) is record:
                 record.status = stored_status
+                record.terminal_status_persisted = stored_status not in (
+                    RunStatus.pending,
+                    RunStatus.running,
+                )
                 record.error = stored.get("error")
                 record.stop_reason = stored.get("stop_reason")
                 record.updated_at = _now_iso()
@@ -1962,6 +2007,7 @@ class RunManager:
         evidence_origin: str = "unknown",
         evidence_agent_id: str | None = None,
         idempotency_request: dict[str, Any] | None = None,
+        run_id: str | None = None,
     ) -> RunRecord:
         """Atomically check for inflight runs and create a new one.
 
@@ -1980,7 +2026,7 @@ class RunManager:
         from deerflow.runtime.assembly_evidence import EVIDENCE_KEY
 
         self._validate_evidence_origin(evidence_origin)
-        run_id = str(uuid.uuid4())
+        run_id = run_id or str(uuid.uuid4())
         now = _now_iso()
         # Resolve before the idempotency checks below compare it with stored rows.
         user_id = _resolve_record_user_id(user_id)
@@ -2021,7 +2067,7 @@ class RunManager:
                     if existing.idempotency_key != idempotency_key:
                         continue
                     if existing.thread_id != thread_id or existing.user_id != user_id:
-                        raise RuntimeError("Run idempotency key resolved to a different thread or user")
+                        raise RunIdempotencyKeyMismatch("Run idempotency key resolved to a different thread or user")
                     existing.idempotency_reused = True
                     return existing
 
@@ -2035,7 +2081,7 @@ class RunManager:
                 # for get(), cancel(), and orphan reconciliation.
                 existing = self._record_from_store(conflict.existing)
                 if existing.thread_id != thread_id or existing.user_id != user_id:
-                    raise RuntimeError("Run idempotency key resolved to a different thread or user") from conflict
+                    raise RunIdempotencyKeyMismatch("Run idempotency key resolved to a different thread or user") from conflict
                 existing.idempotency_reused = True
                 return existing
 
@@ -2180,6 +2226,7 @@ class RunManager:
                     if task_active:
                         r.task.cancel()
                     r.status = RunStatus.interrupted
+                    r.terminal_status_persisted = self._store is None
                     r.updated_at = now
                     interrupted_records.append(r)
 
@@ -2192,7 +2239,13 @@ class RunManager:
             # a terminal write already acknowledged by the atomic transaction.
             await asyncio.sleep(0)
             for interrupted_record in interrupted_records:
-                await self._persist_status(interrupted_record, RunStatus.interrupted)
+                persisted = await self._persist_status(
+                    interrupted_record,
+                    RunStatus.interrupted,
+                )
+                async with self._lock:
+                    if self._runs.get(interrupted_record.run_id) is interrupted_record:
+                        interrupted_record.terminal_status_persisted = persisted
         except asyncio.CancelledError:
             cleanup = asyncio.create_task(self._close_cancelled_admission(record))
             cleanup.set_name(f"deerflow-close-cancelled-admission-{record.run_id}")
@@ -2361,6 +2414,7 @@ class RunManager:
                 )
                 continue
             record.status = RunStatus.error
+            record.terminal_status_persisted = True
             record.error = error
             record.stop_reason = stop_reason
             record.updated_at = now
@@ -3000,6 +3054,7 @@ class RunManager:
                     continue
                 if record.status in (RunStatus.pending, RunStatus.running):
                     record.status = RunStatus.interrupted
+                    record.terminal_status_persisted = self._store is None
                     record.updated_at = _now_iso()
                 to_persist.append(record)
 
@@ -3028,6 +3083,7 @@ class RunManager:
                             logger.warning("Unexpected error persisting interrupted status for run %s during shutdown: %r", record.run_id, result)
                         elif result is False:
                             logger.warning("Could not persist interrupted status for run %s during shutdown", record.run_id)
+                        record.terminal_status_persisted = result is True
 
         if pending:
             logger.warning("Run drain exceeded %.1fs on shutdown; %d run task(s) still active and may race checkpointer teardown", timeout, len(pending))

@@ -5,6 +5,7 @@ import os
 import re
 import uuid
 from collections import defaultdict
+from unittest.mock import AsyncMock
 
 import anyio
 import pytest
@@ -16,7 +17,7 @@ from deerflow.config.stream_bridge_config import (
     StreamBridgeConfig,
     set_stream_bridge_config,
 )
-from deerflow.runtime import END_SENTINEL, HEARTBEAT_SENTINEL, MemoryStreamBridge, StreamGap, make_stream_bridge
+from deerflow.runtime import END_SENTINEL, HEARTBEAT_SENTINEL, MemoryStreamBridge, StreamGap, StreamProducerLeaseState, make_stream_bridge
 
 # RedisStreamBridge is no longer re-exported from deerflow.runtime (redis is an
 # optional extra; see the NOTE in runtime/stream_bridge/__init__.py). Import it
@@ -45,6 +46,7 @@ class _FakeRedis:
         self.counters = defaultdict(int)
         self.deleted = []
         self.expirations = []
+        self.values = {}
         self.closed = False
         self.ping_calls = 0
         self.ping_error: Exception | None = None
@@ -88,17 +90,111 @@ class _FakeRedis:
         entries = list(self.streams.get(name, []))
         return entries[:count] if count is not None else entries
 
-    async def delete(self, name):
-        self.deleted.append(name)
-        self.streams.pop(name, None)
-        return 1
+    async def set(self, name, value, *, ex=None, nx=False, xx=False):
+        exists = name in self.values
+        if nx and exists:
+            return False
+        if xx and not exists:
+            return False
+        self.values[name] = value
+        if ex is not None:
+            self.expirations.append((name, ex))
+        return True
+
+    async def get(self, name):
+        return self.values.get(name)
+
+    async def mget(self, *names):
+        return [self.values.get(name) for name in names]
+
+    async def eval(self, script, numkeys, *args):
+        keys = args[:numkeys]
+        values = args[numkeys:]
+        if numkeys == 2 and not values:
+            tracking_key, active_key = keys
+            if active_key in self.values:
+                return 0
+            if tracking_key not in self.values:
+                return 2
+            self.values.pop(tracking_key, None)
+            self.deleted.append(tracking_key)
+            return 1
+        if numkeys == 3 and not values:
+            stream_key, tracking_key, active_key = keys
+            if active_key in self.values:
+                return 0
+            return await self.delete(stream_key, tracking_key)
+        if numkeys == 3 and len(values) == 1:
+            stream_key, tracking_key, active_key = keys
+            (token,) = values
+            tracked = self.values.get(tracking_key)
+            active = self.values.get(active_key)
+            if tracked is not None and tracked != token or active is not None and active != token:
+                return 0
+            await self.delete(stream_key, tracking_key, active_key)
+            return 1
+        if numkeys == 2 and len(values) == 5:
+            active_key, stream_key = keys
+            maxlen, stream_ttl, kind, event, data = values
+            if active_key in self.values:
+                return None
+            event_id = await self.xadd(
+                stream_key,
+                {"kind": kind, "event": event, "data": data},
+                maxlen=int(maxlen),
+                approximate=False,
+            )
+            if int(stream_ttl) > 0:
+                await self.expire(stream_key, int(stream_ttl))
+            return event_id
+        if numkeys == 1:
+            (name,) = keys
+            (token,) = values
+            if self.values.get(name) != token:
+                return 0
+            self.values.pop(name, None)
+            self.deleted.append(name)
+            return 1
+        if numkeys == 2:
+            active_key, tracking_key = keys
+            token, active_ttl, tracking_ttl = values
+            if self.values.get(active_key) != token or self.values.get(tracking_key) != token:
+                return 0
+            await self.expire(active_key, int(active_ttl))
+            if int(tracking_ttl) > 0:
+                await self.expire(tracking_key, int(tracking_ttl))
+            return 1
+        if numkeys == 3:
+            active_key, tracking_key, stream_key = keys
+            token, maxlen, stream_ttl, kind, event, data = values
+            if self.values.get(active_key) != token or self.values.get(tracking_key) != token:
+                return None
+            event_id = await self.xadd(
+                stream_key,
+                {"kind": kind, "event": event, "data": data},
+                maxlen=int(maxlen),
+                approximate=False,
+            )
+            if int(stream_ttl) > 0:
+                await self.expire(stream_key, int(stream_ttl))
+            return event_id
+        raise AssertionError(f"unexpected eval key count: {numkeys}")
+
+    async def delete(self, *names):
+        deleted = 0
+        for name in names:
+            self.deleted.append(name)
+            deleted += int(name in self.streams or name in self.values)
+            self.streams.pop(name, None)
+            self.values.pop(name, None)
+        return deleted
 
     async def exists(self, name):
-        return 1 if name in self.streams else 0
+        return 1 if name in self.streams or name in self.values else 0
 
     async def expire(self, name, seconds):
         self.expirations.append((name, seconds))
-        return True
+        return name in self.streams or name in self.values
 
     def pipeline(self, *, transaction=True):
         return _FakeRedisPipeline(self)
@@ -864,7 +960,633 @@ async def test_redis_cleanup_deletes_stream(redis_bridge: RedisStreamBridge):
     await redis_bridge.publish(run_id, "event", {})
     await redis_bridge.cleanup(run_id)
 
-    assert fake.deleted == ["deerflow:stream_bridge:redis-run-cleanup"]
+    assert fake.deleted == [
+        "deerflow:stream_bridge:redis-run-cleanup",
+        "deerflow:stream_bridge:redis-run-cleanup:producer-tracked",
+    ]
+
+
+@pytest.mark.anyio
+async def test_redis_producer_lease_distinguishes_active_expired_and_untracked():
+    fake = _FakeRedis()
+    bridge = RedisStreamBridge(redis_url="redis://fake", client=fake)
+    run_id = "redis-run-producer-state"
+
+    assert await bridge.producer_lease_state(run_id) == StreamProducerLeaseState.untracked
+
+    await bridge.start_producer_lease(run_id)
+    assert await bridge.producer_lease_state(run_id) == StreamProducerLeaseState.active
+
+    await bridge.finish_producer_lease(run_id)
+    assert await bridge.producer_lease_state(run_id) == StreamProducerLeaseState.expired
+
+    await bridge.cleanup(run_id)
+    assert await bridge.producer_lease_state(run_id) == StreamProducerLeaseState.untracked
+
+
+@pytest.mark.anyio
+async def test_redis_recovery_cleanup_deletes_only_expired_tracking_marker():
+    fake = _FakeRedis()
+    bridge = RedisStreamBridge(
+        redis_url="redis://fake",
+        stream_ttl_seconds=0,
+        client=fake,
+    )
+    run_id = "redis-run-expired-tracking-cleanup"
+
+    await bridge.start_producer_lease(run_id)
+    assert await bridge.cleanup_expired_producer(run_id) is False
+    assert await bridge.producer_lease_state(run_id) == StreamProducerLeaseState.active
+
+    await bridge.finish_producer_lease(run_id)
+    assert await bridge.cleanup_expired_producer(run_id) is True
+    assert await bridge.producer_lease_state(run_id) == StreamProducerLeaseState.untracked
+    await bridge.cleanup(run_id)
+
+
+@pytest.mark.anyio
+async def test_redis_recovery_cleanup_rejects_active_registration_window():
+    fake = _FakeRedis()
+    bridge = RedisStreamBridge(redis_url="redis://fake", client=fake)
+    run_id = "redis-run-active-registration-window"
+
+    await bridge.start_producer_lease(run_id)
+    fake.values.pop(bridge._producer_tracking_key(run_id))
+    try:
+        assert await bridge.cleanup_expired_producer(run_id) is False
+        assert bridge._producer_active_key(run_id) in fake.values
+    finally:
+        await bridge.abort_producer_lease(run_id)
+
+
+@pytest.mark.anyio
+async def test_redis_lost_producer_lease_cancels_the_owning_task(monkeypatch):
+    import deerflow.runtime.stream_bridge.redis as redis_bridge_module
+
+    monkeypatch.setattr(
+        redis_bridge_module,
+        "_PRODUCER_LEASE_RENEW_INTERVAL_SECONDS",
+        0.01,
+    )
+    fake = _FakeRedis()
+    bridge = RedisStreamBridge(redis_url="redis://fake", client=fake)
+    run_id = "redis-run-producer-lost"
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    release = asyncio.Event()
+
+    async def producer():
+        await bridge.start_producer_lease(run_id)
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            await release.wait()
+            raise
+        finally:
+            await bridge.finish_producer_lease(run_id)
+
+    owner = asyncio.create_task(producer())
+    await asyncio.wait_for(started.wait(), timeout=1)
+    fake.values.pop(bridge._producer_active_key(run_id))
+
+    try:
+        await asyncio.wait_for(cancelled.wait(), timeout=1)
+        with pytest.raises(RuntimeError, match="producer lease was lost"):
+            await bridge.publish(run_id, "late", {})
+        with pytest.raises(RuntimeError, match="producer lease was lost"):
+            await bridge.publish_end(run_id)
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError, match="producer lease expired"):
+            await asyncio.wait_for(owner, timeout=1)
+
+
+@pytest.mark.anyio
+async def test_redis_tracking_marker_outlives_short_stream_ttl():
+    fake = _FakeRedis()
+    bridge = RedisStreamBridge(
+        redis_url="redis://fake",
+        stream_ttl_seconds=1,
+        client=fake,
+    )
+    run_id = "redis-run-short-stream-ttl"
+
+    await bridge.start_producer_lease(run_id)
+    try:
+        assert (
+            bridge._producer_tracking_key(run_id),
+            120,
+        ) in fake.expirations
+        assert await bridge.producer_lease_state(run_id) == StreamProducerLeaseState.active
+    finally:
+        await bridge.finish_producer_lease(run_id)
+
+
+@pytest.mark.anyio
+async def test_redis_finish_does_not_delete_a_successor_token():
+    fake = _FakeRedis()
+    bridge = RedisStreamBridge(redis_url="redis://fake", client=fake)
+    run_id = "redis-run-successor-token"
+    active_key = bridge._producer_active_key(run_id)
+
+    await bridge.start_producer_lease(run_id)
+    fake.values[active_key] = "successor-token"
+    await bridge.finish_producer_lease(run_id)
+
+    assert fake.values[active_key] == "successor-token"
+
+
+@pytest.mark.anyio
+async def test_redis_publish_is_atomically_fenced_by_producer_token():
+    fake = _FakeRedis()
+    bridge = RedisStreamBridge(redis_url="redis://fake", client=fake)
+    run_id = "redis-run-publish-token"
+    active_key = bridge._producer_active_key(run_id)
+    replacement_owner = asyncio.create_task(asyncio.Event().wait())
+
+    await bridge.start_producer_lease(run_id)
+    bridge.transfer_producer_lease(run_id, replacement_owner)
+    fake.values[active_key] = "successor-token"
+    try:
+        with pytest.raises(RuntimeError, match="producer lease was lost"):
+            await bridge.publish(run_id, "late", {"value": 1})
+        assert bridge._stream_key(run_id) not in fake.streams
+        with pytest.raises(asyncio.CancelledError):
+            await replacement_owner
+    finally:
+        await bridge.finish_producer_lease(run_id)
+        replacement_owner.cancel()
+        await asyncio.gather(replacement_owner, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_redis_producer_lease_releases_when_owner_never_starts():
+    fake = _FakeRedis()
+    bridge = RedisStreamBridge(redis_url="redis://fake", client=fake)
+    run_id = "redis-run-owner-never-started"
+
+    await bridge.start_producer_lease(run_id)
+    owner = asyncio.create_task(asyncio.sleep(3600))
+    bridge.transfer_producer_lease(run_id, owner)
+    owner.cancel()
+    await asyncio.gather(owner, return_exceptions=True)
+    for _ in range(10):
+        lease = bridge._producer_leases.get(run_id)
+        if lease is not None and lease.stopped and lease.renewal_task is None and await bridge.producer_lease_state(run_id) == StreamProducerLeaseState.expired:
+            break
+        await asyncio.sleep(0)
+
+    lease = bridge._producer_leases[run_id]
+    assert lease.stopped is True
+    assert lease.renewal_task is None
+    assert await bridge.producer_lease_state(run_id) == StreamProducerLeaseState.expired
+    await bridge.cleanup(run_id)
+    assert run_id not in bridge._producer_leases
+
+
+@pytest.mark.anyio
+async def test_redis_old_owner_exit_cannot_release_transferred_lease():
+    fake = _FakeRedis()
+    bridge = RedisStreamBridge(redis_url="redis://fake", client=fake)
+    run_id = "redis-run-transferred-owner"
+    old_owner = asyncio.create_task(asyncio.sleep(3600))
+    current_owner = asyncio.create_task(asyncio.sleep(3600))
+
+    await bridge.start_producer_lease(run_id)
+    bridge.transfer_producer_lease(run_id, old_owner)
+    bridge.transfer_producer_lease(run_id, current_owner)
+    old_owner.cancel()
+    await asyncio.gather(old_owner, return_exceptions=True)
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+    try:
+        assert bridge._producer_leases[run_id].owner_task is current_owner
+        assert await bridge.producer_lease_state(run_id) == StreamProducerLeaseState.active
+    finally:
+        current_owner.cancel()
+        await asyncio.gather(current_owner, return_exceptions=True)
+        await bridge.finish_producer_lease(run_id)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("operation", ["abort", "close"])
+async def test_redis_explicit_stop_waits_for_owner_cleanup(operation):
+    fake = _FakeRedis()
+    bridge = RedisStreamBridge(redis_url="redis://fake", client=fake)
+    run_id = f"redis-run-owner-cleanup-{operation}"
+    owner = asyncio.create_task(asyncio.sleep(3600))
+    release_started = asyncio.Event()
+    allow_release = asyncio.Event()
+    original_delete = bridge._delete_if_token
+
+    async def block_active_release(name, token):
+        if name == bridge._producer_active_key(run_id):
+            release_started.set()
+            await allow_release.wait()
+        return await original_delete(name, token)
+
+    await bridge.start_producer_lease(run_id)
+    bridge.transfer_producer_lease(run_id, owner)
+    bridge._delete_if_token = block_active_release
+    owner.cancel()
+    await asyncio.gather(owner, return_exceptions=True)
+    await asyncio.wait_for(release_started.wait(), timeout=1)
+
+    if operation == "abort":
+        explicit_stop = asyncio.create_task(bridge.abort_producer_lease(run_id))
+    else:
+        explicit_stop = asyncio.create_task(bridge.close())
+    await asyncio.sleep(0)
+    assert not explicit_stop.done()
+
+    allow_release.set()
+    await asyncio.wait_for(explicit_stop, timeout=1)
+    expected = StreamProducerLeaseState.untracked if operation == "abort" else StreamProducerLeaseState.expired
+    assert await bridge.producer_lease_state(run_id) == expected
+    assert run_id not in bridge._producer_leases
+
+
+@pytest.mark.anyio
+async def test_redis_unowned_end_cannot_bypass_an_active_remote_producer():
+    fake = _FakeRedis()
+    owner = RedisStreamBridge(
+        redis_url="redis://fake",
+        producer_lease_recovery_enabled=True,
+        client=fake,
+    )
+    recovering_peer = RedisStreamBridge(
+        redis_url="redis://fake",
+        producer_lease_recovery_enabled=True,
+        client=fake,
+    )
+    run_id = "redis-run-active-remote-producer"
+
+    await owner.start_producer_lease(run_id)
+    try:
+        with pytest.raises(RuntimeError, match="active producer"):
+            await recovering_peer.publish_end(run_id)
+        assert owner._stream_key(run_id) not in fake.streams
+    finally:
+        await owner.abort_producer_lease(run_id)
+
+
+@pytest.mark.anyio
+async def test_redis_abort_discards_unadmitted_tracking_marker():
+    fake = _FakeRedis()
+    bridge = RedisStreamBridge(redis_url="redis://fake", client=fake)
+    run_id = "redis-run-unadmitted"
+
+    await bridge.start_producer_lease(run_id)
+    await bridge.abort_producer_lease(run_id)
+
+    assert await bridge.producer_lease_state(run_id) == StreamProducerLeaseState.untracked
+
+
+@pytest.mark.anyio
+async def test_redis_abort_retries_transient_release_failure():
+    from redis.exceptions import RedisError
+
+    fake = _FakeRedis()
+    bridge = RedisStreamBridge(
+        redis_url="redis://fake",
+        stream_ttl_seconds=0,
+        client=fake,
+    )
+    run_id = "redis-run-abort-failure"
+
+    await bridge.start_producer_lease(run_id)
+    assert all(name != bridge._producer_tracking_key(run_id) for name, _seconds in fake.expirations)
+
+    original_delete = bridge._delete_if_token
+    failed_once = False
+
+    async def fail_delete_once(name, token):
+        nonlocal failed_once
+        if not failed_once:
+            failed_once = True
+            raise RedisError("delete temporarily unavailable")
+        return await original_delete(name, token)
+
+    bridge._delete_if_token = fail_delete_once
+    await bridge.abort_producer_lease(run_id)
+
+    assert run_id not in bridge._producer_leases
+    assert await bridge.producer_lease_state(run_id) == StreamProducerLeaseState.untracked
+
+
+@pytest.mark.anyio
+async def test_redis_close_retries_failed_abort_cleanup():
+    fake = _FakeRedis()
+    bridge = RedisStreamBridge(redis_url="redis://fake", client=fake)
+    run_id = "redis-run-abort-close-retry"
+    await bridge.start_producer_lease(run_id)
+    bridge._rollback_producer_lease = AsyncMock(
+        side_effect=[False, True],
+    )
+
+    await bridge.abort_producer_lease(run_id)
+    assert bridge._producer_leases[run_id].discard_tracking_requested is True
+
+    await bridge.close()
+
+    assert bridge._rollback_producer_lease.await_count == 2
+    assert run_id not in bridge._producer_leases
+
+
+@pytest.mark.anyio
+async def test_redis_delayed_cleanup_preserves_successor_stream_and_lease():
+    fake = _FakeRedis()
+    bridge = RedisStreamBridge(redis_url="redis://fake", client=fake)
+    run_id = "redis-run-cleanup-successor"
+    stream_key = bridge._stream_key(run_id)
+    tracking_key = bridge._producer_tracking_key(run_id)
+    active_key = bridge._producer_active_key(run_id)
+
+    await bridge.start_producer_lease(run_id)
+    await bridge.publish(run_id, "values", {"owner": "old"})
+    await bridge.finish_producer_lease(run_id)
+    fake.values[tracking_key] = "successor-token"
+    fake.values[active_key] = "successor-token"
+    await fake.xadd(
+        stream_key,
+        {"kind": "event", "event": "values", "data": '{"owner":"successor"}'},
+    )
+
+    await bridge.cleanup(run_id)
+
+    assert fake.values[tracking_key] == "successor-token"
+    assert fake.values[active_key] == "successor-token"
+    assert fake.streams[stream_key]
+
+
+@pytest.mark.anyio
+async def test_redis_unowned_cleanup_preserves_active_successor():
+    fake = _FakeRedis()
+    owner = RedisStreamBridge(redis_url="redis://fake", client=fake)
+    recovering_peer = RedisStreamBridge(redis_url="redis://fake", client=fake)
+    run_id = "redis-run-unowned-cleanup-successor"
+    stream_key = owner._stream_key(run_id)
+    tracking_key = owner._producer_tracking_key(run_id)
+    active_key = owner._producer_active_key(run_id)
+
+    await owner.start_producer_lease(run_id)
+    await owner.publish(run_id, "values", {"owner": "successor"})
+
+    try:
+        await recovering_peer.cleanup(run_id)
+        assert fake.values[tracking_key] == fake.values[active_key]
+        assert fake.streams[stream_key]
+    finally:
+        await owner.abort_producer_lease(run_id)
+        await owner.cleanup(run_id)
+
+
+@pytest.mark.anyio
+async def test_redis_producer_starts_for_unrelated_runs_do_not_serialize():
+    fake = _FakeRedis()
+    bridge = RedisStreamBridge(redis_url="redis://fake", client=fake)
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    original_set = fake.set
+
+    async def delayed_set(name, value, **kwargs):
+        if name == bridge._producer_active_key("run-a"):
+            first_started.set()
+            await release_first.wait()
+        return await original_set(name, value, **kwargs)
+
+    fake.set = delayed_set
+    first = asyncio.create_task(bridge.start_producer_lease("run-a"))
+    second = None
+    try:
+        await asyncio.wait_for(first_started.wait(), timeout=1)
+        second = asyncio.create_task(bridge.start_producer_lease("run-b"))
+        assert await asyncio.wait_for(asyncio.shield(second), timeout=0.2)
+        assert not first.done()
+    finally:
+        release_first.set()
+        await asyncio.wait_for(first, timeout=1)
+        if second is not None:
+            await asyncio.gather(second, return_exceptions=True)
+        await bridge.finish_producer_lease("run-a")
+        await bridge.finish_producer_lease("run-b")
+
+
+@pytest.mark.anyio
+async def test_redis_producer_start_failure_rolls_back_before_falling_back():
+    from redis.exceptions import RedisError
+
+    fake = _FakeRedis()
+    bridge = RedisStreamBridge(redis_url="redis://fake", client=fake)
+    run_id = "redis-run-producer-start-failure"
+    original_set = fake.set
+
+    async def fail_tracking_write(name, value, **kwargs):
+        created = await original_set(name, value, **kwargs)
+        if name == bridge._producer_tracking_key(run_id):
+            raise RedisError("tracking write acknowledgement unavailable")
+        return created
+
+    fake.set = fail_tracking_write
+
+    assert await bridge.start_producer_lease(run_id) is False
+    assert await bridge.producer_lease_state(run_id) == StreamProducerLeaseState.untracked
+    assert run_id not in bridge._producer_leases
+
+
+@pytest.mark.anyio
+async def test_redis_ambiguous_producer_start_fails_closed():
+    from redis.exceptions import RedisError
+
+    fake = _FakeRedis()
+    bridge = RedisStreamBridge(redis_url="redis://fake", client=fake)
+    run_id = "redis-run-producer-start-ambiguous"
+    original_set = fake.set
+
+    async def fail_tracking_write(name, value, **kwargs):
+        created = await original_set(name, value, **kwargs)
+        if name == bridge._producer_tracking_key(run_id):
+            raise RedisError("tracking write acknowledgement unavailable")
+        return created
+
+    async def fail_readback(*names):
+        raise RedisError("rollback read unavailable")
+
+    fake.set = fail_tracking_write
+    fake.mget = fail_readback
+
+    with pytest.raises(
+        RuntimeError,
+        match="Could not safely establish stream producer lease",
+    ):
+        await bridge.start_producer_lease(run_id)
+    assert run_id not in bridge._producer_leases
+
+
+@pytest.mark.anyio
+async def test_redis_producer_start_rollback_drains_repeated_cancellation():
+    fake = _FakeRedis()
+    bridge = RedisStreamBridge(
+        redis_url="redis://fake",
+        stream_ttl_seconds=0,
+        client=fake,
+    )
+    run_id = "redis-run-repeated-start-cancellation"
+    tracking_written = asyncio.Event()
+    rollback_started = asyncio.Event()
+    allow_rollback = asyncio.Event()
+    original_set = fake.set
+    original_delete = bridge._delete_if_token
+
+    async def block_after_tracking_write(name, value, **kwargs):
+        created = await original_set(name, value, **kwargs)
+        if name == bridge._producer_tracking_key(run_id):
+            tracking_written.set()
+            await asyncio.Event().wait()
+        return created
+
+    async def block_rollback(name, token):
+        rollback_started.set()
+        await allow_rollback.wait()
+        return await original_delete(name, token)
+
+    fake.set = block_after_tracking_write
+    bridge._delete_if_token = block_rollback
+    task = asyncio.create_task(bridge.start_producer_lease(run_id))
+    try:
+        await asyncio.wait_for(tracking_written.wait(), timeout=1)
+        task.cancel()
+        await asyncio.wait_for(rollback_started.wait(), timeout=1)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+
+        allow_rollback.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1)
+        assert await bridge.producer_lease_state(run_id) == StreamProducerLeaseState.untracked
+    finally:
+        allow_rollback.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await fake.delete(
+            bridge._producer_active_key(run_id),
+            bridge._producer_tracking_key(run_id),
+        )
+
+
+@pytest.mark.anyio
+async def test_redis_close_releases_producer_leases_concurrently():
+    fake = _FakeRedis()
+    bridge = RedisStreamBridge(redis_url="redis://fake", client=fake)
+    run_ids = ("close-run-a", "close-run-b", "close-run-c")
+    for run_id in run_ids:
+        await bridge.start_producer_lease(run_id)
+
+    releases_started = 0
+    all_releases_started = asyncio.Event()
+    allow_releases = asyncio.Event()
+    original_delete = bridge._delete_if_token
+
+    async def block_active_release(name, token):
+        nonlocal releases_started
+        if name.endswith(":producer-active"):
+            releases_started += 1
+            if releases_started == len(run_ids):
+                all_releases_started.set()
+            await allow_releases.wait()
+        return await original_delete(name, token)
+
+    bridge._delete_if_token = block_active_release
+    close_task = asyncio.create_task(bridge.close())
+    try:
+        await asyncio.wait_for(all_releases_started.wait(), timeout=0.2)
+    finally:
+        allow_releases.set()
+        await asyncio.wait_for(close_task, timeout=1)
+
+
+@pytest.mark.anyio
+async def test_redis_close_waits_for_inflight_producer_start():
+    fake = _FakeRedis()
+    bridge = RedisStreamBridge(redis_url="redis://fake", client=fake)
+    run_id = "redis-run-close-during-start"
+    tracking_write_started = asyncio.Event()
+    allow_tracking_write = asyncio.Event()
+    original_set = fake.set
+
+    async def block_tracking_write(name, value, **kwargs):
+        if name == bridge._producer_tracking_key(run_id):
+            tracking_write_started.set()
+            await allow_tracking_write.wait()
+        return await original_set(name, value, **kwargs)
+
+    fake.set = block_tracking_write
+    start_task = asyncio.create_task(bridge.start_producer_lease(run_id))
+    close_task = None
+    try:
+        await asyncio.wait_for(tracking_write_started.wait(), timeout=1)
+        close_task = asyncio.create_task(bridge.close())
+        await asyncio.sleep(0)
+        assert not close_task.done()
+
+        allow_tracking_write.set()
+        assert await asyncio.wait_for(start_task, timeout=1)
+        await asyncio.wait_for(close_task, timeout=1)
+        assert run_id not in bridge._producer_leases
+        assert await bridge.producer_lease_state(run_id) == StreamProducerLeaseState.expired
+    finally:
+        allow_tracking_write.set()
+        if not start_task.done():
+            start_task.cancel()
+        await asyncio.gather(start_task, return_exceptions=True)
+        if close_task is not None and not close_task.done():
+            await bridge.close()
+            await asyncio.gather(close_task, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_redis_close_honors_abort_intent_declared_while_stopping():
+    fake = _FakeRedis()
+    bridge = RedisStreamBridge(
+        redis_url="redis://fake",
+        stream_ttl_seconds=0,
+        client=fake,
+    )
+    run_id = "redis-run-close-abort-intent"
+    active_release_started = asyncio.Event()
+    allow_active_release = asyncio.Event()
+    original_delete = bridge._delete_if_token
+
+    async def block_active_release(name, token):
+        if name == bridge._producer_active_key(run_id):
+            active_release_started.set()
+            await allow_active_release.wait()
+        return await original_delete(name, token)
+
+    await bridge.start_producer_lease(run_id)
+    bridge._delete_if_token = block_active_release
+    close_task = asyncio.create_task(bridge.close())
+    abort_task = None
+    try:
+        await asyncio.wait_for(active_release_started.wait(), timeout=1)
+        abort_task = asyncio.create_task(bridge.abort_producer_lease(run_id))
+        await asyncio.sleep(0)
+        assert bridge._producer_leases[run_id].discard_tracking_requested is True
+
+        allow_active_release.set()
+        await asyncio.wait_for(close_task, timeout=1)
+        await asyncio.wait_for(abort_task, timeout=1)
+        assert await bridge.producer_lease_state(run_id) == StreamProducerLeaseState.untracked
+    finally:
+        allow_active_release.set()
+        await asyncio.gather(close_task, return_exceptions=True)
+        if abort_task is not None:
+            await asyncio.gather(abort_task, return_exceptions=True)
 
 
 @pytest.mark.anyio
@@ -1042,6 +1764,11 @@ def test_stream_bridge_config_accepts_numeric_heartbeat_string():
     config = StreamBridgeConfig(heartbeat_interval_seconds="2.5")
 
     assert config.heartbeat_interval_seconds == 2.5
+
+
+def test_stream_bridge_producer_lease_recovery_requires_explicit_activation():
+    assert StreamBridgeConfig().producer_lease_recovery_enabled is False
+    assert StreamBridgeConfig(producer_lease_recovery_enabled=True).producer_lease_recovery_enabled is True
 
 
 @pytest.mark.parametrize(
@@ -1375,6 +2102,7 @@ async def test_make_stream_bridge_passes_redis_options(monkeypatch):
             heartbeat_interval_seconds=2.5,
             max_connections=50,
             stream_ttl_seconds=42,
+            producer_lease_recovery_enabled=True,
         )
     )
     try:
@@ -1382,6 +2110,7 @@ async def test_make_stream_bridge_passes_redis_options(monkeypatch):
             assert isinstance(bridge, RedisStreamBridge)
             assert bridge.heartbeat_interval == 2.5
             assert bridge._stream_ttl_seconds == 42
+            assert bridge.producer_lease_recovery_enabled is True
         assert captured["max_connections"] == 50
         assert captured["decode_responses"] is True
     finally:

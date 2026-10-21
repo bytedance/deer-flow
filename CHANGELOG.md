@@ -1265,6 +1265,70 @@ This release closes that milestone with **621 merged pull requests**.
 
 ### Fixed
 
+- **memory:** DeerMem no longer sends conversation turns it already extracted
+  to the memory LLM again when a thread's next turn runs on another Gateway
+  instance or after a restart. The extraction watermark (the last message of
+  each thread already extracted) lived only in a per-process cache; it is now
+  also written to `users/{user}/agents/{agent}/.metadata/watermarks.json` under
+  the shared `storage_path` (bounded by `watermark_max_keys`, without changing
+  the memory revision), and each update starts after the furthest of the
+  process copy and the persisted one. Clearing memory deletes the file with
+  the agent's other `.metadata` sidecars. Messages without an id are identified
+  by a SHA-256 digest of their text, so the sidecar holds no conversation text.
+  (issue #7204, [#7205])
+
+- **skills:** `GET /api/skills/custom/{skill_name}/history` now answers an
+  invalid skill name (not hyphen-case, or longer than 64 characters) with `400`,
+  as delete and rollback already do, instead of `500` with a logged traceback on
+  every request. Only the name check maps to `400`: a corrupt history file
+  (malformed JSON or non-UTF-8) is still a `500`, and `POST .../rollback`, which
+  answered one with `400`, now returns `500` too. Deleting a skill with an
+  invalid name no longer logs a mutation-tail error. ([#7123])
+
+- **channels:** An IM message delivered twice no longer runs twice, and two
+  Gateway instances no longer split a new conversation across two threads.
+  Discord direct messages had no inbound dedupe key (no guild id), and a reply
+  in a Discord thread got a different key on an instance that does not track
+  that thread, so with every instance's session receiving every message both
+  answered. Discord messages are now keyed by guild (`dm` for a direct message)
+  and by the channel they were posted in, and the adapter claims that key
+  before it creates a Discord thread, so only one instance creates one. Past
+  the 10-minute dedupe window, after a restart, or while the shared dedupe
+  store is unavailable, a redelivery used to start a second run (a GitHub
+  "Redeliver" could post a duplicate comment). Every IM run request for a keyed
+  message now carries an `Idempotency-Key` derived from the dedupe key, with a
+  human message id derived from the same key, so the Gateway returns the run
+  it admitted for the first delivery: the redelivery replays its stream, reads
+  this message's turn from the thread state, or replies that the message is
+  still being processed, and never runs the turn again, even when the first
+  run failed or `/new` has since moved the conversation to a new thread: the
+  Gateway scopes `Idempotency-Key`s from trusted internal callers by owner
+  instead of owner and thread, and a key already used on another thread now
+  answers `409` instead of `500`. When two instances create a thread for a
+  conversation's first message, the binding is now claimed insert-if-absent in
+  `channel_conversations` / `channel_thread_bindings`: the instance that loses
+  adopts the winner's thread and deletes its own empty one, and `/new` still
+  rebinds. (issue #7103, [#7104])
+  
+- **skills:** A skill the agent creates, edits, patches or deletes with the
+  `skill_manage` tool now reaches every Gateway process sharing the home
+  volume, as a change made through the skills API already did. The tool
+  refreshed only its own process's skills prompt cache, so a peer replica kept
+  rendering the previous skill list for that user; it now publishes the same
+  user-scoped shared cache reset marker after the local refresh, off the event
+  loop. The write, its history record, the refresh and the marker settle as
+  one unit, so a run cancelled while the write is in flight no longer leaves
+  this or a peer process serving the stale list. When the marker cannot be
+  written, the tool reports that the change was applied but other processes
+  were not notified, instead of reading as a failed write. ([#7099])
+  
+- **provisioner:** When two provisioner replicas start together and
+  `K8S_NAMESPACE` does not exist yet, the one that loses the create race no
+  longer crashes at startup: its `409 AlreadyExists` now counts as the
+  namespace existing, as the Pod and Service creates already did. Helm
+  deployments, where the provisioner runs inside the namespace it manages,
+  never took this path. ([#7099])
+  
 - **projects:** A shelf upload or save-from-thread into a project the caller
   cannot write no longer leaves a directory behind or answers `500`. Both
   routes staged the body under `users/{user_id}/projects/{project_id}/` before
@@ -1274,6 +1338,7 @@ This release closes that milestone with **621 merged pull requests**.
   now check for an owned, active project first and answer the same `404`
   without writing; the shelf insert still re-checks under the project row lock.
   ([#7040])
+  
 - **skills:** Toggling a skill when no `extensions_config.json` exists yet now
   creates the file in the project root (`DEER_FLOW_PROJECT_ROOT`, else the
   working directory), where the MCP editor already creates it and where config
@@ -1294,6 +1359,7 @@ This release closes that milestone with **621 merged pull requests**.
   cancellation, faults and worker exits every 20 ms) without exchanging frames,
   so idle waits no longer consume turns and `timeout_seconds` is the only wall-clock bound;
   scripts that spin the job queue still hit the turn cap. (issue #7022)
+  
 - **browser:** `browser_screenshot` no longer replaces a file that already
   exists in the thread's outputs directory. A screenshot saved as
   `report.png` used to overwrite the user's own `report.png`, an earlier
@@ -6072,6 +6138,14 @@ This release closes that milestone with **621 merged pull requests**.
   reject the root, because a search would read every file below it. ([#6991])
 
 ### Security
+
+- **skills:** `GET /api/skills`, `GET /api/skills/custom` and
+  `GET /api/skills/{name}`, which every signed-in user can call, no longer put
+  the raw exception text in their `500` detail. A malformed or unreadable
+  `extensions_config.json` made all three answer with the file's absolute host
+  path (and, for a permission error, the `[Errno 13]` message). They now return
+  a fixed `Failed to load skills.` / `Failed to list custom skills.` /
+  `Failed to get skill.`, and the full error stays in the Gateway log. ([#7155])
 
 - **skillscan:** The pre-LLM static gate now matches fork bombs by shape
   instead of only the canonical `:(){ :|:& };:` spelling. `resource-fork-bomb`
@@ -11871,3 +11945,8 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6991]: https://github.com/bytedance/deer-flow/pull/6991
 [#7040]: https://github.com/bytedance/deer-flow/pull/7040
 [#7048]: https://github.com/bytedance/deer-flow/pull/7048
+[#7099]: https://github.com/bytedance/deer-flow/pull/7099
+[#7104]: https://github.com/bytedance/deer-flow/pull/7104
+[#7123]: https://github.com/bytedance/deer-flow/pull/7123
+[#7155]: https://github.com/bytedance/deer-flow/pull/7155
+[#7205]: https://github.com/bytedance/deer-flow/pull/7205

@@ -913,3 +913,158 @@ class TestDiscordAllowedChannels:
         await channel._on_message(_make_discord_message("hello"))
 
         assert channel._publish_reserved.called is admitted
+
+
+class TestDiscordDedupeClaimBeforeThreadCreation:
+    """Every instance's Discord session receives every MESSAGE_CREATE. The manager
+    drops the duplicate, but only after both instances created a Discord thread
+    for it. The adapter therefore claims the manager's dedupe key first."""
+
+    @staticmethod
+    def _wire(tmp_path, *, dedupe=None):
+        from app.channels.dedupe_store import MemoryInboundDedupeStore
+        from app.channels.manager import ChannelManager
+        from app.channels.store import JsonChannelStore
+
+        bus = MessageBus()
+        dedupe = dedupe or MemoryInboundDedupeStore()
+        ChannelManager(bus=bus, store=JsonChannelStore(tmp_path / "store.json"), inbound_dedupe_store=dedupe)
+        channel = DiscordChannel(bus=bus, config={"bot_token": "token", "thread_mode": True})
+        channel._running = True
+        channel._client = SimpleNamespace(user=SimpleNamespace(id=999, mention="<@999>"))
+        channel._discord_module = SimpleNamespace(Thread=type("FakeThread", (), {}))
+        channel._main_loop = asyncio.get_running_loop()
+        channel._create_thread = AsyncMock(return_value=SimpleNamespace(id=777))
+        dedupe.try_record = AsyncMock(wraps=dedupe.try_record)
+        channel._start_typing = AsyncMock(return_value=None)
+        channel._add_reaction = AsyncMock(return_value=None)
+        return bus, channel, dedupe
+
+    @staticmethod
+    def _key():
+        from app.channels.manager import ChannelManager
+
+        return ChannelManager._inbound_dedupe_key(InboundMessage(channel_name="discord", chat_id="456", user_id="123", text="", metadata={"guild_id": "321", "channel_id": "456", "message_id": "111"}))
+
+    @pytest.mark.asyncio
+    async def test_message_claimed_by_a_peer_creates_no_thread(self, tmp_path) -> None:
+        bus, channel, dedupe = self._wire(tmp_path)
+        assert await dedupe.try_record(self._key()) is False  # the peer instance won
+
+        await channel._on_message(_make_discord_message("hello"))
+
+        channel._create_thread.assert_not_awaited()
+        assert bus.inbound_queue.qsize() == 0
+        assert bus._inbound_reservations == set()
+
+    @pytest.mark.asyncio
+    async def test_winning_claim_creates_the_thread_and_marks_the_published_message(self, tmp_path) -> None:
+        bus, channel, dedupe = self._wire(tmp_path)
+
+        await channel._on_message(_make_discord_message("hello"))
+        inbound = await asyncio.wait_for(bus.get_inbound(), timeout=5)
+        bus.inbound_task_done()
+
+        channel._create_thread.assert_awaited_once()
+        assert (inbound.chat_id, inbound.topic_id, inbound.dedupe_claimed) == ("456", "777", True)
+        assert self._key() in dedupe._store
+
+        # The same MESSAGE_CREATE on a second session sharing the dedupe store.
+        _, peer, _ = self._wire(tmp_path, dedupe=dedupe)
+        await peer._on_message(_make_discord_message("hello"))
+        peer._create_thread.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_refused_hand_off_gives_the_claim_back(self, tmp_path) -> None:
+        _, channel, dedupe = self._wire(tmp_path)
+        channel._publish_reserved = MagicMock(return_value=None)
+
+        await channel._on_message(_make_discord_message("hello"))
+        for _ in range(20):
+            if self._key() not in dedupe._store:
+                break
+            await asyncio.sleep(0.01)
+
+        channel._create_thread.assert_awaited_once()
+        dedupe.try_record.assert_awaited_once_with(self._key())
+        assert self._key() not in dedupe._store
+
+    @pytest.mark.asyncio
+    async def test_failed_thread_creation_gives_the_claim_back(self, tmp_path) -> None:
+        _, channel, dedupe = self._wire(tmp_path)
+        channel._create_thread = AsyncMock(side_effect=RuntimeError("thread create failed"))
+
+        with pytest.raises(RuntimeError, match="thread create failed"):
+            await channel._on_message(_make_discord_message("hello"))
+        for _ in range(20):
+            if self._key() not in dedupe._store:
+                break
+            await asyncio.sleep(0.01)
+
+        dedupe.try_record.assert_awaited_once_with(self._key())
+        assert self._key() not in dedupe._store
+
+    @pytest.mark.asyncio
+    async def test_failed_commit_gives_the_claim_back(self, tmp_path) -> None:
+        bus, channel, dedupe = self._wire(tmp_path)
+        # The intake closed (shutdown) between the reservation and the commit.
+        channel._commit_reserved_inbound = MagicMock(return_value=False)
+
+        await channel._on_message(_make_discord_message("hello"))
+        for _ in range(20):
+            if self._key() not in dedupe._store:
+                break
+            await asyncio.sleep(0.01)
+
+        dedupe.try_record.assert_awaited_once_with(self._key())
+        assert self._key() not in dedupe._store
+
+    @pytest.mark.asyncio
+    async def test_stop_during_identity_lookup_gives_the_claim_back(self, tmp_path) -> None:
+        """stop() cancels the hand-off while it resolves the connection identity:
+        the message was never committed, so a peer must be able to take it."""
+        _, channel, dedupe = self._wire(tmp_path)
+        lookup_started = asyncio.Event()
+
+        async def lookup_forever(inbound, guild_id=None):
+            lookup_started.set()
+            await asyncio.Event().wait()
+
+        channel._attach_connection_identity = lookup_forever
+        handling = asyncio.create_task(channel._on_message(_make_discord_message("hello")))
+        await asyncio.wait_for(lookup_started.wait(), timeout=5)
+        assert self._key() in dedupe._store
+
+        await channel.stop()
+        await asyncio.wait_for(handling, timeout=5)
+
+        assert self._key() not in dedupe._store
+        peer_bus, peer, _ = self._wire(tmp_path, dedupe=dedupe)
+        await peer._on_message(_make_discord_message("hello"))
+        await asyncio.wait_for(peer_bus.get_inbound(), timeout=5)
+
+    @pytest.mark.asyncio
+    async def test_claim_whose_release_is_refused_during_stop_is_given_back_by_stop(self, tmp_path) -> None:
+        """Thread creation still in flight when stop() closes cross-loop intake:
+        the release cannot be submitted then, so stop() releases it last."""
+        _, channel, dedupe = self._wire(tmp_path)
+        create_started = asyncio.Event()
+        fail_create = asyncio.Event()
+
+        async def create_then_fail(message):
+            create_started.set()
+            await fail_create.wait()
+            raise RuntimeError("thread create failed")
+
+        channel._create_thread = create_then_fail
+        handling = asyncio.create_task(channel._on_message(_make_discord_message("hello")))
+        await asyncio.wait_for(create_started.wait(), timeout=5)
+        await channel._close_and_drain_threadsafe_futures()  # stop() has begun
+        fail_create.set()
+        with pytest.raises(RuntimeError, match="thread create failed"):
+            await handling
+        assert self._key() in dedupe._store
+
+        await channel.stop()
+
+        assert self._key() not in dedupe._store

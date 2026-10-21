@@ -2960,6 +2960,11 @@ run_ownership:
 #   stream_ttl_seconds: 86400    # rolling TTL for retained stream buffers.
 #                                # Refreshed on each publish/publish_end; set 0
 #                                # to disable. This is not a run timeout.
+#   producer_lease_recovery_enabled: false  # restart-required activation gate.
+#                                # First roll this binary to every Gateway and
+#                                # drain pre-upgrade runs; then enable on every
+#                                # instance together. Never enable during a
+#                                # mixed-version rollout.
 #   recovered_stream_cleanup_delay_seconds: 60  # seconds to wait after
 #                                # publishing END for a recovered orphan run
 #                                # before deleting the stream key (max: 86400).
@@ -3289,6 +3294,24 @@ run_ownership:
 #       #           timeout / deadline_seconds / max_attempts / retry_backoff /
 #       #           max_state_chars / cache_size / cache_ttl_seconds /
 #       #           instructions / criteria
+
+# --- Option 4b: the same risk gate over OpenAI Decisions -------------------
+#   Same provider semantics, another endpoint: one `predicate` question about the
+#   call to POST /v1/decisions, denied when its probability reaches `threshold`.
+#   Nothing in the gate is re-decided -- the strict-JSON local preflight, the
+#   character-count limit, the cache and fail_closed are the Option 4 ones, and
+#   every other Option 4 setting below applies here unchanged.
+# guardrails:
+#   enabled: true
+#   fail_closed: true
+#   provider:
+#     use: deerflow.guardrails.openai_decisions:OpenAIDecisionsGuardrailProvider
+#     config:
+#       model: <name the decision model this deployment uses>   # required: this
+#           # backend ships no default model, so batches cannot go to a model nobody chose
+#       api_key_env: OPENAI_API_KEY        # default; base_url defaults to https://api.openai.com
+#       threshold: 0.5
+#       tools: ["bash"]
 
 # ============================================================================
 # TypeSafe (Jev) Client Defaults (optional)

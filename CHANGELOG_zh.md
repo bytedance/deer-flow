@@ -1015,12 +1015,57 @@
 
 ### 修复
 
+- **记忆：** 线程的下一轮落到另一个 Gateway 实例上或进程重启后，DeerMem 不再把已经
+  抽取过的对话轮次再次交给记忆 LLM。抽取水位（每个线程已抽取到的最后一条消息）此前只
+  存在进程内缓存中；现在还会写入共享 `storage_path` 下的
+  `users/{user}/agents/{agent}/.metadata/watermarks.json`（条目数受 `watermark_max_keys`
+  约束，不改变记忆 revision），每次更新从进程内副本与持久化副本中更靠后的那一个之后开始。
+  清空记忆时，该文件与该 agent 的其他 `.metadata` sidecar 一并删除。没有 id 的消息以其
+  文本的 SHA-256 摘要识别，sidecar 中不保存对话文本。
+  (issue #7204, [#7205])
+
+- **技能：** `GET /api/skills/custom/{skill_name}/history` 收到非法技能名（不是
+  hyphen-case，或超过 64 个字符）时，现在与删除、回滚一样返回 `400`，不再返回 `500`
+  并在每次请求时记录一次带堆栈的错误日志。只有名称校验映射为 `400`：损坏的历史文件
+  （JSON 格式错误或非 UTF-8）仍返回 `500`，此前对其返回 `400` 的
+  `POST .../rollback` 现在也返回 `500`。用非法名称删除技能时不再记录变更尾部
+  （mutation tail）错误日志。 ([#7123])
+
+- **渠道：** 同一条 IM 消息被投递两次不再被执行两次，两个 Gateway 实例也不再把一个新
+  会话拆到两个线程上。Discord 私信此前没有入站去重键（没有 guild id），而 Discord 线程
+  内的回复在不跟踪该线程的实例上会得到另一个键；由于每个实例的会话都会收到每条消息，
+  两个实例都会作答。Discord 消息现在按 guild（私信记为 `dm`）和消息所在频道生成去重键，
+  适配器在创建 Discord 线程之前先认领该键，因此只有一个实例会创建线程。超过 10 分钟
+  去重窗口、重启之后或共享去重存储不可用时，重投递此前会启动第二次运行（GitHub 的
+  “Redeliver”可能发出重复评论）。现在带去重键的消息发起的每个 IM 运行请求都携带由去重键
+  派生的 `Idempotency-Key`，人类消息 id 也由同一个键派生，因此 Gateway 会返回首次投递
+  时已接纳的运行：重投递会重放其事件流、从线程状态读取这条消息对应的轮次，或回复“该消息
+  仍在处理中”，而不会把这一轮再执行一遍——即使首次运行失败，或 `/new` 之后会话已换到新
+  线程也是如此：Gateway 对受信内部调用方的 `Idempotency-Key` 只按 owner 而不再按 owner 与
+  线程划分作用域，在另一个线程上复用已用过的 key 现在返回 `409` 而不是 `500`。
+  两个实例为同一会话的第一条消息各自创建线程时，绑定现在以“不存在才插入”的方式在
+  `channel_conversations` / `channel_thread_bindings` 中认领：落败的实例改用胜出者的线程
+  并删除自己创建的空线程，`/new` 仍会重新绑定到新线程。 (issue #7103, [#7104])
+  
+- **技能：** agent 通过 `skill_manage` 工具创建、编辑、修补或删除的技能，现在会像通过
+  技能 API 所做的修改一样，传达到共享同一 home 卷的每个 Gateway 进程。此前该工具只刷新
+  本进程的技能提示缓存，对端副本会继续为该用户渲染旧的技能列表；现在它在本地刷新之后、
+  于事件循环之外发布同一个按用户限定的共享缓存重置标记。写入、历史记录、刷新与标记作为
+  一个整体完成，因此写入途中被取消的运行不再让本进程或对端继续使用过期列表。标记无法写入
+  时，工具会报告修改已生效但未能通知其他进程，而不会让人误以为写入失败。 ([#7099])
+  
+- **provisioner：** 两个 provisioner 副本在 `K8S_NAMESPACE` 尚不存在时同时启动，输掉
+  创建竞争的一方不再在启动时崩溃：它收到的 `409 AlreadyExists` 现在视为命名空间已存在，
+  与 Pod 和 Service 的创建一致。Helm 部署中 provisioner 运行在其管理的命名空间内，从不
+  经过这条路径。 ([#7099])
+  
 - **项目：** 向调用者无权写入的项目上传书架文档或从对话保存文件时，不再遗留目录，
   也不再返回 `500`。这两个路由此前先把请求体暂存到
   `users/{user_id}/projects/{project_id}/` 下才检查项目，因此不存在、属于他人或已归档
   的 id 会留下一个回收站对账永远不会清理的空 `{project_id}/documents/` 目录，而超过单个
   路径分量长度的 id 会因 `ENAMETOOLONG` 失败。现在会先确认项目归调用者所有且处于活跃
   状态，不写任何内容即返回同样的 `404`；书架插入仍会在项目行锁下再次检查。 ([#7040])
+  
 - **skills：** 在尚无 `extensions_config.json` 时切换技能开关，现在会在项目根目录
   （`DEER_FLOW_PROJECT_ROOT`，未设置时为工作目录）创建该文件，这与 MCP 编辑器已有的
   创建位置一致，也是配置解析最先查找的位置。此前技能开关使用工作目录的父目录：当
@@ -1037,7 +1082,6 @@
   上传相同，outputs 目录需要支持硬链接；不支持时工具会报错，而不会覆盖已有文件。发布前
   被替换的暂存截图（例如换成指向宿主机文件的符号链接）绝不会被链接到 outputs，工具会
   报错。 ([#6913])
-
 - **llm：** 流式响应已返回 `200` 之后才在流内报告的 provider 错误，现在会像以 HTTP
   状态码返回的同一错误一样重试。为了用 SSE keepalive 维持慢请求而提前返回 `200` 的
   OpenAI 兼容网关，会把之后发生的 504 作为 SSE `error` 事件发出；openai SDK 将其抛出为
@@ -4582,6 +4626,13 @@
   所有文件。([#6991])
 
 ### 安全
+
+- **技能：** 所有已登录用户都能调用的 `GET /api/skills`、`GET /api/skills/custom`
+  和 `GET /api/skills/{name}`，其 `500` 响应的 detail 不再包含原始异常文本。此前
+  `extensions_config.json` 格式错误或不可读时，这三个接口都会在响应中返回该文件的
+  宿主机绝对路径（权限错误时还会附带 `[Errno 13]` 信息）。现在它们分别返回固定的
+  `Failed to load skills.` / `Failed to list custom skills.` /
+  `Failed to get skill.`，完整错误只记录在 Gateway 日志中。 ([#7155])
 
 - **skillscan：** LLM 之前的静态门禁现在按形状匹配 fork 炸弹，而不再只匹配
   `:(){ :|:& };:` 这一规范写法。`resource-fork-bomb` 和 `shell-destructive-command`
@@ -9438,3 +9489,8 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6991]: https://github.com/bytedance/deer-flow/pull/6991
 [#7040]: https://github.com/bytedance/deer-flow/pull/7040
 [#7048]: https://github.com/bytedance/deer-flow/pull/7048
+[#7099]: https://github.com/bytedance/deer-flow/pull/7099
+[#7104]: https://github.com/bytedance/deer-flow/pull/7104
+[#7123]: https://github.com/bytedance/deer-flow/pull/7123
+[#7155]: https://github.com/bytedance/deer-flow/pull/7155
+[#7205]: https://github.com/bytedance/deer-flow/pull/7205
