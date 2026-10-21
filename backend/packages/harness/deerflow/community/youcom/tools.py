@@ -30,9 +30,11 @@ The tool is a coroutine and sends its request through ``httpx.AsyncClient``. A
 sync client would run the whole tool on the default executor and hold one of
 that pool's threads for the network round-trip, so several providers queried in
 parallel queued behind each other. Two things in this module read from disk,
-and both are resolved off the event loop with ``asyncio.to_thread``: the tool
-config (which stats the config file) and the ``User-Agent`` (which reads the
-installed package metadata the first time it is needed).
+and both are resolved off the event loop: the tool config (which stats the
+config file) always runs on an executor thread, and the ``User-Agent`` (which
+reads the installed package metadata) does so on its first, cold call only.
+Later calls hit the in-memory cache and are read directly, so the hot path
+does not pay an executor round-trip for a string it already has.
 ``backend/tests/blocking_io/test_youcom_search_async.py`` pins the result — the
 request is awaited on the loop thread, and neither disk read runs there.
 """
@@ -79,22 +81,15 @@ def _user_agent() -> str:
     return f"deerflow-harness/{harness_version} youdotcom-integration/bytedance-deer-flow"
 
 
-def _get_api_key(tool_name: str = "web_search") -> str | None:
-    """Resolve the You.com key from the tool's config block, then the env var.
-
-    Returns None when neither is set, which is not an error here: the caller
-    falls back to the keyless endpoint.
-    """
-    api_key, _ = _resolve_tool_settings(tool_name)
-    return api_key
-
-
 def _resolve_tool_settings(tool_name: str) -> tuple[str | None, object]:
     """Resolve the API key and the configured `max_results` in one config read.
 
     Config resolution stats the config file, so callers must run this off the
     agent event loop. Reading the key and the result count from a single
     resolution keeps the tool from touching the config file twice per call.
+
+    The key is None when neither the config nor the environment sets one,
+    which is not an error here: the caller falls back to the keyless endpoint.
     """
     config = get_app_config().get_tool_config(tool_name)
     max_results = None
@@ -110,6 +105,18 @@ def _resolve_tool_settings(tool_name: str) -> tuple[str | None, object]:
         if isinstance(env_key, str) and env_key.strip():
             api_key = env_key.strip()
     return api_key, max_results
+
+
+async def _resolve_user_agent() -> str:
+    """Return the DeerFlow User-Agent, keeping the cold metadata read off the loop.
+
+    The first call reads the installed package metadata from disk, so it runs
+    on an executor thread. Every later call is an in-memory cache hit and is
+    read directly, so the hot path costs no executor round-trip.
+    """
+    if _user_agent.cache_info().currsize:
+        return _user_agent()
+    return await asyncio.to_thread(_user_agent)
 
 
 def _count_for_request(value: object) -> int:
@@ -128,9 +135,7 @@ def _count_for_request(value: object) -> int:
 
 async def _search(api_key: str | None, query: str, count: int) -> dict:
     """GET the keyed endpoint when a key is configured, else the keyless one."""
-    # The first call reads the installed package metadata; keep that off the
-    # event loop too.
-    headers = {"Accept": "application/json", "User-Agent": await asyncio.to_thread(_user_agent)}
+    headers = {"Accept": "application/json", "User-Agent": await _resolve_user_agent()}
     if api_key:
         endpoint = _YOUCOM_SEARCH_ENDPOINT
         headers["X-API-Key"] = api_key

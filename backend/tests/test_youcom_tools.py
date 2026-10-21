@@ -56,16 +56,16 @@ def _web(**overrides) -> dict:
     return result
 
 
-class TestGetApiKey:
+class TestResolveToolSettings:
     def test_returns_config_key_when_present(self):
         with patch("deerflow.community.youcom.tools.get_app_config") as mock:
             tool_config = MagicMock()
             tool_config.model_extra = {"api_key": "from-config"}
             mock.return_value.get_tool_config.return_value = tool_config
 
-            from deerflow.community.youcom.tools import _get_api_key
+            from deerflow.community.youcom.tools import _resolve_tool_settings
 
-            assert _get_api_key("web_search") == "from-config"
+            assert _resolve_tool_settings("web_search")[0] == "from-config"
 
     def test_falls_back_to_env_when_config_key_blank(self):
         with patch("deerflow.community.youcom.tools.get_app_config") as mock:
@@ -73,18 +73,18 @@ class TestGetApiKey:
             tool_config.model_extra = {"api_key": "   "}
             mock.return_value.get_tool_config.return_value = tool_config
             with patch.dict("os.environ", {"YDC_API_KEY": "env-key"}, clear=True):
-                from deerflow.community.youcom.tools import _get_api_key
+                from deerflow.community.youcom.tools import _resolve_tool_settings
 
-                assert _get_api_key("web_search") == "env-key"
+                assert _resolve_tool_settings("web_search")[0] == "env-key"
 
     def test_returns_none_when_no_key_anywhere(self):
         """No key is not an error: it selects the keyless endpoint."""
         with patch("deerflow.community.youcom.tools.get_app_config") as mock:
             mock.return_value.get_tool_config.return_value = None
             with patch.dict("os.environ", {}, clear=True):
-                from deerflow.community.youcom.tools import _get_api_key
+                from deerflow.community.youcom.tools import _resolve_tool_settings
 
-                assert _get_api_key("web_search") is None
+                assert _resolve_tool_settings("web_search")[0] is None
 
 
 class TestEndpointSelection:
