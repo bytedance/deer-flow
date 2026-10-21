@@ -489,6 +489,36 @@ def test_find_glob_matches_raises_not_a_directory(tmp_path) -> None:
         pass
 
 
+def test_local_list_dir_propagates_permission_error(tmp_path) -> None:
+    """Permission-denied roots must not look like an empty successful listing."""
+    from deerflow.sandbox.local.list_dir import list_dir
+
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    (locked / "secret.txt").write_text("hidden\n", encoding="utf-8")
+    locked.chmod(0o000)
+    try:
+        with pytest.raises(PermissionError):
+            list_dir(str(locked))
+    finally:
+        locked.chmod(0o700)
+
+
+def test_find_glob_matches_propagates_permission_error(tmp_path) -> None:
+    """Inaccessible subtrees must surface instead of being skipped as no matches."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    locked = workspace / "locked"
+    locked.mkdir()
+    (locked / "secret.py").write_text("x = 1\n", encoding="utf-8")
+    locked.chmod(0o000)
+    try:
+        with pytest.raises(PermissionError):
+            find_glob_matches(workspace, "**/*.py")
+    finally:
+        locked.chmod(0o700)
+
+
 def test_find_grep_matches_accepts_single_file(tmp_path) -> None:
     file_path = tmp_path / "file.txt"
     file_path.write_text("TODO\n", encoding="utf-8")

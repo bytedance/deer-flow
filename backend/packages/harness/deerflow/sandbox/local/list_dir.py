@@ -19,6 +19,8 @@ def list_dir(path: str, max_depth: int = 2) -> list[str]:
 
     Raises:
         FileNotFoundError: If ``path`` does not exist or is not a directory.
+        PermissionError: If a directory cannot be listed because of access
+            permissions. Callers must not treat this as an empty listing.
     """
     result: list[str] = []
     root_path = Path(path).resolve()
@@ -38,34 +40,31 @@ def list_dir(path: str, max_depth: int = 2) -> list[str]:
         if current_depth > max_depth:
             return
 
-        try:
-            for item in current_path.iterdir():
-                if should_ignore_name(item.name):
-                    continue
+        for item in current_path.iterdir():
+            if should_ignore_name(item.name):
+                continue
 
-                if item.is_symlink():
-                    try:
-                        item_resolved = item.resolve()
-                        if not _is_within_root(item_resolved):
-                            continue
-                    except OSError:
+            if item.is_symlink():
+                try:
+                    item_resolved = item.resolve()
+                    if not _is_within_root(item_resolved):
                         continue
-                    post_fix = "/" if item_resolved.is_dir() else ""
-                    result.append(str(item_resolved) + post_fix)
+                except OSError:
                     continue
-
-                item_resolved = item.resolve()
-                if not _is_within_root(item_resolved):
-                    continue
-
-                post_fix = "/" if item.is_dir() else ""
+                post_fix = "/" if item_resolved.is_dir() else ""
                 result.append(str(item_resolved) + post_fix)
+                continue
 
-                # Recurse into subdirectories if not at max depth
-                if item.is_dir() and current_depth < max_depth:
-                    _traverse(item, current_depth + 1)
-        except PermissionError:
-            pass
+            item_resolved = item.resolve()
+            if not _is_within_root(item_resolved):
+                continue
+
+            post_fix = "/" if item.is_dir() else ""
+            result.append(str(item_resolved) + post_fix)
+
+            # Recurse into subdirectories if not at max depth
+            if item.is_dir() and current_depth < max_depth:
+                _traverse(item, current_depth + 1)
 
     _traverse(root_path, 1)
 
